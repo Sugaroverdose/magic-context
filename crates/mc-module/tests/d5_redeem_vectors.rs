@@ -6,6 +6,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+#[path = "support/d5_scope_model.rs"]
+mod d5_scope_model;
+
+use d5_scope_model::{
+    CapacityCheckOutcome, ModelRequest, ModelSeed, PrepareOutcome, ScopeFacts, ScopeModel,
+    StepOutcome,
+};
+
 const RECEIPT_ID: &str = "0f5c2d7e-1234-4abc-8def-0123456789ab";
 const SEALED_TOKEN: &str = "aaisem2ekvthpcezvk5q";
 const LEGACY_EXPECTED_SHA256: [&str; 20] = [
@@ -43,6 +51,8 @@ struct Fixture {
     precondition_space: PreconditionSpace,
     precedence_table: Vec<PrecedenceRow>,
     vectors: Vec<Vector>,
+    r47_model_seed: ModelSeed,
+    r47_specimen_preimages: Vec<SpecimenPreimage>,
     r47_sequences: Vec<R47Sequence>,
     negative_vectors: Vec<NegativeVector>,
 }
@@ -212,12 +222,62 @@ struct CandidateScopeTransition {
     capacity_uploads_after: u64,
 }
 
+/// An authored digest whose preimage the fixture records, so a reader can
+/// recompute it instead of taking a 64-character literal on trust.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpecimenPreimage {
+    value: String,
+    preimage_utf8: String,
+    #[serde(rename = "use")]
+    usage: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct R47Sequence {
     id: String,
     name: String,
-    steps: Vec<Value>,
+    note: String,
+    steps: Vec<SequenceStep>,
+}
+
+/// One executed operation: the request the model is fed, the result bytes it
+/// must produce, and the scope rows the store must show afterwards.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SequenceStep {
+    op: String,
+    #[serde(default)]
+    note: Option<String>,
+    /// A redeem step runs the request of the vector it names, so a sequence and
+    /// the precedence-table vectors in this same fixture cannot drift apart.
+    #[serde(default)]
+    vector_id: Option<String>,
+    #[serde(default)]
+    request_bytes_base64: Option<String>,
+    #[serde(default)]
+    result_bytes_base64: Option<String>,
+    #[serde(default)]
+    response_bytes_base64: Option<String>,
+    #[serde(default)]
+    bounded_outcome: Option<BoundedOutcome>,
+    scopes_after: Vec<ScopeFacts>,
+}
+
+/// The two outcomes the reference model declines to invent a wire body for.
+/// Each names what is missing and which fixture owns it.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum BoundedOutcome {
+    PrepareAdmitted {
+        attempt_id: String,
+        unmodelled_wire_result: String,
+    },
+    CapacityCheckAuthorized {
+        upload_id: String,
+        unmodelled_wire_result: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -515,25 +575,6 @@ struct MaterialFingerprint {
 struct OutcomeSignature<'a> {
     variant: &'static str,
     reason_or_cause: Option<&'a str>,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase", deny_unknown_fields)]
-enum ScopeOpenResponse {
-    #[serde(rename = "scope.open")]
-    ScopeOpen { result: ScopeOpenResult },
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", deny_unknown_fields)]
-enum ScopeOpenResult {
-    #[serde(rename = "OPENED")]
-    Opened {
-        incarnation: u64,
-        lineage_id: String,
-        resolve_generation: u64,
-        created: bool,
-    },
 }
 
 fn deserialize_present_lineage_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -1638,16 +1679,260 @@ fn fixture_vector<'a>(fixture: &'a Fixture, id: &str) -> &'a Vector {
         .unwrap_or_else(|| panic!("missing vector {id}"))
 }
 
-fn r47_sequence<'a>(fixture: &'a Fixture, id: &str) -> &'a R47Sequence {
-    fixture
-        .r47_sequences
-        .iter()
-        .find(|sequence| sequence.id == id)
-        .unwrap_or_else(|| panic!("missing sequence {id}"))
+/// The request the model is fed and the keyed response envelope the step pins.
+/// A redeem step borrows both from the vector it names.
+fn sequence_step_wire(
+    fixture: &Fixture,
+    step: &SequenceStep,
+    label: &str,
+) -> (Vec<u8>, Option<Vec<u8>>) {
+    match (
+        step.vector_id.as_deref(),
+        step.request_bytes_base64.as_deref(),
+    ) {
+        (Some(id), None) => {
+            let vector = fixture_vector(fixture, id);
+            let request = vector
+                .request_bytes_base64
+                .as_deref()
+                .unwrap_or_else(|| panic!("{label}: vector {id} pins no request bytes"));
+            let expected = vector
+                .expected_bytes_base64
+                .as_deref()
+                .unwrap_or_else(|| panic!("{label}: vector {id} pins no response bytes"));
+            assert_eq!(
+                step.response_bytes_base64.as_deref(),
+                Some(expected),
+                "{label}: the step and vector {id} pin different response bytes"
+            );
+            (decode_base64(request), Some(decode_base64(expected)))
+        }
+        (None, Some(request)) => (
+            decode_base64(request),
+            step.response_bytes_base64.as_deref().map(decode_base64),
+        ),
+        _ => panic!("{label}: a step names exactly one of vector_id or request_bytes_base64"),
+    }
 }
 
-fn decoded_json(encoded: &str) -> Value {
-    serde_json::from_slice(&decode_base64(encoded)).expect("base64 contains JSON")
+/// Decode the pinned result with the contract's own result type for that op, so
+/// an expectation that is merely plausible JSON cannot pass as a typed result.
+fn assert_result_decodes(op: &str, bytes: &[u8], label: &str) {
+    fn check<T: serde::de::DeserializeOwned>(bytes: &[u8], label: &str, type_name: &str) {
+        serde_json::from_slice::<T>(bytes).unwrap_or_else(|error| {
+            panic!("{label}: the pinned result does not decode as {type_name}: {error}")
+        });
+    }
+    match op {
+        "scope.open" => check::<d5_scope_model::ScopeResult>(bytes, label, "ScopeResult"),
+        "attempt.ticket" => check::<d5_scope_model::TicketResult>(bytes, label, "TicketResult"),
+        "redeem" => check::<d5_scope_model::RedeemResult>(bytes, label, "RedeemResult"),
+        "prepare" => check::<d5_scope_model::PrepareResult>(bytes, label, "PrepareResult"),
+        "attempt.resolve" => check::<d5_scope_model::ResolveResult>(bytes, label, "ResolveResult"),
+        "lineage.begin" | "capacity.begin" => {
+            check::<d5_scope_model::BeginResult>(bytes, label, "BeginResult")
+        }
+        "capacity.put" => check::<d5_scope_model::PutResult>(bytes, label, "PutResult"),
+        "capacity.finish" => check::<d5_scope_model::FinishResult>(bytes, label, "FinishResult"),
+        "capacity.check" => check::<d5_scope_model::CapacityResult>(bytes, label, "CapacityResult"),
+        other => panic!("{label}: no result type is bound to op {other}"),
+    }
+}
+
+/// Where the generation proof is allowed to live, asserted on what the model
+/// produced rather than on what the fixture holds: prepare and attempt.resolve
+/// carry it inside their attempt outcome, and the refused source upload carries
+/// no proof at all, because BeginResult has nowhere to put one.
+fn assert_generation_proof_placement(produced: &[(String, Value)]) {
+    let first = |op: &str| {
+        produced
+            .iter()
+            .find(|(name, _)| name == op)
+            .map(|(_, value)| value)
+            .unwrap_or_else(|| panic!("S03 produced no {op} result"))
+    };
+    let prepare = first("prepare");
+    let resolve = first("attempt.resolve");
+    let begin = first("lineage.begin");
+
+    for (op, result) in [("prepare", prepare), ("attempt.resolve", resolve)] {
+        let outcome = &result["attempt_outcome"];
+        assert_eq!(
+            outcome["refusal"]["reason"], "resolved_absent",
+            "{op} refusal reason"
+        );
+        assert_eq!(
+            outcome["negative"]["kind"], "generation_fence",
+            "{op} negative proof"
+        );
+        assert_eq!(outcome["negative"]["incarnation"], 3, "{op} incarnation");
+        assert_eq!(
+            outcome["negative"]["invalidated_ticket_generation"], 6,
+            "{op} invalidated generation"
+        );
+        assert_eq!(outcome["negative"]["fenced_by"], 7, "{op} fenced_by");
+        assert!(
+            result.get("negative").is_none(),
+            "{op} must not repeat the proof beside its outcome"
+        );
+    }
+    assert!(
+        prepare.get("kind").is_none(),
+        "PrepareResult is a struct with an attempt_outcome, not a tagged union"
+    );
+    assert_eq!(resolve["kind"], "RESOLVED");
+    assert!(
+        !resolve["attempt_outcome"].is_null(),
+        "a fenced attempt resolves terminally and is never returned as UNKNOWN"
+    );
+    assert_eq!(
+        resolve["resolve_generation"], 7,
+        "the replay never re-bumps"
+    );
+
+    assert_eq!(begin["kind"], "REFUSED");
+    assert_eq!(begin["refusal"]["reason"], "ticket_invalid");
+    assert!(
+        begin.get("negative").is_none()
+            && begin["refusal"].get("negative").is_none()
+            && begin["refusal"]["details"].get("negative").is_none(),
+        "BeginResult has no placement for a negative proof and must not grow one"
+    );
+}
+
+#[test]
+fn d5_redeem_r47_sequences_execute_against_the_reference_model() {
+    let (fixture, _) = load_fixture();
+    for preimage in &fixture.r47_specimen_preimages {
+        assert_eq!(
+            sha256_hex(preimage.preimage_utf8.as_bytes()),
+            preimage.value,
+            "authored specimen digest does not hash its recorded preimage"
+        );
+        assert!(!preimage.usage.is_empty());
+    }
+    assert_eq!(
+        fixture
+            .r47_sequences
+            .iter()
+            .map(|sequence| sequence.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "S01_adoption_replay",
+            "S02_adoption_then_scope_open",
+            "S03_generation_fence",
+            "S04_concurrent_open_pre_adoption",
+            "S05_concurrent_open_post_adoption",
+            "S06_capacity_upload_survives_adoption",
+        ]
+    );
+
+    for sequence in &fixture.r47_sequences {
+        assert!(
+            !sequence.name.is_empty() && !sequence.note.is_empty(),
+            "{} needs a name and a note",
+            sequence.id
+        );
+        // Every sequence starts from the same authored world and then runs.
+        let mut model = ScopeModel::new(&fixture.r47_model_seed);
+        let mut produced: Vec<(String, Value)> = Vec::new();
+        for (index, step) in sequence.steps.iter().enumerate() {
+            let label = format!("{} step {index} ({})", sequence.id, step.op);
+            if let Some(note) = &step.note {
+                assert!(!note.is_empty(), "{label}: empty note");
+            }
+            let (request_bytes, response_bytes) = sequence_step_wire(&fixture, step, &label);
+            let request: ModelRequest = serde_json::from_slice(&request_bytes)
+                .unwrap_or_else(|error| panic!("{label}: request does not decode: {error}"));
+            assert_eq!(
+                request.op(),
+                step.op,
+                "{label}: the step names an op its request does not carry"
+            );
+
+            let outcome = model.run(&request);
+            let expected_result = step.result_bytes_base64.as_deref().map(decode_base64);
+            match (outcome.wire_result(), expected_result) {
+                (Some(actual), Some(expected)) => {
+                    assert_eq!(
+                        String::from_utf8_lossy(&actual),
+                        String::from_utf8_lossy(&expected),
+                        "{label}: the model produced different result bytes"
+                    );
+                    assert_result_decodes(&step.op, &expected, &label);
+                    let envelope = response_bytes.unwrap_or_else(|| {
+                        panic!("{label}: a wire result needs its response bytes")
+                    });
+                    assert_eq!(
+                        String::from_utf8_lossy(&envelope),
+                        format!(
+                            "{{\"{}\":{{\"result\":{}}}}}",
+                            step.op,
+                            String::from_utf8_lossy(&actual)
+                        ),
+                        "{label}: the keyed response envelope does not wrap this result"
+                    );
+                    produced.push((
+                        step.op.clone(),
+                        serde_json::from_slice(&actual).expect("model result is JSON"),
+                    ));
+                }
+                (None, None) => {
+                    assert!(
+                        response_bytes.is_none(),
+                        "{label}: a bounded outcome pins no response envelope"
+                    );
+                    match (&outcome, &step.bounded_outcome) {
+                        (
+                            StepOutcome::Prepare(PrepareOutcome::Admitted { attempt_id }),
+                            Some(BoundedOutcome::PrepareAdmitted {
+                                attempt_id: expected,
+                                unmodelled_wire_result,
+                            }),
+                        ) => {
+                            assert_eq!(attempt_id, expected, "{label}: admitted attempt");
+                            assert!(!unmodelled_wire_result.is_empty());
+                        }
+                        (
+                            StepOutcome::CapacityCheck(CapacityCheckOutcome::Authorized {
+                                upload,
+                            }),
+                            Some(BoundedOutcome::CapacityCheckAuthorized {
+                                upload_id,
+                                unmodelled_wire_result,
+                            }),
+                        ) => {
+                            assert_eq!(&upload.upload_id, upload_id, "{label}: consumed upload");
+                            assert!(!unmodelled_wire_result.is_empty());
+                        }
+                        (outcome, declared) => panic!(
+                            "{label}: the model produced {outcome:?}, which is not the declared {declared:?}"
+                        ),
+                    }
+                }
+                (Some(actual), None) => panic!(
+                    "{label}: the step declares a bounded outcome but the model produced {}",
+                    String::from_utf8_lossy(&actual)
+                ),
+                (None, Some(expected)) => panic!(
+                    "{label}: the step pins {} but the model produced {outcome:?}",
+                    String::from_utf8_lossy(&expected)
+                ),
+            }
+
+            for expected in &step.scopes_after {
+                let actual = model
+                    .scope_facts(&expected.predecessor_key, &expected.agent)
+                    .unwrap_or_else(|| {
+                        panic!("{label}: no scope row for {}", expected.predecessor_key)
+                    });
+                assert_eq!(&actual, expected, "{label}: scope row after the step");
+            }
+        }
+        if sequence.id == "S03_generation_fence" {
+            assert_generation_proof_placement(&produced);
+        }
+    }
 }
 
 #[test]
@@ -1842,136 +2127,6 @@ fn d5_redeem_r47_replay_precedes_candidate_scope_and_has_no_second_adoption() {
         transition.positive_custody_before,
         transition.positive_custody_after
     );
-    let sequence = r47_sequence(&fixture, "S01_adoption_replay");
-    assert!(!sequence.name.is_empty());
-    assert_eq!(sequence.steps[0]["vector_id"], "V35");
-    assert_eq!(sequence.steps[1]["vector_id"], "V39");
-}
-
-#[test]
-fn d5_redeem_r47_scope_open_and_generation_fence_sequences_are_exact() {
-    let (fixture, _) = load_fixture();
-    let lineage = fixture.sealed_scope.stored_edge.lineage_id.as_str();
-    let open_after = r47_sequence(&fixture, "S02_adoption_then_scope_open");
-    assert!(!open_after.name.is_empty());
-    let opened: ScopeOpenResponse = serde_json::from_value(decoded_json(
-        open_after.steps[1]["expected_bytes_base64"]
-            .as_str()
-            .expect("scope.open response bytes"),
-    ))
-    .expect("shared scope.open response envelope");
-    assert_eq!(
-        opened,
-        ScopeOpenResponse::ScopeOpen {
-            result: ScopeOpenResult::Opened {
-                incarnation: 3,
-                lineage_id: lineage.to_string(),
-                resolve_generation: 7,
-                created: false,
-            },
-        }
-    );
-    assert!(decoded_json(
-        open_after.steps[1]["expected_bytes_base64"]
-            .as_str()
-            .expect("scope.open response bytes")
-    )["scope.open"]["result"]
-        .get("lineage_adopted_from")
-        .is_none());
-
-    let fence = r47_sequence(&fixture, "S03_generation_fence");
-    assert!(!fence.name.is_empty());
-    assert_eq!(fence.steps.len(), 7);
-    assert_eq!(fence.steps[1]["kind"], "gateway.local_ticket_sample");
-    assert_eq!(fence.steps[1]["opaque_local_fact"], true);
-    assert_eq!(fence.steps[1]["admission_ticket"]["resolve_generation"], 6);
-    assert_eq!(fence.steps[2]["vector_id"], "V35");
-    let prepare_refusal = decoded_json(
-        fence.steps[3]["expected_bytes_base64"]
-            .as_str()
-            .expect("prepare refusal bytes"),
-    );
-    let source_upload_refusal = decoded_json(
-        fence.steps[4]["expected_bytes_base64"]
-            .as_str()
-            .expect("source upload refusal bytes"),
-    );
-    let resolve_refusal = decoded_json(
-        fence.steps[5]["expected_bytes_base64"]
-            .as_str()
-            .expect("resolve refusal bytes"),
-    );
-    assert_eq!(
-        prepare_refusal, source_upload_refusal,
-        "source upload uses the same generation fence"
-    );
-    assert_eq!(
-        prepare_refusal, resolve_refusal,
-        "resolve replays the stable refusal"
-    );
-    assert_eq!(prepare_refusal["kind"], "REFUSED");
-    assert_eq!(prepare_refusal["refusal"]["reason"], "resolved_absent");
-    assert_eq!(prepare_refusal["negative"]["kind"], "generation_fence");
-    assert_eq!(prepare_refusal["negative"]["incarnation"], 3);
-    assert_eq!(
-        prepare_refusal["negative"]["invalidated_ticket_generation"],
-        6
-    );
-    assert_eq!(prepare_refusal["negative"]["fenced_by"], 7);
-    assert_eq!(fence.steps[3]["original_attempt_reexecuted"], true);
-    assert_eq!(fence.steps[5]["original_attempt_reexecuted"], true);
-    assert_eq!(fence.steps[5]["terminal"], true);
-    assert_eq!(fence.steps[5]["gateway_may_retire"], true);
-    assert_eq!(fence.steps[6]["new_attempt"], true);
-    assert_eq!(
-        fence.steps[6]["never_retickets_attempt_id"],
-        "attempt-s-stale-0001"
-    );
-    assert_eq!(fence.steps[6]["expected"]["kind"], "PREPARED");
-    assert_eq!(fence.steps[6]["expected"]["lineage_id"], lineage);
-    assert_eq!(fence.steps[6]["expected"]["resolve_generation"], 7);
-
-    let capacity = r47_sequence(&fixture, "S06_capacity_upload_survives_adoption");
-    assert_eq!(capacity.steps[0]["kind"], "capacity.begin");
-    assert!(capacity.steps[0]["ticket"].is_null());
-    assert_eq!(capacity.steps[1]["vector_id"], "V42");
-    assert_eq!(capacity.steps[2]["expected"], "CHECKED");
-    assert_eq!(capacity.steps[2]["upload_still_usable"], true);
-}
-
-#[test]
-fn d5_redeem_r47_concurrent_scope_open_has_only_complete_rows() {
-    let (fixture, _) = load_fixture();
-    let before = r47_sequence(&fixture, "S04_concurrent_open_pre_adoption");
-    let after = r47_sequence(&fixture, "S05_concurrent_open_post_adoption");
-    assert!(!before.name.is_empty() && !after.name.is_empty());
-    let before_result = decoded_json(
-        before.steps[0]["expected_bytes_base64"]
-            .as_str()
-            .expect("before response"),
-    );
-    let after_result = decoded_json(
-        after.steps[1]["expected_bytes_base64"]
-            .as_str()
-            .expect("after response"),
-    );
-    let before_row = &before_result["scope.open"]["result"];
-    let after_row = &after_result["scope.open"]["result"];
-    assert_eq!(before.steps[0]["linearization"], "before_adoption");
-    assert_eq!(after.steps[1]["linearization"], "after_adoption");
-    assert_eq!(
-        before_row["lineage_id"],
-        "33333333-4444-4555-8666-777777777777"
-    );
-    assert_eq!(before_row["resolve_generation"], 6);
-    assert_eq!(
-        after_row["lineage_id"],
-        fixture.sealed_scope.stored_edge.lineage_id
-    );
-    assert_eq!(after_row["resolve_generation"], 7);
-    assert_eq!(before_row["incarnation"], after_row["incarnation"]);
-    assert_eq!(before_row["created"], false);
-    assert_eq!(after_row["created"], false);
 }
 
 #[test]
