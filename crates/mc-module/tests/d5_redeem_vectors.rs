@@ -1842,7 +1842,7 @@ fn d5_redeem_r47_sequences_execute_against_the_reference_model() {
                 assert!(!note.is_empty(), "{label}: empty note");
             }
             let (request_bytes, response_bytes) = sequence_step_wire(&fixture, step, &label);
-            let request: ModelRequest = serde_json::from_slice(&request_bytes)
+            let request = ModelRequest::decode(&request_bytes)
                 .unwrap_or_else(|error| panic!("{label}: request does not decode: {error}"));
             assert_eq!(
                 request.op(),
@@ -1932,6 +1932,108 @@ fn d5_redeem_r47_sequences_execute_against_the_reference_model() {
         if sequence.id == "S03_generation_fence" {
             assert_generation_proof_placement(&produced);
         }
+    }
+}
+
+/// The bytes S03's source-upload step carried while the fixture still put the
+/// clause-3 operation label on the wire, kept verbatim so the refusal is proved
+/// against an envelope the fixture really held rather than against one rebuilt
+/// from the current bytes.
+const PRE_R48_S03_BEGIN_REQUEST: &str = r#"{"op":"lineage.begin","attempt":{"predecessor_key":"session-successor-0001","agent":"agent-main","F":{"digest":"6b25e8a6310ebcd4f992ace9c5cd57cf9cbd7a562989bbd8327de247f13e3afe","normalization_version":1,"excluded_additions":[]},"attempt_id":"attempt-s-stale-0001","incarnation":3},"ticket":{"resolve_generation":6,"P":"session-successor-0001","agent":"agent-main","incarnation":3},"kind":"source_segment","total_bytes":1310720,"total_chunks":2,"digest":"468081473a179b44e7a2c76d499f5db8747e6ab78ff040f67eddb3d924fd8d6a"}"#;
+
+/// The S03 steps whose wire discriminator moved: the step's index in the
+/// sequence, the clause-3 operation label the step keeps, and the discriminator
+/// its request bytes carry.
+const S03_WIRE_DISCRIMINATORS: [(usize, &str, &str); 5] = [
+    (1, "attempt.ticket", "ticket"),
+    (4, "lineage.begin", "begin"),
+    (5, "attempt.resolve", "resolve"),
+    (6, "attempt.ticket", "ticket"),
+    (7, "lineage.begin", "begin"),
+];
+
+fn sequence_by_id<'a>(fixture: &'a Fixture, id: &str) -> &'a R47Sequence {
+    fixture
+        .r47_sequences
+        .iter()
+        .find(|sequence| sequence.id == id)
+        .unwrap_or_else(|| panic!("fixture has no sequence {id}"))
+}
+
+fn step_request_bytes(sequence: &R47Sequence, index: usize) -> Vec<u8> {
+    decode_base64(
+        sequence.steps[index]
+            .request_bytes_base64
+            .as_deref()
+            .unwrap_or_else(|| panic!("{} step {index} pins no request bytes", sequence.id)),
+    )
+}
+
+/// The wire grammar names the nine original lineage operations by their short
+/// discriminators, so the dotted spellings of clause 3 are operation labels and
+/// never wire values. A label on the wire is refused, with no alias and no dual
+/// acceptance, while the operations pinned with dotted discriminators keep
+/// decoding.
+#[test]
+fn d5_lineage_request_decoder_refuses_clause_3_labels_on_the_wire() {
+    let (fixture, _) = load_fixture();
+
+    let refusal = ModelRequest::decode(PRE_R48_S03_BEGIN_REQUEST.as_bytes())
+        .expect_err("an operation label is not a wire discriminator");
+    assert!(
+        refusal.contains("R48") && refusal.contains("lineage.begin"),
+        "the refusal must name the rejected op and the rule that rejects it: {refusal}"
+    );
+
+    let s03 = sequence_by_id(&fixture, "S03_generation_fence");
+    assert_eq!(
+        String::from_utf8(step_request_bytes(s03, 4)).expect("utf8 request"),
+        PRE_R48_S03_BEGIN_REQUEST.replace("\"op\":\"lineage.begin\"", "\"op\":\"begin\""),
+        "the repair moved the discriminator and nothing else in the envelope"
+    );
+
+    for (index, label, discriminator) in S03_WIRE_DISCRIMINATORS {
+        assert_eq!(
+            s03.steps[index].op, label,
+            "S03 step {index} keeps its operation label"
+        );
+        let bytes = step_request_bytes(s03, index);
+        let envelope: Value = serde_json::from_slice(&bytes).expect("request JSON");
+        assert_eq!(
+            envelope["op"], discriminator,
+            "S03 step {index} carries the wire discriminator"
+        );
+        let request = ModelRequest::decode(&bytes)
+            .unwrap_or_else(|error| panic!("S03 step {index} does not decode: {error}"));
+        assert_eq!(request.op(), label, "S03 step {index} decodes to its label");
+
+        let relabelled = String::from_utf8(bytes).expect("utf8 request").replacen(
+            &format!("\"op\":\"{discriminator}\""),
+            &format!("\"op\":\"{label}\""),
+            1,
+        );
+        match ModelRequest::decode(relabelled.as_bytes()) {
+            Ok(_) => panic!("S03 step {index} accepts the label {label} on the wire"),
+            Err(refusal) => assert!(
+                refusal.contains("R48") && refusal.contains(label),
+                "S03 step {index} refusal must name {label} and the rule: {refusal}"
+            ),
+        }
+    }
+
+    // Dotted discriminators are not refused as a class: the capacity family and
+    // scope.open carry the discriminators they were pinned with.
+    for (id, index, discriminator) in [
+        ("S03_generation_fence", 0, "scope.open"),
+        ("S06_capacity_upload_survives_adoption", 0, "capacity.begin"),
+        ("S06_capacity_upload_survives_adoption", 1, "capacity.put"),
+    ] {
+        let bytes = step_request_bytes(sequence_by_id(&fixture, id), index);
+        let envelope: Value = serde_json::from_slice(&bytes).expect("request JSON");
+        assert_eq!(envelope["op"], discriminator, "{id} step {index} wire op");
+        let request = ModelRequest::decode(&bytes)
+            .unwrap_or_else(|error| panic!("{id} step {index} does not decode: {error}"));
+        assert_eq!(request.op(), discriminator, "{id} step {index} label");
     }
 }
 
