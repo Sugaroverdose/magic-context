@@ -8,6 +8,28 @@ use sha2::{Digest, Sha256};
 
 const RECEIPT_ID: &str = "0f5c2d7e-1234-4abc-8def-0123456789ab";
 const SEALED_TOKEN: &str = "aaisem2ekvthpcezvk5q";
+const LEGACY_EXPECTED_SHA256: [&str; 20] = [
+    "d09df1194fe7bce6c043505309ecad441f921d6f3b642e7ee100f836c78f83e9",
+    "d09df1194fe7bce6c043505309ecad441f921d6f3b642e7ee100f836c78f83e9",
+    "5997921873a9d247cafaa95cce44ab186716e2132de1641160e65123d86b4eef",
+    "69e2e3be0715f83fdc7f358eeb598cd3849015494113637522247c014313a5a9",
+    "69e2e3be0715f83fdc7f358eeb598cd3849015494113637522247c014313a5a9",
+    "69e2e3be0715f83fdc7f358eeb598cd3849015494113637522247c014313a5a9",
+    "69e2e3be0715f83fdc7f358eeb598cd3849015494113637522247c014313a5a9",
+    "69e2e3be0715f83fdc7f358eeb598cd3849015494113637522247c014313a5a9",
+    "ea487b4c91d201e5960fe7eb0b62c5dd0576929a9c0b73787474c3c7d5a76bd3",
+    "805d84a372d588759c80efdd7b0d4858ab7967eb5ae805579f83037b5b062827",
+    "7ffa1f372fad507823f71b375f44e62961522c48b758972acacb5b689e287925",
+    "e29876e2785f4df42a4bfd8bd95af109b31cd0592f16113fb03e56ddcb35222b",
+    "a3b6f20dd63d3b618ca1f61b12b1a9f8e08b7720e188fd9f532b6b83ac03f31f",
+    "32d5c8a52b29bf7222ff55d299185c23f3e3332ccf644d12c6a113860dc06cdc",
+    "0c83490e5bed78730d193c2cd08d28e092e983d31922f606374a62e020536b91",
+    "9578fdbb117edc2a1b72ee88d48632f755fd5c6d70ccb5b584a808fa1445a345",
+    "12267f99bd3f662c2afbe866a77be3abd7d48265f3a42d76ca9759ef18781eb7",
+    "12267f99bd3f662c2afbe866a77be3abd7d48265f3a42d76ca9759ef18781eb7",
+    "12267f99bd3f662c2afbe866a77be3abd7d48265f3a42d76ca9759ef18781eb7",
+    "53aa3fd1bb304df20f5b45e467e63c2dda8fae42144563ff4d942f8d3cca0f27",
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,9 +39,12 @@ struct Fixture {
     serde_evidence: Vec<SerdeEvidence>,
     sealed_scope: SealedScope,
     token_values: Vec<TokenValue>,
+    legacy_expected_bytes: Vec<LegacyExpectedBytes>,
     precondition_space: PreconditionSpace,
     precedence_table: Vec<PrecedenceRow>,
     vectors: Vec<Vector>,
+    r47_sequences: Vec<R47Sequence>,
+    negative_vectors: Vec<NegativeVector>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +88,7 @@ struct PreconditionSpace {
     dimensions: PreconditionDimensions,
     delivery_evidence_rule: String,
     metadata_rule: String,
+    candidate_scope_rule: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,9 +99,10 @@ struct PreconditionDimensions {
     candidate_by_scope: BTreeMap<String, Vec<String>>,
     delivery_evidence: Vec<String>,
     metadata: Vec<String>,
+    candidate_scope: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PrecedenceRow {
     row_id: String,
@@ -86,7 +113,7 @@ struct PrecedenceRow {
     expected_reason_or_cause: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Preconditions {
     scope_state: Vec<String>,
@@ -94,6 +121,7 @@ struct Preconditions {
     candidate: Vec<String>,
     delivery_evidence: Vec<String>,
     metadata: Vec<String>,
+    candidate_scope: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +134,11 @@ struct Vector {
     request: Value,
     expected: Value,
     precedence_row: String,
+    #[serde(default)]
+    candidate_scope: CandidateScopeFacts,
+    request_bytes_base64: Option<String>,
+    expected_bytes_base64: Option<String>,
+    transition: Option<CandidateScopeTransition>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +146,87 @@ struct Vector {
 struct ScannedMaterial {
     source_text: Option<String>,
     scanned_bytes_sha256: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyExpectedBytes {
+    vector_id: String,
+    bytes_base64: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CandidateScopeFacts {
+    row: CandidateScopeRow,
+    lineage_relation: Option<LineageRelation>,
+    source_uploads_live: u64,
+    attempts_prepared_or_later: u64,
+    in_edges: u64,
+    out_edges: u64,
+}
+
+impl Default for CandidateScopeFacts {
+    fn default() -> Self {
+        Self {
+            row: CandidateScopeRow::Absent,
+            lineage_relation: None,
+            source_uploads_live: 0,
+            attempts_prepared_or_later: 0,
+            in_edges: 0,
+            out_edges: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CandidateScopeRow {
+    Absent,
+    Present,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+enum LineageRelation {
+    #[serde(rename = "L_P")]
+    Predecessor,
+    #[serde(rename = "other")]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidateScopeTransition {
+    lineage_id_before: Option<String>,
+    lineage_id_after: Option<String>,
+    incarnation_before: Option<u64>,
+    incarnation_after: Option<u64>,
+    resolve_generation_before: Option<u64>,
+    resolve_generation_after: Option<u64>,
+    placeholder_retired: Option<String>,
+    predecessor_counter_before: u64,
+    predecessor_counter_after: u64,
+    positive_custody_before: u64,
+    positive_custody_after: u64,
+    capacity_uploads_before: u64,
+    capacity_uploads_after: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct R47Sequence {
+    id: String,
+    name: String,
+    steps: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NegativeVector {
+    id: String,
+    name: String,
+    response_bytes_base64: String,
+    rejected_field: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -235,9 +349,11 @@ enum RedeemResult {
     #[serde(rename = "REDEEMED")]
     Redeemed {
         receipt_id: String,
-        edge: LineageEdge,
+        edge: Box<LineageEdge>,
         existing: bool,
         fence_generation: u64,
+        #[serde(default, deserialize_with = "deserialize_present_lineage_id")]
+        lineage_adopted_from: Option<String>,
     },
     #[serde(rename = "UNRECOGNIZED")]
     Unrecognized {
@@ -401,6 +517,32 @@ struct OutcomeSignature<'a> {
     reason_or_cause: Option<&'a str>,
 }
 
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+enum ScopeOpenResponse {
+    #[serde(rename = "scope.open")]
+    ScopeOpen { result: ScopeOpenResult },
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+enum ScopeOpenResult {
+    #[serde(rename = "OPENED")]
+    Opened {
+        incarnation: u64,
+        lineage_id: String,
+        resolve_generation: u64,
+        created: bool,
+    },
+}
+
+fn deserialize_present_lineage_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -413,6 +555,38 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn decode_base64(encoded: &str) -> Vec<u8> {
+    fn sextet(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    assert_eq!(encoded.len() % 4, 0, "base64 length");
+    let mut decoded = Vec::new();
+    let (chunks, remainder) = encoded.as_bytes().as_chunks::<4>();
+    assert!(remainder.is_empty(), "base64 remainder");
+    for chunk in chunks {
+        let a = sextet(chunk[0]).expect("base64 digit");
+        let b = sextet(chunk[1]).expect("base64 digit");
+        let c = (chunk[2] != b'=').then(|| sextet(chunk[2]).expect("base64 digit"));
+        let d = (chunk[3] != b'=').then(|| sextet(chunk[3]).expect("base64 digit"));
+        decoded.push((a << 2) | (b >> 4));
+        if let Some(c) = c {
+            decoded.push((b << 4) | (c >> 2));
+            if let Some(d) = d {
+                decoded.push((c << 6) | d);
+            }
+        }
+    }
+    decoded
 }
 
 fn hex_96(value: &str) -> Result<[u8; 12], String> {
@@ -635,6 +809,34 @@ struct PreconditionCell {
     candidate: String,
     delivery_evidence: String,
     metadata: String,
+    candidate_scope: String,
+}
+
+fn candidate_scope_class(facts: &CandidateScopeFacts) -> Result<&'static str, String> {
+    let counts = [
+        facts.source_uploads_live,
+        facts.attempts_prepared_or_later,
+        facts.in_edges,
+        facts.out_edges,
+    ];
+    match facts.row {
+        CandidateScopeRow::Absent => {
+            if facts.lineage_relation.is_some() || counts.iter().any(|count| *count != 0) {
+                Err("an absent candidate scope cannot carry lineage or occupancy facts".to_string())
+            } else {
+                Ok("absent")
+            }
+        }
+        CandidateScopeRow::Present => {
+            if facts.lineage_relation.is_none() {
+                Err("a present candidate scope requires lineage_relation".to_string())
+            } else if counts.iter().all(|count| *count == 0) {
+                Ok("placeholder")
+            } else {
+                Ok("occupied")
+            }
+        }
+    }
 }
 
 fn row_matches(row: &PrecedenceRow, cell: &PreconditionCell) -> bool {
@@ -649,6 +851,10 @@ fn row_matches(row: &PrecedenceRow, cell: &PreconditionCell) -> bool {
             .delivery_evidence
             .contains(&cell.delivery_evidence)
         && row.preconditions.metadata.contains(&cell.metadata)
+        && row
+            .preconditions
+            .candidate_scope
+            .contains(&cell.candidate_scope)
 }
 
 fn outcome_signature(result: &RedeemResult) -> OutcomeSignature<'_> {
@@ -658,6 +864,7 @@ fn outcome_signature(result: &RedeemResult) -> OutcomeSignature<'_> {
             edge,
             existing,
             fence_generation,
+            lineage_adopted_from,
         } => {
             assert!(valid_uuid36(receipt_id));
             assert!(valid_uuid36(&edge.edge_id));
@@ -670,6 +877,9 @@ fn outcome_signature(result: &RedeemResult) -> OutcomeSignature<'_> {
             assert!(edge.fingerprint.excluded_additions.is_empty());
             assert!(edge.native_continuation_identity.ordinal > 0);
             assert!(*fence_generation > 0);
+            if let Some(lineage_id) = lineage_adopted_from {
+                assert!(valid_uuid36(lineage_id));
+            }
             let _ = existing;
             OutcomeSignature {
                 variant: "REDEEMED",
@@ -860,7 +1070,8 @@ fn assert_precondition_space(space: &PreconditionSpace) {
             "delivery_evidence",
             "metadata",
             "observation_class",
-            "candidate"
+            "candidate",
+            "candidate_scope"
         ]
     );
     assert_eq!(
@@ -881,6 +1092,10 @@ fn assert_precondition_space(space: &PreconditionSpace) {
     );
     assert_eq!(space.dimensions.delivery_evidence, ["ok", "missing"]);
     assert_eq!(space.dimensions.metadata, ["consistent", "inconsistent"]);
+    assert_eq!(
+        space.dimensions.candidate_scope,
+        ["absent", "placeholder", "occupied"]
+    );
     assert_eq!(
         space.dimensions.candidate_by_scope["absent"],
         ["none", "other"]
@@ -907,6 +1122,10 @@ fn assert_precondition_space(space: &PreconditionSpace) {
     );
     assert!(space.delivery_evidence_rule.contains("exactly when"));
     assert!(space.metadata_rule.contains("All other schema-valid"));
+    assert!(space.candidate_scope_rule.contains("derive placeholder"));
+    assert!(space.candidate_scope_rule.contains("lineage_relation"));
+    assert!(space.candidate_scope_rule.contains("source_uploads_live"));
+    assert!(!space.candidate_scope_rule.contains("tickets_bound"));
 }
 
 fn precondition_cells(space: &PreconditionSpace) -> Vec<PreconditionCell> {
@@ -916,13 +1135,16 @@ fn precondition_cells(space: &PreconditionSpace) -> Vec<PreconditionCell> {
             for candidate in &space.dimensions.candidate_by_scope[scope] {
                 for delivery in &space.dimensions.delivery_evidence {
                     for metadata in &space.dimensions.metadata {
-                        cells.push(PreconditionCell {
-                            scope_state: scope.clone(),
-                            observation_class: observation.clone(),
-                            candidate: candidate.clone(),
-                            delivery_evidence: delivery.clone(),
-                            metadata: metadata.clone(),
-                        });
+                        for candidate_scope in &space.dimensions.candidate_scope {
+                            cells.push(PreconditionCell {
+                                scope_state: scope.clone(),
+                                observation_class: observation.clone(),
+                                candidate: candidate.clone(),
+                                delivery_evidence: delivery.clone(),
+                                metadata: metadata.clone(),
+                                candidate_scope: candidate_scope.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -941,6 +1163,7 @@ fn assert_regardless_markers(fixture: &Fixture) {
         "candidate",
         "delivery_evidence",
         "metadata",
+        "candidate_scope",
     ];
     for row in &fixture.precedence_table {
         assert_eq!(
@@ -971,6 +1194,11 @@ fn assert_regardless_markers(fixture: &Fixture) {
                 values(&row.preconditions.metadata),
                 values(&fixture.precondition_space.dimensions.metadata),
             ),
+            (
+                "candidate_scope",
+                values(&row.preconditions.candidate_scope),
+                values(&fixture.precondition_space.dimensions.candidate_scope),
+            ),
         ];
         assert!(row
             .applies_regardless_of
@@ -989,37 +1217,95 @@ fn assert_regardless_markers(fixture: &Fixture) {
     }
 }
 
+fn uncovered_cells(space: &PreconditionSpace, rows: &[PrecedenceRow]) -> Vec<PreconditionCell> {
+    precondition_cells(space)
+        .into_iter()
+        .filter(|cell| !rows.iter().any(|row| row_matches(row, cell)))
+        .collect()
+}
+
+fn overlapping_cells(
+    space: &PreconditionSpace,
+    rows: &[PrecedenceRow],
+) -> Vec<(PreconditionCell, Vec<String>)> {
+    precondition_cells(space)
+        .into_iter()
+        .filter_map(|cell| {
+            let matches = rows
+                .iter()
+                .filter(|row| row_matches(row, &cell))
+                .map(|row| row.row_id.clone())
+                .collect::<Vec<_>>();
+            (matches.len() > 1).then_some((cell, matches))
+        })
+        .collect()
+}
+
 #[test]
 fn d5_redeem_precedence_table_is_total() {
     let (fixture, _) = load_fixture();
     assert_precondition_space(&fixture.precondition_space);
     assert_regardless_markers(&fixture);
-    for cell in precondition_cells(&fixture.precondition_space) {
-        let matches = fixture
-            .precedence_table
-            .iter()
-            .filter(|row| row_matches(row, &cell))
-            .count();
-        assert!(matches > 0, "precedence totality: {cell:?} has no row");
-    }
+    assert_eq!(
+        uncovered_cells(&fixture.precondition_space, &fixture.precedence_table),
+        [],
+        "precedence table has uncovered cells"
+    );
 }
 
 #[test]
 fn d5_redeem_precedence_table_is_disjoint() {
     let (fixture, _) = load_fixture();
     assert_precondition_space(&fixture.precondition_space);
-    for cell in precondition_cells(&fixture.precondition_space) {
-        let matching_rows = fixture
-            .precedence_table
-            .iter()
-            .filter(|row| row_matches(row, &cell))
-            .map(|row| row.row_id.as_str())
-            .collect::<Vec<_>>();
-        assert!(
-            matching_rows.len() <= 1,
-            "precedence disjointness: {cell:?} overlaps rows {matching_rows:?}"
-        );
-    }
+    assert_eq!(
+        overlapping_cells(&fixture.precondition_space, &fixture.precedence_table),
+        [],
+        "precedence table has overlapping rows"
+    );
+}
+
+#[test]
+fn d5_redeem_row_deletion_names_the_uncovered_candidate_scope_cell() {
+    let (fixture, _) = load_fixture();
+    let rows = fixture
+        .precedence_table
+        .iter()
+        .filter(|row| row.row_id != "P20_sealed_candidate_scope_occupied")
+        .cloned()
+        .collect::<Vec<_>>();
+    let uncovered = uncovered_cells(&fixture.precondition_space, &rows);
+    assert!(!uncovered.is_empty());
+    assert!(uncovered.iter().all(|cell| {
+        cell.scope_state == "SEALED"
+            && cell.observation_class == "single_valid_stored_marker"
+            && cell.candidate == "observation_consistent"
+            && cell.delivery_evidence == "ok"
+            && cell.metadata == "consistent"
+            && cell.candidate_scope == "occupied"
+    }));
+}
+
+#[test]
+fn d5_redeem_overlap_names_both_candidate_scope_rows() {
+    let (fixture, _) = load_fixture();
+    let mut rows = fixture.precedence_table.clone();
+    let mut duplicate = rows
+        .iter()
+        .find(|row| row.row_id == "P20_sealed_candidate_scope_occupied")
+        .expect("occupied row")
+        .clone();
+    duplicate.row_id = "MUTANT_occupied_as_placeholder".to_string();
+    rows.push(duplicate);
+    let overlaps = overlapping_cells(&fixture.precondition_space, &rows);
+    assert!(!overlaps.is_empty());
+    assert!(overlaps.iter().all(|(cell, matching)| {
+        cell.candidate_scope == "occupied"
+            && matching
+                == &[
+                    "P20_sealed_candidate_scope_occupied".to_string(),
+                    "MUTANT_occupied_as_placeholder".to_string(),
+                ]
+    }));
 }
 
 fn generated_marker_lists(sealed: &SealedScope) -> Vec<Vec<ObservedMarker>> {
@@ -1073,6 +1359,69 @@ fn generated_marker_lists(sealed: &SealedScope) -> Vec<Vec<ObservedMarker>> {
             ObservedMarker::Valid { identity: stored },
         ],
     ]
+}
+
+fn generated_candidate_scope_facts() -> Vec<CandidateScopeFacts> {
+    vec![
+        CandidateScopeFacts::default(),
+        CandidateScopeFacts {
+            row: CandidateScopeRow::Present,
+            lineage_relation: Some(LineageRelation::Predecessor),
+            source_uploads_live: 0,
+            attempts_prepared_or_later: 0,
+            in_edges: 0,
+            out_edges: 0,
+        },
+        CandidateScopeFacts {
+            row: CandidateScopeRow::Present,
+            lineage_relation: Some(LineageRelation::Other),
+            source_uploads_live: 0,
+            attempts_prepared_or_later: 1,
+            in_edges: 0,
+            out_edges: 0,
+        },
+    ]
+}
+
+#[test]
+fn d5_candidate_scope_classifier_derives_raw_occupancy_facts() {
+    let count_values = [0, 1, u64::MAX];
+    for lineage_relation in [LineageRelation::Predecessor, LineageRelation::Other] {
+        for uploads in count_values {
+            for attempts in count_values {
+                for in_edges in count_values {
+                    for out_edges in count_values {
+                        let facts = CandidateScopeFacts {
+                            row: CandidateScopeRow::Present,
+                            lineage_relation: Some(lineage_relation),
+                            source_uploads_live: uploads,
+                            attempts_prepared_or_later: attempts,
+                            in_edges,
+                            out_edges,
+                        };
+                        let expected = if [uploads, attempts, in_edges, out_edges]
+                            .iter()
+                            .all(|count| *count == 0)
+                        {
+                            "placeholder"
+                        } else {
+                            "occupied"
+                        };
+                        assert_eq!(candidate_scope_class(&facts), Ok(expected));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        candidate_scope_class(&CandidateScopeFacts::default()),
+        Ok("absent")
+    );
+    let invalid_absent = CandidateScopeFacts {
+        in_edges: 1,
+        ..CandidateScopeFacts::default()
+    };
+    assert!(candidate_scope_class(&invalid_absent).is_err());
 }
 
 fn generated_candidate_shapes(sealed: &SealedScope) -> Vec<Option<SuccessorCandidate>> {
@@ -1129,6 +1478,7 @@ fn d5_redeem_classifiers_cover_schema_valid_request_grammar() {
     ];
     let marker_lists = generated_marker_lists(&fixture.sealed_scope);
     let candidate_shapes = generated_candidate_shapes(&fixture.sealed_scope);
+    let candidate_scope_facts = generated_candidate_scope_facts();
     let delivery_shapes = [
         (false, None),
         (true, None),
@@ -1138,78 +1488,90 @@ fn d5_redeem_classifiers_cover_schema_valid_request_grammar() {
     let scopes = [ScopeState::Absent, ScopeState::Sealed, ScopeState::Redeemed];
     let mut observed_classes = BTreeMap::<&str, BTreeSet<String>>::new();
 
-    for scope in scopes {
-        for scanned_identity in &identities {
-            for scanned_digest in &digests {
-                for scanned_role in roles {
-                    for scanned_kind in kinds {
-                        for native_user_index in indices {
-                            for scan_source in &scan_sources {
-                                for observed_markers in &marker_lists {
-                                    for candidate in &candidate_shapes {
-                                        for (may_have_replied, ack) in &delivery_shapes {
-                                            let request = LineageRequest::Redeem {
-                                                predecessor_key: "session-predecessor-0001"
+    for candidate_scope in &candidate_scope_facts {
+        for scope in scopes {
+            for scanned_identity in &identities {
+                for scanned_digest in &digests {
+                    for scanned_role in roles {
+                        for scanned_kind in kinds {
+                            for native_user_index in indices {
+                                for scan_source in &scan_sources {
+                                    for observed_markers in &marker_lists {
+                                        for candidate in &candidate_shapes {
+                                            for (may_have_replied, ack) in &delivery_shapes {
+                                                let request = LineageRequest::Redeem {
+                                                    predecessor_key: "session-predecessor-0001"
+                                                        .to_string(),
+                                                    agent: "agent-main".to_string(),
+                                                    incarnation: 7,
+                                                    observation: RecognitionObservation {
+                                                        scanned_identity: scanned_identity.clone(),
+                                                        scanned_bytes_sha256: scanned_digest
+                                                            .clone(),
+                                                        scanned_role,
+                                                        scanned_kind,
+                                                        native_user_index,
+                                                        scan_source: scan_source.clone(),
+                                                        observed_markers: observed_markers.clone(),
+                                                        may_have_replied: *may_have_replied,
+                                                        ack: ack.clone(),
+                                                    },
+                                                    candidate: candidate.clone(),
+                                                };
+                                                let wire = serde_json::to_value(&request)
+                                                    .expect("serialize generated request");
+                                                let decoded: LineageRequest =
+                                                    serde_json::from_value(wire)
+                                                        .expect("generated request follows schema");
+                                                let LineageRequest::Redeem {
+                                                    observation,
+                                                    candidate,
+                                                    ..
+                                                } = decoded;
+                                                let cell = PreconditionCell {
+                                                    scope_state: scope.wire_name().to_string(),
+                                                    observation_class: observation_class(
+                                                        &observation,
+                                                        &fixture.sealed_scope,
+                                                    )
                                                     .to_string(),
-                                                agent: "agent-main".to_string(),
-                                                incarnation: 7,
-                                                observation: RecognitionObservation {
-                                                    scanned_identity: scanned_identity.clone(),
-                                                    scanned_bytes_sha256: scanned_digest.clone(),
-                                                    scanned_role,
-                                                    scanned_kind,
-                                                    native_user_index,
-                                                    scan_source: scan_source.clone(),
-                                                    observed_markers: observed_markers.clone(),
-                                                    may_have_replied: *may_have_replied,
-                                                    ack: ack.clone(),
-                                                },
-                                                candidate: candidate.clone(),
-                                            };
-                                            let wire = serde_json::to_value(&request)
-                                                .expect("serialize generated request");
-                                            let decoded: LineageRequest =
-                                                serde_json::from_value(wire)
-                                                    .expect("generated request follows schema");
-                                            let LineageRequest::Redeem {
-                                                observation,
-                                                candidate,
-                                                ..
-                                            } = decoded;
-                                            let cell = PreconditionCell {
-                                                scope_state: scope.wire_name().to_string(),
-                                                observation_class: observation_class(
-                                                    &observation,
-                                                    &fixture.sealed_scope,
-                                                )
-                                                .to_string(),
-                                                candidate: candidate_class(
-                                                    scope,
-                                                    &observation,
-                                                    candidate.as_ref(),
-                                                    &fixture.sealed_scope,
-                                                )
-                                                .to_string(),
-                                                delivery_evidence: delivery_evidence(&observation)
+                                                    candidate: candidate_class(
+                                                        scope,
+                                                        &observation,
+                                                        candidate.as_ref(),
+                                                        &fixture.sealed_scope,
+                                                    )
                                                     .to_string(),
-                                                metadata: metadata_class(&observation).to_string(),
-                                            };
-                                            assert_eq!(
+                                                    delivery_evidence: delivery_evidence(
+                                                        &observation,
+                                                    )
+                                                    .to_string(),
+                                                    metadata: metadata_class(&observation)
+                                                        .to_string(),
+                                                    candidate_scope: candidate_scope_class(
+                                                        candidate_scope,
+                                                    )
+                                                    .expect("generated candidate scope facts")
+                                                    .to_string(),
+                                                };
+                                                assert_eq!(
                                                 domain.iter().filter(|known| *known == &cell).count(),
                                                 1,
                                                 "schema-valid request did not classify into exactly one domain cell: {cell:?}"
                                             );
-                                            for (dimension, label) in [
-                                                ("scope_state", cell.scope_state),
-                                                ("observation_class", cell.observation_class),
-                                                ("candidate", cell.candidate),
-                                                ("delivery_evidence", cell.delivery_evidence),
-                                                ("metadata", cell.metadata),
-                                            ] {
-                                                observed_classes
-                                                    .entry(dimension)
-                                                    .or_default()
-                                                    .insert(label);
+                                                for (dimension, label) in [
+                                                    ("scope_state", cell.scope_state),
+                                                    ("observation_class", cell.observation_class),
+                                                    ("candidate", cell.candidate),
+                                                    ("delivery_evidence", cell.delivery_evidence),
+                                                    ("metadata", cell.metadata),
+                                                    ("candidate_scope", cell.candidate_scope),
+                                                ] {
+                                                    observed_classes
+                                                        .entry(dimension)
+                                                        .or_default()
+                                                        .insert(label);
+                                                }
                                             }
                                         }
                                     }
@@ -1249,6 +1611,10 @@ fn d5_redeem_classifiers_cover_schema_valid_request_grammar() {
             "metadata",
             values(&fixture.precondition_space.dimensions.metadata),
         ),
+        (
+            "candidate_scope",
+            values(&fixture.precondition_space.dimensions.candidate_scope),
+        ),
     ];
     for (dimension, expected) in expected_classes {
         let observed = observed_classes
@@ -1262,6 +1628,366 @@ fn d5_redeem_classifiers_cover_schema_valid_request_grammar() {
             "classifier grammar labels for {dimension}"
         );
     }
+}
+
+fn fixture_vector<'a>(fixture: &'a Fixture, id: &str) -> &'a Vector {
+    fixture
+        .vectors
+        .iter()
+        .find(|vector| vector.id == id)
+        .unwrap_or_else(|| panic!("missing vector {id}"))
+}
+
+fn r47_sequence<'a>(fixture: &'a Fixture, id: &str) -> &'a R47Sequence {
+    fixture
+        .r47_sequences
+        .iter()
+        .find(|sequence| sequence.id == id)
+        .unwrap_or_else(|| panic!("missing sequence {id}"))
+}
+
+fn decoded_json(encoded: &str) -> Value {
+    serde_json::from_slice(&decode_base64(encoded)).expect("base64 contains JSON")
+}
+
+#[test]
+fn d5_redeem_r47_adoption_is_reported_fenced_and_custody_free() {
+    let (fixture, fixture_bytes) = load_fixture();
+    assert!(
+        !String::from_utf8_lossy(&fixture_bytes).contains("tickets_bound"),
+        "MC candidate-scope occupancy must not claim gateway-local tickets"
+    );
+    let adopted = fixture_vector(&fixture, "V35");
+    assert_eq!(
+        candidate_scope_class(&adopted.candidate_scope),
+        Ok("placeholder")
+    );
+    assert_eq!(
+        adopted.candidate_scope.lineage_relation,
+        Some(LineageRelation::Other)
+    );
+    let transition = adopted.transition.as_ref().expect("adoption transition");
+    assert_eq!(transition.incarnation_before, transition.incarnation_after);
+    assert_eq!(transition.resolve_generation_before, Some(6));
+    assert_eq!(transition.resolve_generation_after, Some(7));
+    assert_eq!(
+        transition.resolve_generation_after,
+        transition
+            .resolve_generation_before
+            .map(|generation| generation + 1)
+    );
+    assert_eq!(transition.lineage_id_before, transition.placeholder_retired);
+    assert_eq!(
+        transition.lineage_id_after.as_deref(),
+        Some(fixture.sealed_scope.stored_edge.lineage_id.as_str())
+    );
+    assert_eq!(transition.positive_custody_before, 0);
+    assert_eq!(transition.positive_custody_after, 0);
+    assert_eq!(transition.capacity_uploads_before, 0);
+    assert_eq!(transition.capacity_uploads_after, 0);
+    assert_eq!(
+        transition.predecessor_counter_before,
+        transition.predecessor_counter_after
+    );
+    assert_eq!(adopted.candidate_scope.attempts_prepared_or_later, 0);
+    assert_eq!(
+        adopted.expected["redeem"]["result"]["lineage_adopted_from"].as_str(),
+        transition.lineage_id_before.as_deref()
+    );
+
+    let same_lineage = fixture_vector(&fixture, "V36");
+    assert_eq!(
+        candidate_scope_class(&same_lineage.candidate_scope),
+        Ok("placeholder")
+    );
+    assert_eq!(
+        same_lineage.candidate_scope.lineage_relation,
+        Some(LineageRelation::Predecessor)
+    );
+    assert_eq!(
+        same_lineage.expected,
+        fixture_vector(&fixture, "V15").expected
+    );
+    assert!(same_lineage.expected["redeem"]["result"]
+        .get("lineage_adopted_from")
+        .is_none());
+    let same_transition = same_lineage
+        .transition
+        .as_ref()
+        .expect("same-lineage transition");
+    assert_eq!(
+        same_transition.lineage_id_before,
+        same_transition.lineage_id_after
+    );
+    assert_eq!(
+        same_transition.resolve_generation_before,
+        same_transition.resolve_generation_after
+    );
+    assert!(same_transition.placeholder_retired.is_none());
+
+    let capacity = fixture_vector(&fixture, "V42");
+    assert_eq!(
+        candidate_scope_class(&capacity.candidate_scope),
+        Ok("placeholder")
+    );
+    assert_eq!(capacity.precedence_row, "P15_sealed_positive");
+    assert_eq!(
+        capacity.expected["redeem"]["result"]["lineage_adopted_from"],
+        "33333333-4444-4555-8666-777777777777"
+    );
+    let capacity_transition = capacity.transition.as_ref().expect("capacity transition");
+    assert_eq!(capacity_transition.capacity_uploads_before, 1);
+    assert_eq!(capacity_transition.capacity_uploads_after, 1);
+}
+
+#[test]
+fn d5_redeem_r47_occupied_scope_refuses_without_state_change() {
+    let (fixture, _) = load_fixture();
+    for id in ["V37", "V38", "V40", "V41", "V43"] {
+        let vector = fixture_vector(&fixture, id);
+        assert_eq!(
+            candidate_scope_class(&vector.candidate_scope),
+            Ok("occupied"),
+            "{id}"
+        );
+        assert_eq!(
+            vector.expected["redeem"]["result"]["kind"], "REFUSED",
+            "{id}"
+        );
+        assert_eq!(
+            vector.expected["redeem"]["result"]["refusal"]["details"]["field"], "candidate",
+            "{id}"
+        );
+        assert_eq!(
+            vector.expected["redeem"]["result"]["refusal"]["details"]["reason"],
+            "candidate scope has its own attempts or descent",
+            "{id}"
+        );
+        let transition = vector.transition.as_ref().expect("occupied transition");
+        assert_eq!(
+            transition.lineage_id_before, transition.lineage_id_after,
+            "{id}"
+        );
+        assert_eq!(
+            transition.incarnation_before, transition.incarnation_after,
+            "{id}"
+        );
+        assert_eq!(
+            transition.resolve_generation_before, transition.resolve_generation_after,
+            "{id}"
+        );
+        assert!(transition.placeholder_retired.is_none(), "{id}");
+        assert_eq!(
+            transition.positive_custody_before, transition.positive_custody_after,
+            "{id}"
+        );
+        assert_eq!(
+            transition.capacity_uploads_before, transition.capacity_uploads_after,
+            "{id}"
+        );
+        assert_eq!(
+            transition.predecessor_counter_before, transition.predecessor_counter_after,
+            "{id}"
+        );
+    }
+    assert!(
+        fixture_vector(&fixture, "V37")
+            .candidate_scope
+            .attempts_prepared_or_later
+            > 0
+    );
+    assert!(fixture_vector(&fixture, "V38").candidate_scope.out_edges > 0);
+    assert!(fixture_vector(&fixture, "V40").candidate_scope.in_edges > 0);
+    assert_eq!(
+        fixture_vector(&fixture, "V40")
+            .candidate_scope
+            .lineage_relation,
+        Some(LineageRelation::Predecessor)
+    );
+    assert!(
+        fixture_vector(&fixture, "V41")
+            .candidate_scope
+            .source_uploads_live
+            > 0
+    );
+}
+
+#[test]
+fn d5_redeem_r47_replay_precedes_candidate_scope_and_has_no_second_adoption() {
+    let (fixture, _) = load_fixture();
+    let replay = fixture_vector(&fixture, "V39");
+    assert_eq!(
+        candidate_scope_class(&replay.candidate_scope),
+        Ok("occupied")
+    );
+    assert_eq!(
+        replay.precedence_row,
+        "P02_redeemed_matching_candidate_and_marker"
+    );
+    assert_eq!(replay.expected, fixture_vector(&fixture, "V16").expected);
+    assert!(replay.expected["redeem"]["result"]
+        .get("lineage_adopted_from")
+        .is_none());
+    let transition = replay.transition.as_ref().expect("replay transition");
+    assert_eq!(transition.lineage_id_before, transition.lineage_id_after);
+    assert_eq!(
+        transition.resolve_generation_before,
+        transition.resolve_generation_after
+    );
+    assert_eq!(
+        transition.predecessor_counter_before,
+        transition.predecessor_counter_after
+    );
+    assert_eq!(
+        transition.positive_custody_before,
+        transition.positive_custody_after
+    );
+    let sequence = r47_sequence(&fixture, "S01_adoption_replay");
+    assert!(!sequence.name.is_empty());
+    assert_eq!(sequence.steps[0]["vector_id"], "V35");
+    assert_eq!(sequence.steps[1]["vector_id"], "V39");
+}
+
+#[test]
+fn d5_redeem_r47_scope_open_and_generation_fence_sequences_are_exact() {
+    let (fixture, _) = load_fixture();
+    let lineage = fixture.sealed_scope.stored_edge.lineage_id.as_str();
+    let open_after = r47_sequence(&fixture, "S02_adoption_then_scope_open");
+    assert!(!open_after.name.is_empty());
+    let opened: ScopeOpenResponse = serde_json::from_value(decoded_json(
+        open_after.steps[1]["expected_bytes_base64"]
+            .as_str()
+            .expect("scope.open response bytes"),
+    ))
+    .expect("shared scope.open response envelope");
+    assert_eq!(
+        opened,
+        ScopeOpenResponse::ScopeOpen {
+            result: ScopeOpenResult::Opened {
+                incarnation: 3,
+                lineage_id: lineage.to_string(),
+                resolve_generation: 7,
+                created: false,
+            },
+        }
+    );
+    assert!(decoded_json(
+        open_after.steps[1]["expected_bytes_base64"]
+            .as_str()
+            .expect("scope.open response bytes")
+    )["scope.open"]["result"]
+        .get("lineage_adopted_from")
+        .is_none());
+
+    let fence = r47_sequence(&fixture, "S03_generation_fence");
+    assert!(!fence.name.is_empty());
+    assert_eq!(fence.steps.len(), 7);
+    assert_eq!(fence.steps[1]["kind"], "gateway.local_ticket_sample");
+    assert_eq!(fence.steps[1]["opaque_local_fact"], true);
+    assert_eq!(fence.steps[1]["admission_ticket"]["resolve_generation"], 6);
+    assert_eq!(fence.steps[2]["vector_id"], "V35");
+    let prepare_refusal = decoded_json(
+        fence.steps[3]["expected_bytes_base64"]
+            .as_str()
+            .expect("prepare refusal bytes"),
+    );
+    let source_upload_refusal = decoded_json(
+        fence.steps[4]["expected_bytes_base64"]
+            .as_str()
+            .expect("source upload refusal bytes"),
+    );
+    let resolve_refusal = decoded_json(
+        fence.steps[5]["expected_bytes_base64"]
+            .as_str()
+            .expect("resolve refusal bytes"),
+    );
+    assert_eq!(
+        prepare_refusal, source_upload_refusal,
+        "source upload uses the same generation fence"
+    );
+    assert_eq!(
+        prepare_refusal, resolve_refusal,
+        "resolve replays the stable refusal"
+    );
+    assert_eq!(prepare_refusal["kind"], "REFUSED");
+    assert_eq!(prepare_refusal["refusal"]["reason"], "resolved_absent");
+    assert_eq!(prepare_refusal["negative"]["kind"], "generation_fence");
+    assert_eq!(prepare_refusal["negative"]["incarnation"], 3);
+    assert_eq!(
+        prepare_refusal["negative"]["invalidated_ticket_generation"],
+        6
+    );
+    assert_eq!(prepare_refusal["negative"]["fenced_by"], 7);
+    assert_eq!(fence.steps[3]["original_attempt_reexecuted"], true);
+    assert_eq!(fence.steps[5]["original_attempt_reexecuted"], true);
+    assert_eq!(fence.steps[5]["terminal"], true);
+    assert_eq!(fence.steps[5]["gateway_may_retire"], true);
+    assert_eq!(fence.steps[6]["new_attempt"], true);
+    assert_eq!(
+        fence.steps[6]["never_retickets_attempt_id"],
+        "attempt-s-stale-0001"
+    );
+    assert_eq!(fence.steps[6]["expected"]["kind"], "PREPARED");
+    assert_eq!(fence.steps[6]["expected"]["lineage_id"], lineage);
+    assert_eq!(fence.steps[6]["expected"]["resolve_generation"], 7);
+
+    let capacity = r47_sequence(&fixture, "S06_capacity_upload_survives_adoption");
+    assert_eq!(capacity.steps[0]["kind"], "capacity.begin");
+    assert!(capacity.steps[0]["ticket"].is_null());
+    assert_eq!(capacity.steps[1]["vector_id"], "V42");
+    assert_eq!(capacity.steps[2]["expected"], "CHECKED");
+    assert_eq!(capacity.steps[2]["upload_still_usable"], true);
+}
+
+#[test]
+fn d5_redeem_r47_concurrent_scope_open_has_only_complete_rows() {
+    let (fixture, _) = load_fixture();
+    let before = r47_sequence(&fixture, "S04_concurrent_open_pre_adoption");
+    let after = r47_sequence(&fixture, "S05_concurrent_open_post_adoption");
+    assert!(!before.name.is_empty() && !after.name.is_empty());
+    let before_result = decoded_json(
+        before.steps[0]["expected_bytes_base64"]
+            .as_str()
+            .expect("before response"),
+    );
+    let after_result = decoded_json(
+        after.steps[1]["expected_bytes_base64"]
+            .as_str()
+            .expect("after response"),
+    );
+    let before_row = &before_result["scope.open"]["result"];
+    let after_row = &after_result["scope.open"]["result"];
+    assert_eq!(before.steps[0]["linearization"], "before_adoption");
+    assert_eq!(after.steps[1]["linearization"], "after_adoption");
+    assert_eq!(
+        before_row["lineage_id"],
+        "33333333-4444-4555-8666-777777777777"
+    );
+    assert_eq!(before_row["resolve_generation"], 6);
+    assert_eq!(
+        after_row["lineage_id"],
+        fixture.sealed_scope.stored_edge.lineage_id
+    );
+    assert_eq!(after_row["resolve_generation"], 7);
+    assert_eq!(before_row["incarnation"], after_row["incarnation"]);
+    assert_eq!(before_row["created"], false);
+    assert_eq!(after_row["created"], false);
+}
+
+#[test]
+fn d5_redeem_lineage_adopted_from_present_null_is_rejected() {
+    let (fixture, _) = load_fixture();
+    let negative = fixture
+        .negative_vectors
+        .first()
+        .expect("present-null negative vector");
+    assert_eq!(negative.id, "N01_lineage_adopted_from_null");
+    assert!(!negative.name.is_empty());
+    assert_eq!(negative.rejected_field, "lineage_adopted_from");
+    let error =
+        serde_json::from_slice::<LineageResponse>(&decode_base64(&negative.response_bytes_base64))
+            .expect_err("present null must not decode as None");
+    assert!(error.to_string().contains("string"));
 }
 
 #[test]
@@ -1334,7 +2060,7 @@ fn d5_redeem_vectors_agree_with_precedence_table() {
             "REDEEMED" | "UNRECOGNIZED" | "REFUSED" | "lineage_corrupt"
         ));
     }
-    assert_eq!(fixture.precedence_table.len(), 20);
+    assert_eq!(fixture.precedence_table.len(), 21);
 
     let mut vector_ids = BTreeSet::new();
     let mut positive_edge = None;
@@ -1345,6 +2071,31 @@ fn d5_redeem_vectors_agree_with_precedence_table() {
             vector.id
         );
         assert!(!vector.name.is_empty());
+        if let (Some(request_bytes), Some(expected_bytes)) = (
+            vector.request_bytes_base64.as_deref(),
+            vector.expected_bytes_base64.as_deref(),
+        ) {
+            let request_wire = decode_base64(request_bytes);
+            let expected_wire = decode_base64(expected_bytes);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&request_wire).expect("exact request JSON"),
+                vector.request,
+                "{} exact request bytes",
+                vector.id
+            );
+            assert_eq!(
+                serde_json::from_slice::<Value>(&expected_wire).expect("exact response JSON"),
+                vector.expected,
+                "{} exact response bytes",
+                vector.id
+            );
+        } else {
+            assert!(
+                vector.request_bytes_base64.is_none() && vector.expected_bytes_base64.is_none(),
+                "{} must pin both request and response bytes together",
+                vector.id
+            );
+        }
         let request: LineageRequest = serde_json::from_value(vector.request.clone())
             .unwrap_or_else(|error| {
                 panic!(
@@ -1383,6 +2134,9 @@ fn d5_redeem_vectors_agree_with_precedence_table() {
             .to_string(),
             delivery_evidence: delivery_evidence(&observation).to_string(),
             metadata: metadata_class(&observation).to_string(),
+            candidate_scope: candidate_scope_class(&vector.candidate_scope)
+                .unwrap_or_else(|error| panic!("{} candidate scope facts: {error}", vector.id))
+                .to_string(),
         };
         let selected = fixture
             .precedence_table
@@ -1423,7 +2177,7 @@ fn d5_redeem_vectors_agree_with_precedence_table() {
             ..
         } = result
         {
-            assert_eq!(edge, fixture.sealed_scope.stored_edge);
+            assert_eq!(*edge, fixture.sealed_scope.stored_edge);
             assert_eq!(fence_generation, fixture.sealed_scope.fence_generation);
             if existing {
                 assert_eq!(
@@ -1436,7 +2190,31 @@ fn d5_redeem_vectors_agree_with_precedence_table() {
             }
         }
     }
-    assert_eq!(fixture.vectors.len(), 34);
+    assert_eq!(fixture.vectors.len(), 43);
+
+    assert_eq!(fixture.legacy_expected_bytes.len(), 20);
+    for (index, pinned) in fixture.legacy_expected_bytes.iter().enumerate() {
+        let expected_id = format!("V{:02}", index + 1);
+        assert_eq!(pinned.vector_id, expected_id);
+        let vector = fixture
+            .vectors
+            .iter()
+            .find(|vector| vector.id == pinned.vector_id)
+            .expect("legacy vector");
+        let pinned_bytes = decode_base64(&pinned.bytes_base64);
+        assert_eq!(
+            sha256_hex(&pinned_bytes),
+            LEGACY_EXPECTED_SHA256[index],
+            "{} pre-R47 expected bytes changed",
+            pinned.vector_id
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&pinned_bytes).expect("legacy expected JSON"),
+            vector.expected,
+            "{} expected envelope no longer matches its pinned bytes",
+            pinned.vector_id
+        );
+    }
 
     let index: Value = serde_json::from_slice(
         &fs::read(fixture_dir().join("fixture-index-v1.json")).expect("read fixture index"),
