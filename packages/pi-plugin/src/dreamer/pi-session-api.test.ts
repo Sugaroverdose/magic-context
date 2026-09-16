@@ -14,6 +14,7 @@ import {
 } from "./pi-session-api";
 
 const PI_SPEC = "@earendil-works/pi-coding-agent";
+const OMP_SPEC = "@oh-my-pi/pi-coding-agent";
 
 /** A fixture module whose listAll returns a unique marker, so tests can tell
  * WHICH copy of pi-coding-agent was resolved through the public API. */
@@ -130,6 +131,7 @@ describe("loadDefaultPiSessionApi", () => {
 			const names = defaultLoaders.map((l) => l.name);
 			expect(names[0]).toBe("Resolve from running Pi binary entry");
 			expect(names).toContain("Bare import");
+			expect(names).toContain("Bare import (OMP)");
 		});
 
 		it("resolves through a bin-shim symlink when argv[1] is the shim path", async () => {
@@ -180,6 +182,33 @@ describe("loadDefaultPiSessionApi", () => {
 	});
 
 	describe("running-Pi resolver layouts", () => {
+		it("resolves the session APIs from the running OMP package", async () => {
+			const dir = createTestTempDir("omp-running-package-").dir;
+			const pkgRoot = join(dir, "node_modules", "@oh-my-pi", "pi-coding-agent");
+			writeFixturePackage(pkgRoot, {
+				manifest: {
+					name: OMP_SPEC,
+					version: "18.2.1",
+					exports: {
+						".": {
+							types: "./dist/types/index.d.ts",
+							import: "./src/index.ts",
+						},
+					},
+				},
+				files: {
+					"dist/cli.js": "// OMP binary entry\n",
+					"src/index.ts": fixtureModule("running-omp-18.2.1"),
+				},
+			});
+
+			await withArgv1(join(pkgRoot, "dist", "cli.js"), async () => {
+				clearCachedModule();
+				const api = await loadDefaultPiSessionApi([defaultLoaders[0]]);
+				expect(await api.listSessions()).toEqual(["running-omp-18.2.1"]);
+			});
+		}, 30000);
+
 		it("prefers the running Pi over a stale extension-tree copy", async () => {
 			const dir = createTestTempDir("pi-running-vs-stale-").dir;
 			const pkgRoot = join(
@@ -498,7 +527,7 @@ describe("loadDefaultPiSessionApi", () => {
 
 			expect(error).not.toBeNull();
 			expect(error?.message).toContain(
-				"Failed to resolve @earendil-works/pi-coding-agent via all strategies",
+				"Failed to resolve a Pi/OMP coding-agent module (@earendil-works/pi-coding-agent or @oh-my-pi/pi-coding-agent) via all strategies",
 			);
 			expect(error?.message).toContain("- First: Cannot find module");
 			expect(error?.message).toContain(
@@ -524,7 +553,7 @@ describe("loadDefaultPiSessionApi", () => {
 				}
 				expect(error).not.toBeNull();
 				expect(error?.message).toContain(
-					"Could not locate @earendil-works/pi-coding-agent package.json from",
+					"Could not locate @earendil-works/pi-coding-agent or @oh-my-pi/pi-coding-agent package.json from",
 				);
 				expect(error?.message).toContain(process.execPath);
 				expect(error?.message).not.toContain("from undefined");
