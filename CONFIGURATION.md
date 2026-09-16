@@ -186,10 +186,13 @@ Per-model overrides for mixed-model workflows:
 {
   "cache_ttl": {
     "default": "5m",
-    "anthropic/claude-opus-4-6": "60m"
+    "anthropic/claude-opus-4-6": "60m",
+    "anthropic/*": "never"
   }
 }
 ```
+
+Keys are matched from most to least specific: the exact `provider/model`, the bare model ID, progressively shorter dash-prefixes of the model ID (`claude-opus-4-6` also matches a `claude-opus-4` entry), then the provider wildcard `provider/*`, then `default`. A more specific entry always wins over a wildcard, so the example above keeps `60m` for Opus 4.6 and applies `never` to every other Anthropic model. Harness provider aliases resolve to the canonical name first, so one entry covers the same model on OpenCode, Pi and OMP.
 
 Supported formats: `"30s"`, `"5m"`, `"1h"`.
 
