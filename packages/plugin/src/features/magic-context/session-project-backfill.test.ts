@@ -233,6 +233,38 @@ describe("runSessionProjectBackfill", () => {
         expect(_getSessionProjectBackfillState(db)?.status).toBe("completed");
     });
 
+    it("makes the lease immediately retryable when page discovery fails", async () => {
+        const db = createDb();
+        const now = 5_500;
+
+        await expect(
+            runSessionProjectBackfill(
+                db,
+                async () => {
+                    throw new Error("session discovery failed");
+                },
+                { holderId: "failed-holder", now: () => now },
+            ),
+        ).rejects.toThrow("session discovery failed");
+
+        expect(_getSessionProjectBackfillState(db)).toMatchObject({
+            status: "running",
+            holder_id: "failed-holder",
+            lease_expires_at: now,
+        });
+
+        const retry = await runSessionProjectBackfill(db, [], {
+            holderId: "retry-holder",
+            now: () => now,
+        });
+        expect(retry.status).toBe("completed");
+        expect(_getSessionProjectBackfillState(db)).toMatchObject({
+            status: "completed",
+            holder_id: "retry-holder",
+            lease_expires_at: null,
+        });
+    });
+
     it("skips empty directories", async () => {
         const db = createDb();
 
