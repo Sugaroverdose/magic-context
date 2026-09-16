@@ -5,10 +5,12 @@ on:
     # train/** runs the same checks on a train branch before it is fast-forwarded
     # onto master; required status checks on master are satisfied by that run.
     branches: [master, main, "train/**"]
-  # This private-source drift leg runs only on the default branch's scheduled
-  # workflow revision, never against untrusted branch code.
+  # This private-source drift leg runs only on the default branch's workflow
+  # revision, never against untrusted branch code: nightly, or by hand on master
+  # so a fix to the leg itself can be verified without waiting for the cron.
   schedule:
     - cron: "17 3 * * *"
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -411,9 +413,10 @@ jobs:
 
   rust-e2e-preflight:
     name: Rust hermetic E2E drift credential preflight
-    # Scheduled workflows use the default branch. This prevents the private-source
-    # App token from being exposed to untrusted branch code.
-    if: ${{ github.event_name == 'schedule' }}
+    # Scheduled workflows use the default branch, and a manual dispatch is only
+    # honoured on master. Both keep the private-source App token away from
+    # untrusted branch code.
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
