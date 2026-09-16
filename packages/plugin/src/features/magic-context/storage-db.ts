@@ -939,7 +939,7 @@ export function initializeDatabase(
       tag_id INTEGER,
       session_id TEXT,
       content TEXT,
-      created_at INTEGER, -- epoch ms (Date.now())
+      created_at INTEGER, -- epoch ms; Date.now() on source writes, preserved on session clones
       harness TEXT NOT NULL DEFAULT 'opencode',
       PRIMARY KEY(session_id, tag_id)
     );

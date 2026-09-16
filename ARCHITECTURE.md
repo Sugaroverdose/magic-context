@@ -149,19 +149,19 @@ Background maintenance (V2: per-task cron scheduling). A process-wide 15-min tim
 
 ### Timestamp Columns
 
-Timestamp columns in the fresh-install schema (`storage-db.ts`) are stamped in **epoch milliseconds**. Each entry below was verified against its writer; the unit is epoch ms on every verified path. Rows whose writer is not TypeScript `Date.now()` (or that have more than one writer) are called out explicitly, and the `storage-db.ts` schema comment `-- epoch ms (Date.now())` is only placed on columns where `Date.now()` is the actual writer.
+Timestamp columns in the fresh-install schema (`storage-db.ts`) are stamped in **epoch milliseconds**. Each entry below was verified against its writer; the unit is epoch ms on every verified path. Rows whose writer is not TypeScript `Date.now()` (or that have more than one writer) are called out explicitly, and the `storage-db.ts` schema comment `-- epoch ms (Date.now())` is only placed on columns where `Date.now()` is the actual writer. Caller-supplied overrides and clone-preserved copies are called out per row and in the Notes below.
 
 | Table | Column | Unit | Writer | Verified |
 |-------|--------|------|--------|----------|
 | source_contents | created_at | epoch ms | `Date.now()` (`storage-source.ts`) | ✅ |
 | compartments | created_at | epoch ms | `Date.now()` (`compartment-storage.ts`) | ✅ |
-| compartment_chunk_embeddings | created_at | epoch ms | `Date.now()` (`compartment-chunk-embedding.ts`) | ✅ |
+| compartment_chunk_embeddings | created_at | epoch ms | `Date.now()` default; caller `row.createdAt` honored (`compartment-chunk-embedding.ts`) | ✅ |
 | compartment_events | created_at | epoch ms | `Date.now()` (`compartment-events.ts`) | ✅ |
 | session_facts | created_at | epoch ms | `Date.now()` (`compartment-storage.ts`) | ✅ |
 | session_facts | updated_at | epoch ms | `Date.now()` (`compartment-storage.ts`) | ✅ |
-| primer_candidates | created_at | epoch ms | `Date.now()` (`storage-primers.ts`) | ✅ |
-| primers | created_at | epoch ms | `Date.now()` (`storage-primers.ts`) | ✅ |
-| primers | updated_at | epoch ms | `Date.now()` (`storage-primers.ts`) | ✅ |
+| primer_candidates | created_at | epoch ms | `Date.now()` default; caller `candidate.createdAt` honored (`storage-primers.ts`) | ✅ |
+| primers | created_at | epoch ms | `Date.now()` default; caller `input.now` honored (`storage-primers.ts`) | ✅ |
+| primers | updated_at | epoch ms | `Date.now()` default; caller `input.now` honored (`storage-primers.ts`) | ✅ |
 | synapse_batch_ledger | created_at | epoch ms | `Date.now()` (`storage-embedding-measurements.ts`) | ✅ |
 | synapse_batch_ledger | updated_at | epoch ms | `Date.now()` (`storage-embedding-measurements.ts`) | ✅ |
 | embedding_measurement_corpus | created_at | epoch ms | `Date.now()` (`storage-embedding-measurements.ts`) | ✅ |
@@ -176,6 +176,8 @@ Timestamp columns in the fresh-install schema (`storage-db.ts`) are stamped in *
 Notes:
 - `memories` rows created by the Rust-module mirror first allocate a placeholder with `created_at`/`updated_at` = 0 (`context-authority.ts`), then apply the module snapshot's own epoch-ms stamp — so `Date.now()` is not the sole writer, and the schema comment deliberately omits `memories`.
 - `workspaces` is stamped by the dashboard Rust backend (`chrono::Utc::now().timestamp_millis()`), not by TypeScript.
+- Session clones (`copySessionStateForClone()`, `storage-clone.ts`) copy `created_at` verbatim from the source row for `source_contents`, `compartments`, and `session_facts` — the original timestamp is preserved, not re-stamped with `Date.now()`.
+- `synapse_batch_ledger` and `embedding_measurement_corpus` declare `NOT NULL DEFAULT 0` as a backstop; every current writer passes `Date.now()` explicitly, so the default never fires on verified write paths.
 - This table covers the `created_at`/`updated_at` columns audited for this change; it is not an exhaustive inventory of every timestamp column in the schema.
 
 ## Session modes
