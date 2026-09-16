@@ -129,9 +129,28 @@ describe("loadDefaultPiSessionApi", () => {
 	describe("default loader order", () => {
 		it('first default loader is "Resolve from running Pi binary entry" (prefer the running Pi version)', () => {
 			const names = defaultLoaders.map((l) => l.name);
-			expect(names[0]).toBe("Resolve from running Pi binary entry");
-			expect(names).toContain("Bare import");
-			expect(names).toContain("Bare import (OMP)");
+			expect(names).toEqual([
+				"Resolve from running Pi binary entry",
+				"Bare import",
+				"Bare import (OMP)",
+			]);
+		});
+
+		it("loads the OMP package through the final bare-import fallback", async () => {
+			mock.module(OMP_SPEC, () => ({
+				SessionManager: { listAll: async () => ["omp-bare-import"] },
+			}));
+			try {
+				const ompLoader = defaultLoaders.find(
+					(loader) => loader.name === "Bare import (OMP)",
+				);
+				if (!ompLoader) throw new Error("OMP bare-import loader missing");
+				const api = await loadDefaultPiSessionApi([ompLoader]);
+				expect(await api.listSessions()).toEqual(["omp-bare-import"]);
+			} finally {
+				mock.restore();
+				clearCachedModule();
+			}
 		});
 
 		it("resolves through a bin-shim symlink when argv[1] is the shim path", async () => {
@@ -206,6 +225,32 @@ describe("loadDefaultPiSessionApi", () => {
 				clearCachedModule();
 				const api = await loadDefaultPiSessionApi([defaultLoaders[0]]);
 				expect(await api.listSessions()).toEqual(["running-omp-18.2.1"]);
+			});
+		}, 30000);
+
+		it("loads an OMP manifest whose export already points to TypeScript source", async () => {
+			const dir = createTestTempDir("omp-source-package-").dir;
+			const pkgRoot = join(dir, "pi-coding-agent");
+			writeFixturePackage(pkgRoot, {
+				manifest: {
+					name: OMP_SPEC,
+					exports: {
+						".": {
+							types: "./dist/types/index.d.ts",
+							import: "./src/index.ts",
+						},
+					},
+				},
+				files: {
+					"src/cli.ts": "// OMP source entry\n",
+					"src/index.ts": fixtureModule("running-omp-source"),
+				},
+			});
+
+			await withArgv1(join(pkgRoot, "src", "cli.ts"), async () => {
+				clearCachedModule();
+				const api = await loadDefaultPiSessionApi([defaultLoaders[0]]);
+				expect(await api.listSessions()).toEqual(["running-omp-source"]);
 			});
 		}, 30000);
 
