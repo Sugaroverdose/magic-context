@@ -446,6 +446,14 @@ export interface RustModeTransformOptions {
     sessionProjectIdentityResolverForTests?: typeof resolveProjectIdentityForSession;
     /** Override only to observe memory-project identity caching in tests. */
     memoryProjectIdentityResolverForTests?: typeof resolveProjectIdentity;
+    /** Arm host-side turn recovery after an engine-reconnecting refusal. */
+    onEngineReconnectRefusal?: (args: {
+        sessionId: string;
+        projectRoot: string;
+        refusedUserMessageId: string;
+        providerProvenEmergency: boolean;
+        compactionOff: boolean;
+    }) => void;
     /** Disable hot-path I/O caches to establish an uncached differential-timing baseline. */
     disableHotPathIoCachesForTests?: boolean;
     /** Test-only callback after a capture is accepted, reporting the reused digest prefix length. */
@@ -2123,6 +2131,8 @@ export function createRustModeTransform(
         }
         let appliedAt: number | undefined;
         let emergencyFailClosed = false;
+        let providerProvenEmergency = false;
+        let recoveryProjectRoot = options.projectRoot ?? deps.directory ?? "";
         // Parking must not hide pressure from the recovery policy. Usage is cheap to read
         // and is the same value copied onto the module request when this pass runs.
         const passUsageSnapshot = loadContextUsage(deps.contextUsageMap, deps.db, sessionId);
@@ -2166,11 +2176,14 @@ export function createRustModeTransform(
         const hasTrustedEmergencyWall = transformGeometry
             ? transformGeometry.usable_hard > 0
             : resolvedContextLimit !== undefined && resolvedContextLimit > 0;
+        const hardWallPercentage = hardWallUsagePercentage(
+            passUsageSnapshot,
+            transformGeometry,
+        );
+        const providerOverflowProven = isProviderOverflowFailClosedProven(sessionId);
         emergencyFailClosed =
-            isProviderOverflowFailClosedProven(sessionId) ||
-            (hardWallUsagePercentage(passUsageSnapshot, transformGeometry) >=
-                RUST_EMERGENCY_WALL_PCT &&
-                hasTrustedEmergencyWall);
+            providerOverflowProven ||
+            (hardWallPercentage >= RUST_EMERGENCY_WALL_PCT && hasTrustedEmergencyWall);
         if (overflowState) {
             const detectedLimitMatchesModel =
                 overflowState.detectedContextLimitModelKey === null ||
@@ -2181,10 +2194,14 @@ export function createRustModeTransform(
                 // An unknown persisted arm alone is not proof. A second provider rejection
                 // while that arm is durable records the process-local reconfirmation.
                 isProviderOverflowReconfirmed(sessionId);
-            emergencyFailClosed ||=
+            const persistedProviderEmergency =
                 overflowState.needsEmergencyRecovery &&
                 overflowState.emergencyRecoveryOrigin === "provider_overflow" &&
                 hasProviderProof;
+            emergencyFailClosed ||= persistedProviderEmergency;
+            providerProvenEmergency =
+                hardWallPercentage >= RUST_EMERGENCY_WALL_PCT &&
+                (providerOverflowProven || persistedProviderEmergency);
         }
         const serveRawFallback = (cause?: unknown): void => {
             const contextLimit =
@@ -2720,6 +2737,7 @@ export function createRustModeTransform(
                 nowMs: Date.now(),
             };
             const projectRoot = options.projectRoot ?? directory;
+            recoveryProjectRoot = projectRoot;
             const authoritySeqAdoption = { used: false };
             const memorySyncRequested =
                 options.memorySyncRequestedSessions?.delete(sessionId) === true;
@@ -3823,6 +3841,25 @@ export function createRustModeTransform(
                 sessionLog(sessionId, "mc_rust_emergency_refusal before_lkg");
                 markFailure(sessionId, state, error);
                 finishPass(false, false);
+                const refusedUser = newestUserMessage(messages);
+                const refusedUserMessageId = refusedUser ? messageIdOf(refusedUser) : null;
+                if (refusedUserMessageId) {
+                    try {
+                        options.onEngineReconnectRefusal?.({
+                            sessionId,
+                            projectRoot: recoveryProjectRoot,
+                            refusedUserMessageId,
+                            providerProvenEmergency,
+                            compactionOff: deps.compactionOff === true,
+                        });
+                    } catch (recoveryError) {
+                        sessionLog(
+                            sessionId,
+                            "rust refusal recovery failed to arm:",
+                            recoveryError,
+                        );
+                    }
+                }
                 throw new EmergencyFailClosedError(ENGINE_RECONNECTING_USER_MESSAGE, {
                     cause: error,
                 });

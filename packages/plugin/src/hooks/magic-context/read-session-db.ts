@@ -29,6 +29,18 @@ interface PartDataRow {
     data?: string | null;
 }
 
+interface PersistedMessageRow {
+    id?: string;
+    data?: string;
+}
+
+export interface LatestPersistedMessage {
+    id: string;
+    role: string;
+    parentID?: string;
+    error?: unknown;
+}
+
 /** Whether the resolved OpenCode session database currently exists. */
 export function openCodeDbExists(): boolean {
     return openCodeDbPathExists(resolveOpenCodeDbPath());
@@ -409,6 +421,35 @@ export function assistantAwaitingToolsFromOpenCodeDb(db: Database, sessionId: st
             return part.type === "tool" && part.providerExecuted !== true;
         } catch {
             return false;
+        }
+    });
+}
+
+export function latestPersistedMessageForRecovery(
+    sessionId: string,
+): LatestPersistedMessage | null {
+    return withReadOnlySessionDb((db) => {
+        const row = db
+            .prepare(
+                `SELECT id, data
+                   FROM message
+                  WHERE session_id = ?
+                  ORDER BY time_created DESC, id DESC
+                  LIMIT 1`,
+            )
+            .get(sessionId) as PersistedMessageRow | null;
+        if (typeof row?.id !== "string" || typeof row.data !== "string") return null;
+        try {
+            const data = JSON.parse(row.data) as Record<string, unknown>;
+            if (typeof data.role !== "string") return null;
+            return {
+                id: row.id,
+                role: data.role,
+                ...(typeof data.parentID === "string" ? { parentID: data.parentID } : {}),
+                ...(data.error === undefined ? {} : { error: data.error }),
+            };
+        } catch {
+            return null;
         }
     });
 }

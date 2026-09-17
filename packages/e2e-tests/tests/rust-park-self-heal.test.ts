@@ -30,8 +30,13 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
+import { RUST_REFUSAL_RECOVERY_PROMPT } from "../../plugin/src/hooks/magic-context/rust-refusal-recovery";
 import { RustTestHarness } from "../src/rust-harness";
-import { driveToSteadyState, rustPrereqs } from "../src/rust-scenario-support";
+import {
+    driveToSteadyState,
+    rustPrereqs,
+    sessionLogLines,
+} from "../src/rust-scenario-support";
 
 describe.skipIf(!rustPrereqs.ok)("rust incident regression: park self-heal", () => {
     let h: RustTestHarness;
@@ -124,6 +129,90 @@ describe.skipIf(!rustPrereqs.ok)("rust incident regression: park self-heal", () 
             await rethrowWithDiagnostics(sessionId, error);
         }
     }, 300_000);
+
+    it(
+        "resumes a refused turn exactly once when the module reconnects",
+        async () => {
+            const sessionId = await h.createSession();
+            await driveToSteadyState(h, sessionId, 1);
+            h.mock.setDefault({
+                text: "high pressure accepted",
+                usage: {
+                    input_tokens: 96_000,
+                    output_tokens: 20,
+                    cache_creation_input_tokens: 0,
+                },
+            });
+            await h.sendPrompt(sessionId, `arm accepted pressure: ${h.ballast(400)}`);
+            await h.waitFor(
+                () => {
+                    const row = h
+                        .contextDb()
+                        .prepare(
+                            "SELECT last_context_percentage FROM session_meta WHERE session_id = ?",
+                        )
+                        .get(sessionId) as { last_context_percentage?: number } | undefined;
+                    return (row?.last_context_percentage ?? 0) >= 95;
+                },
+                { label: "accepted high-pressure usage persisted" },
+            );
+
+            await h.subc.killModuleAndWait();
+            try {
+                await h.sendPrompt(sessionId, "refuse this step while the module is down", {
+                    timeoutMs: 30_000,
+                });
+            } catch {
+                // OpenCode may return the transform refusal as a rejected SDK call.
+            }
+            await h.waitFor(
+                () =>
+                    sessionLogLines(h, sessionId).some((line) =>
+                        line.includes("rust refusal recovery armed"),
+                    ),
+                { label: "post-refusal recovery watcher armed" },
+            );
+
+            const providerRequestsBeforeRecovery = h.mainRequests().length;
+            h.mock.setDefault({
+                text: "continued after reconnect",
+                usage: {
+                    input_tokens: 2_000,
+                    output_tokens: 20,
+                    cache_creation_input_tokens: 100,
+                },
+            });
+            await h.subc.restoreModule();
+            await h.waitFor(
+                async () => {
+                    const messages = await h.listMessages(sessionId);
+                    return messages.some((message) =>
+                        message.parts?.some(
+                            (part) =>
+                                part.type === "text" &&
+                                part.text === RUST_REFUSAL_RECOVERY_PROMPT,
+                        ),
+                    );
+                },
+                { timeoutMs: 30_000, label: "synthetic recovery prompt persisted" },
+            );
+            await h.waitFor(() => h.mainRequests().length > providerRequestsBeforeRecovery, {
+                timeoutMs: 30_000,
+                label: "recovered tool loop reached the provider",
+            });
+            await Bun.sleep(2_500);
+
+            const messages = await h.listMessages(sessionId);
+            const recoveryPrompts = messages.filter((message) =>
+                message.parts?.some(
+                    (part) =>
+                        part.type === "text" && part.text === RUST_REFUSAL_RECOVERY_PROMPT,
+                ),
+            );
+            expect(recoveryPrompts).toHaveLength(1);
+        },
+        300_000,
+    );
 
     // Prove that a session parked by repeated transport failures resumes once
     // the module is healthy, without recreating the OpenCode session.

@@ -108,6 +108,7 @@ import {
     setRecompTerminal,
 } from "./recomp-orchestrator";
 import type { RustModeModuleClient } from "./rust-mode-transform";
+import { createRustRefusalRecovery } from "./rust-refusal-recovery";
 import { createTextCompleteHandler } from "./text-complete";
 import { createTransform } from "./transform";
 import { type ManagedWrapupContext, runManagedWrapup } from "./wrapup-orchestrator";
@@ -855,6 +856,12 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         })();
     const rustModeModuleClient =
         deps.config.transform_mode === "rust" ? authorityRecoveryModuleClient : undefined;
+    const rustRefusalRecovery = rustModeModuleClient
+        ? createRustRefusalRecovery({
+              moduleClient: rustModeModuleClient,
+              client: deps.client,
+          })
+        : undefined;
     const syncModuleDomain = async (domain: "memories" | "notes"): Promise<void> => {
         if (!rustModeModuleClient?.mirrorPull) return;
         await drainMirrorPages({
@@ -1209,6 +1216,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         rustMemorySyncRequestedSessions,
         onRustModeParked: notifyRustModeParked,
         onRustModeProjectPrepared: ensureModuleNoteEvaluationBridge,
+        onRustEngineReconnectRefusal: (args) => rustRefusalRecovery?.arm(args),
     });
     const eventHandler = createEventHandler({
         contextUsageMap,
@@ -1242,6 +1250,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         // Remove module-owned state before the context database drops the durable
         // session→project binding needed to retry a failed module deletion.
         onSessionDeleted: async (sessionId: string) => {
+            rustRefusalRecovery?.forget(sessionId);
             dropSlot(sessionId, "session-deleted");
             try {
                 await transform.clearRustSession(sessionId);
