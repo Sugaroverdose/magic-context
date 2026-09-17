@@ -2573,12 +2573,13 @@ describe("issue #386 sustained execute-pressure batching", () => {
         // That keeps the batching assertion focused on the pressure latch rather than changing
         // which historical outputs constitute the working set.
         const protectedTokens = 12_000;
-        const runPressurePass = async (inputTokens: number) => {
+        const runPressurePass = async (inputTokens: number, flush = false) => {
             const protectionWindow = getProtectionWindowForSession(db, sessionId, protectedTokens);
             return runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
                     schedulerDecision: "execute",
                     contextUsage: { percentage: 90, inputTokens },
+                    pendingMaterializationSessions: new Set(flush ? [sessionId] : []),
                     emergencyCeilingTokens: Math.floor(
                         contextLimit * (executeThresholdPercentage / 100),
                     ),
@@ -2641,6 +2642,9 @@ describe("issue #386 sustained execute-pressure batching", () => {
 
         queuePendingOp(db, sessionId, 19, "drop", 1);
         await runPressurePass(92_000);
+        expect(getPendingOps(db, sessionId)).toHaveLength(1);
+        expect(JSON.stringify(messages.slice(0, 30))).toBe(pricedPrefix);
+        await runPressurePass(92_000, true);
         const ridingStatuses = new Map(
             getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
         );
@@ -4240,8 +4244,7 @@ describe("final message representation", () => {
         expect(JSON.stringify(deferTarget.parts)).toBe(acceptedBytes);
         expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(new Set());
 
-        // Pass N+1: execute is the existing cache-busting gate, so first
-        // application and persistence happen together.
+        // This explicit flush performs the first strip and persists it in the same pass.
         const bustMessages = buildMessages(true);
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, bustMessages, {
@@ -6868,7 +6871,9 @@ describe("ride-only queued drops", () => {
             const message = makeToolMessage("ride-only-tool");
             insertTag(db, sessionId, "ride-only-call", "tool", 1000, 1, 0, "bash", 0, message.info.id);
             padRecentToolSkeletonWindow(sessionId, 1);
+            if (historianRunning) registerActiveCompartmentRun(sessionId, new Promise<void>(() => {}));
             const args = basePostTransformArgs(db, sessionId, [message], {
+                canRunCompartments: historianRunning,
                 schedulerDecision: "execute",
                 schedulerDeferReason: undefined,
                 contextUsage: { percentage: 65, inputTokens: 65000 },
@@ -6883,7 +6888,7 @@ describe("ride-only queued drops", () => {
                 await runPostTransformPhase(args);
                 expect(JSON.stringify(args.messages)).toBe(baseline);
                 expect(getPendingOps(db, sessionId)).toHaveLength(1);
-                expect(log.mock.calls.some((call) => String(call[1]).includes("held — reason=no originating cache-bust opportunity"))).toBe(true);
+                expect(log.mock.calls.some((call) => String(call[1]).includes("held — reason=no originating cache-bust opportunity") && String(call[1]).includes(`historianRunning=${historianRunning}`))).toBe(true);
                 for (let pass = 0; pass < 4; pass++) {
                     await runPostTransformPhase({ ...args, schedulerDecision: "defer" });
                     expect(JSON.stringify(args.messages)).toBe(baseline);
@@ -6896,4 +6901,60 @@ describe("ride-only queued drops", () => {
             }
         });
     }
+});
+
+it("queued agent batches consume only one force episode", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ride-force-batches";
+    const first = makeToolMessage("force-first");
+    const second = makeToolMessage("force-second");
+    for (const [index, message] of [first, second].entries()) {
+        insertTag(db, sessionId, `force-call-${index}`, "tool", 1000, index + 1, 0, "bash", 0, message.info.id);
+    }
+    padRecentToolSkeletonWindow(sessionId, 2);
+    const args = basePostTransformArgs(db, sessionId, [first, second], {
+        schedulerDecision: "execute",
+        contextUsage: { percentage: 90, inputTokens: 90000 },
+        targets: new Map([[1, makeDropTarget(first)], [2, makeDropTarget(second)]]),
+    });
+    queuePendingOp(db, sessionId, 1, "drop");
+    await runPostTransformPhase(args);
+    expect(getPendingOps(db, sessionId)).toHaveLength(0);
+    const frozen = JSON.stringify(args.messages);
+    queuePendingOp(db, sessionId, 2, "drop");
+    await runPostTransformPhase(args);
+    expect(getPendingOps(db, sessionId)).toHaveLength(1);
+    expect(JSON.stringify(args.messages)).toBe(frozen);
+    args.pendingMaterializationSessions.add(sessionId);
+    await runPostTransformPhase(args);
+    expect(getPendingOps(db, sessionId)).toHaveLength(0);
+});
+
+it("four pure defer passes preserve served bytes and durable drop state", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "four-defer-replay";
+    const snapshots: string[] = [];
+    insertTag(db, sessionId, "replay-call", "tool", 1000, 1, 0, "bash", 0, "replay-tool");
+    padRecentToolSkeletonWindow(sessionId, 1);
+    queuePendingOp(db, sessionId, 1, "drop", 1);
+    const pass = async (flush: boolean) => {
+        const message = makeToolMessage("replay-tool");
+        const messages = [message];
+        applyFlushedStatuses(sessionId, db, new Map([[1, makeDropTarget(message)]]), getTagsBySession(db, sessionId));
+        await runPostTransformPhase(basePostTransformArgs(db, sessionId, messages, {
+            pendingMaterializationSessions: new Set(flush ? [sessionId] : []),
+            targets: new Map([[1, makeDropTarget(message)]]),
+        }));
+        return JSON.stringify({ messages, status: getTagsBySession(db, sessionId).map(tag => [tag.tagNumber, tag.status]), pending: getPendingOps(db, sessionId).length });
+    };
+    await pass(true);
+    const baseline = await pass(false);
+    for (let index = 0; index < 4; index++) {
+        const snapshot = await pass(false);
+        expect(snapshot).toBe(baseline);
+        snapshots.push(snapshot);
+    }
+    console.log("RIDE_REPLAY_OC", createHash("sha256").update(JSON.stringify(snapshots)).digest("hex"));
 });

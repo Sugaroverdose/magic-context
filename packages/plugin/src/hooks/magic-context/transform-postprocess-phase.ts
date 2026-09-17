@@ -1357,7 +1357,10 @@ export async function runPostTransformPhase(
     // All first applications share an independently priced cache-bust permission.
     const rideSignals = {
         hardFold: foldExecutedThisPass || firstRenderBust,
-        force: forceMaterialization || emergencyDropEligible,
+        force:
+            emergencyDropEligible &&
+            (args.contextUsage.percentage >= 95 ||
+                getEmergencyInputSample(args.db, args.sessionId) === 0),
         explicitFlush: isExplicitFlush || (deferredMaterialize && !prefixPreflightFailed),
         publishedHistory:
             publishedM1RefreshedThisPass ||

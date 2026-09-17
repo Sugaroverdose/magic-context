@@ -5240,7 +5240,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// OpenCode does, because they do not share the primary agent's turn cache.
 	const rideSignals = {
 		hardFold: foldExecutedThisPass || firstRenderBust,
-		force: args.forceMaterialization === true || emergencyDropEligible,
+		force:
+            (args.forceMaterialization === true || emergencyDropEligible) &&
+            (args.contextUsage.percentage >= 95 || getEmergencyInputSample(args.db, args.sessionId) === 0),
 		explicitFlush: hasPendingMaterializeSignal || (deferredMaterializeEligible && !prefixPreflightContended),
 		publishedHistory:
 			!prefixPreflightContended &&

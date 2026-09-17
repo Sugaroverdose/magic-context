@@ -37,86 +37,29 @@
   ],
   "fullMeasurements": {
     "guidance": {
-      "primary-full-reduce-memory-on": {
-        "chars": 8706,
-        "tokens": 2005
-      },
-      "primary-full-reduce-memory-off": {
-        "chars": 7671,
-        "tokens": 1746
-      },
-      "primary-full-no-reduce-memory-on": {
-        "chars": 6484,
-        "tokens": 1489
-      },
-      "primary-full-no-reduce-memory-off": {
-        "chars": 5449,
-        "tokens": 1230
-      },
-      "primary-full-reduce-dreamer-off": {
-        "chars": 8377,
-        "tokens": 1928
-      },
-      "primary-full-reduce-temporal-off": {
-        "chars": 8271,
-        "tokens": 1898
-      },
-      "primary-full-reduce-caveman-on": {
-        "chars": 9321,
-        "tokens": 2131
-      },
-      "primary-full-reduce-language-on": {
-        "chars": 8906,
-        "tokens": 2051
-      },
-      "subagent-reduce": {
-        "chars": 693,
-        "tokens": 187
-      }
+      "primary-full-reduce-memory-on": { "chars": 8706, "tokens": 2005 },
+      "primary-full-reduce-memory-off": { "chars": 7671, "tokens": 1746 },
+      "primary-full-no-reduce-memory-on": { "chars": 6484, "tokens": 1489 },
+      "primary-full-no-reduce-memory-off": { "chars": 5449, "tokens": 1230 },
+      "primary-full-reduce-dreamer-off": { "chars": 8377, "tokens": 1928 },
+      "primary-full-reduce-temporal-off": { "chars": 8271, "tokens": 1898 },
+      "primary-full-reduce-caveman-on": { "chars": 9321, "tokens": 2131 },
+      "primary-full-reduce-language-on": { "chars": 8906, "tokens": 2051 },
+      "subagent-reduce": { "chars": 693, "tokens": 187 }
     },
     "toolDescriptions": {
-      "ctx_reduce": {
-        "chars": 1278,
-        "tokens": 311
-      },
-      "ctx_expand": {
-        "chars": 1586,
-        "tokens": 395
-      },
-      "ctx_note": {
-        "chars": 1547,
-        "tokens": 387
-      },
-      "ctx_memory": {
-        "chars": 980,
-        "tokens": 234
-      },
-      "ctx_search": {
-        "chars": 1663,
-        "tokens": 402
-      }
+      "ctx_reduce": { "chars": 1278, "tokens": 311 },
+      "ctx_expand": { "chars": 1586, "tokens": 395 },
+      "ctx_note": { "chars": 1547, "tokens": 387 },
+      "ctx_memory": { "chars": 980, "tokens": 234 },
+      "ctx_search": { "chars": 1663, "tokens": 402 }
     },
     "serializedParameterSchemas": {
-      "ctx_reduce": {
-        "chars": 91,
-        "tokens": 31
-      },
-      "ctx_expand": {
-        "chars": 791,
-        "tokens": 177
-      },
-      "ctx_note": {
-        "chars": 1499,
-        "tokens": 359
-      },
-      "ctx_memory": {
-        "chars": 912,
-        "tokens": 216
-      },
-      "ctx_search": {
-        "chars": 777,
-        "tokens": 184
-      },
+      "ctx_reduce": { "chars": 91, "tokens": 31 },
+      "ctx_expand": { "chars": 791, "tokens": 177 },
+      "ctx_note": { "chars": 1499, "tokens": 359 },
+      "ctx_memory": { "chars": 912, "tokens": 216 },
+      "ctx_search": { "chars": 777, "tokens": 184 },
       "totalTokens": 967
     },
     "builtInProviderVisibleTotal": 4701
