@@ -1,13 +1,21 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { getProjectEmbeddingSnapshot } from "@magic-context/core/features/magic-context/memory/embedding";
+import type { EmbeddingConfig } from "@magic-context/core/config/schema/magic-context";
+import {
+	_resetProjectEmbeddingRegistryForTests,
+	_setTestProviderFactoryForProject,
+	getProjectEmbeddingSnapshot,
+	getShadowEmbeddingMeasurementCohort,
+	registerProjectShadowEmbedding,
+} from "@magic-context/core/features/magic-context/memory/embedding";
 import {
 	getProjectEmbeddings,
 	peekProjectEmbeddings,
 	resetEmbeddingCacheForTests,
 } from "@magic-context/core/features/magic-context/memory/embedding-cache";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
+import * as logger from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
 
@@ -89,6 +97,106 @@ describe("ensureProjectRegisteredFromPiDirectory", () => {
 				if (value === undefined) delete process.env[key];
 				else process.env[key] = value;
 			}
+			closeQuietly(db);
+		}
+	});
+	it("retires a disabled shadow without removing the primary lane", async () => {
+		const db = createTestDb();
+		const directory = createTestTempDir("pi-shadow-retirement-").dir;
+		const configHome = createTestTempDir("pi-shadow-config-").dir;
+		const previous = process.env.XDG_CONFIG_HOME;
+		process.env.XDG_CONFIG_HOME = configHome;
+		let disposed = false;
+		_setTestProviderFactoryForProject(() => ({
+			modelId: "shadow",
+			initialize: async () => true,
+			embed: async () => new Float32Array([1, 0]),
+			embedBatch: async (texts: string[]) =>
+				texts.map(() => new Float32Array([1, 0])),
+			dispose: async () => {
+				disposed = true;
+			},
+			isLoaded: () => true,
+		}));
+		try {
+			await fs.mkdir(path.join(configHome, "cortexkit"), { recursive: true });
+			await fs.writeFile(
+				path.join(configHome, "cortexkit", "magic-context.json"),
+				JSON.stringify({
+					embedding: { provider: "off" },
+					shadow_embedding: { enabled: false },
+				}),
+			);
+			const identity = resolveProjectIdentity(directory);
+			registerProjectShadowEmbedding(
+				db,
+				identity,
+				{
+					provider: "synapse",
+					model: "shadow",
+					synapse_fingerprint: "fixture",
+				} as unknown as EmbeddingConfig,
+				directory,
+			);
+			expect(getShadowEmbeddingMeasurementCohort(identity)?.fingerprint).toBe(
+				"fixture",
+			);
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
+			expect(getShadowEmbeddingMeasurementCohort(identity)).toBeNull();
+			expect(getProjectEmbeddingSnapshot(identity)?.provider).toBe("off");
+			expect(disposed).toBe(true);
+		} finally {
+			_resetProjectEmbeddingRegistryForTests();
+			if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+			else process.env.XDG_CONFIG_HOME = previous;
+			closeQuietly(db);
+		}
+	});
+	it("does not repeat a missing-SubC warning until configuration changes", async () => {
+		const db = createTestDb();
+		const directory = createTestTempDir("pi-routing-memo-").dir;
+		const configHome = createTestTempDir("pi-routing-memo-config-").dir;
+		const previous = process.env.XDG_CONFIG_HOME;
+		process.env.XDG_CONFIG_HOME = configHome;
+		const messages: string[] = [];
+		const logging = spyOn(logger, "log").mockImplementation((message) => {
+			messages.push(String(message));
+		});
+		try {
+			const configDir = path.join(configHome, "cortexkit");
+			await fs.mkdir(configDir, { recursive: true });
+			const configFile = path.join(configDir, "magic-context.json");
+			await fs.writeFile(
+				configFile,
+				JSON.stringify({
+					embedding: { provider: "synapse", fallback_provider: "off" },
+				}),
+			);
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
+			expect(
+				messages.filter((message) => message.includes("requires a subc block")),
+			).toHaveLength(1);
+			await fs.writeFile(
+				configFile,
+				JSON.stringify({
+					embedding: { provider: "synapse", fallback_provider: "off" },
+					subc: { connection_file: path.join(configHome, "missing.json") },
+				}),
+			);
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
+			// A configured but unavailable daemon is retryable, unlike missing configuration.
+			expect(
+				messages.filter((message) =>
+					message.startsWith("[magic-context] Synapse is not ready;"),
+				),
+			).toHaveLength(2);
+		} finally {
+			logging.mockRestore();
+			_resetProjectEmbeddingRegistryForTests();
+			if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+			else process.env.XDG_CONFIG_HOME = previous;
 			closeQuietly(db);
 		}
 	});

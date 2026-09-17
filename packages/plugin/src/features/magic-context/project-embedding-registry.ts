@@ -2232,6 +2232,23 @@ export function registerProjectInObservationMode(
     return snapshotFor(registration);
 }
 
+export function unregisterProjectShadowEmbedding(projectIdentity: string): void {
+    const shadow = shadowRegistrations.get(projectIdentity);
+    shadowRegistrations.delete(projectIdentity);
+    dbForShadowQueue.delete(projectIdentity);
+    pendingShadowBackfills.delete(projectIdentity);
+    for (let index = shadowQueue.length - 1; index >= 0; index -= 1) {
+        if (shadowQueue[index].projectIdentity === projectIdentity) shadowQueue.splice(index, 1);
+    }
+    for (const scope of ["memory", "commit", "chunk"] as const) {
+        const key = `${projectIdentity}:${scope}`;
+        shadowBackfillLastIds.delete(key);
+        shadowBackfillStopReasons.delete(key);
+        shadowBackfillLastWriteOutcomes.delete(key);
+    }
+    disposeProvider(shadow?.provider ?? null);
+}
+
 export function unregisterProjectEmbedding(projectIdentity: string): void {
     const prior = projectRegistrations.get(projectIdentity);
     const shadow = shadowRegistrations.get(projectIdentity);

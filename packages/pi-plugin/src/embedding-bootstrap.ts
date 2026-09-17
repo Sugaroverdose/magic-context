@@ -7,6 +7,7 @@ import {
 	type EmbeddingFeatures,
 	registerProjectEmbedding,
 	registerProjectShadowEmbedding,
+	unregisterProjectShadowEmbedding,
 } from "@magic-context/core/features/magic-context/memory/embedding";
 import { resolveProjectIdentityForSession } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
@@ -106,16 +107,23 @@ export async function ensureProjectRegisteredFromPiDirectory(
 			routing.shadow,
 			directory,
 		);
+	} else {
+		unregisterProjectShadowEmbedding(projectIdentity);
 	}
-	// Retry discovery on the next registration if a configured lane was unavailable.
+	// Only failed daemon discovery can recover without a configuration change.
 	const configuredProvider = detailed.config.embedding.provider;
-	const shadowEnabled = detailed.config.shadow_embedding?.enabled === true;
-	if (
-		routing.primary.provider === configuredProvider &&
-		(configuredProvider === "synapse" ||
-			!shadowEnabled ||
-			routing.shadow !== null)
-	) {
+	const canDiscover =
+		Boolean(detailed.config.subc) &&
+		(configuredProvider === "synapse"
+			? Boolean(detailed.config.embedding.fallback_provider)
+			: configuredProvider !== "off" &&
+				detailed.config.shadow_embedding?.enabled === true);
+	const discoveryFailed =
+		canDiscover &&
+		(configuredProvider === "synapse"
+			? routing.primary.provider !== "synapse"
+			: routing.shadow === null);
+	if (!discoveryFailed) {
 		const fingerprintPaths = configCandidatePaths(
 			directory,
 			detailed.loadedFromPaths,
@@ -124,5 +132,7 @@ export async function ensureProjectRegisteredFromPiDirectory(
 			paths: fingerprintPaths,
 			fingerprint: configFingerprint(fingerprintPaths),
 		});
+	} else {
+		registrationFingerprints.delete(projectIdentity);
 	}
 }
