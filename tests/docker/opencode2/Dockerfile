@@ -1,4 +1,4 @@
-# Magic Context — pinned OpenCode 2.0.3 end-to-end image.
+# Magic Context — pinned OpenCode 2.0.5 end-to-end image.
 #
 # Local/CI command (the wrapper builds the exact plugin artifact first):
 #   tests/docker/opencode2/run.sh
@@ -22,9 +22,9 @@ ENV PATH="/root/.bun/bin:/test/host/node_modules/.bin:$PATH"
 # The wrapper and native Linux binary are both explicit exact pins. Installing
 # @opencode/client only equips the lane driver; product code never imports it.
 RUN mkdir -p /test/host && npm install --prefix /test/host --no-audit --no-fund \
-    @opencode/cli@2.0.3 \
-    @opencode/cli-linux-x64@2.0.3 \
-    @opencode/client@2.0.3
+    @opencode/cli@2.0.5 \
+    @opencode/cli-linux-x64@2.0.5 \
+    @opencode/client@2.0.5
 
 # Reconstruct the files npm publishes. The Docker build consumes the locally
 # built dist plus the raw TUI sources rather than the registry release.
@@ -46,6 +46,7 @@ RUN cd /test/mc-package \
     && npm install --prefix /test/mc-install --no-audit --no-fund \
         "/test/mc-package/$(cat /test/plugin-tarball-name)"
 
+COPY packages/e2e-tests/src/opencode2-runner/plugin-activation.ts /test/plugin-activation.ts
 COPY tests/docker/opencode2/lane.mjs /test/lane.mjs
 COPY tests/docker/opencode2/test-opencode2-e2e.sh /test/test-opencode2-e2e.sh
 RUN chmod +x /test/test-opencode2-e2e.sh \

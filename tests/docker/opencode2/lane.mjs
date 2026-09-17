@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { OpenCode } from "/test/host/node_modules/@opencode/client/dist/promise/client.js";
+import { awaitPluginActivation } from "/test/plugin-activation.ts";
 
 const roots = ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"];
 for (const key of roots) {
@@ -119,10 +120,7 @@ try {
         location: { directory },
         model: { providerID: "mock", id: "mock-model" },
     });
-    await client.plugin.awaitActivation(
-        { location: { directory } },
-        { signal: AbortSignal.timeout(20_000) },
-    );
+    await awaitPluginActivation(client, directory);
     const plugins = await client.plugin.list({ location: { directory } });
     const active = plugins.data.find((plugin) => plugin.id === "opencode-magic-context");
     if (active?.state.status !== "active") throw new Error(`plugin not active: ${JSON.stringify(plugins.data)}`);
