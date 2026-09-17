@@ -38,9 +38,10 @@ export interface HiddenChildAttempt {
 export function newestUserText(draft: SessionContext): string | undefined {
     const message = draft.messages.at(-1);
     if (!message || (message.role !== undefined && message.role !== "user")) return undefined;
-    if (typeof message.content === "string" && message.content.length > 0) return message.content;
-    const parts = Array.isArray(message.content)
-        ? message.content
+    const content: unknown = message.content;
+    if (typeof content === "string" && content.length > 0) return content;
+    const parts = Array.isArray(content)
+        ? content
         : Array.isArray(message.parts)
           ? message.parts
           : [];
