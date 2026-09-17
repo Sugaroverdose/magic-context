@@ -45,11 +45,8 @@ export async function setup(context: V2Context) {
         return async () => {};
     }
     setHarness("opencode2");
-    const duties = await registerContext(context);
-    const checks =
-        loadPluginConfigDetailed(context.location.directory).config.auto_update === false
-            ? undefined
-            : startUpdateChecks(context);
+    const duties = undefined; // DIAG skip hooks
+    const checks = undefined; // DIAG: skip event.subscribe update checks
     console.info("[magic-context] @cortexkit/opencode-magic-context v2 setup");
     return async () => {
         await checks?.dispose();

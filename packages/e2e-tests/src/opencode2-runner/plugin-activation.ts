@@ -38,16 +38,6 @@ export async function awaitPluginActivation(
 	pluginID = "opencode-magic-context",
 	timeoutMs = 20_000,
 ): Promise<PluginEntry> {
-	const events = client.event.subscribe()[Symbol.asyncIterator]();
-	let deadline: ReturnType<typeof setTimeout> | undefined;
-	const timedOut = new Promise<never>((_, reject) => {
-		deadline = setTimeout(() => {
-			reject(
-				new Error(`Timed out waiting for plugin ${pluginID} activation`),
-			);
-		}, timeoutMs);
-	});
-	let nextEvent = events.next();
 	const readTerminalState = async (): Promise<PluginEntry | undefined> => {
 		const plugins = await client.plugin.list({ location: { directory } });
 		const plugin = plugins.data.find((entry) => entry.id === pluginID);
@@ -59,6 +49,22 @@ export async function awaitPluginActivation(
 		}
 		return plugin?.state.status === "active" ? plugin : undefined;
 	};
+
+	// 2.0.5 does not drain a session inbox while a client holds /api/event.
+	// Read inventory first and skip subscribe when the plugin is already terminal.
+	const ready = await readTerminalState();
+	if (ready) return ready;
+
+	const events = client.event.subscribe()[Symbol.asyncIterator]();
+	let deadline: ReturnType<typeof setTimeout> | undefined;
+	const timedOut = new Promise<never>((_, reject) => {
+		deadline = setTimeout(() => {
+			reject(
+				new Error(`Timed out waiting for plugin ${pluginID} activation`),
+			);
+		}, timeoutMs);
+	});
+	let nextEvent = events.next();
 
 	try {
 		for (;;) {

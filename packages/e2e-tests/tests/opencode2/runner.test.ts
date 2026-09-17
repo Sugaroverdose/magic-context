@@ -116,6 +116,7 @@ test("v2_loads_via_exports_map and session_message_reader real host writes", asy
 		await client.session.prompt({
 			sessionID: session.id,
 			text: "fixture prompt",
+			delivery: "steer",
 		});
 		await client.session.wait(
 			{ sessionID: session.id },
