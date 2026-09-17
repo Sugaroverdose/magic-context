@@ -11773,7 +11773,7 @@ impl McHandler {
         let Some(action) = string_arg(args, "action") else {
             return invalid_params_error("ctx_memory requires an action");
         };
-        if let Err(error) = validate_memory_id_arguments(args)
+        if let Err(error) = validate_memory_id_arguments(args, action)
             .and_then(|_| validate_string_cap(args, "content", MAX_MEMORY_CONTENT_BYTES))
             .and_then(|_| validate_string_cap(args, "reason", MAX_SHORT_FIELD_BYTES))
         {
@@ -11871,11 +11871,12 @@ impl McHandler {
                 )
             }
             "update" => {
-                let category =
-                    match memory_tool::validate_update_category(string_arg(args, "category")) {
-                        Ok(category) => category,
-                        Err(error) => return tool_error_result(format!("Error: {error}.")),
-                    };
+                let category = match memory_tool::validate_update_category(non_empty_string_arg(
+                    args, "category",
+                )) {
+                    Ok(category) => category,
+                    Err(error) => return tool_error_result(format!("Error: {error}.")),
+                };
                 let Some(id) = single_memory_id(args, "update") else {
                     return tool_error_result(
                         "Error: provide exactly one memory id when action is 'update'.",
@@ -11925,7 +11926,7 @@ impl McHandler {
                         "Error: provide at least one memory id when action is 'archive'.",
                     );
                 }
-                let reason = string_arg(args, "reason");
+                let reason = non_empty_string_arg(args, "reason");
                 facade_command_outcome(
                     store.with_facade_command(
                         facade_scope.route_project_root.as_str(),
@@ -11957,6 +11958,12 @@ impl McHandler {
                 )
             }
             "merge" => {
+                let category = match memory_tool::validate_update_category(non_empty_string_arg(
+                    args, "category",
+                )) {
+                    Ok(category) => category,
+                    Err(error) => return tool_error_result(format!("Error: {error}.")),
+                };
                 let Some(ids) = merge_ids(args) else {
                     return tool_error_result(
                         "Error: provide target_id plus source_ids, or at least two ids when action is 'merge'.",
@@ -11977,7 +11984,7 @@ impl McHandler {
                         action,
                         command_id.as_deref(),
                         |tx| {
-                            let (memory, superseded_ids) = tx
+                            let (mut memory, superseded_ids) = tx
                                 .merge_memories_canonical(
                                     memory_project,
                                     &ids,
@@ -11987,6 +11994,18 @@ impl McHandler {
                                 )
                                 .map_err(|error| error.to_string())?
                                 .ok_or_else(|| "memories could not be merged".to_string())?;
+                            if category.is_some_and(|category| category != memory.category) {
+                                memory = tx
+                                    .update_memory_content(
+                                        memory_project,
+                                        memory.id,
+                                        content,
+                                        category,
+                                        now_ms(),
+                                    )
+                                    .map_err(|error| error.to_string())?
+                                    .ok_or_else(|| "canonical memory disappeared".to_string())?;
+                            }
                             facade_text_response(
                                 format!(
                                     "Merged memories [{}] into canonical memory [ID: {}] in {}; superseded [{}].",
@@ -12006,6 +12025,7 @@ impl McHandler {
                 let limit = args
                     .get("limit")
                     .and_then(Value::as_u64)
+                    .filter(|value| *value > 0)
                     .unwrap_or(20)
                     .clamp(1, 100) as usize;
                 let category = non_empty_string_arg(args, "category");
@@ -12093,7 +12113,10 @@ impl McHandler {
         if let Err(error) = validate_string_cap(args, "query", MAX_QUERY_BYTES) {
             return tool_error_result(format!("Error: {error}."));
         }
-        let limit = usize_arg(args, "limit").unwrap_or(8).clamp(1, 25);
+        let limit = usize_arg(args, "limit")
+            .filter(|value| *value > 0)
+            .unwrap_or(8)
+            .clamp(1, 25);
         let sources = facade_search_sources(args);
         let facade_scope = match self
             .resolve_facade_scope(channel, Some(args), "memories", false)
@@ -12196,12 +12219,11 @@ impl McHandler {
             None => return store_unavailable_error(),
         };
         let session_id = facade_scope.conversation_key.as_str();
-        if args.get("message").is_some() {
-            // Ordinal 0 is a real message on the Claude Code leg (its chunk
-            // transcripts store 0-based ordinals), so the domain is non-negative.
-            let Some(message) = i64_arg(args, "message").filter(|value| *value >= 0) else {
-                return tool_error_result("Error: message must be a non-negative integer.");
-            };
+        let expand_mode = match resolve_ctx_expand_mode(args) {
+            Ok(mode) => mode,
+            Err(error) => return tool_error_result(error),
+        };
+        if let CtxExpandMode::Message(message) = expand_mode {
             if let Some(raw_message) =
                 self.cached_expand_messages(session_id)
                     .and_then(|messages| {
@@ -12232,21 +12254,16 @@ impl McHandler {
                 Err(error) => tool_error_result(format!("Error: {error}")),
             };
         }
-        let Some(start) = i64_arg(args, "start") else {
+        let CtxExpandMode::Range {
+            start,
+            end,
+            verbose,
+        } = expand_mode
+        else {
             return tool_error_result(
                 "Error: provide either message=<ordinal>, or start and end (non-negative integers, start <= end).",
             );
         };
-        let Some(end) = i64_arg(args, "end") else {
-            return tool_error_result(
-                "Error: provide either message=<ordinal>, or start and end (non-negative integers, start <= end).",
-            );
-        };
-        if start < 0 || end < start {
-            return tool_error_result(
-                "Error: provide either message=<ordinal>, or start and end (non-negative integers, start <= end).",
-            );
-        }
         let last_compacted_ordinal = match store.last_compacted_ordinal(session_id) {
             Ok(ordinal) => ordinal,
             Err(error) => return tool_error_result(format!("Error: {error}")),
@@ -12280,7 +12297,7 @@ impl McHandler {
             Ok(transcripts) => transcripts,
             Err(error) => return tool_error_result(format!("Error: {error}")),
         };
-        if args.get("verbose").and_then(Value::as_bool) == Some(true) {
+        if verbose {
             let durable_messages = durable_expand_messages(&transcripts);
             let rendered = self
                 .cached_expand_messages(session_id)
@@ -14689,16 +14706,33 @@ fn validate_string_cap(
     Ok(())
 }
 
-fn validate_memory_id_arguments(args: &Map<String, Value>) -> Result<(), String> {
-    for key in ["id", "target_id"] {
-        if let Some(value) = args.get(key) {
+fn validate_memory_id_arguments(args: &Map<String, Value>, action: &str) -> Result<(), String> {
+    // Validate only the identifier arguments used by the selected action. Some
+    // callers populate every declared identifier field with placeholder values;
+    // checking or combining unused fields could fail a valid call or select the
+    // wrong record.
+    let ids_len = args.get("ids").and_then(Value::as_array).map(Vec::len);
+    let (scalar_keys, array_keys): (&[&str], &[&str]) = match action {
+        "update" | "archive" | "get" if args.contains_key("ids") => (&[], &["ids"]),
+        "update" | "archive" | "get" => (&["id"], &[]),
+        "merge" if ids_len.is_some_and(|len| len >= 2) => (&[], &["ids"]),
+        "merge" if args.contains_key("target_id") || args.contains_key("source_ids") => {
+            (&["target_id"], &["source_ids"])
+        }
+        "merge" => (&["id"], &["ids"]),
+        // write/list do not address memories; id-shaped placeholders are inert.
+        _ => return Ok(()),
+    };
+
+    for key in scalar_keys {
+        if let Some(value) = args.get(*key) {
             if value.as_i64().is_none_or(|id| id <= 0) {
                 return Err(format!("'{key}' must be a positive 64-bit integer"));
             }
         }
     }
-    for key in ["ids", "source_ids"] {
-        if let Some(value) = args.get(key) {
+    for key in array_keys {
+        if let Some(value) = args.get(*key) {
             let Some(values) = value.as_array() else {
                 return Err(format!(
                     "'{key}' must be an array of positive 64-bit integers"
@@ -14717,12 +14751,14 @@ fn validate_memory_id_arguments(args: &Map<String, Value>) -> Result<(), String>
             }
         }
     }
-    if let (Some(target), Some(sources)) = (
-        args.get("target_id").and_then(Value::as_i64),
-        args.get("source_ids").and_then(Value::as_array),
-    ) {
-        if sources.iter().any(|source| source.as_i64() == Some(target)) {
-            return Err("merge target must not appear in source_ids".to_string());
+    if scalar_keys.contains(&"target_id") && array_keys.contains(&"source_ids") {
+        if let (Some(target), Some(sources)) = (
+            args.get("target_id").and_then(Value::as_i64),
+            args.get("source_ids").and_then(Value::as_array),
+        ) {
+            if sources.iter().any(|source| source.as_i64() == Some(target)) {
+                return Err("merge target must not appear in source_ids".to_string());
+            }
         }
     }
     Ok(())
@@ -14770,6 +14806,46 @@ fn usize_arg(args: &Map<String, Value>, key: &str) -> Option<usize> {
 }
 
 #[derive(Debug, Clone, Copy)]
+enum CtxExpandMode {
+    Message(i64),
+    Range { start: i64, end: i64, verbose: bool },
+}
+
+fn resolve_ctx_expand_mode(args: &Map<String, Value>) -> Result<CtxExpandMode, String> {
+    let message = i64_arg(args, "message");
+    let start = i64_arg(args, "start");
+    let end = i64_arg(args, "end");
+    let message_present = args.get("message").is_some();
+    let message_valid = message.filter(|value| *value >= 0);
+    let range_valid = match (start, end) {
+        (Some(start), Some(end)) if start >= 0 && end >= start => Some((start, end)),
+        _ => None,
+    };
+    let filler_pair = matches!((start, end), (Some(0), Some(0)));
+    let range_named = range_valid.filter(|_| !filler_pair);
+
+    if let Some(message) = message_valid {
+        if range_named.is_none() {
+            return Ok(CtxExpandMode::Message(message));
+        }
+    }
+    if message_present && message_valid.is_none() && range_named.is_none() {
+        return Err("Error: message must be a non-negative integer.".to_string());
+    }
+    if let Some((start, end)) = range_valid {
+        return Ok(CtxExpandMode::Range {
+            start,
+            end,
+            verbose: args.get("verbose").and_then(Value::as_bool) == Some(true),
+        });
+    }
+    Err(
+        "Error: provide either message=<ordinal>, or start and end (non-negative integers, start <= end)."
+            .to_string(),
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
 struct FacadeSearchSources {
     memory: bool,
     message: bool,
@@ -14791,6 +14867,13 @@ fn facade_search_sources(args: &Map<String, Value>) -> FacadeSearchSources {
             note: true,
         };
     };
+    if values.is_empty() {
+        return FacadeSearchSources {
+            memory: true,
+            message: true,
+            note: true,
+        };
+    }
     FacadeSearchSources {
         memory: values.iter().any(|value| value.as_str() == Some("memory")),
         message: values.iter().any(|value| value.as_str() == Some("message")),
@@ -15742,31 +15825,37 @@ fn render_notes(
 
 // The facade never panics on agent input; an absent or malformed id stays a typed tool error.
 fn single_memory_id(args: &Map<String, Value>, action: &str) -> Option<i64> {
-    if let Some(id) = i64_arg(args, "id") {
-        return Some(id);
-    }
     let ids = memory_ids(args, action);
     ids.first().copied().filter(|_| ids.len() == 1)
 }
 
-fn memory_ids(args: &Map<String, Value>, _action: &str) -> Vec<i64> {
+fn memory_ids(args: &Map<String, Value>, action: &str) -> Vec<i64> {
+    if matches!(action, "update" | "archive" | "get") {
+        if let Some(values) = args.get("ids").and_then(Value::as_array) {
+            return dedup_i64s(values.iter().filter_map(Value::as_i64).collect());
+        }
+    }
+
     let mut ids = Vec::new();
     if let Some(id) = i64_arg(args, "id") {
         ids.push(id);
     }
     if let Some(values) = args.get("ids").and_then(Value::as_array) {
-        for value in values {
-            if let Some(id) = value.as_i64() {
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-        }
+        ids.extend(values.iter().filter_map(Value::as_i64));
     }
-    ids
+    dedup_i64s(ids)
 }
 
 fn merge_ids(args: &Map<String, Value>) -> Option<Vec<i64>> {
+    if let Some(ids) = args
+        .get("ids")
+        .and_then(Value::as_array)
+        .filter(|ids| ids.len() >= 2)
+    {
+        let ids = dedup_i64s(ids.iter().filter_map(Value::as_i64).collect());
+        return (ids.len() >= 2).then_some(ids);
+    }
+
     let ids = if let Some(target_id) = i64_arg(args, "target_id") {
         let mut ids = vec![target_id];
         ids.extend(
@@ -35540,6 +35629,447 @@ mod tests {
         for property in ["message", "start", "end"] {
             assert_eq!(schema["properties"][property]["minimum"], json!(0));
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ctx_expand_required_all_filler_matches_clean_call_for_every_mode() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, _store, _dir, _project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+
+        let range_clean =
+            tool_text(call_facade(&handler, "ctx_expand", json!({"start": 1, "end": 3})).await);
+        let range_filler = tool_text(
+            call_facade(
+                &handler,
+                "ctx_expand",
+                json!({"start": 1, "end": 3, "message": 0, "verbose": false}),
+            )
+            .await,
+        );
+        assert_eq!(range_filler, range_clean);
+
+        let verbose_clean = tool_text(
+            call_facade(
+                &handler,
+                "ctx_expand",
+                json!({"start": 1, "end": 3, "verbose": true}),
+            )
+            .await,
+        );
+        let verbose_filler = tool_text(
+            call_facade(
+                &handler,
+                "ctx_expand",
+                json!({"start": 1, "end": 3, "verbose": true, "message": 0}),
+            )
+            .await,
+        );
+        assert_eq!(verbose_filler, verbose_clean);
+
+        let message_clean =
+            tool_text(call_facade(&handler, "ctx_expand", json!({"message": 2})).await);
+        let message_filler = tool_text(
+            call_facade(
+                &handler,
+                "ctx_expand",
+                json!({"message": 2, "start": 0, "end": 0, "verbose": false}),
+            )
+            .await,
+        );
+        assert_eq!(message_filler, message_clean);
+
+        let zero_message_clean =
+            tool_text(call_facade(&handler, "ctx_expand", json!({"message": 0})).await);
+        let zero_message_filler = tool_text(
+            call_facade(
+                &handler,
+                "ctx_expand",
+                json!({"message": 0, "start": 0, "end": 0, "verbose": false}),
+            )
+            .await,
+        );
+        assert_eq!(zero_message_filler, zero_message_clean);
+
+        let zero_range_clean =
+            tool_text(call_facade(&handler, "ctx_expand", json!({"start": 0, "end": 10})).await);
+        let zero_range_filler = tool_text(
+            call_facade(
+                &handler,
+                "ctx_expand",
+                json!({"start": 0, "end": 10, "message": 0, "verbose": false}),
+            )
+            .await,
+        );
+        assert_eq!(zero_range_filler, zero_range_clean);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ctx_search_required_all_filler_matches_clean_call() {
+        let resolver = FakeSessionResolver::with(&[("token", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+        let project = project.to_str().unwrap();
+        handler.bind_route(7, binding(project, "token"));
+        insert_memory(
+            &store,
+            project,
+            "CONSTRAINTS",
+            "Needle alpha should appear",
+            10,
+        );
+        insert_memory(
+            &store,
+            project,
+            "CONSTRAINTS",
+            "Needle bravo should appear",
+            20,
+        );
+        insert_memory(
+            &store,
+            project,
+            "CONSTRAINTS",
+            "Needle charlie should appear",
+            30,
+        );
+
+        let clean =
+            tool_text(call_facade(&handler, "ctx_search", json!({"query": "Needle"})).await);
+        let filler = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": "Needle", "sources": [], "limit": 0}),
+            )
+            .await,
+        );
+        assert_eq!(filler, clean);
+        assert!(clean.contains("Found 3 results"), "{clean}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ctx_memory_required_all_filler_matches_clean_call_for_every_action() {
+        let setup = || {
+            let resolver =
+                FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+            handler_with_store_and_resolver(
+                Arc::new(ProducerState::default()),
+                default_test_config(),
+                resolver,
+            )
+        };
+        let filler_ids = |ids: Value| {
+            json!({
+                "ids": ids,
+                "id": 1,
+                "target_id": 1,
+                "source_ids": [1],
+                "memory_project": "",
+                "limit": 0,
+                "reason": ""
+            })
+        };
+        let mut mismatches = Vec::new();
+        let mut check = |action: &'static str, filler: &str, clean: &str| {
+            if filler != clean {
+                mismatches.push(action);
+            }
+        };
+
+        let (write_clean_handler, _store, _dir, _project) = setup();
+        let (write_filler_handler, _store, _dir, _project) = setup();
+        let write_clean = tool_text(
+            call_facade(
+                &write_clean_handler,
+                "ctx_memory",
+                json!({
+                    "action": "write",
+                    "category": "PROJECT_RULES",
+                    "content": "Same standalone fact."
+                }),
+            )
+            .await,
+        );
+        let mut write_filler = filler_ids(json!([0]));
+        write_filler["action"] = json!("write");
+        write_filler["category"] = json!("PROJECT_RULES");
+        write_filler["content"] = json!("Same standalone fact.");
+        let write_filler =
+            tool_text(call_facade(&write_filler_handler, "ctx_memory", write_filler).await);
+        check("write", &write_filler, &write_clean);
+        assert!(write_clean.contains("Saved memory"), "{write_clean}");
+
+        let (update_clean_handler, update_clean_store, _dir, update_clean_project) = setup();
+        let (update_filler_handler, update_filler_store, _dir, update_filler_project) = setup();
+        let update_clean_project = update_clean_project.to_str().unwrap();
+        let update_filler_project = update_filler_project.to_str().unwrap();
+        insert_memory(
+            &update_clean_store,
+            update_clean_project,
+            "PROJECT_RULES",
+            "Unchanged control.",
+            10,
+        );
+        let update_clean_id = insert_memory(
+            &update_clean_store,
+            update_clean_project,
+            "ARCHITECTURE",
+            "Original fact.",
+            20,
+        );
+        insert_memory(
+            &update_filler_store,
+            update_filler_project,
+            "PROJECT_RULES",
+            "Unchanged control.",
+            10,
+        );
+        let update_filler_id = insert_memory(
+            &update_filler_store,
+            update_filler_project,
+            "ARCHITECTURE",
+            "Original fact.",
+            20,
+        );
+        let update_clean = tool_text(
+            call_facade(
+                &update_clean_handler,
+                "ctx_memory",
+                json!({
+                    "action": "update",
+                    "ids": [update_clean_id],
+                    "content": "Updated fact."
+                }),
+            )
+            .await,
+        );
+        let mut update_filler = filler_ids(json!([update_filler_id]));
+        update_filler["action"] = json!("update");
+        update_filler["content"] = json!("Updated fact.");
+        update_filler["category"] = json!("");
+        let update_filler =
+            tool_text(call_facade(&update_filler_handler, "ctx_memory", update_filler).await);
+        check("update", &update_filler, &update_clean);
+
+        let (archive_clean_handler, archive_clean_store, _dir, archive_clean_project) = setup();
+        let (archive_filler_handler, archive_filler_store, _dir, archive_filler_project) = setup();
+        let archive_clean_project = archive_clean_project.to_str().unwrap();
+        let archive_filler_project = archive_filler_project.to_str().unwrap();
+        insert_memory(
+            &archive_clean_store,
+            archive_clean_project,
+            "PROJECT_RULES",
+            "Unchanged control.",
+            10,
+        );
+        let archive_clean_id = insert_memory(
+            &archive_clean_store,
+            archive_clean_project,
+            "PROJECT_RULES",
+            "Archive this fact.",
+            20,
+        );
+        insert_memory(
+            &archive_filler_store,
+            archive_filler_project,
+            "PROJECT_RULES",
+            "Unchanged control.",
+            10,
+        );
+        let archive_filler_id = insert_memory(
+            &archive_filler_store,
+            archive_filler_project,
+            "PROJECT_RULES",
+            "Archive this fact.",
+            20,
+        );
+        let archive_clean = tool_text(
+            call_facade(
+                &archive_clean_handler,
+                "ctx_memory",
+                json!({"action": "archive", "ids": [archive_clean_id]}),
+            )
+            .await,
+        );
+        let mut archive_filler = filler_ids(json!([archive_filler_id]));
+        archive_filler["action"] = json!("archive");
+        archive_filler["content"] = json!("");
+        archive_filler["category"] = json!("");
+        let archive_filler =
+            tool_text(call_facade(&archive_filler_handler, "ctx_memory", archive_filler).await);
+        check("archive", &archive_filler, &archive_clean);
+
+        let (merge_clean_handler, merge_clean_store, _dir, merge_clean_project) = setup();
+        let (merge_filler_handler, merge_filler_store, _dir, merge_filler_project) = setup();
+        let merge_clean_project = merge_clean_project.to_str().unwrap();
+        let merge_filler_project = merge_filler_project.to_str().unwrap();
+        insert_memory(
+            &merge_clean_store,
+            merge_clean_project,
+            "PROJECT_RULES",
+            "Unchanged control.",
+            10,
+        );
+        let merge_clean_id_1 = insert_memory(
+            &merge_clean_store,
+            merge_clean_project,
+            "PROJECT_RULES",
+            "Merge source one.",
+            20,
+        );
+        let merge_clean_id_2 = insert_memory(
+            &merge_clean_store,
+            merge_clean_project,
+            "PROJECT_RULES",
+            "Merge source two.",
+            30,
+        );
+        insert_memory(
+            &merge_filler_store,
+            merge_filler_project,
+            "PROJECT_RULES",
+            "Unchanged control.",
+            10,
+        );
+        let merge_filler_id_1 = insert_memory(
+            &merge_filler_store,
+            merge_filler_project,
+            "PROJECT_RULES",
+            "Merge source one.",
+            20,
+        );
+        let merge_filler_id_2 = insert_memory(
+            &merge_filler_store,
+            merge_filler_project,
+            "PROJECT_RULES",
+            "Merge source two.",
+            30,
+        );
+        let merge_clean = tool_text(
+            call_facade(
+                &merge_clean_handler,
+                "ctx_memory",
+                json!({
+                    "action": "merge",
+                    "ids": [merge_clean_id_1, merge_clean_id_2],
+                    "content": "Merged standalone fact.",
+                    "category": "ARCHITECTURE"
+                }),
+            )
+            .await,
+        );
+        let mut merge_filler = filler_ids(json!([merge_filler_id_1, merge_filler_id_2]));
+        merge_filler["action"] = json!("merge");
+        merge_filler["content"] = json!("Merged standalone fact.");
+        merge_filler["category"] = json!("ARCHITECTURE");
+        let merge_filler =
+            tool_text(call_facade(&merge_filler_handler, "ctx_memory", merge_filler).await);
+        check("merge", &merge_filler, &merge_clean);
+        check(
+            "merge-category",
+            if merge_clean.contains("in ARCHITECTURE") {
+                "present"
+            } else {
+                "missing"
+            },
+            "present",
+        );
+
+        let (get_handler, get_store, _dir, get_project) = setup();
+        let get_project = get_project.to_str().unwrap();
+        insert_memory(
+            &get_store,
+            get_project,
+            "PROJECT_RULES",
+            "Unchanged control.",
+            10,
+        );
+        let get_id = insert_memory(
+            &get_store,
+            get_project,
+            "PROJECT_RULES",
+            "Get this fact.",
+            20,
+        );
+        let get_clean = tool_text(
+            call_facade(
+                &get_handler,
+                "ctx_memory",
+                json!({"action": "get", "ids": [get_id]}),
+            )
+            .await,
+        );
+        let mut get_filler = filler_ids(json!([get_id]));
+        get_filler["action"] = json!("get");
+        get_filler["content"] = json!("");
+        get_filler["category"] = json!("");
+        let get_filler = tool_text(call_facade(&get_handler, "ctx_memory", get_filler).await);
+        check("get", &get_filler, &get_clean);
+
+        let (list_handler, list_store, _dir, list_project) = setup();
+        let list_project = list_project.to_str().unwrap();
+        for (offset, label) in ["one", "two", "three"].into_iter().enumerate() {
+            insert_memory(
+                &list_store,
+                list_project,
+                "PROJECT_RULES",
+                &format!("List filler {label}."),
+                10 + i64::try_from(offset).unwrap(),
+            );
+        }
+        let list_clean =
+            tool_text(call_facade(&list_handler, "ctx_memory", json!({"action": "list"})).await);
+        let mut list_filler = filler_ids(json!([1]));
+        list_filler["action"] = json!("list");
+        list_filler["content"] = json!("");
+        list_filler["category"] = json!("");
+        let list_filler = tool_text(call_facade(&list_handler, "ctx_memory", list_filler).await);
+        check("list", &list_filler, &list_clean);
+
+        assert!(
+            mismatches.is_empty(),
+            "required-all output drifted for: {}",
+            mismatches.join(", ")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ctx_reduce_empty_drop_filler_is_refused_without_queuing() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, _project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+
+        let omitted = tool_text(call_facade(&handler, "ctx_reduce", json!({})).await);
+        let empty = tool_text(call_facade(&handler, "ctx_reduce", json!({"drop": ""})).await);
+        assert_eq!(empty, omitted);
+        assert!(empty.contains("'drop' must be provided"), "{empty}");
+        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
+
+        let append = handler.handle_agent_drops_value(
+            7,
+            json!({
+                "method": "agent_drops.append",
+                "session_id": "ses",
+                "drop": "",
+                "command_id": "empty-drop-cmd",
+            }),
+        );
+        let (code, message) = error_frame(append);
+        assert_eq!(code, "bad_request");
+        assert!(
+            message.contains("'drop' must be a nonempty string"),
+            "{message}"
+        );
+        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
     }
 }
 
