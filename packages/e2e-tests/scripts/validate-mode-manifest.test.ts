@@ -45,7 +45,7 @@ describe("mode manifest validator", () => {
             "tests/opencode2/entry-s2-context.test.ts",
             "tests/opencode2/fold-s3-owner.test.ts",
             "tests/opencode2/harness-s3-identity.test.ts",
-            "tests/opencode2/hidden-s3-executor.test.ts",
+            "tests/opencode2/hidden-child-ga.test.ts",
             "tests/opencode2/marker-s3-runtime.test.ts",
             "tests/opencode2/pins.test.ts",
             "tests/opencode2/probes.test.ts",

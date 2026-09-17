@@ -7,16 +7,7 @@ import {
 	gaDatabasePath,
 	V2StoreReader,
 } from "../../../plugin/src/v2/store-reader";
-import {
-	assertIsolation,
-	assertLiveUnchanged,
-	assertOpenPaths,
-	handoff,
-	isolation,
-	ROOT_KEYS,
-	snapshotLive,
-	spawnOpencode2,
-} from "../../src/opencode2-runner/spawn";
+import { ROOT_KEYS, assertIsolation, assertLiveUnchanged, assertOpenPaths, handoff, isolation, snapshotLive, spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
 
 test("hermetic_v2_runner environment refuses unsafe roots before boot", () => {
 	const fixture = isolation();
@@ -74,10 +65,7 @@ test("v2_loads_via_exports_map and session_message_reader real host writes", asy
 			location: { directory: host.cwd },
 			model: { providerID: "openai", id: "mock-model" },
 		});
-		await client.plugin.awaitActivation(
-			{ location: { directory: host.cwd } },
-			{ signal: AbortSignal.timeout(15000) },
-		);
+		await waitForPluginActive(client, host.cwd);
 		const plugins = await client.plugin.list({
 			location: { directory: host.cwd },
 		});

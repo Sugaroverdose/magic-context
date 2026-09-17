@@ -77,6 +77,8 @@ Both plugins write to the same SQLite database at `~/.local/share/cortexkit/magi
 
 Project memories therefore flow across OpenCode, Pi, and OMP, while per-session state remains scoped to the OpenCode, Pi, or OMP runtime.
 
+> **OpenCode 2 hidden runs:** historian and text-only Dreamer work runs on the resolved `historian.opencode` / `dreamer.opencode` model chain in reusable unparented sessions. This keeps the user's session model and token accounting untouched while preserving the calibrated system/user prompt and request options. OpenCode 2 currently exposes no plugin removal API, so one root titled **Magic Context historian** and, when needed, one titled **Magic Context dreamer** remain visible per project. Failed and incompatible-host-generation roots can also remain. List them with `npx @cortexkit/magic-context@latest doctor list-hidden-sessions`; remove unwanted roots manually in OpenCode. Magic Context never deletes them.
+
 For semantic search to work cross-harness, every host resolves embedding config per project identity on each retrieval path. Keep the effective `embedding` block consistent across OpenCode, Pi, and OMP for the same project.
 
 ### Trusted-group shared storage
@@ -152,6 +154,9 @@ npx @cortexkit/magic-context@latest doctor
 npx @cortexkit/magic-context@latest doctor --harness opencode
 npx @cortexkit/magic-context@latest doctor --harness pi
 npx @cortexkit/magic-context@latest doctor --harness omp
+
+# Read-only inventory of reusable/retired OpenCode 2 hidden-run roots
+npx @cortexkit/magic-context@latest doctor list-hidden-sessions
 ```
 
 The OpenCode doctor checks: installation, CLI version vs npm latest, plugin registration (preserves local dev paths), `magic-context.jsonc` parses + loads through the schema, conflicts (compaction, DCP, OMO hooks), TUI sidebar configuration, embedding endpoint, shared-DB existence + `PRAGMA integrity_check` + row counts, plugin npm cache, and historian debug dumps.
@@ -231,7 +236,7 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `compaction.enabled` | `boolean` | `true` | When `false`, use compaction-off mode: keep Magic Context's knowledge layer and let native compaction (or nothing) own the context window. Boot-resolved; restart after changing it. See below. |
 | `commit_cluster_trigger` | `object` | See below | Controls the commit-cluster historian trigger. |
 | `system_prompt_injection` | `object` | See below | Controls whether and where Magic Context augments the system prompt; lets you opt specific agents out. |
-| `keep_subagents` | `boolean` | `false` | Debug: keep the child sessions Magic Context spawns for its own subagents (historian, dreamer, memory-migration) instead of deleting them on success, so their full transcript stays in the host session store for inspection. Kept sessions accumulate until cleared manually — leave `false` for normal use. |
+| `keep_subagents` | `boolean` | `false` | OpenCode 1 debug option: keep child sessions instead of deleting them on success. On OpenCode 2 the host does not expose removal to plugins, so reusable historian/Dreamer roots are always retained and this option has no effect on them; use `doctor list-hidden-sessions` and remove unwanted roots manually. |
 | `todowrite` | `object` | See below | **Pi only.** Controls Magic Context's built-in `todowrite` tool and persistent task overlay. OpenCode has its own built-in `todowrite`, so this setting has no effect there. |
 | `sqlite` | `object` | See below | Per-connection SQLite tuning for Magic Context's own `context.db`. |
 | `storage.enforce_private_permissions` | `boolean` | `true` | User-config-only. Keep owner-only `0700` directories and `0600` files. Set `false` only for an externally managed trusted-group deployment; Magic Context will never re-tighten storage permissions. |

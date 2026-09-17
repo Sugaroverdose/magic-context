@@ -32,6 +32,7 @@ import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
 import { startDreamTrigger } from "./dream-trigger";
+import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { rawMessages } from "./store";
@@ -78,18 +79,29 @@ export async function registerContext(context: V2Context) {
     const limits = new Map<string, number>();
     const queriedModels = new Set<string>();
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
-    // Bind the host's generate once: the executor's closure runs after this
-    // presence check and must call the same method with the session as receiver.
-    const hostGenerate = context.session.generate?.bind(context.session);
-    const hiddenCompletionExecutor = hostGenerate
-        ? await createV2HiddenCompletionExecutor(
-              {
-                  hook: (name, callback) => context.session.hook(name, callback),
-                  generate: (input, options) => hostGenerate(input, options),
-              },
-              (sessionID) => liveModels.get(sessionID) ?? null,
-          )
-        : undefined;
+    let db: ReturnType<typeof openDatabase> | undefined;
+    try {
+        db = openDatabase() ?? undefined;
+    } catch {
+        // The primary context hook retains the existing fail-closed storage path.
+        // Hidden work remains unavailable for this plugin instance when durable storage cannot open.
+    }
+    const hiddenChildHook = new HiddenChildHook();
+    await registerHiddenChildAgents(context.agent);
+    let hiddenAgentsReady: Promise<void> | undefined;
+    const hiddenCompletionExecutor =
+        db && isDatabasePersisted(db)
+            ? await createV2HiddenCompletionExecutor(context.session, {
+                  db,
+                  projectIdentity: resolveProjectIdentity(directory) ?? directory,
+                  hook: hiddenChildHook,
+                  ensureAgent: () => (hiddenAgentsReady ??= context.agent.reload()),
+                  openReader: () =>
+                      new V2StoreReader(
+                          gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
+                      ),
+              })
+            : undefined;
     const dreamTrigger =
         hiddenCompletionExecutor && config.dreamer && !config.dreamer.disable
             ? startDreamTrigger(context, {
@@ -157,7 +169,6 @@ export async function registerContext(context: V2Context) {
         getCount: (sessionID: string) => read(sessionID).length,
     });
     let transform: ReturnType<typeof createTransform> | undefined;
-    let db: ReturnType<typeof openDatabase> | undefined;
     const refuseIfUnsafe = async (draft: SessionContext): Promise<boolean> => {
         let unsafe = false;
         try {
@@ -256,6 +267,7 @@ export async function registerContext(context: V2Context) {
         }
     });
     await context.session.hook("context", async (draft) => {
+        if (hiddenChildHook.apply(draft)) return;
         let postFold = false;
         try {
             if (await refuseIfUnsafe(draft)) return;

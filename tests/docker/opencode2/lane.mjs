@@ -98,6 +98,32 @@ child.stdout.on("data", (chunk) => (stdout += chunk));
 child.stderr.on("data", (chunk) => (stderr += chunk));
 const exited = new Promise((resolve) => child.once("close", resolve));
 
+async function waitForPluginActive(client, timeoutMs = 20_000) {
+    const events = client.event.subscribe()[Symbol.asyncIterator]();
+    const deadline = Date.now() + timeoutMs;
+    try {
+        for (;;) {
+            const plugins = await client.plugin.list({ location: { directory } });
+            const plugin = plugins.data.find((candidate) => candidate.id === "opencode-magic-context");
+            if (plugin?.state.status === "failed") {
+                throw new Error(`plugin activation failed: ${plugin.state.error}`);
+            }
+            if (plugin?.state.status === "active") return;
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) throw new Error("plugin activation timed out");
+            const event = await Promise.race([
+                events.next(),
+                Bun.sleep(remaining).then(() => {
+                    throw new Error("plugin activation timed out");
+                }),
+            ]);
+            if (event.done || event.value?.type !== "plugin.updated") continue;
+        }
+    } finally {
+        await events.return?.();
+    }
+}
+
 async function handoff() {
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
@@ -119,10 +145,7 @@ try {
         location: { directory },
         model: { providerID: "mock", id: "mock-model" },
     });
-    await client.plugin.awaitActivation(
-        { location: { directory } },
-        { signal: AbortSignal.timeout(20_000) },
-    );
+    await waitForPluginActive(client);
     const plugins = await client.plugin.list({ location: { directory } });
     const active = plugins.data.find((plugin) => plugin.id === "opencode-magic-context");
     if (active?.state.status !== "active") throw new Error(`plugin not active: ${JSON.stringify(plugins.data)}`);

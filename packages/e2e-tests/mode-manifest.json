@@ -43,18 +43,18 @@
 			]
 		},
 		{
-			"path": "tests/opencode2/hidden-s3-executor.test.ts",
+			"path": "tests/opencode2/hidden-child-ga.test.ts",
 			"tier": "excluded",
 			"invocation": {
 				"ts": false,
 				"rust": false
 			},
-			"rationale": "Real GA hidden historian publication, model/tool refusal and warming identity run in the dedicated v2 lane",
+			"rationale": "Real GA reusable hidden-child prompt, model, usage, title, reuse and retirement proof runs in the dedicated v2 lane",
 			"contract_refs": [
-				"R34",
 				"R36",
-				"R37",
-				"R38"
+				"R44",
+				"R44a",
+				"R44b"
 			]
 		},
 		{

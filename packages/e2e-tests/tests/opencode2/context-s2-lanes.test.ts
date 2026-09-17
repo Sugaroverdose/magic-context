@@ -18,7 +18,7 @@ import {
 	gaDatabasePath,
 	V2StoreReader,
 } from "../../../plugin/src/v2/store-reader";
-import { spawnOpencode2 } from "../../src/opencode2-runner/spawn";
+import { spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
 
 const sha = (value: unknown) =>
 	createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -85,7 +85,7 @@ test("I3 context_hook_once_per_round_trip; I5 m1_sentinel_id_recognized; I6 soft
 			location: { directory: host.cwd },
 			model: { providerID: "openai", id: "mock-model" },
 		});
-		await client.plugin.awaitActivation({ location: { directory: host.cwd } });
+		await waitForPluginActive(client, host.cwd);
 		let steps = 0;
 		host.mock.addMatcher((body) => {
 			if (body.model !== "mock-model")
@@ -622,7 +622,7 @@ test("I14 host-capability probe: remove and compact exist on the runner-owned cl
 			location: { directory: host.cwd },
 			model: { providerID: "openai", id: "mock-model" },
 		});
-		await client.plugin.awaitActivation({ location: { directory: host.cwd } });
+		await waitForPluginActive(client, host.cwd);
 		expect(
 			capture.frames().find((frame) => frame.kind === "surface")?.eventMethods,
 		).toEqual(["subscribe"]);
