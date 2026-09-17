@@ -214,6 +214,185 @@ describe.skipIf(!rustPrereqs.ok)("rust incident regression: park self-heal", () 
         300_000,
     );
 
+    it(
+        "does not resume when a newer real user message arrives before reconnect",
+        async () => {
+            const sessionId = await h.createSession();
+            await driveToSteadyState(h, sessionId, 1);
+            h.mock.setDefault({
+                text: "high pressure accepted",
+                usage: {
+                    input_tokens: 96_000,
+                    output_tokens: 20,
+                    cache_creation_input_tokens: 0,
+                },
+            });
+            await h.sendPrompt(sessionId, `arm user-race pressure: ${h.ballast(400)}`);
+            await h.subc.killModuleAndWait();
+            await h
+                .sendPrompt(sessionId, "refuse before a newer user message", { timeoutMs: 30_000 })
+                .catch(() => undefined);
+            await h.waitFor(
+                () =>
+                    sessionLogLines(h, sessionId).some((line) =>
+                        line.includes("rust refusal recovery armed"),
+                    ),
+                { label: "user-race recovery watcher armed" },
+            );
+
+            const client = h.client as unknown as {
+                session: {
+                    promptAsync(input: {
+                        path: { id: string };
+                        body: { noReply: boolean; parts: Array<{ type: "text"; text: string }> };
+                    }): Promise<unknown>;
+                };
+            };
+            await client.session.promptAsync({
+                path: { id: sessionId },
+                body: {
+                    noReply: true,
+                    parts: [{ type: "text", text: "newer operator message" }],
+                },
+            });
+            const providerRequestsBeforeRecovery = h.mainRequests().length;
+            await h.subc.restoreModule();
+            await Bun.sleep(4_500);
+
+            const messages = await h.listMessages(sessionId);
+            expect(
+                messages.some((message) =>
+                    message.parts?.some((part) => part.text === "newer operator message"),
+                ),
+            ).toBe(true);
+            expect(
+                messages.some((message) =>
+                    message.parts?.some((part) => part.text === RUST_REFUSAL_RECOVERY_PROMPT),
+                ),
+            ).toBe(false);
+            expect(h.mainRequests()).toHaveLength(providerRequestsBeforeRecovery);
+        },
+        300_000,
+    );
+
+    it(
+        "does not resume a provider-proven emergency at accepted high pressure",
+        async () => {
+            const sessionId = await h.createSession();
+            await driveToSteadyState(h, sessionId, 1);
+            h.mock.setDefault({
+                text: "high pressure accepted",
+                usage: {
+                    input_tokens: 96_000,
+                    output_tokens: 20,
+                    cache_creation_input_tokens: 0,
+                },
+            });
+            await h.sendPrompt(sessionId, `arm provider pressure: ${h.ballast(400)}`);
+
+            const overflowPrompt = "prove provider overflow before reconnect refusal";
+            let overflowSent = false;
+            h.mock.addMatcher((body) => {
+                if (overflowSent || !JSON.stringify(body.messages ?? []).includes(overflowPrompt)) {
+                    return null;
+                }
+                overflowSent = true;
+                return {
+                    error: {
+                        status: 400,
+                        type: "invalid_request_error",
+                        message:
+                            "This model's maximum context length is 80000 tokens. Please reduce the length of the messages.",
+                    },
+                };
+            });
+            await h.sendPrompt(sessionId, overflowPrompt).catch(() => undefined);
+            await h.waitFor(
+                () => {
+                    const row = h
+                        .contextDb()
+                        .prepare(
+                            "SELECT needs_emergency_recovery FROM session_meta WHERE session_id = ?",
+                        )
+                        .get(sessionId) as { needs_emergency_recovery?: number } | undefined;
+                    return overflowSent && row?.needs_emergency_recovery === 1;
+                },
+                { label: "provider-proven emergency persisted" },
+            );
+
+            await h.subc.killModuleAndWait();
+            const logCount = sessionLogLines(h, sessionId).length;
+            await h
+                .sendPrompt(sessionId, "provider-proven refusal while module is down", {
+                    timeoutMs: 30_000,
+                })
+                .catch(() => undefined);
+            await h.waitFor(
+                () =>
+                    sessionLogLines(h, sessionId)
+                        .slice(logCount)
+                        .some((line) => line.includes("mc_rust_emergency_refusal before_lkg")),
+                { label: "provider-proven reconnect refusal" },
+            );
+            const providerRequestsBeforeRecovery = h.mainRequests().length;
+            await h.subc.restoreModule();
+            await Bun.sleep(4_500);
+
+            const messages = await h.listMessages(sessionId);
+            expect(
+                messages.some((message) =>
+                    message.parts?.some((part) => part.text === RUST_REFUSAL_RECOVERY_PROMPT),
+                ),
+            ).toBe(false);
+            expect(h.mainRequests()).toHaveLength(providerRequestsBeforeRecovery);
+        },
+        300_000,
+    );
+
+    it(
+        "cancels refused-turn recovery when the session is deleted",
+        async () => {
+            const sessionId = await h.createSession();
+            await driveToSteadyState(h, sessionId, 1);
+            h.mock.setDefault({
+                text: "high pressure accepted",
+                usage: {
+                    input_tokens: 96_000,
+                    output_tokens: 20,
+                    cache_creation_input_tokens: 0,
+                },
+            });
+            await h.sendPrompt(sessionId, `arm deletion pressure: ${h.ballast(400)}`);
+            await h.subc.killModuleAndWait();
+            await h
+                .sendPrompt(sessionId, "refuse before deletion", { timeoutMs: 30_000 })
+                .catch(() => undefined);
+            await h.waitFor(
+                () =>
+                    sessionLogLines(h, sessionId).some((line) =>
+                        line.includes("rust refusal recovery armed"),
+                    ),
+                { label: "deletion recovery watcher armed" },
+            );
+
+            const deletion = await fetch(`${h.opencode.url}/session/${sessionId}`, {
+                method: "DELETE",
+            });
+            expect(deletion.ok).toBe(true);
+            const providerRequestsBeforeRecovery = h.mainRequests().length;
+            await h.subc.restoreModule();
+            await Bun.sleep(4_500);
+
+            expect(
+                sessionLogLines(h, sessionId).some((line) =>
+                    line.includes("rust refusal recovery synthetic continue delivered"),
+                ),
+            ).toBe(false);
+            expect(h.mainRequests()).toHaveLength(providerRequestsBeforeRecovery);
+        },
+        300_000,
+    );
+
     // Prove that a session parked by repeated transport failures resumes once
     // the module is healthy, without recreating the OpenCode session.
     it(
