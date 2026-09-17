@@ -142,6 +142,10 @@ import {
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { evaluateChannel2 } from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
 import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
+import {
+	type DroppedTokenReduction,
+	estimateDroppedTokensFromTagReductions,
+} from "@magic-context/core/hooks/magic-context/dropped-token-estimate";
 import { EmergencyFailClosedError } from "@magic-context/core/hooks/magic-context/emergency-fail-closed";
 import {
 	DEFAULT_CONTEXT_LIMIT,
@@ -4942,7 +4946,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let heuristicOrReasoningDidMutate = false;
 	let didMutateFromFlushedStatuses = false;
 	let droppedCount = 0;
-	const droppedTokens = 0;
+	let droppedTokens = 0;
+	const droppedTokenReductions: DroppedTokenReduction[] = [];
 	let emergency = false;
 	let autoReclaimDidMutateThisPass = false;
 	let suppressDeferredHistoryDrain = false;
@@ -5502,6 +5507,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					: protectedTagNumbersForPass,
 				pendingOperationTags,
 				pendingOps,
+				[],
+				new Set(),
+				(reduction) => droppedTokenReductions.push(reduction),
 			);
 			if (pendingOpsDidMutate) {
 				droppedCount += pendingOps.length;
@@ -5830,6 +5838,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						ridingCleanup.compressedTextTags,
 					mutatedTextTags:
 						heuristicsResult.mutatedTextTags + ridingCleanup.mutatedTextTags,
+					droppedTokenReductions: [
+						...heuristicsResult.droppedTokenReductions,
+						...ridingCleanup.droppedTokenReductions,
+					],
 				};
 				routineCleanupApplied = true;
 			}
@@ -5853,6 +5865,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				heuristicsResult.droppedStaleReduceCalls +
 				heuristicsResult.mutatedTextTags;
 			emergency ||= heuristicsResult.emergencyDroppedTools > 0;
+			if (heuristicsResult.droppedTokenReductions.length > 0) {
+				droppedTokenReductions.push(...heuristicsResult.droppedTokenReductions);
+			}
 			if (heuristicMutationCount > 0) heuristicOrReasoningDidMutate = true;
 			heuristicsExecuted = true;
 			executedWorkThisPass = true;
@@ -6036,6 +6051,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				[],
 				syntheticPendingOps,
 				editMarkerTagIds,
+				(reduction) => droppedTokenReductions.push(reduction),
 			);
 			if (autoReclaimDidMutate) {
 				droppedCount += syntheticPendingOps.length;
@@ -6601,6 +6617,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		autoReclaimDidMutateThisPass ||
 		materialized ||
 		historyWasConsumedThisPass;
+
+	if (bustedThisPass || isCacheBustingPass) {
+		droppedTokens = estimateDroppedTokensFromTagReductions(
+			args.db,
+			args.sessionId,
+			droppedTokenReductions,
+		);
+	}
 
 	return {
 		messages: outputMessages,

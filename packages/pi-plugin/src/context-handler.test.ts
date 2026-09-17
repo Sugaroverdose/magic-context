@@ -41,6 +41,7 @@ import {
 	updateTagDropMode,
 	updateTagStatus,
 } from "@magic-context/core/features/magic-context/storage";
+import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import {
 	getEmergencyInputSample,
 	getOverflowState,
@@ -53,6 +54,7 @@ import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/der
 import { resolveExecuteThreshold } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import { withRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
+import * as readSessionFormatting from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { setBootQuietPeriodForTests } from "@magic-context/core/plugin/boot-quiet";
 import { clearModelsDevCache } from "@magic-context/core/shared/models-dev-cache";
 import { resolvePromptSurface } from "@magic-context/core/shared/prompt-surface";
@@ -5988,3 +5990,422 @@ for (const withTools of [false, true]) {
 		}
 	});
 }
+
+describe("Pi transform_decisions dropped_tokens telemetry", () => {
+	it("sums persisted output token counts for dropped tags and records dropped_tokens", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-dropped-tokens-sum-"));
+		const dbPath = join(tempDir, "context.db");
+		const db = openDatabase(dbPath);
+		const sessionId = "ses-pi-dropped-tokens-sum";
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				protectedTags: 0,
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+
+			const msgU = userMessage("user prompt", 1);
+			const msgTC = assistantToolCall(
+				"tc1",
+				"bash",
+				{ command: "echo hello" },
+				2,
+			);
+			const msgTR = toolResultMessage("tc1", "hello output", 3);
+			const entries = [
+				{ id: "e1", type: "message", message: msgU },
+				{ id: "e2", type: "message", message: msgTC },
+				{ id: "e3", type: "message", message: msgTR },
+			];
+			const ctx = {
+				cwd: tempDir,
+				sessionManager: {
+					getSessionId: () => sessionId,
+					getLeafId: () => entries[entries.length - 1].id,
+					getEntry: (id: string) => entries.find((e) => e.id === id),
+					getBranch: () => entries,
+				},
+				getContextUsage: () => ({
+					tokens: 70_000,
+					percent: 70,
+					contextWindow: 100_000,
+				}),
+			};
+
+			// Pass 1: Tagging
+			await handler(
+				{ messages: [msgU, msgTC, msgTR] as never[] },
+				ctx as never,
+			);
+
+			// Persist custom token_count on tool tag #2
+			db.prepare(
+				"UPDATE tags SET token_count = 250 WHERE session_id = ? AND tag_number = 2",
+			).run(sessionId);
+			queuePendingOp(db, sessionId, 2, "drop");
+
+			// Pass 2: Bust pass applying the drop
+			const msgA2 = assistantMessage("assistant turn 2", 4);
+			entries.push({ id: "e4", type: "message", message: msgA2 });
+			await handler(
+				{ messages: [msgU, msgTC, msgTR] as never[] },
+				ctx as never,
+			);
+
+			// Pass 3: Resolve pending decision into transform_decisions
+			const msgA3 = assistantMessage("assistant turn 3", 5);
+			entries.push({ id: "e5", type: "message", message: msgA3 });
+			await handler(
+				{ messages: [msgU, msgTC, msgTR, msgA2] as never[] },
+				ctx as never,
+			);
+
+			await new Promise((resolve) => setTimeout(resolve, 150));
+
+			const row = db
+				.prepare(
+					"SELECT session_id, message_id, decision, dropped_count, dropped_tokens FROM transform_decisions WHERE session_id = ?",
+				)
+				.get(sessionId) as
+				| {
+						session_id: string;
+						message_id: string;
+						decision: string;
+						dropped_count: number;
+						dropped_tokens: number;
+				  }
+				| undefined;
+
+			expect(row).toBeDefined();
+			expect(row?.decision).toBe("execute");
+			expect(row?.dropped_count).toBe(1);
+			expect(row?.dropped_tokens).toBe(250);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("never sends a whole multi-megabyte message array to the exact tokenizer seam during drop pass", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-dropped-tokens-seam-"));
+		const dbPath = join(tempDir, "context.db");
+		const db = openDatabase(dbPath);
+		const sessionId = "ses-pi-tokenizer-seam";
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				protectedTags: 0,
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+
+			const largePayload = "large telemetry fixture content ".repeat(30_000);
+			const msgU = userMessage(largePayload, 1);
+			const msgTC = assistantToolCall(
+				"tc1",
+				"bash",
+				{ command: "echo test" },
+				2,
+			);
+			const msgTR = toolResultMessage("tc1", "test output", 3);
+			const entries = [
+				{ id: "e1", type: "message", message: msgU },
+				{ id: "e2", type: "message", message: msgTC },
+				{ id: "e3", type: "message", message: msgTR },
+			];
+			const ctx = {
+				cwd: tempDir,
+				sessionManager: {
+					getSessionId: () => sessionId,
+					getLeafId: () => entries[entries.length - 1].id,
+					getEntry: (id: string) => entries.find((e) => e.id === id),
+					getBranch: () => entries,
+				},
+				getContextUsage: () => ({
+					tokens: 70_000,
+					percent: 70,
+					contextWindow: 100_000,
+				}),
+			};
+
+			await handler(
+				{ messages: [msgU, msgTC, msgTR] as never[] },
+				ctx as never,
+			);
+			db.prepare(
+				"UPDATE tags SET token_count = 120 WHERE session_id = ? AND tag_number = 2",
+			).run(sessionId);
+			queuePendingOp(db, sessionId, 2, "drop");
+
+			const largeThreshold = 500_000;
+			const messagesStringLength = JSON.stringify([msgU, msgTC, msgTR]).length;
+			expect(messagesStringLength).toBeGreaterThan(largeThreshold);
+
+			const tokenizerInputSizes: number[] = [];
+			const tokenizerSpy = spyOn(
+				readSessionFormatting,
+				"estimateTokens",
+			).mockImplementation((text) => {
+				tokenizerInputSizes.push(text.length);
+				return Math.ceil(text.length / 3.5);
+			});
+			try {
+				const msgA2 = assistantMessage("assistant turn 2", 4);
+				entries.push({ id: "e4", type: "message", message: msgA2 });
+				await handler(
+					{ messages: [msgU, msgTC, msgTR] as never[] },
+					ctx as never,
+				);
+
+				// Zero tokenizer calls on whole-array serialization
+				expect(
+					tokenizerInputSizes.filter((size) => size >= largeThreshold),
+				).toEqual([]);
+			} finally {
+				tokenizerSpy.mockRestore();
+			}
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps execute and following defer bytes pinned while draining the same operations", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-dropped-tokens-parity-"));
+		const dbPath = join(tempDir, "context.db");
+		const db = openDatabase(dbPath);
+		const sessionId = "ses-pi-wire-parity";
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				protectedTags: 0,
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+
+			const msgU = userMessage("user prompt", 1);
+			const msgTC = assistantToolCall(
+				"tc1",
+				"bash",
+				{ command: "echo test" },
+				2,
+			);
+			const msgTR = toolResultMessage("tc1", "test output", 3);
+			const entries = [
+				{ id: "e1", type: "message", message: msgU },
+				{ id: "e2", type: "message", message: msgTC },
+				{ id: "e3", type: "message", message: msgTR },
+			];
+			const ctx = {
+				cwd: tempDir,
+				sessionManager: {
+					getSessionId: () => sessionId,
+					getLeafId: () => entries[entries.length - 1].id,
+					getEntry: (id: string) => entries.find((e) => e.id === id),
+					getBranch: () => entries,
+				},
+				getContextUsage: () => ({
+					tokens: 70_000,
+					percent: 70,
+					contextWindow: 100_000,
+				}),
+			};
+
+			await handler(
+				{ messages: [msgU, msgTC, msgTR] as never[] },
+				ctx as never,
+			);
+			db.prepare(
+				"UPDATE tags SET token_count = 120 WHERE session_id = ? AND tag_number = 2",
+			).run(sessionId);
+			queuePendingOp(db, sessionId, 2, "drop");
+
+			// Execute pass (reduces tag #2)
+			const executeResult = await handler(
+				{ messages: [msgU, msgTC, msgTR] as never[] },
+				ctx as never,
+			);
+			const executeHash = createHash("sha256")
+				.update(JSON.stringify(executeResult.messages))
+				.digest("hex");
+
+			// Defer pass (replays dropped status at low context usage)
+			const deferCtx = {
+				...ctx,
+				getContextUsage: () => ({
+					tokens: 10_000,
+					percent: 10,
+					contextWindow: 100_000,
+				}),
+			};
+			const deferResult = await handler(
+				{ messages: [msgU, msgTC, msgTR] as never[] },
+				deferCtx as never,
+			);
+			const deferHash = createHash("sha256")
+				.update(JSON.stringify(deferResult.messages))
+				.digest("hex");
+
+			expect(executeHash).toBe(deferHash);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("constant-mutation test: fails if writer records constant 0 across passes with different reduction masses", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-const-mutation-test-"));
+		const dbPath = join(tempDir, "context.db");
+		const db = openDatabase(dbPath);
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				protectedTags: 0,
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+
+			// Pass 1: Tag with mass 120
+			const session1 = "ses-mass-1";
+			const msgU1 = userMessage("user 1", 1);
+			const msgTC1 = assistantToolCall("tc1", "bash", { command: "echo 1" }, 2);
+			const msgTR1 = toolResultMessage("tc1", "output 1", 3);
+			const entries1 = [
+				{ id: "e1", type: "message", message: msgU1 },
+				{ id: "e2", type: "message", message: msgTC1 },
+				{ id: "e3", type: "message", message: msgTR1 },
+			];
+			const ctx1 = {
+				cwd: tempDir,
+				sessionManager: {
+					getSessionId: () => session1,
+					getLeafId: () => entries1[entries1.length - 1].id,
+					getEntry: (id: string) => entries1.find((e) => e.id === id),
+					getBranch: () => entries1,
+				},
+				getContextUsage: () => ({
+					tokens: 70_000,
+					percent: 70,
+					contextWindow: 100_000,
+				}),
+			};
+			await handler(
+				{ messages: [msgU1, msgTC1, msgTR1] as never[] },
+				ctx1 as never,
+			);
+			db.prepare(
+				"UPDATE tags SET token_count = 120 WHERE session_id = ? AND tag_number = 2",
+			).run(session1);
+			queuePendingOp(db, session1, 2, "drop");
+
+			const msgA1_next = assistantMessage("turn 2", 4);
+			entries1.push({ id: "e4", type: "message", message: msgA1_next });
+			await handler(
+				{ messages: [msgU1, msgTC1, msgTR1] as never[] },
+				ctx1 as never,
+			);
+
+			const msgA1_resolve = assistantMessage("turn 3", 5);
+			entries1.push({ id: "e5", type: "message", message: msgA1_resolve });
+			await handler(
+				{ messages: [msgU1, msgTC1, msgTR1, msgA1_next] as never[] },
+				ctx1 as never,
+			);
+
+			// Pass 2: Tag with mass 350
+			const session2 = "ses-mass-2";
+			const msgU2 = userMessage("user 2", 1);
+			const msgTC2 = assistantToolCall("tc2", "bash", { command: "echo 2" }, 2);
+			const msgTR2 = toolResultMessage("tc2", "output 2", 3);
+			const entries2 = [
+				{ id: "e21", type: "message", message: msgU2 },
+				{ id: "e22", type: "message", message: msgTC2 },
+				{ id: "e23", type: "message", message: msgTR2 },
+			];
+			const ctx2 = {
+				cwd: tempDir,
+				sessionManager: {
+					getSessionId: () => session2,
+					getLeafId: () => entries2[entries2.length - 1].id,
+					getEntry: (id: string) => entries2.find((e) => e.id === id),
+					getBranch: () => entries2,
+				},
+				getContextUsage: () => ({
+					tokens: 70_000,
+					percent: 70,
+					contextWindow: 100_000,
+				}),
+			};
+			await handler(
+				{ messages: [msgU2, msgTC2, msgTR2] as never[] },
+				ctx2 as never,
+			);
+			db.prepare(
+				"UPDATE tags SET token_count = 350 WHERE session_id = ? AND tag_number = 2",
+			).run(session2);
+			queuePendingOp(db, session2, 2, "drop");
+
+			const msgA2_next = assistantMessage("turn 2", 4);
+			entries2.push({ id: "e24", type: "message", message: msgA2_next });
+			await handler(
+				{ messages: [msgU2, msgTC2, msgTR2] as never[] },
+				ctx2 as never,
+			);
+
+			const msgA2_resolve = assistantMessage("turn 3", 5);
+			entries2.push({ id: "e25", type: "message", message: msgA2_resolve });
+			await handler(
+				{ messages: [msgU2, msgTC2, msgTR2, msgA2_next] as never[] },
+				ctx2 as never,
+			);
+
+			await new Promise((resolve) => setTimeout(resolve, 150));
+
+			const row1 = db
+				.prepare(
+					"SELECT dropped_tokens, dropped_count FROM transform_decisions WHERE session_id = ?",
+				)
+				.get(session1) as
+				| { dropped_tokens: number; dropped_count: number }
+				| undefined;
+			const row2 = db
+				.prepare(
+					"SELECT dropped_tokens, dropped_count FROM transform_decisions WHERE session_id = ?",
+				)
+				.get(session2) as
+				| { dropped_tokens: number; dropped_count: number }
+				| undefined;
+
+			expect(row1).toBeDefined();
+			expect(row2).toBeDefined();
+			expect(row1?.dropped_count).toBe(1);
+			expect(row2?.dropped_count).toBe(1);
+
+			// NON-VACUITY BREAK: a constant 0 writer fails here
+			expect(row1?.dropped_tokens).not.toBe(row2?.dropped_tokens);
+			expect(row1?.dropped_tokens).toBe(120);
+			expect(row2?.dropped_tokens).toBe(350);
+		} finally {
+			clearContextHandlerSession("ses-mass-1");
+			clearContextHandlerSession("ses-mass-2");
+			closeQuietly(db);
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
