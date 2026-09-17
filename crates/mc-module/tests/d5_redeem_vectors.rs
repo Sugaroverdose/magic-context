@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 mod d5_scope_model;
 
 use d5_scope_model::{
-    CapacityCheckOutcome, ModelRequest, ModelSeed, PrepareOutcome, ScopeFacts, ScopeModel,
-    StepOutcome,
+    decode_keyed_response, CapacityCheckOutcome, ModelRequest, ModelSeed, PrepareOutcome,
+    ScopeFacts, ScopeModel, StepOutcome,
 };
 
 const RECEIPT_ID: &str = "0f5c2d7e-1234-4abc-8def-0123456789ab";
@@ -1863,15 +1863,10 @@ fn d5_redeem_r47_sequences_execute_against_the_reference_model() {
                     let envelope = response_bytes.unwrap_or_else(|| {
                         panic!("{label}: a wire result needs its response bytes")
                     });
-                    assert_eq!(
-                        String::from_utf8_lossy(&envelope),
-                        format!(
-                            "{{\"{}\":{{\"result\":{}}}}}",
-                            step.op,
-                            String::from_utf8_lossy(&actual)
-                        ),
-                        "{label}: the keyed response envelope does not wrap this result"
-                    );
+                    decode_keyed_response(&envelope, request.response_wire_key(), &actual)
+                        .unwrap_or_else(|error| {
+                            panic!("{label}: the keyed response envelope does not wrap this result: {error}")
+                        });
                     produced.push((
                         step.op.clone(),
                         serde_json::from_slice(&actual).expect("model result is JSON"),
@@ -1943,7 +1938,7 @@ const PRE_R48_S03_BEGIN_REQUEST: &str = r#"{"op":"lineage.begin","attempt":{"pre
 
 /// The S03 steps whose wire discriminator moved: the step's index in the
 /// sequence, the clause-3 operation label the step keeps, and the discriminator
-/// its request bytes carry.
+/// its request bytes and keyed response envelope both carry.
 const S03_WIRE_DISCRIMINATORS: [(usize, &str, &str); 5] = [
     (1, "attempt.ticket", "ticket"),
     (4, "lineage.begin", "begin"),
@@ -1951,6 +1946,12 @@ const S03_WIRE_DISCRIMINATORS: [(usize, &str, &str); 5] = [
     (6, "attempt.ticket", "ticket"),
     (7, "lineage.begin", "begin"),
 ];
+
+/// The bytes S03's first ticket step carried while the fixture still put the
+/// clause-3 operation label on the keyed response envelope, kept verbatim so
+/// the refusal is proved against an envelope the fixture really held rather
+/// than against one rebuilt from the current bytes.
+const PRE_RESPONSE_KEY_S03_TICKET_ENVELOPE: &str = r#"{"attempt.ticket":{"result":{"kind":"ISSUED","ticket":{"resolve_generation":6,"P":"session-successor-0001","agent":"agent-main","incarnation":3}}}}"#;
 
 fn sequence_by_id<'a>(fixture: &'a Fixture, id: &str) -> &'a R47Sequence {
     fixture
@@ -1966,6 +1967,24 @@ fn step_request_bytes(sequence: &R47Sequence, index: usize) -> Vec<u8> {
             .request_bytes_base64
             .as_deref()
             .unwrap_or_else(|| panic!("{} step {index} pins no request bytes", sequence.id)),
+    )
+}
+
+fn step_response_bytes(sequence: &R47Sequence, index: usize) -> Vec<u8> {
+    decode_base64(
+        sequence.steps[index]
+            .response_bytes_base64
+            .as_deref()
+            .unwrap_or_else(|| panic!("{} step {index} pins no response bytes", sequence.id)),
+    )
+}
+
+fn step_result_bytes(sequence: &R47Sequence, index: usize) -> Vec<u8> {
+    decode_base64(
+        sequence.steps[index]
+            .result_bytes_base64
+            .as_deref()
+            .unwrap_or_else(|| panic!("{} step {index} pins no result bytes", sequence.id)),
     )
 }
 
@@ -2034,6 +2053,91 @@ fn d5_lineage_request_decoder_refuses_clause_3_labels_on_the_wire() {
         let request = ModelRequest::decode(&bytes)
             .unwrap_or_else(|error| panic!("{id} step {index} does not decode: {error}"));
         assert_eq!(request.op(), discriminator, "{id} step {index} label");
+    }
+}
+
+/// The keyed response envelope uses the same short discriminators as the
+/// request. A clause-3 label as the outer key is refused even when the inner
+/// result bytes still match, with no alias and no dual acceptance.
+#[test]
+fn d5_lineage_response_decoder_refuses_clause_3_labels_on_the_wire() {
+    let (fixture, _) = load_fixture();
+    let s03 = sequence_by_id(&fixture, "S03_generation_fence");
+    let result = step_result_bytes(s03, 1);
+
+    let refusal = decode_keyed_response(
+        PRE_RESPONSE_KEY_S03_TICKET_ENVELOPE.as_bytes(),
+        "ticket",
+        &result,
+    )
+    .expect_err("an operation label is not a response key");
+    assert!(
+        refusal.contains("attempt.ticket") && refusal.contains("not response keys"),
+        "the refusal must name the rejected key: {refusal}"
+    );
+    // Dual acceptance is refused: asking the decoder to expect the label still
+    // rejects the label. Inner result bytes are not a substitute for the key.
+    let dual = decode_keyed_response(
+        PRE_RESPONSE_KEY_S03_TICKET_ENVELOPE.as_bytes(),
+        "attempt.ticket",
+        &result,
+    )
+    .expect_err("the label is not accepted as a response key either");
+    assert!(
+        dual.contains("attempt.ticket"),
+        "dual-acceptance refusal must still name the label: {dual}"
+    );
+
+    assert_eq!(
+        String::from_utf8(step_response_bytes(s03, 1)).expect("utf8 response"),
+        PRE_RESPONSE_KEY_S03_TICKET_ENVELOPE.replace("\"attempt.ticket\":", "\"ticket\":"),
+        "the response key moved and nothing else in the envelope"
+    );
+
+    for (index, label, discriminator) in S03_WIRE_DISCRIMINATORS {
+        assert_eq!(
+            s03.steps[index].op, label,
+            "S03 step {index} keeps its operation label"
+        );
+        let envelope = step_response_bytes(s03, index);
+        let result = step_result_bytes(s03, index);
+        let parsed: Value = serde_json::from_slice(&envelope).expect("response JSON");
+        let keys: Vec<&str> = parsed
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(|key| key.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            [discriminator],
+            "S03 step {index} response carries the wire key"
+        );
+        let request = ModelRequest::decode(&step_request_bytes(s03, index))
+            .unwrap_or_else(|error| panic!("S03 step {index} request does not decode: {error}"));
+        assert_eq!(request.op(), label, "S03 step {index} keeps its label");
+        assert_eq!(
+            request.response_wire_key(),
+            discriminator,
+            "S03 step {index} maps the label onto the wire key"
+        );
+        decode_keyed_response(&envelope, discriminator, &result)
+            .unwrap_or_else(|error| panic!("S03 step {index} response does not decode: {error}"));
+
+        let relabelled = String::from_utf8(envelope)
+            .expect("utf8 response")
+            .replacen(
+                &format!("\"{discriminator}\":"),
+                &format!("\"{label}\":"),
+                1,
+            );
+        match decode_keyed_response(relabelled.as_bytes(), discriminator, &result) {
+            Ok(_) => panic!("S03 step {index} accepts the label {label} as a response key"),
+            Err(refusal) => assert!(
+                refusal.contains(label) && refusal.contains("not response keys"),
+                "S03 step {index} refusal must name {label}: {refusal}"
+            ),
+        }
     }
 }
 

@@ -3786,8 +3786,8 @@
     },
     {
       "path": "redeem-vectors-v1.json",
-      "byte_size": 193597,
-      "sha256": "db275c52ad7d89d36350a0387061fba688d024ab31e7a1c73f9ba2b70c6e3f00",
+      "byte_size": 193549,
+      "sha256": "fbfe54ac08b3464165f4e65d025843b838929366ca6c7ee6a1a9f25172f5a116",
       "derived": false,
       "source": "owner-authored D5 redeem contract vectors",
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
@@ -3842,8 +3842,8 @@
     },
     {
       "path": "README.md",
-      "byte_size": 14623,
-      "sha256": "31a79d3ce9fa23479a03b0e498a770111b0612a2101c834faf53e11906e9ba5a",
+      "byte_size": 14714,
+      "sha256": "69930139ced05bc2ef2f6462631e2e67b30134e4856c95584efb88b93e267666",
       "derived": true,
       "source": "VACUUM f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0",
       "length_geometry_source": "capture_13610 766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b",

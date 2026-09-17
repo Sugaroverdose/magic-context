@@ -4134,7 +4134,7 @@
           "note": "the sample writes no row and moves no generation; the bind that follows it is gateway-local (R47b)",
           "request_bytes_base64": "eyJvcCI6InRpY2tldCIsIlAiOiJzZXNzaW9uLXN1Y2Nlc3Nvci0wMDAxIiwiYWdlbnQiOiJhZ2VudC1tYWluIiwiaW5jYXJuYXRpb24iOjN9",
           "result_bytes_base64": "eyJraW5kIjoiSVNTVUVEIiwidGlja2V0Ijp7InJlc29sdmVfZ2VuZXJhdGlvbiI6NiwiUCI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6M319",
-          "response_bytes_base64": "eyJhdHRlbXB0LnRpY2tldCI6eyJyZXN1bHQiOnsia2luZCI6IklTU1VFRCIsInRpY2tldCI6eyJyZXNvbHZlX2dlbmVyYXRpb24iOjYsIlAiOiJzZXNzaW9uLXN1Y2Nlc3Nvci0wMDAxIiwiYWdlbnQiOiJhZ2VudC1tYWluIiwiaW5jYXJuYXRpb24iOjN9fX19",
+          "response_bytes_base64": "eyJ0aWNrZXQiOnsicmVzdWx0Ijp7ImtpbmQiOiJJU1NVRUQiLCJ0aWNrZXQiOnsicmVzb2x2ZV9nZW5lcmF0aW9uIjo2LCJQIjoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsImluY2FybmF0aW9uIjozfX19fQ==",
           "scopes_after": [
             {
               "P": "session-successor-0001",
@@ -4213,7 +4213,7 @@
           "note": "the source-segment upload carries the same stale ticket and is refused, but BeginResult has no placement for a negative proof, so it refuses plainly and the proof stays with prepare/resolve",
           "request_bytes_base64": "eyJvcCI6ImJlZ2luIiwiYXR0ZW1wdCI6eyJwcmVkZWNlc3Nvcl9rZXkiOiJzZXNzaW9uLXN1Y2Nlc3Nvci0wMDAxIiwiYWdlbnQiOiJhZ2VudC1tYWluIiwiRiI6eyJkaWdlc3QiOiI2YjI1ZThhNjMxMGViY2Q0Zjk5MmFjZTljNWNkNTdjZjljYmQ3YTU2Mjk4OWJiZDgzMjdkZTI0N2YxM2UzYWZlIiwibm9ybWFsaXphdGlvbl92ZXJzaW9uIjoxLCJleGNsdWRlZF9hZGRpdGlvbnMiOltdfSwiYXR0ZW1wdF9pZCI6ImF0dGVtcHQtcy1zdGFsZS0wMDAxIiwiaW5jYXJuYXRpb24iOjN9LCJ0aWNrZXQiOnsicmVzb2x2ZV9nZW5lcmF0aW9uIjo2LCJQIjoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsImluY2FybmF0aW9uIjozfSwia2luZCI6InNvdXJjZV9zZWdtZW50IiwidG90YWxfYnl0ZXMiOjEzMTA3MjAsInRvdGFsX2NodW5rcyI6MiwiZGlnZXN0IjoiNDY4MDgxNDczYTE3OWI0NGU3YTJjNzZkNDk5ZjVkYjg3NDdlNmFiNzhmZjA0MGY2N2VkZGIzZDkyNGZkOGQ2YSJ9",
           "result_bytes_base64": "eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoidGlja2V0X2ludmFsaWQiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoidGlja2V0IiwicmVhc29uIjoiYWRtaXNzaW9uIHRpY2tldCBnZW5lcmF0aW9uIGlzIG5vIGxvbmdlciBjdXJyZW50In19fQ==",
-          "response_bytes_base64": "eyJsaW5lYWdlLmJlZ2luIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoidGlja2V0X2ludmFsaWQiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoidGlja2V0IiwicmVhc29uIjoiYWRtaXNzaW9uIHRpY2tldCBnZW5lcmF0aW9uIGlzIG5vIGxvbmdlciBjdXJyZW50In19fX19",
+          "response_bytes_base64": "eyJiZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6InRpY2tldF9pbnZhbGlkIiwicmVjZWlwdF9pZCI6bnVsbCwiZGV0YWlscyI6eyJraW5kIjoiZmllbGQiLCJmaWVsZCI6InRpY2tldCIsInJlYXNvbiI6ImFkbWlzc2lvbiB0aWNrZXQgZ2VuZXJhdGlvbiBpcyBubyBsb25nZXIgY3VycmVudCJ9fX19fQ==",
           "scopes_after": [
             {
               "P": "session-successor-0001",
@@ -4235,7 +4235,7 @@
           "note": "clause 8 returns the outcome, the P fence and the generations, so the terminal refusal rides in RESOLVED.attempt_outcome and never as UNKNOWN; R1 keeps the generation unbumped at 7",
           "request_bytes_base64": "eyJvcCI6InJlc29sdmUiLCJQIjoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsImluY2FybmF0aW9uIjozLCJhdHRlbXB0X2lkIjoiYXR0ZW1wdC1zLXN0YWxlLTAwMDEiLCJGIjp7ImRpZ2VzdCI6IjZiMjVlOGE2MzEwZWJjZDRmOTkyYWNlOWM1Y2Q1N2NmOWNiZDdhNTYyOTg5YmJkODMyN2RlMjQ3ZjEzZTNhZmUiLCJub3JtYWxpemF0aW9uX3ZlcnNpb24iOjEsImV4Y2x1ZGVkX2FkZGl0aW9ucyI6W119LCJhZG1pc3Npb25fdGlja2V0Ijp7InJlc29sdmVfZ2VuZXJhdGlvbiI6NiwiUCI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6M319",
           "result_bytes_base64": "eyJraW5kIjoiUkVTT0xWRUQiLCJhdHRlbXB0X291dGNvbWUiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6InJlc29sdmVkX2Fic2VudCIsInJlY2VpcHRfaWQiOm51bGwsImRldGFpbHMiOnsia2luZCI6InJlc29sdmVkX2Fic2VudCIsImF0dGVtcHRfaWQiOiJhdHRlbXB0LXMtc3RhbGUtMDAwMSIsImluY2FybmF0aW9uIjozfX0sIm5lZ2F0aXZlIjp7ImtpbmQiOiJnZW5lcmF0aW9uX2ZlbmNlIiwiaW5jYXJuYXRpb24iOjMsImludmFsaWRhdGVkX3RpY2tldF9nZW5lcmF0aW9uIjo2LCJmZW5jZWRfYnkiOjd9fSwicF9mZW5jZSI6eyJraW5kIjoibm9uZSJ9LCJmZW5jZV9nZW5lcmF0aW9uIjowLCJyZXNvbHZlX2dlbmVyYXRpb24iOjd9",
-          "response_bytes_base64": "eyJhdHRlbXB0LnJlc29sdmUiOnsicmVzdWx0Ijp7ImtpbmQiOiJSRVNPTFZFRCIsImF0dGVtcHRfb3V0Y29tZSI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoicmVzb2x2ZWRfYWJzZW50IiwicmVjZWlwdF9pZCI6bnVsbCwiZGV0YWlscyI6eyJraW5kIjoicmVzb2x2ZWRfYWJzZW50IiwiYXR0ZW1wdF9pZCI6ImF0dGVtcHQtcy1zdGFsZS0wMDAxIiwiaW5jYXJuYXRpb24iOjN9fSwibmVnYXRpdmUiOnsia2luZCI6ImdlbmVyYXRpb25fZmVuY2UiLCJpbmNhcm5hdGlvbiI6MywiaW52YWxpZGF0ZWRfdGlja2V0X2dlbmVyYXRpb24iOjYsImZlbmNlZF9ieSI6N319LCJwX2ZlbmNlIjp7ImtpbmQiOiJub25lIn0sImZlbmNlX2dlbmVyYXRpb24iOjAsInJlc29sdmVfZ2VuZXJhdGlvbiI6N319fQ==",
+          "response_bytes_base64": "eyJyZXNvbHZlIjp7InJlc3VsdCI6eyJraW5kIjoiUkVTT0xWRUQiLCJhdHRlbXB0X291dGNvbWUiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6InJlc29sdmVkX2Fic2VudCIsInJlY2VpcHRfaWQiOm51bGwsImRldGFpbHMiOnsia2luZCI6InJlc29sdmVkX2Fic2VudCIsImF0dGVtcHRfaWQiOiJhdHRlbXB0LXMtc3RhbGUtMDAwMSIsImluY2FybmF0aW9uIjozfX0sIm5lZ2F0aXZlIjp7ImtpbmQiOiJnZW5lcmF0aW9uX2ZlbmNlIiwiaW5jYXJuYXRpb24iOjMsImludmFsaWRhdGVkX3RpY2tldF9nZW5lcmF0aW9uIjo2LCJmZW5jZWRfYnkiOjd9fSwicF9mZW5jZSI6eyJraW5kIjoibm9uZSJ9LCJmZW5jZV9nZW5lcmF0aW9uIjowLCJyZXNvbHZlX2dlbmVyYXRpb24iOjd9fX0=",
           "scopes_after": [
             {
               "P": "session-successor-0001",
@@ -4257,7 +4257,7 @@
           "note": "a ticket sampled after the adoption carries the advanced generation",
           "request_bytes_base64": "eyJvcCI6InRpY2tldCIsIlAiOiJzZXNzaW9uLXN1Y2Nlc3Nvci0wMDAxIiwiYWdlbnQiOiJhZ2VudC1tYWluIiwiaW5jYXJuYXRpb24iOjN9",
           "result_bytes_base64": "eyJraW5kIjoiSVNTVUVEIiwidGlja2V0Ijp7InJlc29sdmVfZ2VuZXJhdGlvbiI6NywiUCI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6M319",
-          "response_bytes_base64": "eyJhdHRlbXB0LnRpY2tldCI6eyJyZXN1bHQiOnsia2luZCI6IklTU1VFRCIsInRpY2tldCI6eyJyZXNvbHZlX2dlbmVyYXRpb24iOjcsIlAiOiJzZXNzaW9uLXN1Y2Nlc3Nvci0wMDAxIiwiYWdlbnQiOiJhZ2VudC1tYWluIiwiaW5jYXJuYXRpb24iOjN9fX19",
+          "response_bytes_base64": "eyJ0aWNrZXQiOnsicmVzdWx0Ijp7ImtpbmQiOiJJU1NVRUQiLCJ0aWNrZXQiOnsicmVzb2x2ZV9nZW5lcmF0aW9uIjo3LCJQIjoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsImluY2FybmF0aW9uIjozfX19fQ==",
           "scopes_after": [
             {
               "P": "session-successor-0001",
@@ -4279,7 +4279,7 @@
           "note": "the fresh ticket passes the arrival check; a live source upload is occupancy under S",
           "request_bytes_base64": "eyJvcCI6ImJlZ2luIiwiYXR0ZW1wdCI6eyJwcmVkZWNlc3Nvcl9rZXkiOiJzZXNzaW9uLXN1Y2Nlc3Nvci0wMDAxIiwiYWdlbnQiOiJhZ2VudC1tYWluIiwiRiI6eyJkaWdlc3QiOiJlYTY0M2NmNjQxMmUyYWIwZTFkMmZmNzczMzdkNTk0ZjliY2NlMmQ2YjQ5OWM2N2VjOTM2ZjdlNWVkY2VkYWY3Iiwibm9ybWFsaXphdGlvbl92ZXJzaW9uIjoxLCJleGNsdWRlZF9hZGRpdGlvbnMiOltdfSwiYXR0ZW1wdF9pZCI6ImF0dGVtcHQtcy1mcmVzaC0wMDAyIiwiaW5jYXJuYXRpb24iOjN9LCJ0aWNrZXQiOnsicmVzb2x2ZV9nZW5lcmF0aW9uIjo3LCJQIjoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsImluY2FybmF0aW9uIjozfSwia2luZCI6InNvdXJjZV9zZWdtZW50IiwidG90YWxfYnl0ZXMiOjEzMTA3MjAsInRvdGFsX2NodW5rcyI6MiwiZGlnZXN0IjoiMTVkM2FkMTk3ZjdhYzBiNjZlYWJhMGQ4YWM5YmQ5Njc0YjkyMjYzMWFiNWJmYjQ4Zjg1YTU5NmU4ZDRjZmUzYyJ9",
           "result_bytes_base64": "eyJraW5kIjoiQkVHVU4iLCJ1cGxvYWRfaWQiOiJ1cGxvYWQtc291cmNlLXMtMDAwMiJ9",
-          "response_bytes_base64": "eyJsaW5lYWdlLmJlZ2luIjp7InJlc3VsdCI6eyJraW5kIjoiQkVHVU4iLCJ1cGxvYWRfaWQiOiJ1cGxvYWQtc291cmNlLXMtMDAwMiJ9fX0=",
+          "response_bytes_base64": "eyJiZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IkJFR1VOIiwidXBsb2FkX2lkIjoidXBsb2FkLXNvdXJjZS1zLTAwMDIifX19",
           "scopes_after": [
             {
               "P": "session-successor-0001",

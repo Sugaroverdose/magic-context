@@ -635,10 +635,10 @@ impl ModelRequest {
         })
     }
 
-    /// The clause-3 operation LABEL this request carries, which is also the key
-    /// of the clause-3a response envelope. For the nine original operations the
-    /// label and the wire discriminator differ: a request decoded from
-    /// `{"op":"begin"}` is labelled `lineage.begin` (R48).
+    /// The clause-3 operation LABEL this request carries. Step names in the
+    /// fixture stay on this label. For the nine original operations the label
+    /// and the wire discriminator differ: a request decoded from `{"op":"begin"}`
+    /// is labelled `lineage.begin` (R48).
     pub fn op(&self) -> &'static str {
         match self {
             Self::ScopeOpen { .. } => "scope.open",
@@ -653,6 +653,68 @@ impl ModelRequest {
             Self::CapacityCheck { .. } => "capacity.check",
         }
     }
+
+    /// Outer key of the keyed response envelope this request produces.
+    ///
+    /// The nine original lineage operations use the same short discriminators on
+    /// the response as on the request (`ticket`, `resolve`, `begin`). The
+    /// clause-3 labels (`attempt.ticket`, `attempt.resolve`, `lineage.begin`)
+    /// are not response keys. Capacity operations and `scope.open` keep the
+    /// dotted names they were pinned with. No alias: a label is never also
+    /// accepted as a key.
+    pub fn response_wire_key(&self) -> &'static str {
+        match self {
+            Self::AttemptTicket { .. } => "ticket",
+            Self::AttemptResolve { .. } => "resolve",
+            Self::LineageBegin { .. } => "begin",
+            other => other.op(),
+        }
+    }
+}
+
+/// Clause-3 labels that core `LineageResponse` does not accept as outer keys.
+const REFUSED_RESPONSE_LABELS: &[&str] = &["attempt.ticket", "attempt.resolve", "lineage.begin"];
+
+/// Build the keyed response envelope `{ "<wire_key>": { "result": <result> } }`.
+pub fn keyed_response_bytes(wire_key: &str, result: &[u8]) -> Vec<u8> {
+    format!(
+        "{{\"{wire_key}\":{{\"result\":{}}}}}",
+        String::from_utf8_lossy(result)
+    )
+    .into_bytes()
+}
+
+/// Decode a keyed response envelope against one expected wire key and result.
+///
+/// The outer key must be the short wire discriminator. A clause-3 label on the
+/// envelope is refused even if the inner result bytes match, with no alias and
+/// no dual acceptance.
+pub fn decode_keyed_response(envelope: &[u8], wire_key: &str, result: &[u8]) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_slice(envelope)
+        .map_err(|error| format!("response is not JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "response envelope is not an object".to_string())?;
+    if object.len() != 1 {
+        return Err(format!(
+            "response envelope must have exactly one outer key, got {}",
+            object.len()
+        ));
+    }
+    let key = object.keys().next().expect("len == 1").as_str();
+    if REFUSED_RESPONSE_LABELS.contains(&key) {
+        return Err(format!(
+            "unknown variant `{key}`; clause-3 operation labels are not response keys"
+        ));
+    }
+    if key != wire_key {
+        return Err(format!("unknown variant `{key}`, expected `{wire_key}`"));
+    }
+    let expected = keyed_response_bytes(wire_key, result);
+    if envelope != expected.as_slice() {
+        return Err("keyed response envelope does not wrap this result".to_string());
+    }
+    Ok(())
 }
 
 /// What one executed step produced. `wire_result` is None exactly for the two
