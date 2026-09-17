@@ -2185,7 +2185,7 @@ describe("dropped-token telemetry", () => {
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
                     schedulerDecision: "execute",
-                pendingMaterializationSessions: new Set([sessionId]),
+                    pendingMaterializationSessions: new Set([sessionId]),
                     schedulerDeferReason: null,
                     tags: getActiveTagsBySession(db, sessionId),
                     targets: new Map([[1, makeDropTarget(droppedMessage)]]),
@@ -2794,7 +2794,7 @@ describe("smart-drops supersession reclaim (flag-gated)", () => {
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, contractedMessages, {
                     schedulerDecision: "execute",
-                pendingMaterializationSessions: new Set([sessionId]),
+                    pendingMaterializationSessions: new Set([sessionId]),
                     smartDrops: true,
                     tags: getActiveTagsBySession(db, sessionId),
                     targets,
@@ -6869,9 +6869,21 @@ describe("ride-only queued drops", () => {
             initializeDatabase(db);
             const sessionId = `ride-only-${historianRunning}`;
             const message = makeToolMessage("ride-only-tool");
-            insertTag(db, sessionId, "ride-only-call", "tool", 1000, 1, 0, "bash", 0, message.info.id);
+            insertTag(
+                db,
+                sessionId,
+                "ride-only-call",
+                "tool",
+                1000,
+                1,
+                0,
+                "bash",
+                0,
+                message.info.id,
+            );
             padRecentToolSkeletonWindow(sessionId, 1);
-            if (historianRunning) registerActiveCompartmentRun(sessionId, new Promise<void>(() => {}));
+            if (historianRunning)
+                registerActiveCompartmentRun(sessionId, new Promise<void>(() => {}));
             const args = basePostTransformArgs(db, sessionId, [message], {
                 canRunCompartments: historianRunning,
                 schedulerDecision: "execute",
@@ -6888,7 +6900,14 @@ describe("ride-only queued drops", () => {
                 await runPostTransformPhase(args);
                 expect(JSON.stringify(args.messages)).toBe(baseline);
                 expect(getPendingOps(db, sessionId)).toHaveLength(1);
-                expect(log.mock.calls.some((call) => String(call[1]).includes("held — reason=no originating cache-bust opportunity") && String(call[1]).includes(`historianRunning=${historianRunning}`))).toBe(true);
+                expect(
+                    log.mock.calls.some(
+                        (call) =>
+                            String(call[1]).includes(
+                                "held — reason=no originating cache-bust opportunity",
+                            ) && String(call[1]).includes(`historianRunning=${historianRunning}`),
+                    ),
+                ).toBe(true);
                 for (let pass = 0; pass < 4; pass++) {
                     await runPostTransformPhase({ ...args, schedulerDecision: "defer" });
                     expect(JSON.stringify(args.messages)).toBe(baseline);
@@ -6910,13 +6929,27 @@ it("queued agent batches consume only one force episode", async () => {
     const first = makeToolMessage("force-first");
     const second = makeToolMessage("force-second");
     for (const [index, message] of [first, second].entries()) {
-        insertTag(db, sessionId, `force-call-${index}`, "tool", 1000, index + 1, 0, "bash", 0, message.info.id);
+        insertTag(
+            db,
+            sessionId,
+            `force-call-${index}`,
+            "tool",
+            1000,
+            index + 1,
+            0,
+            "bash",
+            0,
+            message.info.id,
+        );
     }
     padRecentToolSkeletonWindow(sessionId, 2);
     const args = basePostTransformArgs(db, sessionId, [first, second], {
         schedulerDecision: "execute",
         contextUsage: { percentage: 90, inputTokens: 90000 },
-        targets: new Map([[1, makeDropTarget(first)], [2, makeDropTarget(second)]]),
+        targets: new Map([
+            [1, makeDropTarget(first)],
+            [2, makeDropTarget(second)],
+        ]),
     });
     queuePendingOp(db, sessionId, 1, "drop");
     await runPostTransformPhase(args);
@@ -6942,12 +6975,23 @@ it("four pure defer passes preserve served bytes and durable drop state", async 
     const pass = async (flush: boolean) => {
         const message = makeToolMessage("replay-tool");
         const messages = [message];
-        applyFlushedStatuses(sessionId, db, new Map([[1, makeDropTarget(message)]]), getTagsBySession(db, sessionId));
-        await runPostTransformPhase(basePostTransformArgs(db, sessionId, messages, {
-            pendingMaterializationSessions: new Set(flush ? [sessionId] : []),
-            targets: new Map([[1, makeDropTarget(message)]]),
-        }));
-        return JSON.stringify({ messages, status: getTagsBySession(db, sessionId).map(tag => [tag.tagNumber, tag.status]), pending: getPendingOps(db, sessionId).length });
+        applyFlushedStatuses(
+            sessionId,
+            db,
+            new Map([[1, makeDropTarget(message)]]),
+            getTagsBySession(db, sessionId),
+        );
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                pendingMaterializationSessions: new Set(flush ? [sessionId] : []),
+                targets: new Map([[1, makeDropTarget(message)]]),
+            }),
+        );
+        return JSON.stringify({
+            messages,
+            status: getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
+            pending: getPendingOps(db, sessionId).length,
+        });
     };
     await pass(true);
     const baseline = await pass(false);
@@ -6956,5 +7000,8 @@ it("four pure defer passes preserve served bytes and durable drop state", async 
         expect(snapshot).toBe(baseline);
         snapshots.push(snapshot);
     }
-    console.log("RIDE_REPLAY_OC", createHash("sha256").update(JSON.stringify(snapshots)).digest("hex"));
+    console.log(
+        "RIDE_REPLAY_OC",
+        createHash("sha256").update(JSON.stringify(snapshots)).digest("hex"),
+    );
 });

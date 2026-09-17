@@ -3,7 +3,7 @@
  *
  * Mirrors OpenCode's `packages/plugin/src/tools/ctx-reduce/tools.ts`.
  * Marking queues the drop; it applies on the next cache-bust cycle (a history
- * fold, a history refresh, /ctx-flush, or the force band) and never causes one.
+ * fold or refresh, or when context pressure is high) and never causes one.
  * The shared description below keeps this contract identical to OpenCode.
  *
  * Registered for primary Pi sessions. `--no-session` child processes omit this

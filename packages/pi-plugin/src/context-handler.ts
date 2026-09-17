@@ -5241,16 +5241,20 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const rideSignals = {
 		hardFold: foldExecutedThisPass || firstRenderBust,
 		force:
-            (args.forceMaterialization === true || emergencyDropEligible) &&
-            (args.contextUsage.percentage >= 95 || getEmergencyInputSample(args.db, args.sessionId) === 0),
-		explicitFlush: hasPendingMaterializeSignal || (deferredMaterializeEligible && !prefixPreflightContended),
+			(args.forceMaterialization === true || emergencyDropEligible) &&
+			(args.contextUsage.percentage >= 95 ||
+				getEmergencyInputSample(args.db, args.sessionId) === 0),
+		explicitFlush:
+			hasPendingMaterializeSignal ||
+			(deferredMaterializeEligible && !prefixPreflightContended),
 		publishedHistory:
 			!prefixPreflightContended &&
-			(args.isCacheBusting || publishedM1RefreshedThisPass ||
+			(args.isCacheBusting ||
+				publishedM1RefreshedThisPass ||
 				(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart)),
 	};
 	const isCacheBustingPass = hasReclaimRide(rideSignals);
-    const publishedWorkDrainAllowed = isCacheBustingPass;
+	const publishedWorkDrainAllowed = isCacheBustingPass;
 	const usesTokenProtection =
 		args.protectedTokenTierOverrides !== undefined ||
 		args.protectedTokens !== undefined;
@@ -5420,7 +5424,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const shouldReadPendingOps =
 		!args.compactionOff &&
 		(publishedWorkDrainAllowed ||
-            args.schedulerDecision === "execute" ||
+			args.schedulerDecision === "execute" ||
 			args.forceMaterialization ||
 			hasPendingMaterializeSignal ||
 			foldExecutedThisPass ||
@@ -5529,8 +5533,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	} else {
 		const pendingOpsDepth = getPendingOpsCount(args.db, args.sessionId);
 		const refusalReason =
-			args.schedulerDeferReason ??
-			"no_originating_cache_bust";
+			args.schedulerDeferReason ?? "no_originating_cache_bust";
 		const pendingDecisionLog = `pending ops WILL NOT APPLY — reason=${refusalReason} pendingOps=${pendingOpsDepth === null ? "not loaded (deferred pass)" : pendingOpsDepth} context=${args.contextUsage.percentage.toFixed(1)}%`;
 		sessionLog(args.sessionId, pendingDecisionLog);
 		pendingDecisionLogObserverForTests?.(pendingDecisionLog);
@@ -5707,7 +5710,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.heuristics === undefined
 				? "disabled"
 				: (args.schedulerDeferReason ??
-					(!isCacheBustingPass ? "no_originating_cache_bust" : alreadyRanHeuristicsThisTurn ? "already_ran_this_turn" : "scheduler_defer"));
+					(!isCacheBustingPass
+						? "no_originating_cache_bust"
+						: alreadyRanHeuristicsThisTurn
+							? "already_ran_this_turn"
+							: "scheduler_defer"));
 		const heuristicsDecisionLog = `heuristics WILL NOT RUN — reason=${reason}`;
 		sessionLog(args.sessionId, heuristicsDecisionLog);
 		pendingDecisionLogObserverForTests?.(heuristicsDecisionLog);

@@ -315,7 +315,8 @@ describe("createTransform index staleness regressions", () => {
     it("clears reasoning before dropped messages correctly after tool-drop pruning", async () => {
         useTempDataHome("context-transform-stale-reasoning-");
         const sessionId = "ses-stale-reasoning";
-        const { transform, shouldExecute, pendingMaterializationSessions } = createTestTransform(sessionId);
+        const { transform, shouldExecute, pendingMaterializationSessions } =
+            createTestTransform(sessionId);
 
         const firstPass: TestMessage[] = [
             {

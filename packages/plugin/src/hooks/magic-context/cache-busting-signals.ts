@@ -39,10 +39,5 @@ export function hasReclaimRide(signals: {
     explicitFlush: boolean;
     publishedHistory: boolean;
 }): boolean {
-    return (
-        signals.hardFold ||
-        signals.force ||
-        signals.explicitFlush ||
-        signals.publishedHistory
-    );
+    return signals.hardFold || signals.force || signals.explicitFlush || signals.publishedHistory;
 }

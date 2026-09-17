@@ -1970,30 +1970,56 @@ describe("registerPiContextHandler", () => {
 	});
 
 	for (const historianRunning of [false, true]) {
-    it(`holds execute-only queued drops byte-identically with historian=${historianRunning}`, async () => {
-        const db = createTestDb();
-        const sessionId = `ride-only-pi-${historianRunning}`;
-        let restoreHistorian: (() => void) | undefined;
-        try {
-            const fake = createFakePi();
-            registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
-            const handler = fake.handlers.get("context") as (event: { messages: never[] }, ctx: never) => Promise<{ messages: never[] }>;
-            const ctx = { ...fakeContext(sessionId), getContextUsage: () => ({ tokens: 70000, percent: 70, contextWindow: 100000 }) };
-            const pass = () => handler({ messages: [userMessage("keep user", 1), assistantMessage("hold assistant", 2)] as never[] }, ctx as never);
-            await pass();
-            const baseline = await pass();
-            queuePendingOp(db, sessionId, 2, "drop");
-            if (historianRunning) restoreHistorian = contextHandlerInternals.setInFlightHistorianForTests(sessionId, new Promise(() => undefined));
-            const result = await pass();
-            expect(JSON.stringify(result.messages)).toBe(JSON.stringify(baseline.messages));
-            expect(getPendingOps(db, sessionId)).toHaveLength(1);
-        } finally {
-            restoreHistorian?.();
-            clearContextHandlerSession(sessionId);
-            closeQuietly(db);
-        }
-    });
-    }
+		it(`holds execute-only queued drops byte-identically with historian=${historianRunning}`, async () => {
+			const db = createTestDb();
+			const sessionId = `ride-only-pi-${historianRunning}`;
+			let restoreHistorian: (() => void) | undefined;
+			try {
+				const fake = createFakePi();
+				registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
+				const handler = fake.handlers.get("context") as (
+					event: { messages: never[] },
+					ctx: never,
+				) => Promise<{ messages: never[] }>;
+				const ctx = {
+					...fakeContext(sessionId),
+					getContextUsage: () => ({
+						tokens: 70000,
+						percent: 70,
+						contextWindow: 100000,
+					}),
+				};
+				const pass = () =>
+					handler(
+						{
+							messages: [
+								userMessage("keep user", 1),
+								assistantMessage("hold assistant", 2),
+							] as never[],
+						},
+						ctx as never,
+					);
+				await pass();
+				const baseline = await pass();
+				queuePendingOp(db, sessionId, 2, "drop");
+				if (historianRunning)
+					restoreHistorian =
+						contextHandlerInternals.setInFlightHistorianForTests(
+							sessionId,
+							new Promise(() => undefined),
+						);
+				const result = await pass();
+				expect(JSON.stringify(result.messages)).toBe(
+					JSON.stringify(baseline.messages),
+				);
+				expect(getPendingOps(db, sessionId)).toHaveLength(1);
+			} finally {
+				restoreHistorian?.();
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+	}
 
 	it("applies and drains pending drops for the session", async () => {
 		const db = createTestDb();
@@ -2034,7 +2060,7 @@ describe("registerPiContextHandler", () => {
 				overThresholdCtx as never,
 			);
 			queuePendingOp(db, "ses-context", 2, "drop");
-            signalPiPendingMaterialization("ses-context");
+			signalPiPendingMaterialization("ses-context");
 			const result = await handler(
 				{
 					messages: [
@@ -2588,7 +2614,7 @@ describe("registerPiContextHandler", () => {
 			);
 
 			expect(textOf(result.messages[1] as never)).toContain("drop");
-            expect(getPendingOps(db, "ses-context")).toHaveLength(1);
+			expect(getPendingOps(db, "ses-context")).toHaveLength(1);
 		} finally {
 			clearContextHandlerSession("ses-context");
 			closeQuietly(db);
@@ -3046,10 +3072,10 @@ describe("registerPiContextHandler", () => {
 			queuePendingOp(db, sessionId, independentDrop.tagNumber, "drop", 1);
 
 			await runPass(93_000);
-            expect(droppedToolCount()).toBe(afterPressureExit);
-            expect(getPendingOps(db, sessionId)).toHaveLength(1);
-            signalPiPendingMaterialization(sessionId);
-            await runPass(93_000);
+			expect(droppedToolCount()).toBe(afterPressureExit);
+			expect(getPendingOps(db, sessionId)).toHaveLength(1);
+			signalPiPendingMaterialization(sessionId);
+			await runPass(93_000);
 			expect(droppedToolCount()).toBeGreaterThan(afterPressureExit + 1);
 		} finally {
 			clearContextHandlerSession(sessionId);
@@ -6079,7 +6105,7 @@ describe("Pi transform_decisions dropped_tokens telemetry", () => {
 				"UPDATE tags SET token_count = 250 WHERE session_id = ? AND tag_number = 2",
 			).run(sessionId);
 			queuePendingOp(db, sessionId, 2, "drop");
-            signalPiPendingMaterialization(sessionId);
+			signalPiPendingMaterialization(sessionId);
 
 			// Pass 2: Bust pass applying the drop
 			const msgA2 = assistantMessage("assistant turn 2", 4);
@@ -6346,7 +6372,7 @@ describe("Pi transform_decisions dropped_tokens telemetry", () => {
 				"UPDATE tags SET token_count = 120 WHERE session_id = ? AND tag_number = 2",
 			).run(session1);
 			queuePendingOp(db, session1, 2, "drop");
-            signalPiPendingMaterialization(session1);
+			signalPiPendingMaterialization(session1);
 
 			const msgA1_next = assistantMessage("turn 2", 4);
 			entries1.push({ id: "e4", type: "message", message: msgA1_next });
@@ -6394,7 +6420,7 @@ describe("Pi transform_decisions dropped_tokens telemetry", () => {
 				"UPDATE tags SET token_count = 350 WHERE session_id = ? AND tag_number = 2",
 			).run(session2);
 			queuePendingOp(db, session2, 2, "drop");
-            signalPiPendingMaterialization(session2);
+			signalPiPendingMaterialization(session2);
 
 			const msgA2_next = assistantMessage("turn 2", 4);
 			entries2.push({ id: "e24", type: "message", message: msgA2_next });
@@ -6446,91 +6472,174 @@ describe("Pi transform_decisions dropped_tokens telemetry", () => {
 });
 
 it("019de471 decision rows hold execute batches until the publication opportunity", async () => {
-    const db = createTestDb();
-    const sessionId = "019de471-ride-observer";
-    const decisions: boolean[] = [];
-    const restoreObserver = contextHandlerInternals.setMutationGateObserverForTests(snapshot => decisions.push(snapshot.shouldApplyPendingOps));
-    let restoreHistorian: (() => void) | undefined;
-    try {
-        const fake = createFakePi();
-        registerPiContextHandler(fake.pi as never, { db, protectedTags: 0, injection: { injectionBudgetTokens: 10000 }, scheduler: { executeThresholdPercentage: 60 } });
-        const handler = fake.handlers.get("context") as (event: { messages: never[] }, ctx: never) => Promise<{ messages: never[] }>;
-        const pass = (percent: number) => handler({ messages: [userMessage("keep", 1), assistantMessage("queued evidence", 2)] as never[] }, { ...fakeContext(sessionId), getContextUsage: () => ({ tokens: percent * 1000, percent, contextWindow: 100000 }) } as never);
-        await pass(20);
-        const baseline = await pass(20);
-        queuePendingOp(db, sessionId, 2, "drop");
-        decisions.length = 0;
-        const first = await pass(65);
-        restoreHistorian = contextHandlerInternals.setInFlightHistorianForTests(sessionId, new Promise(() => undefined));
-        const second = await pass(60);
-        expect(JSON.stringify(first.messages)).toBe(JSON.stringify(baseline.messages));
-        expect(JSON.stringify(second.messages)).toBe(JSON.stringify(baseline.messages));
-        appendCompartments(db, sessionId, [{ sequence: 0, startMessage: 1, endMessage: 1, title: "Published history", content: "U: keep" }]);
-        signalPiDeferredHistoryRefresh(sessionId);
-        signalPiDeferredMaterialization(sessionId);
-        await pass(60);
-        expect(decisions).toEqual([false, false, true]);
-        expect(getPendingOps(db, sessionId)).toHaveLength(0);
-        await pass(60);
-        expect(decisions).toEqual([false, false, true, false]);
-    } finally {
-        restoreHistorian?.();
-        restoreObserver();
-        clearContextHandlerSession(sessionId);
-        closeQuietly(db);
-    }
+	const db = createTestDb();
+	const sessionId = "019de471-ride-observer";
+	const decisions: boolean[] = [];
+	const restoreObserver =
+		contextHandlerInternals.setMutationGateObserverForTests((snapshot) =>
+			decisions.push(snapshot.shouldApplyPendingOps),
+		);
+	let restoreHistorian: (() => void) | undefined;
+	try {
+		const fake = createFakePi();
+		registerPiContextHandler(fake.pi as never, {
+			db,
+			protectedTags: 0,
+			injection: { injectionBudgetTokens: 10000 },
+			scheduler: { executeThresholdPercentage: 60 },
+		});
+		const handler = fake.handlers.get("context") as (
+			event: { messages: never[] },
+			ctx: never,
+		) => Promise<{ messages: never[] }>;
+		const pass = (percent: number) =>
+			handler(
+				{
+					messages: [
+						userMessage("keep", 1),
+						assistantMessage("queued evidence", 2),
+					] as never[],
+				},
+				{
+					...fakeContext(sessionId),
+					getContextUsage: () => ({
+						tokens: percent * 1000,
+						percent,
+						contextWindow: 100000,
+					}),
+				} as never,
+			);
+		await pass(20);
+		const baseline = await pass(20);
+		queuePendingOp(db, sessionId, 2, "drop");
+		decisions.length = 0;
+		const first = await pass(65);
+		restoreHistorian = contextHandlerInternals.setInFlightHistorianForTests(
+			sessionId,
+			new Promise(() => undefined),
+		);
+		const second = await pass(60);
+		expect(JSON.stringify(first.messages)).toBe(
+			JSON.stringify(baseline.messages),
+		);
+		expect(JSON.stringify(second.messages)).toBe(
+			JSON.stringify(baseline.messages),
+		);
+		appendCompartments(db, sessionId, [
+			{
+				sequence: 0,
+				startMessage: 1,
+				endMessage: 1,
+				title: "Published history",
+				content: "U: keep",
+			},
+		]);
+		signalPiDeferredHistoryRefresh(sessionId);
+		signalPiDeferredMaterialization(sessionId);
+		await pass(60);
+		expect(decisions).toEqual([false, false, true]);
+		expect(getPendingOps(db, sessionId)).toHaveLength(0);
+		await pass(60);
+		expect(decisions).toEqual([false, false, true, false]);
+	} finally {
+		restoreHistorian?.();
+		restoreObserver();
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
 });
 
 it("Pi queued agent batches consume only one force episode", async () => {
-    const db = createTestDb();
-    const sessionId = "pi-ride-force-batches";
-    try {
-        const fake = createFakePi();
-        registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
-        const handler = fake.handlers.get("context") as (event: { messages: never[] }, ctx: never) => Promise<{ messages: never[] }>;
-        const pass = () => handler({ messages: [userMessage("keep", 1), assistantMessage("first", 2), assistantMessage("second", 3)] as never[] }, { ...fakeContext(sessionId), getContextUsage: () => ({ tokens: 90000, percent: 90, contextWindow: 100000 }) } as never);
-        await pass();
-        queuePendingOp(db, sessionId, 2, "drop");
-        const first = await pass();
-        expect(getPendingOps(db, sessionId)).toHaveLength(0);
-        queuePendingOp(db, sessionId, 3, "drop");
-        const held = await pass();
-        expect(getPendingOps(db, sessionId)).toHaveLength(1);
-        expect(JSON.stringify(held.messages)).toBe(JSON.stringify(first.messages));
-        signalPiPendingMaterialization(sessionId);
-        await pass();
-        expect(getPendingOps(db, sessionId)).toHaveLength(0);
-    } finally {
-        clearContextHandlerSession(sessionId);
-        closeQuietly(db);
-    }
+	const db = createTestDb();
+	const sessionId = "pi-ride-force-batches";
+	try {
+		const fake = createFakePi();
+		registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
+		const handler = fake.handlers.get("context") as (
+			event: { messages: never[] },
+			ctx: never,
+		) => Promise<{ messages: never[] }>;
+		const pass = () =>
+			handler(
+				{
+					messages: [
+						userMessage("keep", 1),
+						assistantMessage("first", 2),
+						assistantMessage("second", 3),
+					] as never[],
+				},
+				{
+					...fakeContext(sessionId),
+					getContextUsage: () => ({
+						tokens: 90000,
+						percent: 90,
+						contextWindow: 100000,
+					}),
+				} as never,
+			);
+		await pass();
+		queuePendingOp(db, sessionId, 2, "drop");
+		const first = await pass();
+		expect(getPendingOps(db, sessionId)).toHaveLength(0);
+		queuePendingOp(db, sessionId, 3, "drop");
+		const held = await pass();
+		expect(getPendingOps(db, sessionId)).toHaveLength(1);
+		expect(JSON.stringify(held.messages)).toBe(JSON.stringify(first.messages));
+		signalPiPendingMaterialization(sessionId);
+		await pass();
+		expect(getPendingOps(db, sessionId)).toHaveLength(0);
+	} finally {
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
 });
 
 it("Pi four pure defer passes preserve served bytes and durable drop state", async () => {
-    const db = createTestDb();
-    const sessionId = "pi-four-defer-replay";
-    try {
-        const fake = createFakePi();
-        registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
-        const handler = fake.handlers.get("context") as (event: { messages: never[] }, ctx: never) => Promise<{ messages: never[] }>;
-        const pass = async () => {
-            const result = await handler({ messages: [userMessage("keep", 1), assistantMessage("spent", 2)] as never[] }, fakeContext(sessionId) as never);
-            return JSON.stringify({ messages: result.messages, status: getTagsBySession(db, sessionId).map(tag => [tag.tagNumber, tag.status]), pending: getPendingOps(db, sessionId).length });
-        };
-        await pass();
-        queuePendingOp(db, sessionId, 2, "drop", 1);
-        signalPiPendingMaterialization(sessionId);
-        await pass();
-        const baseline = await pass();
-        const snapshots: string[] = [];
-        for (let index = 0; index < 4; index++) {
-            const snapshot = await pass();
-            expect(snapshot).toBe(baseline);
-            snapshots.push(snapshot);
-        }
-        console.log("RIDE_REPLAY_PI", createHash("sha256").update(JSON.stringify(snapshots)).digest("hex"));
-    } finally {
-        clearContextHandlerSession(sessionId);
-        closeQuietly(db);
-    }
+	const db = createTestDb();
+	const sessionId = "pi-four-defer-replay";
+	try {
+		const fake = createFakePi();
+		registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
+		const handler = fake.handlers.get("context") as (
+			event: { messages: never[] },
+			ctx: never,
+		) => Promise<{ messages: never[] }>;
+		const pass = async () => {
+			const result = await handler(
+				{
+					messages: [
+						userMessage("keep", 1),
+						assistantMessage("spent", 2),
+					] as never[],
+				},
+				fakeContext(sessionId) as never,
+			);
+			return JSON.stringify({
+				messages: result.messages,
+				status: getTagsBySession(db, sessionId).map((tag) => [
+					tag.tagNumber,
+					tag.status,
+				]),
+				pending: getPendingOps(db, sessionId).length,
+			});
+		};
+		await pass();
+		queuePendingOp(db, sessionId, 2, "drop", 1);
+		signalPiPendingMaterialization(sessionId);
+		await pass();
+		const baseline = await pass();
+		const snapshots: string[] = [];
+		for (let index = 0; index < 4; index++) {
+			const snapshot = await pass();
+			expect(snapshot).toBe(baseline);
+			snapshots.push(snapshot);
+		}
+		console.log(
+			"RIDE_REPLAY_PI",
+			createHash("sha256").update(JSON.stringify(snapshots)).digest("hex"),
+		);
+	} finally {
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
 });
