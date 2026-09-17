@@ -2246,7 +2246,13 @@ export function unregisterProjectShadowEmbedding(projectIdentity: string): void 
         shadowBackfillStopReasons.delete(key);
         shadowBackfillLastWriteOutcomes.delete(key);
     }
-    disposeProvider(shadow?.provider ?? null);
+    // Production always constructs a distinct shadow instance, but a test factory
+    // (or a future cache) can hand out the same object as the primary. Disposing
+    // that shared instance would take the primary lane down with the shadow.
+    const primaryProvider = projectRegistrations.get(projectIdentity)?.provider ?? null;
+    if (shadow?.provider && shadow.provider !== primaryProvider) {
+        disposeProvider(shadow.provider);
+    }
 }
 
 export function unregisterProjectEmbedding(projectIdentity: string): void {

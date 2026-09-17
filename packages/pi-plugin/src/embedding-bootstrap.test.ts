@@ -2,6 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { EmbeddingConfig } from "@magic-context/core/config/schema/magic-context";
+import * as projectEmbedding from "@magic-context/core/features/magic-context/memory/embedding";
 import {
 	_resetProjectEmbeddingRegistryForTests,
 	_setTestProviderFactoryForProject,
@@ -194,6 +195,135 @@ describe("ensureProjectRegisteredFromPiDirectory", () => {
 			).toHaveLength(2);
 		} finally {
 			logging.mockRestore();
+			_resetProjectEmbeddingRegistryForTests();
+			if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+			else process.env.XDG_CONFIG_HOME = previous;
+			closeQuietly(db);
+		}
+	});
+	it("retires a shadow lane that becomes unavailable without removing the primary lane", async () => {
+		const db = createTestDb();
+		const directory = createTestTempDir("pi-shadow-unavailable-").dir;
+		const configHome = createTestTempDir("pi-shadow-unavailable-config-").dir;
+		const previous = process.env.XDG_CONFIG_HOME;
+		process.env.XDG_CONFIG_HOME = configHome;
+		let disposed = false;
+		_setTestProviderFactoryForProject(() => ({
+			modelId: "shadow",
+			initialize: async () => true,
+			embed: async () => new Float32Array([1, 0]),
+			embedBatch: async (texts: string[]) =>
+				texts.map(() => new Float32Array([1, 0])),
+			dispose: async () => {
+				disposed = true;
+			},
+			isLoaded: () => true,
+		}));
+		try {
+			await fs.mkdir(path.join(configHome, "cortexkit"), { recursive: true });
+			await fs.writeFile(
+				path.join(configHome, "cortexkit", "magic-context.json"),
+				JSON.stringify({
+					embedding: {
+						provider: "openai-compatible",
+						model: "qwen3",
+						endpoint: "http://127.0.0.1:9/v1",
+					},
+					shadow_embedding: { enabled: true },
+					subc: { connection_file: path.join(configHome, "absent-subc.json") },
+				}),
+			);
+			const identity = resolveProjectIdentity(directory);
+			registerProjectShadowEmbedding(
+				db,
+				identity,
+				{
+					provider: "synapse",
+					model: "shadow",
+					synapse_fingerprint: "fixture",
+				} as unknown as EmbeddingConfig,
+				directory,
+			);
+			expect(getShadowEmbeddingMeasurementCohort(identity)?.fingerprint).toBe(
+				"fixture",
+			);
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
+			expect(getShadowEmbeddingMeasurementCohort(identity)).toBeNull();
+			expect(getProjectEmbeddingSnapshot(identity)?.provider).toBe(
+				"openai-compatible",
+			);
+			expect(disposed).toBe(true);
+		} finally {
+			_resetProjectEmbeddingRegistryForTests();
+			if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+			else process.env.XDG_CONFIG_HOME = previous;
+			closeQuietly(db);
+		}
+	});
+	it("treats a no-probe outcome as a registry no-op on the next call", async () => {
+		const db = createTestDb();
+		const directory = createTestTempDir("pi-noprobe-memo-").dir;
+		const configHome = createTestTempDir("pi-noprobe-memo-config-").dir;
+		const previous = process.env.XDG_CONFIG_HOME;
+		process.env.XDG_CONFIG_HOME = configHome;
+		_setTestProviderFactoryForProject(() => ({
+			modelId: "primary",
+			initialize: async () => true,
+			embed: async () => new Float32Array([1, 0]),
+			embedBatch: async (texts: string[]) =>
+				texts.map(() => new Float32Array([1, 0])),
+			dispose: async () => undefined,
+			isLoaded: () => true,
+		}));
+		const registerPrimary = spyOn(projectEmbedding, "registerProjectEmbedding");
+		const registerShadow = spyOn(
+			projectEmbedding,
+			"registerProjectShadowEmbedding",
+		);
+		const unregisterShadow = spyOn(
+			projectEmbedding,
+			"unregisterProjectShadowEmbedding",
+		);
+		try {
+			const configDir = path.join(configHome, "cortexkit");
+			await fs.mkdir(configDir, { recursive: true });
+			const configFile = path.join(configDir, "magic-context.json");
+			// provider off + shadow enabled never probes; the outcome is deterministic.
+			await fs.writeFile(
+				configFile,
+				JSON.stringify({
+					embedding: { provider: "off" },
+					shadow_embedding: { enabled: true },
+				}),
+			);
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
+			expect(registerPrimary).toHaveBeenCalledTimes(1);
+			expect(registerShadow).toHaveBeenCalledTimes(0);
+			expect(unregisterShadow).toHaveBeenCalledTimes(1);
+
+			await fs.writeFile(
+				configFile,
+				JSON.stringify({
+					embedding: {
+						provider: "openai-compatible",
+						model: "qwen3",
+						endpoint: "http://127.0.0.1:9/v1",
+					},
+					shadow_embedding: { enabled: true },
+					subc: { connection_file: path.join(configHome, "absent-subc.json") },
+				}),
+			);
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
+			// An attempted-unavailable shadow probe must re-resolve so a recovered
+			// daemon can be picked up without a configuration change.
+			expect(registerPrimary).toHaveBeenCalledTimes(3);
+			expect(unregisterShadow).toHaveBeenCalledTimes(3);
+		} finally {
+			registerPrimary.mockRestore();
+			registerShadow.mockRestore();
+			unregisterShadow.mockRestore();
 			_resetProjectEmbeddingRegistryForTests();
 			if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
 			else process.env.XDG_CONFIG_HOME = previous;
