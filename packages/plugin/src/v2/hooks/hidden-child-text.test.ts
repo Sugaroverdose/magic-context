@@ -45,7 +45,7 @@ describe("newestUserText", () => {
         ).toBe("mc:hidden:input");
     });
 
-    it("matches an attempt after the v2 ordinal prefix", () => {
+    it("matches an attempt after v2 ordinal prefixes", () => {
         const hook = new HiddenChildHook();
         hook.registerChild("ses-child");
         hook.registerAttempt("mc:hidden:marker", {
@@ -64,7 +64,7 @@ describe("newestUserText", () => {
         const shaped = hook.apply({
             ...draft({
                 role: "user",
-                content: [{ type: "text", text: "§1§ mc:hidden:marker" }],
+                content: [{ type: "text", text: "§1§ §22§ mc:hidden:marker" }],
             }),
             sessionID: "ses-child",
         });

@@ -2,6 +2,7 @@ import {
     HiddenCompletionRefusal,
     type HiddenRunIdentity,
 } from "../../hooks/magic-context/compartment-runner-types";
+import { stripWellFormedLeadingTagPrefix } from "../../hooks/magic-context/tag-content-primitives";
 import type { PromptArgs } from "../../shared/model-suggestion-retry";
 import type { SessionContext, V2AgentDomain } from "./types";
 
@@ -110,7 +111,7 @@ export class HiddenChildHook {
         if (!this.owns(draft.sessionID)) return false;
 
         const raw = newestUserText(draft);
-        const stripped = raw?.replace(/^§\d+§\s*/, "");
+        const stripped = raw === undefined ? undefined : stripWellFormedLeadingTagPrefix(raw);
         const attempt =
             (raw !== undefined ? this.attempts.get(raw) : undefined) ??
             (stripped && stripped !== raw ? this.attempts.get(stripped) : undefined);
