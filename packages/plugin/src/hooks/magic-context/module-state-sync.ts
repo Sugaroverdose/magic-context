@@ -1804,6 +1804,8 @@ export interface ModuleStateSyncClient {
         signal?: AbortSignal;
         generationSensitive?: boolean;
         attemptClass?: "transform_page_upload" | "transform_series_execute";
+        /** Health probes and content-addressed resend attempts must not queue behind the silent request they diagnose. */
+        bypassSessionLane?: boolean;
         timeoutMs?: number;
     }): Promise<unknown>;
 }

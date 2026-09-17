@@ -498,6 +498,12 @@ export class SubcModuleTransport {
         timeoutMs?: number;
         /** Distinguishes cheap page admission from the cold execute on the completed series. */
         attemptClass?: "transform_page_upload" | "transform_series_execute";
+        /**
+         * Bypass the per-session correctness lane only for a health probe or a
+         * content-addressed transform resend. The ordinary request keeps owning
+         * the lane while the probe determines whether the module is alive.
+         */
+        bypassSessionLane?: boolean;
     }): Promise<unknown> {
         const callStartedAt = performance.now();
         const timings: ModuleCallTimings = {
@@ -533,13 +539,15 @@ export class SubcModuleTransport {
             else this.wrapupSessions.delete(args.sessionId);
         };
         const laneDeadlineMs = Date.now() + attemptTimeoutMs;
-        let releaseLane: (() => void) | undefined;
+        let releaseLane: () => void = () => {};
         try {
-            releaseLane = await this.acquireCorrectnessLane(
-                args.sessionId,
-                args.signal,
-                laneDeadlineMs,
-            );
+            if (!args.bypassSessionLane) {
+                releaseLane = await this.acquireCorrectnessLane(
+                    args.sessionId,
+                    args.signal,
+                    laneDeadlineMs,
+                );
+            }
         } catch (error) {
             finishWrapupTracking();
             if (args.method === "state_sync" && isDeadlineFailure(error)) {

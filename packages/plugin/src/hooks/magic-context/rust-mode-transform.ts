@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
     type AuthorityDrainResponse,
@@ -162,6 +162,8 @@ export const RUST_PARK_RETRY_INTERVAL = 5;
 export const RUST_EMERGENCY_WALL_PCT = 95;
 export const RUST_PARK_PROBE_PRESSURE_BYPASS_PCT = 90;
 const RUST_SEND_TIMEOUT_MS = 15_000;
+export const RUST_SILENT_RESEND_AFTER_MS = 10_000;
+export const RUST_HEALTH_PROBE_TIMEOUT_MS = 2_000;
 // A frozen defer prevents an immediate LKG/module/LKG double bust. After eight healthy module
 // passes or sixteen new raw messages, continued replay adds more stale-snapshot risk than value.
 const RUST_LKG_FROZEN_HEALTHY_PASS_LIMIT = 8;
@@ -448,6 +450,10 @@ export interface RustModeTransformOptions {
     disableHotPathIoCachesForTests?: boolean;
     /** Test-only callback after a capture is accepted, reporting the reused digest prefix length. */
     onLkgCaptureForTests?: (reusedPrefix: number) => void;
+    /** Test-only override for the silent-request resend threshold. */
+    silentResendAfterMsForTests?: number;
+    /** Test-only override for the health-probe deadline. */
+    healthProbeTimeoutMsForTests?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1750,6 +1756,85 @@ export function createRustModeTransform(
         }
     };
 
+    const callTransformWithSilentResend = async (
+        args: Parameters<RustModeModuleClient["call"]>[0],
+        attemptTimeoutMs: number,
+    ): Promise<unknown> => {
+        const startedAtMs = Date.now();
+        const deadlineMs = startedAtMs + attemptTimeoutMs;
+        const silentAfterMs =
+            options.silentResendAfterMsForTests ?? RUST_SILENT_RESEND_AFTER_MS;
+        const probeTimeoutMs =
+            options.healthProbeTimeoutMsForTests ?? RUST_HEALTH_PROBE_TIMEOUT_MS;
+        const originalAttemptId = randomUUID();
+        const originalBody = isRecord(args.body)
+            ? { ...args.body, attempt_id: originalAttemptId }
+            : args.body;
+        const original = callModule({ ...args, body: originalBody }, attemptTimeoutMs);
+        if (attemptTimeoutMs <= silentAfterMs) return original;
+
+        let silentTimer: ReturnType<typeof setTimeout> | undefined;
+        const first = await Promise.race([
+            original.then(
+                (response) => ({ kind: "response" as const, response }),
+                (error) => ({ kind: "error" as const, error }),
+            ),
+            new Promise<{ kind: "silent" }>((resolve) => {
+                silentTimer = setTimeout(() => resolve({ kind: "silent" }), silentAfterMs);
+            }),
+        ]);
+        if (first.kind !== "silent") clearTimeout(silentTimer);
+        if (first.kind === "response") return first.response;
+        if (first.kind === "error") throw first.error;
+
+        const probeBudgetMs = Math.min(probeTimeoutMs, Math.max(0, deadlineMs - Date.now()));
+        if (probeBudgetMs <= 0) return original;
+        try {
+            await callModule(
+                {
+                    sessionId: args.sessionId,
+                    projectRoot: args.projectRoot,
+                    method: "session.status",
+                    body: {
+                        method: "session.status",
+                        v: 1,
+                        session_id: args.sessionId,
+                    },
+                    bypassSessionLane: true,
+                },
+                probeBudgetMs,
+            );
+        } catch {
+            // A failed probe indicates that the module may be unavailable. Keep waiting on
+            // the original request so normal timeout handling chooses refusal or fallback.
+            return original;
+        }
+
+        const remainingMs = Math.max(0, deadlineMs - Date.now());
+        if (remainingMs <= 0) return original;
+        const resendAttemptId = randomUUID();
+        sessionLog(
+            args.sessionId,
+            `rust silent resend original_attempt=${originalAttemptId} resend_attempt=${resendAttemptId} silent_gap_ms=${Date.now() - startedAtMs}`,
+        );
+        const resendBody = isRecord(args.body)
+            ? {
+                  ...args.body,
+                  attempt_id: resendAttemptId,
+                  original_attempt_id: originalAttemptId,
+                  resend: true,
+              }
+            : args.body;
+        return callModule(
+            {
+                ...args,
+                body: resendBody,
+                bypassSessionLane: true,
+            },
+            remainingMs,
+        );
+    };
+
     const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
         state.consecutiveFailures = isNonRetryableStateSyncFailure(error)
             ? Math.max(RUST_FAILURE_PARK_THRESHOLD, state.consecutiveFailures + 1)
@@ -2901,9 +2986,12 @@ export function createRustModeTransform(
                 detail = "",
             ): Promise<TransformSeriesResult> => {
                 const pagingStartedAt = performance.now();
+                // A one-page content-addressed envelope lets the module replay a completed
+                // request when only its response was lost, without executing the transform twice.
                 const pages = buildPagedModuleTransformPayloads(
                     payload,
                     options.modulePageMaxBytes,
+                    true,
                 );
                 timings.paging += performance.now() - pagingStartedAt;
                 const seedMessageCount = Array.isArray(payload.input)
@@ -2919,7 +3007,10 @@ export function createRustModeTransform(
                     const transportStartedAt = performance.now();
                     let moduleResponse: unknown;
                     try {
-                        const attemptClass = paged
+                        const attemptClass:
+                            | "transform_page_upload"
+                            | "transform_series_execute"
+                            | undefined = paged
                             ? index === pages.length - 1
                                 ? "transform_series_execute"
                                 : "transform_page_upload"
@@ -2931,25 +3022,25 @@ export function createRustModeTransform(
                                 : attemptClass === "transform_page_upload"
                                   ? TRANSFORM_PAGE_UPLOAD_TIMEOUT_MS
                                   : timeoutMs);
-                        moduleResponse = await callModule(
-                            {
-                                sessionId,
-                                projectRoot,
-                                method: "transform",
-                                body: page,
-                                onTimings: (detail) => {
-                                    for (const key of Object.keys(
-                                        detail,
-                                    ) as (keyof typeof detail)[])
-                                        timings.transportDetail[key] += detail[key];
-                                },
-                                // A reconnect discards a collecting page series. Page zero can be
-                                // retried safely, but later pages must make the caller restart it.
-                                generationSensitive: paged && index > 0,
-                                attemptClass,
+                        const callArgs = {
+                            sessionId,
+                            projectRoot,
+                            method: "transform" as const,
+                            body: page,
+                            onTimings: (detail: import("./module-transport").ModuleCallTimings) => {
+                                for (const key of Object.keys(
+                                    detail,
+                                ) as (keyof typeof detail)[])
+                                    timings.transportDetail[key] += detail[key];
                             },
-                            attemptTimeoutMs,
-                        );
+                            // A reconnect discards a collecting page series. Page zero can be
+                            // retried safely, but later pages must make the caller restart it.
+                            generationSensitive: paged && index > 0,
+                            attemptClass,
+                        };
+                        moduleResponse = page.transform_page_complete
+                            ? await callTransformWithSilentResend(callArgs, attemptTimeoutMs)
+                            : await callModule(callArgs, attemptTimeoutMs);
                     } catch (error) {
                         if (paged && isTransformPageAttemptMismatch(error)) {
                             return {
