@@ -34,7 +34,7 @@ const mock = Bun.serve({
         const serialized = JSON.stringify(body);
         const pressure = serialized.includes("Trigger next-turn pressure");
         pressureNext ||= pressure;
-        const inputTokens = pressure ? 31_000 : 100;
+        const inputTokens = pressure ? 15_000 : 100;
         const id = `chatcmpl-${requests.length}`;
         const model = typeof body.model === "string" ? body.model : "mock-model";
         const encoder = new TextEncoder();
@@ -67,7 +67,7 @@ writeFileSync(
                 models: {
                     "mock-model": {
                         name: "Mock Model",
-                        limit: { context: 32_000, output: 1024 },
+                        limit: { context: 16_000, output: 1024 },
                         compaction: { mode: "local" },
                     },
                 },

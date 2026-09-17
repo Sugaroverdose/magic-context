@@ -222,7 +222,10 @@ test("I4 context_hook_never_fires_for_title_or_compaction_agents", async () => {
 }, 60000);
 
 test("I17 fail_closed_v2 refuses provider-proven 95 percent before any further model request", async () => {
-	const host = await spawnOpencode2();
+	const host = await spawnOpencode2({
+		modelContextLimit: 16_000,
+		modelOutputLimit: 1024,
+	});
 	try {
 		const client = clientFor(host);
 		const session = await client.session.create({

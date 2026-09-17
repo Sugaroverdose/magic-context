@@ -215,8 +215,10 @@ export async function registerContext(context: V2Context) {
                 const tokens = latest?.data.tokens;
                 const modelKey = `${draft.model.providerID}/${draft.model.id}`;
                 if (!queriedModels.has(modelKey)) {
-                    // GA 2.0.5 split catalog into context.model (sync list).
-                    for (const model of context.model.list())
+                    // GA 2.0.5 moved catalog.model.list to context.model.list();
+                    // it is async and returns { data }, not a raw iterable.
+                    const catalog = await context.model.list();
+                    for (const model of catalog.data)
                         limits.set(`${model.providerID}/${model.id}`, model.limit.context);
                     queriedModels.add(modelKey);
                 }

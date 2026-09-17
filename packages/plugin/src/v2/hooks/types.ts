@@ -49,10 +49,12 @@ export interface V2Context {
     agent: V2AgentDomain;
     event: { subscribe(options: { signal: AbortSignal }): AsyncIterable<unknown> };
     model: {
-        list(providerID?: string): Array<{
-            id: string;
-            providerID: string;
-            limit: { context: number };
+        list(): Promise<{
+            data: Array<{
+                id: string;
+                providerID: string;
+                limit: { context: number };
+            }>;
         }>;
     };
     storage: {

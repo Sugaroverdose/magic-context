@@ -16,7 +16,7 @@ for (const mode of ["local", "provider"] as const) {
         const root = mkdtempSync(join(tmpdir(), "mc-s3-fold-"));
         const build = await Bun.build({ entrypoints: [join(import.meta.dir, "fold-s3-probe.ts")], outdir: root, naming: "index.js", target: "node", format: "esm", define: { "process.env.NODE_ENV": '"production"' }, external: ["bun:sqlite", "node:sqlite"] });
         if (!build.success) throw new Error(build.logs.join("\n"));
-        const host = await spawnOpencode2({ probePlugin: root, modelContextLimit: 32_000, modelOutputLimit: 1024 });
+        const host = await spawnOpencode2({ probePlugin: root, modelContextLimit: 16_000, modelOutputLimit: 1024 });
         const trace = join(host.cwd, "s3-fold.jsonl");
         try {
             const configDir = join(host.env.XDG_CONFIG_HOME!, "cortexkit");
@@ -38,7 +38,7 @@ for (const mode of ["local", "provider"] as const) {
             for (const marker of markers) await turn(`${marker} ${"source history detail ".repeat(500)}`);
             const reader = new V2StoreReader(gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env));
             const sourceBefore = rawMessages(reader.history(session.id));
-            host.mock.setDefault({ text: "pressure answer", usage: { input_tokens: 31000, output_tokens: 10 } });
+            host.mock.setDefault({ text: "pressure answer", usage: { input_tokens: 15000, output_tokens: 10 } });
             await turn("Trigger next-turn pressure");
             const before = host.mock.requests().length;
             host.mock.setDefault({ text: "post-fold answer", usage: { input_tokens: 100, output_tokens: 10 } });
