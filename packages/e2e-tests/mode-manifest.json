@@ -1013,9 +1013,22 @@
 				"ts": false,
 				"rust": false
 			},
-			"rationale": "OpenCode v2 lane: boots the real @opencode/cli@2.0.3 in the hermetic v2 runner (throwaway roots, fd guard); v1/v2 payload, hidden-agent and rpc-entry probes; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+			"rationale": "OpenCode v2 lane: boots the real @opencode/cli@2.0.5 in the hermetic v2 runner (throwaway roots, fd guard); v1/v2 payload, hidden-agent and rpc-entry probes; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
 			"contract_refs": [
 				"OC2-S1"
+			]
+		},
+		{
+			"path": "tests/opencode2/prompt-surface-s6.test.ts",
+			"tier": "excluded",
+			"invocation": {
+				"ts": false,
+				"rust": false
+			},
+			"rationale": "OpenCode v2 lane: per-model ctx_* description rewrite and draft-authoritative model tracking on the real GA host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+			"contract_refs": [
+				"R42",
+				"R43"
 			]
 		},
 		{

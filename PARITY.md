@@ -26,6 +26,8 @@ The comparison target for OpenCode 2 is exactly `@opencode/cli@2.0.5`,
   `harness='opencode'` and `harness='opencode2'`; project memories remain shared.
 - **Commands and tools.** The same `ctx_reduce`, `ctx_expand`, `ctx_note`,
   `ctx_memory`, and `ctx_search` behavior is adapted onto the host hook surface.
+  OpenCode 1.x keeps process-scoped tool descriptions; OpenCode 2 rewrites the
+  five `ctx_*` descriptions per `context` pass from the draft model.
   Status and recomp data remain on the authenticated Magic Context RPC surface;
   the GA v2 command-registration gap below currently prevents their slash-command
   entry points.
