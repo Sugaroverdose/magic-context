@@ -6,6 +6,7 @@ import {
 import {
 	type EmbeddingFeatures,
 	registerProjectEmbedding,
+	registerProjectShadowEmbedding,
 } from "@magic-context/core/features/magic-context/memory/embedding";
 import { resolveProjectIdentityForSession } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
@@ -13,6 +14,8 @@ import {
 	handleUntrustedLoad,
 	isConfigLoadUntrusted,
 } from "@magic-context/core/plugin/embedding-bootstrap-helpers";
+import { resolveEmbeddingRouting } from "@magic-context/core/plugin/embedding-routing";
+import { log } from "@magic-context/core/shared/logger";
 import { loadPiConfigDetailed } from "./config";
 
 interface RegistrationFingerprint {
@@ -76,6 +79,15 @@ export async function ensureProjectRegisteredFromPiDirectory(
 		return;
 	}
 
+	const routing = await resolveEmbeddingRouting({
+		config: detailed.config,
+		projectRoot: directory,
+		session: `bootstrap:${projectIdentity}`,
+	});
+	for (const warning of routing.warnings) {
+		log(`[magic-context] ${warning}`);
+	}
+
 	const features: EmbeddingFeatures = {
 		memoryEnabled: detailed.config.memory.enabled,
 		gitCommitEnabled: detailed.config.memory.git_commit_indexing.enabled,
@@ -83,16 +95,34 @@ export async function ensureProjectRegisteredFromPiDirectory(
 	registerProjectEmbedding(
 		db,
 		projectIdentity,
-		detailed.config.embedding,
+		routing.primary,
 		features,
 		directory,
 	);
-	const fingerprintPaths = configCandidatePaths(
-		directory,
-		detailed.loadedFromPaths,
-	);
-	registrationFingerprints.set(projectIdentity, {
-		paths: fingerprintPaths,
-		fingerprint: configFingerprint(fingerprintPaths),
-	});
+	if (routing.shadow) {
+		registerProjectShadowEmbedding(
+			db,
+			projectIdentity,
+			routing.shadow,
+			directory,
+		);
+	}
+	// Retry discovery on the next registration if a configured lane was unavailable.
+	const configuredProvider = detailed.config.embedding.provider;
+	const shadowEnabled = detailed.config.shadow_embedding?.enabled === true;
+	if (
+		routing.primary.provider === configuredProvider &&
+		(configuredProvider === "synapse" ||
+			!shadowEnabled ||
+			routing.shadow !== null)
+	) {
+		const fingerprintPaths = configCandidatePaths(
+			directory,
+			detailed.loadedFromPaths,
+		);
+		registrationFingerprints.set(projectIdentity, {
+			paths: fingerprintPaths,
+			fingerprint: configFingerprint(fingerprintPaths),
+		});
+	}
 }
