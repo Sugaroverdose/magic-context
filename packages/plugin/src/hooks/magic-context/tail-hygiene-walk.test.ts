@@ -511,7 +511,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const defer = refreshTailHygieneBaseline({
             messages,
             tags,
-            protectedTagNumbers: new Set([1]),
+            protectedTagNumbers: new Set([1, 5]),
             cacheBusting: false,
             previous: baseline,
         });
@@ -521,6 +521,53 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         expect(defer.turnDeltaU).toBeGreaterThan(0);
         expect(defer.turnDeltaU).toBeLessThan(defer.turnDeltaT);
         expect(effectiveTailHygiene(defer).u).toBeLessThanOrEqual(effectiveTailHygiene(defer).t);
+    });
+
+    it("counts an appended tool output after it ages out of the protected suffix", () => {
+        const baseMessages = [textMessage("base", "base text")];
+        const baseTags = [tag(1, "base:p0", "message")];
+        const appended = nativeTool(
+            "tool-delta",
+            "call-delta",
+            { path: "new" },
+            "reclaimable tool output ".repeat(1_000),
+        );
+        const messages = [...baseMessages, appended];
+        const tags = [
+            ...baseTags,
+            tag(2, "call-delta", "tool", { toolOwnerMessageId: "tool-delta" }),
+        ];
+        const baseline = refreshTailHygieneBaseline({
+            messages: baseMessages,
+            tags: baseTags,
+            protectedTagNumbers: new Set([1]),
+            cacheBusting: true,
+        });
+        const protectedDefer = refreshTailHygieneBaseline({
+            messages,
+            tags,
+            protectedTagNumbers: new Set([1, 2]),
+            cacheBusting: false,
+            previous: baseline,
+        });
+        const agedDefer = refreshTailHygieneBaseline({
+            messages,
+            tags,
+            protectedTagNumbers: new Set([1]),
+            cacheBusting: false,
+            previous: protectedDefer,
+        });
+        const measuredAged = measureTailHygiene({
+            messages,
+            tags,
+            protectedTagNumbers: new Set([1]),
+        });
+
+        expect(effectiveTailHygiene(protectedDefer).u).toBe(0);
+        expect(effectiveTailHygiene(agedDefer)).toEqual({
+            u: measuredAged.u,
+            t: measuredAged.t,
+        });
     });
 
     it("adds exactly persisted mass when the protection boundary advances", () => {
