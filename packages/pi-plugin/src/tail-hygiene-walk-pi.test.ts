@@ -480,10 +480,7 @@ describe("Pi baseline persistence and defer deltas", () => {
 			`${"reclaimable tool output ".repeat(1_000)}${reminder}`,
 		);
 		const messages = [...baseMessages, ...appended.messages];
-		const tags = [
-			...baseTags,
-			{ ...appended.tag, tagNumber: 2 },
-		];
+		const tags = [...baseTags, { ...appended.tag, tagNumber: 2 }];
 		const stableId = withStableIds(messages, [
 			"base",
 			"tool-delta",
