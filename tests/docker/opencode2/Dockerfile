@@ -46,6 +46,7 @@ RUN cd /test/mc-package \
     && npm install --prefix /test/mc-install --no-audit --no-fund \
         "/test/mc-package/$(cat /test/plugin-tarball-name)"
 
+COPY packages/e2e-tests/src/opencode2-runner/plugin-activation.ts /test/plugin-activation.ts
 COPY tests/docker/opencode2/lane.mjs /test/lane.mjs
 COPY tests/docker/opencode2/test-opencode2-e2e.sh /test/test-opencode2-e2e.sh
 RUN chmod +x /test/test-opencode2-e2e.sh \

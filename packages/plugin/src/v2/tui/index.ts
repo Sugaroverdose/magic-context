@@ -200,7 +200,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         if (!(error instanceof Error) || error.message !== "Keymap.Provider is missing")
             throw error;
         console.warn(
-            "[magic-context] OpenCode 2.0.3 keymap.layer is unavailable during plugin setup; /ctx-status and /ctx-recomp were not registered",
+            "[magic-context] OpenCode 2.0.5 keymap.layer is unavailable during plugin setup; /ctx-status and /ctx-recomp were not registered",
         );
     }
 

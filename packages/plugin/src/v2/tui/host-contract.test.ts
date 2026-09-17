@@ -108,7 +108,7 @@ function v1Api(directory: string) {
     };
 }
 
-test("GA 2.0.3 resolves ./tui and executes the union setup contract", async () => {
+test("GA 2.0.5 resolves ./tui and executes the union setup contract", async () => {
     const packageRoot = resolve(import.meta.dir, "../../..");
     const entrypoints = Host.resolve({
         name: "@cortexkit/opencode-magic-context",
@@ -137,7 +137,7 @@ test("GA 2.0.3 resolves ./tui and executes the union setup contract", async () =
     cleanup();
 });
 
-test("GA 2.0.3 records its unbound keymap.layer gap without losing the sidebar", async () => {
+test("GA 2.0.5 records its unbound keymap.layer gap without losing the sidebar", async () => {
     const fixture = v2Context();
     Object.assign(fixture.context.keymap, {
         layer: () => {

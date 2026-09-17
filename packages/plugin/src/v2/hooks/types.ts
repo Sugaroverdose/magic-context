@@ -48,12 +48,12 @@ export interface V2Context {
     location: { directory: string };
     agent: V2AgentDomain;
     event: { subscribe(options: { signal: AbortSignal }): AsyncIterable<unknown> };
-    catalog: {
-        model: {
-            list(input: { location: { directory: string } }): Promise<{
-                data: Array<{ id: string; providerID: string; limit: { context: number } }>;
-            }>;
-        };
+    model: {
+        list(providerID?: string): Array<{
+            id: string;
+            providerID: string;
+            limit: { context: number };
+        }>;
     };
     storage: {
         get(key: string): Promise<unknown>;

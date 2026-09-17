@@ -192,7 +192,7 @@ test("payload_identity_probe records real v1 and v2 provider bodies", async () =
 					hidden_agent_surface_probe: {
 						verdict: "session.create with explicit model, then session.prompt",
 						evidence:
-							"@opencode/client@2.0.3 dist/promise/client.d.ts:22-25,32-54; dist/promise/generated/types.d.ts SessionCreateInput. AgentEditor exposes list/get/default/update/remove, no add; GA plugin-promise-session.d.ts:105 exposes create/prompt.",
+							"@opencode/client@2.0.5 dist/promise/client.d.ts:22-25,32-54; dist/promise/generated/types.d.ts SessionCreateInput. AgentEditor exposes list/get/default/update/remove, no add; GA plugin-promise-session.d.ts:105 exposes create/prompt.",
 					},
 					rpc_entry_absence_probe: {
 						verdict: "tolerated; no stub",
@@ -200,7 +200,7 @@ test("payload_identity_probe records real v1 and v2 provider bodies", async () =
 							"ga/plugin-host.js:13-29; executed Host.resolve for both name and directory targets in server.test.ts",
 					},
 					cli: {
-						version: "2.0.3",
+						version: "2.0.5",
 						standalone:
 							"serve --standalone exits 1: Unrecognized flag: --standalone in command opencode serve. Runner uses direct serve --port 0 with private roots.",
 						evidence:

@@ -2,7 +2,7 @@
 
 ## Store resolution and dispatch
 
-`packages/plugin/src/shared/opencode-db-path.ts` is the single TypeScript authority for both host shapes. `resolveOpenCodeDbPath()` remains the unchanged v1 default (override, channel handling, candidate discovery and diagnostic text); `resolveOpenCodeDbPath("v2", …)` implements the GA 2.0.3/R16 filename table. `packages/plugin/src/v2/store-reader.ts` now delegates both compatibility exports to that resolver. Generation-specific readers inspect SQLite tables before their first query and refuse with `OpenCode store generation mismatch …; refusing generation-specific database access`.
+`packages/plugin/src/shared/opencode-db-path.ts` is the single TypeScript authority for both host shapes. `resolveOpenCodeDbPath()` remains the unchanged v1 default (override, channel handling, candidate discovery and diagnostic text); `resolveOpenCodeDbPath("v2", …)` implements the GA/R16 filename table. `packages/plugin/src/v2/store-reader.ts` now delegates both compatibility exports to that resolver. Generation-specific readers inspect SQLite tables before their first query and refuse with `OpenCode store generation mismatch …; refusing generation-specific database access`.
 
 ### TypeScript/CLI call-site inventory
 

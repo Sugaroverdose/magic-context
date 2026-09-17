@@ -15,6 +15,10 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { MockProvider, type MockResponse } from "../mock-provider/server";
+import {
+	awaitPluginActivation,
+	type PluginActivationClient,
+} from "./plugin-activation";
 
 export const OPENCODE2_NO_BACKGROUND_SERVICE_FLAG: string = "--standalone";
 export const ROOT_KEYS = [
@@ -73,7 +77,7 @@ export function assertIsolation(root: string, env: NodeJS.ProcessEnv): void {
 	if (env.OPENCODE_DB !== "opencode2.db")
 		throw new Error("OPENCODE_DB must be opencode2.db before boot");
 	// The five private roots are the safety boundary (AFT playbook:46-48,62).
-	// GA CLI 2.0.3 also honours OPENCODE_DB as observed by the placement probe.
+	// GA CLI 2.0.5 also honours OPENCODE_DB as observed by the placement probe.
 	const base = realpathSync(root);
 	for (const key of ROOT_KEYS) {
 		const value = env[key];
@@ -138,54 +142,14 @@ export function handoff(
 	return match ? { url: match[1]!, password: match[2]! } : undefined;
 }
 
-interface PluginReadinessClient {
-	plugin: {
-		list(input: { location: { directory: string } }): Promise<{
-			data: Array<{
-				id: string;
-				state:
-					| { status: "active" }
-					| { status: "failed"; error: string; ref?: string };
-			}>;
-		}>;
-	};
-	event: { subscribe(): AsyncIterable<unknown> };
-}
-
 /** OpenCode 2.0.5 removed awaitActivation; inventory is authoritative and plugin.updated invalidates it. */
 export async function waitForPluginActive(
-	client: PluginReadinessClient,
+	client: PluginActivationClient,
 	directory: string,
 	pluginID = "opencode-magic-context",
 	timeoutMs = 20_000,
 ): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	const events = client.event.subscribe()[Symbol.asyncIterator]();
-	try {
-		for (;;) {
-			const inventory = await client.plugin.list({ location: { directory } });
-			const plugin = inventory.data.find((item) => item.id === pluginID);
-			if (plugin?.state.status === "active") return;
-			if (plugin?.state.status === "failed") {
-				throw new Error(
-					`Plugin ${pluginID} activation failed: ${plugin.state.error}${plugin.state.ref ? ` (ref ${plugin.state.ref})` : ""}`,
-				);
-			}
-			const remaining = deadline - Date.now();
-			if (remaining <= 0) throw new Error(`Timed out waiting for plugin ${pluginID}`);
-			await Promise.race([
-				events.next(),
-				new Promise<never>((_resolve, reject) =>
-					setTimeout(
-						() => reject(new Error(`Timed out waiting for plugin ${pluginID}`)),
-						remaining,
-					),
-				),
-			]);
-		}
-	} finally {
-		await events.return?.();
-	}
+	await awaitPluginActivation(client, directory, pluginID, timeoutMs);
 }
 
 
@@ -201,6 +165,7 @@ export async function spawnOpencode2(
 		extraConfig?: Record<string, unknown>;
 		includeMagicContext?: boolean;
 		modelContextLimit?: number;
+		modelOutputLimit?: number;
 	} = {},
 ) {
 	const providerID = options.providerID ?? "openai";
@@ -218,6 +183,12 @@ export async function spawnOpencode2(
 	}
 	const mock = new MockProvider();
 	const provider = await mock.start(); // Existing mock explicitly binds 127.0.0.1 and captures parsed wire bodies.
+	// 2.0.5 title generation hits the mock on session.create, before tests
+	// install matchers, and uses a host title model rather than mock-model.
+	mock.setDefault({
+		text: "fixture reply",
+		usage: { input_tokens: 100, output_tokens: 10 },
+	});
 	if (options.mockResponse) mock.setDefault(options.mockResponse);
 	const defaultModelID = options.defaultModelID ?? "mock-model";
 	const modelIDs = new Set([
@@ -243,8 +214,11 @@ export async function spawnOpencode2(
 							{
 								name: id,
 								limit: {
-									context: options.modelContextLimit ?? 16000,
-									output: 32768,
+									// 2.0.5 required() is unchanged, but 16k minus a 32k output
+									// makes the first-request ceiling negative. Ordinary turns
+									// stay large; fold scenarios pass 16k/1024 explicitly.
+									context: options.modelContextLimit ?? 200_000,
+									output: options.modelOutputLimit ?? 32768,
 								},
 							},
 						]),

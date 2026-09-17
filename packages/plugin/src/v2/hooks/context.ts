@@ -24,6 +24,12 @@ import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-remi
 import { detectConflicts } from "../../shared/conflict-detector";
 import { getDataDir } from "../../shared/data-path";
 import { resolveHistorianModel } from "../../shared/model-resolution";
+import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
+import {
+    ACTIVE_TOOL_IDS,
+    createPromptSurfaceRuntime,
+    type PromptSurfaceRuntime,
+} from "../../shared/prompt-surface-runtime";
 import { pushNotification } from "../../shared/rpc-notifications";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
@@ -55,10 +61,27 @@ export function createHostSeams(
                 ...args,
                 cacheNamespace: `opencode2:${args.sessionId}`,
             }),
+        // Draft-backed: v2 never reconstructs the live model from message.updated.
         hostModelFallback: (sessionID) => liveModels.get(sessionID) ?? null,
         hostRefuse: (_client, sessionID) =>
             interruptBeforeProvider(context.session, sessionID as SessionContext["sessionID"]),
     };
+}
+
+/** Rewrite Magic Context ctx_* tool descriptions for this draft's model. */
+export function applyV2PromptSurfaceTools(
+    draft: SessionContext,
+    runtime: PromptSurfaceRuntime,
+    config: PromptSurfaceConfig | undefined,
+): void {
+    if (!draft.tools) return;
+    const modelKey = `${draft.model.providerID}/${draft.model.id}`;
+    const registration = runtime.resolveRegistration(config, modelKey);
+    for (const id of ACTIVE_TOOL_IDS) {
+        const tool = draft.tools[id];
+        if (!tool) continue;
+        tool.description = registration.descriptionFor(id, tool.description);
+    }
 }
 
 export async function registerContext(context: V2Context) {
@@ -78,7 +101,13 @@ export async function registerContext(context: V2Context) {
     const folds = new FoldOwner(context.storage);
     const limits = new Map<string, number>();
     const queriedModels = new Set<string>();
+    // Draft-authoritative model/variant/agent. Not the v1 event-driven map.
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
+    const promptSurfaceRuntime = createPromptSurfaceRuntime({
+        harness: "opencode2",
+        directory,
+        warn: (message) => console.warn(`[magic-context] config warning: ${message}`),
+    });
     let db: ReturnType<typeof openDatabase> | undefined;
     try {
         db = openDatabase() ?? undefined;
@@ -186,10 +215,8 @@ export async function registerContext(context: V2Context) {
                 const tokens = latest?.data.tokens;
                 const modelKey = `${draft.model.providerID}/${draft.model.id}`;
                 if (!queriedModels.has(modelKey)) {
-                    const catalog = await context.catalog.model.list({
-                        location: context.location,
-                    });
-                    for (const model of catalog.data)
+                    // GA 2.0.5 split catalog into context.model (sync list).
+                    for (const model of context.model.list())
                         limits.set(`${model.providerID}/${model.id}`, model.limit.context);
                     queriedModels.add(modelKey);
                 }
@@ -209,7 +236,8 @@ export async function registerContext(context: V2Context) {
             } finally {
                 reader.close();
             }
-        } catch {
+        } catch (error) {
+            console.warn("[magic-context] v2 refuseIfUnsafe", error);
             unsafe = true;
         }
         if (unsafe) await interruptBeforeProvider(context.session, draft.sessionID);
@@ -268,6 +296,13 @@ export async function registerContext(context: V2Context) {
     });
     await context.session.hook("context", async (draft) => {
         if (hiddenChildHook.apply(draft)) return;
+        liveModels.set(draft.sessionID, {
+            providerID: draft.model.providerID,
+            modelID: draft.model.id,
+        });
+        variants.set(draft.sessionID, draft.model.variant);
+        agents.set(draft.sessionID, draft.agent);
+        applyV2PromptSurfaceTools(draft, promptSurfaceRuntime, config.prompt_surface);
         let postFold = false;
         try {
             if (await refuseIfUnsafe(draft)) return;

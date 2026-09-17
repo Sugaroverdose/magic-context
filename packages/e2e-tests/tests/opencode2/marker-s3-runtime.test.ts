@@ -48,7 +48,7 @@ async function until(predicate: () => boolean) { const end = Date.now()+15000; w
 
 test("I10 real-host counters: v2 fold plus historian publication plus ten turns invoke no v1 marker members; v1 control invokes all four", async () => {
     const fixture = await instrument();
-    const host = await spawnOpencode2();
+    const host = await spawnOpencode2({ modelContextLimit: 32_000, modelOutputLimit: 1024 });
     try {
         const path = join(host.cwd, "opencode.json");
         const config = JSON.parse(readFileSync(path, "utf8")); config.plugins = [fixture.root]; writeFileSync(path, JSON.stringify(config));
