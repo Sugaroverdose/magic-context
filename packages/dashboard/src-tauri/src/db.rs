@@ -2785,6 +2785,7 @@ pub fn get_session_cache_stats_from_db(
                 );
             }
         }
+        mark_opencode_store_children_as_subagents(&mut pre_cap_subagent_flags);
     }
     let hidden_opencode_ids: HashSet<String> = pre_cap_subagent_flags
         .iter()
@@ -2901,7 +2902,9 @@ pub fn get_session_cache_stats_from_db(
     let subagent_flags = if hide_subagents {
         pre_cap_subagent_flags
     } else {
-        load_cache_subagent_flags(&stat_keys)
+        let mut flags = load_cache_subagent_flags(&stat_keys);
+        mark_opencode_store_children_as_subagents(&mut flags);
+        flags
     };
 
     sessions
@@ -5414,6 +5417,10 @@ fn session_matches_filter(row: &SessionRow, filter: &SessionFilter) -> bool {
 /// missing cortexkit DB never crashes the dashboard — sessions then default
 /// to `is_subagent=false` and the user simply sees no filtering until the
 /// plugin's first run populates the table.
+///
+/// OpenCode 1.x seats that locked the harness to "opencode2" wrote the flag
+/// under that label while the host store still lists the session as OpenCode.
+/// Match either label so the dashboard filter still sees those rows.
 fn load_subagent_map_for_harness(harness: Harness) -> std::collections::HashMap<String, bool> {
     use std::collections::HashMap;
     let mut map: HashMap<String, bool> = HashMap::new();
@@ -5423,7 +5430,25 @@ fn load_subagent_map_for_harness(harness: Harness) -> std::collections::HashMap<
     let Ok(conn) = open_readonly(&db_path) else {
         return map;
     };
-    let harness_str = harness.as_str();
+    if matches!(harness, Harness::Opencode | Harness::Opencode2) {
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT session_id, is_subagent
+             FROM session_meta
+             WHERE harness IN ('opencode', 'opencode2') AND is_subagent != 0",
+        ) else {
+            return map;
+        };
+        if let Ok(rows) = stmt.query_map([], |row| {
+            let sid: String = row.get(0)?;
+            let flag: i64 = row.get(1)?;
+            Ok((sid, flag != 0))
+        }) {
+            for row in rows.flatten() {
+                map.insert(row.0, row.1);
+            }
+        }
+        return map;
+    }
     let Ok(mut stmt) = conn.prepare(
         "SELECT session_id, is_subagent
          FROM session_meta
@@ -5431,17 +5456,50 @@ fn load_subagent_map_for_harness(harness: Harness) -> std::collections::HashMap<
     ) else {
         return map;
     };
-    let rows = stmt.query_map([harness_str], |row| {
+    if let Ok(rows) = stmt.query_map([harness.as_str()], |row| {
         let sid: String = row.get(0)?;
         let flag: i64 = row.get(1)?;
         Ok((sid, flag != 0))
-    });
-    if let Ok(rows) = rows {
+    }) {
         for row in rows.flatten() {
             map.insert(row.0, row.1);
         }
     }
     map
+}
+
+/// OpenCode writes `session.parent_id` synchronously when it spawns a task
+/// child. That column is the host's structural subagent signal and is present
+/// even when Magic Context has no `session_meta` row yet (or the row was
+/// mislabelled). Empty-string parent_id is treated as primary, matching the
+/// plugin fallback.
+fn load_opencode_store_child_session_ids() -> HashSet<String> {
+    let mut out = HashSet::new();
+    let Some(path) = resolve_opencode_db_path() else {
+        return out;
+    };
+    let Ok((conn, _)) = open_opencode_readonly(&path) else {
+        return out;
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id FROM session
+         WHERE parent_id IS NOT NULL AND TRIM(parent_id) != ''",
+    ) else {
+        return out;
+    };
+    if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+        for id in rows.flatten() {
+            out.insert(id);
+        }
+    }
+    out
+}
+
+fn mark_opencode_store_children_as_subagents(flags: &mut HashMap<(Harness, String), bool>) {
+    for session_id in load_opencode_store_child_session_ids() {
+        flags.insert((Harness::Opencode, session_id.clone()), true);
+        flags.insert((Harness::Opencode2, session_id), true);
+    }
 }
 
 pub fn get_session_detail(
@@ -7197,6 +7255,103 @@ mod cache_session_list_query_tests {
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "primary");
+    }
+}
+
+#[cfg(test)]
+mod opencode_parent_id_subagent_hide_tests {
+    use super::*;
+    use rusqlite::{params, Connection};
+    use std::fs;
+
+    fn insert_cache_message(conn: &Connection, id: &str, session_id: &str, time: i64) {
+        let data = serde_json::json!({
+            "role": "assistant",
+            "tokens": { "input": 10, "cache": { "read": 80, "write": 10 }, "total": 100 }
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?1, ?2, ?3, ?4)",
+            params![id, session_id, time, data],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hide_subagents_uses_opencode_parent_id_when_session_meta_is_missing() {
+        let _guard = super::RESOLVE_DB_PATH_ENV_LOCK.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().join("mc");
+        fs::create_dir_all(&storage).unwrap();
+        let context_db = storage.join("context.db");
+        Connection::open(&context_db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE session_meta (
+                    session_id TEXT PRIMARY KEY,
+                    harness TEXT NOT NULL DEFAULT 'opencode',
+                    is_subagent INTEGER DEFAULT 0
+                );",
+            )
+            .unwrap();
+
+        let opencode_db = root.path().join("opencode.db");
+        let oc = Connection::open(&opencode_db).unwrap();
+        oc.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                time_updated INTEGER NOT NULL,
+                time_archived INTEGER,
+                parent_id TEXT
+            );
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        oc.execute(
+            "INSERT INTO session (id, title, time_updated, time_archived, parent_id)
+             VALUES ('ses-primary', 'primary', 200, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        oc.execute(
+            "INSERT INTO session (id, title, time_updated, time_archived, parent_id)
+             VALUES ('ses-child', 'child', 300, NULL, 'ses-primary')",
+            [],
+        )
+        .unwrap();
+        insert_cache_message(&oc, "m-primary", "ses-primary", 200);
+        insert_cache_message(&oc, "m-child", "ses-child", 300);
+
+        let old_storage = std::env::var_os("MAGIC_CONTEXT_STORAGE_DIR");
+        let old_opencode = std::env::var_os("OPENCODE_DB");
+        std::env::set_var("MAGIC_CONTEXT_STORAGE_DIR", &storage);
+        std::env::set_var("OPENCODE_DB", &opencode_db);
+
+        let stats = get_session_cache_stats_from_db(10, true, true, Some(Harness::Opencode));
+        let ids: Vec<&str> = stats.iter().map(|row| row.session_id.as_str()).collect();
+        assert!(
+            ids.contains(&"ses-primary"),
+            "primary session should remain visible: {ids:?}",
+        );
+        assert!(
+            !ids.contains(&"ses-child"),
+            "child with parent_id and no session_meta row must still be hidden: {ids:?}",
+        );
+
+        match old_storage {
+            Some(value) => std::env::set_var("MAGIC_CONTEXT_STORAGE_DIR", value),
+            None => std::env::remove_var("MAGIC_CONTEXT_STORAGE_DIR"),
+        }
+        match old_opencode {
+            Some(value) => std::env::set_var("OPENCODE_DB", value),
+            None => std::env::remove_var("OPENCODE_DB"),
+        }
     }
 }
 
