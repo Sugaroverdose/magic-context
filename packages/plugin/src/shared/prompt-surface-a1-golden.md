@@ -5,7 +5,7 @@ Token counts are Claude BPE estimates on the raw text.
 
 ## 1. System-prompt guidance section
 
-### PRIMARY full (reduce=on, memory=on, dreamer=on, temporal=on) — 8706 chars, ~2005 tokens
+### PRIMARY full (reduce=on, memory=on, dreamer=on, temporal=on) — 8697 chars, ~1998 tokens
 
 ```markdown
 ## Magic Context
@@ -71,7 +71,7 @@ Example: `ctx_note(action="write", content="Implement X because Y", surface_cond
 Prefer many small targeted operations over one large blanket operation, and keep the working set tidy as routine maintenance.
 ```
 
-### PRIMARY memory-off (reduce=on, memory=off) — 7671 chars, ~1746 tokens
+### PRIMARY memory-off (reduce=on, memory=off) — 7662 chars, ~1739 tokens
 
 ```markdown
 ## Magic Context
@@ -185,7 +185,7 @@ Older tool calls may show `[dropped §N§]` sentinels; that is normal context ma
 
 ## 2. Tool surface (description + parameters as serialized to the provider)
 
-### ctx_reduce — description ~311 tokens, params ~31 tokens (total ~342)
+### ctx_reduce — description ~304 tokens, params ~31 tokens (total ~335)
 
 **Description:**
 
@@ -461,8 +461,8 @@ The hash handler persists the MD5 of `output.system.join("\\n")`. The values bel
 
 | Variant | Guidance bytes | MD5 system-prompt hash |
 |---|---:|---|
-| PRIMARY full | 8768 | `91dbb12d367d2ce11943486eccf98541` |
-| PRIMARY memory-off | 7727 | `8e45151eb97d8ee50afa7bbe8f009a58` |
+| PRIMARY full | 8759 | `f513711009bd420fe07b2672ce30d279` |
+| PRIMARY memory-off | 7718 | `6834a01be9891fa5461e996f281ba63d` |
 | PRIMARY reduce-off | 6526 | `7e5d386d94abe4f101bfd6d891ec183b` |
 | SUBAGENT minimal | 705 | `1c09c70b742f79274c501dd8f7eff1fc` |
 
