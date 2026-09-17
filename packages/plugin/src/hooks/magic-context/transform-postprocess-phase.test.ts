@@ -2049,6 +2049,7 @@ describe("dropped-token telemetry", () => {
         const result = await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 schedulerDeferReason: null,
                 tags: getActiveTagsBySession(db, sessionId),
                 targets,
@@ -2113,6 +2114,7 @@ describe("dropped-token telemetry", () => {
         const executeResult = await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, executeMessages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 schedulerDeferReason: null,
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: buildTargets(executeMessages),
@@ -2183,6 +2185,7 @@ describe("dropped-token telemetry", () => {
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
                     schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                     schedulerDeferReason: null,
                     tags: getActiveTagsBySession(db, sessionId),
                     targets: new Map([[1, makeDropTarget(droppedMessage)]]),
@@ -2269,6 +2272,7 @@ describe("two-pass tool reclaim", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [first, second], {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: new Map([
                     [1, makeDropTarget(first)],
@@ -2310,6 +2314,7 @@ describe("two-pass tool reclaim", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [trigger, small, large], {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: new Map([
                     [1, makeDropTarget(trigger)],
@@ -2350,6 +2355,7 @@ describe("two-pass tool reclaim", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [trigger, older, newest], {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 smartDrops: false,
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: new Map([
@@ -2380,6 +2386,7 @@ describe("two-pass tool reclaim", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [visible], {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: new Map([[2, makeDropTarget(visible)]]),
                 sessionMeta: getOrCreateSessionMeta(db, sessionId),
@@ -2685,6 +2692,7 @@ describe("smart-drops supersession reclaim (flag-gated)", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [trigger, older, newer, ...recentTail], {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 smartDrops: false,
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: new Map([
@@ -2711,6 +2719,7 @@ describe("smart-drops supersession reclaim (flag-gated)", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [trigger, older, newer, ...recentTail], {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 smartDrops: true,
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: new Map([
@@ -2781,6 +2790,7 @@ describe("smart-drops supersession reclaim (flag-gated)", () => {
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, contractedMessages, {
                     schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                     smartDrops: true,
                     tags: getActiveTagsBySession(db, sessionId),
                     targets,
@@ -3631,6 +3641,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, foldMessages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-late-clear",
                 resolvedProviderID: "anthropic",
@@ -3765,6 +3776,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, foldMessages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-preserve-reasoning",
                 resolvedProviderID: "anthropic",
@@ -3871,6 +3883,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, foldMessages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-final-adjacency",
                 resolvedProviderID: "anthropic",
@@ -6485,11 +6498,12 @@ describe("contract adversarial cache sequences", () => {
         });
         expect(moved.floor).toBe(8000);
         expect(moved.preSnapshotInputChanged).toBe(true);
-        const pass = async (decision: "execute" | "defer") => {
+        const pass = async (decision: "execute" | "defer", flush = false) => {
             const window = getProtectionWindowForSession(db, sessionId, moved.floor);
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
                     schedulerDecision: decision,
+                    pendingMaterializationSessions: new Set(flush ? [sessionId] : []),
                     targets,
                     tags: getActiveTagsBySession(db, sessionId),
                     protectedTagIds: window.protectedTagNumbers,
@@ -6507,7 +6521,7 @@ describe("contract adversarial cache sequences", () => {
         for (let n = 11; n <= 14; n++) seed(n);
         await pass("defer");
         expect(getPendingOps(db, sessionId)).toHaveLength(1);
-        await pass("execute");
+        await pass("execute", true);
         expect(getPendingOps(db, sessionId)).toHaveLength(0);
         expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 9)?.status).toBe(
             "dropped",
@@ -6843,4 +6857,43 @@ it("contract OC zero yield stays armed and text-only reclaim consumes the shared
     await pass(90.2);
     expect(JSON.stringify(messages)).toBe(bytes);
     expect(getEmergencyInputSample(db, sessionId)).toBe(90100);
+});
+
+describe("ride-only queued drops", () => {
+    for (const historianRunning of [false, true]) {
+        it(`holds execute-only queued drops with historian=${historianRunning}`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `ride-only-${historianRunning}`;
+            const message = makeToolMessage("ride-only-tool");
+            insertTag(db, sessionId, "ride-only-call", "tool", 1000, 1, 0, "bash", 0, message.info.id);
+            padRecentToolSkeletonWindow(sessionId, 1);
+            const args = basePostTransformArgs(db, sessionId, [message], {
+                schedulerDecision: "execute",
+                schedulerDeferReason: undefined,
+                contextUsage: { percentage: 65, inputTokens: 65000 },
+                compartmentInProgress: historianRunning,
+                targets: new Map([[1, makeDropTarget(message)]]),
+            });
+            await runPostTransformPhase(args);
+            const baseline = JSON.stringify(args.messages);
+            queuePendingOp(db, sessionId, 1, "drop");
+            const log = spyOn(loggerModule, "sessionLog");
+            try {
+                await runPostTransformPhase(args);
+                expect(JSON.stringify(args.messages)).toBe(baseline);
+                expect(getPendingOps(db, sessionId)).toHaveLength(1);
+                expect(log.mock.calls.some((call) => String(call[1]).includes("held — reason=no originating cache-bust opportunity"))).toBe(true);
+                for (let pass = 0; pass < 4; pass++) {
+                    await runPostTransformPhase({ ...args, schedulerDecision: "defer" });
+                    expect(JSON.stringify(args.messages)).toBe(baseline);
+                }
+                args.pendingMaterializationSessions.add(sessionId);
+                await runPostTransformPhase(args);
+                expect(getPendingOps(db, sessionId)).toHaveLength(0);
+            } finally {
+                log.mockRestore();
+            }
+        });
+    }
 });
