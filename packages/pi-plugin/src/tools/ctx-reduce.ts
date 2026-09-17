@@ -2,8 +2,8 @@
  * Pi-side wrapper for the `ctx_reduce` tool.
  *
  * Mirrors OpenCode's `packages/plugin/src/tools/ctx-reduce/tools.ts`.
- * Marking queues the drop; it applies on the next cache-bust cycle (a history
- * fold or refresh, or when context pressure is high) and never causes one.
+ * Marking QUEUES content for release; it stays visible until it is actually
+ * released, which may be the next turn or many turns later.
  * The shared description below keeps this contract identical to OpenCode.
  *
  * Registered for primary Pi sessions. `--no-session` child processes omit this

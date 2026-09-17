@@ -11761,7 +11761,7 @@ impl McHandler {
             }
             reply.push_str(&ctx_reduce_held_reply(&deferred));
         }
-        reply.push_str(" Marking queues the drop; it applies on the next cache-bust cycle (a history fold or refresh, or when context pressure is high) and never causes one.");
+        reply.push_str(" Marking QUEUES content for release. It stays fully visible to you until it is actually released, which may be the next turn or many turns later.");
         mcp_text_result(reply, false)
     }
 
