@@ -1770,10 +1770,8 @@ export function createRustModeTransform(
     ): Promise<unknown> => {
         const startedAtMs = Date.now();
         const deadlineMs = startedAtMs + attemptTimeoutMs;
-        const silentAfterMs =
-            options.silentResendAfterMsForTests ?? RUST_SILENT_RESEND_AFTER_MS;
-        const probeTimeoutMs =
-            options.healthProbeTimeoutMsForTests ?? RUST_HEALTH_PROBE_TIMEOUT_MS;
+        const silentAfterMs = options.silentResendAfterMsForTests ?? RUST_SILENT_RESEND_AFTER_MS;
+        const probeTimeoutMs = options.healthProbeTimeoutMsForTests ?? RUST_HEALTH_PROBE_TIMEOUT_MS;
         const originalAttemptId = randomUUID();
         const originalBody = isRecord(args.body)
             ? { ...args.body, attempt_id: originalAttemptId }
@@ -2176,10 +2174,7 @@ export function createRustModeTransform(
         const hasTrustedEmergencyWall = transformGeometry
             ? transformGeometry.usable_hard > 0
             : resolvedContextLimit !== undefined && resolvedContextLimit > 0;
-        const hardWallPercentage = hardWallUsagePercentage(
-            passUsageSnapshot,
-            transformGeometry,
-        );
+        const hardWallPercentage = hardWallUsagePercentage(passUsageSnapshot, transformGeometry);
         const providerOverflowProven = isProviderOverflowFailClosedProven(sessionId);
         emergencyFailClosed =
             providerOverflowProven ||
@@ -3046,9 +3041,7 @@ export function createRustModeTransform(
                             method: "transform" as const,
                             body: page,
                             onTimings: (detail: import("./module-transport").ModuleCallTimings) => {
-                                for (const key of Object.keys(
-                                    detail,
-                                ) as (keyof typeof detail)[])
+                                for (const key of Object.keys(detail) as (keyof typeof detail)[])
                                     timings.transportDetail[key] += detail[key];
                             },
                             // A reconnect discards a collecting page series. Page zero can be

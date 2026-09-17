@@ -3,11 +3,8 @@
 import { describe, expect, it } from "bun:test";
 
 import { ENGINE_RECONNECTING_USER_MESSAGE } from "./emergency-fail-closed";
-import {
-    createRustRefusalRecovery,
-    RUST_REFUSAL_RECOVERY_PROMPT,
-} from "./rust-refusal-recovery";
 import type { RustModeModuleClient } from "./rust-mode-transform";
+import { createRustRefusalRecovery, RUST_REFUSAL_RECOVERY_PROMPT } from "./rust-refusal-recovery";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -20,7 +17,11 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 500): Promise<voi
     throw new Error("condition did not become true");
 }
 
-function recoveryFixture(latest: () => ReturnType<NonNullable<Parameters<typeof createRustRefusalRecovery>[0]["readLatestMessage"]>>) {
+function recoveryFixture(
+    latest: () => ReturnType<
+        NonNullable<Parameters<typeof createRustRefusalRecovery>[0]["readLatestMessage"]>
+    >,
+) {
     let healthProbes = 0;
     const prompts: unknown[] = [];
     const moduleClient: RustModeModuleClient = {

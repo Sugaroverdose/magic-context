@@ -5985,11 +5985,9 @@ describe("delta prefix-mutation guard", () => {
 describe("Rust silent transform resend", () => {
     const abortableSilence = (signal?: AbortSignal): Promise<never> =>
         new Promise((_resolve, reject) => {
-            signal?.addEventListener(
-                "abort",
-                () => reject(signal.reason ?? new Error("aborted")),
-                { once: true },
-            );
+            signal?.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), {
+                once: true,
+            });
         });
 
     it("serves the pass from one resend after a healthy probe and logs it once", async () => {
@@ -6034,13 +6032,12 @@ describe("Rust silent transform resend", () => {
             expect(transformBodies).toHaveLength(2);
             expect(transformBodies[0]!.resend).toBeUndefined();
             expect(transformBodies[1]!.resend).toBe(true);
-            expect(transformBodies[1]!.original_attempt_id).toBe(
-                transformBodies[0]!.attempt_id,
-            );
+            expect(transformBodies[1]!.original_attempt_id).toBe(transformBodies[0]!.attempt_id);
             expect(transformBodies[1]!.attempt_id).not.toBe(transformBodies[0]!.attempt_id);
             const resendLogs = logSpy.mock.calls.filter(
                 ([loggedSession, message]) =>
-                    loggedSession === sessionId && String(message).startsWith("rust silent resend "),
+                    loggedSession === sessionId &&
+                    String(message).startsWith("rust silent resend "),
             );
             expect(resendLogs).toHaveLength(1);
             expect(String(resendLogs[0]![1])).toContain(

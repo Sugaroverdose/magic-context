@@ -41,10 +41,8 @@ export function createRustRefusalRecovery(options: RustRefusalRecoveryOptions) {
     const latestRefusalBySession = new Map<string, string>();
     const pollIntervalMs = options.pollIntervalMs ?? RUST_REFUSAL_RECOVERY_POLL_MS;
     const maxDurationMs = options.maxDurationMs ?? RUST_REFUSAL_RECOVERY_MAX_MS;
-    const probeTimeoutMs =
-        options.probeTimeoutMs ?? RUST_REFUSAL_RECOVERY_PROBE_TIMEOUT_MS;
-    const readLatestMessage =
-        options.readLatestMessage ?? latestPersistedMessageForRecovery;
+    const probeTimeoutMs = options.probeTimeoutMs ?? RUST_REFUSAL_RECOVERY_PROBE_TIMEOUT_MS;
+    const readLatestMessage = options.readLatestMessage ?? latestPersistedMessageForRecovery;
 
     const cancel = (sessionId: string): void => {
         const watcher = watchers.get(sessionId);
@@ -126,8 +124,7 @@ export function createRustRefusalRecovery(options: RustRefusalRecoveryOptions) {
         const delivered = await deliverSyntheticUserMessage(sessionId, {
             client: options.client,
             text: RUST_REFUSAL_RECOVERY_PROMPT,
-            beforeSend: () =>
-                watchers.get(sessionId) === watcher && watcher.state === "claimed",
+            beforeSend: () => watchers.get(sessionId) === watcher && watcher.state === "claimed",
         }).catch((error) => {
             sessionLog(sessionId, "rust refusal recovery synthetic delivery failed:", error);
             return false;

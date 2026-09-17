@@ -158,9 +158,11 @@ export async function deliverSyntheticUserMessage(
     if (promptContext?.variant) body.variant = promptContext.variant;
     if (deps.beforeSend && !deps.beforeSend()) return false;
 
-    const session = (deps.client as {
-        session?: { promptAsync?: (input: unknown) => Promise<unknown> };
-    }).session;
+    const session = (
+        deps.client as {
+            session?: { promptAsync?: (input: unknown) => Promise<unknown> };
+        }
+    ).session;
     if (typeof session?.promptAsync !== "function") {
         throw new Error("client has no session.promptAsync");
     }

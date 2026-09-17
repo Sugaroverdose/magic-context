@@ -334,7 +334,9 @@ export function buildPagedModuleTransformPayloads(
                     const value = body[field];
                     return (
                         Array.isArray(value) ||
-                        (value !== null && typeof value === "object" && field === "tool_input_key_orders")
+                        (value !== null &&
+                            typeof value === "object" &&
+                            field === "tool_input_key_orders")
                     );
                 })
                 .map((field) => [field, body[field]]),
