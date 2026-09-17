@@ -5234,31 +5234,23 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		!args.sessionMeta.isSubagent &&
 		executePressureEligible &&
 		routinePressureAppliedBySession.get(args.sessionId) === true;
-	const historianRunning = inFlightHistorian.has(args.sessionId);
-	// Published summaries and reductions cannot change the historian's raw input.
-	// Share one permission across refresh and reduction lanes, including overlap.
-	const publishedWorkDrainAllowed =
-		args.schedulerDecision === "execute" ||
-		args.forceMaterialization === true ||
-		foldExecutedThisPass ||
-		firstRenderBust ||
-		hasPendingMaterialization(args.sessionId) ||
-		deferredMaterializeEligible;
 	const hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
 	// Pi sessions are primary-equivalent today. If Pi adds subagents on this
 	// transform path, subagents should bypass this once-per-turn guard like
 	// OpenCode does, because they do not share the primary agent's turn cache.
 	const rideSignals = {
 		hardFold: foldExecutedThisPass || firstRenderBust,
-		force: args.forceMaterialization === true || emergencyDropEligible,
-		explicitFlush: hasPendingMaterializeSignal || args.isCacheBusting,
+		force:
+            (args.forceMaterialization === true || emergencyDropEligible) &&
+            (args.contextUsage.percentage >= 95 || getEmergencyInputSample(args.db, args.sessionId) === 0),
+		explicitFlush: hasPendingMaterializeSignal || (deferredMaterializeEligible && !prefixPreflightContended),
 		publishedHistory:
 			!prefixPreflightContended &&
-			(publishedM1RefreshedThisPass ||
+			(args.isCacheBusting || publishedM1RefreshedThisPass ||
 				(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart)),
-		agentDrop: false,
 	};
-	let isCacheBustingPass = hasReclaimRide(rideSignals);
+	const isCacheBustingPass = hasReclaimRide(rideSignals);
+    const publishedWorkDrainAllowed = isCacheBustingPass;
 	const usesTokenProtection =
 		args.protectedTokenTierOverrides !== undefined ||
 		args.protectedTokens !== undefined;
@@ -5427,12 +5419,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// them, matching OpenCode's cache-stable per-pass gate.
 	const shouldReadPendingOps =
 		!args.compactionOff &&
-		(args.schedulerDecision === "execute" ||
+		(publishedWorkDrainAllowed ||
+            args.schedulerDecision === "execute" ||
 			args.forceMaterialization ||
 			hasPendingMaterializeSignal ||
 			foldExecutedThisPass ||
-			firstRenderBust ||
-			historianRunning);
+			firstRenderBust);
 	const pendingOps = shouldReadPendingOps
 		? getPendingOps(args.db, args.sessionId)
 		: [];
@@ -5457,23 +5449,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					RECENT_TOOL_SKELETON_WINDOW,
 				)
 			: [];
-	const baseShouldApplyPendingOps =
-		args.schedulerDecision === "execute" ||
-		args.forceMaterialization ||
-		hasPendingMaterializeSignal ||
-		foldExecutedThisPass ||
-		firstRenderBust;
-	// `canConsumeDeferredLate` is computed once, above shouldRunHeuristics, as a
-	// bust-opportunity gate independent of shouldRunHeuristics. Explicit flush
-	// (hasPendingMaterializeSignal) still forces application through
-	// baseShouldApplyPendingOps, matching OpenCode's separate flush gate.
 	const deferredMaterialize =
 		canConsumeDeferredLate && deferredMaterializationWasPending;
 	const deferredHistoryRefresh =
 		canConsumeDeferredLate && deferredHistoryRefreshWasPending;
-	const shouldApplyPendingOps =
-		(baseShouldApplyPendingOps || deferredMaterialize) &&
-		publishedWorkDrainAllowed;
+	const shouldApplyPendingOps = publishedWorkDrainAllowed;
 	mutationGateObserverForTests?.({
 		foldDue: foldDueDecision.value,
 		foldExecuted: foldExecutedThisPass,
@@ -5519,10 +5499,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				"applyPendingOperations",
 				tApplyPending,
 			);
-			rideSignals.agentDrop = pendingOpsDidMutate;
-			isCacheBustingPass = hasReclaimRide(rideSignals);
-			if (pendingOpsDidMutate)
-				shouldRunHeuristics = args.heuristics !== undefined;
 			executedWorkThisPass ||= isCacheBustingPass;
 			// materializationSatisfiedThisPass enables the deferred-HISTORY drain
 			// below. OpenCode drains deferred-history on history-consumption alone
@@ -5554,7 +5530,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		const pendingOpsDepth = getPendingOpsCount(args.db, args.sessionId);
 		const refusalReason =
 			args.schedulerDeferReason ??
-			(historianRunning ? "historian_in_flight" : "scheduler_defer");
+			"no_originating_cache_bust";
 		const pendingDecisionLog = `pending ops WILL NOT APPLY — reason=${refusalReason} pendingOps=${pendingOpsDepth === null ? "not loaded (deferred pass)" : pendingOpsDepth} context=${args.contextUsage.percentage.toFixed(1)}%`;
 		sessionLog(args.sessionId, pendingDecisionLog);
 		pendingDecisionLogObserverForTests?.(pendingDecisionLog);
@@ -5731,11 +5707,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.heuristics === undefined
 				? "disabled"
 				: (args.schedulerDeferReason ??
-					(historianRunning
-						? "historian_in_flight"
-						: alreadyRanHeuristicsThisTurn
-							? "already_ran_this_turn"
-							: "scheduler_defer"));
+					(!isCacheBustingPass ? "no_originating_cache_bust" : alreadyRanHeuristicsThisTurn ? "already_ran_this_turn" : "scheduler_defer"));
 		const heuristicsDecisionLog = `heuristics WILL NOT RUN — reason=${reason}`;
 		sessionLog(args.sessionId, heuristicsDecisionLog);
 		pendingDecisionLogObserverForTests?.(heuristicsDecisionLog);

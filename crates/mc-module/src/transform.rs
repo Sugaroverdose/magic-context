@@ -4188,23 +4188,8 @@ fn apply_once(
         || system_absorb_hard_due
         || external_revision_changed
         || project_memory_epoch_hard_due;
-    // Prefix work, explicit refresh, and force/emergency drives supply opportunities.
-    // Historian activity only vetoes ordinary executes without published work or
-    // pending agent drops; unpublished in-flight work remains pending.
-    let emergency_arm_engaged = matches!(
-        scheduler_outcome.pass,
-        scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
-    ) || scheduler_outcome.drain_latch.is_active();
-    let ordinary_historian_veto = ctx.historian_active
-        && current_m1_digest == loaded.meta.m1_revision
-        && pending_drop_target_ids.is_empty()
-        && scheduler_outcome.pass == scheduler::PassDecision::Execute
-        && !hard_fold_requested
-        && !emergency_arm_engaged
-        && !loaded.meta.soft_refresh_pending
-        && !render_config_changed
-        && !reconcile_hard_due
-        && loaded.meta.initialized;
+    // Historian activity is not a second gate: only independently priced work
+    // below can authorize new provider-visible mutations.
     // Subagents execute a reductions-only branch, not the prefix plan. Inherited
     // HARD/reconcile advisories cannot price automatic reductions without a fold.
     let prefix_materialization_enabled = !req.is_subagent;
@@ -4215,6 +4200,7 @@ fn apply_once(
     let supersession_ride_available = (prefix_materialization_enabled
         && (!loaded.meta.initialized
             || render_config_changed
+            || cached_m1_missing(&loaded.core)
             || hard_fold_requested
             || reconcile_hard_due
             || lineage_state.force_hard
@@ -4224,6 +4210,9 @@ fn apply_once(
         || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
         || loaded.meta.soft_refresh_pending;
     let pass_already_busting = supersession_ride_available;
+    if !pass_already_busting && !pending_drop_target_ids.is_empty() {
+        eprintln!("mc-module: pending drops held session={} reason=no_originating_cache_bust scheduler={:?} historian_active={}", req.session_id, scheduler_outcome.pass, ctx.historian_active);
+    }
     // Tail reclaim gates purely on the serializer profile. Every shipping profile is a
     // full-array consumer (healing::tail_reclaim is true for all of them), so the request
     // array round-trips both prefix and tail mutations on every pass. The U1-era layering
@@ -4241,10 +4230,10 @@ fn apply_once(
                 || hard_fold_requested
                 || cached_m1_missing_due,
         );
-    // Keep selection deferred when the producer gate or historian veto blocks it.
+    // Keep selection deferred when the producer gate blocks it.
     // An execute selection class still needs the separate ride permission above
     // before it can choose automatic reductions.
-    let selection_class = if producer_gate && !ordinary_historian_veto {
+    let selection_class = if producer_gate {
         selection_pass_class(scheduler_outcome.pass)
     } else {
         PassClass::Defer
@@ -4275,10 +4264,7 @@ fn apply_once(
         req.protected_tokens_effective,
         loaded.meta.protected_tokens_effective,
         ctx.protected_tokens_floor,
-        if pass_already_busting
-            || (scheduler_outcome.pass == scheduler::PassDecision::Execute
-                && !ordinary_historian_veto)
-        {
+        if pass_already_busting {
             FloorPass::CacheBust
         } else {
             FloorPass::Defer
@@ -18180,6 +18166,122 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn four_pure_defer_passes_preserve_served_bytes_and_durable_drop_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let messages = vec![item("a", 1, "raw"), item("tail", 2, "spent")];
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        s.append_pending_agent_drops("ses", &["tail#0".to_string()], 1)
+            .unwrap();
+        let request = with_usage(req("ses", "cfg0", messages), 10, 100);
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        transform(&s, &request, &ctx).unwrap();
+        let baseline = transform(&s, &request, &ctx).unwrap();
+        let baseline_bytes = serde_json::to_vec(&baseline.ck_messages).unwrap();
+        let frozen = s.load("ses").unwrap().core.frozen_units;
+        let mut snapshots = Vec::new();
+        for _ in 0..4 {
+            let pass = transform(&s, &request, &ctx).unwrap();
+            let bytes = serde_json::to_vec(&pass.ck_messages).unwrap();
+            assert_eq!(bytes, baseline_bytes);
+            assert_eq!(s.load("ses").unwrap().core.frozen_units, frozen);
+            assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
+            snapshots.push(bytes);
+        }
+        println!(
+            "RIDE_REPLAY_RUST {}",
+            serde_json::to_string(&(snapshots, frozen)).unwrap()
+        );
+    }
+
+    #[test]
+    fn execute_only_queued_drops_are_held_without_historian() {
+        check_execute_only_queued_drops(false);
+    }
+
+    #[test]
+    fn execute_only_queued_drops_are_held_with_historian() {
+        check_execute_only_queued_drops(true);
+    }
+
+    fn check_execute_only_queued_drops(historian_active: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let messages = vec![item("a", 1, "raw"), item("tail", 2, "pending drop")];
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let request = with_usage(req("ses", "cfg0", messages), 65, 100);
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        transform(&s, &request, &ctx).unwrap();
+        let baseline = transform(&s, &request, &ctx).unwrap();
+        ctx.historian_active = historian_active;
+        s.append_pending_agent_drops("ses", &["tail#0".to_string()], 1)
+            .unwrap();
+        let held = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&held.ck_messages).unwrap(),
+            serde_json::to_vec(&baseline.ck_messages).unwrap()
+        );
+        assert_eq!(s.load_pending_agent_drops("ses").unwrap().len(), 1);
+        let mut loaded = s.load("ses").unwrap();
+        loaded.meta.soft_refresh_pending = true;
+        s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let applied = transform(&s, &request, &ctx).unwrap();
+        assert_ne!(
+            serde_json::to_vec(&applied.ck_messages).unwrap(),
+            serde_json::to_vec(&held.ck_messages).unwrap()
+        );
+        assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
+    }
+
+    #[test]
+    fn queued_drops_coalesce_with_fold_and_published_refresh_once() {
+        for hard_fold in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            s.replace_compartments("ses", &[comp(1, 1, 1, "a", "BASELINE")])
+                .unwrap();
+            let mut request = with_usage(
+                req(
+                    "ses",
+                    "cfg0",
+                    vec![
+                        item("a", 1, "covered"),
+                        item("next", 2, "history"),
+                        item("tail", 3, "spent"),
+                    ],
+                ),
+                70,
+                100,
+            );
+            let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+            transform(&s, &request, &ctx).unwrap();
+            let baseline = transform(&s, &request, &ctx).unwrap();
+            s.append_pending_agent_drops("ses", &["tail#0".to_string()], 1)
+                .unwrap();
+            ctx.historian_active = true;
+            if hard_fold {
+                request.render_config = "cfg1".to_string();
+            } else {
+                s.append_compartments("ses", &[comp(2, 2, 2, "next", "PUBLISHED")])
+                    .unwrap();
+            }
+            let applied = transform(&s, &request, &ctx).unwrap();
+            assert_ne!(applied.messages(), baseline.messages());
+            assert_eq!(applied.action, if hard_fold { "HARD" } else { "SOFT" });
+            if !hard_fold {
+                assert!(m1_bytes(&applied).contains("PUBLISHED"));
+            }
+            assert!(frozen_red_payload(&s.load("ses").unwrap().core, "tail#0").is_some());
+            assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
+            let replay = transform(&s, &request, &ctx).unwrap();
+            assert_eq!(applied.messages(), replay.messages());
+        }
+    }
+
+    #[test]
     fn cached_m1_missing_hard_advisory_drains_pending_drop_on_defer() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -18642,6 +18744,7 @@ pub(crate) mod tests {
         let mut messages = vec![
             item("a", 1, "raw"),
             item("m3", 3, &caveman_test_source("old user")),
+            item("queued", 4, "late queued drop"),
         ];
         let named_call = |mid: &str, ordinal, name: &str| {
             let mut message = assistant_tool_call(mid, ordinal, name);
@@ -18694,6 +18797,8 @@ pub(crate) mod tests {
             );
         }
         let bytes = serde_json::to_vec(&first.ck_messages).unwrap();
+        s.append_pending_agent_drops("ses", &["queued#0".to_string()], 1)
+            .unwrap();
         for usage in [90_100, 90_200] {
             request = with_usage(request, usage, 100_000);
             let next = transform(&s, &request, &context).unwrap();
@@ -18701,6 +18806,7 @@ pub(crate) mod tests {
                 serde_json::to_vec(&next.ck_messages).unwrap() == bytes,
                 "force follow-up changed served bytes"
             );
+            assert_eq!(s.load_pending_agent_drops("ses").unwrap().len(), 1);
         }
         request
             .messages
@@ -18731,6 +18837,7 @@ pub(crate) mod tests {
             .frozen_units
             .iter()
             .any(|u| u.key == "red:late#0"));
+        assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
     }
 
     #[test]
@@ -31685,6 +31792,25 @@ pub(crate) mod tests {
             )
             .unwrap();
 
+        let held = run(
+            &store,
+            &with_usage(stable_request.clone(), 70, 100),
+            &spine(),
+        );
+        assert_eq!(
+            serde_json::to_vec(&held.ck_messages).unwrap(),
+            baseline_bytes
+        );
+        let mut loaded = store.load("ride-output").unwrap();
+        loaded.meta.soft_refresh_pending = true;
+        store
+            .commit(
+                "ride-output",
+                loaded.row_version,
+                &loaded.core,
+                &loaded.meta,
+            )
+            .unwrap();
         let ride = run(
             &store,
             &with_usage(stable_request.clone(), 70, 100),
@@ -31709,7 +31835,7 @@ pub(crate) mod tests {
             .count();
         assert!(
             distinct_byte_changing_passes <= 2,
-            "two commands may cause at most two self-caused busts"
+            "queued commands must share the independently priced refresh"
         );
     }
 

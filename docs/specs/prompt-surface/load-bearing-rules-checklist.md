@@ -884,7 +884,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** A spent tagged output should leave the working set.
 - **Mechanism:** Mark it discardable; release is queued and delayed until context space is needed.
 - **Consequence:** The original remains visible until the system releases it.
-- **Source evidence:** `Marking QUEUES content for release`
+- **Source evidence:** `Marking queues the drop`
 
 | Variant | Applicability status |
 | --- | --- |

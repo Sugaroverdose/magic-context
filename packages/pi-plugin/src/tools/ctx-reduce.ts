@@ -2,11 +2,9 @@
  * Pi-side wrapper for the `ctx_reduce` tool.
  *
  * Mirrors OpenCode's `packages/plugin/src/tools/ctx-reduce/tools.ts`.
- * The agent uses this tool to mark tag IDs (`§N§`) as "drop" — those
- * tags get removed from the live message array on the next execute pass
- * (via `applyPendingOperations` in the runPipeline). Used to keep
- * historian noise out of the working context window without paying for
- * a full historian round.
+ * Marking queues the drop; it applies on the next cache-bust cycle (a history
+ * fold, a history refresh, /ctx-flush, or the force band) and never causes one.
+ * The shared description below keeps this contract identical to OpenCode.
  *
  * Registered for primary Pi sessions. `--no-session` child processes omit this
  * tool because it resolves the current session id at call time, and those
