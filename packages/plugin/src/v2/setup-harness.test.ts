@@ -21,22 +21,27 @@ const openCode11830SetupContext = {
     skill: {},
 };
 
-test("setup() with the OpenCode 1.18.30 context shape stays inert and does not lock opencode2", async () => {
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (...args: unknown[]) => {
-        warnings.push(args.map(String).join(" "));
-    };
+test("setup() with the OpenCode 1.18.30 context shape stays inert, locks nothing, and writes nothing to the console", async () => {
+    // Every 1.18.x seat takes this branch at boot; anything on the console is
+    // painted onto the TUI prompt line, so the inert path must be console-silent.
+    const consoleLines: string[] = [];
+    const originals = { warn: console.warn, error: console.error, log: console.log };
+    for (const level of ["warn", "error", "log"] as const) {
+        console[level] = (...args: unknown[]) => {
+            consoleLines.push(`${level}: ${args.map(String).join(" ")}`);
+        };
+    }
     try {
         const dispose = await setup(openCode11830SetupContext as never);
         expect(isOpenCode2HostContext(openCode11830SetupContext)).toBe(false);
         expect(getHarness()).toBe("opencode");
-        expect(warnings).toHaveLength(1);
-        expect(warnings[0]).toContain("v2 setup is inert");
+        expect(consoleLines).toEqual([]);
         await dispose();
         expect(getHarness()).toBe("opencode");
     } finally {
-        console.warn = originalWarn;
+        console.warn = originals.warn;
+        console.error = originals.error;
+        console.log = originals.log;
     }
 });
 

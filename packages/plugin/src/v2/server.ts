@@ -1,5 +1,6 @@
 import { loadPluginConfigDetailed } from "../config";
 import { setHarness } from "../shared/harness";
+import { log } from "../shared/logger";
 import { registerContext } from "./hooks/context";
 import type { V2Context } from "./hooks/types";
 import { startUpdateChecks } from "./hooks/update-check";
@@ -34,8 +35,12 @@ export function isOpenCode2HostContext(context: unknown): context is V2Context {
 
 export async function setup(context: V2Context) {
     if (!isOpenCode2HostContext(context)) {
-        console.warn(
-            "[magic-context] setup() called without an OpenCode 2 session hook surface; the v1 server lane owns this host, v2 setup is inert",
+        // Every OpenCode 1.18.x seat takes this branch at boot (the core
+        // external-plugin layer calls setup() on the union export), so this is
+        // routine, not a fault: record it in the plugin log and never on the
+        // console, which the TUI paints straight onto the screen.
+        log(
+            "v2 setup() called on a host without session.hook; v1 server lane owns this host, v2 lane inert",
         );
         return async () => {};
     }
