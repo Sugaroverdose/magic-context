@@ -13,7 +13,11 @@ async function fixture(config: unknown) {
     const observer = mkdtempSync(join(tmpdir(), "mc-s3-events-"));
     writeFileSync(join(observer, "index.js"), `import {appendFileSync} from 'node:fs'; import {join} from 'node:path';
 export default {id:'s3-events',setup(context){ process.env.MAGIC_CONTEXT_LOG_PATH=join(context.location.directory,'mc.log'); const control=new AbortController(); void (async()=>{for await(const event of context.event.subscribe({signal:control.signal})) appendFileSync(join(context.location.directory,'events.jsonl'),JSON.stringify(event)+'\\n');})(); return ()=>control.abort(); }};`);
-    const host = await spawnOpencode2({ probePlugin: observer });
+    const host = await spawnOpencode2({
+        probePlugin: observer,
+        modelContextLimit: 16_000,
+        modelOutputLimit: 1024,
+    });
     const directory = join(host.env.XDG_CONFIG_HOME!, "cortexkit");
     mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, "magic-context.jsonc"), JSON.stringify(config));

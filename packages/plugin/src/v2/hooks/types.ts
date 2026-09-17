@@ -49,19 +49,44 @@ export interface V2Context {
     agent: V2AgentDomain;
     event: { subscribe(options: { signal: AbortSignal }): AsyncIterable<unknown> };
     model: {
-        list(): Promise<{
-            data: Array<{
-                id: string;
-                providerID: string;
-                limit: { context: number };
-            }>;
-        }>;
+        list():
+            | Promise<{
+                  data: Array<{
+                      id: string;
+                      providerID: string;
+                      limit: { context: number };
+                  }>;
+              }>
+            | Promise<
+                  Array<{
+                      id: string;
+                      providerID: string;
+                      limit: { context: number };
+                  }>
+              >
+            | Array<{
+                  id: string;
+                  providerID: string;
+                  limit: { context: number };
+              }>
+            | {
+                  data: Array<{
+                      id: string;
+                      providerID: string;
+                      limit: { context: number };
+                  }>;
+              };
     };
     storage: {
         get(key: string): Promise<unknown>;
         set(key: string, value: unknown): Promise<void>;
     };
     tool: {
+        transform?(
+            callback: (editor: {
+                update(id: string, update: (tool: { description: string }) => void): void;
+            }) => void,
+        ): Promise<unknown>;
         hook(
             name: "execute.before" | "execute.after",
             callback: (draft: {

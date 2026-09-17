@@ -30,10 +30,18 @@ export default { id: "s6-surface", async setup(context) {
       });
     }
   });
-  await context.session.hook("context", (draft) => {
+  await context.session.hook("context", async (draft) => {
+    const fromDraft = Object.fromEntries(Object.entries(draft.tools ?? {}).filter(([name]) => name.startsWith("ctx_")));
+    const fromEditor = {};
+    if (context.tool?.transform) await context.tool.transform((editor) => {
+      for (const tool of editor.list?.() ?? []) {
+        const id = tool.id ?? tool.name;
+        if (String(id).startsWith("ctx_")) fromEditor[id] = { description: tool.description };
+      }
+    });
     appendFileSync(${JSON.stringify(trace)}, JSON.stringify({
       model: draft.model,
-      tools: Object.fromEntries(Object.entries(draft.tools ?? {}).filter(([name]) => name.startsWith("ctx_"))),
+      tools: Object.keys(fromDraft).length ? fromDraft : fromEditor,
     }) + "\\n");
   });
 }};`,

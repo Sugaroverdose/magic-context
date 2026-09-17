@@ -8,7 +8,7 @@ import {
     createPromptSurfaceRuntime,
     LIGHT_TOOL_DESCRIPTIONS,
 } from "../../shared/prompt-surface-runtime";
-import { applyV2PromptSurfaceTools, createHostSeams } from "./context";
+import { applyV2PromptSurfaceTools, catalogModels, createHostSeams } from "./context";
 import type { SessionContext, V2Context } from "./types";
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -80,5 +80,26 @@ describe("v2 draft-authoritative model tracking", () => {
             providerID: "openai",
             modelID: "mock-light",
         });
+    });
+});
+
+describe("catalogModels", () => {
+    const mock = {
+        id: "mock-model",
+        providerID: "openai",
+        limit: { context: 16000 },
+    };
+
+    it("reads a raw array", () => {
+        expect(catalogModels([mock])).toEqual([mock]);
+    });
+
+    it("reads a { data } payload", () => {
+        expect(catalogModels({ data: [mock] })).toEqual([mock]);
+    });
+
+    it("does not iterate a thenable or empty object", () => {
+        expect(catalogModels({})).toEqual([]);
+        expect(catalogModels(Promise.resolve([mock]))).toEqual([]);
     });
 });

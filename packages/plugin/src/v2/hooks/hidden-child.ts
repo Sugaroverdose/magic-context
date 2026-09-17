@@ -34,11 +34,25 @@ export interface HiddenChildAttempt {
     shaped: boolean;
 }
 
-function newestUserText(draft: SessionContext): string | undefined {
+/** Last user text on a context draft. 2.0.5 may use a string body, extra parts, or input_text. */
+export function newestUserText(draft: SessionContext): string | undefined {
     const message = draft.messages.at(-1);
-    if (message?.role !== "user" || message.content.length !== 1) return undefined;
-    const part = message.content[0];
-    return part?.type === "text" && typeof part.text === "string" ? part.text : undefined;
+    if (!message || (message.role !== undefined && message.role !== "user")) return undefined;
+    if (typeof message.content === "string" && message.content.length > 0) return message.content;
+    const parts = Array.isArray(message.content)
+        ? message.content
+        : Array.isArray(message.parts)
+          ? message.parts
+          : [];
+    for (const part of parts) {
+        if (!part || typeof part !== "object") continue;
+        const record = part as { type?: unknown; text?: unknown };
+        if (typeof record.text !== "string" || record.text.length === 0) continue;
+        if (record.type === undefined || record.type === "text" || record.type === "input_text") {
+            return record.text;
+        }
+    }
+    return undefined;
 }
 
 function calibratedParts(attempt: HiddenChildAttempt): Array<{ type: "text"; text: string }> {
@@ -94,8 +108,11 @@ export class HiddenChildHook {
     apply(draft: SessionContext): boolean {
         if (!this.owns(draft.sessionID)) return false;
 
-        const marker = newestUserText(draft);
-        const attempt = marker === undefined ? undefined : this.attempts.get(marker);
+        const raw = newestUserText(draft);
+        const stripped = raw?.replace(/^§\d+§\s*/, "");
+        const attempt =
+            (raw !== undefined ? this.attempts.get(raw) : undefined) ??
+            (stripped && stripped !== raw ? this.attempts.get(stripped) : undefined);
         if (!attempt || attempt.childSessionId !== draft.sessionID) {
             throw new HiddenCompletionRefusal(
                 "hidden_prompt_unrecognized",

@@ -68,6 +68,54 @@ export function createHostSeams(
     };
 }
 
+function toolResultText(result: { content?: unknown } | undefined): string {
+    const content = result?.content ?? (result as { output?: unknown } | undefined)?.output;
+    if (typeof content === "string") return content;
+    if (content && typeof content === "object" && !Array.isArray(content)) {
+        const record = content as { text?: unknown; value?: unknown };
+        if (typeof record.text === "string") return record.text;
+        if (typeof record.value === "string") return record.value;
+        return "";
+    }
+    if (!Array.isArray(content)) return "";
+    return content
+        .map((part) => {
+            if (typeof part === "string") return part;
+            if (!part || typeof part !== "object") return "";
+            const record = part as { type?: unknown; text?: unknown; value?: unknown };
+            if (typeof record.text === "string") return record.text;
+            if (typeof record.value === "string") return record.value;
+            return "";
+        })
+        .filter(Boolean)
+        .join("\n");
+}
+
+/** Accept both a raw model array and the 2.0.5 `{ data }` list payload. */
+export function catalogModels(listed: unknown): Array<{
+    id: string;
+    providerID: string;
+    limit: { context: number };
+}> {
+    const rows = Array.isArray(listed)
+        ? listed
+        : listed && typeof listed === "object" && Array.isArray((listed as { data?: unknown }).data)
+          ? (listed as { data: unknown[] }).data
+          : [];
+    return rows.flatMap((row) => {
+        if (!row || typeof row !== "object") return [];
+        const model = row as {
+            id?: unknown;
+            providerID?: unknown;
+            limit?: { context?: unknown };
+        };
+        if (typeof model.id !== "string" || typeof model.providerID !== "string") return [];
+        const contextLimit = model.limit?.context;
+        if (typeof contextLimit !== "number" || !Number.isFinite(contextLimit)) return [];
+        return [{ id: model.id, providerID: model.providerID, limit: { context: contextLimit } }];
+    });
+}
+
 /** Rewrite Magic Context ctx_* tool descriptions for this draft's model. */
 export function applyV2PromptSurfaceTools(
     draft: SessionContext,
@@ -154,22 +202,15 @@ export async function registerContext(context: V2Context) {
     let toolDuties: ReturnType<typeof createToolExecuteAfterHook> | undefined;
     await context.tool.hook("execute.before", (draft) => assertExecutableToolInput(draft.input));
     await context.tool.hook("execute.after", async (draft) => {
-        if (!db || draft.status !== "completed") return;
+        if (!db) return;
+        if (draft.status && draft.status !== "completed") return;
         try {
             toolDuties ??= createToolExecuteAfterHook({ db, channel1StateBySession: channel1 });
-            const content = draft.result?.content;
-            const text =
-                typeof content === "string"
-                    ? content
-                    : Array.isArray(content)
-                      ? content
-                            .filter((part) => part.type === "text")
-                            .map((part) => part.text)
-                            .join("\n")
-                      : "";
+            const text = toolResultText(draft.result);
             const output = { output: text };
             await toolDuties({ ...draft, args: draft.input }, output);
             if (draft.result && output.output !== text) {
+                const content = draft.result.content;
                 if (typeof content === "string") draft.result.content = output.output;
                 else if (Array.isArray(content) && output.output.startsWith(text))
                     content.push({ type: "text", text: output.output.slice(text.length) });
@@ -215,10 +256,8 @@ export async function registerContext(context: V2Context) {
                 const tokens = latest?.data.tokens;
                 const modelKey = `${draft.model.providerID}/${draft.model.id}`;
                 if (!queriedModels.has(modelKey)) {
-                    // GA 2.0.5 moved catalog.model.list to context.model.list();
-                    // it is async and returns { data }, not a raw iterable.
-                    const catalog = await context.model.list();
-                    for (const model of catalog.data)
+                    const catalog = await Promise.resolve(context.model.list());
+                    for (const model of catalogModels(catalog))
                         limits.set(`${model.providerID}/${model.id}`, model.limit.context);
                     queriedModels.add(modelKey);
                 }
@@ -305,6 +344,20 @@ export async function registerContext(context: V2Context) {
         variants.set(draft.sessionID, draft.model.variant);
         agents.set(draft.sessionID, draft.agent);
         applyV2PromptSurfaceTools(draft, promptSurfaceRuntime, config.prompt_surface);
+        if (context.tool.transform) {
+            const modelKey = `${draft.model.providerID}/${draft.model.id}`;
+            const registration = promptSurfaceRuntime.resolveRegistration(
+                config.prompt_surface,
+                modelKey,
+            );
+            await context.tool.transform((editor) => {
+                for (const id of ACTIVE_TOOL_IDS) {
+                    editor.update(id, (tool) => {
+                        tool.description = registration.descriptionFor(id, tool.description);
+                    });
+                }
+            });
+        }
         let postFold = false;
         try {
             if (await refuseIfUnsafe(draft)) return;
@@ -451,6 +504,14 @@ export async function registerContext(context: V2Context) {
             const mapped = adaptPayload(draft, admitted);
             await transform({}, mapped);
             mapped.commit();
+            if (db) {
+                await deliverPendingChannel2(
+                    context,
+                    db,
+                    draft.sessionID,
+                    channel1.get(draft.sessionID),
+                );
+            }
             if (checkpoint && submitted !== undefined) {
                 const head = draft.messages.find((message) => message.id === HEAD_IDS[0]);
                 const baseline = head?.content.find((part) => part.type === "text")?.text;
