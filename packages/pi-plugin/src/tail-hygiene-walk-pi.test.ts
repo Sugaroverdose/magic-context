@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { computeProtectionWindow } from "@magic-context/core/features/magic-context/protection-window";
@@ -464,6 +465,73 @@ describe("Pi baseline persistence and defer deltas", () => {
 		expect(effectivePiTailHygiene(defer).u).toBeLessThanOrEqual(
 			effectivePiTailHygiene(defer).t,
 		);
+	});
+
+	it("counts an appended tool output after it ages out of the protected suffix", () => {
+		const baseMessages = [textMessage("user", "base text")];
+		const baseTags = [tag(1, "base:p0", "message")];
+		const reminder =
+			"\n\n<system-reminder>\nHousekeeping backlog: spent tool outputs are reclaimable.\n</system-reminder>";
+		const appended = toolArc(
+			"tool-delta",
+			"call-delta",
+			"read",
+			{ path: "new" },
+			`${"reclaimable tool output ".repeat(1_000)}${reminder}`,
+		);
+		const messages = [...baseMessages, ...appended.messages];
+		const tags = [
+			...baseTags,
+			{ ...appended.tag, tagNumber: 2 },
+		];
+		const stableId = withStableIds(messages, [
+			"base",
+			"tool-delta",
+			"tool-delta-result",
+		]);
+		const sha256 = (value: unknown): string =>
+			createHash("sha256").update(JSON.stringify(value)).digest("hex");
+		const prefixSha = sha256(baseMessages);
+		const servedArraySha = sha256(messages);
+		const baseline = refreshPiTailHygieneBaseline({
+			messages: baseMessages,
+			tags: baseTags,
+			protectedTagNumbers: new Set([1]),
+			stableId: withStableIds(baseMessages, ["base"]),
+			cacheBusting: true,
+		});
+		const protectedDefer = refreshPiTailHygieneBaseline({
+			messages,
+			tags,
+			protectedTagNumbers: new Set([1, 2]),
+			stableId,
+			cacheBusting: false,
+			previous: baseline,
+		});
+		const agedDefer = refreshPiTailHygieneBaseline({
+			messages,
+			tags,
+			protectedTagNumbers: new Set([1]),
+			stableId,
+			cacheBusting: false,
+			previous: protectedDefer,
+		});
+		const measuredAged = measurePiTailHygiene({
+			messages,
+			tags,
+			protectedTagNumbers: new Set([1]),
+			stableId,
+		});
+
+		expect(effectivePiTailHygiene(protectedDefer).u).toBe(0);
+		expect(effectivePiTailHygiene(agedDefer)).toEqual({
+			u: measuredAged.u,
+			t: measuredAged.t,
+		});
+		expect(sha256(baseMessages)).toBe(prefixSha);
+		expect(sha256(messages)).toBe(servedArraySha);
+		expect(JSON.stringify(baseMessages)).not.toContain("Housekeeping backlog");
+		expect(JSON.stringify(messages.at(-1))).toContain("Housekeeping backlog");
 	});
 
 	it("advances the protection boundary additively without changing generation", () => {
