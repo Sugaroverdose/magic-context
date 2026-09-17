@@ -12434,39 +12434,36 @@ impl McHandler {
         let action = string_arg(args, "action")
             .or_else(|| non_empty_string_arg(args, "content").map(|_| "write"))
             .unwrap_or("read");
-        let has_note_id = args.contains_key("note_id");
-        let has_note_ids = args.contains_key("note_ids");
-        if has_note_id && has_note_ids {
-            return tool_error_result(
-                "Error: 'note_id' and 'note_ids' cannot be used together; provide one or the other.",
-            );
-        }
-        if has_note_ids && action != "dismiss" {
-            return tool_error_result("Error: 'note_ids' is only valid when action is 'dismiss'.");
-        }
-        let note_ids = if action == "dismiss" && has_note_ids {
-            let Some(values) = args.get("note_ids").and_then(Value::as_array) else {
-                return tool_error_result(
-                    "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.",
-                );
-            };
-            if !(1..=50).contains(&values.len()) {
-                return tool_error_result(
-                    "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.",
-                );
-            }
-            let mut parsed = Vec::with_capacity(values.len());
-            for value in values {
-                let Some(note_id) = value.as_i64().filter(|id| *id > 0) else {
-                    return tool_error_result(
-                        "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.",
-                    );
+        // `note_ids` is the only id field, on the model-facing schema and on
+        // the TS adapter's internal wire alike. `write` and `read` never read
+        // it: tool surfaces that require every declared property make the
+        // model send filler there (issue 460), and filler on an action that
+        // does not use the field must not fail the call. `update` addresses
+        // exactly one note; `dismiss` takes one to fifty.
+        let note_ids = match action {
+            "update" | "dismiss" => {
+                let max = if action == "update" { 1 } else { 50 };
+                let error = if action == "update" {
+                    "Error: 'note_ids' must contain exactly one positive integer id when action is 'update'."
+                } else {
+                    "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'."
                 };
-                parsed.push(note_id);
+                let Some(values) = args.get("note_ids").and_then(Value::as_array) else {
+                    return tool_error_result(error);
+                };
+                if !(1..=max).contains(&values.len()) {
+                    return tool_error_result(error);
+                }
+                let mut parsed = Vec::with_capacity(values.len());
+                for value in values {
+                    let Some(note_id) = value.as_i64().filter(|id| *id > 0) else {
+                        return tool_error_result(error);
+                    };
+                    parsed.push(note_id);
+                }
+                Some(parsed)
             }
-            Some(parsed)
-        } else {
-            None
+            _ => None,
         };
         let is_mutation = matches!(action, "write" | "update" | "dismiss");
         let facade_scope = match self
@@ -12674,11 +12671,10 @@ impl McHandler {
                 )
             }
             "update" => {
-                let Some(note_id) = i64_arg(args, "note_id").filter(|id| *id > 0) else {
-                    return tool_error_result(
-                        "Error: 'note_id' is required when action is 'update'.",
-                    );
-                };
+                let note_id = note_ids
+                    .as_deref()
+                    .and_then(|ids| ids.first().copied())
+                    .unwrap_or(0);
                 let content = string_arg(args, "content");
                 let condition = string_arg(args, "surface_condition")
                     .map(str::trim)
@@ -12747,7 +12743,9 @@ impl McHandler {
             }
             "dismiss" => {
                 let resolution = string_arg(args, "content");
-                if let Some(note_ids) = note_ids.as_deref() {
+                let ids = note_ids.as_deref().unwrap_or(&[]);
+                if ids.len() > 1 {
+                    let note_ids = ids;
                     return facade_command_outcome(
                         store.with_facade_command(
                             facade_scope.route_project_root.as_str(),
@@ -12789,11 +12787,7 @@ impl McHandler {
                         "notes",
                     );
                 }
-                let Some(note_id) = i64_arg(args, "note_id").filter(|id| *id > 0) else {
-                    return tool_error_result(
-                        "Error: 'note_id' is required when action is 'dismiss'.",
-                    );
-                };
+                let note_id = ids[0];
                 facade_command_outcome(
                     store.with_facade_command(
                         facade_scope.route_project_root.as_str(),
@@ -15721,7 +15715,7 @@ fn render_notes(
         ""
     };
     format!(
-        "{body}{anchor_hint}\n\nTo dismiss a stale note: ctx_note(action=\"dismiss\", note_id=N)"
+        "{body}{anchor_hint}\n\nTo dismiss a stale note: ctx_note(action=\"dismiss\", note_ids=[N])"
     )
 }
 
@@ -16540,7 +16534,7 @@ fn ctx_expand_description() -> String {
 }
 
 fn ctx_note_description() -> String {
-    "Save or inspect durable session notes for future follow-ups. Dismiss one note with note_id or 1–50 with note_ids, never both. surface_condition is accepted and recorded, but condition evaluation arrives later on this leg.".to_string()
+    "Save or inspect durable session notes for future follow-ups. update changes one note (note_ids=[N]); dismiss retires 1–50 (note_ids). surface_condition is accepted and recorded, but condition evaluation arrives later on this leg.".to_string()
 }
 
 fn ctx_memory_schema() -> Value {
@@ -16638,8 +16632,7 @@ fn ctx_note_schema() -> Value {
         "properties": {
             "action": { "type": "string", "enum": ["write", "read", "update", "dismiss"], "description": "Operation to perform. Defaults to write when content is provided, otherwise read." },
             "content": { "type": "string", "maxLength": 65536, "description": "Note text for write/update, or optional dismissal resolution when action is dismiss." },
-            "note_id": { "type": "integer", "minimum": 1, "description": "Note id for update or dismiss." },
-            "note_ids": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 }, "description": "One to fifty note ids for 'dismiss' only; do not combine with note_id." },
+            "note_ids": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 }, "description": "Note ids: exactly one for 'update', one to fifty for 'dismiss'. Ignored by 'write' and 'read'." },
             "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25, "description": "Maximum active notes to return." },
             "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest notes in each section." },
             "filter": { "type": "string", "enum": ["all", "active", "pending", "ready", "dismissed"], "description": "Optional read filter. Defaults to active session notes plus ready smart notes." },
@@ -24663,7 +24656,7 @@ mod tests {
             "ctx_note",
             json!({
                 "action": "update",
-                "note_id": note_id,
+                "note_ids": [note_id],
                 "surface_condition": "when the replacement path exists",
                 "compiled_provider": "retina-local-fs",
                 "compiled_config": "{\"kind\":\"path_exists\",\"path\":\"new\"}",
@@ -24708,16 +24701,11 @@ mod tests {
     }
 
     #[test]
-    fn ctx_note_schema_pins_the_multi_dismiss_contract() {
+    fn ctx_note_schema_declares_one_id_field() {
         let properties = ctx_note_schema()["properties"].clone();
-        assert_eq!(
-            properties["note_id"],
-            json!({
-                "type": "integer",
-                "minimum": 1,
-                "description": "Note id for update or dismiss."
-            })
-        );
+        // A second scalar id field is what made required-all tool surfaces fail
+        // every call with filler in both (issue 460).
+        assert!(properties.get("note_id").is_none());
         assert_eq!(
             properties["note_ids"],
             json!({
@@ -24725,7 +24713,7 @@ mod tests {
                 "minItems": 1,
                 "maxItems": 50,
                 "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 },
-                "description": "One to fifty note ids for 'dismiss' only; do not combine with note_id."
+                "description": "Note ids: exactly one for 'update', one to fifty for 'dismiss'. Ignored by 'write' and 'read'."
             })
         );
     }
@@ -24945,13 +24933,13 @@ mod tests {
         let _ = call_facade(
             &handler,
             "ctx_note",
-            json!({"action": "update", "note_id": note_id, "content": "remember the updated lattice"}),
+            json!({"action": "update", "note_ids": [note_id], "content": "remember the updated lattice"}),
         )
         .await;
         let _ = call_facade(
             &handler,
             "ctx_note",
-            json!({"action": "dismiss", "note_id": note_id, "content": "finished"}),
+            json!({"action": "dismiss", "note_ids": [note_id], "content": "finished"}),
         )
         .await;
         let dismissed_search = tool_text(
@@ -25000,7 +24988,7 @@ mod tests {
             call_facade(
                 &handler,
                 "ctx_note",
-                json!({"action": "dismiss", "note_id": 3}),
+                json!({"action": "dismiss", "note_ids": [3]}),
             )
             .await,
         );
@@ -26389,7 +26377,6 @@ mod tests {
                 vec![
                     "action",
                     "content",
-                    "note_id",
                     "note_ids",
                     "limit",
                     "offset",
@@ -26962,7 +26949,7 @@ mod tests {
             "note-update",
             json!({
                 "action": "update",
-                "note_id": 1,
+                "note_ids": [1],
                 "content": "updated note",
                 "command_id": "note-update"
             }),
@@ -26982,7 +26969,7 @@ mod tests {
             "note-dismiss",
             json!({
                 "action": "dismiss",
-                "note_id": 1,
+                "note_ids": [1],
                 "command_id": "note-dismiss"
             }),
         )
@@ -27382,8 +27369,8 @@ mod tests {
         }
         for arguments in [
             json!({"action": "write", "content": "late"}),
-            json!({"action": "update", "note_id": note.id, "content": "late"}),
-            json!({"action": "dismiss", "note_id": note.id}),
+            json!({"action": "update", "note_ids": [note.id], "content": "late"}),
+            json!({"action": "dismiss", "note_ids": [note.id]}),
         ] {
             assert_eq!(
                 error_code(call_facade(&handler, "ctx_note", arguments).await),

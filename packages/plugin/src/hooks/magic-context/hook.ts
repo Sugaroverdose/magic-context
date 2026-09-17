@@ -908,7 +908,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                       filter,
                       limit,
                       offset,
-                      noteId,
+                      noteIds,
                   }) => {
                       const response = await rustModeModuleClient.call({
                           sessionId,
@@ -929,7 +929,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                                   filter,
                                   limit,
                                   offset,
-                                  note_id: noteId,
+                                  note_ids: noteIds,
                               },
                           },
                       });
@@ -938,7 +938,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                       await syncModuleNotes();
                       if (compileStatus && !moduleNoteResponseIsError(response)) {
                           const moduleRowId =
-                              action === "write" ? moduleNoteRowId(response) : (noteId ?? null);
+                              action === "write"
+                                  ? moduleNoteRowId(response)
+                                  : (noteIds?.[0] ?? null);
                           if (
                               moduleRowId === null ||
                               !applyMirroredNoteCompileFields({
