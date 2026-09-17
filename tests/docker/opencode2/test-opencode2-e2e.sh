@@ -49,19 +49,39 @@ test -s "$XDG_DATA_HOME/cortexkit/magic-context/context.db" || {
 
 SESSION_ID=$(tr -d '\n' < /test/session-id)
 rm -f /tmp/opencode2-tui.log
+# Wait for the sidebar marker rather than for a fixed wall-clock: on a loaded
+# CI runner the TUI boot plus plugin load plus first paint took longer than the
+# old 20 s cap and failed a lane whose product code had not changed, while a
+# quiet runner finishes in a few seconds. The bound below is a ceiling, not a
+# budget: the TUI is stopped the moment the marker appears.
+TUI_MARKER_CEILING_SECONDS=120
 set +e
-timeout --foreground --signal=TERM 20 \
-    script -qefc "stty rows 40 cols 160; opencode2 --standalone --print-logs --session '$SESSION_ID'" \
-    /tmp/opencode2-tui.log >/tmp/opencode2-tui.stdout 2>&1
+script -qefc "stty rows 40 cols 160; opencode2 --standalone --print-logs --session '$SESSION_ID'" \
+    /tmp/opencode2-tui.log >/tmp/opencode2-tui.stdout 2>&1 &
+TUI_PID=$!
+TUI_MARKER_SEEN=0
+for ((elapsed = 0; elapsed < TUI_MARKER_CEILING_SECONDS; elapsed++)); do
+    if grep -aFq "Magic Context" /tmp/opencode2-tui.log 2>/dev/null \
+        || grep -aFq "MagicContext" /tmp/opencode2-tui.log 2>/dev/null; then
+        TUI_MARKER_SEEN=1
+        echo "TUI sidebar marker painted after ${elapsed}s"
+        break
+    fi
+    if ! kill -0 "$TUI_PID" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+kill -TERM "$TUI_PID" 2>/dev/null
+wait "$TUI_PID"
 TUI_EXIT=$?
 set -e
-if [[ $TUI_EXIT -ne 0 && $TUI_EXIT -ne 124 && $TUI_EXIT -ne 143 ]]; then
+if [[ $TUI_MARKER_SEEN -eq 0 && $TUI_EXIT -ne 0 && $TUI_EXIT -ne 124 && $TUI_EXIT -ne 143 ]]; then
     echo "FAIL OpenCode 2 TUI exited unexpectedly: $TUI_EXIT"
     tail -80 /tmp/opencode2-tui.stdout
     exit 1
 fi
-if ! grep -aFq "Magic Context" /tmp/opencode2-tui.log \
-    && ! grep -aFq "MagicContext" /tmp/opencode2-tui.log; then
+if [[ $TUI_MARKER_SEEN -eq 0 ]]; then
     echo "FAIL GA TUI did not execute setup and paint the Magic Context sidebar"
     tail -80 /tmp/opencode2-tui.stdout
     exit 1
