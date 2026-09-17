@@ -8817,6 +8817,24 @@ impl McHandler {
         let request_decode_started_at = Instant::now();
         let mut delta_expand_ms = 0.0;
         const REQUEST_OBSERVED_KEY: &str = "request_observed_at_ms";
+        let request_attempt_id = request
+            .get("attempt_id")
+            .and_then(Value::as_str)
+            .filter(|attempt_id| !attempt_id.is_empty())
+            .map(|attempt_id| attempt_id.chars().take(128).collect::<String>())
+            .unwrap_or_else(|| {
+                format!(
+                    "legacy-{}-{}",
+                    request
+                        .get(REQUEST_OBSERVED_KEY)
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default(),
+                    request
+                        .get("full_array_fingerprint")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                )
+            });
         let request_observed_to_handler = request
             .get(REQUEST_OBSERVED_KEY)
             .and_then(Value::as_u64)
@@ -8910,6 +8928,10 @@ impl McHandler {
                 };
             }
         };
+        let pass_now = now_ms();
+        let trace_received_started_at = Instant::now();
+        let _ = store.trace_pass_received(&parsed.session_id, &request_attempt_id, pass_now);
+        let trace_received_ms = trace_received_started_at.elapsed().as_secs_f64() * 1_000.0;
         apply_claude_code_config_controls(&mut parsed, &binding.config, serializer_profile);
         parsed
             .prompt_surface_tool_descriptions
@@ -9008,7 +9030,6 @@ impl McHandler {
                     };
                 }
             };
-        let pass_now = now_ms();
         match serializer_profile {
             Some(SerializerProfile::OpencodeAiSdk) => {
                 if let Some((data_url, content_hash)) = host_mural_artifact(parsed.mural.as_ref()) {
@@ -9060,12 +9081,6 @@ impl McHandler {
             HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND,
         );
         let side_channel_drain_ms = side_channel_drain_started_at.elapsed().as_secs_f64() * 1_000.0;
-        // This trace is intentionally outside the fenced cache-state commit: a rejected
-        // pass must still leave a durable breadcrumb, and a trace failure must never
-        // change the transform result.
-        let trace_received_started_at = Instant::now();
-        let _ = store.trace_pass_received(&parsed.session_id, pass_now);
-        let trace_received_ms = trace_received_started_at.elapsed().as_secs_f64() * 1_000.0;
         let hostless_usable_soft = parsed
             .geometry
             .as_ref()
@@ -9221,7 +9236,12 @@ impl McHandler {
                         },
                     );
             }
-            let _ = store.trace_pass_rejected(&parsed.session_id, &message, now_ms());
+            let _ = store.trace_pass_rejected(
+                &parsed.session_id,
+                &request_attempt_id,
+                &message,
+                now_ms(),
+            );
             HandlerOutcome::Error {
                 code: code.to_string(),
                 message,
@@ -9502,7 +9522,7 @@ impl McHandler {
         );
         let native_attach_ms = native_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
         let trace_complete_started_at = Instant::now();
-        let _ = store.trace_pass_completed(&parsed.session_id, now_ms());
+        let _ = store.trace_pass_completed(&parsed.session_id, &request_attempt_id, now_ms());
         let trace_complete_ms = trace_complete_started_at.elapsed().as_secs_f64() * 1_000.0;
         let response_observation_started_at = Instant::now();
         self.record_response_observation(&parsed.session_id, now_ms());
@@ -23842,6 +23862,65 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn request_trace_ring_records_attempt_lifecycle_and_caps_at_thirty_two() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+
+        for index in 0..35 {
+            let mut input = request(vec![ck("m1", 1, "hello")]);
+            input["attempt_id"] = json!(format!("attempt-{index}"));
+            let response = call_transform_request(&handler, input).await;
+            assert_eq!(response["status"], "ok");
+        }
+
+        let trace = store.load_pass_trace("ses").unwrap().unwrap();
+        assert_eq!(trace.request_history.len(), 32);
+        assert_eq!(
+            trace.request_history.first().unwrap().attempt_id,
+            "attempt-3"
+        );
+        assert_eq!(
+            trace.request_history.last().unwrap().attempt_id,
+            "attempt-34"
+        );
+        assert!(trace.request_history.iter().all(|request| {
+            request.outcome == "completed"
+                && request
+                    .completed_at_ms
+                    .is_some_and(|completed| completed >= request.received_at_ms)
+        }));
+
+        store
+            .trace_pass_received("ses", "attempt-stalled", now_ms())
+            .unwrap();
+        let status = call_dispatch_request(
+            &handler,
+            json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        )
+        .await;
+        let history = status["pass_trace"]["request_history"]
+            .as_array()
+            .expect("session.status exposes request history");
+        assert_eq!(history.len(), 32);
+        assert_eq!(history.last().unwrap()["attempt_id"], "attempt-stalled");
+        assert_eq!(
+            history.last().unwrap()["received_at_ms"],
+            json!(
+                store
+                    .load_pass_trace("ses")
+                    .unwrap()
+                    .unwrap()
+                    .request_history
+                    .last()
+                    .unwrap()
+                    .received_at_ms
+            )
+        );
+        assert_eq!(history.last().unwrap()["completed_at_ms"], Value::Null);
+        assert_eq!(history.last().unwrap()["outcome"], "received");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn repeated_rejects_increment_trace_and_overwrite_last_error() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
@@ -23939,6 +24018,22 @@ mod tests {
         assert_eq!(status["epochs"]["state_sync_deltas"], json!(true));
         assert_eq!(status["pass_trace"]["receive_count"], 1);
         assert_eq!(status["pass_trace"]["reject_count"], 1);
+        assert_eq!(
+            status["pass_trace"]["request_history"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(status["pass_trace"]["request_history"][0]["attempt_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("legacy-"));
+        assert_eq!(
+            status["pass_trace"]["request_history"][0]["outcome"],
+            "rejected"
+        );
+        assert!(status["pass_trace"]["request_history"][0]["completed_at_ms"].is_number());
         assert_eq!(
             status["pass_trace"]["last_reject_error"],
             json!("live-source ordinals not strictly increasing")

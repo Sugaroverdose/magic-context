@@ -3274,6 +3274,73 @@ fn serialize_interesting_scheduler_observation(
     .map_err(|error| McStoreError::Serde(error.to_string()))
 }
 
+const REQUEST_TRACE_HISTORY_LIMIT: usize = 32;
+// Reuse the existing scheduler metadata JSON instead of adding a schema column. The carrier
+// is intentionally not a scheduler record: its missing timestamp keeps incident queries blind
+// to it, while the loader extracts it before deserializing scheduler observations.
+const REQUEST_TRACE_CARRIER_DECISION: &str = "__request_trace_history__";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PassRequestTrace {
+    pub attempt_id: String,
+    pub received_at_ms: i64,
+    pub completed_at_ms: Option<i64>,
+    pub outcome: String,
+}
+
+fn pass_trace_meta_parts(
+    raw: &str,
+) -> Result<(Vec<Value>, Vec<PassRequestTrace>), serde_json::Error> {
+    let mut entries: Vec<Value> = serde_json::from_str(raw)?;
+    let carrier_index = entries.iter().rposition(|entry| {
+        entry.get("scheduler_decision").and_then(Value::as_str)
+            == Some(REQUEST_TRACE_CARRIER_DECISION)
+    });
+    let request_history = carrier_index
+        .map(|index| entries.remove(index))
+        .and_then(|carrier| carrier.get("request_history").cloned())
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    Ok((entries, request_history))
+}
+
+fn pass_trace_meta_json(
+    mut scheduler_interesting_history: Vec<Value>,
+    request_history: &[PassRequestTrace],
+) -> Result<String, serde_json::Error> {
+    scheduler_interesting_history.push(serde_json::json!({
+        "scheduler_decision": REQUEST_TRACE_CARRIER_DECISION,
+        "request_history": request_history,
+    }));
+    serde_json::to_string(&scheduler_interesting_history)
+}
+
+fn mutate_pass_request_history(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    mutate: impl FnOnce(&mut Vec<PassRequestTrace>),
+) -> rusqlite::Result<()> {
+    let raw = conn.query_row(
+        "SELECT scheduler_interesting_history FROM mc_pass_trace WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get::<_, String>(0),
+    )?;
+    let (scheduler_history, mut request_history) = pass_trace_meta_parts(&raw)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    mutate(&mut request_history);
+    if request_history.len() > REQUEST_TRACE_HISTORY_LIMIT {
+        request_history.drain(..request_history.len() - REQUEST_TRACE_HISTORY_LIMIT);
+    }
+    let meta = pass_trace_meta_json(scheduler_history, &request_history)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    conn.execute(
+        "UPDATE mc_pass_trace SET scheduler_interesting_history = ?2 WHERE session_id = ?1",
+        params![session_id, meta],
+    )?;
+    Ok(())
+}
+
 /// Durable receive/complete/reject breadcrumbs for one session's transform passes.
 /// Stored separately from `mc_cache_state` so a rejected pass can still leave a readable
 /// trail without advancing the cache row_version.
@@ -3291,6 +3358,8 @@ pub struct PassTrace {
     pub last_divergence: Option<String>,
     /// Oldest-to-newest bounded history of accepted scheduler decisions and latch state.
     pub scheduler_history: Vec<PassSchedulerObservation>,
+    /// Oldest-to-newest bounded history of module receipt and terminal outcomes.
+    pub request_history: Vec<PassRequestTrace>,
 }
 
 /// A validated historian fact that may become a project memory. Validation owns
@@ -8028,7 +8097,7 @@ impl McStore {
                 .query_row(
                     "SELECT last_received_at_ms, last_completed_at_ms, last_reject_error,
                             last_reject_at_ms, reject_count, receive_count, first_divergence,
-                            last_divergence, scheduler_history
+                            last_divergence, scheduler_history, scheduler_interesting_history
                        FROM mc_pass_trace WHERE session_id = ?1",
                     params![session_id],
                     |row| {
@@ -8051,6 +8120,15 @@ impl McStore {
                                     Box::new(error),
                                 )
                             })?,
+                            request_history: pass_trace_meta_parts(&row.get::<_, String>(9)?)
+                                .map(|(_, history)| history)
+                                .map_err(|error| {
+                                    rusqlite::Error::FromSqlConversionFailure(
+                                        9,
+                                        rusqlite::types::Type::Text,
+                                        Box::new(error),
+                                    )
+                                })?,
                         })
                     },
                 )
@@ -8069,10 +8147,15 @@ impl McStore {
         Ok(snapshot)
     }
 
-    /// Record that the module accepted a transform request for this session. This is a
-    /// plain one-statement UPSERT outside the fenced cache-state transaction so the
-    /// observability write never contends with or extends the pass commit.
-    pub fn trace_pass_received(&self, session_id: &str, now_ms: i64) -> Result<(), McStoreError> {
+    /// Record that the module accepted a transform request for this session. The count and
+    /// bounded metadata-ring writes stay outside the fenced cache-state transaction, so
+    /// observability never changes pass CAS semantics.
+    pub fn trace_pass_received(
+        &self,
+        session_id: &str,
+        attempt_id: &str,
+        now_ms: i64,
+    ) -> Result<(), McStoreError> {
         self.inner.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO mc_pass_trace (
@@ -8091,6 +8174,14 @@ impl McStore {
                      first_divergence = NULL",
                 params![session_id, now_ms],
             )?;
+            mutate_pass_request_history(conn, session_id, |history| {
+                history.push(PassRequestTrace {
+                    attempt_id: attempt_id.to_string(),
+                    received_at_ms: now_ms,
+                    completed_at_ms: None,
+                    outcome: "received".to_string(),
+                });
+            })?;
             Ok(())
         })?;
         Ok(())
@@ -8171,7 +8262,12 @@ impl McStore {
     /// Record that a transform request finished successfully. This remains outside the
     /// fenced cache-state transaction so a pass completion breadcrumb cannot alter CAS
     /// semantics or hold the commit transaction open longer than the cache write itself.
-    pub fn trace_pass_completed(&self, session_id: &str, now_ms: i64) -> Result<(), McStoreError> {
+    pub fn trace_pass_completed(
+        &self,
+        session_id: &str,
+        attempt_id: &str,
+        now_ms: i64,
+    ) -> Result<(), McStoreError> {
         self.inner.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO mc_pass_trace (
@@ -8188,6 +8284,16 @@ impl McStore {
                      last_completed_at_ms = excluded.last_completed_at_ms",
                 params![session_id, now_ms],
             )?;
+            mutate_pass_request_history(conn, session_id, |history| {
+                if let Some(request) = history
+                    .iter_mut()
+                    .rev()
+                    .find(|request| request.attempt_id == attempt_id)
+                {
+                    request.completed_at_ms = Some(now_ms);
+                    request.outcome = "completed".to_string();
+                }
+            })?;
             Ok(())
         })?;
         Ok(())
@@ -8195,11 +8301,12 @@ impl McStore {
 
     /// Record the last rejected transform for a session. The error string is capped so
     /// the durable diagnostic stays readable even if an upstream failure produces a huge
-    /// message. Like the other trace writes, this is a single plain UPSERT outside the
-    /// fenced cache-state transaction.
+    /// message. Like the other trace writes, this stays outside the fenced cache-state
+    /// transaction.
     pub fn trace_pass_rejected(
         &self,
         session_id: &str,
+        attempt_id: &str,
         error: &str,
         now_ms: i64,
     ) -> Result<(), McStoreError> {
@@ -8222,6 +8329,16 @@ impl McStore {
                      reject_count = mc_pass_trace.reject_count + 1",
                 params![session_id, error, now_ms],
             )?;
+            mutate_pass_request_history(conn, session_id, |history| {
+                if let Some(request) = history
+                    .iter_mut()
+                    .rev()
+                    .find(|request| request.attempt_id == attempt_id)
+                {
+                    request.completed_at_ms = Some(now_ms);
+                    request.outcome = "rejected".to_string();
+                }
+            })?;
             Ok(())
         })?;
         Ok(())
@@ -8240,7 +8357,8 @@ impl McStore {
                      receive_count,
                      first_divergence,
                      last_divergence,
-                     scheduler_history
+                     scheduler_history,
+                     scheduler_interesting_history
                    FROM mc_pass_trace
                  WHERE session_id = ?1",
                 params![session_id],
@@ -8263,6 +8381,15 @@ impl McStore {
                                 )
                             },
                         )?,
+                        request_history: pass_trace_meta_parts(&r.get::<_, String>(9)?)
+                            .map(|(_, history)| history)
+                            .map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    9,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?,
                     })
                 },
             )
@@ -20188,13 +20315,17 @@ mod tests {
         let store = McStore::open(&descriptor(dir.path())).unwrap();
         let long_error = "é".repeat(2_500);
 
-        store.trace_pass_received("trace", 11).unwrap();
-        store.trace_pass_received("trace", 12).unwrap();
-        store.trace_pass_rejected("trace", &long_error, 21).unwrap();
+        store.trace_pass_received("trace", "attempt-1", 11).unwrap();
+        store.trace_pass_received("trace", "attempt-2", 12).unwrap();
         store
-            .trace_pass_rejected("trace", "second error", 22)
+            .trace_pass_rejected("trace", "attempt-1", &long_error, 21)
             .unwrap();
-        store.trace_pass_completed("trace", 31).unwrap();
+        store
+            .trace_pass_rejected("trace", "attempt-1", "second error", 22)
+            .unwrap();
+        store
+            .trace_pass_completed("trace", "attempt-2", 31)
+            .unwrap();
 
         let trace = store.load_pass_trace("trace").unwrap().unwrap();
         assert_eq!(trace.last_received_at_ms, 12);
@@ -20203,6 +20334,23 @@ mod tests {
         assert_eq!(trace.last_reject_at_ms, Some(22));
         assert_eq!(trace.reject_count, 2);
         assert_eq!(trace.receive_count, 2);
+        assert_eq!(
+            trace.request_history,
+            vec![
+                PassRequestTrace {
+                    attempt_id: "attempt-1".to_string(),
+                    received_at_ms: 11,
+                    completed_at_ms: Some(22),
+                    outcome: "rejected".to_string(),
+                },
+                PassRequestTrace {
+                    attempt_id: "attempt-2".to_string(),
+                    received_at_ms: 12,
+                    completed_at_ms: Some(31),
+                    outcome: "completed".to_string(),
+                },
+            ]
+        );
 
         let defer = PassSchedulerObservation {
             timestamp_ms: 32,
@@ -20262,7 +20410,7 @@ mod tests {
         assert_eq!(bounded.last().unwrap().timestamp_ms, 256);
 
         store
-            .trace_pass_rejected("trace-cap", &long_error, 41)
+            .trace_pass_rejected("trace-cap", "attempt-cap", &long_error, 41)
             .unwrap();
         let capped = store.load_pass_trace("trace-cap").unwrap().unwrap();
         assert_eq!(
