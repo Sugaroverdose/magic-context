@@ -7,7 +7,7 @@ import { OpenCode } from "../../../plugin/node_modules/@opencode/client/dist/pro
 import { seedTaskScheduleState } from "../../../plugin/src/features/magic-context/dreamer/storage-task-schedule";
 import { resolveProjectIdentity } from "../../../plugin/src/features/magic-context/memory/project-identity";
 import { insertMemory } from "../../../plugin/src/features/magic-context/memory";
-import { spawnOpencode2 } from "../../src/opencode2-runner/spawn";
+import { spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
 
 async function fixture(config: unknown) {
     const observer = mkdtempSync(join(tmpdir(), "mc-s3-events-"));
@@ -19,7 +19,7 @@ export default {id:'s3-events',setup(context){ process.env.MAGIC_CONTEXT_LOG_PAT
     writeFileSync(join(directory, "magic-context.jsonc"), JSON.stringify(config));
     const client = OpenCode.make({ baseUrl: host.url, headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
     const session = await client.session.create({ location: { directory: host.cwd }, model: { providerID: "openai", id: "mock-model" } });
-    await client.plugin.awaitActivation({ location: { directory: host.cwd } });
+    await waitForPluginActive(client, host.cwd);
     const turn = async (text: string) => {
         await client.session.prompt({ sessionID: session.id, text });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(20000) });

@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import ts from "../../../plugin/node_modules/typescript";
 import { OpenCode } from "../../../plugin/node_modules/@opencode/client/dist/promise/client.js";
 import { TestHarness } from "../../src/harness";
-import { spawnOpencode2 } from "../../src/opencode2-runner/spawn";
+import { spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";
 
 const names = ["applyDeferredCompactionMarker", "reconcileMarkerRepresentation", "setPendingCompactionMarkerState", "updateCompactionMarkerAfterPublication"];
@@ -56,7 +56,7 @@ test("I10 real-host counters: v2 fold plus historian publication plus ten turns 
         writeFileSync(join(directory, "magic-context.jsonc"), JSON.stringify({ auto_update: false, protected_tokens: 4000, memory: { enabled: false }, dreamer: { disable: true }, historian: { two_pass: false } }));
         const client = OpenCode.make({ baseUrl: host.url, headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
         const session = await client.session.create({ location: { directory: host.cwd }, model: { providerID: "openai", id: "mock-model" } });
-        await client.plugin.awaitActivation({ location: { directory: host.cwd } });
+        await waitForPluginActive(client, host.cwd);
         const turn = async (text: string) => { await client.session.prompt({ sessionID: session.id, text }); await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(25000) }); };
         host.mock.setDefault({ text: "source answer", usage });
         for (let index=0;index<8;index++) await turn(`marker-source-${index} ${"bounded history ".repeat(700)}`);

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { OpenCode } from "../../../plugin/node_modules/@opencode/client/dist/promise/client.js";
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";
 import { rawMessages } from "../../../plugin/src/v2/hooks/store";
-import { spawnOpencode2 } from "../../src/opencode2-runner/spawn";
+import { spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 for (const mode of ["local", "provider"] as const) {
@@ -28,7 +28,7 @@ for (const mode of ["local", "provider"] as const) {
             writeFileSync(configPath, JSON.stringify(config));
             const client = OpenCode.make({ baseUrl: host.url, headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
             const session = await client.session.create({ location: { directory: host.cwd }, model: { providerID: "openai", id: "mock-model" } });
-            await client.plugin.awaitActivation({ location: { directory: host.cwd } });
+            await waitForPluginActive(client, host.cwd);
             const turn = async (text: string) => {
                 await client.session.prompt({ sessionID: session.id, text });
                 await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(20000) });

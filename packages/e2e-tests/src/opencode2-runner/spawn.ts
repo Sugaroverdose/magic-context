@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { MockProvider } from "../mock-provider/server";
+import { MockProvider, type MockResponse } from "../mock-provider/server";
 
 export const OPENCODE2_NO_BACKGROUND_SERVICE_FLAG: string = "--standalone";
 export const ROOT_KEYS = [
@@ -138,12 +138,69 @@ export function handoff(
 	return match ? { url: match[1]!, password: match[2]! } : undefined;
 }
 
+interface PluginReadinessClient {
+	plugin: {
+		list(input: { location: { directory: string } }): Promise<{
+			data: Array<{
+				id: string;
+				state:
+					| { status: "active" }
+					| { status: "failed"; error: string; ref?: string };
+			}>;
+		}>;
+	};
+	event: { subscribe(): AsyncIterable<unknown> };
+}
+
+/** OpenCode 2.0.5 removed awaitActivation; inventory is authoritative and plugin.updated invalidates it. */
+export async function waitForPluginActive(
+	client: PluginReadinessClient,
+	directory: string,
+	pluginID = "opencode-magic-context",
+	timeoutMs = 20_000,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	const events = client.event.subscribe()[Symbol.asyncIterator]();
+	try {
+		for (;;) {
+			const inventory = await client.plugin.list({ location: { directory } });
+			const plugin = inventory.data.find((item) => item.id === pluginID);
+			if (plugin?.state.status === "active") return;
+			if (plugin?.state.status === "failed") {
+				throw new Error(
+					`Plugin ${pluginID} activation failed: ${plugin.state.error}${plugin.state.ref ? ` (ref ${plugin.state.ref})` : ""}`,
+				);
+			}
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw new Error(`Timed out waiting for plugin ${pluginID}`);
+			await Promise.race([
+				events.next(),
+				new Promise<never>((_resolve, reject) =>
+					setTimeout(
+						() => reject(new Error(`Timed out waiting for plugin ${pluginID}`)),
+						remaining,
+					),
+				),
+			]);
+		}
+	} finally {
+		await events.return?.();
+	}
+}
+
+
 /** Event-driven, bounded startup; no readiness polling. CLI contract: AFT playbook:54-64. */
 export async function spawnOpencode2(
 	options: {
 		probePlugin?: string;
 		providerID?: string;
 		probeStandalone?: boolean;
+		defaultModelID?: string;
+		additionalModelIDs?: string[];
+		mockResponse?: MockResponse;
+		extraConfig?: Record<string, unknown>;
+		includeMagicContext?: boolean;
+		modelContextLimit?: number;
 	} = {},
 ) {
 	const providerID = options.providerID ?? "openai";
@@ -153,26 +210,45 @@ export async function spawnOpencode2(
 		: undefined;
 	const before = snapshotReason ? undefined : snapshotLive();
 	assertIsolation(fixture.root, fixture.env);
-	if (!existsSync(join(PLUGIN, "dist/v2/server.js"))) {
+	if (
+		options.includeMagicContext !== false &&
+		!existsSync(join(PLUGIN, "dist/v2/server.js"))
+	) {
 		throw new Error("Build the plugin before booting v2");
 	}
 	const mock = new MockProvider();
 	const provider = await mock.start(); // Existing mock explicitly binds 127.0.0.1 and captures parsed wire bodies.
+	if (options.mockResponse) mock.setDefault(options.mockResponse);
+	const defaultModelID = options.defaultModelID ?? "mock-model";
+	const modelIDs = new Set([
+		defaultModelID,
+		...(options.additionalModelIDs ?? []),
+	]);
 	writeFileSync(
 		join(fixture.cwd, "opencode.json"),
 		JSON.stringify({
-			plugins: [PLUGIN, ...(options.probePlugin ? [options.probePlugin] : [])],
-			model: `${providerID}/mock-model`,
+			...options.extraConfig,
+			plugins: [
+				...(options.includeMagicContext === false ? [] : [PLUGIN]),
+				...(options.probePlugin ? [options.probePlugin] : []),
+			],
+			model: `${providerID}/${defaultModelID}`,
 			compaction: { auto: true, buffer: 1024, keep: { tokens: 1024 } },
 			providers: {
 				[providerID]: {
 					settings: { baseURL: provider.baseURL, apiKey: "mock-key" },
-					models: {
-						"mock-model": {
-							name: "Mock",
-							limit: { context: 16000, output: 1024 },
-						},
-					},
+					models: Object.fromEntries(
+						[...modelIDs].map((id) => [
+							id,
+							{
+								name: id,
+								limit: {
+									context: options.modelContextLimit ?? 16000,
+									output: 32768,
+								},
+							},
+						]),
+					),
 				},
 			},
 		}),

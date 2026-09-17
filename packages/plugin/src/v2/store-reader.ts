@@ -39,6 +39,9 @@ export interface MessageData {
     [key: string]: unknown;
     content?: Array<Record<string, unknown>>;
     text?: string;
+    finish?: string;
+    error?: unknown;
+    model?: { id: string; providerID: string; variant?: string };
     tokens?: {
         input: number;
         output: number;
@@ -130,6 +133,20 @@ export class V2StoreReader {
     }
     idleRows(sessionID: string, after = -1): StoreRow<"idle">[] {
         return this.all(sessionID, after, "idle") as StoreRow<"idle">[];
+    }
+    latestSequence(sessionID: string): number {
+        const row = this.db
+            .prepare("SELECT MAX(seq) AS seq FROM session_message WHERE session_id = ?")
+            .get(sessionID) as { seq: number | null } | undefined;
+        return typeof row?.seq === "number" ? row.seq : -1;
+    }
+    latestAssistant(sessionID: string): StoreRow<"assistant"> | undefined {
+        const row = this.db
+            .prepare(`SELECT id, session_id, type, seq, data FROM session_message
+            WHERE session_id = ? AND type = 'assistant'
+            ORDER BY seq DESC LIMIT 1`)
+            .get(sessionID) as RawRow | undefined;
+        return row ? (decode(row) as StoreRow<"assistant">) : undefined;
     }
     /** Include the completed checkpoint itself, matching the host history cut. */
     window(sessionID: string): StoreRow[] {
