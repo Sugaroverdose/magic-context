@@ -2731,6 +2731,104 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN SELECT RAISE(ABORT, 'authority_draining'); END;
         "#,
     },
+    Migration {
+        version: 54,
+        // Agent-visible ids on host-backed harnesses belong to context.db. The module keeps
+        // that acknowledged identity separately from source provenance so module-authored rows
+        // can remain hostless until their changefeed row has been mirrored. Older binaries
+        // ignore this nullable column when opening a store created by this migration.
+        statements: r#"
+        ALTER TABLE mc_memories ADD COLUMN host_row_id INTEGER;
+        CREATE INDEX IF NOT EXISTS idx_mc_memories_host_row_id
+            ON mc_memories(host_row_id);
+
+        DROP TRIGGER IF EXISTS mc_memories_feed_insert;
+        DROP TRIGGER IF EXISTS mc_memories_feed_update;
+        DROP TRIGGER IF EXISTS mc_memories_feed_delete;
+        CREATE TRIGGER mc_memories_feed_insert AFTER INSERT ON mc_memories BEGIN
+            INSERT INTO mc_changefeed(domain, op, module_row_id, full_row_snapshot, content_hash)
+            VALUES ('memories', 'insert', NEW.id,
+                json_object(
+                    'id', NEW.id, 'project_path', NEW.project_path, 'category', NEW.category,
+                    'content', NEW.content, 'normalized_hash', NEW.normalized_hash,
+                    'importance', NEW.importance, 'scope', NEW.scope, 'shareable', NEW.shareable,
+                    'source_session_id', NEW.source_session_id, 'source_type', NEW.source_type,
+                    'seen_count', NEW.seen_count, 'retrieval_count', NEW.retrieval_count,
+                    'first_seen_at', NEW.first_seen_at, 'created_at', NEW.created_at,
+                    'updated_at', NEW.updated_at, 'last_seen_at', NEW.last_seen_at,
+                    'last_retrieved_at', NEW.last_retrieved_at, 'status', NEW.status,
+                    'expires_at', NEW.expires_at, 'verification_status', NEW.verification_status,
+                    'verified_at', NEW.verified_at, 'classified_at', NEW.classified_at,
+                    'superseded_by_memory_id', NEW.superseded_by_memory_id, 'merged_from', NEW.merged_from,
+                    'metadata_json', NEW.metadata_json, 'context_store_uuid', NEW.context_store_uuid,
+                    'context_row_id', NEW.context_row_id, 'mural_cue', NEW.mural_cue,
+                    'mural_cue_hash', NEW.mural_cue_hash, 'mural_cue_at', NEW.mural_cue_at,
+                    'mural_cue_rejection_count', NEW.mural_cue_rejection_count,
+                    'host_row_id', NEW.host_row_id), NEW.normalized_hash);
+        END;
+        CREATE TRIGGER mc_memories_feed_update AFTER UPDATE ON mc_memories
+        WHEN NEW.id IS NOT OLD.id OR NEW.project_path IS NOT OLD.project_path
+          OR NEW.category IS NOT OLD.category OR NEW.content IS NOT OLD.content
+          OR NEW.normalized_hash IS NOT OLD.normalized_hash OR NEW.importance IS NOT OLD.importance
+          OR NEW.scope IS NOT OLD.scope OR NEW.shareable IS NOT OLD.shareable
+          OR NEW.source_session_id IS NOT OLD.source_session_id OR NEW.source_type IS NOT OLD.source_type
+          OR NEW.seen_count IS NOT OLD.seen_count OR NEW.retrieval_count IS NOT OLD.retrieval_count
+          OR NEW.first_seen_at IS NOT OLD.first_seen_at OR NEW.created_at IS NOT OLD.created_at
+          OR NEW.updated_at IS NOT OLD.updated_at OR NEW.last_seen_at IS NOT OLD.last_seen_at
+          OR NEW.last_retrieved_at IS NOT OLD.last_retrieved_at OR NEW.status IS NOT OLD.status
+          OR NEW.expires_at IS NOT OLD.expires_at OR NEW.verification_status IS NOT OLD.verification_status
+          OR NEW.verified_at IS NOT OLD.verified_at OR NEW.classified_at IS NOT OLD.classified_at
+          OR NEW.superseded_by_memory_id IS NOT OLD.superseded_by_memory_id
+          OR NEW.merged_from IS NOT OLD.merged_from OR NEW.metadata_json IS NOT OLD.metadata_json
+          OR NEW.context_store_uuid IS NOT OLD.context_store_uuid
+          OR NEW.context_row_id IS NOT OLD.context_row_id
+          OR NEW.mural_cue IS NOT OLD.mural_cue OR NEW.mural_cue_hash IS NOT OLD.mural_cue_hash
+          OR NEW.mural_cue_at IS NOT OLD.mural_cue_at
+          OR NEW.mural_cue_rejection_count IS NOT OLD.mural_cue_rejection_count
+        BEGIN
+            INSERT INTO mc_changefeed(domain, op, module_row_id, full_row_snapshot, content_hash)
+            VALUES ('memories', 'update', NEW.id,
+                json_object(
+                    'id', NEW.id, 'project_path', NEW.project_path, 'category', NEW.category,
+                    'content', NEW.content, 'normalized_hash', NEW.normalized_hash,
+                    'importance', NEW.importance, 'scope', NEW.scope, 'shareable', NEW.shareable,
+                    'source_session_id', NEW.source_session_id, 'source_type', NEW.source_type,
+                    'seen_count', NEW.seen_count, 'retrieval_count', NEW.retrieval_count,
+                    'first_seen_at', NEW.first_seen_at, 'created_at', NEW.created_at,
+                    'updated_at', NEW.updated_at, 'last_seen_at', NEW.last_seen_at,
+                    'last_retrieved_at', NEW.last_retrieved_at, 'status', NEW.status,
+                    'expires_at', NEW.expires_at, 'verification_status', NEW.verification_status,
+                    'verified_at', NEW.verified_at, 'classified_at', NEW.classified_at,
+                    'superseded_by_memory_id', NEW.superseded_by_memory_id, 'merged_from', NEW.merged_from,
+                    'metadata_json', NEW.metadata_json, 'context_store_uuid', NEW.context_store_uuid,
+                    'context_row_id', NEW.context_row_id, 'mural_cue', NEW.mural_cue,
+                    'mural_cue_hash', NEW.mural_cue_hash, 'mural_cue_at', NEW.mural_cue_at,
+                    'mural_cue_rejection_count', NEW.mural_cue_rejection_count,
+                    'host_row_id', NEW.host_row_id), NEW.normalized_hash);
+        END;
+        CREATE TRIGGER mc_memories_feed_delete AFTER DELETE ON mc_memories BEGIN
+            INSERT INTO mc_changefeed(domain, op, module_row_id, full_row_snapshot, content_hash)
+            VALUES ('memories', 'tombstone', OLD.id,
+                json_object(
+                    'id', OLD.id, 'project_path', OLD.project_path, 'category', OLD.category,
+                    'content', OLD.content, 'normalized_hash', OLD.normalized_hash,
+                    'importance', OLD.importance, 'scope', OLD.scope, 'shareable', OLD.shareable,
+                    'source_session_id', OLD.source_session_id, 'source_type', OLD.source_type,
+                    'seen_count', OLD.seen_count, 'retrieval_count', OLD.retrieval_count,
+                    'first_seen_at', OLD.first_seen_at, 'created_at', OLD.created_at,
+                    'updated_at', OLD.updated_at, 'last_seen_at', OLD.last_seen_at,
+                    'last_retrieved_at', OLD.last_retrieved_at, 'status', OLD.status,
+                    'expires_at', OLD.expires_at, 'verification_status', OLD.verification_status,
+                    'verified_at', OLD.verified_at, 'classified_at', OLD.classified_at,
+                    'superseded_by_memory_id', OLD.superseded_by_memory_id, 'merged_from', OLD.merged_from,
+                    'metadata_json', OLD.metadata_json, 'context_store_uuid', OLD.context_store_uuid,
+                    'context_row_id', OLD.context_row_id, 'mural_cue', OLD.mural_cue,
+                    'mural_cue_hash', OLD.mural_cue_hash, 'mural_cue_at', OLD.mural_cue_at,
+                    'mural_cue_rejection_count', OLD.mural_cue_rejection_count,
+                    'host_row_id', OLD.host_row_id), OLD.normalized_hash);
+        END;
+        "#,
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -4622,7 +4720,10 @@ pub struct M1RevisionSnapshot {
 /// A project memory row projected for rendering into the prompt.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StoredMemory {
+    /// Module-local primary key used for storage and mutation-log joins.
     pub id: i64,
+    /// Agent-visible context.db id acknowledged by a host-backed harness.
+    pub host_row_id: Option<i64>,
     pub project_path: String,
     pub category: String,
     pub content: String,
@@ -4643,6 +4744,7 @@ pub struct StoredMemory {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StoredMemoryFull {
     pub id: i64,
+    pub host_row_id: Option<i64>,
     pub project_path: String,
     pub category: String,
     pub content: String,
@@ -4713,6 +4815,7 @@ pub const MEMORY_FEED_COLUMNS: &[&str] = &[
     "mural_cue_hash",
     "mural_cue_at",
     "mural_cue_rejection_count",
+    "host_row_id",
 ];
 
 /// Inputs for an additive ctx_memory write. Duplicate detection follows the plugin's
@@ -4947,6 +5050,12 @@ pub struct ChangefeedPage {
     pub rows: Vec<ChangefeedRow>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostMemoryIdentityAck {
+    pub module_row_id: i64,
+    pub host_row_id: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DreamTaskCommandRow {
     pub response_json: String,
@@ -5107,6 +5216,8 @@ pub enum RecordWrapupCommandOutcome {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleMemoryRow {
     pub id: i64,
+    /// State-sync memory ids originate in context.db and are already host-visible.
+    pub host_row_id: Option<i64>,
     pub project_path: String,
     pub category: String,
     pub content: String,
@@ -12153,6 +12264,58 @@ impl McStore {
         Ok(row)
     }
 
+    /// Record context.db ids acknowledged by a host mirror. The visibility marker makes a
+    /// memory rendered without an id eligible for reconsideration during the next correction pass.
+    pub fn acknowledge_host_memory_ids(
+        &self,
+        project_path: &str,
+        acknowledgements: &[HostMemoryIdentityAck],
+    ) -> Result<usize, McStoreError> {
+        self.inner
+            .with_conn_fenced(|tx| {
+                let mut changed = 0usize;
+                for acknowledgement in acknowledgements {
+                    let row = tx
+                        .query_row(
+                            "SELECT project_path, host_row_id FROM mc_memories WHERE id = ?1",
+                            params![acknowledgement.module_row_id],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+                        )
+                        .optional()?;
+                    let Some((row_project, current_host_id)) = row else {
+                        continue;
+                    };
+                    if row_project != project_path {
+                        return Err(rusqlite::Error::InvalidParameterName(format!(
+                            "memory {} belongs to a different project",
+                            acknowledgement.module_row_id
+                        )));
+                    }
+                    if current_host_id == Some(acknowledgement.host_row_id) {
+                        continue;
+                    }
+                    tx.execute(
+                        "UPDATE mc_memories SET host_row_id = ?1 WHERE id = ?2",
+                        params![acknowledgement.host_row_id, acknowledgement.module_row_id],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO mc_memory_mutation_log(
+                         project_path, mutation_type, target_memory_id, category, queued_at
+                     ) VALUES (?1, 'update', ?2, ?3, ?4)",
+                        params![
+                            project_path,
+                            acknowledgement.module_row_id,
+                            MEMORY_VISIBILITY_MUTATION_CATEGORY,
+                            current_time_ms(),
+                        ],
+                    )?;
+                    changed += 1;
+                }
+                Ok(changed)
+            })
+            .map_err(Into::into)
+    }
+
     /// Load multiple memory rows by id through the same workspace-visibility predicate the
     /// m0 render path uses. Missing ids are silently absent from the result; rows that the
     /// caller's project identity cannot see (own project always visible; foreign member
@@ -12189,7 +12352,7 @@ impl McStore {
         let mut binds = id_binds;
         binds.extend(visibility_binds);
         let sql = format!(
-            "SELECT id, project_path, category, content, normalized_hash, importance, scope,
+            "SELECT id, host_row_id, project_path, category, content, normalized_hash, importance, scope,
                     shareable, source_session_id, source_type, seen_count, retrieval_count,
                     first_seen_at, created_at, updated_at, last_seen_at, last_retrieved_at,
                     status, expires_at, verification_status, verified_at, classified_at,
@@ -13317,7 +13480,7 @@ impl McStore {
     ) -> Result<Vec<StoredMemory>, McStoreError> {
         let rows = self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, project_path, category, content, importance, status, expires_at,
+                "SELECT id, host_row_id, project_path, category, content, importance, status, expires_at,
                         superseded_by_memory_id, updated_at
                  FROM mc_memories
                  WHERE project_path = ?1
@@ -13329,20 +13492,86 @@ impl McStore {
                 .query_map(params![project_path, now_ms], |r| {
                     Ok(StoredMemory {
                         id: r.get(0)?,
-                        project_path: r.get(1)?,
-                        category: r.get(2)?,
-                        content: r.get(3)?,
-                        importance: r.get(4)?,
-                        status: r.get(5)?,
-                        expires_at: r.get(6)?,
-                        superseded_by_memory_id: r.get(7)?,
-                        updated_at: r.get(8)?,
+                        host_row_id: r.get(1)?,
+                        project_path: r.get(2)?,
+                        category: r.get(3)?,
+                        content: r.get(4)?,
+                        importance: r.get(5)?,
+                        status: r.get(6)?,
+                        expires_at: r.get(7)?,
+                        superseded_by_memory_id: r.get(8)?,
+                        updated_at: r.get(9)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(mapped)
         })?;
         Ok(rows)
+    }
+
+    pub fn module_memory_ids_for_host_ids(
+        &self,
+        project_paths: &[String],
+        host_ids: &[i64],
+    ) -> Result<HashMap<i64, i64>, McStoreError> {
+        if project_paths.is_empty() || host_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let project_placeholders = std::iter::repeat_n("?", project_paths.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let id_placeholders = std::iter::repeat_n("?", host_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT host_row_id, id FROM mc_memories
+              WHERE project_path IN ({project_placeholders})
+                AND host_row_id IN ({id_placeholders})"
+        );
+        let mut binds = project_paths
+            .iter()
+            .cloned()
+            .map(rusqlite::types::Value::from)
+            .collect::<Vec<_>>();
+        binds.extend(host_ids.iter().copied().map(rusqlite::types::Value::from));
+        self.inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(&sql)?;
+                let rows = statement
+                    .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<Result<HashMap<_, _>, _>>()?;
+                Ok(rows)
+            })
+            .map_err(Into::into)
+    }
+
+    pub fn host_memory_ids_for_module_ids(
+        &self,
+        module_ids: &[i64],
+    ) -> Result<HashMap<i64, i64>, McStoreError> {
+        if module_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = std::iter::repeat_n("?", module_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, host_row_id FROM mc_memories
+              WHERE id IN ({placeholders}) AND host_row_id IS NOT NULL"
+        );
+        self.inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(&sql)?;
+                let rows = statement
+                    .query_map(rusqlite::params_from_iter(module_ids.iter()), |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<Result<HashMap<_, _>, _>>()?;
+                Ok(rows)
+            })
+            .map_err(Into::into)
     }
 
     /// The coalesced memory corrections to render as the delta across the workspace union.
@@ -13579,8 +13808,8 @@ impl McStore {
 
         let rows = self.inner.with_conn(|conn| {
             let sql = format!(
-                "SELECT id, {path_column}, category, content, importance, status, expires_at,
-                        superseded_by_memory_id, updated_at
+"SELECT id, host_row_id, {path_column}, category, content, importance, status, expires_at,
+                         superseded_by_memory_id, updated_at
                    FROM {table}
                   WHERE {pool_filter}
                   ORDER BY COALESCE(importance, 50) DESC, id ASC"
@@ -13590,14 +13819,15 @@ impl McStore {
                 .query_map(rusqlite::params_from_iter(binds.iter()), |r| {
                     Ok(StoredMemory {
                         id: r.get(0)?,
-                        project_path: r.get(1)?,
-                        category: r.get(2)?,
-                        content: r.get(3)?,
-                        importance: r.get(4)?,
-                        status: r.get(5)?,
-                        expires_at: r.get(6)?,
-                        superseded_by_memory_id: r.get(7)?,
-                        updated_at: r.get(8)?,
+                        host_row_id: r.get(1)?,
+                        project_path: r.get(2)?,
+                        category: r.get(3)?,
+                        content: r.get(4)?,
+                        importance: r.get(5)?,
+                        status: r.get(6)?,
+                        expires_at: r.get(7)?,
+                        superseded_by_memory_id: r.get(8)?,
+                        updated_at: r.get(9)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -13628,8 +13858,8 @@ impl McStore {
                 now_ms,
             );
             let sql = format!(
-                "SELECT id, {path_column}, category, content, importance, status, expires_at,
-                        superseded_by_memory_id, updated_at
+"SELECT id, host_row_id, {path_column}, category, content, importance, status, expires_at,
+                         superseded_by_memory_id, updated_at
                    FROM {table}
                   WHERE {pool_filter}
                   ORDER BY COALESCE(importance, 50) DESC, id ASC"
@@ -13639,14 +13869,15 @@ impl McStore {
                 .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
                     Ok(StoredMemory {
                         id: row.get(0)?,
-                        project_path: row.get(1)?,
-                        category: row.get(2)?,
-                        content: row.get(3)?,
-                        importance: row.get(4)?,
-                        status: row.get(5)?,
-                        expires_at: row.get(6)?,
-                        superseded_by_memory_id: row.get(7)?,
-                        updated_at: row.get(8)?,
+                        host_row_id: row.get(1)?,
+                        project_path: row.get(2)?,
+                        category: row.get(3)?,
+                        content: row.get(4)?,
+                        importance: row.get(5)?,
+                        status: row.get(6)?,
+                        expires_at: row.get(7)?,
+                        superseded_by_memory_id: row.get(8)?,
+                        updated_at: row.get(9)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -15927,8 +16158,8 @@ impl McStore {
                                 ELSE MAX(classified_at, ?21)
                             END,
                             superseded_by_memory_id=?22, merged_from=?23, metadata_json=?24,
-                            context_store_uuid=?25, context_row_id=?26
-                      WHERE id=?28",
+                            context_store_uuid=?25, context_row_id=?26, host_row_id=?28
+                      WHERE id=?29",
                 )?;
                 let mut memory_upsert = tx.prepare(
                     "INSERT INTO mc_memories
@@ -15936,9 +16167,9 @@ impl McStore {
                          source_session_id, source_type, seen_count, retrieval_count, first_seen_at,
                          created_at, updated_at, last_seen_at, last_retrieved_at, status, expires_at,
                          verification_status, verified_at, classified_at, superseded_by_memory_id,
-                         merged_from, metadata_json, context_store_uuid, context_row_id)
+                         merged_from, metadata_json, context_store_uuid, context_row_id, host_row_id)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                             ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
+                             ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
                      ON CONFLICT(context_store_uuid, context_row_id) DO UPDATE SET
                         project_path=excluded.project_path, category=excluded.category,
                         content=excluded.content, normalized_hash=excluded.normalized_hash,
@@ -15959,8 +16190,9 @@ impl McStore {
                             WHEN excluded.classified_at IS NULL THEN classified_at
                             ELSE MAX(classified_at, excluded.classified_at)
                         END,
-                        superseded_by_memory_id=excluded.superseded_by_memory_id,
-                        merged_from=excluded.merged_from, metadata_json=excluded.metadata_json",
+                         superseded_by_memory_id=excluded.superseded_by_memory_id,
+                         merged_from=excluded.merged_from, metadata_json=excluded.metadata_json,
+                         host_row_id=excluded.host_row_id",
                 )?;
                 let mut memory_by_source = tx.prepare(
                     "SELECT id FROM mc_memories
@@ -16094,6 +16326,7 @@ impl McStore {
                             context_store_uuid,
                             prepared_row.source_row_id,
                             i64::from(force_incoming_content),
+                            prepared_row.source_row_id,
                             selected_id,
                         ])?;
                     } else {
@@ -16123,6 +16356,7 @@ impl McStore {
                             text("merged_from"),
                             text("metadata_json"),
                             context_store_uuid,
+                            prepared_row.source_row_id,
                             prepared_row.source_row_id,
                         ])?;
                     }
@@ -16409,6 +16643,46 @@ impl McStore {
                     params![domain],
                     |row| row.get(0),
                 )
+            })
+            .map_err(Into::into)
+    }
+
+    /// Return the latest complete feed snapshot for one live memory without advancing a
+    /// consumer cursor. Host adapters use this bounded path to obtain a freshly written row's
+    /// context.db id before replying; the ordinary cursor drain may replay it idempotently.
+    pub fn pull_memory_changefeed_row(
+        &self,
+        module_row_id: i64,
+    ) -> Result<Option<ChangefeedRow>, McStoreError> {
+        self.inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT feed_seq, domain, op, module_row_id, full_row_snapshot, content_hash
+                       FROM mc_changefeed
+                      WHERE domain = 'memories' AND module_row_id = ?1 AND op != 'tombstone'
+                      ORDER BY feed_seq DESC LIMIT 1",
+                    params![module_row_id],
+                    |row| {
+                        let snapshot: String = row.get(4)?;
+                        Ok(ChangefeedRow {
+                            feed_seq: row.get(0)?,
+                            domain: row.get(1)?,
+                            op: row.get(2)?,
+                            module_row_id: row.get(3)?,
+                            full_row_snapshot: serde_json::from_str(&snapshot).map_err(
+                                |error| {
+                                    rusqlite::Error::FromSqlConversionFailure(
+                                        4,
+                                        rusqlite::types::Type::Text,
+                                        Box::new(error),
+                                    )
+                                },
+                            )?,
+                            content_hash: row.get(5)?,
+                        })
+                    },
+                )
+                .optional()
             })
             .map_err(Into::into)
     }
@@ -16705,7 +16979,7 @@ fn replace_authority_memories_tx(
                         verification_status = ?20, verified_at = ?21, classified_at = ?22,
                         superseded_by_memory_id = ?23, merged_from = ?24, metadata_json = ?25,
                         mural_cue = ?26, mural_cue_hash = ?27, mural_cue_at = ?28,
-                        mural_cue_rejection_count = ?29
+                        mural_cue_rejection_count = ?29, host_row_id = ?30
                   WHERE id = ?1",
                 params![
                     existing_id,
@@ -16737,6 +17011,7 @@ fn replace_authority_memories_tx(
                     memory.mural_cue_hash.as_deref(),
                     memory.mural_cue_at,
                     memory.mural_cue_rejection_count,
+                    memory.host_row_id.or(Some(memory.id)),
                 ],
             )?;
             continue;
@@ -16747,9 +17022,9 @@ fn replace_authority_memories_tx(
                 scope, shareable, source_session_id, source_type, seen_count, retrieval_count,
                 first_seen_at, created_at, updated_at, last_seen_at, last_retrieved_at,
                 status, expires_at, verification_status, verified_at, classified_at,
-                 superseded_by_memory_id, merged_from, metadata_json, mural_cue, mural_cue_hash,
-                 mural_cue_at, mural_cue_rejection_count)
-              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
+                  superseded_by_memory_id, merged_from, metadata_json, mural_cue, mural_cue_hash,
+                  mural_cue_at, mural_cue_rejection_count, host_row_id)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)
              ON CONFLICT(id) DO UPDATE SET
                 project_path = excluded.project_path,
                 category = excluded.category,
@@ -16777,8 +17052,9 @@ fn replace_authority_memories_tx(
                  metadata_json = excluded.metadata_json,
                  mural_cue = excluded.mural_cue,
                  mural_cue_hash = excluded.mural_cue_hash,
-                 mural_cue_at = excluded.mural_cue_at,
-                 mural_cue_rejection_count = excluded.mural_cue_rejection_count
+                  mural_cue_at = excluded.mural_cue_at,
+                  mural_cue_rejection_count = excluded.mural_cue_rejection_count,
+                  host_row_id = excluded.host_row_id
                ON CONFLICT(project_path, category, normalized_hash) DO UPDATE SET
                  content = excluded.content,
                  importance = excluded.importance,
@@ -16803,8 +17079,9 @@ fn replace_authority_memories_tx(
                  metadata_json = excluded.metadata_json,
                  mural_cue = excluded.mural_cue,
                  mural_cue_hash = excluded.mural_cue_hash,
-                 mural_cue_at = excluded.mural_cue_at,
-                 mural_cue_rejection_count = excluded.mural_cue_rejection_count",
+                  mural_cue_at = excluded.mural_cue_at,
+                  mural_cue_rejection_count = excluded.mural_cue_rejection_count,
+                  host_row_id = excluded.host_row_id",
             params![
                 memory.id,
                 &memory.project_path,
@@ -16835,6 +17112,7 @@ fn replace_authority_memories_tx(
                 memory.mural_cue_hash.as_deref(),
                 memory.mural_cue_at,
                 memory.mural_cue_rejection_count,
+                memory.host_row_id.or(Some(memory.id)),
             ],
         )?;
     }
@@ -17410,7 +17688,7 @@ fn promote_facts_tx(
 }
 
 const MEMORY_FULL_SELECT_COLUMNS: &str =
-    "SELECT id, project_path, category, content, normalized_hash, importance, scope,
+    "SELECT id, host_row_id, project_path, category, content, normalized_hash, importance, scope,
             shareable, source_session_id, source_type, seen_count, retrieval_count,
             first_seen_at, created_at, updated_at, last_seen_at, last_retrieved_at,
             status, expires_at, verification_status, verified_at, classified_at,
@@ -17419,7 +17697,7 @@ const MEMORY_FULL_SELECT_COLUMNS: &str =
             mural_cue_rejection_count";
 
 const MEMORY_FULL_SELECT_BY_ID: &str =
-    "SELECT id, project_path, category, content, normalized_hash, importance, scope,
+    "SELECT id, host_row_id, project_path, category, content, normalized_hash, importance, scope,
             shareable, source_session_id, source_type, seen_count, retrieval_count,
             first_seen_at, created_at, updated_at, last_seen_at, last_retrieved_at,
             status, expires_at, verification_status, verified_at, classified_at,
@@ -17431,40 +17709,41 @@ const MEMORY_FULL_SELECT_BY_ID: &str =
 fn stored_memory_full_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMemoryFull> {
     Ok(StoredMemoryFull {
         id: r.get(0)?,
-        project_path: r.get(1)?,
-        category: r.get(2)?,
-        content: r.get(3)?,
-        normalized_hash: r.get(4)?,
-        importance: r.get::<_, Option<i64>>(5)?.map(|v| v as i32),
-        scope: r.get(6)?,
-        shareable: r.get::<_, i64>(7)? as i32,
-        source_session_id: r.get(8)?,
-        source_type: r.get(9)?,
-        seen_count: r.get::<_, Option<i64>>(10)?.unwrap_or(0),
-        retrieval_count: r.get::<_, Option<i64>>(11)?.unwrap_or(0),
-        first_seen_at: r.get(12)?,
-        created_at: r.get(13)?,
-        updated_at: r.get(14)?,
-        last_seen_at: r.get(15)?,
-        last_retrieved_at: r.get(16)?,
+        host_row_id: r.get(1)?,
+        project_path: r.get(2)?,
+        category: r.get(3)?,
+        content: r.get(4)?,
+        normalized_hash: r.get(5)?,
+        importance: r.get::<_, Option<i64>>(6)?.map(|v| v as i32),
+        scope: r.get(7)?,
+        shareable: r.get::<_, i64>(8)? as i32,
+        source_session_id: r.get(9)?,
+        source_type: r.get(10)?,
+        seen_count: r.get::<_, Option<i64>>(11)?.unwrap_or(0),
+        retrieval_count: r.get::<_, Option<i64>>(12)?.unwrap_or(0),
+        first_seen_at: r.get(13)?,
+        created_at: r.get(14)?,
+        updated_at: r.get(15)?,
+        last_seen_at: r.get(16)?,
+        last_retrieved_at: r.get(17)?,
         status: r
-            .get::<_, Option<String>>(17)?
+            .get::<_, Option<String>>(18)?
             .unwrap_or_else(|| "active".to_string()),
-        expires_at: r.get(18)?,
+        expires_at: r.get(19)?,
         verification_status: r
-            .get::<_, Option<String>>(19)?
+            .get::<_, Option<String>>(20)?
             .unwrap_or_else(|| "unverified".to_string()),
-        verified_at: r.get(20)?,
-        classified_at: r.get(21)?,
-        superseded_by_memory_id: r.get(22)?,
-        merged_from: r.get(23)?,
-        metadata_json: r.get(24)?,
-        context_store_uuid: r.get(25)?,
-        context_row_id: r.get(26)?,
-        mural_cue: r.get(27)?,
-        mural_cue_hash: r.get(28)?,
-        mural_cue_at: r.get(29)?,
-        mural_cue_rejection_count: r.get::<_, Option<i64>>(30)?.unwrap_or(0),
+        verified_at: r.get(21)?,
+        classified_at: r.get(22)?,
+        superseded_by_memory_id: r.get(23)?,
+        merged_from: r.get(24)?,
+        metadata_json: r.get(25)?,
+        context_store_uuid: r.get(26)?,
+        context_row_id: r.get(27)?,
+        mural_cue: r.get(28)?,
+        mural_cue_hash: r.get(29)?,
+        mural_cue_at: r.get(30)?,
+        mural_cue_rejection_count: r.get::<_, Option<i64>>(31)?.unwrap_or(0),
     })
 }
 
@@ -17558,6 +17837,7 @@ fn memory_feed_snapshot(memory: &StoredMemoryFull, mapping: Value, mapping_origi
         "mural_cue_hash": memory.mural_cue_hash,
         "mural_cue_at": memory.mural_cue_at,
         "mural_cue_rejection_count": memory.mural_cue_rejection_count,
+        "host_row_id": memory.host_row_id,
         "mapping": mapping,
         "mapping_origin": mapping_origin,
     })

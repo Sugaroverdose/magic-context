@@ -2658,18 +2658,32 @@ fn compose_additive_m0(
             revision: MemoryRevision::default(),
         }
     };
-    let source_name_by_id = membership
+    let source_name_by_module_id = membership
         .as_ref()
         .map(|value| workspace_source_names(&snapshot.memories, value))
         .unwrap_or_default();
     let selected_memories = trim_memories_to_budget(
         snapshot.memories,
         membership.as_ref(),
-        &source_name_by_id,
+        &source_name_by_module_id,
         ctx.memory_budget_tokens,
         estimate_tokens,
     );
-    let rendered_memory_ids = selected_memories.iter().map(|memory| memory.id).collect();
+    let host_backed_memory_ids = serializer_profile != Some(SerializerProfile::ClaudeCodeAnthropic);
+    let mut rendered_memories = selected_memories;
+    if host_backed_memory_ids {
+        for memory in &mut rendered_memories {
+            memory.id = memory.host_row_id.unwrap_or(0);
+        }
+    }
+    let source_name_by_id = membership
+        .as_ref()
+        .map(|value| workspace_source_names(&rendered_memories, value))
+        .unwrap_or_default();
+    let rendered_memory_ids = rendered_memories
+        .iter()
+        .filter_map(|memory| (memory.id > 0).then_some(memory.id))
+        .collect();
     let user_profile = if ctx.memory_enabled {
         store.load_active_user_memories()?
     } else {
@@ -2695,7 +2709,7 @@ fn compose_additive_m0(
             user_profile: &user_profile,
             covered_system_messages: &[],
             compartments: &[],
-            memories: &selected_memories,
+            memories: &rendered_memories,
             source_name_by_id: &source_name_by_id,
             history_budget_tokens: 0.0,
             decay_pressure_multiplier: 1.0,
@@ -4748,6 +4762,8 @@ fn apply_once(
                         history_budget_tokens: ctx.history_budget_tokens,
                         covered_system_messages: &covered_system_messages,
                         memory_enabled: ctx.memory_enabled,
+                        host_backed_memory_ids: serializer_profile
+                            != Some(SerializerProfile::ClaudeCodeAnthropic),
                         memory_budget_tokens: ctx.memory_budget_tokens,
                         user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                         inject_docs: ctx.inject_docs,
@@ -4851,6 +4867,8 @@ fn apply_once(
                                     history_budget_tokens: ctx.history_budget_tokens,
                                     covered_system_messages: &recut_covered_system_messages,
                                     memory_enabled: ctx.memory_enabled,
+                                    host_backed_memory_ids: serializer_profile
+                                        != Some(SerializerProfile::ClaudeCodeAnthropic),
                                     memory_budget_tokens: ctx.memory_budget_tokens,
                                     user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                                     inject_docs: ctx.inject_docs,
@@ -5100,6 +5118,8 @@ fn apply_once(
                             history_budget_tokens: ctx.history_budget_tokens,
                             covered_system_messages: &covered_system_messages,
                             memory_enabled: ctx.memory_enabled,
+                            host_backed_memory_ids: serializer_profile
+                                != Some(SerializerProfile::ClaudeCodeAnthropic),
                             memory_budget_tokens: ctx.memory_budget_tokens,
                             user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                             inject_docs: ctx.inject_docs,
@@ -15982,6 +16002,18 @@ pub(crate) mod tests {
         request
     }
 
+    fn acknowledge_test_host_memory(store: &McStore, project_path: &str, id: i64) {
+        store
+            .acknowledge_host_memory_ids(
+                project_path,
+                &[mc_store::HostMemoryIdentityAck {
+                    module_row_id: id,
+                    host_row_id: id,
+                }],
+            )
+            .unwrap();
+    }
+
     fn memory_input<'a>(
         project_path: &'a str,
         category: &'a str,
@@ -19768,6 +19800,7 @@ pub(crate) mod tests {
         let memory_id = s
             .insert_memory(memory_input("git:proj", "ARCHITECTURE", "original", 0))
             .unwrap();
+        acknowledge_test_host_memory(&s, "git:proj", memory_id);
         let execute_req = with_usage(req("ses", "cfg0", vec![item("a", 1, "raw")]), 70, 100);
         let boot = run(&s, &execute_req, &spine());
         assert_eq!(boot.action, "HARD");
@@ -26795,6 +26828,7 @@ pub(crate) mod tests {
         let memory_id = s
             .insert_memory(memory_input("git:proj", "ARCHITECTURE", "original", 0))
             .unwrap();
+        acknowledge_test_host_memory(&s, "git:proj", memory_id);
         s.replace_compartments("ses", &[comp(1, 1, 1, "m1msg", "SUMMARY")])
             .unwrap();
         let before = run(
@@ -26995,6 +27029,7 @@ pub(crate) mod tests {
         // a memory is in the m0 baseline (seeded before bootstrap → in the manifest)
         s.seed_memory(5, "git:proj", "ARCHITECTURE", "original", 70)
             .unwrap();
+        acknowledge_test_host_memory(&s, "git:proj", 5);
         s.replace_compartments("ses", &[comp(1, 1, 1, "m1msg", "SUMMARY")])
             .unwrap();
         let before = run(
@@ -28334,6 +28369,7 @@ pub(crate) mod tests {
                     70,
                 )
                 .unwrap();
+                acknowledge_test_host_memory(s, "git:proj", id);
             })
             .collect()
     }

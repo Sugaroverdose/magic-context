@@ -276,6 +276,14 @@ export interface RustModeModuleClient extends ModuleStateSyncClient {
         live_only?: boolean;
         projectRoot?: string;
     }): Promise<{ page: import("../../features/magic-context/context-authority").ChangefeedPage }>;
+    mirrorMemory?(args: { module_row_id: number; projectRoot?: string }): Promise<{
+        row: import("../../features/magic-context/context-authority").ChangefeedRow | null;
+    }>;
+    memoryIdentityAck?(args: {
+        project: string;
+        rows: Array<{ module_row_id: number; context_row_id: number }>;
+        projectRoot?: string;
+    }): Promise<{ acknowledged: number }>;
     deleteSession?(sessionId: string, projectRoot: string): Promise<void>;
     closeSession?(sessionId: string): void;
     getCompartmentsAfter?(
