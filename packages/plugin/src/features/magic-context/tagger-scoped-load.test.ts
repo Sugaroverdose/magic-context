@@ -14,8 +14,12 @@
  */
 
 import { beforeEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Database as DatabaseType } from "../../shared/sqlite";
 import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
 import {
@@ -154,14 +158,14 @@ describe("tagger scoped initFromDb", () => {
         expect(next).toBe(11);
     });
 
-    it("a floor change forces exactly one reload; same floor + same data_version cache-HITs", () => {
+    it("a floor change forces exactly one reload; same floor + same tags version cache-HITs", () => {
         const s = "ses-1";
         for (let n = 1; n <= 10; n++) insertMessageTag(db, s, `msg_${n}:p0`, n);
         const tagger = createTagger();
         const tracker = trackAssignmentReloads(db);
         try {
             tagger.initFromDb(s, db, 8); // reload #1
-            tagger.initFromDb(s, db, 8); // same floor + dv → HIT, no reload
+            tagger.initFromDb(s, db, 8); // same floor + version → HIT, no reload
             expect(tracker.count()).toBe(1);
             tagger.initFromDb(s, db, 3); // floor drop (revert) → reload #2
             expect(tracker.count()).toBe(2);
@@ -169,6 +173,39 @@ describe("tagger scoped initFromDb", () => {
             expect(tagger.getTag(s, "msg_3:p0", "message")).toBe(3);
         } finally {
             tracker.restore();
+        }
+    });
+
+    it("keeps this session hot across foreign writes to another session", () => {
+        const directory = mkdtempSync(join(tmpdir(), "mc-tagger-version-"));
+        const path = join(directory, "context.db");
+        const primary = new Database(path);
+        const foreign = new Database(path);
+        try {
+            initializeDatabase(primary);
+            runMigrations(primary);
+            const sessionId = "ses-target";
+            insertMessageTag(primary, sessionId, "msg_1:p0", 1);
+
+            const tagger = createTagger();
+            const tracker = trackAssignmentReloads(primary);
+            try {
+                tagger.initFromDb(sessionId, primary);
+                insertMessageTag(foreign, "ses-unrelated", "other:p0", 1);
+                tagger.initFromDb(sessionId, primary);
+                expect(tracker.count()).toBe(1);
+
+                insertMessageTag(foreign, sessionId, "msg_2:p0", 2);
+                tagger.initFromDb(sessionId, primary);
+                expect(tracker.count()).toBe(2);
+                expect(tagger.getTag(sessionId, "msg_2:p0", "message")).toBe(2);
+            } finally {
+                tracker.restore();
+            }
+        } finally {
+            closeQuietly(foreign);
+            closeQuietly(primary);
+            rmSync(directory, { recursive: true, force: true });
         }
     });
 

@@ -53,7 +53,7 @@ describe("migration v85: relabel OpenCode 1.x opencode2 mislabels", () => {
 
             expect(columnNames(db, "session_meta")).toContain("protected_tokens_effective");
             expect(columnNames(db, "session_meta")).toContain("harness");
-            expect(LATEST_SUPPORTED_VERSION).toBe(85);
+            expect(LATEST_SUPPORTED_VERSION).toBe(86);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
             expect(
                 db
