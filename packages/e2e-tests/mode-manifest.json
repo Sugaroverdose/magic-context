@@ -601,6 +601,19 @@
 			]
 		},
 		{
+			"path": "tests/rust-cold-seed-tag-surface.test.ts",
+			"tier": "rust-only",
+			"invocation": {
+				"ts": false,
+				"rust": true
+			},
+			"rationale": "a cold state-sync seed renders every tag on its first coordinating HARD, replays byte-identically, and appends without rewriting the stable prefix",
+			"contract_refs": [
+				"RUST-E2E",
+				"COLD-SEED-TAG-SURFACE"
+			]
+		},
+		{
 			"path": "tests/rust-ctx-reduce-roundtrip.test.ts",
 			"tier": "rust-only",
 			"invocation": {
