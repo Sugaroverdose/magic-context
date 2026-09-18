@@ -6071,6 +6071,38 @@ pub enum NoteDismissOutcome {
     AlreadyDismissed,
 }
 
+/// This error may contain internal module-store row ids. Transaction-scoped callers must convert
+/// those ids to host-visible memory identities before exposing the error to an agent, so
+/// host-backed harnesses do not display internal database ids directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FacadeMemoryMutationError {
+    Storage(String),
+    Unavailable { id: i64 },
+    DuplicateContent { id: i64, host_id: Option<i64> },
+    InvalidMerge,
+}
+
+impl FacadeMemoryMutationError {
+    fn storage(error: impl std::fmt::Display) -> Self {
+        Self::Storage(error.to_string())
+    }
+}
+
+impl std::fmt::Display for FacadeMemoryMutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(error) => f.write_str(error),
+            Self::Unavailable { id } => write!(f, "memory {id} was not found"),
+            Self::DuplicateContent { id, .. } => {
+                write!(f, "memory content already exists as ID {id}")
+            }
+            Self::InvalidMerge => f.write_str("memories could not be merged"),
+        }
+    }
+}
+
+impl std::error::Error for FacadeMemoryMutationError {}
+
 /// Transaction-scoped ports used by the module facade. Every method operates on the transaction
 /// owned by `with_facade_command`, so the mutation and its response ledger row commit together.
 pub struct FacadeMutationTxn<'a> {
@@ -6136,34 +6168,38 @@ impl<'a> FacadeMutationTxn<'a> {
         content: &str,
         category: Option<&str>,
         now_ms: i64,
-    ) -> Result<Option<StoredMemoryFull>, String> {
-        let Some(memory) = load_memory_full_tx(self.tx, id).map_err(|error| error.to_string())?
+    ) -> Result<StoredMemoryFull, FacadeMemoryMutationError> {
+        let Some(memory) =
+            load_memory_full_tx(self.tx, id).map_err(FacadeMemoryMutationError::storage)?
         else {
-            return Ok(None);
+            return Err(FacadeMemoryMutationError::Unavailable { id });
         };
         if memory.project_path != project_path
             || memory.superseded_by_memory_id.is_some()
             || !matches!(memory.status.as_str(), "active" | "permanent")
         {
-            return Ok(None);
+            return Err(FacadeMemoryMutationError::Unavailable { id });
         }
         let target_category = category.unwrap_or(&memory.category);
         let normalized_hash = compute_normalized_memory_hash(content);
-        let duplicate_id = self
+        let duplicate = self
             .tx
             .query_row(
-                "SELECT id FROM mc_memories
+                "SELECT id, host_row_id FROM mc_memories
                   WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3
                   LIMIT 1",
                 params![project_path, target_category, normalized_hash],
-                |row| row.get::<_, i64>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
             )
             .optional()
-            .map_err(|error| error.to_string())?;
-        if let Some(duplicate_id) = duplicate_id.filter(|duplicate_id| *duplicate_id != id) {
-            return Err(format!(
-                "memory content already exists as ID {duplicate_id}"
-            ));
+            .map_err(FacadeMemoryMutationError::storage)?;
+        if let Some((duplicate_id, host_id)) =
+            duplicate.filter(|(duplicate_id, _)| *duplicate_id != id)
+        {
+            return Err(FacadeMemoryMutationError::DuplicateContent {
+                id: duplicate_id,
+                host_id,
+            });
         }
         self.tx
             .execute(
@@ -6181,7 +6217,7 @@ impl<'a> FacadeMutationTxn<'a> {
                   WHERE id = ?5",
                 params![content, target_category, normalized_hash, now_ms, id],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(FacadeMemoryMutationError::storage)?;
         append_memory_mutation_tx(
             self.tx,
             MemoryMutationAppend {
@@ -6194,8 +6230,10 @@ impl<'a> FacadeMutationTxn<'a> {
                 queued_at: now_ms,
             },
         )
-        .map_err(|error| error.to_string())?;
-        load_memory_full_tx(self.tx, id).map_err(|error| error.to_string())
+        .map_err(FacadeMemoryMutationError::storage)?;
+        load_memory_full_tx(self.tx, id)
+            .map_err(FacadeMemoryMutationError::storage)?
+            .ok_or(FacadeMemoryMutationError::Unavailable { id })
     }
 
     pub fn archive_memories(
@@ -6204,19 +6242,19 @@ impl<'a> FacadeMutationTxn<'a> {
         ids: &[i64],
         reason: Option<&str>,
         now_ms: i64,
-    ) -> Result<Option<Vec<i64>>, String> {
+    ) -> Result<Vec<i64>, FacadeMemoryMutationError> {
         let mut memories = Vec::with_capacity(ids.len());
         for id in ids {
             let Some(memory) =
-                load_memory_full_tx(self.tx, *id).map_err(|error| error.to_string())?
+                load_memory_full_tx(self.tx, *id).map_err(FacadeMemoryMutationError::storage)?
             else {
-                return Ok(None);
+                return Err(FacadeMemoryMutationError::Unavailable { id: *id });
             };
             if memory.project_path != project_path
                 || memory.superseded_by_memory_id.is_some()
                 || !matches!(memory.status.as_str(), "active" | "permanent" | "archived")
             {
-                return Ok(None);
+                return Err(FacadeMemoryMutationError::Unavailable { id: *id });
             }
             memories.push(memory);
         }
@@ -6235,14 +6273,14 @@ impl<'a> FacadeMutationTxn<'a> {
                           WHERE id = ?3",
                         params![metadata_json, now_ms, memory.id],
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(FacadeMemoryMutationError::storage)?;
             } else {
                 self.tx
                     .execute(
                         "UPDATE mc_memories SET status = 'archived', updated_at = ?1 WHERE id = ?2",
                         params![now_ms, memory.id],
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(FacadeMemoryMutationError::storage)?;
             }
             append_memory_mutation_tx(
                 self.tx,
@@ -6256,10 +6294,10 @@ impl<'a> FacadeMutationTxn<'a> {
                     queued_at: now_ms,
                 },
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(FacadeMemoryMutationError::storage)?;
             archived.push(memory.id);
         }
-        Ok(Some(archived))
+        Ok(archived)
     }
 
     pub fn merge_memories_canonical(
@@ -6269,15 +6307,16 @@ impl<'a> FacadeMutationTxn<'a> {
         merged_content: &str,
         source_session_id: Option<&str>,
         now_ms: i64,
-    ) -> Result<Option<(StoredMemoryFull, Vec<i64>)>, String> {
+    ) -> Result<(StoredMemoryFull, Vec<i64>), FacadeMemoryMutationError> {
         if ids.len() < 2 {
-            return Ok(None);
+            return Err(FacadeMemoryMutationError::InvalidMerge);
         }
         let mut rows = Vec::with_capacity(ids.len());
         for id in ids {
-            let Some(row) = load_memory_full_tx(self.tx, *id).map_err(|error| error.to_string())?
+            let Some(row) =
+                load_memory_full_tx(self.tx, *id).map_err(FacadeMemoryMutationError::storage)?
             else {
-                return Ok(None);
+                return Err(FacadeMemoryMutationError::Unavailable { id: *id });
             };
             if row.project_path != project_path
                 || row.superseded_by_memory_id.is_some()
@@ -6286,30 +6325,30 @@ impl<'a> FacadeMutationTxn<'a> {
                     .first()
                     .is_some_and(|first: &StoredMemoryFull| first.category != row.category)
             {
-                return Ok(None);
+                return Err(FacadeMemoryMutationError::Unavailable { id: *id });
             }
             rows.push(row);
         }
 
         let category = rows[0].category.clone();
         let normalized_hash = compute_normalized_memory_hash(merged_content);
-        let matching_id = self
+        let matching = self
             .tx
             .query_row(
-                "SELECT id FROM mc_memories
+                "SELECT id, host_row_id FROM mc_memories
                   WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3
                   LIMIT 1",
                 params![project_path, category, normalized_hash],
-                |row| row.get::<_, i64>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
             )
             .optional()
-            .map_err(|error| error.to_string())?;
-        if let Some(id) = matching_id.filter(|id| !ids.contains(id)) {
-            return Err(format!("memory content already exists as ID {id}"));
+            .map_err(FacadeMemoryMutationError::storage)?;
+        if let Some((id, host_id)) = matching.filter(|(id, _)| !ids.contains(id)) {
+            return Err(FacadeMemoryMutationError::DuplicateContent { id, host_id });
         }
 
-        let created_canonical = matching_id.is_none();
-        let target_id = if let Some(id) = matching_id {
+        let created_canonical = matching.is_none();
+        let target_id = if let Some((id, _)) = matching {
             id
         } else {
             self.insert_memory(InsertMemoryInput {
@@ -6323,18 +6362,16 @@ impl<'a> FacadeMutationTxn<'a> {
                 expires_at: None,
                 metadata_json: None,
                 now_ms,
-            })?
+            })
+            .map_err(FacadeMemoryMutationError::Storage)?
         };
         let source_ids = ids
             .iter()
             .copied()
             .filter(|id| *id != target_id)
             .collect::<Vec<_>>();
-        let Some(mut merged) =
-            self.merge_memories(project_path, target_id, &source_ids, merged_content, now_ms)?
-        else {
-            return Ok(None);
-        };
+        let mut merged =
+            self.merge_memories(project_path, target_id, &source_ids, merged_content, now_ms)?;
 
         if created_canonical {
             // The TypeScript-compatible merge path inserts the new canonical row with
@@ -6353,7 +6390,7 @@ impl<'a> FacadeMutationTxn<'a> {
                       WHERE id = ?4",
                     params![seen_count, retrieval_count, merged_from, target_id],
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(FacadeMemoryMutationError::storage)?;
             self.tx
                 .execute(
                     "DELETE FROM mc_memory_mutation_log
@@ -6364,12 +6401,12 @@ impl<'a> FacadeMutationTxn<'a> {
                       )",
                     params![project_path, target_id, now_ms],
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(FacadeMemoryMutationError::storage)?;
             merged = load_memory_full_tx(self.tx, target_id)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "canonical memory disappeared during merge".to_string())?;
+                .map_err(FacadeMemoryMutationError::storage)?
+                .ok_or(FacadeMemoryMutationError::Unavailable { id: target_id })?;
         }
-        Ok(Some((merged, source_ids)))
+        Ok((merged, source_ids))
     }
 
     pub fn merge_memories(
@@ -6379,17 +6416,17 @@ impl<'a> FacadeMutationTxn<'a> {
         source_ids: &[i64],
         merged_content: &str,
         now_ms: i64,
-    ) -> Result<Option<StoredMemoryFull>, String> {
+    ) -> Result<StoredMemoryFull, FacadeMemoryMutationError> {
         let Some(target) =
-            load_memory_full_tx(self.tx, target_id).map_err(|error| error.to_string())?
+            load_memory_full_tx(self.tx, target_id).map_err(FacadeMemoryMutationError::storage)?
         else {
-            return Ok(None);
+            return Err(FacadeMemoryMutationError::Unavailable { id: target_id });
         };
         if target.project_path != project_path
             || target.superseded_by_memory_id.is_some()
             || !matches!(target.status.as_str(), "active" | "permanent")
         {
-            return Ok(None);
+            return Err(FacadeMemoryMutationError::Unavailable { id: target_id });
         }
         let mut unique_sources = source_ids.to_vec();
         unique_sources.sort_unstable();
@@ -6398,40 +6435,38 @@ impl<'a> FacadeMutationTxn<'a> {
             || unique_sources.len() != source_ids.len()
             || unique_sources.binary_search(&target_id).is_ok()
         {
-            return Ok(None);
+            return Err(FacadeMemoryMutationError::InvalidMerge);
         }
         let mut source_rows = Vec::with_capacity(unique_sources.len());
         for source_id in unique_sources {
-            let Some(source) =
-                load_memory_full_tx(self.tx, source_id).map_err(|error| error.to_string())?
+            let Some(source) = load_memory_full_tx(self.tx, source_id)
+                .map_err(FacadeMemoryMutationError::storage)?
             else {
-                return Ok(None);
+                return Err(FacadeMemoryMutationError::Unavailable { id: source_id });
             };
             if source.project_path != project_path
                 || source.category != target.category
                 || source.superseded_by_memory_id.is_some()
                 || !matches!(source.status.as_str(), "active" | "permanent")
             {
-                return Ok(None);
+                return Err(FacadeMemoryMutationError::Unavailable { id: source_id });
             }
             source_rows.push(source);
         }
         let normalized_hash = compute_normalized_memory_hash(merged_content);
-        let duplicate_id = self
+        let duplicate = self
             .tx
             .query_row(
-                "SELECT id FROM mc_memories
+                "SELECT id, host_row_id FROM mc_memories
                   WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3
                   LIMIT 1",
                 params![project_path, target.category, normalized_hash],
-                |row| row.get::<_, i64>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
             )
             .optional()
-            .map_err(|error| error.to_string())?;
-        if let Some(duplicate_id) = duplicate_id.filter(|duplicate_id| *duplicate_id != target_id) {
-            return Err(format!(
-                "memory content already exists as ID {duplicate_id}"
-            ));
+            .map_err(FacadeMemoryMutationError::storage)?;
+        if let Some((id, host_id)) = duplicate.filter(|(id, _)| *id != target_id) {
+            return Err(FacadeMemoryMutationError::DuplicateContent { id, host_id });
         }
         let mut affected = Vec::with_capacity(source_rows.len() + 1);
         affected.push(target.clone());
@@ -6457,7 +6492,7 @@ impl<'a> FacadeMutationTxn<'a> {
                       WHERE id = ?3",
                     params![target_id, now_ms, source.id],
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(FacadeMemoryMutationError::storage)?;
             append_memory_mutation_tx(
                 self.tx,
                 MemoryMutationAppend {
@@ -6470,7 +6505,7 @@ impl<'a> FacadeMutationTxn<'a> {
                     queued_at: now_ms,
                 },
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(FacadeMemoryMutationError::storage)?;
         }
         self.tx
             .execute(
@@ -6496,7 +6531,7 @@ impl<'a> FacadeMutationTxn<'a> {
                     target_id,
                 ],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(FacadeMemoryMutationError::storage)?;
         append_memory_mutation_tx(
             self.tx,
             MemoryMutationAppend {
@@ -6509,8 +6544,10 @@ impl<'a> FacadeMutationTxn<'a> {
                 queued_at: now_ms,
             },
         )
-        .map_err(|error| error.to_string())?;
-        load_memory_full_tx(self.tx, target_id).map_err(|error| error.to_string())
+        .map_err(FacadeMemoryMutationError::storage)?;
+        load_memory_full_tx(self.tx, target_id)
+            .map_err(FacadeMemoryMutationError::storage)?
+            .ok_or(FacadeMemoryMutationError::Unavailable { id: target_id })
     }
 
     pub fn set_memory_verification(
@@ -28654,8 +28691,8 @@ mod shadow_tests {
                             "new canonical content",
                             Some("canonical-session"),
                             2,
-                        )?
-                        .expect("valid same-category merge");
+                        )
+                        .map_err(|error| error.to_string())?;
                     Ok(serde_json::to_vec(&(canonical.id, superseded)).unwrap())
                 },
             )

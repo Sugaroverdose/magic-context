@@ -884,7 +884,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         });
     };
     const syncModuleNotes = (): Promise<void> => syncModuleDomain("notes");
-    const syncModuleMemories = (): Promise<void> => syncModuleDomain("memories", 2);
     const syncModuleMemoryIdentity = async (
         moduleProject: string,
         moduleRowId: number,
@@ -1042,8 +1041,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                           },
                       });
                       // A fresh canonical row can sit behind a large cursor backlog. Pull that
-                      // one row first so the agent reply has a bounded path to its host id; the
-                      // ordinary two-page drain still advances the durable read model.
+                      // one row first so the agent reply has a bounded path to its host id. The
+                      // ordinary memory drain remains on the transform-pass cadence.
                       const operation = moduleMemoryOperation(response);
                       const newModuleRowId =
                           operation?.action === "write"
@@ -1059,9 +1058,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                                   projectRoot,
                               );
                           }
-                          await syncModuleMemories();
                       } catch (error) {
-                          log("[magic-context] bounded memory mirror sync failed:", error);
+                          log("[magic-context] targeted memory mirror sync failed:", error);
                       }
                       if (
                           !moduleNoteResponseIsError(response) &&
