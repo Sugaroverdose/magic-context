@@ -3460,7 +3460,6 @@ fn apply_once(
     let temporal_parity_detected = !consumed_transition_classes
         .contains(&RendererTransitionClass::TemporalParity)
         && tagging_surface_requested
-        && (persisted_tagging_surface_active || !loaded.meta.initialized)
         && ctx.temporal_awareness
         && temporal_parity_transition_needed(
             req,
@@ -3525,10 +3524,9 @@ fn apply_once(
         SurfaceState::Inactive
     };
 
-    // Every module-owned byte-affecting epoch is folded before activation decisions. The
-    // tagger is active only after its non-zero epoch is present in the session's committed
-    // render identity, so an established dormant session cannot acquire tags before the
-    // coordinating cache-breaking HARD fold has committed.
+    // Apply every module-owned change that affects serialized bytes before activation. When tags
+    // are requested, generate them during the HARD pass that records the new render configuration;
+    // otherwise the module-composed provider prefix is cached untagged and rewritten next pass.
     let mut content_epoch = m0_content_epoch_for_pass(
         store,
         req,
@@ -3546,17 +3544,14 @@ fn apply_once(
     let effective_render_config_base = fold_m0_content_epoch(&render_identity, &content_epoch);
     let effective_render_config =
         fold_mural_content_identity(&effective_render_config_base, &persisted_mural_hash);
-    // A brand-new session has no provider-visible prefix to invalidate, so the first requested
-    // tagging surface may mint and render tags on its bootstrap HARD. This is safe for both CC and
-    // OpenCode: the store namespace already exists when the transform snapshot and tags are loaded,
-    // and the tag rows commit atomically with that first cache-state row. Established dormant
-    // sessions still wait for the coordinating identity fold before tags can change replayed bytes.
-    // Subagents intentionally share this bootstrap arm; they have no provider-cache prefix.
+    // The store namespace exists before snapshots and tags load, so tag decisions can commit
+    // atomically with cache state. New and previously inactive sessions therefore emit their full
+    // requested tag surface during the HARD that changes render configuration. Subagents use the
+    // same first-render path because they do not emit a module-composed provider prefix.
     let bootstrap_tagging_active = !loaded.meta.initialized;
     let suppress_bootstrap_reduction_tag_overlay = bootstrap_tagging_active
         && serializer_profile == Some(SerializerProfile::ClaudeCodeAnthropic);
-    let tagging_active =
-        tagging_surface_requested && (persisted_tagging_surface_active || bootstrap_tagging_active);
+    let tagging_active = tagging_surface_requested;
     // Previously stored overlay rows may still replay when boundary-lineage validation
     // later forces pass-through. Decisions from this request stay in memory until the
     // final cache-state compare-and-swap accepts the pass.
@@ -28532,11 +28527,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn opencode_surface_flip_folds_once_before_rendering_tags() {
+    fn opencode_surface_flip_folds_once_and_tags_the_transition_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let mut request =
-            opencode_req("opencode-flip", "cfg0", vec![item("m1", 1, "stable bytes")]);
+        let mut request = opencode_req(
+            "opencode-flip",
+            "cfg0",
+            vec![
+                item("m1", 1, "first stable bytes"),
+                item("m2", 2, "second stable bytes"),
+            ],
+        );
 
         let before = run(&s, &request, &spine());
         let before_config = s.load("opencode-flip").unwrap().meta.last_render_config;
@@ -28545,13 +28546,13 @@ pub(crate) mod tests {
 
         request.tool_present = true;
         let transition = run(&s, &request, &spine());
+        let transition_bytes = serde_json::to_vec(transition.messages()).unwrap();
         let transitioned_config = s.load("opencode-flip").unwrap().meta.last_render_config;
         assert_eq!(transition.action, "HARD");
         assert_ne!(transitioned_config, before_config);
         assert!(transitioned_config.contains("tfe:4:tfe4"));
-        assert!(!serde_json::to_string(transition.messages())
-            .unwrap()
-            .contains("§1§"));
+        assert_eq!(tail_bytes(&transition, "m1"), "§1§ first stable bytes");
+        assert_eq!(tail_bytes(&transition, "m2"), "§2§ second stable bytes");
 
         let active = run(&s, &request, &spine());
         assert_ne!(active.action, "HARD");
@@ -28559,13 +28560,28 @@ pub(crate) mod tests {
             s.load("opencode-flip").unwrap().meta.last_render_config,
             transitioned_config
         );
-        assert!(serde_json::to_string(active.messages())
-            .unwrap()
-            .contains("§1§ stable bytes"));
+        assert_eq!(
+            serde_json::to_vec(active.messages()).unwrap(),
+            transition_bytes
+        );
+
+        request.messages.push(item("m3", 3, "appended tail"));
+        let appended = run(&s, &request, &spine());
+        let stable_prefix = appended
+            .messages()
+            .iter()
+            .take(transition.messages().len())
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            serde_json::to_vec(&stable_prefix).unwrap(),
+            transition_bytes
+        );
+        assert_eq!(tail_bytes(&appended, "m3"), "§3§ appended tail");
     }
 
     #[test]
-    fn tagger_flip_hards_before_committed_identity_can_render_tags() {
+    fn claude_code_surface_flip_hard_commits_the_first_tagged_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let mut request = cc_req("flip", "cfg0", vec![item("m1", 1, "hello")]);
@@ -28583,19 +28599,22 @@ pub(crate) mod tests {
         request.tool_present = true;
         let transition = run(&s, &request, &spine());
         assert_eq!(transition.action, "HARD");
-        assert_eq!(tail_bytes(&transition, "m1"), "hello");
-        assert!(s.load_tags_for_session("flip").unwrap().is_empty());
+        assert_eq!(tail_bytes(&transition, "m1"), "§1§ hello");
+        assert_eq!(s.load_tags_for_session("flip").unwrap().len(), 1);
         assert!(s
             .load("flip")
             .unwrap()
             .meta
             .last_render_config
             .contains("tfe:4:tfe4"));
+        let transition_bytes = serde_json::to_vec(transition.messages()).unwrap();
 
         let after_commit = run(&s, &request, &spine());
         assert_eq!(after_commit.action, "SOFT+");
-        assert_eq!(tail_bytes(&after_commit, "m1"), "§1§ hello");
-        assert_eq!(s.load_tags_for_session("flip").unwrap().len(), 1);
+        assert_eq!(
+            serde_json::to_vec(after_commit.messages()).unwrap(),
+            transition_bytes
+        );
     }
 
     #[test]
@@ -28982,7 +29001,7 @@ pub(crate) mod tests {
             disabled_request.prev_response_completed_at_ms = Some(10_000);
             disabled_request.request_observed_at_ms = Some(730_000);
             let disabled = transform(&s, &disabled_request, &temporal_disabled).unwrap();
-            assert_eq!(tail_bytes(&disabled, "m3"), "question");
+            assert_eq!(tail_bytes(&disabled, "m3"), "§3§ question");
         });
     }
 
