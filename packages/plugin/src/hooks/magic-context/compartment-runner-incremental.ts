@@ -75,7 +75,10 @@ import {
 import { clearInjectionCache, renderMemoryBlock } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
 import { persistFilteredNoise } from "./persist-filtered-noise";
-import { producerWindowFailureReason } from "./producer-window-guard";
+import {
+    fitAtomicHistorianSourceToProducerWindow,
+    producerWindowFailureReason,
+} from "./producer-window-guard";
 import {
     createDefaultBoundarySnapshotForTests,
     describeBoundaryDiagnostics,
@@ -448,14 +451,28 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             rollbackDrainReservation();
             return;
         }
+        const fittedAtomicSource = chunk.oversizeAtomicUnit
+            ? fitAtomicHistorianSourceToProducerWindow({
+                  text: chunk.text,
+                  resultBoundaries: chunk.toolResultBoundaries,
+                  contextLimitTokens: deps.historianContextLimit,
+                  maxOutputTokens: deps.historianMaxOutputTokens ?? 32_000,
+              })
+            : null;
         const chunkText = chunk.oversizeAtomicUnit
-            ? chunk.text
+            ? (fittedAtomicSource?.text ?? chunk.text)
             : truncateHistorianInputIfNeeded(chunk.text, historianChunkTokens);
         const producerSourceTokens = estimateTokens(chunkText);
         if (boundarySnapshot.oversizeAtomicUnit || chunk.oversizeAtomicUnit) {
             sessionLog(
                 sessionId,
                 `historian oversize admission: range=${chunk.startIndex}-${chunk.endIndex} rawComponentTokens=${boundarySnapshot.diagnostics?.head.completedFence.tokenMass ?? "unknown"} perRunCap=${perRunCap} producerSourceTokens=${producerSourceTokens} historianChunkTokens=${historianChunkTokens}; ${describeBoundaryDiagnostics(boundarySnapshot)}`,
+            );
+        }
+        if (fittedAtomicSource && fittedAtomicSource.removedTokens > 0) {
+            sessionLog(
+                sessionId,
+                `historian pathological component split: range=${chunk.startIndex}-${chunk.endIndex} resultBoundary=${fittedAtomicSource.splitBoundaryOrdinal ?? "midpoint"} removedTokens=${fittedAtomicSource.removedTokens} producerSourceTokens=${producerSourceTokens} producerInputLimitTokens=${fittedAtomicSource.producerInputLimitTokens ?? "unknown"}`,
             );
         }
         const producerWindowFailure = producerWindowFailureReason({
