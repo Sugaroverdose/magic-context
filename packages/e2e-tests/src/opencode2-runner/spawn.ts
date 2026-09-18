@@ -353,12 +353,12 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 }
 
 function activeV1Host(): boolean {
-	const result = spawnSync("pgrep", ["-f", "opencode serve"], {
+	const result = spawnSync("pgrep", ["-alf", "opencode"], {
 		encoding: "utf8",
 	});
 	if (result.error || (result.status !== 0 && result.status !== 1))
-		throw new Error("Cannot determine whether a live v1 host owns the store");
-	return result.status === 0;
+		throw new Error("Cannot determine whether a live OpenCode host owns the store");
+	return result.status === 0 && result.stdout.split("\n").some((line) => /\bserve\b/.test(line));
 }
 
 export function assertOpenPaths(

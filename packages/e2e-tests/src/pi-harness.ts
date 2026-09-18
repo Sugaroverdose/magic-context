@@ -103,7 +103,7 @@ export class PiTestHarness implements PiHostHarness {
     try {
       await rpc.start();
     } catch (error) {
-      await mock.stop();
+      await Promise.allSettled([rpc.shutdown(), mock.stop()]);
       throw error;
     }
 
@@ -196,12 +196,16 @@ export class PiTestHarness implements PiHostHarness {
         });
       }
     });
-    // Pi 0.83 emits agent_end before extension-triggered continuations. Only
-    // agent_settled closes the run, including any ceiling-nudge steer; an end
-    // event for a different user/custom message cannot complete this prompt.
+    // Pi emits agent_settled after extension-triggered continuations. OMP's RPC
+    // protocol has no equivalent event, so its submitted agent_end is terminal.
     const agentEnd = this.rpc.waitForEvent(
-      (event) => submittedTurnEnded && event.type === "agent_settled",
-      { timeoutMs, label: "submitted turn agent_settled" },
+      (event) =>
+        submittedTurnEnded &&
+        event.type === (this.host === "omp" ? "agent_end" : "agent_settled"),
+      {
+        timeoutMs,
+        label: this.host === "omp" ? "submitted turn agent_end" : "submitted turn agent_settled",
+      },
     );
 
     try {

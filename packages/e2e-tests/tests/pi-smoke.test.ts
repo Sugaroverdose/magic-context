@@ -19,7 +19,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-    await h.dispose();
+    await h?.dispose();
 });
 
 describe(`${selectedHost} smoke`, () => {

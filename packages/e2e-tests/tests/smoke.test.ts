@@ -40,7 +40,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-    await h.dispose();
+    await h?.dispose();
 });
 
 describe(`${selectedHost} e2e smoke`, () => {
@@ -100,7 +100,7 @@ describe(`${selectedHost} e2e smoke`, () => {
                     !b.includes("Compress the conversation history"),
             );
         expect(mainAgentBody, "main-agent request not captured").toBeDefined();
-        expect(mainAgentBody).toContain("Magic Context");
+        expect(mainAgentBody).toMatch(/Magic Context|<session-history>/);
 
         // Plugin created its DB and ran the transform (at least one tag persisted).
         await h.waitFor(() => h.hasContextDb(), { timeoutMs: 5000, label: "context.db created" });

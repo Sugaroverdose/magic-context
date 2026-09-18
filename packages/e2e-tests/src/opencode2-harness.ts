@@ -45,7 +45,7 @@ export class OpenCode2TestHarness implements HostHarness {
     private hostInstance: OpenCode2Host;
     private clientInstance: OpenCode2Client;
     private readonly spawnOptions: OpenCode2SpawnOptions;
-    private readonly requestOffsets = new Map<string, number>();
+    private readonly requestEvidence = new Map<string, { offset: number; prompt: string }>();
     private contextDbCached: Database | null = null;
 
     private constructor(
@@ -98,7 +98,7 @@ export class OpenCode2TestHarness implements HostHarness {
             existingMock: { mock: previous.mock, baseURL: previous.mockBaseURL },
         });
         this.clientInstance = OpenCode2TestHarness.clientFor(this.hostInstance);
-        this.requestOffsets.clear();
+        this.requestEvidence.clear();
     }
 
     async createSession(): Promise<string> {
@@ -119,7 +119,10 @@ export class OpenCode2TestHarness implements HostHarness {
         options: { timeoutMs?: number } = {},
     ): Promise<unknown> {
         const timeoutMs = options.timeoutMs ?? 180_000;
-        this.requestOffsets.set(sessionId, this.mock.requests().length);
+        this.requestEvidence.set(sessionId, {
+            offset: this.mock.requests().length,
+            prompt: text,
+        });
         const prompt = await this.clientInstance.session.prompt({ sessionID: sessionId, text });
         await this.clientInstance.session.wait(
             { sessionID: sessionId },
@@ -150,13 +153,19 @@ export class OpenCode2TestHarness implements HostHarness {
     }
 
     assertMagicContextProcessed(sessionId: string): void {
-        const offset = this.requestOffsets.get(sessionId) ?? 0;
+        const evidence = this.requestEvidence.get(sessionId);
+        if (!evidence) {
+            throw new Error(`OpenCode 2 has no submitted prompt evidence for session ${sessionId}`);
+        }
         const transformed = this.mock
             .requests()
-            .slice(offset)
+            .slice(evidence.offset)
             .some((request) => {
                 const body = JSON.stringify(request.body);
-                return body.includes("<session-history>") || body.includes("<conversation-checkpoint>");
+                const hasTransformedHead =
+                    body.includes("<session-history>") || body.includes("<conversation-checkpoint>");
+                const serializedPrompt = JSON.stringify(evidence.prompt).slice(1, -1);
+                return hasTransformedHead && body.includes(serializedPrompt);
             });
         if (!transformed) {
             throw new Error(`OpenCode 2 Magic Context did not transform session ${sessionId}`);
