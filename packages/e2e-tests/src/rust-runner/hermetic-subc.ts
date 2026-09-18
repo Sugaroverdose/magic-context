@@ -542,6 +542,9 @@ export class HermeticSubcStack {
                 NO_COLOR: "1",
                 SUBC_MODULE_ID: MODULE_ID,
                 SUBC_LAUNCH_NONCE: "",
+                // Keep module config hermetic too. ConfigCache reloads this path on
+                // each transform, so tests can write explicit Rust-only settings.
+                XDG_CONFIG_HOME: join(this.dataDir, "module-config"),
                 // The module opens its store under this data home — the SAME dir
                 // opencode uses, matching production's shared cortexkit layout.
                 XDG_DATA_HOME: this.dataDir,
