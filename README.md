@@ -111,7 +111,7 @@ If you cannot run the wizard, add this to `opencode.jsonc`:
 }
 ```
 
-> **Plugin updates:** A bare plugin entry is pinned to the downloaded exact version before restart so OpenCode does not remove the active package mid-session. To deliberately keep it unpinned after removing a version, write `@latest` explicitly.
+> **Plugin updates:** A bare plugin entry is pinned to the downloaded exact version before restart so OpenCode does not remove the active package mid-session. Magic Context records the exact spec written by its updater and advances that updater-owned pin on later checks. Any other exact spec is treated as pinned by you and is not changed. Because provenance is keyed to the exact spec string, manually changing the entry to the same spec the updater last wrote is indistinguishable from the updater's pin and will be advanced. To opt out, set `auto_update: false` or pin any other exact version. To deliberately stay unpinned, write `@latest` explicitly (OpenCode may remove an unpinned active package mid-session).
 
 Then create `magic-context.jsonc` with the OpenCode historian setting:
 
