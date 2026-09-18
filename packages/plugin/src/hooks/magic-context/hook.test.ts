@@ -251,7 +251,7 @@ function countIndexedHookMessage(sessionId: string, messageId: string): number {
 }
 
 describe("magic-context hook", () => {
-    it.skipIf(process.env.MC_REVIEW_BUDGET_REPRO !== "1")("review: refusing ordinary mirror must not extend the 1.9s tool reply budget", async () => {
+    it("review: refusing ordinary mirror must not extend the 1.9s tool reply budget", async () => {
         process.env.XDG_DATA_HOME = makeTempDir("hook-review-memory-budget-");
         const deps = createMockDeps();
         deps.config = { ...deps.config, transform_mode: "rust" } as never;
@@ -279,9 +279,9 @@ describe("magic-context hook", () => {
         });
         const elapsed = performance.now() - started;
         expect(targeted).toBe(true);
-        expect(drained).toBe(true);
+        expect(drained).toBe(false);
         expect(reply).toBe("Saved memory in CONSTRAINTS. Its id will appear in <project-memory> on the next pass.");
-        console.log(`review tool reply elapsed_ms=${elapsed.toFixed(1)}`);
+        expect(reply).not.toContain("9101");
         expect(elapsed).toBeLessThan(2_000);
     });
     it("constructs with directory fallback when load-time identity resolution throws", () => {

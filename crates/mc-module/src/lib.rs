@@ -68,16 +68,16 @@ use cortexkit_store_types::{sqlite_store_path, Isolation, StorageBackend, Storag
 use mc_store::TagNumberRow;
 use mc_store::{
     canonical_root, validate_state_import_compartments, AuthoritySeedRow, DeferredExecuteState,
-    FacadeMutationOutcome, HistorianChunkRange, HistorianDecision, HistorianPhase,
-    HistorianRecentDecision, HostMemoryIdentityAck, InsertMemoryInput, LoadedState, MappingUpdate,
-    McStore, McStoreError, McTagRow, ModuleDropSeedRow, ModuleMemoryMutationRow, ModuleMemoryRow,
-    ModuleStateSyncError, ModuleStateSyncRequest, ModuleStripSeedRow, ModuleWorkspaceMemberRow,
-    ModuleWorkspaceRow, NoteCasOutcome, NoteDismissOutcome, NoteEvaluationInput, NoteInput,
-    NoteNudgeAnchorSeed, NoteWriteInput, PendingAgentDrop, PendingAgentDropSeedRow,
-    PendingCompactionMarkerState, RecordWrapupCommandOutcome, StateImportError,
-    StateImportPreflight, StateImportValidationError, StoredChunkTranscript, StoredCompartment,
-    StoredMemoryMutation, StoredNote, TodoStateSetOutcome, UserHintSeedRow, VerificationUpdate,
-    WrapupCommandRecord, LATEST_MIGRATION_VERSION,
+    FacadeMemoryMutationError, FacadeMutationOutcome, HistorianChunkRange, HistorianDecision,
+    HistorianPhase, HistorianRecentDecision, HostMemoryIdentityAck, InsertMemoryInput, LoadedState,
+    MappingUpdate, McStore, McStoreError, McTagRow, ModuleDropSeedRow, ModuleMemoryMutationRow,
+    ModuleMemoryRow, ModuleStateSyncError, ModuleStateSyncRequest, ModuleStripSeedRow,
+    ModuleWorkspaceMemberRow, ModuleWorkspaceRow, NoteCasOutcome, NoteDismissOutcome,
+    NoteEvaluationInput, NoteInput, NoteNudgeAnchorSeed, NoteWriteInput, PendingAgentDrop,
+    PendingAgentDropSeedRow, PendingCompactionMarkerState, RecordWrapupCommandOutcome,
+    StateImportError, StateImportPreflight, StateImportValidationError, StoredChunkTranscript,
+    StoredCompartment, StoredMemoryMutation, StoredNote, TodoStateSetOutcome, UserHintSeedRow,
+    VerificationUpdate, WrapupCommandRecord, LATEST_MIGRATION_VERSION,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -11879,6 +11879,10 @@ impl McHandler {
         } else if !requested_host_ids.is_empty() {
             return tool_error_result("Error: host_ids require memory_id_lane 'host'.".to_string());
         }
+        let request_context = MemoryFacadeRequestContext {
+            lane: id_lane,
+            host_id_by_module,
+        };
         if is_mutation {
             if let Err(error) = store.enforce_facade_project_vocabulary(
                 facade_scope.route_project_root.as_str(),
@@ -11943,7 +11947,11 @@ impl McHandler {
                                     metadata_json: None,
                                     now_ms: now_ms(),
                                 })
-                                .map_err(|error| error.to_string())?;
+                                .map_err(|error| {
+                                    request_context.render_mutation_error(
+                                        FacadeMemoryMutationError::Storage(error),
+                                    )
+                                })?;
                             let text = if id_lane == MemoryIdLane::Host {
                                 format!("Saved memory in {category}. Its id will appear in <project-memory> on the next pass.")
                             } else {
@@ -11994,12 +12002,15 @@ impl McHandler {
                                     category,
                                     now_ms(),
                                 )
-                                .map_err(|error| error.to_string())?
-                                .ok_or_else(|| format!("memory {id} was not found"))?;
+                                .map_err(|error| request_context.render_mutation_error(error))?;
                             let rendered_id = if id_lane == MemoryIdLane::Host {
-                                host_id_by_module.get(&memory.id).copied().ok_or_else(|| {
-                                    "translated host memory identity disappeared".to_string()
-                                })?
+                                request_context
+                                    .host_id_by_module
+                                    .get(&memory.id)
+                                    .copied()
+                                    .ok_or_else(|| {
+                                        "translated host memory identity disappeared".to_string()
+                                    })?
                             } else {
                                 memory.id
                             };
@@ -12035,8 +12046,7 @@ impl McHandler {
                         |tx| {
                             let archived = tx
                                 .archive_memories(memory_project, &ids, reason, now_ms())
-                                .map_err(|error| error.to_string())?
-                                .ok_or_else(|| "memories could not be archived".to_string())?;
+                                .map_err(|error| request_context.render_mutation_error(error))?;
                             if archived.is_empty() {
                                 facade_text_response(
                                     "No active memories needed archiving.".to_string(),
@@ -12047,10 +12057,14 @@ impl McHandler {
                                     archived
                                         .iter()
                                         .map(|id| {
-                                            host_id_by_module.get(id).copied().ok_or_else(|| {
-                                                "translated host memory identity disappeared"
-                                                    .to_string()
-                                            })
+                                            request_context
+                                                .host_id_by_module
+                                                .get(id)
+                                                .copied()
+                                                .ok_or_else(|| {
+                                                    "translated host memory identity disappeared"
+                                                        .to_string()
+                                                })
                                         })
                                         .collect::<Result<Vec<_>, _>>()?
                                 } else {
@@ -12101,8 +12115,7 @@ impl McHandler {
                                     Some(conversation_key),
                                     now_ms(),
                                 )
-                                .map_err(|error| error.to_string())?
-                                .ok_or_else(|| "memories could not be merged".to_string())?;
+                                .map_err(|error| request_context.render_mutation_error(error))?;
                             if category.is_some_and(|category| category != memory.category) {
                                 memory = tx
                                     .update_memory_content(
@@ -12112,8 +12125,7 @@ impl McHandler {
                                         category,
                                         now_ms(),
                                     )
-                                    .map_err(|error| error.to_string())?
-                                    .ok_or_else(|| "canonical memory disappeared".to_string())?;
+                                    .map_err(|error| request_context.render_mutation_error(error))?;
                             }
                             let rendered_inputs = if id_lane == MemoryIdLane::Host {
                                 requested_host_ids.clone()
@@ -12123,7 +12135,9 @@ impl McHandler {
                             let rendered_superseded = if id_lane == MemoryIdLane::Host {
                                 superseded_ids
                                     .iter()
-                                    .filter_map(|id| host_id_by_module.get(id).copied())
+                                    .filter_map(|id| {
+                                        request_context.host_id_by_module.get(id).copied()
+                                    })
                                     .collect::<Vec<_>>()
                             } else {
                                 superseded_ids.clone()
@@ -12227,7 +12241,10 @@ impl McHandler {
                             false,
                         )
                     }
-                    Err(error) => tool_error_result(format!("Error: {error}")),
+                    Err(error) => tool_error_result(format!(
+                        "Error: {}",
+                        request_context.render_store_error(error)
+                    )),
                 }
             }
             "get" => {
@@ -12242,7 +12259,8 @@ impl McHandler {
                             .iter()
                             .map(|id| {
                                 let rendered_id = if id_lane == MemoryIdLane::Host {
-                                    host_id_by_module
+                                    request_context
+                                        .host_id_by_module
                                         .get(id)
                                         .copied()
                                         .expect("host lane ids were validated before facade dispatch")
@@ -12263,7 +12281,10 @@ impl McHandler {
                             .join("\n\n");
                         mcp_text_result(lines, false)
                     }
-                    Err(error) => tool_error_result(format!("Error: {error}")),
+                    Err(error) => tool_error_result(format!(
+                        "Error: {}",
+                        request_context.render_tool_error(error)
+                    )),
                 }
             }
             _ => tool_error_result("Error: Unknown ctx_memory action.".to_string()),
@@ -16080,6 +16101,91 @@ fn join_i64s(ids: &[i64]) -> String {
 enum MemoryIdLane {
     Module,
     Host,
+}
+
+struct MemoryFacadeRequestContext {
+    lane: MemoryIdLane,
+    host_id_by_module: HashMap<i64, i64>,
+}
+
+impl MemoryFacadeRequestContext {
+    fn rendered_id(&self, module_id: i64, known_host_id: Option<i64>) -> Option<i64> {
+        match self.lane {
+            MemoryIdLane::Module => Some(module_id),
+            MemoryIdLane::Host => self
+                .host_id_by_module
+                .get(&module_id)
+                .copied()
+                .or(known_host_id),
+        }
+    }
+
+    fn render_mutation_error(&self, error: FacadeMemoryMutationError) -> String {
+        match error {
+            FacadeMemoryMutationError::Storage(error) => error,
+            FacadeMemoryMutationError::Unavailable { id } => {
+                self.rendered_id(id, None).map_or_else(
+                    || "memory was not found".to_string(),
+                    |id| format!("memory {id} was not found"),
+                )
+            }
+            FacadeMemoryMutationError::DuplicateContent { id, host_id } => {
+                self.rendered_id(id, host_id).map_or_else(
+                    || "memory content already exists".to_string(),
+                    |id| format!("memory content already exists as ID {id}"),
+                )
+            }
+            FacadeMemoryMutationError::InvalidMerge => "memories could not be merged".to_string(),
+        }
+    }
+
+    fn render_store_error(&self, error: McStoreError) -> String {
+        match error {
+            McStoreError::MemoryDuplicateContent { id } => self.rendered_id(id, None).map_or_else(
+                || "memory content already exists".to_string(),
+                |id| format!("memory content already exists as ID {id}"),
+            ),
+            error => error.to_string(),
+        }
+    }
+
+    fn render_tool_error(&self, error: memory_tool::MemoryToolError) -> String {
+        match error {
+            memory_tool::MemoryToolError::Store(error) => {
+                format!("store: {}", self.render_store_error(error))
+            }
+            memory_tool::MemoryToolError::DuplicateSourceId { id } => {
+                self.rendered_id(id, None).map_or_else(
+                    || "duplicate source memory id".to_string(),
+                    |id| format!("duplicate source memory id {id}"),
+                )
+            }
+            memory_tool::MemoryToolError::NotFound { id } => {
+                self.rendered_id(id, None).map_or_else(
+                    || "memory was not found".to_string(),
+                    |id| format!("memory {id} was not found"),
+                )
+            }
+            memory_tool::MemoryToolError::Inactive { id, status } => {
+                self.rendered_id(id, None).map_or_else(
+                    || format!("memory is not mutable in status {status}"),
+                    |id| format!("memory {id} is not mutable in status {status}"),
+                )
+            }
+            memory_tool::MemoryToolError::Superseded { id, superseded_by } => {
+                let id = self.rendered_id(id, None);
+                let superseded_by = self.rendered_id(superseded_by, None);
+                match (id, superseded_by) {
+                    (Some(id), Some(superseded_by)) => {
+                        format!("memory {id} was superseded by {superseded_by}")
+                    }
+                    (Some(id), None) => format!("memory {id} was superseded"),
+                    _ => "memory was superseded".to_string(),
+                }
+            }
+            error => error.to_string(),
+        }
+    }
 }
 
 fn memory_id_lane(args: &Map<String, Value>) -> Result<MemoryIdLane, String> {
@@ -27296,6 +27402,22 @@ mod tests {
                 }],
             )
             .unwrap();
+        let get = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "get", "ids": [id], "host_ids": [901],
+                "memory_id_lane": "host"
+            }),
+        )
+        .await;
+        let get_text = tool_text(get);
+        assert!(
+            get_text.contains("id 901: not found or not visible"),
+            "{get_text}"
+        );
+        assert!(!get_text.contains(&format!("id {id}:")), "{get_text}");
+
         for action in ["update", "archive", "merge"] {
             let ids = if action == "merge" {
                 vec![id, other]
@@ -27321,6 +27443,14 @@ mod tests {
             assert!(!text.contains("Updated memory"), "{text}");
             assert!(!text.contains("Archived memory IDs"), "{text}");
             assert!(!text.contains("Merged memories"), "{text}");
+            assert!(
+                text.contains("901"),
+                "host id missing from {action} error: {text}"
+            );
+            assert!(
+                !text.contains(&format!("memory {id} was not found")),
+                "raw module id escaped from {action}: {text}"
+            );
             let row = store.get_memory_full(id).unwrap().unwrap();
             assert_eq!(row.content, "foreign pinned");
             assert_eq!(row.status, "active");
@@ -27328,7 +27458,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[ignore = "Known defect: ownership failure exposes the translated module id; run explicitly to reproduce"]
     async fn review_host_ownership_error_must_not_expose_module_id() {
         let producer = Arc::new(ProducerState::default());
         let resolver =
@@ -27359,9 +27488,82 @@ mod tests {
         )
         .await;
         let text = tool_text(result);
+        assert!(text.contains("memory 901 was not found"), "{text}");
         assert!(
             !text.contains(&format!("memory {id} was not found")),
             "raw module id escaped: {text}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_memory_lane_translates_constraint_error_ids() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        let project = project.to_str().unwrap();
+        handler.bind_route(7, binding_with_harness(project, "opencode", "token"));
+
+        let target = insert_memory(&store, project, "CONSTRAINTS", "target", 1);
+        let duplicate = insert_memory(&store, project, "CONSTRAINTS", "duplicate", 2);
+        let source = insert_memory(&store, project, "CONSTRAINTS", "source", 3);
+        store
+            .acknowledge_host_memory_ids(
+                project,
+                &[
+                    HostMemoryIdentityAck {
+                        module_row_id: target,
+                        host_row_id: 901,
+                    },
+                    HostMemoryIdentityAck {
+                        module_row_id: duplicate,
+                        host_row_id: 902,
+                    },
+                    HostMemoryIdentityAck {
+                        module_row_id: source,
+                        host_row_id: 903,
+                    },
+                ],
+            )
+            .unwrap();
+
+        let update = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "update", "ids": [target], "host_ids": [901],
+                "memory_id_lane": "host", "content": "duplicate"
+            }),
+        )
+        .await;
+        let update_text = tool_text(update);
+        assert!(
+            update_text.contains("memory content already exists as ID 902"),
+            "{update_text}"
+        );
+        assert!(
+            !update_text.contains(&format!("ID {duplicate}")),
+            "raw duplicate module id escaped: {update_text}"
+        );
+
+        let merge = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "merge", "ids": [target, source], "host_ids": [901, 903],
+                "memory_id_lane": "host", "content": "duplicate"
+            }),
+        )
+        .await;
+        let merge_text = tool_text(merge);
+        assert!(
+            merge_text.contains("memory content already exists as ID 902"),
+            "{merge_text}"
+        );
+        assert!(
+            !merge_text.contains(&format!("ID {duplicate}")),
+            "raw duplicate module id escaped: {merge_text}"
         );
     }
 
