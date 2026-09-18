@@ -34,6 +34,8 @@ describe("mode manifest validator", () => {
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(22);
         expect(filesForMode(validation, "ts", "opencode")).toHaveLength(22);
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(22);
+        expect(filesForMode(validation, "ts", "opencode2")).toEqual(["tests/smoke.test.ts"]);
+        expect(filesForMode(validation, "ts", "omp")).toEqual(["tests/pi-smoke.test.ts"]);
         const excluded = validation.manifest.entries
             .filter((entry) => entry.tier === "excluded")
             .map((entry) => entry.path);
@@ -79,6 +81,17 @@ describe("mode manifest validator", () => {
         ).toThrow(/dead or out-of-scope/);
     });
 
+    it("derives legacy hosts and accepts explicit multi-host entries", () => {
+        const smoke = validation.manifest.entries.find((entry) => entry.path === "tests/smoke.test.ts");
+        const piSmoke = validation.manifest.entries.find((entry) => entry.path === "tests/pi-smoke.test.ts");
+        const ordinary = validation.manifest.entries.find((entry) => entry.path === "tests/cache-invariants.test.ts");
+        const opencode2 = validation.manifest.entries.find((entry) => entry.path === "tests/opencode2/runner.test.ts");
+        expect(smoke?.hosts).toEqual(["opencode", "opencode2"]);
+        expect(piSmoke?.hosts).toEqual(["pi", "omp"]);
+        expect(ordinary?.hosts).toEqual(["opencode"]);
+        expect(opencode2?.hosts).toEqual(["opencode2"]);
+    });
+
     it("accepts a both-modes entry in both invocation lists", () => {
         const entries = validation.manifest.entries;
         const both = validateManifestDocument(
@@ -97,7 +110,7 @@ describe("mode manifest validator", () => {
         expect(filesForMode(both, "rust")).toContain(entries[0]!.path);
     });
 
-    it("rejects invalid tiers and a both-modes entry missing an invocation", () => {
+    it("rejects invalid tiers, hosts, and a both-modes entry missing an invocation", () => {
         const entries = validation.manifest.entries;
         expect(() =>
             validateManifestDocument(
@@ -111,6 +124,18 @@ describe("mode manifest validator", () => {
                 validation.files,
             ),
         ).toThrow(/invalid classification/);
+        expect(() =>
+            validateManifestDocument(
+                manifestWith([
+                    {
+                        ...entries[0]!,
+                        hosts: ["opencode", "opencode"] as never,
+                    },
+                    ...entries.slice(1),
+                ]),
+                validation.files,
+            ),
+        ).toThrow(/invalid hosts/);
         expect(() =>
             validateManifestDocument(
                 manifestWith([
