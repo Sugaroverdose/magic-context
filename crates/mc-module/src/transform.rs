@@ -19827,6 +19827,65 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn review_late_host_ack_preserves_m0_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let first = s
+            .insert_memory(memory_input("git:proj", "CONSTRAINTS", "acknowledged", 0))
+            .unwrap();
+        let pending = s
+            .insert_memory(memory_input("git:proj", "CONSTRAINTS", "pending", 0))
+            .unwrap();
+        s.acknowledge_host_memory_ids(
+            "git:proj",
+            &[mc_store::HostMemoryIdentityAck {
+                module_row_id: first,
+                host_row_id: 901,
+            }],
+        )
+        .unwrap();
+        let mut request = with_usage(req("ses", "cfg0", vec![item("a", 1, "raw")]), 70, 100);
+        request.serializer_profile = "opencode".into();
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        let boot = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(boot.action, "HARD");
+        let frozen = m0_bytes(&boot).to_string();
+        assert!(frozen.contains("#901:"));
+        assert!(!frozen.contains(&format!("#{pending}:")));
+        let second = transform(&s, &request, &ctx).unwrap();
+        assert_ne!(second.action, "HARD");
+        assert_eq!(m0_bytes(&second), frozen);
+        s.acknowledge_host_memory_ids(
+            "git:proj",
+            &[mc_store::HostMemoryIdentityAck {
+                module_row_id: pending,
+                host_row_id: 902,
+            }],
+        )
+        .unwrap();
+        for _ in 0..3 {
+            let pass = transform(&s, &request, &ctx).unwrap();
+            assert_ne!(pass.action, "HARD", "late identity ack must not bust m0");
+            assert_eq!(m0_bytes(&pass), frozen);
+        }
+        drop(s);
+        let reopened = store(dir.path());
+        assert_eq!(
+            reopened
+                .get_memory_full(pending)
+                .unwrap()
+                .unwrap()
+                .host_row_id,
+            Some(902)
+        );
+        let pass = transform(&reopened, &request, &ctx).unwrap();
+        assert_ne!(pass.action, "HARD");
+        assert_eq!(m0_bytes(&pass), frozen);
+    }
+
+    #[test]
     fn project_memory_epoch_from_state_sync_is_an_eager_hard_input() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());

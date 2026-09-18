@@ -27260,6 +27260,112 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn review_host_identity_does_not_grant_foreign_write_ownership() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(
+            7,
+            binding_with_harness(project.to_str().unwrap(), "opencode", "token"),
+        );
+        let id = insert_memory(&store, "git:foreign", "CONSTRAINTS", "foreign pinned", 1);
+        store
+            .acknowledge_host_memory_ids(
+                "git:foreign",
+                &[HostMemoryIdentityAck {
+                    module_row_id: id,
+                    host_row_id: 901,
+                }],
+            )
+            .unwrap();
+        let other = insert_memory(
+            &store,
+            "git:foreign",
+            "CONSTRAINTS",
+            "other foreign pinned",
+            2,
+        );
+        store
+            .acknowledge_host_memory_ids(
+                "git:foreign",
+                &[HostMemoryIdentityAck {
+                    module_row_id: other,
+                    host_row_id: 902,
+                }],
+            )
+            .unwrap();
+        for action in ["update", "archive", "merge"] {
+            let ids = if action == "merge" {
+                vec![id, other]
+            } else {
+                vec![id]
+            };
+            let host_ids = if action == "merge" {
+                vec![901, 902]
+            } else {
+                vec![901]
+            };
+            let result = call_facade(
+                &handler,
+                "ctx_memory",
+                json!({
+                    "action": action, "ids": ids, "host_ids": host_ids,
+                    "memory_id_lane": "host", "content": "must not write"
+                }),
+            )
+            .await;
+            let text = tool_text(result);
+            eprintln!("host ownership probe {action}: {text}");
+            assert!(!text.contains("Updated memory"), "{text}");
+            assert!(!text.contains("Archived memory IDs"), "{text}");
+            assert!(!text.contains("Merged memories"), "{text}");
+            let row = store.get_memory_full(id).unwrap().unwrap();
+            assert_eq!(row.content, "foreign pinned");
+            assert_eq!(row.status, "active");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "Known defect: ownership failure exposes the translated module id; run explicitly to reproduce"]
+    async fn review_host_ownership_error_must_not_expose_module_id() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(
+            7,
+            binding_with_harness(project.to_str().unwrap(), "opencode", "token"),
+        );
+        let id = insert_memory(&store, "git:foreign", "CONSTRAINTS", "foreign pinned", 1);
+        store
+            .acknowledge_host_memory_ids(
+                "git:foreign",
+                &[HostMemoryIdentityAck {
+                    module_row_id: id,
+                    host_row_id: 901,
+                }],
+            )
+            .unwrap();
+        let result = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "update", "ids": [id], "host_ids": [901],
+                "memory_id_lane": "host", "content": "must not write"
+            }),
+        )
+        .await;
+        let text = tool_text(result);
+        assert!(
+            !text.contains(&format!("memory {id} was not found")),
+            "raw module id escaped: {text}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn claude_code_memory_lane_keeps_module_ids_byte_for_byte() {
         let producer = Arc::new(ProducerState::default());
         let resolver =
