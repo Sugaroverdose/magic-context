@@ -522,7 +522,11 @@
 				"ts": true,
 				"rust": false
 			},
-			"rationale": "pi harness leg",
+			"hosts": [
+				"pi",
+				"omp"
+			],
+			"rationale": "shared Pi-family smoke contract runs unchanged on Pi and OMP",
 			"contract_refs": [
 				"PI-HARNESS"
 			]
@@ -858,7 +862,11 @@
 				"ts": true,
 				"rust": false
 			},
-			"rationale": "OpenCode TS harness leg",
+			"hosts": [
+				"opencode",
+				"opencode2"
+			],
+			"rationale": "shared OpenCode smoke contract runs unchanged on OpenCode 1 and OpenCode 2",
 			"contract_refs": [
 				"TS-HARNESS"
 			]

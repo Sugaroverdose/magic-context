@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { pinMockAgents } from "../mock-routing";
 import { MockProvider, type MockResponse } from "../mock-provider/server";
 import {
 	awaitPluginActivation,
@@ -50,11 +51,13 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
 		process.exit(1);
 	});
 }
-export function isolation(): {
+export interface OpenCode2Isolation {
 	root: string;
 	env: NodeJS.ProcessEnv;
 	cwd: string;
-} {
+}
+
+export function isolation(): OpenCode2Isolation {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "mc-opencode2-")));
 	const env: NodeJS.ProcessEnv = {
 		PATH: process.env.PATH,
@@ -153,23 +156,26 @@ export async function waitForPluginActive(
 }
 
 
+export interface OpenCode2SpawnOptions {
+	probePlugin?: string;
+	providerID?: string;
+	probeStandalone?: boolean;
+	defaultModelID?: string;
+	additionalModelIDs?: string[];
+	mockResponse?: MockResponse;
+	extraConfig?: Record<string, unknown>;
+	magicContextConfig?: Record<string, unknown>;
+	includeMagicContext?: boolean;
+	modelContextLimit?: number;
+	modelOutputLimit?: number;
+	existingIsolation?: OpenCode2Isolation;
+	existingMock?: { mock: MockProvider; baseURL: string };
+}
+
 /** Event-driven, bounded startup; no readiness polling. CLI contract: AFT playbook:54-64. */
-export async function spawnOpencode2(
-	options: {
-		probePlugin?: string;
-		providerID?: string;
-		probeStandalone?: boolean;
-		defaultModelID?: string;
-		additionalModelIDs?: string[];
-		mockResponse?: MockResponse;
-		extraConfig?: Record<string, unknown>;
-		includeMagicContext?: boolean;
-		modelContextLimit?: number;
-		modelOutputLimit?: number;
-	} = {},
-) {
+export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 	const providerID = options.providerID ?? "openai";
-	const fixture = isolation();
+	const fixture = options.existingIsolation ?? isolation();
 	const snapshotReason = activeV1Host()
 		? "live snapshot skipped: active v1 opencode serve writes operator store"
 		: undefined;
@@ -181,8 +187,8 @@ export async function spawnOpencode2(
 	) {
 		throw new Error("Build the plugin before booting v2");
 	}
-	const mock = new MockProvider();
-	const provider = await mock.start(); // Existing mock explicitly binds 127.0.0.1 and captures parsed wire bodies.
+	const mock = options.existingMock?.mock ?? new MockProvider();
+	const provider = options.existingMock ?? await mock.start(); // Existing mock explicitly binds 127.0.0.1 and captures parsed wire bodies.
 	// 2.0.5 title generation hits the mock on session.create, before tests
 	// install matchers, and uses a host title model rather than mock-model.
 	mock.setDefault({
@@ -227,6 +233,28 @@ export async function spawnOpencode2(
 			},
 		}),
 	);
+	if (options.magicContextConfig !== undefined) {
+		const configDir = join(fixture.env.XDG_CONFIG_HOME!, "cortexkit");
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			join(configDir, "magic-context.jsonc"),
+			JSON.stringify(
+				{
+					auto_update: false,
+					execute_threshold_percentage: 40,
+					history_budget_percentage: 0.15,
+					embedding: { provider: "off" },
+					...pinMockAgents(
+						options.magicContextConfig,
+						`${providerID}/${defaultModelID}`,
+						"opencode2",
+					),
+				},
+				null,
+				2,
+			),
+		);
+	}
 	// serve owns its server directly; --standalone is a TUI/run flag, not a serve option.
 	const child = spawn(
 		CLI,
@@ -254,7 +282,10 @@ export async function spawnOpencode2(
 	const exited = new Promise<void>((resolveExit) =>
 		child.once("close", () => resolveExit()),
 	);
-	const stop = async () => {
+	let hostStopped = false;
+	const stopHost = async () => {
+		if (hostStopped) return;
+		hostStopped = true;
 		let safetyError: unknown;
 		try {
 			if (child.pid && child.exitCode === null && child.signalCode === null)
@@ -265,9 +296,15 @@ export async function spawnOpencode2(
 		if (child.pid) killGroup(child.pid);
 		await exited;
 		if (child.pid) groups.delete(child.pid);
-		await mock.stop();
 		if (before) assertLiveUnchanged(before);
 		if (safetyError) throw safetyError;
+	};
+	const stop = async () => {
+		try {
+			await stopHost();
+		} finally {
+			await mock.stop();
+		}
 	};
 	try {
 		const ready = await new Promise<{ url: string; password: string }>(
@@ -303,6 +340,8 @@ export async function spawnOpencode2(
 			...fixture,
 			snapshotReason,
 			mock,
+			mockBaseURL: provider.baseURL,
+			stopHost,
 			stop,
 			stdout: () => stdout,
 			stderr: () => stderr,
