@@ -46,6 +46,7 @@ import {
     openCodeHostGenerationFromVersion,
     resolveOpenCodeDbPath,
 } from "@magic-context/core/shared/opencode-db-path";
+import { Database } from "@magic-context/core/shared/sqlite";
 import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
 import { parse, stringify } from "comment-json";
 import {
@@ -99,6 +100,10 @@ import {
 } from "../lib/storage-versions";
 import { runV22BackfillCommands, type V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
 import { reportAuthorityMarkers } from "./doctor-authority";
+import {
+    formatDanglingCompartmentBoundary,
+    listDanglingCompartmentBoundaries,
+} from "./doctor-compartment-boundaries";
 import { clearPluginCache } from "./doctor-opencode-cache";
 
 const CLI_PACKAGE_NAME = "@cortexkit/magic-context";
@@ -818,11 +823,42 @@ export async function runDoctor(
     }
 
     const hostGeneration = openCodeHostGenerationFromVersion(activeInstallation.version);
-    const openCodeDbCheck = describeOpenCodeDatabaseDoctorCheck(
-        resolveOpenCodeDbPath(hostGeneration),
-    );
+    const openCodeDbResolution = resolveOpenCodeDbPath(hostGeneration);
+    const openCodeDbCheck = describeOpenCodeDatabaseDoctorCheck(openCodeDbResolution);
     if (openCodeDbCheck.ok) pass(openCodeDbCheck.message);
     else fail(openCodeDbCheck.message);
+
+    if (openCodeDbCheck.ok) {
+        let contextDb: ReturnType<typeof openExistingContextDatabase> = null;
+        let sessionDb: Database | null = null;
+        try {
+            contextDb = openExistingContextDatabase(authorityDbPath, { readonly: true });
+            if (contextDb) {
+                sessionDb = new Database(openCodeDbResolution.path, {
+                    readonly: true,
+                    fileMustExist: true,
+                });
+                const dangling = listDanglingCompartmentBoundaries(contextDb, sessionDb);
+                if (dangling.length === 0) {
+                    pass("Compartment boundary ids resolve in the OpenCode session store");
+                } else {
+                    warn(`${dangling.length} compartment(s) have dangling OpenCode boundary ids`);
+                    for (const boundary of dangling) {
+                        log.warn(`  ${formatDanglingCompartmentBoundary(boundary)}`);
+                    }
+                }
+            } else {
+                log.info("Compartment boundary check: no context database found");
+            }
+        } catch (error) {
+            warn(
+                `Compartment boundary check unavailable: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        } finally {
+            sessionDb?.close();
+            contextDb?.close();
+        }
+    }
 
     // 1b. CLI vs npm latest
     const selfVersion = getSelfVersion();
