@@ -14,6 +14,7 @@ import type { ResolvedTransformMode } from "../../config/transform-mode";
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
 import {
     applyMirroredNoteCompileFields,
+    applyTargetedMemoryMirrorRow,
     drainMirrorPages,
     ensureContextStoreUuid,
     getModuleNoteEvaluationBridge,
@@ -61,6 +62,11 @@ import { getCurrentToolSetHash } from "../../features/magic-context/tool-definit
 import type { ContextUsage } from "../../features/magic-context/types";
 import { bootQuietRemainingMs, scheduleAfterBootQuiet } from "../../plugin/boot-quiet";
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "../../plugin/embedding-bootstrap";
+import {
+    moduleMemoryOperation,
+    translateHostMemoryIds,
+    translateModuleMemoryMutationReply,
+} from "../../plugin/memory-id-translation";
 import { buildStatusDetail } from "../../plugin/rpc-handlers";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../plugin/types";
@@ -805,6 +811,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 authoritySeed: (args) => transport.authoritySeed(args),
                 authorityDrain: (args) => transport.authorityDrain(args),
                 mirrorPull: (args) => transport.mirrorPull(args),
+                mirrorMemory: (args) => transport.mirrorMemory(args),
+                memoryIdentityAck: (args) => transport.memoryIdentityAck(args),
                 getCompartmentsAfter: async (sessionId, afterSequence) => {
                     const response = await transport.call({
                         sessionId,
@@ -862,17 +870,45 @@ export function createMagicContextHook(deps: MagicContextDeps) {
               client: deps.client,
           })
         : undefined;
-    const syncModuleDomain = async (domain: "memories" | "notes"): Promise<void> => {
+    const syncModuleDomain = async (
+        domain: "memories" | "notes",
+        pageBudget?: number,
+    ): Promise<void> => {
         if (!rustModeModuleClient?.mirrorPull) return;
         await drainMirrorPages({
             db,
             module: rustModeModuleClient,
             domain,
             limit: 1000,
+            pageBudget,
         });
     };
     const syncModuleNotes = (): Promise<void> => syncModuleDomain("notes");
-    const syncModuleMemories = (): Promise<void> => syncModuleDomain("memories");
+    const syncModuleMemories = (): Promise<void> => syncModuleDomain("memories", 2);
+    const syncModuleMemoryIdentity = async (
+        moduleProject: string,
+        moduleRowId: number,
+        projectRoot: string,
+    ): Promise<void> => {
+        if (!rustModeModuleClient?.mirrorMemory) return;
+        const { row } = await rustModeModuleClient.mirrorMemory({
+            module_row_id: moduleRowId,
+            projectRoot,
+        });
+        if (!row) return;
+        const identity = applyTargetedMemoryMirrorRow({ db, row });
+        if (!identity || !rustModeModuleClient.memoryIdentityAck) return;
+        await rustModeModuleClient.memoryIdentityAck({
+            project: moduleProject,
+            projectRoot,
+            rows: [
+                {
+                    module_row_id: moduleRowId,
+                    context_row_id: identity.contextRowId,
+                },
+            ],
+        });
+    };
     const rustToolBackends: RustToolBackends | undefined =
         deps.config.transform_mode === "rust" && rustModeModuleClient
             ? {
@@ -981,6 +1017,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                       reason,
                       limit,
                   }) => {
+                      const hostIds = ids ?? [];
+                      const translatedIds = translateHostMemoryIds(db, hostIds);
+                      if ("error" in translatedIds) return translatedIds.error;
+                      const moduleIds = translatedIds.moduleIds;
                       const response = await rustModeModuleClient.call({
                           sessionId,
                           projectRoot,
@@ -992,16 +1032,37 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                                   action,
                                   content,
                                   category,
-                                  ids,
+                                  ids: moduleIds,
+                                  host_ids: hostIds,
+                                  memory_id_lane: "host",
                                   reason,
                                   limit,
                                   memory_project: memoryProject,
                               },
                           },
                       });
-                      // Auto-search and local RPC/dashboard reads consume the mirror,
-                      // so publish the module mutation to that read model before return.
-                      await syncModuleMemories();
+                      // A fresh canonical row can sit behind a large cursor backlog. Pull that
+                      // one row first so the agent reply has a bounded path to its host id; the
+                      // ordinary two-page drain still advances the durable read model.
+                      const operation = moduleMemoryOperation(response);
+                      const newModuleRowId =
+                          operation?.action === "write"
+                              ? operation.module_id
+                              : operation?.action === "merge"
+                                ? operation.canonical_module_id
+                                : undefined;
+                      try {
+                          if (newModuleRowId !== undefined) {
+                              await syncModuleMemoryIdentity(
+                                  memoryProject,
+                                  newModuleRowId,
+                                  projectRoot,
+                              );
+                          }
+                          await syncModuleMemories();
+                      } catch (error) {
+                          log("[magic-context] bounded memory mirror sync failed:", error);
+                      }
                       if (
                           !moduleNoteResponseIsError(response) &&
                           (action === "write" || action === "update" || action === "merge")
@@ -1023,7 +1084,15 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                               log("[magic-context] mirrored memory embedding failed:", error);
                           });
                       }
-                      return response;
+                      return (
+                          translateModuleMemoryMutationReply({
+                              db,
+                              moduleProject: memoryProject,
+                              response,
+                              requestedHostIds: hostIds,
+                              requestedCategory: category,
+                          }) ?? response
+                      );
                   },
                   noteEvaluationAvailable: (evaluationProjectPath: string) =>
                       getModuleNoteEvaluationBridge(evaluationProjectPath) !== undefined,

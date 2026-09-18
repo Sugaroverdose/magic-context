@@ -69,15 +69,15 @@ use mc_store::TagNumberRow;
 use mc_store::{
     canonical_root, validate_state_import_compartments, AuthoritySeedRow, DeferredExecuteState,
     FacadeMutationOutcome, HistorianChunkRange, HistorianDecision, HistorianPhase,
-    HistorianRecentDecision, InsertMemoryInput, LoadedState, MappingUpdate, McStore, McStoreError,
-    McTagRow, ModuleDropSeedRow, ModuleMemoryMutationRow, ModuleMemoryRow, ModuleStateSyncError,
-    ModuleStateSyncRequest, ModuleStripSeedRow, ModuleWorkspaceMemberRow, ModuleWorkspaceRow,
-    NoteCasOutcome, NoteDismissOutcome, NoteEvaluationInput, NoteInput, NoteNudgeAnchorSeed,
-    NoteWriteInput, PendingAgentDrop, PendingAgentDropSeedRow, PendingCompactionMarkerState,
-    RecordWrapupCommandOutcome, StateImportError, StateImportPreflight, StateImportValidationError,
-    StoredChunkTranscript, StoredCompartment, StoredMemoryMutation, StoredNote,
-    TodoStateSetOutcome, UserHintSeedRow, VerificationUpdate, WrapupCommandRecord,
-    LATEST_MIGRATION_VERSION,
+    HistorianRecentDecision, HostMemoryIdentityAck, InsertMemoryInput, LoadedState, MappingUpdate,
+    McStore, McStoreError, McTagRow, ModuleDropSeedRow, ModuleMemoryMutationRow, ModuleMemoryRow,
+    ModuleStateSyncError, ModuleStateSyncRequest, ModuleStripSeedRow, ModuleWorkspaceMemberRow,
+    ModuleWorkspaceRow, NoteCasOutcome, NoteDismissOutcome, NoteEvaluationInput, NoteInput,
+    NoteNudgeAnchorSeed, NoteWriteInput, PendingAgentDrop, PendingAgentDropSeedRow,
+    PendingCompactionMarkerState, RecordWrapupCommandOutcome, StateImportError,
+    StateImportPreflight, StateImportValidationError, StoredChunkTranscript, StoredCompartment,
+    StoredMemoryMutation, StoredNote, TodoStateSetOutcome, UserHintSeedRow, VerificationUpdate,
+    WrapupCommandRecord, LATEST_MIGRATION_VERSION,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -1919,6 +1919,7 @@ impl ModuleMemoryWire {
             .unwrap_or_else(|| mc_store::compute_normalized_memory_hash(&self.content));
         ModuleMemoryRow {
             id: self.id,
+            host_row_id: Some(self.id),
             project_path,
             category: self.category,
             content: self.content,
@@ -8200,6 +8201,55 @@ impl McHandler {
         }
     }
 
+    fn handle_mirror_memory_value(&self, request: &Value) -> HandlerOutcome {
+        let Some(store) = self.store.get() else {
+            return store_unavailable_error();
+        };
+        let Some(module_row_id) = request.get("module_row_id").and_then(Value::as_i64) else {
+            return invalid_params_error("mirror.memory requires module_row_id");
+        };
+        match store.pull_memory_changefeed_row(module_row_id) {
+            Ok(row) => respond(json!({ "ok": true, "row": row })),
+            Err(error) => HandlerOutcome::Error {
+                code: "mirror_memory_failed".to_string(),
+                message: error.to_string(),
+            },
+        }
+    }
+
+    fn handle_memory_identity_ack_value(&self, request: &Value) -> HandlerOutcome {
+        let Some(store) = self.store.get() else {
+            return store_unavailable_error();
+        };
+        let Some(project) = request.get("project").and_then(Value::as_str) else {
+            return invalid_params_error("memory.identity.ack requires project");
+        };
+        let Some(rows) = request.get("rows").and_then(Value::as_array) else {
+            return invalid_params_error("memory.identity.ack requires rows");
+        };
+        let acknowledgements = rows
+            .iter()
+            .map(|row| {
+                Some(HostMemoryIdentityAck {
+                    module_row_id: row.get("module_row_id")?.as_i64()?,
+                    host_row_id: row.get("context_row_id")?.as_i64()?,
+                })
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(acknowledgements) = acknowledgements else {
+            return invalid_params_error(
+                "memory.identity.ack rows require module_row_id and context_row_id",
+            );
+        };
+        match store.acknowledge_host_memory_ids(project, &acknowledgements) {
+            Ok(acknowledged) => respond(json!({ "ok": true, "acknowledged": acknowledged })),
+            Err(error) => HandlerOutcome::Error {
+                code: "memory_identity_ack_failed".to_string(),
+                message: error.to_string(),
+            },
+        }
+    }
+
     fn handle_mirror_pull_value(&self, request: &Value) -> HandlerOutcome {
         let Some(store) = self.store.get() else {
             return store_unavailable_error();
@@ -11796,6 +11846,39 @@ impl McHandler {
         };
         let memory_project = facade_scope.memory_project_path.as_str();
         let conversation_key = facade_scope.conversation_key.as_str();
+        let id_lane = match memory_id_lane(args) {
+            Ok(lane) => lane,
+            Err(error) => return tool_error_result(format!("Error: {error}.")),
+        };
+        let module_request_ids = memory_ids(args, action);
+        let requested_host_ids = host_memory_ids(args);
+        let mut host_id_by_module = HashMap::new();
+        if id_lane == MemoryIdLane::Host {
+            if module_request_ids.len() != requested_host_ids.len() {
+                return tool_error_result(
+                    "Error: host memory ids must accompany every translated module id.".to_string(),
+                );
+            }
+            for (module_id, host_id) in module_request_ids
+                .iter()
+                .copied()
+                .zip(requested_host_ids.iter().copied())
+            {
+                let acknowledged = store
+                    .get_memory_full(module_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|memory| memory.host_row_id);
+                if acknowledged != Some(host_id) {
+                    return tool_error_result(format!(
+                        "Error: memory id {host_id} has no module mapping yet — it was written seconds ago or the mirror is behind; retry or use the id shown in <project-memory>."
+                    ));
+                }
+                host_id_by_module.insert(module_id, host_id);
+            }
+        } else if !requested_host_ids.is_empty() {
+            return tool_error_result("Error: host_ids require memory_id_lane 'host'.".to_string());
+        }
         if is_mutation {
             if let Err(error) = store.enforce_facade_project_vocabulary(
                 facade_scope.route_project_root.as_str(),
@@ -11861,9 +11944,15 @@ impl McHandler {
                                     now_ms: now_ms(),
                                 })
                                 .map_err(|error| error.to_string())?;
-                            facade_text_response(
-                                format!("Saved memory [ID: {id}] in {category}."),
+                            let text = if id_lane == MemoryIdLane::Host {
+                                format!("Saved memory in {category}. Its id will appear in <project-memory> on the next pass.")
+                            } else {
+                                format!("Saved memory [ID: {id}] in {category}.")
+                            };
+                            mcp_memory_result(
+                                text,
                                 false,
+                                json!({ "action": "write", "module_id": id, "category": category }),
                             )
                         },
                     ),
@@ -11907,10 +11996,17 @@ impl McHandler {
                                 )
                                 .map_err(|error| error.to_string())?
                                 .ok_or_else(|| format!("memory {id} was not found"))?;
+                            let rendered_id = if id_lane == MemoryIdLane::Host {
+                                host_id_by_module.get(&memory.id).copied().ok_or_else(|| {
+                                    "translated host memory identity disappeared".to_string()
+                                })?
+                            } else {
+                                memory.id
+                            };
                             facade_text_response(
                                 format!(
-                                    "Updated memory [ID: {}] in {}.",
-                                    memory.id, memory.category
+                                    "Updated memory [ID: {rendered_id}] in {}.",
+                                    memory.category
                                 ),
                                 false,
                             )
@@ -11947,8 +12043,21 @@ impl McHandler {
                                     false,
                                 )
                             } else {
+                                let rendered_ids = if id_lane == MemoryIdLane::Host {
+                                    archived
+                                        .iter()
+                                        .map(|id| {
+                                            host_id_by_module.get(id).copied().ok_or_else(|| {
+                                                "translated host memory identity disappeared"
+                                                    .to_string()
+                                            })
+                                        })
+                                        .collect::<Result<Vec<_>, _>>()?
+                                } else {
+                                    archived
+                                };
                                 facade_text_response(
-                                    format!("Archived memory IDs [{}].", join_i64s(&archived)),
+                                    format!("Archived memory IDs [{}].", join_i64s(&rendered_ids)),
                                     false,
                                 )
                             }
@@ -12006,15 +12115,50 @@ impl McHandler {
                                     .map_err(|error| error.to_string())?
                                     .ok_or_else(|| "canonical memory disappeared".to_string())?;
                             }
-                            facade_text_response(
+                            let rendered_inputs = if id_lane == MemoryIdLane::Host {
+                                requested_host_ids.clone()
+                            } else {
+                                ids.clone()
+                            };
+                            let rendered_superseded = if id_lane == MemoryIdLane::Host {
+                                superseded_ids
+                                    .iter()
+                                    .filter_map(|id| host_id_by_module.get(id).copied())
+                                    .collect::<Vec<_>>()
+                            } else {
+                                superseded_ids.clone()
+                            };
+                            let text = if id_lane == MemoryIdLane::Host {
+                                match memory.host_row_id {
+                                    Some(host_id) => format!(
+                                        "Merged memories [{}] into canonical memory [ID: {host_id}] in {}; superseded [{}].",
+                                        join_i64s(&rendered_inputs),
+                                        memory.category,
+                                        join_i64s(&rendered_superseded)
+                                    ),
+                                    None => format!(
+                                        "Merged memories [{}] into a canonical memory in {}. Its id will appear in <project-memory> on the next pass.",
+                                        join_i64s(&rendered_inputs), memory.category
+                                    ),
+                                }
+                            } else {
                                 format!(
                                     "Merged memories [{}] into canonical memory [ID: {}] in {}; superseded [{}].",
-                                    join_i64s(&ids),
+                                    join_i64s(&rendered_inputs),
                                     memory.id,
                                     memory.category,
-                                    join_i64s(&superseded_ids)
-                                ),
+                                    join_i64s(&rendered_superseded)
+                                )
+                            };
+                            mcp_memory_result(
+                                text,
                                 false,
+                                json!({
+                                    "action": "merge",
+                                    "canonical_module_id": memory.id,
+                                    "superseded_module_ids": superseded_ids,
+                                    "category": memory.category,
+                                }),
                             )
                         },
                     ),
@@ -12039,12 +12183,21 @@ impl McHandler {
                         if rows.is_empty() {
                             return mcp_text_result("No active memories found.".to_string(), false);
                         }
+                        let pending_host_id = id_lane == MemoryIdLane::Host
+                            && rows.iter().any(|memory| memory.host_row_id.is_none());
                         let body = rows
                             .iter()
                             .map(|memory| {
+                                let prefix = if id_lane == MemoryIdLane::Host {
+                                    memory.host_row_id.map_or_else(
+                                        || "Memory".to_string(),
+                                        |id| format!("Memory [ID: {id}]"),
+                                    )
+                                } else {
+                                    format!("Memory [ID: {}]", memory.id)
+                                };
                                 format!(
-                                    "Memory [ID: {}] in {} (status: {}): {}",
-                                    memory.id,
+                                    "{prefix} in {} (status: {}): {}",
                                     memory.category,
                                     memory.status,
                                     memory
@@ -12056,9 +12209,14 @@ impl McHandler {
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
+                        let mirror_note = if pending_host_id {
+                            "\nNote: one or more memory ids are waiting for the host mirror; retry after the next pass."
+                        } else {
+                            ""
+                        };
                         mcp_text_result(
                             format!(
-                                "Found {} active {}:\n\n{body}",
+                                "Found {} active {}:\n\n{body}{mirror_note}",
                                 rows.len(),
                                 if rows.len() == 1 {
                                     "memory"
@@ -12082,13 +12240,23 @@ impl McHandler {
                             .collect::<std::collections::HashMap<_, _>>();
                         let lines = ids
                             .iter()
-                            .map(|id| match by_id.get(id) {
-                                Some(memory) => format!(
-                                    "Memory [ID: {}] in {} (status: {}): {}",
-                                    memory.id, memory.category, memory.status, memory.content
-                                ),
-                                None => {
-                                    format!("id {id}: not found or not visible from this project")
+                            .map(|id| {
+                                let rendered_id = if id_lane == MemoryIdLane::Host {
+                                    host_id_by_module
+                                        .get(id)
+                                        .copied()
+                                        .expect("host lane ids were validated before facade dispatch")
+                                } else {
+                                    *id
+                                };
+                                match by_id.get(id) {
+                                    Some(memory) => format!(
+                                        "Memory [ID: {rendered_id}] in {} (status: {}): {}",
+                                        memory.category, memory.status, memory.content
+                                    ),
+                                    None => format!(
+                                        "id {rendered_id}: not found or not visible from this project"
+                                    ),
                                 }
                             })
                             .collect::<Vec<_>>()
@@ -12131,18 +12299,32 @@ impl McHandler {
         };
         let memory_project = facade_scope.memory_project_path.as_str();
         let conversation_key = facade_scope.conversation_key.as_str();
-        let visible_memory_ids = match store.load(conversation_key) {
-            Ok(state) => state
-                .meta
-                .rendered_memory_ids
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
+        let state = match store.load(conversation_key) {
+            Ok(state) => state,
             Err(error) => return tool_error_result(format!("Error: {error}")),
         };
         let include_memories = facade_scope.memory_enabled && sources.memory;
         let workspace_membership = match store.resolve_workspace_membership(memory_project) {
             Ok(membership) => membership,
             Err(error) => return tool_error_result(format!("Error: {error}")),
+        };
+        let host_backed_memory_ids = !state.meta.last_serializer_profile.is_empty()
+            && state.meta.last_serializer_profile != "claude-code-anthropic";
+        let visible_memory_ids = if host_backed_memory_ids {
+            let paths = workspace_membership
+                .as_ref()
+                .map(|workspace| workspace.union_identities.clone())
+                .unwrap_or_else(|| vec![memory_project.to_string()]);
+            match store.module_memory_ids_for_host_ids(&paths, &state.meta.rendered_memory_ids) {
+                Ok(mapped) => mapped.values().copied().collect::<BTreeSet<_>>(),
+                Err(error) => return tool_error_result(format!("Error: {error}")),
+            }
+        } else {
+            state
+                .meta
+                .rendered_memory_ids
+                .into_iter()
+                .collect::<BTreeSet<_>>()
         };
 
         if include_memories {
@@ -12974,6 +13156,8 @@ impl McHandler {
                 | "authority.drain_flip"
                 | "authority.drain_finish" => self.handle_authority_drain_value(&request, method),
                 "mirror.pull" => self.handle_mirror_pull_value(&request),
+                "mirror.memory" => self.handle_mirror_memory_value(&request),
+                "memory.identity.ack" => self.handle_memory_identity_ack_value(&request),
                 "guidance.get" => self.handle_guidance_value(channel, &request),
                 "manifest.get" => self.handle_prompt_surface_manifest_value(channel, &request),
                 "dreamer.run_task" => self.handle_dreamer_run_task(channel, &request).await,
@@ -14574,6 +14758,15 @@ fn mcp_text_result(text: String, is_error: bool) -> HandlerOutcome {
     }))
 }
 
+fn mcp_memory_result(text: String, is_error: bool, operation: Value) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": is_error,
+        "memory_operation": operation,
+    }))
+    .map_err(|error| error.to_string())
+}
+
 fn tool_error_result(message: impl Into<String>) -> HandlerOutcome {
     mcp_text_result(message.into(), true)
 }
@@ -15881,6 +16074,27 @@ fn join_i64s(ids: &[i64]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryIdLane {
+    Module,
+    Host,
+}
+
+fn memory_id_lane(args: &Map<String, Value>) -> Result<MemoryIdLane, String> {
+    match string_arg(args, "memory_id_lane") {
+        None | Some("module") => Ok(MemoryIdLane::Module),
+        Some("host") => Ok(MemoryIdLane::Host),
+        Some(_) => Err("memory_id_lane must be 'host' or 'module'".to_string()),
+    }
+}
+
+fn host_memory_ids(args: &Map<String, Value>) -> Vec<i64> {
+    args.get("host_ids")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_i64).collect())
+        .unwrap_or_default()
 }
 
 fn parse_tag_range_string(input: &str) -> Result<Vec<u64>, String> {
@@ -19164,7 +19378,7 @@ mod tests {
         content: &str,
         now: i64,
     ) -> i64 {
-        store
+        let id = store
             .insert_memory(InsertMemoryInput {
                 project_path: project,
                 route_project_root: None,
@@ -19177,7 +19391,17 @@ mod tests {
                 metadata_json: None,
                 now_ms: now,
             })
-            .unwrap()
+            .unwrap();
+        store
+            .acknowledge_host_memory_ids(
+                project,
+                &[HostMemoryIdentityAck {
+                    module_row_id: id,
+                    host_row_id: id,
+                }],
+            )
+            .unwrap();
+        id
     }
 
     fn activate_module_authority(
@@ -26865,6 +27089,203 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn host_memory_lane_translates_overlap_ids_and_never_mutates_the_raw_module_row() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        let project = project.to_str().unwrap();
+        handler.bind_route(7, binding_with_harness(project, "opencode", "token"));
+
+        for index in 1..=7 {
+            assert_eq!(
+                insert_memory(
+                    &store,
+                    project,
+                    "CONSTRAINTS",
+                    &format!("memory-{index}"),
+                    index,
+                ),
+                index
+            );
+        }
+        store
+            .acknowledge_host_memory_ids(
+                project,
+                &[
+                    HostMemoryIdentityAck {
+                        module_row_id: 1,
+                        host_row_id: 2,
+                    },
+                    HostMemoryIdentityAck {
+                        module_row_id: 2,
+                        host_row_id: 102,
+                    },
+                    HostMemoryIdentityAck {
+                        module_row_id: 3,
+                        host_row_id: 4,
+                    },
+                    HostMemoryIdentityAck {
+                        module_row_id: 4,
+                        host_row_id: 104,
+                    },
+                    HostMemoryIdentityAck {
+                        module_row_id: 5,
+                        host_row_id: 6,
+                    },
+                    HostMemoryIdentityAck {
+                        module_row_id: 6,
+                        host_row_id: 106,
+                    },
+                    HostMemoryIdentityAck {
+                        module_row_id: 7,
+                        host_row_id: 7,
+                    },
+                ],
+            )
+            .unwrap();
+
+        let get = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "get",
+                "ids": [1],
+                "host_ids": [2],
+                "memory_id_lane": "host",
+            }),
+        )
+        .await;
+        assert_eq!(
+            tool_text(get),
+            "Memory [ID: 2] in CONSTRAINTS (status: active): memory-1"
+        );
+
+        let raw_overlap = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "get",
+                "ids": [2],
+                "host_ids": [2],
+                "memory_id_lane": "host",
+            }),
+        )
+        .await;
+        assert!(tool_text(raw_overlap).contains("memory id 2 has no module mapping yet"));
+
+        let update = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "update",
+                "ids": [1],
+                "host_ids": [2],
+                "memory_id_lane": "host",
+                "content": "updated-host-two",
+            }),
+        )
+        .await;
+        assert_eq!(tool_text(update), "Updated memory [ID: 2] in CONSTRAINTS.");
+        assert_eq!(
+            store.get_memory_full(1).unwrap().unwrap().content,
+            "updated-host-two"
+        );
+        assert_eq!(
+            store.get_memory_full(2).unwrap().unwrap().content,
+            "memory-2"
+        );
+
+        let archive = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "archive",
+                "ids": [3],
+                "host_ids": [4],
+                "memory_id_lane": "host",
+            }),
+        )
+        .await;
+        assert_eq!(tool_text(archive), "Archived memory IDs [4].");
+        assert_eq!(
+            store.get_memory_full(3).unwrap().unwrap().status,
+            "archived"
+        );
+        assert_eq!(store.get_memory_full(4).unwrap().unwrap().status, "active");
+
+        let merge = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "merge",
+                "ids": [5, 7],
+                "host_ids": [6, 7],
+                "memory_id_lane": "host",
+                "content": "merged-host-six",
+            }),
+        )
+        .await;
+        assert!(!tool_text(merge).contains("ID: 8"));
+        assert_eq!(
+            store.get_memory_full(6).unwrap().unwrap().content,
+            "memory-6"
+        );
+
+        let write = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "write",
+                "memory_id_lane": "host",
+                "host_ids": [],
+                "ids": [],
+                "category": "CONSTRAINTS",
+                "content": "fresh host write",
+            }),
+        )
+        .await;
+        let body = tool_body(write);
+        assert!(body["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("id will appear in <project-memory>"));
+        assert!(body["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .find("ID:")
+            .is_none());
+        assert!(body["memory_operation"]["module_id"].as_i64().is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn claude_code_memory_lane_keeps_module_ids_byte_for_byte() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        let project = project.to_str().unwrap();
+        handler.bind_route(7, binding_with_harness(project, "claude-code", "token"));
+        assert_eq!(
+            insert_memory(&store, project, "CONSTRAINTS", "claude row", 1),
+            1
+        );
+
+        let get = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({ "action": "get", "ids": [1] }),
+        )
+        .await;
+        assert_eq!(
+            tool_text(get),
+            "Memory [ID: 1] in CONSTRAINTS (status: active): claude row"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn memory_facade_routes_all_authority_actions_into_store_and_changefeed() {
         let producer = Arc::new(ProducerState::default());
         let resolver =
@@ -28356,20 +28777,30 @@ mod tests {
             add_before,
             "additive writes must not append mutation-log rows"
         );
-        assert!(store
+        let new_memory = store
             .load_active_memories(additive_project_root, now_ms())
             .unwrap()
-            .iter()
-            .any(|memory| {
-                memory.content == "new additive memory"
-                    && store
-                        .get_memory_full(memory.id)
-                        .unwrap()
-                        .unwrap()
-                        .source_session_id
-                        .as_deref()
-                        == Some(additive_scope)
-            }));
+            .into_iter()
+            .find(|memory| memory.content == "new additive memory")
+            .expect("facade write stored the additive memory");
+        assert_eq!(
+            store
+                .get_memory_full(new_memory.id)
+                .unwrap()
+                .unwrap()
+                .source_session_id
+                .as_deref(),
+            Some(additive_scope)
+        );
+        store
+            .acknowledge_host_memory_ids(
+                additive_project_root,
+                &[HostMemoryIdentityAck {
+                    module_row_id: new_memory.id,
+                    host_row_id: new_memory.id,
+                }],
+            )
+            .unwrap();
         let add_delta = call_transform_request_on_channel(&handler, 9, add_req).await;
         assert_eq!(add_delta["action"], "SOFT");
         assert!(synthetic_text(&add_delta, 1).contains("<new-memories>"));
@@ -35373,6 +35804,7 @@ mod tests {
                 history_budget_tokens: 60_000.0,
                 covered_system_messages: &[],
                 memory_enabled: true,
+                host_backed_memory_ids: false,
                 memory_budget_tokens: 8_000.0,
                 user_profile_budget_tokens: 4_000.0,
                 inject_docs: true,

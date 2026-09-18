@@ -17,6 +17,7 @@ import type {
     AuthorityDrainResponse,
     AuthorityStatus,
     ChangefeedPage,
+    ChangefeedRow,
 } from "../../features/magic-context/context-authority";
 import { getDataDir } from "../../shared/data-path";
 import { getHarness } from "../../shared/harness";
@@ -481,6 +482,8 @@ export class SubcModuleTransport {
             | "authority.drain_flip"
             | "authority.drain_finish"
             | "mirror.pull"
+            | "mirror.memory"
+            | "memory.identity.ack"
             | "ctx_note"
             | "ctx_memory"
             | "note.evaluate"
@@ -716,8 +719,11 @@ export class SubcModuleTransport {
             | "authority.drain_reconcile"
             | "authority.drain_verify"
             | "authority.drain_finish"
-            | "mirror.pull",
+            | "mirror.pull"
+            | "mirror.memory"
+            | "memory.identity.ack",
         body: Record<string, unknown>,
+        timeoutMs?: number,
     ): Promise<Record<string, unknown>> {
         // The transport serializes the body verbatim; the module dispatches on the
         // body's own method field, so it must always be present and canonical here.
@@ -726,6 +732,7 @@ export class SubcModuleTransport {
             projectRoot,
             method,
             body: { ...body, method, v: 1 },
+            timeoutMs,
         })) as unknown;
         if (isRecord(response) && isRecord(response.result)) return response.result;
         if (isRecord(response)) return response;
@@ -832,6 +839,40 @@ export class SubcModuleTransport {
         );
         if (!isRecord(response.page)) throw new Error("mirror.pull omitted page");
         return { page: response.page as unknown as ChangefeedPage };
+    }
+
+    async mirrorMemory(args: {
+        module_row_id: number;
+        projectRoot?: string;
+    }): Promise<{ row: ChangefeedRow | null }> {
+        const { projectRoot, ...body } = args;
+        const response = await this.authorityRequest(
+            `mirror-memory:${args.module_row_id}`,
+            projectRoot ?? this.bindRootForAuthority(),
+            "mirror.memory",
+            body,
+            1_900,
+        );
+        return {
+            row: isRecord(response.row) ? (response.row as unknown as ChangefeedRow) : null,
+        };
+    }
+
+    async memoryIdentityAck(args: {
+        project: string;
+        rows: Array<{ module_row_id: number; context_row_id: number }>;
+        projectRoot?: string;
+    }): Promise<{ acknowledged: number }> {
+        const { projectRoot, ...body } = args;
+        const response = await this.authorityRequest(
+            `memory-identity:${args.project}`,
+            projectRoot ?? this.bindRootForAuthority(),
+            "memory.identity.ack",
+            body,
+        );
+        return {
+            acknowledged: typeof response.acknowledged === "number" ? response.acknowledged : 0,
+        };
     }
 
     async deleteSession(sessionId: string, projectRoot: string): Promise<void> {
