@@ -717,6 +717,18 @@
 			]
 		},
 		{
+			"path": "tests/rust-dangling-boundary-seed.test.ts",
+			"tier": "rust-only",
+			"invocation": {
+				"ts": false,
+				"rust": true
+			},
+			"rationale": "a compartment whose boundary message id is absent from the raw store must not park the rust cold seed; the boundary resolves from its neighbours and a clean session's served bytes stay byte-identical",
+			"contract_refs": [
+				"RUST-E2E"
+			]
+		},
+		{
 			"path": "tests/rust-paired-session-replay.test.ts",
 			"tier": "rust-only",
 			"invocation": {
