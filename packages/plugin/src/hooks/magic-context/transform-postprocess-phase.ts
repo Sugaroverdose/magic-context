@@ -37,7 +37,6 @@ import {
     getPersistedCompactionMarkerState,
     getThinkingBindingRecoveryTarget,
     getTrailingBlankDecisions,
-    loadPostprocessReplaySnapshot,
     NEWEST_REASONING_BEARING_ASSISTANT,
     type PersistedCompactionMarkerState,
     type PostprocessReplaySnapshot,
@@ -47,9 +46,7 @@ import {
     thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
 import {
-    getOldestActiveUnprotectedToolTags,
     getTagNumberByMessageId,
-    getTailHygieneTags,
     markTagsCompactedByMessageIds,
     updateTagStatus,
 } from "../../features/magic-context/storage-tags";
@@ -104,6 +101,11 @@ import {
 import { markNoteNudgeDelivered, peekNoteNudgeText } from "./note-nudger";
 import { hasVisibleNoteReadCall } from "./note-visibility";
 import type { PassOutcome } from "./pass-outcome";
+import {
+    postprocessOldestTags,
+    postprocessReplaySnapshot,
+    postprocessTailTags,
+} from "./postprocess-read-cache";
 import { estimateTokens } from "./read-session-formatting";
 import { modelAcceptsEmptyContent, replaySentinelByMessageIds } from "./sentinel";
 import {
@@ -1145,6 +1147,7 @@ export function finalizeMessageRepresentation(
 export async function runPostTransformPhase(
     args: RunPostTransformPhaseArgs,
 ): Promise<PostTransformPhaseResult> {
+    const tPostprocessSetup = performance.now();
     const compactionOff = args.compactionOff === true;
     const trailingBlankSourceDecisions =
         args.trailingBlankSourceDecisions ?? snapshotTrailingBlankSourceDecisions(args.messages);
@@ -1877,9 +1880,12 @@ export async function runPostTransformPhase(
     // All replay-only fields below come from one coherent session_meta row.
     // Writes that use compare-and-swap still perform their own winner re-read;
     // this snapshot only coalesces independent reads between those mutations.
+    logTransformTiming(args.sessionId, "pp.setupAndOperations", tPostprocessSetup);
+    const tReplaySnapshot = performance.now();
     const replaySnapshot = !compactionOff
-        ? loadPostprocessReplaySnapshot(args.db, args.sessionId)
+        ? postprocessReplaySnapshot(args.db, args.sessionId)
         : undefined;
+    logTransformTiming(args.sessionId, "pp.replaySnapshot", tReplaySnapshot);
 
     // Stale ctx_reduce strip is a REPLAY-class transform driven by a FROZEN,
     // id-keyed watermark (`stale_reduce_stripped_ids`), mirroring reasoning /
@@ -2208,6 +2214,7 @@ export async function runPostTransformPhase(
     // fire (fullFeatureMode), so we skip the scan in subagent sessions.
     logTransformTiming(args.sessionId, "pp.nudgeAndSticky", tNudgeBlock);
 
+    const tMarker = performance.now();
     const explicitRebuildHappened =
         args.historyRefreshExplicitBeforePrepare && args.rebuiltHistoryFromInitialPrepare;
     const materializationSatisfied =
@@ -2311,6 +2318,7 @@ export async function runPostTransformPhase(
         args.deferredMaterializationSessions.delete(args.sessionId);
     }
 
+    logTransformTiming(args.sessionId, "pp.markerReconcile", tMarker);
     const tNoteAndTodo = performance.now();
     const noteReadStillVisible = args.fullFeatureMode
         ? hasVisibleNoteReadCall(args.messages)
@@ -2478,6 +2486,7 @@ export async function runPostTransformPhase(
     // and defer must serialize identical prefixes. Do not add message, tool-target,
     // or role-topology mutations below this phase.
     //
+    const tFrozenDecisions = performance.now();
     if (reasoningMutationTargetUnknown) {
         const reasoningCandidates =
             args.reasoningByMessage.size > 0 ? args.reasoningByMessage.keys() : args.messages;
@@ -2700,6 +2709,7 @@ export async function runPostTransformPhase(
         }
     }
 
+    logTransformTiming(args.sessionId, "pp.frozenDecisions", tFrozenDecisions);
     const tFinalRepresentation = performance.now();
     const finalRepresentation = finalizeMessageRepresentation(
         args.messages,
@@ -2727,6 +2737,7 @@ export async function runPostTransformPhase(
         `clearedParts=${finalRepresentation.clearedParts} mergedReasoningParts=${finalRepresentation.mergedReasoningParts}`,
     );
 
+    const tTailBaseline = performance.now();
     let assertedBaseline:
         | {
               tags: TagEntry[];
@@ -2738,7 +2749,8 @@ export async function runPostTransformPhase(
     if (args.channel1StateBySession) {
         if (args.ctxReduceAvailability.callable && !compactionOff) {
             try {
-                const tags = getTailHygieneTags(args.db, args.sessionId);
+                const tTailReads = performance.now();
+                const tags = postprocessTailTags(args.db, args.sessionId);
                 // A queued ctx_reduce drop is already actioned by the agent. Keep its
                 // still-rendered bytes in T, but exclude it from the actionable U backlog.
                 const pendingDropTagNumbers = new Set(
@@ -2747,6 +2759,8 @@ export async function runPostTransformPhase(
                         .map((operation) => operation.tagId),
                 );
                 const previous = args.channel1StateBySession.get(args.sessionId);
+                logTransformTiming(args.sessionId, "pp.tailReads", tTailReads);
+                const tTailMeasure = performance.now();
                 const baseline = refreshTailHygieneBaseline({
                     messages: args.messages,
                     tags,
@@ -2755,6 +2769,8 @@ export async function runPostTransformPhase(
                     cacheBusting: bustedThisPass,
                     previous,
                 });
+                logTransformTiming(args.sessionId, "pp.tailMeasure", tTailMeasure);
+                const tTailState = performance.now();
                 const structuralSignature = tailHygieneStructuralSignature(args.messages);
                 const effective = effectiveTailHygiene(baseline);
                 const durableGrace =
@@ -2784,7 +2800,7 @@ export async function runPostTransformPhase(
                             ? false
                             : (previous?.reducedSinceRefresh ?? false),
                     agentDropsAppliedThisPass: pendingOpsDidMutate,
-                    oldestReclaimableToolTags: getOldestActiveUnprotectedToolTags(
+                    oldestReclaimableToolTags: postprocessOldestTags(
                         args.db,
                         args.sessionId,
                         args.protectedTagNumbers,
@@ -2803,6 +2819,7 @@ export async function runPostTransformPhase(
                         error,
                     );
                 }
+                logTransformTiming(args.sessionId, "pp.tailState", tTailState);
                 assertedBaseline = {
                     tags,
                     protectedTagNumbers: args.protectedTagNumbers,
@@ -2821,6 +2838,8 @@ export async function runPostTransformPhase(
             args.channel1StateBySession.delete(args.sessionId);
         }
     }
+    logTransformTiming(args.sessionId, "pp.tailBaseline", tTailBaseline);
+    const tTailGuard = performance.now();
     if (assertedBaseline) {
         try {
             const servedSignature = tailHygieneStructuralSignature(args.messages);
@@ -2854,6 +2873,7 @@ export async function runPostTransformPhase(
         }
     }
 
+    logTransformTiming(args.sessionId, "pp.tailGuard", tTailGuard);
     return {
         explicitMaterializedSuccessfully,
         deferredMaterializedSuccessfully,
