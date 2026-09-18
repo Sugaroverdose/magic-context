@@ -115,3 +115,26 @@ describe("host/module memory id translation", () => {
         expect(reply).not.toContain("42");
     });
 });
+
+describe("adversarial merge identity replies", () => {
+    test("merge survivor and superseded ids are host ids, including delayed survivor ack", () => {
+        const database = db();
+        try {
+            const old = insertMemory(database, { projectPath: "/repo", category: "CONSTRAINTS", content: "old" });
+            const survivor = insertMemory(database, { projectPath: "/repo", category: "CONSTRAINTS", content: "survivor" });
+            database.prepare("INSERT INTO mirror_identity(domain, module_project, module_row_id, context_row_id) VALUES ('memories', '/repo', 9101, ?)").run(old.id);
+            const args = {
+                db: database,
+                moduleProject: "/repo",
+                requestedHostIds: [old.id],
+                response: { result: { memory_operation: { action: "merge", canonical_module_id: 9202, superseded_module_ids: [9101, 9303], category: "CONSTRAINTS" } } },
+            };
+            expect(translateModuleMemoryMutationReply(args)).toBe(`Merged memories [${old.id}] into a canonical memory in CONSTRAINTS. Its id will appear in <project-memory> on the next pass.`);
+            database.prepare("INSERT INTO mirror_identity(domain, module_project, module_row_id, context_row_id) VALUES ('memories', '/repo', 9202, ?)").run(survivor.id);
+            expect(translateModuleMemoryMutationReply(args)).toBe(`Merged memories [${old.id}] into canonical memory [ID: ${survivor.id}] in CONSTRAINTS; superseded [${old.id}].`);
+            expect(translateHostMemoryIds(database, [9202])).toEqual({ error: unmappedMemoryIdMessage(9202) });
+        } finally {
+            database.close();
+        }
+    });
+});
