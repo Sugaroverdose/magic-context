@@ -259,7 +259,9 @@ describe("magic-context hook", () => {
         let drained = false;
         deps.rustModeModuleClient = {
             async call() {
-                return { memory_operation: { action: "write", module_id: 9101, category: "CONSTRAINTS" } };
+                return {
+                    memory_operation: { action: "write", module_id: 9101, category: "CONSTRAINTS" },
+                };
             },
             async mirrorMemory() {
                 targeted = true;
@@ -274,13 +276,20 @@ describe("magic-context hook", () => {
         const hook = requireHook(createMagicContextHook(deps));
         const started = performance.now();
         const reply = await hook.rustToolBackends!.memory!({
-            sessionId: "review-budget", projectRoot: "/tmp", projectPath: "/tmp",
-            memoryProject: "/tmp", action: "write", category: "CONSTRAINTS", content: "budget probe",
+            sessionId: "review-budget",
+            projectRoot: "/tmp",
+            projectPath: "/tmp",
+            memoryProject: "/tmp",
+            action: "write",
+            category: "CONSTRAINTS",
+            content: "budget probe",
         });
         const elapsed = performance.now() - started;
         expect(targeted).toBe(true);
         expect(drained).toBe(false);
-        expect(reply).toBe("Saved memory in CONSTRAINTS. Its id will appear in <project-memory> on the next pass.");
+        expect(reply).toBe(
+            "Saved memory in CONSTRAINTS. Its id will appear in <project-memory> on the next pass.",
+        );
         expect(reply).not.toContain("9101");
         expect(elapsed).toBeLessThan(2_000);
     });
