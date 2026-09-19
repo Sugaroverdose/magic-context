@@ -129,6 +129,7 @@ export interface V2Context {
             text: string;
             delivery: "steer";
         }): Promise<unknown>;
+        hook(name: "http.response", callback: (draft: { sessionID: string; model: { providerID: string; id: string }; kind: string; response: Response }) => Promise<void>): Promise<unknown>;
         hook(
             name: "context" | "compaction" | "generate",
             callback: (draft: SessionContext) => Promise<void>,

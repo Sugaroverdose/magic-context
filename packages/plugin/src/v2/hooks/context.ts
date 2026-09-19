@@ -2,6 +2,8 @@ import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import { detectOverflow } from "../../features/magic-context/overflow-detection";
+import { recordDetectedContextLimit, recordOverflowDetected } from "../../features/magic-context/storage";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import {
     clearSession,
@@ -173,6 +175,17 @@ export async function registerContext(context: V2Context) {
         // Hidden work remains unavailable for this plugin instance when durable storage cannot open.
     }
     const tools = db && isDatabasePersisted(db) ? await registerTools(context, db, config) : undefined;
+    await context.session.hook("http.response", async (draft) => {
+        if (!db || draft.kind !== "primary" || draft.response.ok) return;
+        const detection = detectOverflow(await draft.response.clone().text());
+        if (!detection.isOverflow) return;
+        const modelKey = `${draft.model.providerID}/${draft.model.id}`;
+        if (compactionOff) {
+            if (detection.reportedLimit) recordDetectedContextLimit(db, draft.sessionID, detection.reportedLimit, modelKey, detection.reportedLimitProvenance);
+        } else {
+            recordOverflowDetected(db, draft.sessionID, detection.reportedLimit, modelKey, "provider_overflow", detection.reportedLimitProvenance);
+        }
+    });
     const hiddenChildHook = new HiddenChildHook();
     await registerHiddenChildAgents(context.agent);
     let hiddenAgentsReady: Promise<void> | undefined;
@@ -289,7 +302,7 @@ export async function registerContext(context: V2Context) {
                     const inputTokens = tokens.input + tokens.cache.read + tokens.cache.write;
                     // Only the raw host window is an immediate admission boundary.
                     // Reserved-output pressure still reaches the historian recovery path.
-                    unsafe = rawLimit !== undefined && inputTokens / rawLimit.context >= 0.95;
+                    unsafe = rawLimit !== undefined && inputTokens <= rawLimit.context && inputTokens / rawLimit.context >= 0.95;
                     const completed = latest?.data.time?.completed;
                     if (typeof completed === "number")
                         updateSessionMeta(db, draft.sessionID, { lastResponseTime: completed });
