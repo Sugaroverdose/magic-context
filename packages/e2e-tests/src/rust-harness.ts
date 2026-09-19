@@ -668,6 +668,14 @@ export class RustTestHarness {
         });
     }
 
+    /** Fetch the session row via the SDK (revert marker, timestamps). */
+    async getSession(
+        sessionId: string,
+    ): Promise<{ revert?: { messageID?: string }; time?: { updated?: number } } | undefined> {
+        const response = await this.clientInstance.session.get({ path: { id: sessionId } });
+        return (response as { data?: { revert?: { messageID?: string } } }).data ?? undefined;
+    }
+
     /** Fetch the session's messages via the SDK (for choosing a mid-session id to remove). */
     async listMessages(
         sessionId: string,
