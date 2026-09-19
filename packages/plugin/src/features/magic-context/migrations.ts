@@ -2,6 +2,7 @@ import { extractTiersFromInner } from "../../hooks/magic-context/compartment-par
 import { log } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
+import { repairOpenCode2HarnessLabels } from "./opencode2-relabel";
 import { ensureColumn, healAllNullColumns } from "./storage-schema-helpers";
 import { bumpEpochsForWorkspaceMemberSet } from "./workspaces";
 
@@ -53,19 +54,17 @@ function tableExists(db: Database, name: string): boolean {
     );
 }
 
-function tableHasHarnessColumn(db: Database, name: string): boolean {
-    if (!tableExists(db, name)) return false;
-    return (db.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string }>).some(
-        (column) => column.name === "harness",
-    );
-}
-
 /**
- * Session-scoped (and singleton cursor) tables whose `harness` column v85
- * rewrites from the OpenCode 1.x mislabel `opencode2` to `opencode`.
- * Named so a structural test can prove every DDL-declared harness table is
- * covered: a table added later without being listed goes red.
+ * Session-scoped (and singleton cursor) tables whose `harness` column the
+ * OpenCode 1.x/2.x relabel touches. Named so a structural test can prove every
+ * DDL-declared harness table is covered: a table added later without being
+ * listed goes red.
+ *
+ * The name records history — v85 rewrote every one of these to `opencode` — but
+ * the list is now consumed by v87, which decides each session's label from the
+ * OpenCode store instead of assuming one direction.
  */
+
 export const V85_OPENCODE2_RELABEL_TABLES = [
     "tags",
     "pending_ops",
@@ -91,127 +90,10 @@ export const V85_OPENCODE2_RELABEL_TABLES = [
 ] as const;
 
 /**
- * Runtime-created singleton (not part of initializeDatabase). Relabel when
- * the table exists so a live upgrade does not leave an `opencode2` cursor.
+ * Runtime-created singleton (not part of initializeDatabase), carried in the
+ * relabel set so a live upgrade sees it when it exists.
  */
 export const V85_OPTIONAL_OPENCODE2_RELABEL_TABLES = ["session_project_backfill_state"] as const;
-
-function deleteLosingOpenCode2Twin(
-    db: Database,
-    table: string,
-    joinColumns: readonly string[],
-    newerPredicate: string,
-): void {
-    if (!tableHasHarnessColumn(db, table)) return;
-    const naturalJoin = joinColumns.map((column) => `oc.${column} = o2.${column}`).join(" AND ");
-    const o2On = naturalJoin
-        ? `${naturalJoin} AND oc.harness = 'opencode'`
-        : `oc.harness = 'opencode'`;
-    const ocOn = naturalJoin
-        ? `${naturalJoin} AND o2.harness = 'opencode2'`
-        : `o2.harness = 'opencode2'`;
-    db.exec(`
-        DELETE FROM ${table}
-        WHERE rowid IN (
-            SELECT o2.rowid
-            FROM ${table} AS o2
-            JOIN ${table} AS oc
-              ON ${o2On}
-            WHERE o2.harness = 'opencode2'
-              AND NOT (${newerPredicate})
-        );
-        DELETE FROM ${table}
-        WHERE rowid IN (
-            SELECT oc.rowid
-            FROM ${table} AS oc
-            JOIN ${table} AS o2
-              ON ${ocOn}
-            WHERE oc.harness = 'opencode'
-              AND (${newerPredicate})
-        );
-    `);
-}
-
-function relabelOpenCode2HarnessRows(db: Database): void {
-    // session_projects PK(session_id, harness): keep the newer updated_at.
-    // On a tie, keep the already-correct `opencode` row.
-    deleteLosingOpenCode2Twin(
-        db,
-        "session_projects",
-        ["session_id"],
-        "o2.updated_at > oc.updated_at",
-    );
-    // primer_candidates unique includes harness: keep the newer created_at.
-    deleteLosingOpenCode2Twin(
-        db,
-        "primer_candidates",
-        ["project_path", "session_id", "source_start_message_id", "source_end_message_id"],
-        "o2.created_at > oc.created_at",
-    );
-    // transform_decisions PK(session_id, harness, message_id): keep the newer ts_ms.
-    deleteLosingOpenCode2Twin(
-        db,
-        "transform_decisions",
-        ["session_id", "message_id"],
-        "o2.ts_ms > oc.ts_ms",
-    );
-    // message_history_orphan_sweep PK(harness): keep the larger last_swept_at.
-    // NULL sorts as older than any timestamp.
-    deleteLosingOpenCode2Twin(
-        db,
-        "message_history_orphan_sweep",
-        [],
-        "COALESCE(o2.last_swept_at, -1) > COALESCE(oc.last_swept_at, -1)",
-    );
-    // session_project_backfill_state PK(harness): prefer a completed cursor
-    // over a mislabelled running lease, then the larger started_at.
-    if (tableHasHarnessColumn(db, "session_project_backfill_state")) {
-        db.exec(`
-            DELETE FROM session_project_backfill_state
-            WHERE harness = 'opencode2'
-              AND EXISTS (
-                  SELECT 1 FROM session_project_backfill_state WHERE harness = 'opencode'
-              )
-              AND NOT (
-                  (status = 'completed'
-                    AND (SELECT status FROM session_project_backfill_state WHERE harness = 'opencode')
-                        != 'completed')
-                  OR (
-                      status = (SELECT status FROM session_project_backfill_state WHERE harness = 'opencode')
-                      AND COALESCE(started_at, -1) > COALESCE(
-                          (SELECT started_at FROM session_project_backfill_state WHERE harness = 'opencode'),
-                          -1
-                      )
-                  )
-              );
-            DELETE FROM session_project_backfill_state
-            WHERE harness = 'opencode'
-              AND EXISTS (
-                  SELECT 1 FROM session_project_backfill_state WHERE harness = 'opencode2'
-              )
-              AND (
-                  ((SELECT status FROM session_project_backfill_state WHERE harness = 'opencode2') = 'completed'
-                    AND status != 'completed')
-                  OR (
-                      status = (SELECT status FROM session_project_backfill_state WHERE harness = 'opencode2')
-                      AND COALESCE(
-                          (SELECT started_at FROM session_project_backfill_state WHERE harness = 'opencode2'),
-                          -1
-                      ) > COALESCE(started_at, -1)
-                  )
-              );
-        `);
-    }
-
-    const tables = new Set<string>([
-        ...V85_OPENCODE2_RELABEL_TABLES,
-        ...V85_OPTIONAL_OPENCODE2_RELABEL_TABLES,
-    ]);
-    for (const table of tables) {
-        if (!tableHasHarnessColumn(db, table)) continue;
-        db.exec(`UPDATE ${table} SET harness = 'opencode' WHERE harness = 'opencode2'`);
-    }
-}
 
 /**
  * Heal compartments stranded by a mismatched tier closing tag (issue #246).
@@ -3087,24 +2969,24 @@ export const MIGRATIONS: Migration[] = [
     },
     {
         version: 85,
-        description: "relabel OpenCode 1.x mis-tagged opencode2 session rows",
-        up(db: Database): void {
-            // No released Magic Context has ever run on an OpenCode 2 host against
-            // a shared context.db (the v2 lane is dev-only and hermetic). OpenCode
-            // 1.18.30 calls setup() on the published { id, server, setup } export.
-            // Ungated setup() locked the harness to "opencode2", so every
-            // session-scoped row the v1 seat wrote was mislabelled. At upgrade time
-            // every harness='opencode2' row in a shared database is that v1 mislabel.
+        description:
+            "relabel OpenCode 1.x mis-tagged opencode2 session rows (inert; superseded by v87)",
+        up(): void {
+            // INERT since v87. This migration used to rewrite EVERY harness='opencode2'
+            // row to 'opencode', on the premise that no released Magic Context had run
+            // on a real OpenCode 2 host, so such a row could only be the OpenCode 1.x
+            // mislabel (an ungated setup() on a 1.18.x seat locked the harness to
+            // "opencode2"). Early adopters broke that premise: issue #475 reported a
+            // genuine OpenCode 2.0.7 server whose 2,788 tags and 32 session_meta rows
+            // were relabelled away from the host that was still writing them, which
+            // hid every earlier drop decision from it.
             //
-            // Twin rule, per table, when a natural key already has an 'opencode' row:
-            //   session_projects: keep the newer updated_at (tie keeps opencode)
-            //   primer_candidates: keep the newer created_at (tie keeps opencode)
-            //   transform_decisions: keep the newer ts_ms (tie keeps opencode)
-            //   message_history_orphan_sweep: keep the larger last_swept_at (NULL loses)
-            //   session_project_backfill_state: prefer status='completed', else newer started_at
-            // Every other harness table has a unique key that does not include harness,
-            // so twins cannot exist and a plain UPDATE is enough.
-            relabelOpenCode2HarnessRows(db);
+            // The body is empty rather than deleted so the version keeps its place in
+            // the ledger: an install that has not reached 85 still records it and then
+            // gets the evidence-based decision from v87, and an install that already
+            // applied 85 is repaired by v87 in the direction its own OpenCode store
+            // supports. A hand-inserted schema_migrations row for 85 (the workaround
+            // in #475) is equivalent to running this no-op.
         },
     },
     {
@@ -3132,6 +3014,21 @@ export const MIGRATIONS: Migration[] = [
                     ON CONFLICT(session_id) DO UPDATE SET tags_version = tags_version + 1;
                 END;
             `);
+        },
+    },
+    {
+        version: 87,
+        description: "repair OpenCode harness labels from host-store evidence",
+        up(db: Database): void {
+            // Issue #475. Decide each session's harness label from the OpenCode store
+            // the runtime reads — the generation that wrote the session most recently
+            // owns the label — and move rows in whichever direction that evidence
+            // points. This both guards installs that never applied v85 and repairs the
+            // ones it already rewrote. With no readable store nothing moves: the
+            // affected sessions are recorded for doctor instead of guessed at.
+            repairOpenCode2HarnessLabels(db, {
+                tables: [...V85_OPENCODE2_RELABEL_TABLES, ...V85_OPTIONAL_OPENCODE2_RELABEL_TABLES],
+            });
         },
     },
 ];
