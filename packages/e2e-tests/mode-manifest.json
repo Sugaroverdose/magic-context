@@ -1291,7 +1291,12 @@
                 "pi",
                 "omp"
             ],
-            "behavior": true
+            "behavior": true,
+            "divergences": [{
+                "host": "opencode2",
+                "reason": "GA 2.0.5 exposes no native todowrite tool or todo state; verify the real tool inventory instead of inventing a host todo snapshot",
+                "contract_ref": "packages/plugin/PARITY.md#native-todos"
+            }]
         },
         {
             "path": "tests/window-overlay-reload.test.ts",
