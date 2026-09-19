@@ -51,6 +51,74 @@ const DEFAULT_MOCK_RESPONSE: MockResponse = {
 
 const RPC_EVENT_DIAGNOSTIC_TAIL = 12;
 
+/**
+ * Text OMP uses when it refuses a prompt because a run already owns the agent.
+ * `AgentSession.prompt` reaches `throw new AgentBusyError()` and that class
+ * carries this message with no machine-readable code alongside it
+ * (@oh-my-pi/pi-agent-core 18.2.6, src/agent.ts), so the text is the only
+ * signal an RPC client gets.
+ */
+const OMP_AGENT_BUSY_ERROR = "Agent is already processing";
+
+/** How often to re-read OMP's streaming flag while waiting for it to clear. */
+const OMP_IDLE_POLL_INTERVAL_MS = 25;
+
+/** What a prompt submission did, once OMP has had its say about it. */
+type PromptSubmission =
+  | { kind: "admitted" }
+  | { kind: "refused"; refusal: OmpPromptRefusal };
+
+interface OmpPromptRefusal {
+  /** OMP's own refusal text, carried into the harness failure verbatim. */
+  error: string;
+  /**
+   * Terminal agent_end count observed when the refusal arrived. The run that
+   * owns the agent has not reported its end yet, so the retry waits for the
+   * count to move past this before submitting again.
+   */
+  terminalAgentEndsSeen: number;
+}
+
+/**
+ * OMP ends a continuation that is still part of the same turn with
+ * `isTerminal: false`; only an end without that marker means the agent is done.
+ */
+function isTerminalAgentEnd(event: PiRpcEvent): boolean {
+  return event.type === "agent_end" && event.isTerminal !== false;
+}
+
+/**
+ * OMP answers a `prompt` command as soon as it has handed the text to the
+ * session, before the agent run starts, and reports a later refusal as a
+ * second response record for the same command. By then nothing is waiting on
+ * that id, so it reaches the harness through the event stream rather than as
+ * the command's result.
+ */
+function isAgentBusyPromptRejection(event: PiRpcEvent): boolean {
+  return event.type === "response" &&
+    event.command === "prompt" &&
+    event.success === false &&
+    typeof event.error === "string" &&
+    event.error.includes(OMP_AGENT_BUSY_ERROR);
+}
+
+/** The refusal text when a `prompt` command itself came back refused, else null. */
+function agentBusyResponseError(response: { success: boolean; error?: string }): string | null {
+  if (response.success) return null;
+  const error = response.error;
+  return typeof error === "string" && error.includes(OMP_AGENT_BUSY_ERROR) ? error : null;
+}
+
+/**
+ * Whether a failure is one the RPC event tail and last provider request explain.
+ * Both waiting failures and a refusal are caused by something visible there.
+ */
+function needsRpcWaitDiagnostics(message: string): boolean {
+  return message.includes("waiting for Pi RPC event") ||
+    message.includes("waiting for the OMP agent to go idle") ||
+    message.includes(OMP_AGENT_BUSY_ERROR);
+}
+
 function summarizeContent(content: unknown): { characters: number; preview: string } | { kind: string } {
   let text: string | undefined;
   if (typeof content === "string") {
@@ -261,15 +329,26 @@ export class PiTestHarness implements PiHostHarness {
     // covers the slowest known Pi paths (historian + compartment publish chain)
     // while still bounding tests. Individual call sites can pass smaller values.
     const timeoutMs = options.timeoutMs ?? 180_000;
+    // Everything below — the idle wait, the submission, one retry, and the wait
+    // for the turn to end — shares this single per-turn budget.
+    const deadline = Date.now() + timeoutMs;
+    const remainingMs = () => Math.max(1, deadline - Date.now());
     const events: PiRpcEvent[] = [];
     const recentEvents: PiRpcEvent[] = [];
     let capturing = false;
     let submittedTurnEnded = false;
+    let terminalAgentEnds = 0;
+    const terminalAgentEndWaiters = new Set<() => void>();
+    let notifyRefusal: ((refusal: OmpPromptRefusal) => void) | undefined;
     const unsubscribe = this.rpc.onEvent((event) => {
       recentEvents.push(event);
       if (recentEvents.length > RPC_EVENT_DIAGNOSTIC_TAIL) recentEvents.shift();
       if (event.type === "agent_start") capturing = true;
       if (capturing) events.push(event);
+      if (isTerminalAgentEnd(event)) {
+        terminalAgentEnds++;
+        for (const waiter of [...terminalAgentEndWaiters]) waiter();
+      }
       if (event.type === "agent_end" && Array.isArray(event.messages)) {
         submittedTurnEnded ||= event.messages.some((message: { role?: string; content?: unknown }) => {
           if (message.role !== "user") return false;
@@ -280,6 +359,9 @@ export class PiTestHarness implements PiHostHarness {
               : undefined;
           return content === text;
         });
+      }
+      if (isAgentBusyPromptRejection(event)) {
+        notifyRefusal?.({ error: String(event.error), terminalAgentEndsSeen: terminalAgentEnds });
       }
     });
     // Pi signals that a turn is fully finished with agent_settled, including after
@@ -297,13 +379,67 @@ export class PiTestHarness implements PiHostHarness {
       },
     );
 
-    try {
+    // Resolve once a terminal agent_end arrives beyond the `seen` count. A
+    // refusal and the end of the run that caused it can reach the harness in one
+    // synchronous burst of stdout lines, so this compares counts instead of
+    // subscribing after the refusal has already been handled.
+    const waitForTerminalAgentEndAfter = (seen: number, label: string): Promise<void> => {
+      if (terminalAgentEnds > seen) return Promise.resolve();
+      const waitMs = remainingMs();
+      return new Promise<void>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const check = () => {
+          if (terminalAgentEnds <= seen) return;
+          clearTimeout(timer);
+          terminalAgentEndWaiters.delete(check);
+          resolve();
+        };
+        timer = setTimeout(() => {
+          terminalAgentEndWaiters.delete(check);
+          reject(new Error(`Timed out after ${waitMs}ms waiting for Pi RPC event (${label})`));
+        }, waitMs);
+        terminalAgentEndWaiters.add(check);
+      });
+    };
+
+    const submitPrompt = async (label: string): Promise<PromptSubmission> => {
+      if (this.host === "omp") await this.waitForOmpIdle(deadline, label);
+      const refused = new Promise<OmpPromptRefusal>((resolve) => { notifyRefusal = resolve; });
       const promptResponse = await this.rpc.sendCommand(
         "prompt",
         { message: text, ...(options.images ? { images: options.images } : {}) },
-        { timeoutMs, label: "prompt response" },
+        { timeoutMs: remainingMs(), label: "prompt response" },
       );
+      const directRefusal = agentBusyResponseError(promptResponse);
+      if (directRefusal) {
+        return { kind: "refused", refusal: { error: directRefusal, terminalAgentEndsSeen: terminalAgentEnds } };
+      }
       requireSuccessfulResponse(promptResponse);
+      // The command is acknowledged before the run starts, so a refusal can still
+      // be on its way. Whichever of the two arrives first decides this attempt.
+      return await Promise.race<PromptSubmission>([
+        agentEnd.then(() => ({ kind: "admitted" as const })),
+        refused.then((refusal) => ({ kind: "refused" as const, refusal })),
+      ]);
+    };
+
+    try {
+      let submission = await submitPrompt("OMP idle before prompt submission");
+      if (submission.kind === "refused") {
+        // Magic Context delivers its Channel-2 ceiling nudge as a steer, which
+        // starts a run of its own after the previous turn already reported a
+        // terminal agent_end. This prompt landed inside that run. Let the run
+        // finish and submit once more — one retry only, so a host that stays busy
+        // surfaces as a failure instead of spinning.
+        await waitForTerminalAgentEndAfter(
+          submission.refusal.terminalAgentEndsSeen,
+          "terminal agent_end of the run that refused the prompt",
+        );
+        submission = await submitPrompt("OMP idle before prompt resubmission");
+        if (submission.kind === "refused") {
+          throw new Error(`OMP refused the resubmitted prompt: ${submission.refusal.error}`);
+        }
+      }
       await agentEnd;
       const extensionErrors = this.rpc.getExtensionErrors();
       if (extensionErrors.length > 0) {
@@ -330,13 +466,39 @@ export class PiTestHarness implements PiHostHarness {
     } catch (error) {
       void agentEnd.catch(() => undefined);
       const message = error instanceof Error ? error.message : String(error);
-      const timeoutDiagnostics = message.includes("waiting for Pi RPC event")
+      const timeoutDiagnostics = needsRpcWaitDiagnostics(message)
         ? `\n--- pi rpc event tail ---\n${recentEvents.length > 0 ? recentEvents.map(summarizeRpcEvent).join("\n") : "(empty)"}` +
           `\n--- last mock provider request body summary ---\n${summarizeLastMockRequest(this.mock?.lastRequest())}`
         : "";
       throw new Error(`${message}${timeoutDiagnostics}\n--- pi rpc stderr ---\n${this.rpc.getStderr()}`);
     } finally {
       unsubscribe();
+    }
+  }
+
+  /**
+   * Block until OMP reports that no run owns the agent.
+   *
+   * OMP refuses a prompt when `AgentSession.isStreaming` holds
+   * (`if (this.isStreaming) { ... throw new AgentBusyError(); }` in
+   * agent-session.ts) and `get_state` reports that very getter
+   * (`isStreaming: session.isStreaming` in the RPC mode's `get_state` handler,
+   * @oh-my-pi/pi-coding-agent 18.2.6). Reading it asks the host the same
+   * question the host asks itself instead of inferring idleness from events.
+   * The flag can still flip between this read and OMP handling the prompt, so
+   * callers must also handle a refusal.
+   */
+  private async waitForOmpIdle(deadline: number, label: string): Promise<void> {
+    const startedAt = Date.now();
+    while (true) {
+      const state = await this.getState();
+      if (!state.isStreaming) return;
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out after ${Date.now() - startedAt}ms waiting for the OMP agent to go idle (${label})`,
+        );
+      }
+      await Bun.sleep(OMP_IDLE_POLL_INTERVAL_MS);
     }
   }
 

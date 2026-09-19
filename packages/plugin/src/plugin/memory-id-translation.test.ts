@@ -4,6 +4,8 @@ import { runMigrations } from "../features/magic-context/migrations";
 import { initializeDatabase } from "../features/magic-context/storage-db";
 import { Database } from "../shared/sqlite";
 import {
+    planRustMemoryRouting,
+    routeHostMemoryIds,
     translateHostMemoryIds,
     translateModuleMemoryMutationReply,
     unmappedMemoryIdMessage,
@@ -113,6 +115,81 @@ describe("host/module memory id translation", () => {
             "Saved memory in CONSTRAINTS. Its id will appear in <project-memory> on the next pass.",
         );
         expect(reply).not.toContain("42");
+    });
+});
+
+describe("routing host memory ids under module authority", () => {
+    test("a row mapped under a NEIGHBOURING project's module never routes to this module", () => {
+        const database = db();
+        try {
+            const neighbour = insertMemory(database, {
+                projectPath: "/other-repo",
+                category: "CONSTRAINTS",
+                content: "neighbouring project's mirrored memory",
+            });
+            database
+                .prepare(
+                    "INSERT INTO mirror_identity(domain, module_project, module_row_id, context_row_id) VALUES ('memories', '/other-repo', 77, ?)",
+                )
+                .run(neighbour.id);
+
+            const routed = routeHostMemoryIds({
+                db: database,
+                projectIdentity: "/repo",
+                hostIds: [neighbour.id],
+            });
+
+            // Two projects can share one context store. The other project's module
+            // row id is meaningless to this project's module.
+            expect(routed.routes).toEqual([{ kind: "unknown", hostId: neighbour.id }]);
+        } finally {
+            database.close();
+        }
+    });
+
+    test("a merge is refused whole, so no source is silently dropped", () => {
+        const plan = planRustMemoryRouting({
+            action: "merge",
+            routes: [
+                { kind: "module", hostId: 10, moduleId: 1 },
+                { kind: "host", hostId: 11 },
+            ],
+        });
+
+        expect(plan.refusal).toBe(
+            [
+                "id 11: not owned by this project's module — read-only here; retrying will not help.",
+                "No merge was performed.",
+            ].join("\n"),
+        );
+        expect(plan.hostReadIds).toEqual([]);
+    });
+
+    test("an archive keeps its mappable ids and reports the rest per id", () => {
+        const plan = planRustMemoryRouting({
+            action: "archive",
+            routes: [
+                { kind: "module", hostId: 10, moduleId: 1 },
+                { kind: "pending", hostId: 11 },
+            ],
+        });
+
+        expect(plan.refusal).toBeNull();
+        expect(plan.moduleHostIds).toEqual([10]);
+        expect(plan.unaddressableLines).toEqual([
+            "id 11: not mirrored yet — it was written seconds ago or the mirror is behind; retry.",
+        ]);
+    });
+
+    test("a read of only host-served ids skips the module call entirely", () => {
+        const plan = planRustMemoryRouting({
+            action: "get",
+            routes: [{ kind: "host", hostId: 12 }],
+        });
+
+        expect(plan.skipModuleCall).toBe(true);
+        expect(plan.hostReadIds).toEqual([12]);
+        expect(plan.unaddressableLines).toEqual([]);
     });
 });
 

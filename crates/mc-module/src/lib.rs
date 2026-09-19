@@ -240,12 +240,25 @@ const STORE_OPENED: u8 = 3;
 const STORE_LEASE_WAIT_WINDOW: Duration = Duration::from_secs(60);
 const STORE_LEASE_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const STORE_LEASE_MAX_BACKOFF: Duration = Duration::from_secs(1);
+// How long a request may block on a store open that is still in flight before it refuses. A
+// request already blocks up to SESSION_RESOLVE_DEADLINE (2s, session_resolver.rs) resolving its
+// session before it ever reads the store, so a wait well inside that stays within the deadline
+// this lane already tolerates. One local database open is far quicker than that, so the budget
+// sits at the low end: long enough that a fast open never refuses a first call, short enough that
+// a wedged open still answers. The lease window (up to a minute) is never waited on here.
+const STORE_OPENING_REQUEST_WAIT: Duration = Duration::from_millis(500);
+// The user-facing sentence for a context service that cannot answer right now, mirroring the
+// MC-C10 entry of the plugin's user-facing failure catalog. Anything a user reads instead of a
+// tool result uses this text; engine detail belongs in the error code and the logs.
+const CONTEXT_SERVICE_UNAVAILABLE_MESSAGE: &str =
+    "Magic Context is temporarily unavailable. Retry in a moment. (MC-C10)";
 
 #[derive(Clone, Copy)]
 struct StoreOpenPolicy {
     wait_window: Duration,
     initial_backoff: Duration,
     max_backoff: Duration,
+    request_wait: Duration,
 }
 
 impl Default for StoreOpenPolicy {
@@ -254,12 +267,165 @@ impl Default for StoreOpenPolicy {
             wait_window: STORE_LEASE_WAIT_WINDOW,
             initial_backoff: STORE_LEASE_INITIAL_BACKOFF,
             max_backoff: STORE_LEASE_MAX_BACKOFF,
+            request_wait: STORE_OPENING_REQUEST_WAIT,
+        }
+    }
+}
+
+/// Where the descriptor being opened came from. A refusal names it because the two origins mean
+/// different investigations: a daemon-assigned path is a storage-seam problem, while a dev
+/// fallback means this process resolved a path on its own and can therefore collide with another
+/// incarnation that resolved the very same one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DescriptorOrigin {
+    DaemonAck,
+    DevFallback,
+}
+
+impl DescriptorOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DaemonAck => "daemon_ack",
+            Self::DevFallback => "dev_fallback",
+        }
+    }
+}
+
+/// The descriptor label a refusal or health report may carry. A storage location is sensitive
+/// (the sqlite path contains a home directory, a postgres DSN contains a credential), so only the
+/// file name plus a short hash of its directory survives: enough to tell two rigs' stores apart,
+/// never enough to disclose where either lives.
+fn redacted_descriptor_label(descriptor: &StorageDescriptor) -> String {
+    match &descriptor.backend {
+        StorageBackend::Sqlite { path } => {
+            let path = Path::new(path);
+            let file = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unnamed");
+            let directory = path.parent().and_then(Path::to_str).unwrap_or("");
+            let digest = sha256_hex(directory.as_bytes());
+            format!("sqlite:{file}@{}", &digest[..12])
+        }
+        StorageBackend::Postgres { database, .. } => format!("postgres:{database}"),
+    }
+}
+
+/// The descriptor of the open attempt in progress (or the last one that ran).
+#[derive(Clone, Debug)]
+struct StoreOpenAttempt {
+    label: String,
+    origin: DescriptorOrigin,
+}
+
+/// Why a store open ended for good. Recorded BEFORE the phase returns to idle so a request that
+/// observes an idle phase always finds the reason, instead of falling through to the
+/// "nothing was ever attempted" arm and blaming a missing ack that did arrive.
+#[derive(Clone, Debug)]
+struct StoreOpenFailure {
+    reason: String,
+    origin: &'static str,
+    descriptor: String,
+    at_ms: u64,
+}
+
+/// Why a request found no open store handle.
+///
+/// The handle is a single `Option`, so its emptiness on its own cannot say which of these holds —
+/// and they need opposite responses: retry in a moment, wait for another process to exit, look up
+/// why the open failed, or find out why no ack arrived. One shared code and message would be
+/// wrong in nearly every case, so the seam reports the state it actually observed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StoreRefusal {
+    /// No HELLO_ACK has arrived, so no open has ever been attempted.
+    NeverAcked,
+    /// An open is in flight and this request already spent its wait budget.
+    Opening { elapsed_ms: u64 },
+    /// Another live process holds the single-writer lease; the open keeps retrying until its
+    /// window runs out.
+    LeaseWait {
+        elapsed_ms: u64,
+        wait_window_ms: u64,
+        descriptor: String,
+    },
+    /// The open ended and is not retried, so every later request refuses the same way until the
+    /// module restarts.
+    Failed {
+        reason: String,
+        origin: &'static str,
+        descriptor: String,
+    },
+}
+
+impl StoreRefusal {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::NeverAcked => "store_unavailable",
+            Self::Opening { .. } => "store_opening",
+            Self::LeaseWait { .. } => "store_lease_wait",
+            Self::Failed { .. } => "store_open_failed",
+        }
+    }
+
+    /// Whether an identical request sent later can succeed without anyone intervening.
+    fn retryable(&self) -> bool {
+        !matches!(self, Self::Failed { .. })
+    }
+
+    fn message(&self) -> String {
+        let disposition = if self.retryable() {
+            "retryable"
+        } else {
+            "terminal"
+        };
+        match self {
+            Self::NeverAcked => format!(
+                "storage is not open: no HELLO_ACK has arrived on this connection, so no open has been attempted yet ({disposition})"
+            ),
+            Self::Opening { elapsed_ms } => format!(
+                "storage open is still in flight: elapsed_ms={elapsed_ms} ({disposition})"
+            ),
+            Self::LeaseWait {
+                elapsed_ms,
+                wait_window_ms,
+                descriptor,
+            } => format!(
+                "storage single-writer lease is held by another live process: elapsed_ms={elapsed_ms} wait_window_ms={wait_window_ms} descriptor={descriptor} ({disposition})"
+            ),
+            Self::Failed {
+                reason,
+                origin,
+                descriptor,
+            } => format!(
+                "storage open failed and is not retried before restart: reason={reason} descriptor_origin={origin} descriptor={descriptor} ({disposition})"
+            ),
+        }
+    }
+
+    /// The refusal as an error frame for an internal lane (transform, status, sync, authority),
+    /// whose reader is an operator or a log.
+    fn into_outcome(self) -> HandlerOutcome {
+        HandlerOutcome::Error {
+            code: self.code().to_string(),
+            message: self.message(),
+        }
+    }
+
+    /// The refusal as an error frame for a facade tool, whose message reaches the user. The text
+    /// stays the user-facing sentence — engine internals (paths, lease state, open errors) must
+    /// never surface in tool output — while the code still carries the arm for logs.
+    fn into_facade_outcome(self) -> HandlerOutcome {
+        HandlerOutcome::Error {
+            code: self.code().to_string(),
+            message: CONTEXT_SERVICE_UNAVAILABLE_MESSAGE.to_string(),
         }
     }
 }
 
 struct StoreOpenCoordinator {
     phase: AtomicU8,
+    phase_changed: Notify,
+    opening_started_at_ms: AtomicU64,
     wait_started_at_ms: AtomicU64,
     cancelled: AtomicBool,
     cancel: Notify,
@@ -267,12 +433,16 @@ struct StoreOpenCoordinator {
     waiter_completed: Notify,
     waiter_starts: AtomicU64,
     policy: Mutex<StoreOpenPolicy>,
+    attempt: Mutex<Option<StoreOpenAttempt>>,
+    failure: Mutex<Option<StoreOpenFailure>>,
 }
 
 impl StoreOpenCoordinator {
     fn new() -> Self {
         Self {
             phase: AtomicU8::new(STORE_OPEN_IDLE),
+            phase_changed: Notify::new(),
+            opening_started_at_ms: AtomicU64::new(0),
             wait_started_at_ms: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
             cancel: Notify::new(),
@@ -280,6 +450,107 @@ impl StoreOpenCoordinator {
             waiter_completed: Notify::new(),
             waiter_starts: AtomicU64::new(0),
             policy: Mutex::new(StoreOpenPolicy::default()),
+            attempt: Mutex::new(None),
+            failure: Mutex::new(None),
+        }
+    }
+
+    /// Publish a phase and wake the requests waiting on an in-flight open. Every phase write goes
+    /// through here so a waiter can never sleep through the transition it is waiting for.
+    fn set_phase(&self, phase: u8) {
+        self.phase.store(phase, Ordering::Release);
+        self.phase_changed.notify_waiters();
+    }
+
+    /// Note which descriptor this attempt opens, and drop any reason left by an earlier attempt so
+    /// a fresh open is never reported as the old failure.
+    fn begin_attempt(&self, descriptor: &StorageDescriptor, origin: DescriptorOrigin, now_ms: u64) {
+        *self.attempt.lock().expect("store open attempt mutex") = Some(StoreOpenAttempt {
+            label: redacted_descriptor_label(descriptor),
+            origin,
+        });
+        *self.failure.lock().expect("store open failure mutex") = None;
+        self.opening_started_at_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    fn attempt_snapshot(&self) -> Option<StoreOpenAttempt> {
+        self.attempt
+            .lock()
+            .expect("store open attempt mutex")
+            .clone()
+    }
+
+    fn failure_snapshot(&self) -> Option<StoreOpenFailure> {
+        self.failure
+            .lock()
+            .expect("store open failure mutex")
+            .clone()
+    }
+
+    /// Record why the open ended, then release the phase. The order matters: a request that sees
+    /// the idle phase must already be able to read the reason.
+    fn fail_and_idle(&self, reason: String, now_ms: u64) {
+        let attempt = self.attempt_snapshot();
+        *self.failure.lock().expect("store open failure mutex") = Some(StoreOpenFailure {
+            reason,
+            origin: attempt
+                .as_ref()
+                .map_or("unknown", |attempt| attempt.origin.as_str()),
+            descriptor: attempt.map_or_else(|| "unknown".to_string(), |attempt| attempt.label),
+            at_ms: now_ms,
+        });
+        self.set_phase(STORE_OPEN_IDLE);
+    }
+
+    /// The one place that turns "no store handle" into an answer, so every seam refuses with the
+    /// state that actually holds.
+    fn refusal(&self, now_ms: u64) -> StoreRefusal {
+        let elapsed_since = |at_ms: u64| {
+            if at_ms == 0 {
+                0
+            } else {
+                now_ms.saturating_sub(at_ms)
+            }
+        };
+        match self.phase.load(Ordering::Acquire) {
+            // The handle is published before the phase flips to opened, so an opened phase with an
+            // empty handle exists only in the instant between those two writes: still in flight.
+            STORE_OPENING | STORE_OPENED => StoreRefusal::Opening {
+                elapsed_ms: elapsed_since(self.opening_started_at_ms.load(Ordering::Relaxed)),
+            },
+            STORE_OPEN_WAITING => StoreRefusal::LeaseWait {
+                elapsed_ms: elapsed_since(self.wait_started_at_ms.load(Ordering::Relaxed)),
+                wait_window_ms: self
+                    .policy
+                    .lock()
+                    .expect("store open policy mutex")
+                    .wait_window
+                    .as_millis() as u64,
+                descriptor: self
+                    .attempt_snapshot()
+                    .map_or_else(|| "unknown".to_string(), |attempt| attempt.label),
+            },
+            _ => match self.failure_snapshot() {
+                Some(failure) => StoreRefusal::Failed {
+                    reason: failure.reason,
+                    origin: failure.origin,
+                    descriptor: failure.descriptor,
+                },
+                // Idle with nothing ever attempted is the only genuinely never-acked state.
+                None if self.waiter_starts.load(Ordering::Relaxed) == 0 => StoreRefusal::NeverAcked,
+                // An attempt ran but left no reason. Unreachable by construction (every exit from
+                // the open records one), and reported as a failed open rather than as a missing
+                // ack so a bookkeeping gap can never masquerade as "the daemon never acked".
+                None => StoreRefusal::Failed {
+                    reason: "store open ended without recording a reason".to_string(),
+                    origin: self
+                        .attempt_snapshot()
+                        .map_or("unknown", |attempt| attempt.origin.as_str()),
+                    descriptor: self
+                        .attempt_snapshot()
+                        .map_or_else(|| "unknown".to_string(), |attempt| attempt.label),
+                },
+            },
         }
     }
 
@@ -299,6 +570,30 @@ impl StoreOpenCoordinator {
                 "lane": TRANSFORM_HEALTH_LANE,
                 "storage_state": "waiting_for_lease",
                 "storage_lease_wait_elapsed_ms": elapsed_ms,
+            })),
+        })
+    }
+
+    /// A terminally failed open is reported on the health lane as well, so `ck module status`
+    /// discriminates it too and the reason is not confined to this process's stderr.
+    fn failed_report(&self) -> Option<HealthReport> {
+        if self.phase.load(Ordering::Acquire) != STORE_OPEN_IDLE {
+            return None;
+        }
+        let failure = self.failure_snapshot()?;
+        Some(HealthReport {
+            status: HealthStatus::Failing,
+            detail: Some(format!(
+                "storage open failed and is not retried: {} (descriptor {} from {}); requests refuse with store_open_failed until the module restarts",
+                failure.reason, failure.descriptor, failure.origin
+            )),
+            metrics: Some(json!({
+                "lane": TRANSFORM_HEALTH_LANE,
+                "storage_state": "open_failed",
+                "storage_open_failure_reason": failure.reason,
+                "storage_descriptor": failure.descriptor,
+                "storage_descriptor_origin": failure.origin,
+                "storage_open_failed_at_ms": failure.at_ms,
             })),
         })
     }
@@ -3910,7 +4205,7 @@ impl McHandler {
         }
     }
 
-    fn begin_store_open(&self, descriptor: StorageDescriptor) {
+    fn begin_store_open(&self, descriptor: StorageDescriptor, origin: DescriptorOrigin) {
         if self.store.get().is_some()
             || self
                 .store_open
@@ -3926,6 +4221,9 @@ impl McHandler {
             return;
         }
 
+        self.store_open
+            .begin_attempt(&descriptor, origin, now_ms().max(0) as u64);
+        self.store_open.phase_changed.notify_waiters();
         self.store_open
             .active_waiters
             .fetch_add(1, Ordering::AcqRel);
@@ -3951,17 +4249,20 @@ impl McHandler {
         let mut last_lease_error = match Self::open_store_once(&descriptor).await {
             Ok(opened) => {
                 if coordinator.cancelled.load(Ordering::Acquire) {
-                    coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
+                    coordinator.fail_and_idle(
+                        "store open cancelled during shutdown".to_string(),
+                        now_ms().max(0) as u64,
+                    );
                     return;
                 }
                 let _ = store_slot.set(Arc::new(opened));
-                coordinator.phase.store(STORE_OPENED, Ordering::Release);
+                coordinator.set_phase(STORE_OPENED);
                 return;
             }
             Err(error) if store_open_error_is_live_lease(&error) => error,
             Err(error) => {
                 eprintln!("mc-module: store open failed: {error}");
-                coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
+                coordinator.fail_and_idle(error.to_string(), now_ms().max(0) as u64);
                 return;
             }
         };
@@ -3970,9 +4271,7 @@ impl McHandler {
         coordinator
             .wait_started_at_ms
             .store(now_ms().max(0) as u64, Ordering::Relaxed);
-        coordinator
-            .phase
-            .store(STORE_OPEN_WAITING, Ordering::Release);
+        coordinator.set_phase(STORE_OPEN_WAITING);
         eprintln!(
             "mc-module: storage lease held; waiting up to {}s for predecessor exit",
             STORE_LEASE_WAIT_WINDOW.as_secs()
@@ -3983,11 +4282,7 @@ impl McHandler {
         loop {
             let elapsed = started.elapsed();
             if coordinator.cancelled.load(Ordering::Acquire) {
-                eprintln!(
-                    "mc-module: storage lease wait cancelled during shutdown after {:.2}s",
-                    elapsed.as_secs_f64()
-                );
-                coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
+                Self::abandon_lease_wait_on_shutdown(&coordinator, elapsed);
                 return;
             }
             if elapsed >= policy.wait_window {
@@ -3995,7 +4290,13 @@ impl McHandler {
                     "mc-module: storage lease wait expired after {:.2}s; store open failed: {last_lease_error}",
                     elapsed.as_secs_f64()
                 );
-                coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
+                coordinator.fail_and_idle(
+                    format!(
+                        "storage lease wait expired after {:.2}s: {last_lease_error}",
+                        elapsed.as_secs_f64()
+                    ),
+                    now_ms().max(0) as u64,
+                );
                 return;
             }
 
@@ -4003,21 +4304,13 @@ impl McHandler {
                 .min(policy.wait_window.saturating_sub(elapsed));
             tokio::select! {
                 _ = coordinator.cancel.notified() => {
-                    eprintln!(
-                        "mc-module: storage lease wait cancelled during shutdown after {:.2}s",
-                        started.elapsed().as_secs_f64()
-                    );
-                    coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
+                    Self::abandon_lease_wait_on_shutdown(&coordinator, started.elapsed());
                     return;
                 }
                 _ = tokio::time::sleep(delay) => {}
             }
             if coordinator.cancelled.load(Ordering::Acquire) {
-                eprintln!(
-                    "mc-module: storage lease wait cancelled during shutdown after {:.2}s",
-                    started.elapsed().as_secs_f64()
-                );
-                coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
+                Self::abandon_lease_wait_on_shutdown(&coordinator, started.elapsed());
                 return;
             }
             if started.elapsed() >= policy.wait_window {
@@ -4027,11 +4320,11 @@ impl McHandler {
             match Self::open_store_once(&descriptor).await {
                 Ok(opened) => {
                     if coordinator.cancelled.load(Ordering::Acquire) {
-                        coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
+                        Self::abandon_lease_wait_on_shutdown(&coordinator, started.elapsed());
                         return;
                     }
                     let _ = store_slot.set(Arc::new(opened));
-                    coordinator.phase.store(STORE_OPENED, Ordering::Release);
+                    coordinator.set_phase(STORE_OPENED);
                     eprintln!(
                         "mc-module: storage lease released; store opened after {:.2}s",
                         started.elapsed().as_secs_f64()
@@ -4048,10 +4341,80 @@ impl McHandler {
                         "mc-module: storage lease wait ended after {:.2}s; store open failed: {error}",
                         started.elapsed().as_secs_f64()
                     );
-                    coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
+                    coordinator.fail_and_idle(error.to_string(), now_ms().max(0) as u64);
                     return;
                 }
             }
+        }
+    }
+
+    /// A shutdown ends the open for good as far as any later request is concerned, so it records a
+    /// reason like any other terminal exit rather than leaving the idle phase unexplained.
+    fn abandon_lease_wait_on_shutdown(coordinator: &StoreOpenCoordinator, elapsed: Duration) {
+        eprintln!(
+            "mc-module: storage lease wait cancelled during shutdown after {:.2}s",
+            elapsed.as_secs_f64()
+        );
+        coordinator.fail_and_idle(
+            format!(
+                "storage lease wait cancelled during shutdown after {:.2}s",
+                elapsed.as_secs_f64()
+            ),
+            now_ms().max(0) as u64,
+        );
+    }
+
+    /// The refusal for a lane that does not wait for an in-flight open, rendered for an operator:
+    /// the synchronous seams, plus the host-driven lanes (sync, mirror, authority, note delivery)
+    /// whose caller retries on its own schedule. Transform and the facade tools wait instead.
+    fn store_refusal(&self) -> HandlerOutcome {
+        self.store_open
+            .refusal(now_ms().max(0) as u64)
+            .into_outcome()
+    }
+
+    /// The refusal for a synchronous facade seam, rendered for the user.
+    fn facade_store_refusal(&self) -> HandlerOutcome {
+        self.store_open
+            .refusal(now_ms().max(0) as u64)
+            .into_facade_outcome()
+    }
+
+    /// The store handle for a request lane, waiting out a bounded budget when an open is still in
+    /// flight. An empty handle during the open is a startup race, not a failure: a first request
+    /// that a few hundred milliseconds would have served should not be refused. The lease wait is
+    /// deliberately excluded — it runs up to `STORE_LEASE_WAIT_WINDOW`, far beyond any request's
+    /// deadline, so that arm refuses at once with its own retryable code.
+    async fn store_for_request(&self) -> Result<Arc<McStore>, StoreRefusal> {
+        if let Some(store) = self.store.get() {
+            return Ok(Arc::clone(store));
+        }
+        let deadline = Instant::now()
+            + self
+                .store_open
+                .policy
+                .lock()
+                .expect("store open policy mutex")
+                .request_wait;
+        while self.store_open.phase.load(Ordering::Acquire) == STORE_OPENING {
+            // Arm the wakeup before re-reading the handle, so an open that lands between the two
+            // cannot be missed and leave this request asleep for the whole budget.
+            let phase_changed = self.store_open.phase_changed.notified();
+            if let Some(store) = self.store.get() {
+                return Ok(Arc::clone(store));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero()
+                || tokio::time::timeout(remaining, phase_changed)
+                    .await
+                    .is_err()
+            {
+                break;
+            }
+        }
+        match self.store.get() {
+            Some(store) => Ok(Arc::clone(store)),
+            None => Err(self.store_open.refusal(now_ms().max(0) as u64)),
         }
     }
 
@@ -6348,7 +6711,7 @@ impl McHandler {
             Some(store) => Arc::clone(store),
             None => {
                 discard(self);
-                return store_unavailable_error();
+                return self.store_refusal();
             }
         };
         match store.preflight_state_import(&parsed.session_id, &parsed.import_id) {
@@ -6504,7 +6867,7 @@ impl McHandler {
         };
         let store = match self.store.get() {
             Some(store) => Arc::clone(store),
-            None => return store_unavailable_error(),
+            None => return self.store_refusal(),
         };
         let tags = match store.load_tags_for_session(session_id) {
             Ok(tags) => tags,
@@ -6632,7 +6995,7 @@ impl McHandler {
         let state_hash = sha256_hex(normalized.as_bytes());
         let store = match self.store.get() {
             Some(store) => store,
-            None => return store_unavailable_error(),
+            None => return self.store_refusal(),
         };
         match store.set_todo_state(&session_id, &normalized, owner_message_id, &state_hash) {
             Ok(TodoStateSetOutcome::Updated { .. }) | Ok(TodoStateSetOutcome::Noop) => {
@@ -6653,7 +7016,7 @@ impl McHandler {
             };
         let store = match self.store.get() {
             Some(store) => store,
-            None => return store_unavailable_error(),
+            None => return self.store_refusal(),
         };
         match store.arm_soft_refresh(&session_id) {
             Ok(armed) => respond(json!({ "ok": true, "armed": armed })),
@@ -6678,7 +7041,7 @@ impl McHandler {
         }
         let store = match self.store.get() {
             Some(store) => store,
-            None => return store_unavailable_error(),
+            None => return self.store_refusal(),
         };
         match store.load_recomp_command(&session_id, command_id) {
             Ok(Some(row)) => {
@@ -6814,7 +7177,7 @@ impl McHandler {
             };
         let store = match self.store.get() {
             Some(store) => store,
-            None => return store_unavailable_error(),
+            None => return self.store_refusal(),
         };
         match store.delete_session(&session_id, &binding.project_root.to_string_lossy()) {
             Ok(deleted_rows) => {
@@ -6851,7 +7214,7 @@ impl McHandler {
             };
         let store = match self.store.get() {
             Some(store) => store,
-            None => return store_unavailable_error(),
+            None => return self.store_refusal(),
         };
         if request.get("state_sync_inventory").and_then(Value::as_bool) == Some(true) {
             let (meta, boundary, sequence) =
@@ -7400,7 +7763,7 @@ impl McHandler {
         };
         let store = match self.store.get() {
             Some(store) => Arc::clone(store),
-            None => return store_unavailable_error(),
+            None => return self.store_refusal(),
         };
         let route_project_root = binding.project_root.to_string_lossy().to_string();
         let project_path = match store.authority_project_for_route(&route_project_root, "memories")
@@ -7916,7 +8279,7 @@ impl McHandler {
 
     fn handle_authority_status_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let Some((context_store_uuid, project, domain)) = authority_request_key(request) else {
             return invalid_params_error(
@@ -7947,7 +8310,7 @@ impl McHandler {
 
     fn handle_authority_prepare_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let Some((context_store_uuid, project, domain)) = authority_request_key(request) else {
             return invalid_params_error(
@@ -8041,7 +8404,7 @@ impl McHandler {
 
     fn handle_authority_seed_value(&self, request: &Value) -> HandlerOutcome {
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let Some((context_store_uuid, project, domain)) = authority_request_key(request) else {
             return invalid_params_error(
@@ -8094,7 +8457,7 @@ impl McHandler {
 
     fn handle_authority_drain_value(&self, request: &Value, method: &str) -> HandlerOutcome {
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let Some((context_store_uuid, project, domain)) = authority_request_key(request) else {
             return invalid_params_error(
@@ -8203,7 +8566,7 @@ impl McHandler {
 
     fn handle_mirror_memory_value(&self, request: &Value) -> HandlerOutcome {
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let Some(module_row_id) = request.get("module_row_id").and_then(Value::as_i64) else {
             return invalid_params_error("mirror.memory requires module_row_id");
@@ -8219,7 +8582,7 @@ impl McHandler {
 
     fn handle_memory_identity_ack_value(&self, request: &Value) -> HandlerOutcome {
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let Some(project) = request.get("project").and_then(Value::as_str) else {
             return invalid_params_error("memory.identity.ack requires project");
@@ -8252,7 +8615,7 @@ impl McHandler {
 
     fn handle_mirror_pull_value(&self, request: &Value) -> HandlerOutcome {
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let Some(domain) = request.get("domain").and_then(Value::as_str) else {
             return invalid_params_error("mirror.pull requires domain");
@@ -8452,7 +8815,7 @@ impl McHandler {
     fn handle_guidance_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
         let store = match self.store.get() {
             Some(store) => Arc::clone(store),
-            None => return store_unavailable_error(),
+            None => return self.store_refusal(),
         };
         let Some(session_id) = request.get("session_id").and_then(Value::as_str) else {
             return HandlerOutcome::Error {
@@ -8731,7 +9094,7 @@ impl McHandler {
     fn handle_status_value(&self, request: &Value) -> HandlerOutcome {
         let store = match self.store.get() {
             Some(store) => Arc::clone(store),
-            None => return store_unavailable_error(),
+            None => return self.store_refusal(),
         };
         let Some(session_id) = request.get("session_id").and_then(Value::as_str) else {
             if let Err(error) = self.observe_memory_mirror_frontier(&store) {
@@ -8953,14 +9316,9 @@ impl McHandler {
                 }
             }
         }
-        let store = match self.store.get() {
-            Some(store) => Arc::clone(store),
-            None => {
-                return HandlerOutcome::Error {
-                    code: "store_unavailable".to_string(),
-                    message: "store not opened (no HELLO_ACK storage seam)".to_string(),
-                };
-            }
+        let store = match self.store_for_request().await {
+            Ok(store) => store,
+            Err(refusal) => return refusal.into_outcome(),
         };
         let binding = match self.resolve_binding(channel, &parsed.session_id) {
             Ok(b) => b,
@@ -9733,7 +10091,7 @@ impl McHandler {
         timing.session = binding.session.clone();
         let store = match self.store.get() {
             Some(store) => Arc::clone(store),
-            None => return store_unavailable_error(),
+            None => return self.store_refusal(),
         };
 
         if envelope_fields_present == 0 {
@@ -10797,7 +11155,7 @@ impl McHandler {
                 Err(outcome) => return outcome,
             };
         let Some(store) = self.store.get().cloned() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let Some(task) = request.get("task").and_then(Value::as_str) else {
             return invalid_params_error("dreamer.run_task requires task");
@@ -11061,7 +11419,7 @@ impl McHandler {
         };
         let route_root = binding.project_root.to_string_lossy().to_string();
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let authority_project =
             match store.authority_project_state_for_route(&route_root, "memories") {
@@ -11187,7 +11545,7 @@ impl McHandler {
         };
         let route_root = binding.project_root.to_string_lossy().to_string();
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let command_id = args
             .get("command_id")
@@ -11292,7 +11650,7 @@ impl McHandler {
         };
         let route_root = binding.project_root.to_string_lossy().to_string();
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let command_id = args
             .get("command_id")
@@ -11396,7 +11754,7 @@ impl McHandler {
         };
         let route_root = binding.project_root.to_string_lossy().to_string();
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let command_id = args
             .get("command_id")
@@ -11544,7 +11902,7 @@ impl McHandler {
             .map_err(|_| session_unresolved_error())?;
         let route_project_root = binding.project_root.to_string_lossy().to_string();
         let Some(store) = self.store.get() else {
-            return Err(store_unavailable_error());
+            return Err(self.facade_store_refusal());
         };
         let authority = store
             .facade_authority_for_project(requested_project, authority_domain)
@@ -11715,9 +12073,9 @@ impl McHandler {
             Ok(scope) => scope,
             Err(outcome) => return outcome,
         };
-        let store = match self.store.get() {
-            Some(store) => store,
-            None => return store_unavailable_error(),
+        let store = match self.store_for_request().await {
+            Ok(store) => store,
+            Err(refusal) => return refusal.into_facade_outcome(),
         };
         let session_id = facade_scope.conversation_key.as_str();
         let tags = match store.load_tags_for_session(session_id) {
@@ -11840,9 +12198,9 @@ impl McHandler {
         if !facade_scope.memory_enabled {
             return tool_error_result("Error: memory is disabled for this project.".to_string());
         }
-        let store = match self.store.get() {
-            Some(store) => store,
-            None => return store_unavailable_error(),
+        let store = match self.store_for_request().await {
+            Ok(store) => store,
+            Err(refusal) => return refusal.into_facade_outcome(),
         };
         let memory_project = facade_scope.memory_project_path.as_str();
         let conversation_key = facade_scope.conversation_key.as_str();
@@ -12249,7 +12607,7 @@ impl McHandler {
             }
             "get" => {
                 let ids = memory_ids(args, "get");
-                match memory_tool::get_memories(store, memory_project, &ids) {
+                match memory_tool::get_memories(&store, memory_project, &ids) {
                     Ok(memories) => {
                         let by_id = memories
                             .into_iter()
@@ -12314,9 +12672,9 @@ impl McHandler {
             Ok(scope) => scope,
             Err(outcome) => return outcome,
         };
-        let store = match self.store.get() {
-            Some(store) => store,
-            None => return store_unavailable_error(),
+        let store = match self.store_for_request().await {
+            Ok(store) => store,
+            Err(refusal) => return refusal.into_facade_outcome(),
         };
         let memory_project = facade_scope.memory_project_path.as_str();
         let conversation_key = facade_scope.conversation_key.as_str();
@@ -12351,7 +12709,7 @@ impl McHandler {
         if include_memories {
             if let Some(ids) = parse_search_memory_ids(query) {
                 match memory_tool::resolve_memory_ids_for_search_with_diagnostics(
-                    store,
+                    &store,
                     memory_project,
                     &ids,
                     limit.max(ids.len()),
@@ -12379,7 +12737,7 @@ impl McHandler {
         }
 
         match memory_tool::search_available_corpora_for_session_with_diagnostics(
-            store,
+            &store,
             memory_project,
             conversation_key,
             query,
@@ -12417,9 +12775,9 @@ impl McHandler {
             Ok(scope) => scope,
             Err(outcome) => return outcome,
         };
-        let store = match self.store.get() {
-            Some(store) => store,
-            None => return store_unavailable_error(),
+        let store = match self.store_for_request().await {
+            Ok(store) => store,
+            Err(refusal) => return refusal.into_facade_outcome(),
         };
         let session_id = facade_scope.conversation_key.as_str();
         let expand_mode = match resolve_ctx_expand_mode(args) {
@@ -12550,7 +12908,7 @@ impl McHandler {
             };
         }
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let Some(source_revision) = request.get("source_revision").and_then(Value::as_i64) else {
             return HandlerOutcome::Error {
@@ -12633,7 +12991,7 @@ impl McHandler {
             };
         }
         let Some(store) = self.store.get() else {
-            return store_unavailable_error();
+            return self.store_refusal();
         };
         let result = if ack {
             store.ack_note_delivery(
@@ -12714,9 +13072,9 @@ impl McHandler {
             Ok(scope) => scope,
             Err(outcome) => return outcome,
         };
-        let store = match self.store.get() {
-            Some(store) => store,
-            None => return store_unavailable_error(),
+        let store = match self.store_for_request().await {
+            Ok(store) => store,
+            Err(refusal) => return refusal.into_facade_outcome(),
         };
         let project = facade_scope.memory_project_path.as_str();
         let session = facade_scope.conversation_key.as_str();
@@ -13083,7 +13441,8 @@ impl ModuleHandler for McHandler {
     /// the path isn't known until the ACK lands. Opening runs off the request lane so a
     /// predecessor's live single-writer lease cannot block transform dispatch.
     async fn on_hello_ack(&self, ack: &ModuleHelloAckBody) {
-        self.begin_store_open(resolve_descriptor(ack.storage.as_ref()));
+        let (descriptor, origin) = resolve_descriptor_with_origin(ack.storage.as_ref());
+        self.begin_store_open(descriptor, origin);
     }
 
     /// Return an atomics-only liveness snapshot. The SDK invokes this on its separate
@@ -13092,6 +13451,9 @@ impl ModuleHandler for McHandler {
         let now = now_ms().max(0) as u64;
         if let Some(waiting) = self.store_open.waiting_report(now) {
             return waiting;
+        }
+        if let Some(failed) = self.store_open.failed_report() {
+            return failed;
         }
         self.augment_memory_mirror_health(DISPATCH_HEALTH.report(now), now)
     }
@@ -14805,7 +15167,7 @@ fn capability_refusal_message(domain: &str) -> &'static str {
             "Memory writes are paused while the engine syncs. Retry in a moment. (MC-C01)"
         }
         "notes" => "Note changes are paused while the engine syncs. Retry in a moment. (MC-C03)",
-        _ => "Magic Context is temporarily unavailable. Retry in a moment. (MC-C10)",
+        _ => CONTEXT_SERVICE_UNAVAILABLE_MESSAGE,
     }
 }
 
@@ -14834,14 +15196,6 @@ fn invalid_params_error(message: impl Into<String>) -> HandlerOutcome {
     HandlerOutcome::Error {
         code: "invalid_params".to_string(),
         message: message.into(),
-    }
-}
-
-fn store_unavailable_error() -> HandlerOutcome {
-    HandlerOutcome::Error {
-        code: "store_unavailable".to_string(),
-        message: "Magic Context is temporarily unavailable. Retry in a moment. (MC-C10)"
-            .to_string(),
     }
 }
 
@@ -16918,12 +17272,21 @@ fn record_historian_connect_failure(
 /// Resolve the storage descriptor: prefer the daemon-provided `ack.storage`, else
 /// fall back to a local dev path (standalone / no managed storage configured).
 pub fn resolve_descriptor(storage: Option<&Value>) -> StorageDescriptor {
+    resolve_descriptor_with_origin(storage).0
+}
+
+/// The same resolution, plus which of the two sources answered. A refusal or health report names
+/// the origin because a dev fallback is exactly how two incarnations end up resolving one path and
+/// fighting over its single-writer lease.
+fn resolve_descriptor_with_origin(
+    storage: Option<&Value>,
+) -> (StorageDescriptor, DescriptorOrigin) {
     if let Some(value) = storage {
         if let Ok(descriptor) = serde_json::from_value::<StorageDescriptor>(value.clone()) {
-            return descriptor;
+            return (descriptor, DescriptorOrigin::DaemonAck);
         }
     }
-    dev_descriptor()
+    (dev_descriptor(), DescriptorOrigin::DevFallback)
 }
 
 fn dev_descriptor() -> StorageDescriptor {
@@ -17930,6 +18293,7 @@ mod tests {
             wait_window,
             initial_backoff: Duration::from_millis(10),
             max_backoff: Duration::from_millis(20),
+            request_wait: STORE_OPENING_REQUEST_WAIT,
         }
     }
 
@@ -17963,11 +18327,10 @@ mod tests {
         let handler = McHandler::new();
         handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(500)));
 
-        handler.begin_store_open(descriptor);
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
         wait_for_store_open_phase(&handler, STORE_OPEN_WAITING).await;
         let before = error_frame(call_transform_outcome(&handler, request(big_messages())).await);
-        assert_eq!(before.0, "store_unavailable");
-        assert_eq!(before.1, "store not opened (no HELLO_ACK storage seam)");
+        assert_eq!(before.0, "store_lease_wait");
 
         drop(predecessor);
         wait_for_store_open(&handler).await;
@@ -17975,8 +18338,11 @@ mod tests {
         assert_eq!(after.0, "route_unbound");
     }
 
+    /// A request that arrives while the lease is still held may retry; once the wait window has
+    /// expired the open is never retried, so the refusal has to stop inviting a retry and name the
+    /// reason instead. The two states therefore MUST NOT answer identically.
     #[tokio::test]
-    async fn lease_held_past_window_preserves_terminal_store_error() {
+    async fn lease_wait_expiry_turns_the_refusal_terminal_with_the_open_reason() {
         let dir = tempfile::tempdir().unwrap();
         let data_home = dir.path().join("data");
         std::fs::create_dir_all(&data_home).unwrap();
@@ -17985,12 +18351,151 @@ mod tests {
         let handler = McHandler::new();
         handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(60)));
 
-        handler.begin_store_open(descriptor);
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
         wait_for_store_open_phase(&handler, STORE_OPEN_WAITING).await;
-        let before = error_frame(call_transform_outcome(&handler, request(big_messages())).await);
+        let during = error_frame(call_transform_outcome(&handler, request(big_messages())).await);
         wait_for_store_open_phase(&handler, STORE_OPEN_IDLE).await;
         let after = error_frame(call_transform_outcome(&handler, request(big_messages())).await);
-        assert_eq!(after, before);
+
+        assert_eq!(during.0, "store_lease_wait");
+        assert_eq!(after.0, "store_open_failed");
+        assert!(
+            after.1.contains("storage lease wait expired"),
+            "the terminal refusal must carry the open reason: {}",
+            after.1
+        );
+        assert!(
+            after.1.contains("descriptor_origin=dev_fallback"),
+            "the terminal refusal must name where the descriptor came from: {}",
+            after.1
+        );
+        assert!(
+            after.1.contains("terminal"),
+            "a failed open must not invite a retry: {}",
+            after.1
+        );
+        assert_ne!(
+            during, after,
+            "a retryable lease wait and a terminal failed open must not share one refusal"
+        );
+    }
+
+    /// The handle is a bare `Option`, so its emptiness cannot say WHICH state holds. These two
+    /// states need opposite operator actions (wait for the other process to exit vs. find out why
+    /// no ack arrived), so one shared code would be useless in both.
+    #[tokio::test]
+    async fn store_refusal_discriminates_a_lease_wait_from_a_missing_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let _predecessor = McStore::open(&descriptor).unwrap();
+
+        let never_acked = McHandler::new();
+        let missing_ack =
+            error_frame(call_transform_outcome(&never_acked, request(big_messages())).await);
+
+        let waiting = McHandler::new();
+        waiting.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(500)));
+        waiting.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
+        wait_for_store_open_phase(&waiting, STORE_OPEN_WAITING).await;
+        let lease_wait =
+            error_frame(call_transform_outcome(&waiting, request(big_messages())).await);
+
+        assert_eq!(missing_ack.0, "store_unavailable");
+        assert_eq!(lease_wait.0, "store_lease_wait");
+        assert_ne!(
+            missing_ack.0, lease_wait.0,
+            "two different storage states must not answer with one code"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_ack_refusal_says_no_open_was_ever_attempted() {
+        let handler = McHandler::new();
+
+        let (code, message) =
+            error_frame(call_transform_outcome(&handler, request(big_messages())).await);
+
+        assert_eq!(code, "store_unavailable");
+        assert!(
+            message.contains("no HELLO_ACK has arrived"),
+            "the never-acked arm is the only one that may blame the missing ack: {message}"
+        );
+        assert!(message.contains("retryable"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn lease_wait_refusal_carries_elapsed_window_and_a_redacted_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let full_path = match &descriptor.backend {
+            StorageBackend::Sqlite { path } => path.clone(),
+            other => panic!("expected sqlite backend, got {other:?}"),
+        };
+        let _predecessor = McStore::open(&descriptor).unwrap();
+        let handler = McHandler::new();
+        handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(500)));
+
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
+        wait_for_store_open_phase(&handler, STORE_OPEN_WAITING).await;
+        let (code, message) =
+            error_frame(call_transform_outcome(&handler, request(big_messages())).await);
+
+        assert_eq!(code, "store_lease_wait");
+        assert!(message.contains("elapsed_ms="), "{message}");
+        assert!(message.contains("wait_window_ms=500"), "{message}");
+        assert!(message.contains("descriptor=sqlite:store.db@"), "{message}");
+        assert!(
+            !message.contains(&full_path),
+            "a refusal must never disclose the storage path: {message}"
+        );
+        let parent_dir = Path::new(&full_path)
+            .parent()
+            .and_then(Path::to_str)
+            .expect("the dev descriptor path has a parent directory")
+            .to_string();
+        assert!(
+            !message.contains(&parent_dir),
+            "a refusal must never disclose the storage directory: {message}"
+        );
+    }
+
+    /// `ck module status` reads the health lane, so an open that failed terminally has to be
+    /// visible there too — otherwise the only record of the reason is this process's stderr.
+    #[tokio::test]
+    async fn health_reports_the_terminal_store_open_failure_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let _predecessor = McStore::open(&descriptor).unwrap();
+        let handler = McHandler::new();
+        handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(60)));
+
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
+        wait_for_store_open_phase(&handler, STORE_OPEN_IDLE).await;
+        let report = <McHandler as ModuleHandler>::health(&handler).await;
+
+        assert_eq!(report.status, HealthStatus::Failing);
+        let detail = report
+            .detail
+            .expect("a failed open must carry a health detail");
+        assert!(detail.contains("storage open failed"), "{detail}");
+        assert!(detail.contains("lease"), "{detail}");
+        let metrics = report
+            .metrics
+            .expect("a failed open must carry health metrics");
+        assert_eq!(metrics["storage_state"], "open_failed");
+        assert_eq!(metrics["storage_descriptor_origin"], "dev_fallback");
+        assert!(
+            metrics["storage_open_failure_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("lease")),
+            "{metrics}"
+        );
     }
 
     #[tokio::test]
@@ -18003,9 +18508,9 @@ mod tests {
         let handler = McHandler::new();
         handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(500)));
 
-        handler.begin_store_open(descriptor.clone());
+        handler.begin_store_open(descriptor.clone(), DescriptorOrigin::DevFallback);
         wait_for_store_open_phase(&handler, STORE_OPEN_WAITING).await;
-        handler.begin_store_open(descriptor);
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
         tokio::time::sleep(Duration::from_millis(30)).await;
 
         assert_eq!(handler.store_open.waiter_starts.load(Ordering::Relaxed), 1);
@@ -18023,7 +18528,7 @@ mod tests {
         handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_secs(5)));
         let coordinator = Arc::clone(&handler.store_open);
 
-        handler.begin_store_open(descriptor);
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
         wait_for_store_open_phase(&handler, STORE_OPEN_WAITING).await;
         drop(handler);
         tokio::time::timeout(Duration::from_millis(200), async {
@@ -18045,7 +18550,7 @@ mod tests {
         let handler = McHandler::new();
         handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(500)));
 
-        handler.begin_store_open(descriptor);
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
         wait_for_store_open_phase(&handler, STORE_OPEN_WAITING).await;
         let first = <McHandler as ModuleHandler>::health(&handler).await;
         tokio::time::sleep(Duration::from_millis(35)).await;
@@ -18069,6 +18574,98 @@ mod tests {
         assert_eq!(
             StoreOpenPolicy::default().wait_window,
             Duration::from_secs(60)
+        );
+    }
+
+    /// Stand in for an open that has begun and not yet landed, so a test can drive the request
+    /// lane's in-flight arm without racing a real open to it.
+    fn mark_store_open_in_flight(handler: &McHandler, descriptor: &StorageDescriptor) {
+        handler.store_open.begin_attempt(
+            descriptor,
+            DescriptorOrigin::DaemonAck,
+            now_ms().max(0) as u64,
+        );
+        handler.store_open.set_phase(STORE_OPENING);
+    }
+
+    /// A first request that arrives during the open must be served by that open, not refused a few
+    /// dozen milliseconds before it lands.
+    #[tokio::test]
+    async fn a_request_waits_out_an_in_flight_store_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let opened = McStore::open(&descriptor).unwrap();
+        let handler = McHandler::new();
+        mark_store_open_in_flight(&handler, &descriptor);
+
+        let slot = Arc::clone(&handler.store);
+        let coordinator = Arc::clone(&handler.store_open);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            let _ = slot.set(Arc::new(opened));
+            coordinator.set_phase(STORE_OPENED);
+        });
+        let code = error_code(call_transform_outcome(&handler, request(big_messages())).await);
+
+        assert_eq!(
+            code, "route_unbound",
+            "the request must reach the far side of the store seam once the open lands"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_in_flight_open_past_the_wait_budget_refuses_store_opening() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let handler = McHandler::new();
+        handler.set_store_open_policy_for_test(StoreOpenPolicy {
+            request_wait: Duration::from_millis(20),
+            ..short_store_open_policy(Duration::from_millis(500))
+        });
+        mark_store_open_in_flight(&handler, &descriptor);
+
+        let started = Instant::now();
+        let (code, message) =
+            error_frame(call_transform_outcome(&handler, request(big_messages())).await);
+
+        assert_eq!(code, "store_opening");
+        assert!(message.contains("elapsed_ms="), "{message}");
+        assert!(message.contains("retryable"), "{message}");
+        assert!(
+            started.elapsed() >= Duration::from_millis(20),
+            "the request must spend its budget waiting for the open before refusing"
+        );
+    }
+
+    /// The lease wait runs for up to a minute. Holding a request for that is worse than refusing
+    /// it, so this arm must answer immediately no matter how large the request budget is.
+    #[tokio::test]
+    async fn a_request_never_waits_on_the_storage_lease_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let _predecessor = McStore::open(&descriptor).unwrap();
+        let handler = McHandler::new();
+        handler.set_store_open_policy_for_test(StoreOpenPolicy {
+            request_wait: Duration::from_secs(5),
+            ..short_store_open_policy(Duration::from_secs(5))
+        });
+
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
+        wait_for_store_open_phase(&handler, STORE_OPEN_WAITING).await;
+        let started = Instant::now();
+        let code =
+            error_code(call_transform_outcome(&handler, request(vec![ck("m1", 1, "one")])).await);
+
+        assert_eq!(code, "store_lease_wait");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a lease wait must refuse at once, not hold the request for the lease window"
         );
     }
 

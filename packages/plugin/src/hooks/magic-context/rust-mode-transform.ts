@@ -12,6 +12,7 @@ import {
     pullMemoryMirrorOnce,
     reconcileAuthorityProject,
 } from "../../features/magic-context/context-authority";
+import { reembedMirrorInvalidatedMemories } from "../../features/magic-context/memory/mirror-reembed";
 import {
     resolveProjectIdentity,
     resolveProjectIdentityForSession,
@@ -3830,6 +3831,14 @@ export function createRustModeTransform(
                             if (mirrorDrain.cuePoolVersion !== state.muralCuePoolVersion) {
                                 state.muralCuePoolVersion = mirrorDrain.cuePoolVersion;
                                 state.muralCache = null;
+                            }
+                            // A module-side edit arrives here as changed content, and
+                            // the mirror drops the row's now-stale embedding. Put a
+                            // fresh one back while the module still holds authority,
+                            // so an edited memory does not quietly fall out of scored
+                            // recall for the rest of the session.
+                            if (mirrorDrain.rowsApplied > 0) {
+                                await reembedMirrorInvalidatedMemories(deps.db);
                             }
                             if (mirrorDrain.complete) {
                                 state.memoryMirrorProjectionKey = projectionKey;

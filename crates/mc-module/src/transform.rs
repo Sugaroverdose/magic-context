@@ -5523,12 +5523,35 @@ fn apply_once(
             loaded.meta.tail_hygiene_baseline.as_ref(),
             ctx.now_ms,
         );
-        meta.tail_hygiene_baseline = Some(refreshed.clone());
-        Some(refreshed)
+        meta.tail_hygiene_baseline = Some(refreshed.baseline.clone());
+        Some(refreshed.baseline)
     } else {
-        loaded.meta.tail_hygiene_baseline.as_ref().map(|previous| {
-            refresh_tail_hygiene_baseline(hygiene_measurement, false, Some(previous), ctx.now_ms)
-        })
+        loaded
+            .meta
+            .tail_hygiene_baseline
+            .as_ref()
+            .map(|previous| {
+                refresh_tail_hygiene_baseline(
+                    hygiene_measurement,
+                    false,
+                    Some(previous),
+                    ctx.now_ms,
+                )
+            })
+            .map(|refreshed| {
+                if let Some(mismatch) = refreshed.prefix_mismatch {
+                    // One line per invalidation event, not one per pass: the re-measured
+                    // baseline is persisted here so the next defer pass compares against
+                    // the prefix this pass actually froze.
+                    eprintln!(
+                        "mc-module: [{}] {}",
+                        req.session_id,
+                        mismatch.diagnostic_line(refreshed.baseline.baseline_generation)
+                    );
+                    meta.tail_hygiene_baseline = Some(refreshed.baseline.clone());
+                }
+                refreshed.baseline
+            })
     };
     let refreshed_coverage = meta.coverage_ordinal;
     rearm_channel2_after_hard_fold(
@@ -30993,7 +31016,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn channel1_hygiene_ratio_nudge_replays_and_structural_minimum_suppresses_refire() {
+    fn channel1_hygiene_ratio_nudge_replays_then_refires_after_the_protection_drop() {
         run_active_surface_test(|| {
             let dir = tempfile::tempdir().unwrap();
             let s = store(dir.path());
@@ -31024,6 +31047,22 @@ pub(crate) mod tests {
             let replay = run(&s, &request, &spine());
             assert_eq!(tail_bytes(&replay, "result5"), first_result);
             assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 1);
+            // The protection window always keeps the newest three tool arcs, and it
+            // covers them from the pass after their tags are minted. That takes
+            // reclaimable mass out of U on blocks the first pass already froze, so the
+            // baseline re-measures instead of holding, and the lower band it now
+            // measures is recorded without emitting another reminder.
+            let after_replay = s.load("nudge").unwrap();
+            let replayed_baseline = after_replay.meta.tail_hygiene_baseline.as_ref().unwrap();
+            assert_eq!(replayed_baseline.baseline_generation, 2);
+            assert!(replayed_baseline.evaluable);
+            assert!(!replayed_baseline.generation_invalidated);
+            assert_eq!(
+                effective_tail_hygiene(replayed_baseline).0 * 5,
+                effective_tail_hygiene(replayed_baseline).1 * 2,
+                "three of five arcs are protected, so U is two fifths of T"
+            );
+            assert_eq!(after_replay.meta.channel1_last_nudge_level, "firm");
 
             let mut grace_meta = s.load("nudge").unwrap();
             let grace_u =
@@ -31077,35 +31116,48 @@ pub(crate) mod tests {
             let mut refire_request = active_cc_req("nudge", "cfg0", refire_messages.clone());
             refire_request.protected_tags = 0;
             let refire_request = with_usage(refire_request, 900, 1024);
-            let sticky = run(&s, &refire_request, &spine());
-            let sticky_result = tail_bytes(&sticky, "result6").to_string();
+            let refired = run(&s, &refire_request, &spine());
+            let refired_result = tail_bytes(&refired, "result6").to_string();
             assert_eq!(
-                tail_bytes(&sticky, "result5"),
+                tail_bytes(&refired, "result5"),
                 first_result,
-                "the first reminder stays frozen while the structural minimum suppresses a new span"
+                "the first reminder stays frozen when a later one fires"
             );
-            assert!(
-                !sticky_result.contains("Reminder: "),
-                "the newest-three structural minimum must suppress this refire"
+            // A re-fire after the band was recorded as firm is a genuine crossing back
+            // into urgent, so it renders the full copy rather than the calm same-band one,
+            // and it lands on the newest tool result.
+            assert!(refired_result.contains("Housekeeping backlog:"));
+            assert!(!refired_result.contains("Reminder: "));
+            assert_eq!(
+                s.load_channel1_appends("nudge")
+                    .unwrap()
+                    .iter()
+                    .map(|row| row.block_id.clone())
+                    .collect::<Vec<_>>(),
+                vec!["result5#0".to_string(), "result6#0".to_string()]
             );
-            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 1);
-            let sticky_replay = run(&s, &refire_request, &spine());
-            assert_eq!(tail_bytes(&sticky_replay, "result6"), sticky_result);
-            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 1);
+            let refired_replay = run(&s, &refire_request, &spine());
+            assert_eq!(tail_bytes(&refired_replay, "result6"), refired_result);
+            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 2);
 
             let mut loaded = s.load("nudge").unwrap();
             loaded.meta.channel1_reduce_suppressed = true;
             s.commit("nudge", loaded.row_version, &loaded.core, &loaded.meta)
                 .unwrap();
             refire_messages.push(assistant_tool_call("call7", 13, "c7"));
-            refire_messages.push(tool_result("result7", 14, "c7", &huge));
+            // Small enough that U/T stays inside the band observed before the reduce, so
+            // post-reduce grace is what decides this pass and no escalation escapes it.
+            refire_messages.push(tool_result("result7", 14, "c7", &"word ".repeat(200)));
             let mut suppressed_request = active_cc_req("nudge", "cfg0", refire_messages);
             suppressed_request.protected_tags = 0;
             let suppressed = run(&s, &with_usage(suppressed_request, 900, 1024), &spine());
             assert!(tail_bytes(&suppressed, "result5").contains("<system-reminder>"));
-            assert!(!tail_bytes(&suppressed, "result6").contains("<system-reminder>"));
-            assert!(!tail_bytes(&suppressed, "result7").contains("<system-reminder>"));
-            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 1);
+            assert!(tail_bytes(&suppressed, "result6").contains("<system-reminder>"));
+            assert!(
+                !tail_bytes(&suppressed, "result7").contains("<system-reminder>"),
+                "a reduce-suppressed pass adds no new span"
+            );
+            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 2);
         });
     }
 
