@@ -187,6 +187,14 @@ function createTestDb(dbPath = ":memory:"): Database {
             rekeyed_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS mirror_identity (
+            domain TEXT NOT NULL,
+            module_project TEXT NOT NULL,
+            module_row_id INTEGER NOT NULL,
+            context_row_id INTEGER NOT NULL,
+            PRIMARY KEY (domain, module_project, module_row_id)
+        );
+
         CREATE
         VIRTUAL
         TABLE IF
@@ -268,6 +276,24 @@ function installTestEmbeddingProvider(
                 isLoaded: () => true,
             }) satisfies EmbeddingProvider,
     );
+}
+
+/**
+ * Record the host<->module row mapping the Rust mirror would have written.
+ *
+ * Under module authority the facade only forwards ids it can address, so a
+ * fixture that wants a module round trip has to look mirrored.
+ */
+function mirrorMemoryId(
+    db: Database,
+    hostId: number,
+    moduleRowId: number,
+    projectPath = "/repo/project",
+): number {
+    db.prepare(
+        "INSERT INTO mirror_identity(domain, module_project, module_row_id, context_row_id) VALUES ('memories', ?, ?, ?)",
+    ).run(projectPath, moduleRowId, hostId);
+    return hostId;
 }
 
 function registerMemoryEmbeddingsForProject(
@@ -391,6 +417,21 @@ describe("createCtxMemoryTools", () => {
         });
 
         it("routes all module-owned memory actions without writing the TS table", async () => {
+            // The ids in this fixture must be addressable: the module facade now
+            // classifies every requested id and refuses ones with no mirrored
+            // counterpart, so a bare id would never reach the backend.
+            const mirroredIds = ["mirrored source one", "mirrored source two"].map(
+                (content, index) =>
+                    mirrorMemoryId(
+                        db,
+                        insertMemory(db, {
+                            projectPath: "/repo/project",
+                            category: "CONSTRAINTS",
+                            content,
+                        }).id,
+                        9000 + index,
+                    ),
+            );
             const routed: Array<{ action: string; ids?: number[]; memoryProject: string }> = [];
             const moduleTools = createCtxMemoryTools({
                 db,
@@ -411,11 +452,11 @@ describe("createCtxMemoryTools", () => {
             });
             const actions = [
                 { action: "write", category: "CONSTRAINTS", content: "module write" },
-                { action: "update", ids: [1], content: "module update" },
-                { action: "archive", ids: [1] },
-                { action: "merge", ids: [1, 2], content: "module merge" },
+                { action: "update", ids: [mirroredIds[0]], content: "module update" },
+                { action: "archive", ids: [mirroredIds[0]] },
+                { action: "merge", ids: mirroredIds, content: "module merge" },
                 { action: "list", limit: 5 },
-                { action: "get", ids: [1] },
+                { action: "get", ids: [mirroredIds[0]] },
             ] as const;
             for (const request of actions) {
                 const context =
@@ -434,7 +475,8 @@ describe("createCtxMemoryTools", () => {
                 "get",
             ]);
             expect(routed.every((request) => request.memoryProject === "/repo/project")).toBe(true);
-            expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
+            // Only the two seeded rows: the module path wrote nothing to the TS table.
+            expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(2);
         });
 
         it("maps a raced module drain rejection to the transition retry message", async () => {
@@ -528,6 +570,17 @@ describe("createCtxMemoryTools", () => {
         it("keeps module call details in logs and returns capability copy", async () => {
             const content = "module failure must preserve this content";
             const moduleError = "supervisor state: MODULE call failed";
+            const mergeIds = ["merge source one", "merge source two"].map((seed, index) =>
+                mirrorMemoryId(
+                    db,
+                    insertMemory(db, {
+                        projectPath: "/repo/project",
+                        category: "CONSTRAINTS",
+                        content: seed,
+                    }).id,
+                    9100 + index,
+                ),
+            );
             const moduleTools = createCtxMemoryTools({
                 db,
                 resolveProjectPath: () => "/repo/project",
@@ -542,7 +595,7 @@ describe("createCtxMemoryTools", () => {
             });
 
             const result = await moduleTools.ctx_memory.execute(
-                { action: "merge", ids: [1, 2], content },
+                { action: "merge", ids: mergeIds, content },
                 toolContext(),
             );
 
@@ -551,10 +604,20 @@ describe("createCtxMemoryTools", () => {
             );
             expect(result).not.toContain(moduleError);
             expect(result).not.toContain(content);
-            expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
+            // Only the two mirrored fixtures: the failed module call wrote nothing.
+            expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(2);
         });
 
         it("does not echo content attached to a read-only module refusal", async () => {
+            const readId = mirrorMemoryId(
+                db,
+                insertMemory(db, {
+                    projectPath: "/repo/project",
+                    category: "CONSTRAINTS",
+                    content: "mirrored read target",
+                }).id,
+                9200,
+            );
             const moduleTools = createCtxMemoryTools({
                 db,
                 resolveProjectPath: () => "/repo/project",
@@ -568,7 +631,7 @@ describe("createCtxMemoryTools", () => {
                 },
             });
             const result = await moduleTools.ctx_memory.execute(
-                { action: "get", ids: [1], content: "read-only content must not echo" },
+                { action: "get", ids: [readId], content: "read-only content must not echo" },
                 toolContext(),
             );
             expect(result).toBe(
@@ -1026,6 +1089,157 @@ describe("createCtxMemoryTools", () => {
         expect(getMemoryById(db, own.id)?.status).toBe("archived");
     });
 
+    describe("#given module authority and a workspace-shared memory", () => {
+        // <project-memory> renders workspace-shared memories owned by other
+        // projects. The module mirrors only this project's rows, so those ids
+        // have no module counterpart and never will. Reads still have to work,
+        // mutations have to say why they never will, and one such id must not
+        // take down the rest of the batch.
+        const seedWorkspace = (): void => {
+            db.exec(`
+                INSERT INTO workspaces (id, name, created_at, updated_at, share_categories)
+                VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+                INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+                VALUES (1, '/repo/project', 'Own', '/repo/project', 1),
+                       (1, '/repo/foreign', 'Foreign', '/repo/foreign', 1);
+            `);
+        };
+        const seedForeignShared = (content: string): number => {
+            const foreign = insertMemory(db, {
+                projectPath: "/repo/foreign",
+                category: "CONSTRAINTS",
+                content,
+            });
+            db.prepare("UPDATE memories SET shareable = 1, scope = 'project' WHERE id = ?").run(
+                foreign.id,
+            );
+            return foreign.id;
+        };
+        const moduleToolsWith = (
+            routed: Array<{ action: string; ids?: number[] }>,
+            text = "module reply",
+        ) =>
+            createCtxMemoryTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                rustToolBackends: {
+                    authorityState: async () => "MODULE",
+                    memory: async (request) => {
+                        routed.push({ action: request.action, ids: request.ids });
+                        return { content: [{ type: "text", text }] };
+                    },
+                },
+            });
+
+        it("reads a foreign shared memory from the host instead of refusing it", async () => {
+            seedWorkspace();
+            const foreignId = seedForeignShared(
+                "Foreign shared constraint that outlives this repo.",
+            );
+            const routed: Array<{ action: string; ids?: number[] }> = [];
+
+            const result = await moduleToolsWith(routed).ctx_memory.execute(
+                { action: "get", ids: [foreignId] },
+                toolContext(),
+            );
+
+            expect(result).toContain("Foreign shared constraint that outlives this repo.");
+            expect(result).toContain(String(foreignId));
+            expect(result).not.toContain("retry");
+            // No mappable id was requested, so the module was never called.
+            expect(routed).toEqual([]);
+        });
+
+        it("refuses to update a foreign shared memory with a refusal that is never transient", async () => {
+            seedWorkspace();
+            const foreignId = seedForeignShared("Foreign shared constraint under curation.");
+            const routed: Array<{ action: string; ids?: number[] }> = [];
+
+            const result = await moduleToolsWith(routed).ctx_memory.execute(
+                { action: "update", ids: [foreignId], content: "rewritten by the wrong project" },
+                toolContext(),
+            );
+
+            expect(result).toBe(
+                `id ${foreignId}: not owned by this project's module — read-only here; retrying will not help.`,
+            );
+            expect(result).not.toContain("retry;");
+            expect(routed).toEqual([]);
+            expect(getMemoryById(db, foreignId)?.content).toBe(
+                "Foreign shared constraint under curation.",
+            );
+        });
+
+        it("keeps the transient retry wording for this project's own not-yet-mirrored row", async () => {
+            seedWorkspace();
+            const own = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Own row written seconds ago.",
+            });
+            const routed: Array<{ action: string; ids?: number[] }> = [];
+
+            const result = await moduleToolsWith(routed).ctx_memory.execute(
+                { action: "update", ids: [own.id], content: "corrected own row" },
+                toolContext(),
+            );
+
+            expect(result).toBe(
+                `id ${own.id}: not mirrored yet — it was written seconds ago or the mirror is behind; retry.`,
+            );
+            expect(routed).toEqual([]);
+        });
+
+        it("returns a per-id outcome for a batch mixing mapped, shared, and unknown ids", async () => {
+            seedWorkspace();
+            const mappedId = mirrorMemoryId(
+                db,
+                insertMemory(db, {
+                    projectPath: "/repo/project",
+                    category: "CONSTRAINTS",
+                    content: "Mapped own memory.",
+                }).id,
+                9400,
+            );
+            const foreignId = seedForeignShared("Foreign shared constraint in a mixed batch.");
+            const missingId = 987_654;
+            const routed: Array<{ action: string; ids?: number[] }> = [];
+
+            const result = await moduleToolsWith(routed, "module get reply").ctx_memory.execute(
+                { action: "get", ids: [mappedId, foreignId, missingId] },
+                toolContext(),
+            );
+
+            // The mappable id still reaches the module, and the module never sees
+            // an id it cannot address.
+            expect(routed).toEqual([{ action: "get", ids: [mappedId] }]);
+            expect(result).toContain("module get reply");
+            expect(result).toContain("Foreign shared constraint in a mixed batch.");
+            expect(result).toContain(`id ${missingId}: not found or not visible from this project`);
+        });
+
+        it("reports a foreign memory in a non-shared category as not visible, never as shared", async () => {
+            seedWorkspace();
+            const hidden = insertMemory(db, {
+                projectPath: "/repo/foreign",
+                category: "ARCHITECTURE",
+                content: "Foreign architecture detail not shared with this project.",
+            });
+            const routed: Array<{ action: string; ids?: number[] }> = [];
+
+            const result = await moduleToolsWith(routed).ctx_memory.execute(
+                { action: "get", ids: [hidden.id] },
+                toolContext(),
+            );
+
+            expect(result).toBe(`id ${hidden.id}: not found or not visible from this project`);
+            expect(result).not.toContain("Foreign architecture detail");
+            expect(routed).toEqual([]);
+        });
+    });
+
     it("REFUSES a PRIMARY merge that pulls in a foreign memory in a NON-shared category", async () => {
         // Primary mutations require ownership, not workspace visibility. A shared
         // workspace may make foreign memories readable, but the caller may only
@@ -1424,6 +1638,8 @@ describe("createCtxMemoryTools", () => {
                 category: "ARCHITECTURE",
                 content: "The loader initializes and validates the registry.",
             });
+            mirrorMemoryId(db, source.id, 9300);
+            mirrorMemoryId(db, successor.id, 9301);
             const routed: Array<{ action: string; ids?: number[]; content?: string }> = [];
             const moduleTools = createCtxMemoryTools({
                 db,

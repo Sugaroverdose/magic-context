@@ -35,6 +35,7 @@ import {
     clearHookInitFailure,
     recordHookInitFailure,
 } from "../../features/magic-context/fail-closed-block";
+import { reembedMirrorInvalidatedMemories } from "../../features/magic-context/memory/mirror-reembed";
 import {
     resolveProjectIdentityForSession,
     takeDubiousOwnershipProjectIdentityWarning,
@@ -1040,35 +1041,57 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                               },
                           },
                       });
-                      // A fresh canonical row can sit behind a large cursor backlog. Pull that
-                      // one row first so the agent reply has a bounded path to its host id. The
-                      // ordinary memory drain remains on the transform-pass cadence.
+                      // Pull the rows this call touched before anything reads the host
+                      // copy. A fresh canonical row can sit behind a large cursor backlog,
+                      // so the agent reply needs a bounded path to its host id; an edited
+                      // row needs its new content on the host before the embedding pass
+                      // below, or that pass embeds content the mirror is about to replace
+                      // and the replacement silently drops the vector. The ordinary memory
+                      // drain remains on the transform-pass cadence.
                       const operation = moduleMemoryOperation(response);
-                      const newModuleRowId =
-                          operation?.action === "write"
-                              ? operation.module_id
-                              : operation?.action === "merge"
-                                ? operation.canonical_module_id
-                                : undefined;
-                      try {
-                          if (newModuleRowId !== undefined) {
+                      const touchedModuleRowIds = new Set<number>();
+                      if (action === "update" || action === "archive" || action === "merge") {
+                          for (const moduleId of moduleIds) touchedModuleRowIds.add(moduleId);
+                      }
+                      if (operation?.action === "write" && operation.module_id !== undefined) {
+                          touchedModuleRowIds.add(operation.module_id);
+                      }
+                      if (operation?.action === "merge") {
+                          if (operation.canonical_module_id !== undefined) {
+                              touchedModuleRowIds.add(operation.canonical_module_id);
+                          }
+                          for (const supersededId of operation.superseded_module_ids ?? []) {
+                              touchedModuleRowIds.add(supersededId);
+                          }
+                      }
+                      for (const moduleRowId of touchedModuleRowIds) {
+                          // One unpullable row (a merge source the module already
+                          // retired, say) must not skip the rows after it.
+                          try {
                               await syncModuleMemoryIdentity(
                                   memoryProject,
-                                  newModuleRowId,
+                                  moduleRowId,
                                   projectRoot,
                               );
+                          } catch (error) {
+                              log("[magic-context] targeted memory mirror sync failed:", error);
                           }
-                      } catch (error) {
-                          log("[magic-context] targeted memory mirror sync failed:", error);
                       }
                       if (
                           !moduleNoteResponseIsError(response) &&
-                          (action === "write" || action === "update" || action === "merge")
+                          (action === "write" ||
+                              action === "update" ||
+                              action === "archive" ||
+                              action === "merge")
                       ) {
                           // TypeScript memory writes queue embedding work immediately.
                           // The Rust path must do the same after publishing its memory.
                           void (async () => {
                               await ensureProjectRegisteredFromOpenCodeDirectory(projectRoot, db);
+                              // An edit that changed content left the host row without an
+                              // embedding when it mirrored back; re-embed before looking for
+                              // anything else still missing one.
+                              await reembedMirrorInvalidatedMemories(db);
                               const embedded = await embedUnembeddedMemoriesForProject(
                                   db,
                                   memoryProject,
