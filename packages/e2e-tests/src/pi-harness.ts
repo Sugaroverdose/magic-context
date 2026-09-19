@@ -1,7 +1,7 @@
 /** PiTestHarness — facade for Pi Magic Context e2e tests. */
 
 import { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HostCapabilities, PiHostHarness } from "./host-harness";
 import { assertHistorianMockRouting } from "./mock-routing";
@@ -340,8 +340,26 @@ export class PiTestHarness implements PiHostHarness {
     }
   }
 
+  async hasNativeCompactionMarker(ordinal: number): Promise<boolean> {
+    const state = await this.getState();
+    if (!state.sessionFile) return false;
+    // Applied Pi markers live in the host session JSONL, not OpenCode's SQL column.
+    return readFileSync(state.sessionFile, "utf8").split("\n").filter(Boolean).some((line) => {
+      const entry = JSON.parse(line) as {
+        type?: string;
+        details?: { source?: string; lastCompactedOrdinal?: number };
+      };
+      return entry.type === "compaction" &&
+        entry.details?.source === "magic-context" &&
+        entry.details.lastCompactedOrdinal === ordinal;
+    });
+  }
+
   async reloadPlugin(): Promise<void> {
-    await this.reloadExtensions();
+    // OMP's RPC mode leaves ExtensionCommandContext.reload as a no-op.
+    // Restart and resume to reload resources without losing the active session.
+    if (this.host === "omp") await this.restart();
+    else await this.reloadExtensions();
   }
 
   /** Restart Pi and explicitly resume the same saved session. */
