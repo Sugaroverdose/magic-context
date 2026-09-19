@@ -161,6 +161,23 @@ describe("task_schedule_state storage", () => {
         ]);
     });
 
+    it("does not report a succeeded task that still carries older error text", () => {
+        // Legacy rows put non-failure detail in `last_error` (the dashboard renders such a
+        // value neutrally for the same reason), so the status is what decides, not the text.
+        db = freshDb();
+        writeTaskScheduleState(db, {
+            projectPath: "git:abc",
+            task: "verify-broad",
+            lastRunAt: 7_000,
+            nextDueAt: 9_000,
+            schedule: "0 3 * * *",
+            lastStatus: "completed",
+            lastError: "verify-broad: processed 12 (verified 12); 0 remain",
+            retryCount: 0,
+        });
+        expect(getFailingDreamTasks(db, "git:abc")).toEqual([]);
+    });
+
     it("does not report a failed row whose error text was never recorded", () => {
         db = freshDb();
         writeTaskScheduleState(db, {
