@@ -4340,6 +4340,10 @@ pub struct ModuleMeta {
     /// Baseline calculated by one shared tail walk so both nudge channels use the same measurements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail_hygiene_baseline: Option<TailHygieneBaseline>,
+    /// Tag rows first discovered after their block was served remain hidden until an independent
+    /// cache-busting pass. A genuinely new physical tail renders its tag immediately.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub pending_tag_block_ids: BTreeSet<String>,
     /// Auto-search decisions targeting a previously served block remain hidden until an
     /// independent cache-busting pass. A genuinely new physical tail renders immediately and
     /// never enters this set.
