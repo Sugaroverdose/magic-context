@@ -44,6 +44,7 @@ import {
     flushShadowEmbeddingBacklog,
     getEmbeddingCoverageStatus,
     getProjectEmbeddingSnapshot,
+    getShadowBackfillRemaining,
     getShadowBackfillStopReason,
     getShadowEmbeddingMeasurementCohort,
     markProjectLoadUntrusted,
@@ -1989,6 +1990,218 @@ describe("project embedding registry", () => {
         await flushShadowEmbeddingBacklog(projectIdentity);
         expect(getShadowBackfillStopReason(projectIdentity, "memory")).toBe("drained");
         expect(loadAllEmbeddings(db, projectIdentity, repeated!.modelId).size).toBe(3);
+    });
+
+    it("discards shadow vectors when the registration is retired while the provider call is in flight", async () => {
+        const db = useTempDb();
+        const projectIdentity = "git:shadow-retired-in-flight";
+        registerProjectEmbedding(
+            db,
+            projectIdentity,
+            localConfig("model-primary"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/shadow-retired-in-flight",
+        );
+        for (let i = 0; i < 3; i++) {
+            const memory = insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "CONSTRAINTS",
+                content: `retired shadow memory ${i}`,
+            });
+            saveEmbedding(db, memory.id, new Float32Array([i, 1]), currentModelId(projectIdentity));
+        }
+        const shadowConfig = {
+            provider: "synapse",
+            model: "synapse-model",
+            synapse_fingerprint: "fp-retired-in-flight",
+        } as unknown as EmbeddingConfig;
+        let returnedShadowVectors = 0;
+        // Retire the shadow from inside the provider call. processShadowQueueItem
+        // captures the registration before awaiting, so this reproduces the
+        // unregister-during-embed window: without a post-await re-check the
+        // returned vectors are written under a registration that no longer exists.
+        _setTestProviderFactoryForProject(
+            () =>
+                new (class extends FakeEmbeddingProvider {
+                    override async embedBatch(texts: string[]): Promise<Float32Array[]> {
+                        unregisterProjectShadowEmbedding(projectIdentity);
+                        const vectors = texts.map(
+                            (text) => new Float32Array([text.length, this.modelId.length]),
+                        );
+                        returnedShadowVectors += vectors.length;
+                        return vectors;
+                    }
+                })("shadow"),
+        );
+        const registration = registerProjectShadowEmbedding(
+            db,
+            projectIdentity,
+            shadowConfig,
+            "/tmp/shadow-retired-in-flight",
+        );
+        await flushShadowEmbeddingBacklog(projectIdentity);
+
+        expect(returnedShadowVectors).toBeGreaterThan(0);
+        expect(loadAllEmbeddings(db, projectIdentity, registration!.modelId).size).toBe(0);
+    });
+
+    it("discards commit shadow vectors when the registration is retired during the embed call", async () => {
+        const db = useTempDb();
+        const projectIdentity = "git:shadow-retired-commit-in-flight";
+        registerProjectEmbedding(
+            db,
+            projectIdentity,
+            localConfig("model-primary"),
+            { memoryEnabled: false, gitCommitEnabled: true },
+            "/tmp/shadow-retired-commit-in-flight",
+        );
+        const commits = ["c-a", "c-b", "c-c"].map((seed) => makeGitCommit(seed, 1000));
+        upsertCommits(db, projectIdentity, commits);
+        const primaryModelId = currentModelId(projectIdentity);
+        for (const commit of commits) {
+            saveCommitEmbedding(db, commit.sha, new Float32Array([1, 1]), primaryModelId);
+        }
+        let returnedShadowVectors = 0;
+        _setTestProviderFactoryForProject(
+            () =>
+                new (class extends FakeEmbeddingProvider {
+                    override async embedBatch(texts: string[]): Promise<Float32Array[]> {
+                        unregisterProjectShadowEmbedding(projectIdentity);
+                        const vectors = texts.map(
+                            (text) => new Float32Array([text.length, this.modelId.length]),
+                        );
+                        returnedShadowVectors += vectors.length;
+                        return vectors;
+                    }
+                })("shadow"),
+        );
+        const registration = registerProjectShadowEmbedding(
+            db,
+            projectIdentity,
+            {
+                provider: "synapse",
+                model: "synapse-model",
+                synapse_fingerprint: "fp-retired-commit",
+            } as unknown as EmbeddingConfig,
+            "/tmp/shadow-retired-commit-in-flight",
+        );
+        await flushShadowEmbeddingBacklog(projectIdentity);
+
+        expect(returnedShadowVectors).toBeGreaterThan(0);
+        expect(countEmbeddedCommits(db, projectIdentity, registration!.modelId)).toBe(0);
+    });
+
+    it("discards chunk shadow vectors when the registration is retired during the embed call", async () => {
+        const db = useTempDb();
+        const projectIdentity = "git:shadow-retired-chunk-in-flight";
+        const sessionId = "ses-shadow-retired-chunk-in-flight";
+        registerProjectEmbedding(
+            db,
+            projectIdentity,
+            localConfig("model-primary", 512),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/shadow-retired-chunk-in-flight",
+        );
+        recordSessionProjectIdentity(db, sessionId, projectIdentity);
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: "a1",
+                endMessageId: "a1",
+                title: "Retired chunk",
+                content: "large transcript",
+                p1: "large transcript",
+            },
+        ]);
+        const content = Array.from({ length: 2_000 }, (_, index) => `token-${index}`).join(" ");
+        const ftsRow = db
+            .prepare(
+                "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, 1, 'a1', 'assistant', ?)",
+            )
+            .run(sessionId, content) as { lastInsertRowid: number | bigint };
+        recordMessageFtsRowid(db, sessionId, 1, ftsRow.lastInsertRowid);
+        let returnedShadowVectors = 0;
+        _setTestProviderFactoryForProject((config) =>
+            config.provider === "synapse"
+                ? // Only the shadow lane retires itself mid-embed; the primary lane
+                  // must embed normally so the shadow has a row to mirror.
+                  new (class extends FakeEmbeddingProvider {
+                      override async embedBatch(texts: string[]): Promise<Float32Array[]> {
+                          unregisterProjectShadowEmbedding(projectIdentity);
+                          const vectors = texts.map(
+                              (text) => new Float32Array([text.length, this.modelId.length]),
+                          );
+                          returnedShadowVectors += vectors.length;
+                          return vectors;
+                      }
+                  })(config.model)
+                : new FakeEmbeddingProvider(config.model),
+        );
+        // Seed the primary chunk lane so the shadow lane has a row to mirror.
+        expect(await embedUnembeddedCompartmentChunksForProject(db, projectIdentity, 8)).toBe(1);
+
+        const registration = registerProjectShadowEmbedding(
+            db,
+            projectIdentity,
+            {
+                provider: "synapse",
+                model: "synapse-model",
+                synapse_fingerprint: "fp-retired-chunk",
+            } as unknown as EmbeddingConfig,
+            "/tmp/shadow-retired-chunk-in-flight",
+        );
+        // Positive control: the fixture must produce a chunk candidate, otherwise
+        // "no rows written" would hold for the wrong reason.
+        expect(getShadowBackfillRemaining(db, projectIdentity).chunk).toBe(1);
+
+        await flushShadowEmbeddingBacklog(projectIdentity);
+
+        expect(returnedShadowVectors).toBeGreaterThan(0);
+        expect(
+            countRows(
+                db,
+                "SELECT COUNT(*) AS count FROM compartment_chunk_embeddings WHERE model_id = ?",
+                registration!.chunkModelId,
+            ),
+        ).toBe(0);
+    });
+
+    it("assigns a fresh generation when the same shadow identity is retired and re-armed", () => {
+        const db = useTempDb();
+        const projectIdentity = "git:shadow-same-identity-rearm";
+        _setTestProviderFactoryForProject(() => new FakeEmbeddingProvider("test"));
+        registerProjectEmbedding(
+            db,
+            projectIdentity,
+            localConfig("model-primary"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/shadow-same-identity-rearm",
+        );
+        const shadowConfig = {
+            provider: "synapse",
+            model: "synapse-model",
+            synapse_fingerprint: "fp-same-identity-rearm",
+        } as unknown as EmbeddingConfig;
+        const first = registerProjectShadowEmbedding(
+            db,
+            projectIdentity,
+            shadowConfig,
+            "/tmp/shadow-same-identity-rearm",
+        );
+
+        unregisterProjectShadowEmbedding(projectIdentity);
+        const rearmed = registerProjectShadowEmbedding(
+            db,
+            projectIdentity,
+            shadowConfig,
+            "/tmp/shadow-same-identity-rearm",
+        );
+
+        expect(first).not.toBeNull();
+        expect(rearmed).not.toBeNull();
+        expect(rearmed!.generation).toBeGreaterThan(first!.generation);
     });
 
     it("does not dispose a shadow provider that is the same instance as the primary", async () => {

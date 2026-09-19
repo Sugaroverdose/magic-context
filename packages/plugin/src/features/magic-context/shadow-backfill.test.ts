@@ -837,12 +837,26 @@ describe("shadow embedding historical backfill", () => {
         expect(formatShadowBackfillStall(stall!)).toContain(
             "memory normalized-hash guard rejected vectors",
         );
+        const coverage = getEmbeddingCoverageStatus(db, projectIdentity, "ses-no-history");
+        expect(formatEmbedStatusText(coverage, { status: "idle" })).toContain(
+            "the memory normalized-hash guard rejected vectors",
+        );
         expect(
             formatEmbedStatusText(
-                getEmbeddingCoverageStatus(db, projectIdentity, "ses-no-history"),
+                {
+                    ...coverage,
+                    shadowBackfillStalls: [
+                        {
+                            ...stall!,
+                            writeRefusalReason: "registration_retired_during_embed",
+                        },
+                    ],
+                },
                 { status: "idle" },
             ),
-        ).toContain("the memory normalized-hash guard rejected vectors");
+        ).toContain(
+            "the shadow registration was retired or replaced while the provider call was in flight",
+        );
     });
 
     it("does not resubmit the same shadow bytes within one hour", async () => {
