@@ -35,10 +35,28 @@ export const ROOT_KEYS = [
 // bin under the package's own node_modules; the hoisted linker (the release e2e
 // container installs with --linker=hoisted) puts it under the workspace root. Take
 // whichever exists so the lane does not depend on the linker choice.
-export const CLI = [
-	resolve(import.meta.dir, "../../../plugin/node_modules/.bin/opencode2"),
-	resolve(import.meta.dir, "../../../../node_modules/.bin/opencode2"),
-].find((candidate) => existsSync(candidate)) ?? resolve(import.meta.dir, "../../../plugin/node_modules/.bin/opencode2");
+//
+// MC_E2E_OPENCODE2_CLI points the lane at a different GA build than the pinned
+// devDependency. Host-behavior findings are version-specific — a defect that the
+// pinned build tolerates can be fatal two patch releases later — so the lane has to
+// be runnable against an arbitrary installed binary without touching node_modules.
+function resolveCLI(): string {
+	const override = process.env.MC_E2E_OPENCODE2_CLI;
+	if (override) {
+		if (!existsSync(override)) {
+			throw new Error(`MC_E2E_OPENCODE2_CLI does not exist: ${override}`);
+		}
+		return resolve(override);
+	}
+	return (
+		[
+			resolve(import.meta.dir, "../../../plugin/node_modules/.bin/opencode2"),
+			resolve(import.meta.dir, "../../../../node_modules/.bin/opencode2"),
+		].find((candidate) => existsSync(candidate)) ??
+		resolve(import.meta.dir, "../../../plugin/node_modules/.bin/opencode2")
+	);
+}
+export const CLI = resolveCLI();
 export const PLUGIN = resolve(import.meta.dir, "../../../plugin");
 const groups = new Set<number>();
 function killGroup(pid: number): void {

@@ -20,6 +20,9 @@ export interface OpenCode2TestHarnessOptions {
     modelContextLimit?: number;
     mockDefault?: MockResponse;
     expectMagicContext?: boolean;
+    /** Absolute path to a second plugin, loaded after Magic Context so its own
+     * session hooks observe the draft Magic Context hands back to the host. */
+    probePlugin?: string;
 }
 
 const DEFAULT_MOCK_RESPONSE: MockResponse = {
@@ -72,6 +75,7 @@ export class OpenCode2TestHarness implements HostHarness {
             modelOutputLimit: 8192,
             providerID: "anthropic",
             mockResponse: options.mockDefault ?? DEFAULT_MOCK_RESPONSE,
+            probePlugin: options.probePlugin,
         };
         const host = await spawnOpencode2(spawnOptions);
         return new OpenCode2TestHarness(
