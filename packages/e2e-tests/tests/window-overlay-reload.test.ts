@@ -30,6 +30,11 @@ function writeOverlay(path: string, enforcedWindow: number): void {
             minted_provider_ids: [],
             cells: [
                 {
+                    provider_id: "mock",
+                    model_id: "mock-model",
+                    facts: { "window.enforced": fact },
+                },
+                {
                     provider_id: "mock-anthropic",
                     model_id: "mock-sonnet",
                     facts: { "window.enforced": fact },

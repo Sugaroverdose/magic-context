@@ -2423,9 +2423,8 @@ async function startPiMagicContextRuntime(
 				sessionId,
 				message: event.message,
 				piContextWindow,
-				piContextWindowSource: hasObservedContextWindow
-					? "observed"
-					: "catalog",
+				// Both Pi hosts report the configured model window here, not a provider-observed limit.
+				piContextWindowSource: "catalog",
 				piModel: ctx.model,
 				piTokens:
 					piUsage && typeof piUsage.tokens === "number"

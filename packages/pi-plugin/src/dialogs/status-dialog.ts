@@ -607,8 +607,7 @@ export function buildPiStatusDetail(
 	}
 	const windowGeometry = resolvePiWindowGeometry({
 		rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
-		rawContextWindowSource:
-			usage?.contextWindow === undefined ? "catalog" : "observed",
+		rawContextWindowSource: "catalog",
 		model: ctx.model,
 		detectedContextLimit,
 		persistedInputTokens: meta.lastInputTokens,

@@ -2759,7 +2759,7 @@ export function registerPiContextHandler(
 			let usageContextLimit = isSaneLimit(piUsage?.contextWindow)
 				? piUsage.contextWindow
 				: undefined;
-			let usageContextWindowSource: "observed" | "catalog" = "observed";
+			let usageContextWindowSource: "observed" | "catalog" = "catalog";
 			let detectedContextLimit: number | undefined;
 
 			// Overflow recovery: a previous LLM call ended with a
@@ -4310,7 +4310,7 @@ function maybeFireHistorian(args: {
 		usageContextLimit = isSaneLimit(piUsage?.contextWindow)
 			? piUsage.contextWindow
 			: undefined;
-		let usageContextWindowSource: "observed" | "catalog" = "observed";
+		let usageContextWindowSource: "observed" | "catalog" = "catalog";
 		let detectedContextLimit: number | undefined;
 		// Cold-start: fall back to the model's window when usage hasn't reported
 		// a sane one yet (first pass after restart).
