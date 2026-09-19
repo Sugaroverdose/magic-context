@@ -121,6 +121,7 @@ import {
     encodeOpenCodeMessagesToCk,
     resolveOrdinalsForModule,
 } from "./module-wire";
+import { onNoteTrigger } from "./note-nudger";
 import { RECOVERY_NO_HEAD_LIMIT } from "./protected-tail-boundary";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
@@ -423,6 +424,9 @@ interface RustSessionState extends ModuleStateSyncState {
     lkgRepresentationFrozen: boolean;
     lkgFrozenHealthyPasses: number;
     lkgFrozenAtInputCount: number | null;
+    /** Highest fold coverage ordinal this process has already armed the deferred-note
+     * nudge for. Null until the first committed boundary of the process is observed. */
+    noteNudgePublishedOrdinal: number | null;
 }
 
 export interface RustModeTransformOptions {
@@ -736,6 +740,44 @@ function materializedCompactionBoundary(
     };
 }
 
+/**
+ * Arm the deferred-note nudge when a response reports that a fold published new
+ * compartments.
+ *
+ * In rust mode the module owns the historian, so the host never reaches the publish
+ * path that arms this nudge in TypeScript mode; without this the deferred notes are
+ * only ever re-surfaced by the commit and todo triggers. The committed materialized
+ * boundary above is the host's view of that publish, and its coverage ordinal grows
+ * only when a fold covered more raw history. Re-rendering the same fold repeats the
+ * same ordinal, so comparing against the highest ordinal already armed keeps every
+ * later cache-busting pass from re-arming.
+ *
+ * `persistedBoundaryOrdinal` is the compaction marker already applied to this session,
+ * read before this pass could advance it. It seeds the comparison so a fold published
+ * by an earlier process is not treated as new after a restart.
+ *
+ * Cooldown, clear-on-use, and the "are there notes at all" question stay where the
+ * other two triggers leave them: in the shared nudge state machine.
+ */
+function armNoteNudgeOnRustPublish(args: {
+    db: TransformDeps["db"];
+    sessionId: string;
+    state: RustSessionState;
+    boundary: ReturnType<typeof materializedCompactionBoundary>;
+    persistedBoundaryOrdinal: number | null;
+}): void {
+    if (!args.boundary) return;
+    const armedThrough =
+        args.state.noteNudgePublishedOrdinal ?? args.persistedBoundaryOrdinal ?? -1;
+    args.state.noteNudgePublishedOrdinal = Math.max(armedThrough, args.boundary.ordinal);
+    if (args.boundary.ordinal <= armedThrough) return;
+    sessionLog(
+        args.sessionId,
+        `rust fold published compartments through ordinal ${args.boundary.ordinal} (previously ${armedThrough}); arming the deferred-note nudge`,
+    );
+    onNoteTrigger(args.db, args.sessionId, "historian_complete");
+}
+
 function formatRustPassLog(args: {
     decision: string;
     reason: string;
@@ -1016,6 +1058,7 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             lkgRepresentationFrozen: false,
             lkgFrozenHealthyPasses: 0,
             lkgFrozenAtInputCount: null,
+            noteNudgePublishedOrdinal: null,
         };
         states.set(sessionId, state);
     }
@@ -2129,9 +2172,13 @@ export function createRustModeTransform(
         let rowVersion = 0;
         let coveredOrdinal = 0;
         let markerAt: string | null = null;
+        // Read before this pass can advance the marker: the nudge arm below needs the
+        // coverage a previous process already published.
+        let persistedBoundaryOrdinal: number | null = null;
         try {
             const marker = getPersistedCompactionMarkerState(deps.db, sessionId);
             markerAt = marker?.targetEndMessageId ?? marker?.boundaryMessageId ?? null;
+            persistedBoundaryOrdinal = marker?.boundaryOrdinal ?? null;
         } catch {
             // Diagnostics remain available even when the local state database is unavailable.
         }
@@ -3642,6 +3689,19 @@ export function createRustModeTransform(
                 mirrorRustRenderedMemoryIds({ db: deps.db, sessionId, response });
             } catch (error) {
                 sessionLog(sessionId, "rust rendered-memory mirror write failed (ignored):", error);
+            }
+            try {
+                armNoteNudgeOnRustPublish({
+                    db: deps.db,
+                    sessionId,
+                    state,
+                    boundary: materializedBoundary,
+                    persistedBoundaryOrdinal,
+                });
+            } catch (error) {
+                // The module output is already installed for this pass, so a failure while
+                // recording the nudge must not fail the pass; a later publish arms it again.
+                sessionLog(sessionId, "rust note-nudge arm after publish failed (ignored):", error);
             }
             const deliveryStartedAt = performance.now();
             if (deliveryPassIds.length > 0) {
