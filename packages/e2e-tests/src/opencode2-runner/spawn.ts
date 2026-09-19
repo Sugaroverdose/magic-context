@@ -197,11 +197,13 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 	const provider = options.existingMock ?? await mock.start(); // Existing mock explicitly binds 127.0.0.1 and captures parsed wire bodies.
 	// 2.0.5 title generation hits the mock on session.create, before tests
 	// install matchers, and uses a host title model rather than mock-model.
-	mock.setDefault({
-		text: "fixture reply",
-		usage: { input_tokens: 100, output_tokens: 10 },
-	});
-	if (options.mockResponse) mock.setDefault(options.mockResponse);
+    if (!options.existingMock) {
+        mock.setDefault({
+            text: "fixture reply",
+            usage: { input_tokens: 100, output_tokens: 10 },
+        });
+        if (options.mockResponse) mock.setDefault(options.mockResponse);
+    }
 	const defaultModelID = options.defaultModelID ?? "mock-model";
 	const modelIDs = new Set([
 		defaultModelID,

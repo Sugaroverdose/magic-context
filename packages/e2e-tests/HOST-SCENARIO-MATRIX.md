@@ -13,7 +13,7 @@ means the real-host run failed; product code was not changed in this slice.
 | conflict disable | pass | product-bug | pass | product-bug |
 | context limits | pass | pass | pass | pass |
 | deferred compaction marker | pass | product-bug | declared-divergence | product-bug |
-| dropped-input guard | pass | product-bug | declared-divergence | declared-divergence |
+| dropped-input guard | pass | pass | declared-divergence | declared-divergence |
 | drops | pass | pass | pass | pass |
 | emergency blocking | pass | pass | pass | product-bug |
 | historian success | pass | pass | pass | product-bug |
@@ -30,7 +30,7 @@ means the real-host run failed; product code was not changed in this slice.
 | tagging | pass | pass | pass | pass |
 | thinking-block safety | pass | declared-divergence | declared-divergence | declared-divergence |
 | todo synthesis | pass | product-bug | pass | product-bug |
-| window overlay reload | pass | product-bug | product-bug | product-bug |
+| window overlay reload | pass | pass | product-bug | product-bug |
 | Pi cross-harness | declared-divergence | declared-divergence | pass | declared-divergence |
 | Pi Rust degradation arc 1 | declared-divergence | declared-divergence | pass | declared-divergence |
 | Pi Rust degradation arc 4 | declared-divergence | declared-divergence | pass | declared-divergence |
@@ -39,6 +39,8 @@ means the real-host run failed; product code was not changed in this slice.
 
 - Context limits: adapter now persists completed assistant usage on `session.execution.succeeded` and feeds the resolved model catalog into shared budget arithmetic; harness output limit matches the other hosts (8,192). Exact real-host assertion: `47.83773440489858` for 20,000 / 41,808.
 - Cache invariants: v2 now applies the shared system-guidance/hash handler; the scenario harness uses Anthropic transport like the other hosts so the existing wire oracle sees the actual provider request.
+- Dropped-input guard: select GA's `shell` tool instead of v1 `bash`; the unchanged refusal and recovery-message assertions pass on the real host.
+- Window overlay reload: include the OC2 model key in the fixture and preserve mock usage across restart; exact initial and reloaded percentages pass.
 - Compaction off: retain memory/tool registration, pass the shared compaction-off mode, and bypass v1-only synthetic marker deletion for GA-owned checkpoints.
 - Memory injection: register the shared ctx_* implementations with the GA tool editor using JSON Schema; a real ctx_memory write is now present in a fresh session's first request.
 - Historian success: Anthropic transport allows the shared historian mock matcher to return the publication payload; real-host publication now passes.

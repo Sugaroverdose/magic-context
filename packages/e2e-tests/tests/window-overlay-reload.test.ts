@@ -39,6 +39,11 @@ function writeOverlay(path: string, enforcedWindow: number): void {
                     model_id: "claude-haiku-4-5",
                     facts: { "window.enforced": fact },
                 },
+                {
+                    provider_id: "anthropic",
+                    model_id: "mock-model",
+                    facts: { "window.enforced": fact },
+                },
             ],
         }),
     );
