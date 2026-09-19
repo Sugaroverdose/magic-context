@@ -17,6 +17,7 @@ import {
     markNoteNudgeDelivered,
     onNoteTrigger,
     peekNoteNudgeText,
+    resetNoteNudgeCooldownOnly,
 } from "./note-nudger";
 
 const dbs: Database[] = [];
@@ -237,6 +238,32 @@ describe("note-nudger", () => {
         onNoteTrigger(db, "ses-clear", "todos_complete");
 
         expect(getNoteNudgeText(db, "ses-clear")).toContain("You have 1 deferred note");
+    });
+
+    it("suppresses a later trigger inside the cooldown window whichever arm fired it", () => {
+        const db = makeDb();
+        addNote(db, "session", { sessionId: "ses-cooldown", content: "Circle back." });
+
+        onNoteTrigger(db, "ses-cooldown", "todos_complete");
+        expect(peekNoteNudgeText(db, "ses-cooldown", "u-1")).toBeNull();
+        const text = peekNoteNudgeText(db, "ses-cooldown", "u-2");
+        expect(text).toContain("You have 1 deferred note");
+        markNoteNudgeDelivered(db, "ses-cooldown", text!, "u-2");
+
+        // A second work boundary — here the historian-publish arm, which rust mode also
+        // uses — lands inside the 15-minute window, so the peek consumes the trigger
+        // instead of nudging again.
+        onNoteTrigger(db, "ses-cooldown", "historian_complete");
+        expect(peekNoteNudgeText(db, "ses-cooldown", "u-3")).toBeNull();
+        expect(peekNoteNudgeText(db, "ses-cooldown", "u-4")).toBeNull();
+        expect(getPersistedRow(db, "ses-cooldown")?.triggerPending).toBe(0);
+
+        // With the window expired, the same arm delivers again — the suppression above
+        // was the cooldown and nothing else.
+        onNoteTrigger(db, "ses-cooldown", "historian_complete");
+        resetNoteNudgeCooldownOnly("ses-cooldown");
+        expect(peekNoteNudgeText(db, "ses-cooldown", "u-5")).toBeNull();
+        expect(peekNoteNudgeText(db, "ses-cooldown", "u-6")).toContain("You have 1 deferred note");
     });
 
     it("clearNoteNudgeTriggerOnly preserves delivered anchors", () => {

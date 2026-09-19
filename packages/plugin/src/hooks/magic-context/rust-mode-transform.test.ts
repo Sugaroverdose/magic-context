@@ -38,6 +38,7 @@ import {
     getEmergencyRecoveryArmedAt,
     getMergedReasoningStrippedIds,
     getOverflowState,
+    getPersistedNoteNudge,
     getThinkingBindingRecoveryTarget,
     recordDetectedContextLimit,
     recordOverflowDetected,
@@ -66,6 +67,7 @@ import { getVisibleMemoryIds } from "./inject-compartments";
 import { createDbLkgPersistence } from "./lkg-persist";
 import { getSlot, registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
 import { MODULE_PAGE_MAX_BYTES } from "./module-wire";
+import { clearNoteNudgeTriggerOnly } from "./note-nudger";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
@@ -1196,6 +1198,107 @@ describe("Rust mode authority adapter", () => {
                 boundary_id: "msg_boundary#3",
             }),
         ).toBeUndefined();
+    });
+
+    it("arms the deferred-note nudge only when a module fold advances the published sequence", async () => {
+        const sessionId = `rust-note-nudge-publish-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let coverageOrdinal = 12;
+        const native = () => [
+            {
+                info: { role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "<project-docs>m0</project-docs>", synthetic: true }],
+            },
+            {
+                info: { id: "m1", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "tail" }],
+            },
+        ];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform"
+                    ? {
+                          decision: "HARD",
+                          scheduler_decision: "execute",
+                          committed: true,
+                          row_version: 4,
+                          coverage_ordinal: coverageOrdinal,
+                          boundary_id: "m1#0",
+                          native_messages: native(),
+                      }
+                    : { ok: true },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const runPass = async () => {
+            const input = makeMessages(sessionId);
+            await transform.run(sessionId, input, { messages: input }, makeMeta(db, sessionId));
+        };
+
+        await runPass();
+        expect(getPersistedNoteNudge(db, sessionId).triggerPending).toBe(true);
+
+        // Clear the armed trigger so the next assertion observes only what this pass does.
+        clearNoteNudgeTriggerOnly(db, sessionId);
+        await runPass();
+        expect(getPersistedNoteNudge(db, sessionId).triggerPending).toBe(false);
+
+        coverageOrdinal = 30;
+        await runPass();
+        expect(getPersistedNoteNudge(db, sessionId).triggerPending).toBe(true);
+    });
+
+    it("does not re-arm the deferred-note nudge for a fold published before this process", async () => {
+        const sessionId = `rust-note-nudge-restart-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        // Seed the compaction marker as if an earlier process had already recorded a fold
+        // covering raw history through ordinal 12, so this pass sees no new coverage.
+        setPersistedCompactionMarkerState(db, sessionId, {
+            boundaryMessageId: "m1",
+            summaryMessageId: "m1",
+            compactionPartId: "prt_compaction",
+            summaryPartId: "prt_summary",
+            boundaryOrdinal: 12,
+            targetEndMessageId: "m1",
+        });
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform"
+                    ? {
+                          decision: "HARD",
+                          scheduler_decision: "execute",
+                          committed: true,
+                          row_version: 4,
+                          coverage_ordinal: 12,
+                          boundary_id: "m1#0",
+                          native_messages: [
+                              {
+                                  info: { role: "user", sessionID: sessionId },
+                                  parts: [
+                                      {
+                                          type: "text",
+                                          text: "<project-docs>m0</project-docs>",
+                                          synthetic: true,
+                                      },
+                                  ],
+                              },
+                              {
+                                  info: { id: "m1", role: "user", sessionID: sessionId },
+                                  parts: [{ type: "text", text: "tail" }],
+                              },
+                          ],
+                      }
+                    : { ok: true },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const input = makeMessages(sessionId);
+
+        await transform.run(sessionId, input, { messages: input }, makeMeta(db, sessionId));
+
+        expect(getPersistedNoteNudge(db, sessionId).triggerPending).toBe(false);
     });
 
     it("consumes the persisted provider-overflow limit on the next Rust-mode pass", async () => {
