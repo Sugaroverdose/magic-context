@@ -1072,8 +1072,9 @@ export function findAdoptableFallbackTags(
  * Race-safe migrate of a tag's `message_id` from a known old (fallback) value to
  * a new (real) value. The old value in the WHERE clause is the concurrency fence
  * (mirrors `adoptNullOwnerToolTag`'s NULL guard): if a sibling process already
- * migrated or re-keyed the row, `changes === 0` and the caller skips. Returns
- * true iff exactly this migration applied.
+ * migrated or re-keyed the row, `changes === 0` and the caller skips. Trigger
+ * writes may increase a positive count, so only zero versus nonzero is meaningful.
+ * Returns true iff exactly this migration applied.
  */
 export function adoptFallbackTagMessageId(
     db: Database,
@@ -1445,9 +1446,8 @@ export function adoptPiFallbackToolOwnerTag(
                    AND tool_owner_message_id = ?`,
             )
             .run(newOwnerMessageId, sessionId, tagNumber, callId, oldOwnerMessageId);
-        return (result.changes ?? 0) === 1
-            ? { action: "rekeyed", tagNumber }
-            : { action: "skipped" };
+        // Trigger writes can inflate changes, but zero still means this guard matched no row.
+        return (result.changes ?? 0) > 0 ? { action: "rekeyed", tagNumber } : { action: "skipped" };
     }
 
     if (existing.tagNumber === tagNumber) {
@@ -1500,9 +1500,8 @@ export function adoptPiFallbackMessageTag(
                    AND message_id = ?`,
             )
             .run(newRealMessageId, sessionId, tagNumber, oldFallbackMessageId);
-        return (result.changes ?? 0) === 1
-            ? { action: "rekeyed", tagNumber }
-            : { action: "skipped" };
+        // Trigger writes can inflate changes, but zero still means this guard matched no row.
+        return (result.changes ?? 0) > 0 ? { action: "rekeyed", tagNumber } : { action: "skipped" };
     }
 
     // A real-id row can appear after the adoption probe but before allocation.
@@ -1533,6 +1532,7 @@ export function markTagsCompactedByMessageIds(
     sessionId: string,
     messageIds: Iterable<string>,
 ): number {
+    // RETURNING counts top-level tag rows without including writes made by triggers.
     const update = db.prepare(
         `UPDATE tags
          SET status = 'compacted'
@@ -1543,19 +1543,20 @@ export function markTagsCompactedByMessageIds(
                OR message_id LIKE ? ESCAPE '\\'
                OR message_id LIKE ? ESCAPE '\\'
                OR tool_owner_message_id = ?
-           )`,
+           )
+         RETURNING id`,
     );
     return db.transaction(() => {
         let changed = 0;
         for (const messageId of new Set(messageIds)) {
             const escaped = escapeLikePattern(messageId);
-            changed += update.run(
+            changed += update.all(
                 sessionId,
                 messageId,
                 `${escaped}:p%`,
                 `${escaped}:file%`,
                 messageId,
-            ).changes;
+            ).length;
         }
         return changed;
     })();
@@ -2089,6 +2090,7 @@ export function getTopNBySize(db: Database, sessionId: string, n: number): TagEn
 const getToolTagNumberByOwnerStatements = new WeakMap<Database, PreparedStatement>();
 const getNullOwnerToolTagStatements = new WeakMap<Database, PreparedStatement>();
 const adoptNullOwnerToolTagStatements = new WeakMap<Database, PreparedStatement>();
+const getToolOwnerByTagIdStatements = new WeakMap<Database, PreparedStatement>();
 const deleteToolTagsByOwnerStatements = new WeakMap<Database, PreparedStatement>();
 
 function getGetToolTagNumberByOwnerStatement(db: Database): PreparedStatement {
@@ -2179,14 +2181,22 @@ function getAdoptNullOwnerToolTagStatement(db: Database): PreparedStatement {
     if (!stmt) {
         // NULL-guarded UPDATE: matches zero rows if another writer
         // (backfill or a concurrent runtime adoption) already populated
-        // owner. Caller MUST treat changes=0 as "race lost" and
-        // recover.
+        // owner.
         stmt = db.prepare(
             `UPDATE tags
              SET tool_owner_message_id = ?
              WHERE id = ? AND tool_owner_message_id IS NULL`,
         );
         adoptNullOwnerToolTagStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getToolOwnerByTagIdStatement(db: Database): PreparedStatement {
+    let stmt = getToolOwnerByTagIdStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare("SELECT tool_owner_message_id FROM tags WHERE id = ?");
+        getToolOwnerByTagIdStatements.set(db, stmt);
     }
     return stmt;
 }
@@ -2198,11 +2208,25 @@ function getAdoptNullOwnerToolTagStatement(db: Database): PreparedStatement {
  * adopted between our SELECT and UPDATE).
  *
  * The NULL guard makes this concurrent-safe with both the backfill
- * pass and concurrent runtime adoptions in other plugin processes.
+ * pass and concurrent runtime adoptions in other plugin processes. The
+ * transaction verifies the owner value directly because trigger writes make
+ * the statement's numeric change count unsuitable as a claim result.
  */
 export function adoptNullOwnerToolTag(db: Database, rowId: number, ownerMsgId: string): boolean {
-    const result = getAdoptNullOwnerToolTagStatement(db).run(ownerMsgId, rowId);
-    return (result.changes ?? 0) === 1;
+    return db
+        .transaction(() => {
+            const before = getToolOwnerByTagIdStatement(db).get(rowId) as
+                | { tool_owner_message_id: string | null }
+                | undefined;
+            if (!before || before.tool_owner_message_id !== null) return false;
+
+            getAdoptNullOwnerToolTagStatement(db).run(ownerMsgId, rowId);
+            const after = getToolOwnerByTagIdStatement(db).get(rowId) as
+                | { tool_owner_message_id: string | null }
+                | undefined;
+            return after?.tool_owner_message_id === ownerMsgId;
+        })
+        .immediate();
 }
 
 /**
@@ -2304,7 +2328,8 @@ function getDeleteToolTagsByOwnerStatement(db: Database): PreparedStatement {
             `DELETE FROM tags
              WHERE session_id = ?
                AND type = 'tool'
-               AND tool_owner_message_id = ?`,
+               AND tool_owner_message_id = ?
+             RETURNING id`,
         );
         deleteToolTagsByOwnerStatements.set(db, stmt);
     }
@@ -2324,6 +2349,6 @@ function getDeleteToolTagsByOwnerStatement(db: Database): PreparedStatement {
  * deletion paths until adopted or backfilled.
  */
 export function deleteToolTagsByOwner(db: Database, sessionId: string, ownerMsgId: string): number {
-    const result = getDeleteToolTagsByOwnerStatement(db).run(sessionId, ownerMsgId);
-    return result.changes ?? 0;
+    // RETURNING contains only rows deleted by this statement, not writes made by triggers.
+    return getDeleteToolTagsByOwnerStatement(db).all(sessionId, ownerMsgId).length;
 }
