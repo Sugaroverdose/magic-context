@@ -605,9 +605,12 @@ describe("tail hygiene baseline and defer-window deltas", () => {
 
     it("ignores a Channel-1 reminder appended after the measured pass", () => {
         const original = nativeTool("owner", "call-reminder", { path: "x" }, "tool output");
+        // The newest message is never frozen, so the tool arc being tested needs a
+        // message after it to land inside the frozen prefix, where its delta is zero.
+        const newest = textMessage("newest", "newest turn");
         const tags = [tag(1, "call-reminder", "tool", { toolOwnerMessageId: "owner" })];
         const baseline = refreshTailHygieneBaseline({
-            messages: [original],
+            messages: [original, newest],
             tags,
             protectedTagNumbers: new Set(),
             cacheBusting: true,
@@ -616,7 +619,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const toolPart = mutated.parts[0] as { state: { output: string } };
         toolPart.state.output += buildChannel1Reminder("gentle", 25_000, 16);
         const defer = refreshTailHygieneBaseline({
-            messages: [mutated],
+            messages: [mutated, newest],
             tags,
             protectedTagNumbers: new Set(),
             cacheBusting: false,
@@ -625,12 +628,13 @@ describe("tail hygiene baseline and defer-window deltas", () => {
 
         expect(defer.evaluable).toBe(true);
         expect(defer.turnDeltaU).toBe(0);
-        expect(defer.turnDeltaT).toBe(0);
+        expect(defer.turnDeltaT).toBe(baseline.turnDeltaT);
         expect(effectiveTailHygiene(defer)).toEqual(effectiveTailHygiene(baseline));
     });
 
-    it("marks non-append mutation as generation-invalidated until a bust rewalk", () => {
-        const original = [textMessage("m", "original content")];
+    it("re-measures a non-append mutation on the defer pass that finds it", () => {
+        const newest = textMessage("newest", "newest turn");
+        const original = [textMessage("m", "original content"), newest];
         const tags = [tag(1, "m:p0", "message")];
         const baseline = refreshTailHygieneBaseline({
             messages: original,
@@ -638,7 +642,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
             protectedTagNumbers: new Set(),
             cacheBusting: true,
         });
-        const changed = [textMessage("m", "changed content")];
+        const changed = [textMessage("m", "changed content and then some"), newest];
         const defer = refreshTailHygieneBaseline({
             messages: changed,
             tags,
@@ -646,20 +650,33 @@ describe("tail hygiene baseline and defer-window deltas", () => {
             cacheBusting: false,
             previous: baseline,
         });
-        const rewalk = refreshTailHygieneBaseline({
+        const measured = measureTailHygiene({
             messages: changed,
             tags,
             protectedTagNumbers: new Set(),
-            cacheBusting: true,
+        });
+        const steady = refreshTailHygieneBaseline({
+            messages: changed,
+            tags,
+            protectedTagNumbers: new Set(),
+            cacheBusting: false,
             previous: defer,
         });
 
-        expect(defer.evaluable).toBe(false);
-        expect(defer.generationInvalidated).toBe(true);
-        expect(defer.baselineGeneration).toBe(baseline.baselineGeneration);
-        expect(rewalk.evaluable).toBe(true);
-        expect(rewalk.generationInvalidated).toBe(false);
-        expect(rewalk.baselineGeneration).toBe(baseline.baselineGeneration + 1);
+        // The mutation is detected and reported, then measured on this same pass
+        // instead of being held until the next cache-busting pass.
+        expect(defer.lastPrefixMismatch).toMatchObject({
+            partIndex: 0,
+            messageId: "m",
+            field: "contentHash",
+        });
+        expect(defer.evaluable).toBe(true);
+        expect(defer.generationInvalidated).toBe(false);
+        expect(defer.baselineGeneration).toBe(baseline.baselineGeneration + 1);
+        expect(effectiveTailHygiene(defer)).toEqual({ u: measured.u, t: measured.t });
+        // One invalidation event, one diagnostic: the next quiet pass reports none.
+        expect(steady.lastPrefixMismatch).toBeUndefined();
+        expect(steady.baselineGeneration).toBe(defer.baselineGeneration);
     });
 
     it("detects a byte mutation after the walk with a content-hash assertion", () => {
@@ -942,6 +959,7 @@ describe("tail baseline replay memo", () => {
         const input = {
             messages: [
                 nativeTool("memo-owner", "memo-call", { path: "unique-memo-path" }, "memo output"),
+                textMessage("memo-newest", "newest turn"),
             ],
             tags: [tag(1, "memo-call", "tool", { toolOwnerMessageId: "memo-owner" })],
             protectedTagNumbers: new Set<number>(),
@@ -961,7 +979,8 @@ describe("tail baseline replay memo", () => {
                 changed.messages[0].parts[0] as { state: { input: { path: string } } }
             ).state.input.path = "unique-memo-PATh";
             const invalidated = refreshTailHygieneBaseline({ ...changed, previous: replay });
-            expect(invalidated.generationInvalidated).toBe(true);
+            expect(invalidated.lastPrefixMismatch?.messageId).toBe("memo-owner");
+            expect(invalidated.baselineGeneration).toBe(first.baselineGeneration + 1);
             expect(invalidated.contentSignature).not.toBe(first.contentSignature);
             expect(serialize).toHaveBeenCalled();
         } finally {
@@ -978,6 +997,7 @@ describe("tail baseline replay memo", () => {
                     { path: "file" },
                     "large output ".repeat(200),
                 ),
+                textMessage("memo-newest-2", "newest turn"),
             ],
             tags: [tag(2, "memo-call-2", "tool", { toolOwnerMessageId: "memo-owner-2" })],
             protectedTagNumbers: new Set<number>(),
@@ -993,15 +1013,19 @@ describe("tail baseline replay memo", () => {
         expect(effectiveTailHygiene(queued).u).toBe(0);
         const unqueued = refreshTailHygieneBaseline({ ...input, previous: queued });
         expect(effectiveTailHygiene(unqueued).u).toBe(effectiveTailHygiene(first).u);
+        // Protection entering a frozen part and a tag leaving active are both
+        // unattributable on a defer pass: each is named, then re-measured.
         const protectedReplay = refreshTailHygieneBaseline({
             ...input,
             previous: unqueued,
             protectedTagNumbers: new Set([2]),
         });
-        expect(protectedReplay.generationInvalidated).toBe(true);
+        expect(protectedReplay.lastPrefixMismatch?.field).toBe("protection-entered");
+        expect(effectiveTailHygiene(protectedReplay).u).toBe(0);
         input.tags[0].status = "dropped";
         const dropped = refreshTailHygieneBaseline({ ...input, previous: first });
-        expect(dropped.generationInvalidated).toBe(true);
+        expect(dropped.lastPrefixMismatch?.field).toBe("tagStatus");
+        expect(dropped.baselineGeneration).toBe(first.baselineGeneration + 1);
         const rebuilt = refreshTailHygieneBaseline({
             ...input,
             previous: dropped,
