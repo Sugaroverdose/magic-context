@@ -2200,14 +2200,28 @@ async function runShadowWorker(): Promise<void> {
             shadowQueue.unshift(item);
             break;
         }
+        // A worker item may outlive its registration: retirement or a re-arm can
+        // land while the provider call is in flight. Publishing the outcome then
+        // re-creates state that retirement just cleared, and the stall detector
+        // reads that map — so a retired item's refusal could be attributed to a
+        // freshly re-armed registration and stop its backfill. Only record the
+        // outcome when the registration this item started under is still live.
+        const generationAtStart = shadowRegistrations.get(item.projectIdentity)?.generation;
+        const isStillCurrent = (): boolean =>
+            generationAtStart !== undefined &&
+            shadowRegistrations.get(item.projectIdentity)?.generation === generationAtStart;
         try {
             const outcome = await processShadowQueueItem(item);
-            shadowBackfillLastWriteOutcomes.set(`${item.projectIdentity}:${item.scope}`, outcome);
+            if (isStillCurrent()) {
+                shadowBackfillLastWriteOutcomes.set(`${item.projectIdentity}:${item.scope}`, outcome);
+            }
         } catch (error) {
-            shadowBackfillLastWriteOutcomes.set(`${item.projectIdentity}:${item.scope}`, {
-                writes: 0,
-                refusalReason: "provider_returned_no_vectors",
-            });
+            if (isStillCurrent()) {
+                shadowBackfillLastWriteOutcomes.set(`${item.projectIdentity}:${item.scope}`, {
+                    writes: 0,
+                    refusalReason: "provider_returned_no_vectors",
+                });
+            }
             log("[magic-context] Synapse shadow write failed:", error);
         }
         processed += item.ids.length;
