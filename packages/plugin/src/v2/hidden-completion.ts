@@ -6,6 +6,7 @@ import type {
 } from "../hooks/magic-context/compartment-runner-types";
 import { HiddenCompletionRefusal } from "../hooks/magic-context/compartment-runner-types";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
+import { log } from "../shared/logger";
 import type { PromptArgs } from "../shared/model-suggestion-retry";
 import { parseProviderModel, toModelEntry } from "../shared/resolve-fallbacks";
 import type { Database } from "../shared/sqlite";
@@ -65,6 +66,12 @@ export interface HiddenChildHost {
     wait(input: { sessionID: string }): Promise<void>;
     interrupt(input: { sessionID: string }): Promise<{ interrupted: boolean }>;
     update(input: { sessionID: string; title: string }): Promise<void>;
+    /**
+     * Deletes a session and everything hanging off it. Optional because the host surface this
+     * adapter is handed does not always carry it; when it is missing, a retired child keeps its
+     * entry in the retired list and the next boot sweep tries again.
+     */
+    remove?(input: { sessionID: string }): Promise<void>;
 }
 
 export interface HiddenChildRows {
@@ -79,6 +86,13 @@ export interface V2HiddenCompletionOptions {
     openReader: () => HiddenChildRows & { close?: () => void };
     ensureAgent?(): Promise<void>;
     generation?: string;
+    /**
+     * Gap left between two session removals. Deleting a session walks its children one at a time
+     * inside the host and publishes an event per deletion, so a backlog is drained slowly on
+     * purpose rather than fired off in parallel.
+     */
+    removalSpacingMs?: number;
+    log?: (message: string) => void;
 }
 
 interface RunState {
@@ -95,6 +109,15 @@ interface RunState {
 
 const META_PREFIX = "opencode2_hidden_children:";
 const POLL_INTERVAL_MS = 200;
+const REMOVAL_SPACING_MS = 250;
+/**
+ * Ceiling on remembered retired children. Entries leave this list as their sessions are deleted, so
+ * it only grows while deletion is failing or unavailable; the cap keeps a long outage from growing
+ * the project's metadata row without limit. The oldest entries are dropped first because the sweep
+ * drains oldest first, so anything still at the front after a full pass is what deletion keeps
+ * refusing; those sessions are then left behind in the host rather than retried forever.
+ */
+const RETIRED_CHILDREN_LIMIT = 200;
 
 export function hiddenChildrenMetaKey(projectIdentity: string): string {
     return `${META_PREFIX}${projectIdentity}`;
@@ -232,7 +255,16 @@ class HiddenChildStateStore {
                 retired_at: Date.now(),
                 reason,
             });
+            const excess = state.retired_children.length - RETIRED_CHILDREN_LIMIT;
+            if (excess > 0) state.retired_children.splice(0, excess);
             delete state.active[child.role];
+        });
+    }
+
+    /** Forgets one retired child, called once its session is gone from the host. */
+    prune(id: string): void {
+        this.mutate((state) => {
+            state.retired_children = state.retired_children.filter((child) => child.id !== id);
         });
     }
 }
@@ -296,12 +328,18 @@ function meter(system: string, prompt: string, text: string) {
  * The provider answered with an error (quota, rate limit, refused request) and the host persisted it
  * as a settled assistant row. The child is safe to reuse: every hidden prompt replaces the child's
  * whole context in the hidden-child hook, so the error row is never sent again.
+ *
+ * `finish` is what makes the row settled, and it is required for the same reason the success
+ * predicate below requires it: a row that only carries `error` tells us a failure was recorded, not
+ * that the message it belongs to is over, so reusing on `error` alone can hand a caller a child that
+ * is still being written. Measured against OpenCode 2.0.5: a failed hidden prompt persists one
+ * assistant row carrying `finish: "error"`, `time.completed` and the provider error together, and no
+ * tokens, so requiring `finish` costs nothing in practice while keeping the two reuse paths at the
+ * same bar.
  */
 function settledProviderError(row: StoreRow<"assistant"> | undefined): boolean {
-    return row !== undefined && row.data.error !== undefined;
+    return row !== undefined && row.data.error !== undefined && typeof row.data.finish === "string";
 }
-
-const PROVIDER_ERROR_PREFIX = "Hidden completion provider error: ";
 
 function successfulReusableAssistant(row: StoreRow<"assistant"> | undefined): boolean {
     return (
@@ -319,6 +357,19 @@ function assistantText(row: StoreRow<"assistant">): string | null {
         )
         .join("");
     return text.length > 0 ? text : null;
+}
+
+/**
+ * A provider error the host recorded as an assistant row, as opposed to every other way a hidden run
+ * can fail (dispatch error, refusal, timeout, abort). Only this class keeps the child alive, so it is
+ * a distinct type rather than a shape of the message: a message the next editor rewords would
+ * silently turn every quota failure back into a new hidden session per run.
+ */
+export class HiddenProviderError extends Error {
+    constructor(detail: string) {
+        super(`Hidden completion provider error: ${detail}`);
+        this.name = "HiddenProviderError";
+    }
 }
 
 function errorText(value: unknown): string {
@@ -389,7 +440,7 @@ async function awaitAssistantRow(
         const row = withReader(openReader, (reader) => reader.latestAssistant(childID));
         if (row && row.seq > afterSeq) {
             if (row.data.error !== undefined) {
-                throw new Error(`${PROVIDER_ERROR_PREFIX}${errorText(row.data.error)}`);
+                throw new HiddenProviderError(errorText(row.data.error));
             }
             if (typeof row.data.finish === "string") return row;
         }
@@ -413,6 +464,66 @@ export async function createV2HiddenCompletionExecutor(
     for (const child of [...Object.values(persisted.active), ...persisted.retired_children]) {
         if (child) options.hook.registerChild(child.id);
     }
+
+    const spacing = options.removalSpacingMs ?? REMOVAL_SPACING_MS;
+    const note = options.log ?? log;
+    const queued = new Set<string>();
+    // One chain, so removals never overlap however many retirements land at once.
+    let removals: Promise<void> = Promise.resolve();
+
+    const pause = (ms: number) =>
+        new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, ms);
+            // Draining leftovers must never be the reason a host process stays alive.
+            (timer as unknown as { unref?: () => void }).unref?.();
+        });
+
+    const removeChildSession = async (id: string): Promise<void> => {
+        const remove = host.remove;
+        if (!remove) return;
+        try {
+            await remove({ sessionID: id });
+        } catch (error) {
+            // The host was unreachable or refused. Keep the entry so a later sweep retries it;
+            // cleanup is never allowed to fail the hidden run that triggered it.
+            note(
+                `[magic-context] hidden child ${id} could not be deleted, left for a later sweep: ${errorText(error)}`,
+            );
+            return;
+        }
+        try {
+            store.prune(id);
+        } catch (error) {
+            note(
+                `[magic-context] hidden child ${id} was deleted but not forgotten: ${errorText(error)}`,
+            );
+        }
+    };
+
+    /**
+     * Queues a retired child's session for deletion. Returns immediately: a caller in the middle of
+     * a hidden run must not wait on host cleanup.
+     */
+    const scheduleRemoval = (id: string): void => {
+        if (!host.remove || queued.has(id)) return;
+        queued.add(id);
+        removals = removals
+            .then(() => pause(spacing))
+            .then(() => removeChildSession(id))
+            .catch(() => {})
+            .finally(() => {
+                queued.delete(id);
+            });
+    };
+
+    const retireChild = (child: PersistedHiddenChild, reason: string): void => {
+        store.retire(child, reason);
+        scheduleRemoval(child.id);
+    };
+
+    // Boot sweep. Anything left over from an earlier process — including the backlog built up
+    // before retirement deleted anything — is drained here, spaced like every other removal.
+    for (const child of persisted.retired_children) scheduleRemoval(child.id);
 
     const acquireRole = async (role: HiddenChildRole): Promise<() => void> => {
         const previous = roleTails.get(role) ?? Promise.resolve();
@@ -469,7 +580,7 @@ export async function createV2HiddenCompletionExecutor(
 
     const retire = (run: RunState, reason: string): void => {
         if (run.retired) return;
-        store.retire(run.child, reason);
+        retireChild(run.child, reason);
         run.retired = true;
     };
 
@@ -492,7 +603,7 @@ export async function createV2HiddenCompletionExecutor(
                 const head = await resolveHead(identity);
                 let active = store.read().active[role];
                 if (active && active.generation !== generation) {
-                    store.retire(active, "host-generation-changed");
+                    retireChild(active, "host-generation-changed");
                     active = undefined;
                 }
                 if (active) {
@@ -501,7 +612,7 @@ export async function createV2HiddenCompletionExecutor(
                         reader.latestAssistant(activeID),
                     );
                     if (!successfulReusableAssistant(latest) && !settledProviderError(latest)) {
-                        store.retire(active, "newest-assistant-not-reusable");
+                        retireChild(active, "newest-assistant-not-reusable");
                         active = undefined;
                     }
                 }
@@ -547,7 +658,7 @@ export async function createV2HiddenCompletionExecutor(
                 await switchChildModel(run, head);
                 return handle;
             } catch (error) {
-                if (openedChild) store.retire(openedChild, "hidden-run-open-failed");
+                if (openedChild) retireChild(openedChild, "hidden-run-open-failed");
                 releaseRole();
                 throw error;
             }
@@ -643,7 +754,7 @@ export async function createV2HiddenCompletionExecutor(
                 };
             } catch (error) {
                 run.failed = true;
-                if (!(error instanceof Error && error.message.startsWith(PROVIDER_ERROR_PREFIX))) {
+                if (!(error instanceof HiddenProviderError)) {
                     run.unsettledFailure = true;
                 }
                 if (request.signal?.aborted && !run.retired) {

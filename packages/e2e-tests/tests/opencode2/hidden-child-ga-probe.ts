@@ -7,12 +7,15 @@ import {
     HiddenChildHook,
     registerHiddenChildAgents,
 } from "../../../plugin/src/v2/hooks/hidden-child";
+import { removeHostSession } from "../../../plugin/src/v2/host-service";
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";
 
 interface Command {
     seq: number;
     parentSessionID: string;
     temperature?: number;
+    /** Selects which executor answers, so a run can arrive as if a new host build had booted. */
+    generation?: string;
 }
 
 export default {
@@ -28,20 +31,41 @@ export default {
             hook.apply(draft);
         });
         let agentsReady: Promise<void> | undefined;
-        const executor = await createV2HiddenCompletionExecutor(context.session, {
-            db,
-            projectIdentity: context.location.directory,
-            hook,
-            ensureAgent: () => (agentsReady ??= context.agent.reload()),
-            openReader: () =>
-                new V2StoreReader(
-                    gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
-                ),
-            generation: "ga-proof-generation",
-        });
+
+        // Exactly what the shipped plugin does: find the running host through its own service
+        // registration and delete over its HTTP route. Nothing here is handed in by the harness.
+        const remove = (input: { sessionID: string }) => removeHostSession(input.sessionID);
+
+        const executors = new Map<
+            string,
+            Promise<Awaited<ReturnType<typeof createV2HiddenCompletionExecutor>>>
+        >();
+        const executorFor = (generation: string) => {
+            const existing = executors.get(generation);
+            if (existing) return existing;
+            const created = createV2HiddenCompletionExecutor(
+                { ...context.session, remove },
+                {
+                    db,
+                    projectIdentity: context.location.directory,
+                    hook,
+                    ensureAgent: () => (agentsReady ??= context.agent.reload()),
+                    openReader: () =>
+                        new V2StoreReader(
+                            gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
+                        ),
+                    generation,
+                    removalSpacingMs: 50,
+                },
+            );
+            executors.set(generation, created);
+            return created;
+        };
+        await executorFor("ga-proof-generation");
         writeFileSync(readyPath, "ready\n");
 
         const run = async (command: Command) => {
+            const executor = await executorFor(command.generation ?? "ga-proof-generation");
             let handle: Awaited<ReturnType<typeof executor.open>> | null = null;
             let settled = false;
             try {

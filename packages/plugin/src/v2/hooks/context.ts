@@ -49,6 +49,7 @@ import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
 import { createV2HiddenCompletionExecutor } from "../hidden-completion";
+import { removeHostSession } from "../host-service";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
 import { startDreamTrigger } from "./dream-trigger";
@@ -218,16 +219,27 @@ export async function registerContext(context: V2Context) {
     let hiddenAgentsReady: Promise<void> | undefined;
     const hiddenCompletionExecutor =
         db && isDatabasePersisted(db)
-            ? await createV2HiddenCompletionExecutor(context.session, {
-                  db,
-                  projectIdentity: resolveProjectIdentity(directory) ?? directory,
-                  hook: hiddenChildHook,
-                  ensureAgent: () => (hiddenAgentsReady ??= context.agent.reload()),
-                  openReader: () =>
-                      new V2StoreReader(
-                          gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
-                      ),
-              })
+            ? await createV2HiddenCompletionExecutor(
+                  {
+                      ...context.session,
+                      // The injected session surface stops short of deletion, so retiring a hidden
+                      // child reaches the host's delete route directly.
+                      remove: (input: { sessionID: string }) => removeHostSession(input.sessionID),
+                  },
+                  {
+                      db,
+                      projectIdentity: resolveProjectIdentity(directory) ?? directory,
+                      hook: hiddenChildHook,
+                      ensureAgent: () => (hiddenAgentsReady ??= context.agent.reload()),
+                      openReader: () =>
+                          new V2StoreReader(
+                              gaDatabasePath(
+                                  getDataDir(),
+                                  process.env.OPENCODE_CHANNEL ?? "latest",
+                              ),
+                          ),
+                  },
+              )
             : undefined;
     const dreamTrigger =
         hiddenCompletionExecutor && config.dreamer && !config.dreamer.disable
