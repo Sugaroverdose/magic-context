@@ -10,6 +10,21 @@ export const PRODUCER_WINDOW_REFUSAL_MARGIN = 0.03;
 export const HISTORIAN_TRUNCATION_MARKER =
     "[… tokens truncated by Magic Context to fit the historian window …]";
 
+/**
+ * Clamp one producer atom without tokenizing it. Keeping equal head/tail slices
+ * matches the historian's atomic-source guard: preserve the user's request and
+ * the beginning of pasted content, plus enough trailing context to identify it.
+ */
+export function clampProducerAtomChars(text: string, maxChars: number, marker: string): string {
+    const limit = Math.max(0, Math.floor(maxChars));
+    if (text.length <= limit) return text;
+    if (limit <= marker.length) return marker.slice(0, limit);
+    const keptChars = limit - marker.length;
+    const headChars = Math.ceil(keptChars / 2);
+    const tailChars = Math.floor(keptChars / 2);
+    return `${text.slice(0, headChars)}${marker}${text.slice(text.length - tailChars)}`;
+}
+
 export interface ProducerWindowFailureInput {
     producerSourceTokens: number;
     contextLimitTokens?: number;

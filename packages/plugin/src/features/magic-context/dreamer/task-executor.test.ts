@@ -1863,6 +1863,105 @@ describe("createDreamTaskExecutor — compress-cues", () => {
 });
 
 describe("createDreamTaskExecutor — retrospective", () => {
+    test("two size rejections persist recovery and make the third source window disjoint", async () => {
+        db = freshDb();
+        const project = "/repo/retrospective-overflow";
+        const start = Date.now() - 10_000;
+        const rows = Array.from({ length: 20 }, (_, index) => ({
+            sessionId: "s1",
+            ordinal: index + 1,
+            role: "user" as const,
+            text: `line-${index + 1} ${"diagnostic payload ".repeat(80)}`,
+            ts: start + index * 10,
+        }));
+        const provider = {
+            listProjectSessions: mock(() => [{ sessionId: "s1", updatedAt: rows.at(-1)?.ts }]),
+            readUserMessagesSince: mock((_sessionId: string, sinceMs: number, cap: number) => {
+                const eligible = rows.filter((row) => row.ts > sinceMs);
+                return { messages: eligible.slice(0, cap), truncated: eligible.length > cap };
+            }),
+            readOldestMessageTimesSince: mock((_ids: readonly string[], sinceMs: number) => {
+                const oldest = rows.find((row) => row.ts > sinceMs);
+                return oldest ? new Map([["s1", oldest.ts]]) : new Map<string, number>();
+            }),
+            readUserMessagesBefore: mock(() => []),
+        };
+        const promptedWindows: string[][] = [];
+        let promptAttempts = 0;
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [] })),
+                create: mock(async () => ({ data: { id: `retro-overflow-${promptAttempts}` } })),
+                prompt: mock(async (args: { body?: { parts?: Array<{ text?: string }> } }) => {
+                    promptedWindows.push(args.body?.parts?.[0]?.text?.match(/line-\d+/g) ?? []);
+                    promptAttempts += 1;
+                    if (promptAttempts <= 2) {
+                        throw new Error(
+                            "maximum context length is 2000 tokens; prompt exceeds the context window",
+                        );
+                    }
+                    return {};
+                }),
+                messages: mock(async () => ({ data: assistantMessages("n") })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+            retrospectiveRawProvider: provider,
+            resolveRetrospectiveUsableInputTokens: () => 2_000,
+        });
+        const task: DreamTaskRuntimeConfig = {
+            task: "retrospective",
+            schedule: "",
+            timeoutMinutes: 20,
+            retrospectiveRecencyDays: 30,
+        };
+
+        const first = await runManualDream({
+            db,
+            projectIdentity: project,
+            tasks: [task],
+            executor,
+            task: "retrospective",
+        });
+        const afterFirst = getTaskScheduleState(db, project, "retrospective");
+        expect(first.failed).toEqual(["retrospective"]);
+        // lastRunAt and the content watermark do not move on the first rejected run:
+        // neither field may claim source was processed. Only the smaller retry budget persists.
+        expect(afterFirst?.lastRunAt).toBeNull();
+        expect(afterFirst?.retrospectiveWatermarkMs).toBeNull();
+        expect(afterFirst?.taskStateJson).toContain("retrospectiveOverflow");
+
+        const second = await runManualDream({
+            db,
+            projectIdentity: project,
+            tasks: [task],
+            executor,
+            task: "retrospective",
+        });
+        expect(second.failed).toEqual(["retrospective"]);
+        expect(
+            getTaskScheduleState(db, project, "retrospective")?.retrospectiveWatermarkMs,
+        ).toBeGreaterThan(start);
+
+        const third = await runManualDream({
+            db,
+            projectIdentity: project,
+            tasks: [task],
+            executor,
+            task: "retrospective",
+        });
+        expect(third.ran).toEqual(["retrospective"]);
+        expect(promptedWindows).toHaveLength(3);
+        expect(promptedWindows[1]?.length).toBeLessThan(promptedWindows[0]?.length ?? 0);
+        expect(promptedWindows[2]?.filter((line) => promptedWindows[0]?.includes(line))).toEqual(
+            [],
+        );
+    });
+
     test("retrospective memory insert leaves project memory epoch unchanged", () => {
         db = freshDb();
         const project = "/repo/project";
@@ -1931,7 +2030,12 @@ describe("createDreamTaskExecutor — retrospective", () => {
         });
 
         const result = await executor(
-            { task: "retrospective", schedule: "0 5 * * *", timeoutMinutes: 20 },
+            {
+                task: "retrospective",
+                schedule: "0 5 * * *",
+                timeoutMinutes: 20,
+                retrospectiveRecencyDays: 100_000,
+            },
             {
                 db,
                 projectIdentity: project,
@@ -2040,7 +2144,12 @@ describe("createDreamTaskExecutor — retrospective", () => {
         });
 
         const result = await executor(
-            { task: "retrospective", schedule: "0 5 * * *", timeoutMinutes: 20 },
+            {
+                task: "retrospective",
+                schedule: "0 5 * * *",
+                timeoutMinutes: 20,
+                retrospectiveRecencyDays: 100_000,
+            },
             {
                 db,
                 projectIdentity: project,
@@ -2126,7 +2235,12 @@ describe("createDreamTaskExecutor — retrospective", () => {
         });
 
         await executor(
-            { task: "retrospective", schedule: "0 5 * * *", timeoutMinutes: 20 },
+            {
+                task: "retrospective",
+                schedule: "0 5 * * *",
+                timeoutMinutes: 20,
+                retrospectiveRecencyDays: 100_000,
+            },
             {
                 db,
                 projectIdentity: project,

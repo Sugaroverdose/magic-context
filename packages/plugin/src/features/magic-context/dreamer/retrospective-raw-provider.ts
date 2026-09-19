@@ -1,8 +1,16 @@
+import {
+    clampProducerAtomChars,
+    producerInputTokenLimit,
+} from "../../../hooks/magic-context/producer-window-guard";
 import { cleanUserText } from "../../../hooks/magic-context/read-session-chunk";
-import { hasMeaningfulUserText } from "../../../hooks/magic-context/read-session-formatting";
+import {
+    estimateTokens,
+    hasMeaningfulUserText,
+} from "../../../hooks/magic-context/read-session-formatting";
 import type { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { openOpenCodeDb } from "./open-opencode-db";
+import { buildFrictionGatePrompt, FRICTION_GATE_SYSTEM_PROMPT } from "./task-prompts";
 
 export const RETROSPECTIVE_MAX_MESSAGES_PER_SESSION = 80;
 export const RETROSPECTIVE_MAX_MESSAGES_PER_RUN = 240;
@@ -10,6 +18,15 @@ export const RETROSPECTIVE_MAX_MESSAGES_PER_RUN = 240;
 // (watermark=0) would otherwise fan out over the project's entire session
 // history; this bounds the scan/IO regardless of how many sessions exist.
 export const RETROSPECTIVE_MAX_SESSIONS_PER_RUN = 20;
+/**
+ * A pasted log is one semantic message, not an entitlement to the whole child
+ * window. The 8,000 ceiling mirrors the historian's `HISTORIAN_CHUNK_MIN`
+ * convention, but applies it as a stricter character cap to avoid per-message
+ * tokenizing. Its head+tail shape is shared with the historian atomic guard.
+ */
+export const RETROSPECTIVE_MAX_USER_MESSAGE_CHARS = 8_000;
+export const RETROSPECTIVE_MESSAGE_TRUNCATION_MARKER =
+    "\n[… middle of user message truncated by Magic Context …]\n";
 
 export type RetrospectiveMessageRole = "user" | "assistant" | "tool";
 
@@ -184,23 +201,46 @@ export class OpenCodeRetrospectiveRawProvider implements RetrospectiveRawProvide
 }
 
 export interface RetrospectiveScanWindow {
-    /** All scanned messages (user rows + tool metadata), oldest→newest, ordinals
-     *  reassigned globally. Includes the pre-watermark overlap (user-only). */
+    /** All admitted messages (user rows + tool metadata), oldest→newest. Includes
+     *  only overlap rows that also fit the child prompt budget. */
     messages: RetrospectiveRawMessage[];
-    /** The max message ts ACTUALLY scanned this run (the content watermark to
-     *  persist on completion). Never less than `watermarkMs` (overlap rows are
-     *  ≤ watermark and cannot pull it back). */
+    /** The max message ts ACTUALLY admitted this run (the content watermark to
+     *  persist on completion). A recency cutoff may move it past expired rows. */
     maxScannedTs: number;
+    /** Exact estimate for the gate system+user prompt assembled from `messages`. */
+    promptTokens: number;
+    /** Usable child-model input after reserving the shared estimator's 3% safety margin. */
+    promptInputLimitTokens?: number;
+    /** True when the token budget, rather than a count cap, cut the since prefix. */
+    budgetTruncated: boolean;
 }
 
-/**
- * The retrospective scan window for one run: everything new since the content
- * watermark, PLUS the ~`overlapUserCount` user lines immediately before the
- * watermark for sessions that have kept new rows (so friction straddling a run
- * boundary isn't missed).
- * The since portion carries user rows + tool metadata (the deepen context); the
- * overlap portion is user-only (gate context). Ordinals are reassigned globally.
- */
+function clampRetrospectiveMessage(message: RetrospectiveRawMessage): RetrospectiveRawMessage {
+    if (message.role !== "user" || message.text.length <= RETROSPECTIVE_MAX_USER_MESSAGE_CHARS) {
+        return message;
+    }
+    return {
+        ...message,
+        text: clampProducerAtomChars(
+            message.text,
+            RETROSPECTIVE_MAX_USER_MESSAGE_CHARS,
+            RETROSPECTIVE_MESSAGE_TRUNCATION_MARKER,
+        ),
+    };
+}
+
+function retrospectiveGatePrompt(messages: readonly RetrospectiveRawMessage[]): string {
+    const userLines = messages
+        .map((message, index) => ({ ...message, ordinal: index + 1 }))
+        .filter((message) => message.role === "user")
+        .map((message) => `${message.ordinal}: ${message.text}`);
+    return `${FRICTION_GATE_SYSTEM_PROMPT}\n${buildFrictionGatePrompt({ userLines })}`;
+}
+
+function retrospectiveGatePromptTokens(messages: readonly RetrospectiveRawMessage[]): number {
+    return estimateTokens(retrospectiveGatePrompt(messages));
+}
+
 export async function readRetrospectiveScanWindow(
     provider: RetrospectiveRawProvider,
     projectIdentity: string,
@@ -210,6 +250,10 @@ export async function readRetrospectiveScanWindow(
         maxMessagesPerRun?: number;
         capPerSession?: number;
         maxSessionsPerRun?: number;
+        /** Child model's already-output-reserved usable input window. */
+        usableInputTokens?: number;
+        /** Oldest timestamp still eligible. Rows below it expire without collection. */
+        recencyCutoffMs?: number;
     },
 ): Promise<RetrospectiveScanWindow> {
     const maxMessages = options?.maxMessagesPerRun ?? RETROSPECTIVE_MAX_MESSAGES_PER_RUN;
@@ -218,15 +262,24 @@ export async function readRetrospectiveScanWindow(
         1,
         Math.floor(options?.maxSessionsPerRun ?? RETROSPECTIVE_MAX_SESSIONS_PER_RUN),
     );
+    const recencyCutoffMs =
+        typeof options?.recencyCutoffMs === "number" && Number.isFinite(options.recencyCutoffMs)
+            ? Math.floor(options.recencyCutoffMs)
+            : Number.NEGATIVE_INFINITY;
+    // Providers read `ts > sinceMs`. cutoff−1 therefore admits an exact-boundary
+    // row while advancing the durable frontier past every expired row.
+    const scanSinceMs = Math.max(watermarkMs, recencyCutoffMs - 1);
+    const promptInputLimitTokens = producerInputTokenLimit(options?.usableInputTokens, 0);
+
     try {
         const allSessions = await provider.listProjectSessions(projectIdentity);
         const eligibleSessions = allSessions
             .map((session, index) => ({ session, index }))
-            .filter(({ session }) => (session.updatedAt ?? Number.POSITIVE_INFINITY) > watermarkMs);
+            .filter(({ session }) => (session.updatedAt ?? Number.POSITIVE_INFINITY) > scanSinceMs);
         const oldestBySession = provider.readOldestMessageTimesSince
             ? await provider.readOldestMessageTimesSince(
                   eligibleSessions.map(({ session }) => session.sessionId),
-                  watermarkMs,
+                  scanSinceMs,
               )
             : null;
         const sessions = (
@@ -259,7 +312,7 @@ export async function readRetrospectiveScanWindow(
                     sessionsToRead.map((session) =>
                         provider.readUserMessagesSince(
                             session.sessionId,
-                            watermarkMs,
+                            scanSinceMs,
                             capPerSession,
                         ),
                     ),
@@ -268,63 +321,68 @@ export async function readRetrospectiveScanWindow(
         }
 
         // A TRUNCATED session read hit its per-session cap with more rows
-        // available — it may hold newer (unseen) messages beyond what we got.
-        // Each batch is oldest-first, so everything ≤ its last-kept ts is seen;
-        // advancing the watermark past that ts would skip the unseen tail. Record
-        // a safe frontier (lastKept.ts − 1, so same-ms siblings re-read next run).
-        // `truncated` is the EXACT SQL-level signal — never inferred from
-        // messages.length, which normalization distorts in both directions.
+        // available. Its last timestamp remains a safe exclusive frontier even
+        // after text clamping because clamping never changes source identity.
         let saturatedFrontier = Number.POSITIVE_INFINITY;
         for (const read of sinceReads) {
             const lastKept = read.truncated ? read.messages[read.messages.length - 1] : undefined;
-            if (lastKept) {
-                saturatedFrontier = Math.min(saturatedFrontier, lastKept.ts - 1);
-            }
+            if (lastKept) saturatedFrontier = Math.min(saturatedFrontier, lastKept.ts - 1);
         }
-        // Cap the SINCE portion OLDEST-first (so a backlog drains from the front,
-        // one bounded chunk per run). Reading/capping newest-first dropped the
-        // oldest friction while the watermark jumped to the newest → permanent
-        // loss of the gap.
+
         const allSince = sinceReads
             .flatMap((read) => read.messages)
+            .filter((message) => message.ts >= recencyCutoffMs)
+            .map(clampRetrospectiveMessage)
             .sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
-        const keptSince = allSince.slice(0, maxMessages);
-        const droppedSince = allSince.slice(maxMessages);
+        const countCandidates = allSince.slice(0, maxMessages);
+        const countDropped = allSince.slice(maxMessages);
 
-        // Watermark = newest KEPT ts, clamped below any INCOMPLETELY-scanned
-        // frontier so the exclusive `> watermark` next-run filter can never skip
-        // pending work. Three truncation sources can split the eligible backlog:
-        //   • global maxMessages cap → never advance into the FIRST dropped row's
-        //     ts (droppedSince[0].ts − 1); if it's strictly newer than newestKept
-        //     the min() is a no-op (clean boundary).
-        //   • per-session saturation → saturatedFrontier (computed above).
-        //   • session cap → first excluded session's oldest pending message − 1
-        //     (falling back to updated_at when a provider has no indexed frontier).
-        //     The scan is oldest-frontier first, so clamping cannot starve the
-        //     excluded session on the next run.
-        // Take the tightest; never move backward.
-        let maxScannedTs = watermarkMs;
+        // Admission is an oldest-first prefix. Rebuilding the exact gate prompt
+        // at each boundary accounts for labels and static instructions while the
+        // 240-message count cap keeps this bounded. Once one row does not fit,
+        // every newer row waits behind the same durable source frontier.
+        const keptSince: RetrospectiveRawMessage[] = [];
+        let budgetDropped: RetrospectiveRawMessage[] = [];
+        if (promptInputLimitTokens === undefined) {
+            keptSince.push(...countCandidates);
+        } else {
+            for (let index = 0; index < countCandidates.length; index += 1) {
+                const row = countCandidates[index];
+                if (!row) continue;
+                const candidate = [...keptSince, row];
+                if (retrospectiveGatePromptTokens(candidate) <= promptInputLimitTokens) {
+                    keptSince.push(row);
+                    continue;
+                }
+                budgetDropped = countCandidates.slice(index);
+                break;
+            }
+        }
+        const droppedSince = [...budgetDropped, ...countDropped];
+
+        // Watermark = newest ADMITTED ts, clamped below any incompletely-scanned
+        // source. Starting at scanSinceMs makes the configured recency cutoff a
+        // durable jump even when every historical session is already expired.
+        let maxScannedTs = scanSinceMs;
         for (const row of keptSince) {
             if (row.ts > maxScannedTs) maxScannedTs = row.ts;
         }
         let frontier = saturatedFrontier;
         const firstDropped = droppedSince[0];
-        if (firstDropped) {
-            frontier = Math.min(frontier, firstDropped.ts - 1);
-        }
+        if (firstDropped) frontier = Math.min(frontier, firstDropped.ts - 1);
         if (typeof firstExcludedPendingTs === "number") {
             frontier = Math.min(frontier, firstExcludedPendingTs - 1);
         } else if (typeof firstExcludedSession?.updatedAt === "number") {
             frontier = Math.min(frontier, firstExcludedSession.updatedAt - 1);
         }
-        maxScannedTs = Math.max(watermarkMs, Math.min(maxScannedTs, frontier));
+        maxScannedTs = Math.max(scanSinceMs, Math.min(maxScannedTs, frontier));
 
         const keptSessionIds = new Set(keptSince.map((message) => message.sessionId));
         const overlapSessions = sessionsToRead.filter((session) =>
             keptSessionIds.has(session.sessionId),
         );
         const overlapBatches =
-            overlapUserCount > 0 && watermarkMs > 0
+            overlapUserCount > 0 && watermarkMs > 0 && watermarkMs >= recencyCutoffMs
                 ? await Promise.all(
                       overlapSessions.map((session) =>
                           provider.readUserMessagesBefore(
@@ -336,19 +394,49 @@ export async function readRetrospectiveScanWindow(
                   )
                 : [];
 
-        // Merge kept-since + overlap (context only, bounded by sessions with kept
-        // messages × overlapUserCount), dedupe by stable identity, oldest-first.
-        // Overlap rows are ≤ watermark so they never affect maxScannedTs.
         const seen = new Set<string>();
         const merged: RetrospectiveRawMessage[] = [];
-        for (const row of [...keptSince, ...overlapBatches.flat()]) {
+        const appendUnique = (row: RetrospectiveRawMessage): boolean => {
             const key = `${row.sessionId}\u0000${row.ts}\u0000${row.role}\u0000${row.toolName ?? ""}`;
-            if (seen.has(key)) continue;
+            if (seen.has(key)) return false;
             seen.add(key);
             merged.push(row);
+            return true;
+        };
+        for (const row of keptSince) appendUnique(row);
+
+        // Overlap is context only. Admit each row only if it leaves the same exact
+        // child request below budget; dropping overlap never changes the frontier.
+        const overlapRows = overlapBatches
+            .flat()
+            .filter((message) => message.ts >= recencyCutoffMs)
+            .map(clampRetrospectiveMessage)
+            .sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
+        for (const row of overlapRows) {
+            const beforeLength = merged.length;
+            if (!appendUnique(row)) continue;
+            merged.sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
+            if (
+                promptInputLimitTokens !== undefined &&
+                retrospectiveGatePromptTokens(merged) > promptInputLimitTokens
+            ) {
+                merged.splice(merged.indexOf(row), 1);
+                seen.delete(
+                    `${row.sessionId}\u0000${row.ts}\u0000${row.role}\u0000${row.toolName ?? ""}`,
+                );
+            }
+            if (merged.length === beforeLength) continue;
         }
         merged.sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
-        return { messages: merged, maxScannedTs };
+        const promptTokens = retrospectiveGatePromptTokens(merged);
+
+        return {
+            messages: merged,
+            maxScannedTs,
+            promptTokens,
+            ...(promptInputLimitTokens === undefined ? {} : { promptInputLimitTokens }),
+            budgetTruncated: budgetDropped.length > 0,
+        };
     } finally {
         provider.dispose?.();
     }

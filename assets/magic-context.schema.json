@@ -1666,7 +1666,8 @@
               "schedule": "0 6 * * *"
             },
             "retrospective": {
-              "schedule": "0 5 * * *"
+              "schedule": "0 5 * * *",
+              "recency_days": 30
             },
             "maintain-docs": {
               "schedule": ""
@@ -1774,7 +1775,8 @@
             },
             "retrospective": {
               "default": {
-                "schedule": "0 5 * * *"
+                "schedule": "0 5 * * *",
+                "recency_days": 30
               },
               "type": "object",
               "properties": {
@@ -1782,6 +1784,13 @@
                   "default": "",
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
+                },
+                "recency_days": {
+                  "default": 30,
+                  "description": "retrospective: collect source messages from only the most recent N days",
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3650
                 }
               },
               "additionalProperties": false

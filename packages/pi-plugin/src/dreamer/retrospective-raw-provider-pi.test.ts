@@ -1,6 +1,10 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
+import {
+	RETROSPECTIVE_MAX_USER_MESSAGE_CHARS,
+	readRetrospectiveScanWindow,
+} from "@magic-context/core/features/magic-context/dreamer/retrospective-raw-provider";
 import { PiRetrospectiveRawProvider } from "./retrospective-raw-provider-pi";
 
 describe("PiRetrospectiveRawProvider", () => {
@@ -92,6 +96,45 @@ describe("PiRetrospectiveRawProvider", () => {
 			],
 			truncated: false,
 		});
+	});
+
+	it("inherits the shared clamp and oldest-first prompt budget for JSONL messages", async () => {
+		const start = Date.now() - 1_000;
+		const provider = new PiRetrospectiveRawProvider({
+			projectCwd: "/repo/project",
+			listSessions: () => [
+				{
+					id: "s1",
+					cwd: "/repo/project",
+					path: "/sessions/s1.jsonl",
+					modified: start + 100,
+				},
+			],
+			loadEntriesFromFile: () =>
+				Array.from({ length: 6 }, (_, index) => ({
+					type: "message",
+					message: {
+						role: "user",
+						timestamp: start + index * 10,
+						content: `pi-${index + 1} ${"oversized jsonl paste ".repeat(20_000)}`,
+					},
+				})),
+		});
+
+		const win = await readRetrospectiveScanWindow(provider, "identity", 0, 0, {
+			usableInputTokens: 4_000,
+		});
+
+		expect(win.budgetTruncated).toBe(true);
+		expect(win.messages.length).toBeGreaterThan(0);
+		expect(win.messages.length).toBeLessThan(6);
+		expect(win.messages[0]?.text).toStartWith("pi-1");
+		expect(
+			win.messages.every(
+				(message) =>
+					message.text.length <= RETROSPECTIVE_MAX_USER_MESSAGE_CHARS,
+			),
+		).toBe(true);
 	});
 
 	it("readUserMessagesBefore returns the newest N typed user lines at/before the cutoff", async () => {

@@ -203,6 +203,7 @@ Off-hours maintenance through Dreamer.
 | `dreamer.tasks.compress-cues.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
 | `dreamer.tasks.classify-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
 | `dreamer.tasks.retrospective.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.retrospective.recency_days` | integer (1–3650) | `30` | retrospective: collect source messages from only the most recent N days |
 | `dreamer.tasks.maintain-docs.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
 | `dreamer.tasks.evaluate-smart-notes.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
 | `dreamer.tasks.review-user-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |

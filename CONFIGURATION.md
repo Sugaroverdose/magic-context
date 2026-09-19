@@ -547,6 +547,7 @@ Dreamer scheduling and agent metadata remain at `dreamer`, while task execution 
     "inject_docs": true,
     "tasks": {
       "verify": { "schedule": "0 3 * * *" },
+      "retrospective": { "schedule": "0 5 * * *", "recency_days": 30 },
       "review-user-memories": { "schedule": "0 3 * * *", "promotion_threshold": 3 }
     },
     "opencode": {
@@ -582,7 +583,9 @@ Dreamer scheduling and agent metadata remain at `dreamer`, while task execution 
 | `dreamer.opencode.tasks.<task>` | `model`, `fallback_models`, `variant`, `timeout_minutes` | Strict OpenCode task execution override. |
 | `dreamer.pi.tasks.<task>` | `model`, `fallback_models`, `thinking_level`, `timeout_minutes` | Strict Pi task execution override. |
 | `dreamer.omp.tasks.<task>` | `model`, `fallback_models`, `thinking_level`, `timeout_minutes` | Strict OMP task execution override. |
-| `dreamer.tasks.<task>` | `schedule`, `promotion_threshold` | Harness-independent task metadata. `schedule: ""` disables the task; there is no separate `enabled` key. |
+| `dreamer.tasks.<task>` | `schedule` | Harness-independent task metadata. `schedule: ""` disables the task; there is no separate `enabled` key. |
+| `dreamer.tasks.retrospective` | `schedule`, `recency_days` | Retrospective metadata. `recency_days` is the source lookback in whole days (default `30`); older lines expire by advancing the content watermark without collecting them. |
+| `dreamer.tasks.review-user-memories`, `dreamer.tasks.promote-primers` | `schedule`, `promotion_threshold` | Task-specific promotion metadata. |
 | `dreamer.temperature`, `top_p`, `prompt`, `tools`, `disable`, `description`, `mode`, `color`, `maxSteps`, `permission`, `maxTokens`, `inject_docs` | metadata | Retained at `dreamer`; these fields never move into a harness block. |
 
 To disable the dreamer entirely, set `dreamer.disable: true`. To disable a single task, set its top-level `dreamer.tasks.<task>.schedule` to `""`; it can still be run on demand via `/ctx-dream <task>`.
@@ -605,7 +608,7 @@ To disable the dreamer entirely, set `dreamer.disable: true`. To disable a singl
 
 ### Retrospective privacy
 
-`retrospective` is default-on but cheap. It scans only new typed user messages since its last successful run; if there is no correction/re-explanation signal, it exits without a child session. On a signal, a ctx_search-only child emits XML learnings and the host validates/applies them. Project learnings become normal project memories; observation learnings are dropped unless `review-user-memories` is scheduled.
+`retrospective` is default-on but cheap. It scans typed user messages newer than both its content watermark and `dreamer.tasks.retrospective.recency_days` (default 30 days). Oversized user pastes are clamped head+tail, and the oldest-first source window is admitted against the child model's usable input budget so a backlog drains without skipping newer rows. A cheap child turn first detects correction/re-explanation signal; on a signal, a ctx_search-only second turn emits XML learnings and the host validates/applies them. Project learnings become normal project memories; observation learnings are dropped unless `review-user-memories` is scheduled.
 
 ### How scheduling works
 

@@ -36,6 +36,11 @@ export function buildDreamTaskRuntimeConfigs(
             language,
             timeoutMinutes: resolved.timeoutMinutes ?? 20,
             promotionThreshold: resolved.promotionThreshold,
+            retrospectiveRecencyDays:
+                task === "retrospective"
+                    ? ((dreamer as DreamerConfig | undefined)?.tasks?.retrospective?.recency_days ??
+                      30)
+                    : undefined,
         };
     });
 }
