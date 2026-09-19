@@ -19,7 +19,8 @@ env:
 #
 #   check-plugin, check-pi-plugin                          (unit tests + lint + typecheck, parallel)
 #                  ↓
-#   e2e-opencode, e2e-opencode2, e2e-pi                    (Docker install + smoke, parallel — gated by unit)
+#   e2e-opencode, e2e-opencode2, e2e-pi, e2e-omp           (Docker install + smoke, parallel — gated by unit)
+#   e2e-host-opencode, e2e-host-opencode2, e2e-host-pi, e2e-host-omp (host-behavior lanes from the mode manifest)
 #                  ↓
 #   e2e-host-opencode, e2e-host-pi                         (host behavior suite from packages/e2e-tests, parallel — gated by Docker)
 #
@@ -412,6 +413,87 @@ jobs:
            echo "Running Pi host tests from mode manifest: $files"
            # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
            bun test --timeout 600000 $files
+
+  e2e-host-opencode2:
+    name: E2E (OpenCode 2, host behavior)
+    runs-on: ubuntu-latest
+    needs: [e2e-opencode2]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # The OpenCode 2 harness spawns the real GA host from @opencode/cli, a
+      # workspace dev dependency whose postinstall unpacks the platform binary
+      # (trustedDependencies at the workspace root lets bun run it).
+      - name: Install workspace deps
+        run: bun install --frozen-lockfile
+
+      - name: Verify the GA host binary
+        run: bun -e "const { CLI } = await import('./packages/e2e-tests/src/opencode2-runner/spawn.ts'); console.log(CLI); const { execFileSync } = await import('node:child_process'); console.log(execFileSync(CLI, ['--version']).toString())"
+
+      - name: Build OpenCode plugin (v1 + v2 entries)
+        run: bun run --cwd packages/plugin build
+
+      - name: Run host e2e suite (OpenCode 2 tests from mode manifest)
+        env:
+          NODE_ENV: ""
+          MC_E2E_MODE: ts
+          MC_E2E_HOST: opencode2
+        run: |
+          cd packages/e2e-tests
+          set -o pipefail
+          files=$(bun scripts/validate-mode-manifest.ts --mode ts --harness opencode2 | tr '\n' ' ')
+          if [ -z "${files// /}" ]; then echo 'mode manifest selected no files'; exit 1; fi
+          echo "Running OpenCode 2 host tests from mode manifest: $files"
+          # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
+          bun test --timeout 600000 $files
+
+  e2e-host-omp:
+    name: E2E (Oh My Pi, host behavior)
+    runs-on: ubuntu-latest
+    needs: [e2e-omp]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # OMP runs the same Pi plugin through Pi's extension API; the harness
+      # resolves @oh-my-pi/pi-coding-agent (a workspace dev dependency) when
+      # MC_E2E_HOST=omp.
+      - name: Install workspace deps
+        run: bun install --frozen-lockfile
+
+      - name: Install opencode
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Build Pi plugin
+        run: bun run --cwd packages/pi-plugin build
+
+      - name: Build OpenCode plugin
+        run: bun run --cwd packages/plugin build
+
+      - name: Run host e2e suite (OMP tests from mode manifest)
+        env:
+          NODE_ENV: ""
+          MC_E2E_MODE: ts
+          MC_E2E_HOST: omp
+        run: |
+          cd packages/e2e-tests
+          set -o pipefail
+          files=$(bun scripts/validate-mode-manifest.ts --mode ts --harness omp | tr '\n' ' ')
+          if [ -z "${files// /}" ]; then echo 'mode manifest selected no files'; exit 1; fi
+          echo "Running OMP host tests from mode manifest: $files"
+          # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
+          bun test --timeout 600000 $files
 
   rust-e2e-preflight:
     name: Rust hermetic E2E drift credential preflight
