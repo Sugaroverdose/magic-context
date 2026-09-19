@@ -89,9 +89,9 @@ use subc_client_rs::{
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
 use classify::{
-    child_session_id, has_manifest_envelope, CLASSIFY_AWAIT_TIMEOUT, CLASSIFY_MAX_OUTPUT_TOKENS,
-    CLASSIFY_RECOVERY_TIMEOUT, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK, CLASSIFY_TEMPERATURE,
-    MAX_CLASSIFY_PROMPT_BYTES,
+    child_session_id, has_manifest_envelope, next_attempt_nonce, CLASSIFY_AWAIT_TIMEOUT,
+    CLASSIFY_MAX_OUTPUT_TOKENS, CLASSIFY_RECOVERY_TIMEOUT, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK,
+    CLASSIFY_TEMPERATURE, MAX_CLASSIFY_PROMPT_BYTES,
 };
 use config::{derive_historian_chunk_tokens, ConfigCache, McModuleConfig};
 use healing::{tail_reclaim, SerializerProfile};
@@ -11299,22 +11299,42 @@ impl McHandler {
         let model_chain = requested_model_chain
             .as_deref()
             .unwrap_or(&binding.config.model_chain);
-        let child_session = child_session_id(&authority_project, command_id);
         let classify_system_prompt = historian_prompt::with_content_language_directive(
             CLASSIFY_SYSTEM_PROMPT,
             binding.config.language.as_deref(),
             historian_prompt::ContentLanguageDirectiveOptions::default(),
         );
-        let _dreamer_run_guard = self.register_dreamer_run(&child_session);
         let mut attempts = 0usize;
-        let mut last_error = String::new();
+        // Every attempt's failure is kept. Overwriting one slot reported whichever model
+        // happened to be last and threw away the cause of the run that actually broke.
+        let mut attempt_errors: Vec<String> = Vec::new();
         let mut output = None;
         for model in model_chain {
             attempts += 1;
+            // Each attempt gets its OWN provider session. An attempt can end while its run
+            // is still active (a parked run, or one abandoned at the await deadline), and a
+            // send into a session that still holds an active run is queued behind it rather
+            // than started -- which the classifier cannot drain.
+            let child_session =
+                child_session_id(&authority_project, command_id, next_attempt_nonce(now_ms()));
+            let _dreamer_run_guard = self.register_dreamer_run(&child_session);
+            let mut record_attempt = |outcome: &str, detail: String| {
+                eprintln!(
+                    "mc-module: classify attempt={attempts} model={model} session={child_session} outcome={outcome}{}",
+                    if detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {detail}")
+                    }
+                );
+                if !detail.is_empty() {
+                    attempt_errors.push(format!("{model}: {detail}"));
+                }
+            };
             let mut producer = match self.producer_factory.connect(&binding.project_root).await {
                 Ok(producer) => producer,
                 Err(error) => {
-                    last_error = error.to_string();
+                    record_attempt("connect_failed", error.to_string());
                     continue;
                 }
             };
@@ -11348,23 +11368,29 @@ impl McHandler {
                     // The module checks only for the task-specific envelope. Even if the
                     // output limit truncated a result, this layer accepts it when the
                     // envelope remains; the host parser rejects malformed contents.
-                    output = Some((model.clone(), result));
+                    record_attempt("manifest", String::new());
+                    output = Some((model.clone(), result, child_session.clone()));
                     producer.purge_session(&child_session).await;
                     break;
                 }
-                Ok(_) => {
-                    last_error =
-                        "classify producer returned no classify manifest envelope".to_string();
-                }
-                Err(error) => last_error = error.to_string(),
+                Ok(_) => record_attempt(
+                    "no_manifest",
+                    "classify producer returned no classify manifest envelope".to_string(),
+                ),
+                Err(error) => record_attempt("failed", error.to_string()),
             }
             producer.purge_session(&child_session).await;
         }
         if output.is_none() {
+            let failure = if attempt_errors.is_empty() {
+                "classify producer has no usable model".to_string()
+            } else {
+                attempt_errors.join("; ")
+            };
             let response = json!({
                 "ok": false,
                 "code": "dreamer_run_failed",
-                "message": if last_error.is_empty() { "classify producer has no usable model" } else { &last_error },
+                "message": failure,
             });
             let _ = store.record_dream_task_command(
                 &ledger_session,
@@ -11374,10 +11400,10 @@ impl McHandler {
             );
             return HandlerOutcome::Error {
                 code: "dreamer_run_failed".to_string(),
-                message: last_error,
+                message: failure,
             };
         }
-        let (model, result) = output.expect("classifier output set");
+        let (model, result, child_session) = output.expect("classifier output set");
         let response = json!({
             "ok": true,
             "manifest_text": result.text,
@@ -19388,6 +19414,8 @@ mod tests {
         prompts: Mutex<Vec<String>>,
         systems: Mutex<Vec<String>>,
         models: Mutex<Vec<String>>,
+        /// The provider session each start ran under, in attempt order.
+        sessions: Mutex<Vec<String>>,
         on_await_output: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
@@ -19430,12 +19458,17 @@ mod tests {
 
         async fn start(
             &mut self,
-            _session_id: &str,
+            session_id: &str,
             system: &str,
             prompt: &str,
             model: &str,
         ) -> Result<RunHandle, HistorianProducerError> {
             let n = self.state.starts.fetch_add(1, Ordering::SeqCst) + 1;
+            self.state
+                .sessions
+                .lock()
+                .expect("sessions mutex")
+                .push(session_id.to_string());
             self.state
                 .prompts
                 .lock()
@@ -29033,6 +29066,127 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn classify_fallback_attempts_never_share_a_provider_session() {
+        // A parked run does not end: it keeps holding its provider session. A second
+        // attempt sent into that same session would be queued behind it instead of
+        // started, and a queued classify run is one nothing here can ever read.
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .expect("await results mutex")
+            .extend([
+                Err(HistorianProducerError::RunPaused {
+                    run_id: "run-parked".to_string(),
+                    reason: Some("awaiting re-auth".to_string()),
+                    classification: None,
+                    class_field_present: false,
+                }),
+                Ok(ProducerOutput {
+                    text: "<classify></classify>".to_string(),
+                    length_capped: false,
+                }),
+            ]);
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let route_root = project.to_str().unwrap();
+        handler.bind_route(7, binding(route_root, "ses"));
+        activate_module_authority(&store, "context", "git:identity", route_root, "memories");
+        let generation = store
+            .authority_status("context", "git:identity", "memories")
+            .unwrap()
+            .unwrap()
+            .generation;
+
+        let outcome = handler
+            .handle_dreamer_run_task(
+                7,
+                &json!({
+                    "v": 1,
+                    "session_id": "ses",
+                    "task": CLASSIFY_TASK,
+                    "command_id": "parked-then-fallback",
+                    "authority_generation": generation,
+                    "model_chain": ["test/first", "test/second"],
+                    "payload": { "prompt_body": "classify", "items": [] },
+                }),
+            )
+            .await;
+        assert!(
+            matches!(outcome, HandlerOutcome::Response(_)),
+            "the fallback attempt must produce a manifest: {outcome:?}"
+        );
+
+        let sessions = producer.sessions.lock().expect("sessions mutex").clone();
+        assert_eq!(sessions.len(), 2, "{sessions:?}");
+        assert_ne!(
+            sessions[0], sessions[1],
+            "the fallback attempt reused the parked attempt's provider session"
+        );
+        assert!(sessions
+            .iter()
+            .all(|session| session.starts_with("mc-dreamer:classify:")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn classify_failure_names_every_attempt_not_only_the_last() {
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .expect("await results mutex")
+            .extend([
+                Err(HistorianProducerError::RunPaused {
+                    run_id: "run-parked".to_string(),
+                    reason: Some("awaiting re-auth".to_string()),
+                    classification: None,
+                    class_field_present: false,
+                }),
+                Err(HistorianProducerError::SendQueued {
+                    submission_id: "sub-1".to_string(),
+                    retracted: true,
+                }),
+            ]);
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let route_root = project.to_str().unwrap();
+        handler.bind_route(7, binding(route_root, "ses"));
+        activate_module_authority(&store, "context", "git:identity", route_root, "memories");
+        let generation = store
+            .authority_status("context", "git:identity", "memories")
+            .unwrap()
+            .unwrap()
+            .generation;
+
+        let outcome = handler
+            .handle_dreamer_run_task(
+                7,
+                &json!({
+                    "v": 1,
+                    "session_id": "ses",
+                    "task": CLASSIFY_TASK,
+                    "command_id": "all-attempts-fail",
+                    "authority_generation": generation,
+                    "model_chain": ["test/first", "test/second"],
+                    "payload": { "prompt_body": "classify", "items": [] },
+                }),
+            )
+            .await;
+        let message = match outcome {
+            HandlerOutcome::Error { message, .. } => message,
+            other => panic!("expected a failed classify run: {other:?}"),
+        };
+        assert!(
+            message.contains("test/first") && message.contains("awaiting re-auth"),
+            "the first attempt's cause must survive: {message}"
+        );
+        assert!(
+            message.contains("test/second"),
+            "the later attempt must still be reported: {message}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn cancelled_dreamer_run_unregisters_its_child_session() {
         let producer = Arc::new(ProducerState::default());
         producer.block_output.store(true, Ordering::SeqCst);
@@ -29046,7 +29200,6 @@ mod tests {
             .unwrap()
             .unwrap()
             .generation;
-        let child_session = child_session_id("git:identity", "cancel-command");
         let handler = Arc::new(handler);
         let running_handler = Arc::clone(&handler);
         let task = tokio::spawn(async move {
@@ -29065,6 +29218,15 @@ mod tests {
                 .await
         });
         wait_for_count(&producer.await_outputs, 1).await;
+        // The session is minted per attempt, so read the one the producer actually ran
+        // under rather than recomputing an id this test would have to keep in step.
+        let child_session = producer
+            .sessions
+            .lock()
+            .expect("sessions mutex")
+            .first()
+            .cloned()
+            .expect("the classify attempt started under a session");
         assert!(handler.dreamer_run_registered(&child_session));
 
         task.abort();

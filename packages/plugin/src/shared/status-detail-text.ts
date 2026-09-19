@@ -1,3 +1,4 @@
+import { formatDreamTaskFailures } from "../features/magic-context/dreamer/task-registry";
 import { formatCacheTtlDisplay } from "./cache-ttl-display";
 import { formatConfigParseStatusLine } from "./config-diagnostics";
 import {
@@ -90,6 +91,16 @@ export function formatStatusDiagnosticsMarkdown(detail: StatusDetail): string {
     }
     if (detail.memoryAuthorityMismatch) {
         lines.push(`- **Warning:** ${renderUserFacingFailure("memory_authority_mismatch")}`);
+    }
+    // The scheduler's own failure text. Its absence is why a task could fail on every
+    // slot for a week with no signal but a backlog that never fell.
+    if ((detail.dreamerFailures?.length ?? 0) > 0) {
+        lines.push(
+            "- **Dreamer:** scheduled tasks failing",
+            ...formatDreamTaskFailures(detail.dreamerFailures ?? [])
+                .split("\n")
+                .map((line) => `  ${line}`),
+        );
     }
 
     return lines.join("\n");

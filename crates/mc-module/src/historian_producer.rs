@@ -272,6 +272,14 @@ pub enum HistorianProducerError {
     Subc(ProducerErrorBody),
     UnexpectedControlResponse,
     MissingRunId,
+    /// The send was accepted but did not start a run: the lineage already had an active
+    /// run, so the prompt was durably queued behind it under `submission_id`.
+    SendQueued {
+        submission_id: String,
+        /// Whether the queued submission was withdrawn again. A submission left standing
+        /// eventually runs a model call whose output no one is waiting for.
+        retracted: bool,
+    },
     MissingSession,
     UnexpectedStreamEnd,
     TimedOut,
@@ -350,6 +358,12 @@ impl HistorianProducerError {
             HistorianProducerError::Subc(body) => body.classification(),
             HistorianProducerError::RunFailed { classification, .. }
             | HistorianProducerError::RunPaused { classification, .. } => *classification,
+            // A busy lineage clears once its active run ends, so a queued send is always
+            // worth retrying. This is a fact about the response, not a parsed hint.
+            HistorianProducerError::SendQueued { .. } => Some(ErrorClassification {
+                class: ErrorClass::Transient,
+                retry_after_secs: None,
+            }),
             _ => None,
         }
     }
@@ -441,6 +455,7 @@ impl HistorianProducerError {
             HistorianProducerError::Subc(body) => &body.code,
             HistorianProducerError::RunFailed { .. } => "run_failed",
             HistorianProducerError::RunPaused { .. } => "run_paused",
+            HistorianProducerError::SendQueued { .. } => "send_queued",
             HistorianProducerError::TimedOut => "timed_out",
             _ => "producer_error",
         }
@@ -496,6 +511,14 @@ impl fmt::Display for HistorianProducerError {
             HistorianProducerError::MissingRunId => {
                 write!(f, "session.send did not return an active run_id")
             }
+            HistorianProducerError::SendQueued {
+                submission_id,
+                retracted,
+            } => write!(
+                f,
+                "session.send queued this prompt behind the run already active on the session (submission {submission_id}, retracted: {})",
+                if *retracted { "yes" } else { "no" }
+            ),
             HistorianProducerError::MissingSession => {
                 write!(f, "historian producer has no bound session")
             }
@@ -538,6 +561,7 @@ impl Error for HistorianProducerError {
             | HistorianProducerError::Subc(_)
             | HistorianProducerError::UnexpectedControlResponse
             | HistorianProducerError::MissingRunId
+            | HistorianProducerError::SendQueued { .. }
             | HistorianProducerError::MissingSession
             | HistorianProducerError::UnexpectedStreamEnd
             | HistorianProducerError::TimedOut
@@ -717,19 +741,40 @@ impl HistorianProducer {
             "params": params
         });
         let response = self.unary_json(route, body).await?;
-        let run_id = response
-            .get("run_id")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                response
-                    .get("result")
-                    .and_then(|r| r.get("run_id"))
-                    .and_then(Value::as_str)
-            })
-            .ok_or(HistorianProducerError::MissingRunId)?;
-        Ok(RunHandle {
-            run_id: run_id.to_string(),
-        })
+        match send_outcome(&response) {
+            SendOutcome::Active(run_id) => Ok(RunHandle { run_id }),
+            SendOutcome::Queued(submission_id) => {
+                // The prompt was ACCEPTED, not rejected: the run this producer wanted is
+                // sitting in the lineage's queue. Nothing here will ever drain it — this
+                // producer only subscribes to a run it started — so withdraw it rather
+                // than leave a model call to fire for output no one is waiting for.
+                let retracted = self.retract(route, &submission_id).await.is_ok();
+                Err(HistorianProducerError::SendQueued {
+                    submission_id,
+                    retracted,
+                })
+            }
+            SendOutcome::Unrecognized => Err(HistorianProducerError::MissingRunId),
+        }
+    }
+
+    /// Withdraw a queued submission. Best effort: a submission the server has already
+    /// consumed, or a server without the operation, is reported by the caller as such.
+    async fn retract(
+        &mut self,
+        route: OpenedRoute,
+        submission_id: &str,
+    ) -> Result<(), HistorianProducerError> {
+        let _ = self
+            .unary_json(
+                route,
+                json!({
+                    "method": "session.retract",
+                    "params": { "submission_id": submission_id }
+                }),
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn await_output(
@@ -1077,6 +1122,42 @@ impl HistorianProducer {
 impl Drop for HistorianProducer {
     fn drop(&mut self) {
         // Async close is preferred by callers; drop only releases the TCP socket.
+    }
+}
+
+/// What a `session.send` reply actually said.
+#[derive(Debug, PartialEq, Eq)]
+enum SendOutcome {
+    /// The session was idle and this run started.
+    Active(String),
+    /// The session was busy; the prompt is durably queued under this submission id.
+    Queued(String),
+    /// Neither shape — the reply carries no run and names no submission.
+    Unrecognized,
+}
+
+/// Decode a `session.send` reply.
+///
+/// The runner answers with a `state`-tagged result inside a `result` envelope: `active`
+/// carries the run that started, `pending` means the session already had an active run and
+/// this prompt was durably QUEUED behind it under a submission id. Reading only `run_id`
+/// collapses those two into "no run id", which reports a queued (accepted) prompt as a
+/// malformed reply and hides the one fact that explains it — the session was busy.
+fn send_outcome(response: &Value) -> SendOutcome {
+    let body = match response.get("result") {
+        Some(result) if result.is_object() => result,
+        _ => response,
+    };
+    if let Some(run_id) = body.get("run_id").and_then(Value::as_str) {
+        return SendOutcome::Active(run_id.to_string());
+    }
+    let pending = body
+        .get("state")
+        .and_then(Value::as_str)
+        .is_some_and(|state| state.eq_ignore_ascii_case("pending"));
+    match body.get("submission_id").and_then(Value::as_str) {
+        Some(submission_id) if pending => SendOutcome::Queued(submission_id.to_string()),
+        _ => SendOutcome::Unrecognized,
     }
 }
 
@@ -1536,11 +1617,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn send_outcome_reads_the_runner_send_contract() {
+        // Both shapes ride a `result` envelope and are tagged by `state`.
+        assert_eq!(
+            send_outcome(&json!({"result":{"state":"active","run_id":"run-9"}})),
+            SendOutcome::Active("run-9".to_string())
+        );
+        assert_eq!(
+            send_outcome(&json!({"result":{"state":"pending","submission_id":"sub-3"}})),
+            SendOutcome::Queued("sub-3".to_string()),
+            "a queued prompt was ACCEPTED behind a busy session, not malformed"
+        );
+        // An un-enveloped reply carrying the run directly stays readable.
+        assert_eq!(
+            send_outcome(&json!({"state":"active","run_id":"run-flat"})),
+            SendOutcome::Active("run-flat".to_string())
+        );
+        // A submission id without the pending state is not a queue acknowledgement.
+        assert_eq!(
+            send_outcome(&json!({"result":{"submission_id":"sub-4"}})),
+            SendOutcome::Unrecognized
+        );
+        assert_eq!(send_outcome(&json!({})), SendOutcome::Unrecognized);
+        assert_eq!(send_outcome(&Value::Null), SendOutcome::Unrecognized);
+    }
+
     #[derive(Debug, Default)]
     struct ServerLog {
         route_sessions: Vec<String>,
         sends: Vec<Value>,
         subscribes: Vec<Value>,
+        retracts: Vec<Value>,
         goodbyes: Vec<u16>,
     }
 
@@ -1676,6 +1784,17 @@ mod tests {
                                 )
                                 .await;
                             }
+                            Some("session.retract") => {
+                                log_task.lock().await.retracts.push(req["params"].clone());
+                                send_response_frame(
+                                    &mut stream,
+                                    frame.header.channel,
+                                    frame.header.epoch,
+                                    frame.header.corr,
+                                    serde_json::to_vec(&json!({"result":"retracted"})).unwrap(),
+                                )
+                                .await;
+                            }
                             other => panic!(
                                 "unexpected request {other:?} on route {:?}",
                                 route_sessions.get(&frame.header.channel)
@@ -1803,6 +1922,45 @@ mod tests {
             "system rides the role-scoped SendParams field, byte-exact"
         );
         assert_eq!(log.goodbyes, vec![10]);
+    }
+
+    #[tokio::test]
+    async fn a_queued_send_is_named_as_such_and_its_submission_is_withdrawn() {
+        let server = fake_server(
+            json!({"result":{"state":"pending","submission_id":"sub-77"}}),
+            Vec::new(),
+        )
+        .await;
+        let mut client = client(&server).await;
+        let error = client
+            .start("mc-dreamer:classify:abc", "role", "prompt", "prov/model-a")
+            .await
+            .expect_err("a queued send starts no run");
+
+        match &error {
+            HistorianProducerError::SendQueued {
+                submission_id,
+                retracted,
+            } => {
+                assert_eq!(submission_id, "sub-77");
+                assert!(retracted, "the queued submission must be withdrawn");
+            }
+            other => panic!("expected a queued send, got {other:?}"),
+        }
+        assert!(
+            error.to_string().contains("already active on the session"),
+            "the message must name the busy session, not a missing field: {error}"
+        );
+        assert!(
+            error.is_retryable_model_failure(),
+            "a busy session clears; the caller should try again"
+        );
+        client.close().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let log = server.log.lock().await;
+        assert_eq!(log.retracts.len(), 1);
+        assert_eq!(log.retracts[0]["submission_id"], json!("sub-77"));
     }
 
     #[tokio::test]

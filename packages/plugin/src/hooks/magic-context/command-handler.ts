@@ -3,9 +3,11 @@ import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
 import type { DreamerConfig, MagicContextConfig } from "../../config/schema/magic-context";
 import type { ResolvedTransformMode } from "../../config/transform-mode";
 import type { MagicContextBuiltinCommandName } from "../../features/builtin-commands/commands";
+import { getFailingDreamTasks } from "../../features/magic-context/dreamer/storage-task-schedule";
 import { getDreamTaskBacklogs } from "../../features/magic-context/dreamer/task-gates";
 import {
     CANONICAL_DREAM_TASKS,
+    type DreamTaskFailureState,
     type DreamTaskName,
     formatDreamTaskBacklogs,
     isCanonicalDreamTask,
@@ -372,6 +374,15 @@ function readDreamTaskBacklogsSafely(
     } catch {
         // Command handling must remain available while an older/empty database is migrating.
         return {};
+    }
+}
+
+function readFailingDreamTasksSafely(db: Database, projectPath: string): DreamTaskFailureState[] {
+    try {
+        return getFailingDreamTasks(db, projectPath);
+    } catch {
+        // Same reason as the backlog read: status must survive an older/empty database.
+        return [];
     }
 }
 
@@ -813,6 +824,10 @@ export function createMagicContextCommandHandler(deps: {
                                           CANONICAL_DREAM_TASKS,
                                       ),
                                       progress: deps.getDreamerProgress?.() ?? null,
+                                      failures: readFailingDreamTasksSafely(
+                                          deps.db,
+                                          deps.dreamer.projectPath,
+                                      ),
                                   }
                                 : undefined,
                             windowGeometry,

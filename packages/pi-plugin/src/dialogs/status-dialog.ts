@@ -12,9 +12,16 @@ import {
 } from "@earendil-works/pi-tui";
 import type { MagicContextConfig } from "@magic-context/core/config/schema/magic-context";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
-import { getMostRecentTaskRunAt } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
+import {
+	getFailingDreamTasks,
+	getMostRecentTaskRunAt,
+} from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
 import { getDreamTaskBacklogs } from "@magic-context/core/features/magic-context/dreamer/task-gates";
-import { CANONICAL_DREAM_TASKS } from "@magic-context/core/features/magic-context/dreamer/task-registry";
+import {
+	CANONICAL_DREAM_TASKS,
+	type DreamTaskFailureState,
+	formatDreamTaskFailures,
+} from "@magic-context/core/features/magic-context/dreamer/task-registry";
 import { getMemoryCount } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import { getEmbeddingCoverageStatus } from "@magic-context/core/features/magic-context/project-embedding-registry";
 import {
@@ -180,6 +187,8 @@ export interface StatusDialogDetail {
 		scheduleSummary: string | null;
 		lastRunAt: number | null;
 		backlog: ReturnType<typeof getDreamTaskBacklogs>;
+		/** Tasks whose last scheduled run failed; empty when all of them are healthy. */
+		failures: DreamTaskFailureState[];
 	};
 	embedding: {
 		state: "off" | "running" | "paused" | "stopped" | "ready" | "waiting";
@@ -322,6 +331,7 @@ export function formatPiStatusSummary(s: StatusDialogDetail): string {
 	const warnings: UserStatusSummary["warnings"] = [];
 	if (s.lastTransformError) warnings.push("transform_update_failed");
 	if (s.historianFailureCount > 0) warnings.push("historian_unavailable");
+	if (s.dreamer.failures.length > 0) warnings.push("dreamer_task_failing");
 	if (s.configParseFailures.length > 0 || s.hasDeprecatedProtectedTags) {
 		warnings.push("configuration_warning");
 	}
@@ -378,6 +388,14 @@ export function formatPiStatusDiagnostics(s: StatusDialogDetail): string {
 		`History block tokens: ${fmt(s.historyBlockTokens)}`,
 		`Compression budget: ${s.compressionBudget ? `${fmt(s.compressionBudget)} (${s.compressionUsage} used)` : "unavailable"}`,
 		`Subagent: ${s.isSubagent ? "yes" : "no"}`,
+		// The scheduler's own failure text. Without it a task can fail on every slot
+		// for weeks and show up only as a backlog count that never falls.
+		...(s.dreamer.failures.length > 0
+			? [
+					"Dreamer: scheduled tasks failing",
+					formatDreamTaskFailures(s.dreamer.failures),
+				]
+			: []),
 	].join("\n");
 }
 
@@ -548,6 +566,14 @@ function renderInner(
 		lines.push(
 			theme.fg("error", renderUserFacingFailure("historian_unavailable")),
 		);
+	if (s.dreamer.failures.length > 0) {
+		lines.push(theme.fg("muted", "Dreamer"));
+		for (const line of formatDreamTaskFailures(s.dreamer.failures).split(
+			"\n",
+		)) {
+			lines.push(theme.fg("error", line));
+		}
+	}
 
 	lines.push("");
 	lines.push(theme.fg("muted", "Press Escape to close"));
@@ -904,6 +930,10 @@ export function buildPiStatusDetail(
 						CANONICAL_DREAM_TASKS,
 					),
 				{},
+			),
+			failures: safeRead(
+				() => getFailingDreamTasks(deps.db, deps.projectIdentity),
+				[],
 			),
 		},
 		embedding: {

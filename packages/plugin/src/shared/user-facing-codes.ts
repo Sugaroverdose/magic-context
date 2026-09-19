@@ -187,6 +187,11 @@ export const USER_FACING_FAILURES = {
         sentence: "Memory authority is inconsistent between the host and module.",
         action: "Run `ck doctor drain-authority` before changing Rust mode.",
     },
+    dreamer_task_failing: {
+        code: "MC-S05",
+        sentence: "A background maintenance task keeps failing on its schedule.",
+        action: "Run /ctx-status diagnostics to see which task and why.",
+    },
 } as const;
 
 export type UserFacingFailureKey = keyof typeof USER_FACING_FAILURES;

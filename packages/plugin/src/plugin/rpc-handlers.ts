@@ -13,11 +13,15 @@ import {
     getAuthorityManagedMarker,
     getMemoryMirrorStatus,
 } from "../features/magic-context/context-authority";
-import { getMostRecentTaskRunAt } from "../features/magic-context/dreamer/storage-task-schedule";
+import {
+    getFailingDreamTasks,
+    getMostRecentTaskRunAt,
+} from "../features/magic-context/dreamer/storage-task-schedule";
 import { getDreamTaskBacklogs } from "../features/magic-context/dreamer/task-gates";
 import {
     CANONICAL_DREAM_TASKS,
     type DreamTaskBacklogMap,
+    type DreamTaskFailureState,
 } from "../features/magic-context/dreamer/task-registry";
 import { getLocalEmbeddingNativeMemoryStats } from "../features/magic-context/memory/embedding-local";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
@@ -426,6 +430,7 @@ export function buildSidebarSnapshot(
 
         let lastDreamerRunAt: number | null = null;
         let dreamerBacklog: DreamTaskBacklogMap | undefined;
+        let dreamerFailures: DreamTaskFailureState[] | undefined;
         const dreamerProgress = projectIdentity
             ? (liveSessionState?.dreamerProgressByProject?.get(projectIdentity) ?? null)
             : null;
@@ -442,6 +447,9 @@ export function buildSidebarSnapshot(
                 // the live "last successful run" is MAX(last_run_at) across the
                 // project's task_schedule_state rows (issue #194).
                 lastDreamerRunAt = getMostRecentTaskRunAt(db, projectIdentity);
+                // A scheduled task can fail on every slot for weeks. Without this the
+                // only in-session trace is a backlog count that never falls.
+                dreamerFailures = getFailingDreamTasks(db, projectIdentity);
             } catch {
                 // task_schedule_state may not exist on a pre-V2 DB
             }
@@ -604,6 +612,7 @@ export function buildSidebarSnapshot(
             projectIdentity,
             dreamerBacklog,
             dreamerProgress,
+            ...(dreamerFailures === undefined ? {} : { dreamerFailures }),
             compartmentTokens: calibrated.compartmentTokens,
             factTokens: calibrated.factTokens,
             memoryTokens: calibrated.memoryTokens,
