@@ -768,7 +768,7 @@ function prefixMismatch(
     current: readonly TailHygienePartMeasurement[],
     partIndex: number,
     field: TailHygienePrefixMismatchField,
-): PrefixComparison {
+): TailHygienePrefixComparison {
     return {
         valid: false,
         boundaryAdvanceU: 0,
@@ -783,7 +783,8 @@ function prefixMismatch(
     };
 }
 
-interface PrefixComparison {
+/** Result of comparing a frozen prefix against the current measurement. */
+export interface TailHygienePrefixComparison {
     valid: boolean;
     boundaryAdvanceU: number;
     queuedDropDeltaU: number;
@@ -791,10 +792,14 @@ interface PrefixComparison {
     mismatch?: TailHygienePrefixMismatch;
 }
 
-function sameMeasuredPrefix(
+/**
+ * Lane-neutral: both TypeScript walks (OpenCode and Pi) compare their measured
+ * parts through this one implementation so their defer-window rules cannot drift.
+ */
+export function compareMeasuredTailPrefix(
     baseline: readonly TailHygienePartMeasurement[],
     current: readonly TailHygienePartMeasurement[],
-): PrefixComparison {
+): TailHygienePrefixComparison {
     if (current.length < baseline.length) {
         return prefixMismatch(baseline, current, current.length, "shorter");
     }
@@ -958,7 +963,7 @@ function retainBaselineMeasurement(
  * them guarantees a mismatch on the very next pass. Everything after the cut is
  * re-measured on every pass, so the reported totals are unchanged.
  */
-function freezeMeasurement(measured: TailHygieneMeasurement): {
+export function freezeTailHygieneMeasurement(measured: TailHygieneMeasurement): {
     baselineU: number;
     baselineT: number;
     turnDeltaU: number;
@@ -1033,7 +1038,7 @@ export function refreshTailHygieneBaseline(input: {
           };
     const now = input.now ?? Date.now();
     const refrozen = (mismatch?: TailHygienePrefixMismatch): TailHygieneBaseline => {
-        const frozen = freezeMeasurement(measured);
+        const frozen = freezeTailHygieneMeasurement(measured);
         retainBaselineMeasurement(frozen.baselineParts, memo);
         return {
             ...frozen,
@@ -1048,7 +1053,7 @@ export function refreshTailHygieneBaseline(input: {
     };
     if (input.cacheBusting || !input.previous) return refrozen();
 
-    const prefix = sameMeasuredPrefix(input.previous.baselineParts, measured.parts);
+    const prefix = compareMeasuredTailPrefix(input.previous.baselineParts, measured.parts);
     // A defer pass cannot attribute this change to an append, and this walk measures
     // the rendered tail rather than producing wire bytes, so re-measure instead of
     // holding the stale baseline until the next cache-busting pass. Holding left the
