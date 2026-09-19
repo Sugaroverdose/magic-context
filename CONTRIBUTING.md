@@ -14,18 +14,17 @@ path-derived bypass for docs-only or test-only changes: deleting a guarding test
 can change behaviour. The contributor bypass is a maintainer-applied `trivial`
 label on the PR, an explicit judgement rather than a filename heuristic.
 
-The fleet gate is **enforced by draft conversion** when an unapproved PR is
+The gate is **enforced by draft conversion** when an unapproved PR is
 marked ready for review. It posts one comment and updates that comment on later
 runs. When a maintainer labels the linked issue `design-approved`, the gate marks
-waiting drafts ready for review. The inherited gate does not convert a PR opened
+waiting drafts ready for review. The gate does not convert a PR opened
 already ready, or an existing ready PR on edits or pushes; those events report a
 failing check and a comment. Keep new unapproved PRs in draft yourself.
 This repository is private today: no required branch-protection check is
 configured; the required-check half must wait until the repository is public.
 
-The fleet gate also exempts same-repository maintainer branches under `train/**`
-and `alfonso/**`, and automation branches under `ci/**`. Fork branches with those
-names are not exempt. Applying `trivial` does not itself re-run the workflow;
+Maintainer and automation branches in this repository are exempt from the gate;
+fork branches never are. Applying `trivial` does not itself re-run the workflow;
 re-run it from the checks tab or push to refresh the result.
 
 ## Cover every shipped harness
