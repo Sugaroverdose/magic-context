@@ -2129,17 +2129,6 @@ describe("project embedding registry", () => {
         // Seed the primary chunk lane so the shadow lane has a row to mirror.
         expect(await embedUnembeddedCompartmentChunksForProject(db, projectIdentity, 8)).toBe(1);
 
-        _setTestProviderFactoryForProject(
-            () =>
-                new (class extends FakeEmbeddingProvider {
-                    override async embedBatch(texts: string[]): Promise<Float32Array[]> {
-                        unregisterProjectShadowEmbedding(projectIdentity);
-                        return texts.map(
-                            (text) => new Float32Array([text.length, this.modelId.length]),
-                        );
-                    }
-                })("shadow"),
-        );
         const registration = registerProjectShadowEmbedding(
             db,
             projectIdentity,
