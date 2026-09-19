@@ -22,6 +22,9 @@ import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatt
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
 import { detectConflicts } from "../../shared/conflict-detector";
+import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
+import { refreshModelLimitsFromApi, setOutputReserveConfig } from "../../shared/models-dev-cache";
+import { sessionLog } from "../../shared/logger";
 import { getDataDir } from "../../shared/data-path";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
@@ -95,7 +98,7 @@ function toolResultText(result: { content?: unknown } | undefined): string {
 export function catalogModels(listed: unknown): Array<{
     id: string;
     providerID: string;
-    limit: { context: number };
+    limit: { context: number; input?: number; output?: number };
 }> {
     const rows = Array.isArray(listed)
         ? listed
@@ -107,12 +110,12 @@ export function catalogModels(listed: unknown): Array<{
         const model = row as {
             id?: unknown;
             providerID?: unknown;
-            limit?: { context?: unknown };
+            limit?: { context?: unknown; input?: number; output?: number };
         };
         if (typeof model.id !== "string" || typeof model.providerID !== "string") return [];
         const contextLimit = model.limit?.context;
         if (typeof contextLimit !== "number" || !Number.isFinite(contextLimit)) return [];
-        return [{ id: model.id, providerID: model.providerID, limit: { context: contextLimit } }];
+        return [{ id: model.id, providerID: model.providerID, limit: { ...model.limit, context: contextLimit } }];
     });
 }
 
@@ -147,7 +150,7 @@ export async function registerContext(context: V2Context) {
         return;
     }
     const folds = new FoldOwner(context.storage);
-    const limits = new Map<string, number>();
+    setOutputReserveConfig(config.output_reserve);
     const queriedModels = new Set<string>();
     // Draft-authoritative model/variant/agent. Not the v1 event-driven map.
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
@@ -239,7 +242,7 @@ export async function registerContext(context: V2Context) {
         getCount: (sessionID: string) => read(sessionID).length,
     });
     let transform: ReturnType<typeof createTransform> | undefined;
-    const refuseIfUnsafe = async (draft: SessionContext): Promise<boolean> => {
+    const recordUsage = async (draft: Pick<SessionContext, "sessionID" | "model">): Promise<boolean> => {
         let unsafe = false;
         try {
             db ??= openDatabase();
@@ -257,17 +260,30 @@ export async function registerContext(context: V2Context) {
                 const modelKey = `${draft.model.providerID}/${draft.model.id}`;
                 if (!queriedModels.has(modelKey)) {
                     const catalog = await Promise.resolve(context.model.list());
-                    for (const model of catalogModels(catalog))
-                        limits.set(`${model.providerID}/${model.id}`, model.limit.context);
+                    const providers = new Map<string, { id: string; models: Record<string, { limit: { context: number; input?: number; output?: number } }> }>();
+                    for (const model of catalogModels(catalog)) {
+                        const provider = providers.get(model.providerID) ?? { id: model.providerID, models: {} };
+                        provider.models[model.id] = { limit: model.limit };
+                        providers.set(model.providerID, provider);
+                    }
+                    await refreshModelLimitsFromApi({ config: { providers: async () => ({ data: { providers: [...providers.values()] } }) } });
                     queriedModels.add(modelKey);
                 }
-                const limit = limits.get(modelKey);
+                const limit = resolveContextLimit(draft.model.providerID, draft.model.id, { db, sessionID: draft.sessionID });
                 if (tokens && limit && Number.isFinite(limit) && limit > 0) {
                     const inputTokens = tokens.input + tokens.cache.read + tokens.cache.write;
                     unsafe = inputTokens / limit >= 0.95;
                     const completed = latest?.data.time?.completed;
                     if (typeof completed === "number")
                         updateSessionMeta(db, draft.sessionID, { lastResponseTime: completed });
+                    const percentage = (inputTokens / limit) * 100;
+                    updateSessionMeta(db, draft.sessionID, {
+                        lastContextPercentage: percentage,
+                        lastInputTokens: inputTokens,
+                        lastUsageContextLimit: limit,
+                        lastObservedModelKey: modelKey,
+                    });
+                    sessionLog(draft.sessionID, `v2 usage: inputTokens=${inputTokens} contextLimit=${limit} percentage=${percentage}`);
                     usage.set(draft.sessionID, {
                         usage: { inputTokens, percentage: (inputTokens / limit) * 100 },
                         hasUsageTokens: true,
@@ -281,9 +297,25 @@ export async function registerContext(context: V2Context) {
             console.warn("[magic-context] v2 refuseIfUnsafe", error);
             unsafe = true;
         }
-        if (unsafe) await interruptBeforeProvider(context.session, draft.sessionID);
         return unsafe;
     };
+    // Context runs before generation. Persist terminal usage at execution completion
+    // so pressure is visible even when the user has not started another turn.
+    const usageController = new AbortController();
+    const usageDone = (async () => {
+        try {
+            for await (const value of context.event.subscribe({ signal: usageController.signal })) {
+                if (usageController.signal.aborted) break;
+                const event = value as { type?: string; data?: { sessionID?: string } };
+                if (event.type !== "session.execution.succeeded" || !event.data?.sessionID) continue;
+                const sessionID = event.data.sessionID;
+                const model = liveModels.get(sessionID);
+                if (model) await recordUsage({ sessionID, model: { providerID: model.providerID, id: model.modelID } });
+            }
+        } catch (error) {
+            if (!usageController.signal.aborted) console.warn("[magic-context] v2 usage subscription failed", error);
+        }
+    })();
     const materialize = (draft: SessionContext) => {
         db ??= openDatabase();
         if (!db || !isDatabasePersisted(db)) throw new Error("context storage is not durable");
@@ -360,7 +392,10 @@ export async function registerContext(context: V2Context) {
         }
         let postFold = false;
         try {
-            if (await refuseIfUnsafe(draft)) return;
+            if (await recordUsage(draft)) {
+                await interruptBeforeProvider(context.session, draft.sessionID);
+                return;
+            }
             if (!db) return;
             const storage = db;
             updateSessionMeta(db, draft.sessionID, {
@@ -551,6 +586,8 @@ export async function registerContext(context: V2Context) {
     });
     return {
         async dispose() {
+            usageController.abort();
+            await usageDone;
             await dreamTrigger?.dispose();
             for (const release of rawProviders.values()) release();
             rawProviders.clear();

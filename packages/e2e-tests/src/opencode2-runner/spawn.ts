@@ -15,6 +15,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pinMockAgents } from "../mock-routing";
+import { prepareContextDatabase } from "../prepare-context-db";
 import { MockProvider, type MockResponse } from "../mock-provider/server";
 import {
 	awaitPluginActivation,
@@ -185,6 +186,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 		: undefined;
 	const before = snapshotReason ? undefined : snapshotLive();
 	assertIsolation(fixture.root, fixture.env);
+	prepareContextDatabase(fixture.env.XDG_DATA_HOME!);
 	if (
 		options.includeMagicContext !== false &&
 		!existsSync(join(PLUGIN, "dist/v2/server.js"))

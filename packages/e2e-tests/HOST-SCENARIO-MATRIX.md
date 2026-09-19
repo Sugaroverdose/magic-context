@@ -11,7 +11,7 @@ means the real-host run failed; product code was not changed in this slice.
 | cache stability | pass | product-bug | pass | product-bug |
 | compaction off | pass | product-bug | pass | product-bug |
 | conflict disable | pass | product-bug | pass | product-bug |
-| context limits | pass | product-bug | pass | pass |
+| context limits | pass | pass | pass | pass |
 | deferred compaction marker | pass | product-bug | declared-divergence | product-bug |
 | dropped-input guard | pass | product-bug | declared-divergence | declared-divergence |
 | drops | pass | pass | pass | pass |
@@ -34,6 +34,11 @@ means the real-host run failed; product code was not changed in this slice.
 | Pi cross-harness | declared-divergence | declared-divergence | pass | declared-divergence |
 | Pi Rust degradation arc 1 | declared-divergence | declared-divergence | pass | declared-divergence |
 | Pi Rust degradation arc 4 | declared-divergence | declared-divergence | pass | declared-divergence |
+
+## OpenCode 2 repair evidence (2026-09-19)
+
+- Context limits: adapter now persists completed assistant usage on `session.execution.succeeded` and feeds the resolved model catalog into shared budget arithmetic; harness output limit matches the other hosts (8,192). Exact real-host assertion: `47.83773440489858` for 20,000 / 41,808.
+- The usage repair does not explain all remaining failures: the immediate manifest rerun still finds requests filtered out by Anthropic-only wire readers, historian publication timeouts, and todo tool timeout. No assertion was relaxed.
 
 ## Reproduction summary
 
