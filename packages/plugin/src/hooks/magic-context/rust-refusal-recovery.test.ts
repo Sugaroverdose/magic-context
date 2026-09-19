@@ -91,6 +91,48 @@ describe("Rust post-refusal recovery", () => {
         expect(fixture.recovery.activeCountForTests()).toBe(0);
     });
 
+    it("delivers when the refused assistant child is still finalizing", async () => {
+        const sessionId = "finalizing-refusal";
+        const fixture = recoveryFixture(() => ({
+            id: `assistant-${sessionId}`,
+            role: "assistant",
+            parentID: "user-1",
+        }));
+
+        fixture.recovery.arm({
+            sessionId,
+            projectRoot: "/tmp/project",
+            refusedUserMessageId: "user-1",
+            providerProvenEmergency: false,
+            compactionOff: false,
+        });
+
+        await waitUntil(() => fixture.prompts.length === 1);
+        expect(fixture.prompts).toHaveLength(1);
+        expect(fixture.recovery.activeCountForTests()).toBe(0);
+    });
+
+    it("does not continue after the refused assistant child completed successfully", async () => {
+        const fixture = recoveryFixture(() => ({
+            id: "assistant-completed",
+            role: "assistant",
+            parentID: "user-1",
+            completedAt: Date.now(),
+        }));
+        fixture.recovery.arm({
+            sessionId: "completed",
+            projectRoot: "/tmp/project",
+            refusedUserMessageId: "user-1",
+            providerProvenEmergency: false,
+            compactionOff: false,
+        });
+
+        await waitUntil(() => fixture.healthProbes() === 1);
+        await sleep(20);
+        expect(fixture.prompts).toHaveLength(0);
+        expect(fixture.recovery.activeCountForTests()).toBe(0);
+    });
+
     it("does not continue when a newer user message replaced the refused assistant tail", async () => {
         const fixture = recoveryFixture(() => ({ id: "user-2", role: "user" }));
         fixture.recovery.arm({

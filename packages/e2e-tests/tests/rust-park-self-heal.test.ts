@@ -58,15 +58,39 @@ describe.skipIf(!rustPrereqs.ok)("rust incident regression: park self-heal", () 
         } catch {
             // OpenCode can fail before plugin initialization creates the log.
         }
+        let messageSnapshot = "unavailable";
+        try {
+            const messages = await h.listMessages(sessionId);
+            messageSnapshot = JSON.stringify(
+                messages.slice(-8).map((message) => ({
+                    info: message.info,
+                    parts: message.parts?.map((part) => {
+                        const row = part as Record<string, unknown>;
+                        return {
+                            type: row.type,
+                            text:
+                                typeof row.text === "string" ? row.text.slice(0, 160) : undefined,
+                            synthetic: row.synthetic,
+                            ignored: row.ignored,
+                        };
+                    }),
+                })),
+            );
+        } catch (snapshotError) {
+            messageSnapshot = `failed: ${String(snapshotError)}`;
+        }
         const [status, sessionStatus] = await Promise.all([
             statusSnapshot(sessionId, "status"),
             statusSnapshot(sessionId, "session.status"),
         ]);
+        const sessionLogTail = sessionLogLines(h, sessionId).slice(-80).join("\n");
         throw new Error(
             `park self-heal failed: ${String(error)}\n` +
                 `status: ${status}\n` +
                 `session store state: ${sessionStatus}\n` +
+                `OpenCode message snapshot: ${messageSnapshot}\n` +
                 `rust passes: ${JSON.stringify(h.readRustPasses().map((pass) => pass.raw))}\n` +
+                `session MC log tail:\n${sessionLogTail}\n` +
                 `module log:\n${h.subc.moduleLog().slice(-8_000)}\n` +
                 `daemon log:\n${h.subc.daemonLog().slice(-8_000)}\n` +
                 `plugin log:\n${pluginLog}`,
@@ -183,33 +207,62 @@ describe.skipIf(!rustPrereqs.ok)("rust incident regression: park self-heal", () 
                 },
             });
             await h.subc.restoreModule();
-            await h.waitFor(
-                async () => {
-                    const messages = await h.listMessages(sessionId);
-                    return messages.some((message) =>
-                        message.parts?.some(
-                            (part) =>
-                                part.type === "text" &&
-                                part.text === RUST_REFUSAL_RECOVERY_PROMPT,
-                        ),
-                    );
-                },
-                { timeoutMs: 30_000, label: "synthetic recovery prompt persisted" },
-            );
-            await h.waitFor(() => h.mainRequests().length > providerRequestsBeforeRecovery, {
-                timeoutMs: 30_000,
-                label: "recovered tool loop reached the provider",
-            });
-            await Bun.sleep(2_500);
+            try {
+                const recoveryMessage = await h.waitFor(
+                    async () => {
+                        const messages = await h.listMessages(sessionId);
+                        return (
+                            messages.find(
+                                (message) =>
+                                    typeof message.info?.id === "string" &&
+                                    message.parts?.some(
+                                        (part) =>
+                                            part.type === "text" &&
+                                            part.text === RUST_REFUSAL_RECOVERY_PROMPT,
+                                    ),
+                            ) ?? null
+                        );
+                    },
+                    { timeoutMs: 30_000, label: "synthetic recovery prompt persisted" },
+                );
+                const recoveryMessageId = recoveryMessage.info?.id;
+                if (!recoveryMessageId) {
+                    throw new Error("synthetic recovery prompt has no message id");
+                }
+                const recoveryPart = recoveryMessage.parts?.find(
+                    (part) => part.type === "text" && part.text === RUST_REFUSAL_RECOVERY_PROMPT,
+                );
+                expect(recoveryPart?.synthetic).toBe(true);
+                expect(recoveryPart?.ignored).toBeUndefined();
+                await h.waitFor(
+                    async () => {
+                        if (h.mainRequests().length > providerRequestsBeforeRecovery) return true;
+                        const messages = await h.listMessages(sessionId);
+                        return messages.some(
+                            (message) =>
+                                message.info?.role === "assistant" &&
+                                message.info.parentID === recoveryMessageId,
+                        );
+                    },
+                    { timeoutMs: 30_000, label: "synthetic recovery turn started" },
+                );
+                await h.waitFor(() => h.mainRequests().length > providerRequestsBeforeRecovery, {
+                    timeoutMs: 30_000,
+                    label: "started recovery turn reached the provider",
+                });
+                await Bun.sleep(2_500);
 
-            const messages = await h.listMessages(sessionId);
-            const recoveryPrompts = messages.filter((message) =>
-                message.parts?.some(
-                    (part) =>
-                        part.type === "text" && part.text === RUST_REFUSAL_RECOVERY_PROMPT,
-                ),
-            );
-            expect(recoveryPrompts).toHaveLength(1);
+                const messages = await h.listMessages(sessionId);
+                const recoveryPrompts = messages.filter((message) =>
+                    message.parts?.some(
+                        (part) =>
+                            part.type === "text" && part.text === RUST_REFUSAL_RECOVERY_PROMPT,
+                    ),
+                );
+                expect(recoveryPrompts).toHaveLength(1);
+            } catch (error) {
+                await rethrowWithDiagnostics(sessionId, error);
+            }
         },
         300_000,
     );
