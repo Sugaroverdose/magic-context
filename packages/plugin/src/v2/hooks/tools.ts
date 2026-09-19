@@ -15,16 +15,31 @@ import { createCtxSearchTools } from "../../tools/ctx-search";
 import type { V2Context } from "./types";
 
 /** OpenCode 2 requires explicit tool-editor registration; it does not load the v1 tool map. */
-export async function registerTools(context: V2Context, db: Database, config: MagicContextPluginConfig) {
+export async function registerTools(
+    context: V2Context,
+    db: Database,
+    config: MagicContextPluginConfig,
+) {
     const compaction = isCompactionEnabled(config);
     setCtxReduceRegisteredGlobally(compaction);
     const project = {
         db,
-        resolveProjectPath: (directory: string) => resolveProjectIdentityForSession(directory, config.allow_home_project),
+        resolveProjectPath: (directory: string) =>
+            resolveProjectIdentityForSession(directory, config.allow_home_project),
         ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
     };
     const definitions = {
-        ...(compaction ? createCtxReduceTools({ db, getProtectionWindow: (sessionID) => getProtectionWindowForSession(db, sessionID, getObservedEpochFloor(db, sessionID)) }) : {}),
+        ...(compaction
+            ? createCtxReduceTools({
+                  db,
+                  getProtectionWindow: (sessionID) =>
+                      getProtectionWindowForSession(
+                          db,
+                          sessionID,
+                          getObservedEpochFloor(db, sessionID),
+                      ),
+              })
+            : {}),
         ...createCtxExpandTools({ db }),
         ...createCtxNoteTools({ ...project, dreamerEnabled: isDreamerRunnable(config) }),
         ...createCtxSearchTools(project),
@@ -39,16 +54,25 @@ export async function registerTools(context: V2Context, db: Database, config: Ma
                 input: tool.schema.toJSONSchema(tool.schema.object(definition.args)),
                 options: { codemode: false },
                 async execute(input, call) {
-                    const result = await definition.execute(tool.schema.object(definition.args).parse(input), {
-                        sessionID: call.sessionID,
-                        messageID: call.messageID,
-                        agent: call.agent,
-                        directory: context.location.directory,
-                        worktree: context.location.directory,
-                        abort: controller.signal,
-                        metadata: (value) => { void call.progress(value); },
-                        ask: async () => { throw new Error("This tool requires an unavailable permission request"); },
-                    });
+                    const result = await definition.execute(
+                        tool.schema.object(definition.args).parse(input),
+                        {
+                            sessionID: call.sessionID,
+                            messageID: call.messageID,
+                            agent: call.agent,
+                            directory: context.location.directory,
+                            worktree: context.location.directory,
+                            abort: controller.signal,
+                            metadata: (value) => {
+                                void call.progress(value);
+                            },
+                            ask: async () => {
+                                throw new Error(
+                                    "This tool requires an unavailable permission request",
+                                );
+                            },
+                        },
+                    );
                     return { content: typeof result === "string" ? result : result.output };
                 },
             });

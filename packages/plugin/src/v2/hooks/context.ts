@@ -3,35 +3,41 @@ import { isCompactionEnabled } from "../../config/agent-disable";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
-import { recordDetectedContextLimit, recordOverflowDetected } from "../../features/magic-context/storage";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import {
     clearSession,
-    markSessionCleanupPending,
     getOrCreateSessionMeta,
     isDatabasePersisted,
+    markSessionCleanupPending,
     openDatabase,
+    recordDetectedContextLimit,
+    recordOverflowDetected,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import { assertExecutableToolInput } from "../../hooks/magic-context/dropped-input-guard";
+import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import {
     createChatMessageHook,
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
-import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
 import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
+import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
 import { detectConflicts } from "../../shared/conflict-detector";
-import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
-import { refreshModelLimitsFromApi, setOutputReserveConfig, resolveLimit, isSaneLimit } from "../../shared/models-dev-cache";
-import { sessionLog } from "../../shared/logger";
 import { getDataDir } from "../../shared/data-path";
+import { sessionLog } from "../../shared/logger";
 import { resolveHistorianModel } from "../../shared/model-resolution";
+import {
+    isSaneLimit,
+    refreshModelLimitsFromApi,
+    resolveLimit,
+    setOutputReserveConfig,
+} from "../../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import {
     ACTIVE_TOOL_IDS,
@@ -121,7 +127,13 @@ export function catalogModels(listed: unknown): Array<{
         if (typeof model.id !== "string" || typeof model.providerID !== "string") return [];
         const contextLimit = model.limit?.context;
         if (typeof contextLimit !== "number" || !Number.isFinite(contextLimit)) return [];
-        return [{ id: model.id, providerID: model.providerID, limit: { ...model.limit, context: contextLimit } }];
+        return [
+            {
+                id: model.id,
+                providerID: model.providerID,
+                limit: { ...model.limit, context: contextLimit },
+            },
+        ];
     });
 }
 
@@ -174,16 +186,31 @@ export async function registerContext(context: V2Context) {
         // The primary context hook retains the existing fail-closed storage path.
         // Hidden work remains unavailable for this plugin instance when durable storage cannot open.
     }
-    const tools = db && isDatabasePersisted(db) ? await registerTools(context, db, config) : undefined;
+    const tools =
+        db && isDatabasePersisted(db) ? await registerTools(context, db, config) : undefined;
     await context.session.hook("http.response", async (draft) => {
         if (!db || draft.kind !== "primary" || draft.response.ok) return;
         const detection = detectOverflow(await draft.response.clone().text());
         if (!detection.isOverflow) return;
         const modelKey = `${draft.model.providerID}/${draft.model.id}`;
         if (compactionOff) {
-            if (detection.reportedLimit) recordDetectedContextLimit(db, draft.sessionID, detection.reportedLimit, modelKey, detection.reportedLimitProvenance);
+            if (detection.reportedLimit)
+                recordDetectedContextLimit(
+                    db,
+                    draft.sessionID,
+                    detection.reportedLimit,
+                    modelKey,
+                    detection.reportedLimitProvenance,
+                );
         } else {
-            recordOverflowDetected(db, draft.sessionID, detection.reportedLimit, modelKey, "provider_overflow", detection.reportedLimitProvenance);
+            recordOverflowDetected(
+                db,
+                draft.sessionID,
+                detection.reportedLimit,
+                modelKey,
+                "provider_overflow",
+                detection.reportedLimitProvenance,
+            );
         }
     });
     const hiddenChildHook = new HiddenChildHook();
@@ -264,7 +291,9 @@ export async function registerContext(context: V2Context) {
     let transform: ReturnType<typeof createTransform> | undefined;
     let systemPrompt: ReturnType<typeof createSystemPromptHashHandler> | undefined;
     const systemPromptRefreshSessions = new Set<string>();
-    const recordUsage = async (draft: Pick<SessionContext, "sessionID" | "model">): Promise<boolean> => {
+    const recordUsage = async (
+        draft: Pick<SessionContext, "sessionID" | "model">,
+    ): Promise<boolean> => {
         let unsafe = false;
         try {
             db ??= openDatabase();
@@ -282,27 +311,52 @@ export async function registerContext(context: V2Context) {
                 const modelKey = `${draft.model.providerID}/${draft.model.id}`;
                 if (!queriedModels.has(modelKey)) {
                     const catalog = await Promise.resolve(context.model.list());
-                    const providers = new Map<string, { id: string; models: Record<string, { limit: { context: number; input?: number; output?: number } }> }>();
+                    const providers = new Map<
+                        string,
+                        {
+                            id: string;
+                            models: Record<
+                                string,
+                                { limit: { context: number; input?: number; output?: number } }
+                            >;
+                        }
+                    >();
                     for (const model of catalogModels(catalog)) {
                         rawLimits.set(`${model.providerID}/${model.id}`, model.limit);
-                        const provider = providers.get(model.providerID) ?? { id: model.providerID, models: {} };
+                        const provider = providers.get(model.providerID) ?? {
+                            id: model.providerID,
+                            models: {},
+                        };
                         provider.models[model.id] = { limit: model.limit };
                         providers.set(model.providerID, provider);
                     }
-                    await refreshModelLimitsFromApi({ config: { providers: async () => ({ data: { providers: [...providers.values()] } }) } });
+                    await refreshModelLimitsFromApi({
+                        config: {
+                            providers: async () => ({
+                                data: { providers: [...providers.values()] },
+                            }),
+                        },
+                    });
                     queriedModels.add(modelKey);
                 }
                 const rawLimit = rawLimits.get(modelKey);
                 // The shared catalog rejects small limits as implausible, but a GA
                 // provider may explicitly configure a valid small context window.
-                const limit = rawLimit && !isSaneLimit(rawLimit.context)
-                    ? resolveLimit(rawLimit, draft.model.providerID, draft.model.id)
-                    : resolveContextLimit(draft.model.providerID, draft.model.id, { db, sessionID: draft.sessionID });
+                const limit =
+                    rawLimit && !isSaneLimit(rawLimit.context)
+                        ? resolveLimit(rawLimit, draft.model.providerID, draft.model.id)
+                        : resolveContextLimit(draft.model.providerID, draft.model.id, {
+                              db,
+                              sessionID: draft.sessionID,
+                          });
                 if (tokens && limit && Number.isFinite(limit) && limit > 0) {
                     const inputTokens = tokens.input + tokens.cache.read + tokens.cache.write;
                     // Only the raw host window is an immediate admission boundary.
                     // Reserved-output pressure still reaches the historian recovery path.
-                    unsafe = rawLimit !== undefined && inputTokens <= rawLimit.context && inputTokens / rawLimit.context >= 0.95;
+                    unsafe =
+                        rawLimit !== undefined &&
+                        inputTokens <= rawLimit.context &&
+                        inputTokens / rawLimit.context >= 0.95;
                     const completed = latest?.data.time?.completed;
                     if (typeof completed === "number")
                         updateSessionMeta(db, draft.sessionID, { lastResponseTime: completed });
@@ -313,7 +367,10 @@ export async function registerContext(context: V2Context) {
                         lastUsageContextLimit: limit,
                         lastObservedModelKey: modelKey,
                     });
-                    sessionLog(draft.sessionID, `v2 usage: inputTokens=${inputTokens} contextLimit=${limit} percentage=${percentage}`);
+                    sessionLog(
+                        draft.sessionID,
+                        `v2 usage: inputTokens=${inputTokens} contextLimit=${limit} percentage=${percentage}`,
+                    );
                     usage.set(draft.sessionID, {
                         usage: { inputTokens, percentage: (inputTokens / limit) * 100 },
                         hasUsageTokens: true,
@@ -360,10 +417,15 @@ export async function registerContext(context: V2Context) {
                 }
                 if (event.type !== "session.execution.succeeded") continue;
                 const model = liveModels.get(sessionID);
-                if (model) await recordUsage({ sessionID, model: { providerID: model.providerID, id: model.modelID } });
+                if (model)
+                    await recordUsage({
+                        sessionID,
+                        model: { providerID: model.providerID, id: model.modelID },
+                    });
             }
         } catch (error) {
-            if (!usageController.signal.aborted) console.warn("[magic-context] v2 usage subscription failed", error);
+            if (!usageController.signal.aborted)
+                console.warn("[magic-context] v2 usage subscription failed", error);
         }
     })();
     const materialize = (draft: SessionContext) => {
@@ -387,36 +449,40 @@ export async function registerContext(context: V2Context) {
             },
         }).m0Text;
     };
-    if (!compactionOff) await context.session.hook("compaction", async (draft) => {
-        const reader = new V2StoreReader(
-            gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
-        );
-        try {
-            const rows = reader.history(draft.sessionID);
-            const ids = new Set(draft.messages.map((message) => message.id));
-            const watermark = Math.max(
-                -1,
-                ...rows.filter((row) => ids.has(row.id)).map((row) => row.seq),
+    if (!compactionOff)
+        await context.session.hook("compaction", async (draft) => {
+            const reader = new V2StoreReader(
+                gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
             );
-            const running = rows
-                .filter((row) => row.type === "compaction" && row.data.status === "running")
-                .at(-1);
-            const fold = await folds.supply({
-                sessionID: draft.sessionID,
-                watermark,
-                runningCut: running?.seq,
-                materialize: () => materialize(draft),
-            });
-            draft.result = { summary: fold.submitted };
-        } catch (cause) {
-            await interruptBeforeProvider(context.session, draft.sessionID);
-            throw new V2ContextRefusal("Magic Context could not preserve the host checkpoint.", {
-                cause,
-            });
-        } finally {
-            reader.close();
-        }
-    });
+            try {
+                const rows = reader.history(draft.sessionID);
+                const ids = new Set(draft.messages.map((message) => message.id));
+                const watermark = Math.max(
+                    -1,
+                    ...rows.filter((row) => ids.has(row.id)).map((row) => row.seq),
+                );
+                const running = rows
+                    .filter((row) => row.type === "compaction" && row.data.status === "running")
+                    .at(-1);
+                const fold = await folds.supply({
+                    sessionID: draft.sessionID,
+                    watermark,
+                    runningCut: running?.seq,
+                    materialize: () => materialize(draft),
+                });
+                draft.result = { summary: fold.submitted };
+            } catch (cause) {
+                await interruptBeforeProvider(context.session, draft.sessionID);
+                throw new V2ContextRefusal(
+                    "Magic Context could not preserve the host checkpoint.",
+                    {
+                        cause,
+                    },
+                );
+            } finally {
+                reader.close();
+            }
+        });
     await context.session.hook("context", async (draft) => {
         if (hiddenChildHook.apply(draft)) return;
         liveModels.set(draft.sessionID, {
@@ -442,7 +508,7 @@ export async function registerContext(context: V2Context) {
         }
         let postFold = false;
         try {
-            if (await recordUsage(draft) && !compactionOff) {
+            if ((await recordUsage(draft)) && !compactionOff) {
                 await interruptBeforeProvider(context.session, draft.sessionID);
                 return;
             }
@@ -463,9 +529,23 @@ export async function registerContext(context: V2Context) {
                 injectionSkipSignatures: config.system_prompt_injection.skip_signatures,
             });
             const system = { system: draft.system.map((part) => String(part.text ?? "")) };
-            await systemPrompt.handler({ sessionID: draft.sessionID, model: { providerID: draft.model.providerID, modelID: draft.model.id } }, system);
+            await systemPrompt.handler(
+                {
+                    sessionID: draft.sessionID,
+                    model: { providerID: draft.model.providerID, modelID: draft.model.id },
+                },
+                system,
+            );
             const originals = [...draft.system];
-            draft.system.splice(0, draft.system.length, ...system.system.map((text, index) => ({ ...originals[index], type: "text", text })));
+            draft.system.splice(
+                0,
+                draft.system.length,
+                ...system.system.map((text, index) => ({
+                    ...originals[index],
+                    type: "text",
+                    text,
+                })),
+            );
             await preloadTokenizer();
             passDuties ??= createChatMessageHook({
                 db,
@@ -516,7 +596,12 @@ export async function registerContext(context: V2Context) {
                 compactionOff,
                 // GA owns its native checkpoints; this adapter never writes the v1
                 // synthetic marker rows that the shared off-transition deletes.
-                hostCleanupCompactionMarkers: () => ({ verified: true, removedLineages: 0, removedRows: 0, retainedLineages: 0 }),
+                hostCleanupCompactionMarkers: () => ({
+                    verified: true,
+                    removedLineages: 0,
+                    removedRows: 0,
+                    retainedLineages: 0,
+                }),
                 protectedTokens: config.protected_tokens,
                 protectedTokenTierOverrides: getProtectedTokensTierOverrides(config),
                 executeThresholdPercentage: config.execute_threshold_percentage,
@@ -531,7 +616,9 @@ export async function registerContext(context: V2Context) {
                 projectPath: directory,
                 hiddenCompletionExecutor,
                 historianRunnable:
-                    !compactionOff && hiddenCompletionExecutor !== undefined && config.historian?.disable !== true,
+                    !compactionOff &&
+                    hiddenCompletionExecutor !== undefined &&
+                    config.historian?.disable !== true,
                 historianModel: historianModels.primary,
                 fallbackModels: historianModels.fallbacks,
                 historianTimeoutMs: config.historian_timeout_ms,
