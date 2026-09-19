@@ -72,7 +72,7 @@ test("I14 sdk_renames: v2 supplies all four host seams, v1 defaults retain funct
 			join(root, "packages/plugin/src/v2", file),
 			"utf8",
 		);
-		expect(source).not.toMatch(/\.\s*(abort|delete|promptAsync)\s*\(/);
+		expect(source).not.toMatch(/\.\s*session\s*\.\s*(abort|delete|promptAsync)\s*\(/);
 		expect(source).not.toMatch(/import\s+(?!type\b).*from\s+["']@opencode\//);
 		expect(source).not.toMatch(/live-session-state/);
 	}

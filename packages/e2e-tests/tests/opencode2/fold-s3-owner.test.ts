@@ -85,6 +85,7 @@ for (const mode of ["local", "provider"] as const) {
             expect(publication.runs[0].status).toBe("success");
             expect(host.mock.requests().length - beforePublication).toBe(1);
             const mc = new Database(join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"));
+            mc.exec("PRAGMA busy_timeout = 5000");
             queuePendingOp(mc as never, session.id, 2, "drop");
             host.mock.setDefault({ text: "Prime SOFT pressure", usage: { input_tokens: 11000, output_tokens: 10 } });
             await turn("Prime SOFT after publication");
@@ -102,6 +103,7 @@ for (const mode of ["local", "provider"] as const) {
             const afterDefer = frames().filter(frame => frame.kind === "context").at(-1);
             expect(sha(afterDefer.messages.slice(0, 2))).toBe(sha(afterPublication.messages.slice(0, 2)));
             const hardDb = new Database(join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"));
+            hardDb.exec("PRAGMA busy_timeout = 5000");
             const snapshot = () => hardDb.prepare("SELECT cached_m0_materialized_at AS stamp FROM session_meta WHERE session_id = ?").get(session.id) as { stamp: number };
             // Stale persisted identities exercise the same real transform gates as a changed live signal.
             for (const [name, column, stale] of [

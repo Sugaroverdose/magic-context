@@ -467,6 +467,7 @@ test("I15 channel2_via_synthetic uses a recorded admission id at the tool batch 
 		const mc = new Database(
 			join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"),
 		);
+        mc.exec("PRAGMA busy_timeout = 5000");
 		// A real queued drop gives the TS pipeline its single permitted cache
 		// mutation, refreshing the now-unprotected completed-output baseline.
 		queuePendingOp(mc as never, session.id, 2, "drop");
@@ -753,7 +754,7 @@ test("I16a tool_argument_surfaces_v2 preserve edit regions and share supersessio
 	}
 }, 60000);
 
-test("I17 compaction-off mode registers no MC context mutations or refusals", async () => {
+test("I17 compaction-off mode preserves additive memory heads without tags or refusals", async () => {
 	const capture = observer();
 	const host = await spawnOpencode2({ probePlugin: capture.plugin });
 	try {
@@ -790,8 +791,9 @@ test("I17 compaction-off mode registers no MC context mutations or refusals", as
 			{ signal: AbortSignal.timeout(20000) },
 		);
 		expect(host.mock.requests().length).toBeGreaterThan(before);
-		expect(JSON.stringify(capture.frames())).not.toContain(HEAD_IDS[0]);
-		expect(JSON.stringify(host.mock.requests())).not.toContain(
+		expect(JSON.stringify(capture.frames())).toContain(HEAD_IDS[0]);
+        expect(JSON.stringify(capture.frames())).not.toMatch(/§\d+§/);
+		expect(JSON.stringify(host.mock.requests())).toContain(
 			"<session-history>",
 		);
 		expect(host.stderr()).not.toContain("V2ContextRefusal");

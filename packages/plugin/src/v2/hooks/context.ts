@@ -26,7 +26,7 @@ import { createTransform, type TransformDeps } from "../../hooks/magic-context/t
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
 import { detectConflicts } from "../../shared/conflict-detector";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
-import { refreshModelLimitsFromApi, setOutputReserveConfig } from "../../shared/models-dev-cache";
+import { refreshModelLimitsFromApi, setOutputReserveConfig, resolveLimit, isSaneLimit } from "../../shared/models-dev-cache";
 import { sessionLog } from "../../shared/logger";
 import { getDataDir } from "../../shared/data-path";
 import { resolveHistorianModel } from "../../shared/model-resolution";
@@ -157,6 +157,7 @@ export async function registerContext(context: V2Context) {
     const folds = new FoldOwner(context.storage);
     setOutputReserveConfig(config.output_reserve);
     const queriedModels = new Set<string>();
+    const rawLimits = new Map<string, { context: number; input?: number; output?: number }>();
     // Draft-authoritative model/variant/agent. Not the v1 event-driven map.
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
@@ -270,6 +271,7 @@ export async function registerContext(context: V2Context) {
                     const catalog = await Promise.resolve(context.model.list());
                     const providers = new Map<string, { id: string; models: Record<string, { limit: { context: number; input?: number; output?: number } }> }>();
                     for (const model of catalogModels(catalog)) {
+                        rawLimits.set(`${model.providerID}/${model.id}`, model.limit);
                         const provider = providers.get(model.providerID) ?? { id: model.providerID, models: {} };
                         provider.models[model.id] = { limit: model.limit };
                         providers.set(model.providerID, provider);
@@ -277,11 +279,17 @@ export async function registerContext(context: V2Context) {
                     await refreshModelLimitsFromApi({ config: { providers: async () => ({ data: { providers: [...providers.values()] } }) } });
                     queriedModels.add(modelKey);
                 }
-                const limit = resolveContextLimit(draft.model.providerID, draft.model.id, { db, sessionID: draft.sessionID });
+                const rawLimit = rawLimits.get(modelKey);
+                // The shared catalog rejects small limits as implausible, but a GA
+                // provider may explicitly configure a valid small context window.
+                const limit = rawLimit && !isSaneLimit(rawLimit.context)
+                    ? resolveLimit(rawLimit, draft.model.providerID, draft.model.id)
+                    : resolveContextLimit(draft.model.providerID, draft.model.id, { db, sessionID: draft.sessionID });
                 if (tokens && limit && Number.isFinite(limit) && limit > 0) {
                     const inputTokens = tokens.input + tokens.cache.read + tokens.cache.write;
-                    // Let the context transform first reduce usage by awaiting the historian;
-                    // it refuses requests that remain unsafe after recovery.
+                    // Only the raw host window is an immediate admission boundary.
+                    // Reserved-output pressure still reaches the historian recovery path.
+                    unsafe = rawLimit !== undefined && inputTokens / rawLimit.context >= 0.95;
                     const completed = latest?.data.time?.completed;
                     if (typeof completed === "number")
                         updateSessionMeta(db, draft.sessionID, { lastResponseTime: completed });
@@ -421,7 +429,7 @@ export async function registerContext(context: V2Context) {
         }
         let postFold = false;
         try {
-            if (await recordUsage(draft)) {
+            if (await recordUsage(draft) && !compactionOff) {
                 await interruptBeforeProvider(context.session, draft.sessionID);
                 return;
             }
