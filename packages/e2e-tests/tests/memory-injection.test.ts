@@ -33,7 +33,7 @@ function emitMemoryWriteOnce(content: string): void {
             (tool) =>
                 tool !== null &&
                 typeof tool === "object" &&
-                (tool as { name?: unknown }).name === "ctx_memory",
+                ["ctx_memory", "_ctx_memory"].includes(String((tool as { name?: unknown }).name)),
         ) as { name: string } | undefined;
         if (!memoryTool) return null;
         emitted = true;

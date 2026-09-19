@@ -200,7 +200,7 @@ function findToolUseId(message: WireMessage, expectedCallId?: string): string | 
         if (!block || typeof block !== "object") continue;
         const b = block as { type?: unknown; id?: unknown; name?: unknown };
         if (b.type !== "tool_use") continue;
-        if (typeof b.name !== "string" || !["mcp_Todowrite", "todowrite"].includes(b.name)) continue;
+        if (typeof b.name !== "string" || !["mcp_Todowrite", "todowrite", "_todowrite"].includes(b.name)) continue;
         if (typeof b.id !== "string") continue;
         if (expectedCallId && b.id !== expectedCallId) continue;
         return b.id;

@@ -55,9 +55,15 @@ function isHistorian(body: Record<string, unknown>): boolean {
 
 function bigReplyText(turn: number, targetBytes: number): string {
     const header = `turn-${turn}-reply: `;
-    const filler = "abcdefghij0123456789".repeat(200);
-    const reps = Math.max(1, Math.floor(targetBytes / filler.length));
-    return header + filler.repeat(reps);
+    // Unique records carry real content mass without tripping OMP's repeated-cycle guard.
+    const records: string[] = [];
+    let length = header.length;
+    for (let record = 0; length < targetBytes; record++) {
+        const text = `Record ${turn}-${record}: inspected boundary ${record * 7919} and retained decision ${record * 104729}.\n`;
+        records.push(text);
+        length += text.length;
+    }
+    return (header + records.join("")).slice(0, targetBytes);
 }
 
 forEachHost(import.meta.url, "short context accumulating overflow", (host) => {
