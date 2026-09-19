@@ -151,6 +151,66 @@ function readRawReplayDocument(
     }
 }
 
+// Cache only validated trailing-blank dictionaries, never mutable replay documents.
+// The raw column is re-read on every access, so writes from another connection,
+// a rollback, or a value changed and later restored cannot leave a stale interpretation.
+const trailingBlankReadCache = new WeakMap<
+    Database,
+    Map<
+        string,
+        {
+            raw: string | null | undefined;
+            decisions: Readonly<Record<string, PersistedTrailingBlankDecision>>;
+        }
+    >
+>();
+const TRAILING_BLANK_CACHE_MAX_SESSIONS = 4;
+const TRAILING_BLANK_CACHE_MAX_CHARS = 4 * 1024 * 1024;
+
+/** Read only visible assistants' choices without re-enumerating archived history. */
+export function readReplayTrailingBlankSubset(
+    db: Database,
+    sessionId: string,
+    messageIds: Iterable<string>,
+): Map<string, PersistedTrailingBlankDecision> {
+    const raw = readRawReplayDocument(db, sessionId);
+    if (raw === MISSING_REPLAY_DOCUMENT_COLUMN) return new Map();
+    let cache = trailingBlankReadCache.get(db);
+    if (!cache) {
+        cache = new Map();
+        trailingBlankReadCache.set(db, cache);
+    }
+    let entry = cache.get(sessionId);
+    if (!entry || entry.raw !== raw) {
+        cache.delete(sessionId);
+        entry = { raw, decisions: parseReplayDocument(raw, "read").trailingBlank };
+        // Bound retained source text per connection as well as session cardinality.
+        // Oversized documents are still readable, but must not pin unbounded history.
+        if ((raw?.length ?? 0) <= TRAILING_BLANK_CACHE_MAX_CHARS) {
+            let retainedChars = raw?.length ?? 0;
+            for (const value of cache.values()) retainedChars += value.raw?.length ?? 0;
+            while (
+                cache.size >= TRAILING_BLANK_CACHE_MAX_SESSIONS ||
+                retainedChars > TRAILING_BLANK_CACHE_MAX_CHARS
+            ) {
+                const oldest = cache.keys().next().value;
+                if (oldest === undefined) break;
+                retainedChars -= cache.get(oldest)?.raw?.length ?? 0;
+                cache.delete(oldest);
+            }
+            cache.set(sessionId, entry);
+        }
+    } else {
+        cache.delete(sessionId);
+        cache.set(sessionId, entry);
+    }
+    const selected = new Map<string, PersistedTrailingBlankDecision>();
+    for (const id of messageIds) {
+        if (Object.hasOwn(entry.decisions, id)) selected.set(id, entry.decisions[id]);
+    }
+    return selected;
+}
+
 /** Read the raw document without creating session metadata. */
 export function readReplayDocument(
     db: Database,

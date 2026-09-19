@@ -576,9 +576,19 @@ export function runRustModePostprocess(args: {
         }
     }
     const trailingBlankDecisions = new Map<string, TrailingBlankDecision>();
+    // Only visible assistants can be stripped or become candidates. The persisted
+    // replay document also contains archived turns, often far larger than this tail.
+    const visibleAssistantIds = args.messages
+        .filter((message) => message.info.role === "assistant")
+        .map((message) => message.info.id)
+        .filter((id): id is string => typeof id === "string");
     if (modelAcceptsEmptyContent(args.resolvedProviderID)) {
         try {
-            for (const [id, decision] of getTrailingBlankDecisions(args.db, args.sessionId)) {
+            for (const [id, decision] of getTrailingBlankDecisions(
+                args.db,
+                args.sessionId,
+                visibleAssistantIds,
+            )) {
                 trailingBlankDecisions.set(id, decision);
             }
             const candidates = findTrailingBlankDecisionCandidates(
@@ -591,7 +601,11 @@ export function runRustModePostprocess(args: {
                     overwriteMessageId: args.trailingBlankNewestAssistantId,
                 });
                 if (persisted) {
-                    const committed = getTrailingBlankDecisions(args.db, args.sessionId);
+                    const committed = getTrailingBlankDecisions(
+                        args.db,
+                        args.sessionId,
+                        visibleAssistantIds,
+                    );
                     for (const [id] of candidates) {
                         const decision = committed.get(id);
                         if (decision) trailingBlankDecisions.set(id, decision);
