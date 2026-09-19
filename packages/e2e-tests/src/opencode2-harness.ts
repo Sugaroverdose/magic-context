@@ -67,6 +67,10 @@ export class OpenCode2TestHarness implements HostHarness {
             magicContextConfig: options.magicContextConfig ?? {},
             extraConfig: options.openCodeConfigExtra,
             modelContextLimit: options.modelContextLimit,
+            // Use the other test hosts' output limit so context-pressure assertions
+            // reserve the same number of output tokens on every host.
+            modelOutputLimit: 8192,
+            providerID: "anthropic",
             mockResponse: options.mockDefault ?? DEFAULT_MOCK_RESPONSE,
         };
         const host = await spawnOpencode2(spawnOptions);
@@ -138,6 +142,11 @@ export class OpenCode2TestHarness implements HostHarness {
         return session.id;
     }
 
+    async compactSession(sessionId: string): Promise<void> {
+        await this.clientInstance.session.compact({ sessionID: sessionId });
+        await this.clientInstance.session.wait({ sessionID: sessionId }, { signal: AbortSignal.timeout(60_000) });
+    }
+
     async removeSession(sessionId: string): Promise<void> {
         await this.clientInstance.session.remove({ sessionID: sessionId });
     }
@@ -198,7 +207,7 @@ export class OpenCode2TestHarness implements HostHarness {
                 return hasTransformedHead && body.includes(serializedPrompt);
             });
         if (!transformed) {
-            throw new Error(`OpenCode 2 Magic Context did not transform session ${sessionId}`);
+            throw new Error(`OpenCode 2 Magic Context did not transform session ${sessionId}\n${this.hostInstance.stderr()}`);
         }
     }
 

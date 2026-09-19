@@ -85,6 +85,13 @@ export interface V2Context {
         transform?(
             callback: (editor: {
                 update(id: string, update: (tool: { description: string }) => void): void;
+                add?(tool: {
+                    name: string;
+                    description: string;
+                    input: unknown;
+                    options?: { codemode: boolean };
+                    execute(input: unknown, context: { sessionID: string; messageID: string; agent: string; progress(value: Record<string, unknown>): Promise<void> }): Promise<{ content: string }>;
+                }): void;
             }) => void,
         ): Promise<unknown>;
         hook(
@@ -122,6 +129,7 @@ export interface V2Context {
             text: string;
             delivery: "steer";
         }): Promise<unknown>;
+        hook(name: "http.response", callback: (draft: { sessionID: string; model: { providerID: string; id: string }; kind: string; response: Response }) => Promise<void>): Promise<unknown>;
         hook(
             name: "context" | "compaction" | "generate",
             callback: (draft: SessionContext) => Promise<void>,

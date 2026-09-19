@@ -8,6 +8,7 @@ import { computeNormalizedHash } from "../../plugin/src/features/magic-context/m
 import { resolveProjectIdentity } from "../../plugin/src/features/magic-context/memory/project-identity";
 import { computeSyntheticCallId } from "../../plugin/src/hooks/magic-context/todo-view";
 import { TestHarness } from "../src/harness";
+import { OpenCode2TestHarness } from "../src/opencode2-harness";
 import { PiTestHarness } from "../src/pi-harness";
 import {
     createScenarioHarness,
@@ -470,7 +471,7 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
     // (95% emergency notification re-firing) is fixed and locked in
     // by transform-compartment-phase.test.ts ("95% emergency
     // notification idempotency" describe block).
-    it.skipIf(Boolean(process.env.CI))("exercises execute, notes, reduce, historian, todo synthesis, and auto-search over one realistic session", async () => {
+    it.skipIf(Boolean(process.env.CI))(host === "opencode2" ? "exercises execute, notes, reduce, historian, native folds, and auto-search without native todos" : "exercises execute, notes, reduce, historian, todo synthesis, and auto-search over one realistic session", async () => {
         await resetMock("start long-running session");
 
         const historianCaptures: HistorianCapture[] = [];
@@ -550,6 +551,12 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
         expect(
             h.contextDb().prepare("SELECT COUNT(*) AS n FROM notes WHERE session_id = ?").get(sessionId) as { n: number },
         ).toMatchObject({ n: 1 });
+        let replayNudgeMarker: string;
+        if (h.host === "opencode2") {
+            replayNudgeMarker = await send(sessionId, "continue after the persisted note", "phase 3 native host without todo trigger");
+            const nativeTools = (await mainRequestForMarker(replayNudgeMarker)).body.tools as Array<{ name: string }>;
+            expect(nativeTools.some((tool) => /todo.*write|write.*todo/i.test(tool.name))).toBe(false);
+        } else {
         emitToolOnce(/todo.*write|write.*todo|todowrite/i, { todos: TERMINAL_TODOS });
         await send(sessionId, "turn 8: mark terminal todos to create a work-boundary note trigger", "phase 3 after terminal todos");
         await send(sessionId, "turn 9: first post-trigger turn records the nudge anchor", "phase 3 nudge anchor");
@@ -560,10 +567,11 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
             nudgeBody = (await mainRequestForMarker(nudgeMarker)).body;
         }
         expect(JSON.stringify(nudgeBody)).toContain("deferred note");
-        const replayNudgeMarker = await send(sessionId, "turn 15: note nudge sticky replay should be byte-identical", "phase 3 nudge replay");
+        replayNudgeMarker = await send(sessionId, "turn 15: note nudge sticky replay should be byte-identical", "phase 3 nudge replay");
         const replayNudgeBody = (await mainRequestForMarker(replayNudgeMarker)).body;
         expect(JSON.stringify(replayNudgeBody)).toContain("deferred note");
         expect(readMeta<{ note_nudge_anchors: string }>(sessionId, "note_nudge_anchors")?.note_nudge_anchors ?? "").toContain("deferred note");
+        }
         // The 15-minute cooldown uses process-local wall-clock time; this long test cannot advance it without sleeping.
 
         // Phase 4: ctx_reduce queues a real drop; the next force pass materializes a dropped shell and suppresses cleanup nudges.
@@ -648,7 +656,9 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
                 pending_compaction_marker_state: string | null;
                 compaction_marker_state: string | null;
             }>(sessionId, pendingMarkerColumns());
-            expect(
+            if (h.host === "opencode2") {
+                expect(markerAfterPublish?.pending_compaction_marker_state).toBeNull();
+            } else expect(
                 Boolean(markerAfterPublish?.pending_compaction_marker_state) ||
                     Boolean(markerAfterPublish?.compaction_marker_state) ||
                     (h instanceof PiTestHarness && await h.hasNativeCompactionMarker(matchedPublication.compartment.end_message)),
@@ -657,6 +667,15 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
         }
 
         // Phase 6: Synthetic todowrite rides the next cache-busting pass, while the marker drains with that pass.
+        if (h instanceof OpenCode2TestHarness) {
+            const beforeFold = h.mock.requests().length;
+            await h.compactSession(sessionId);
+            expect(h.mock.requests().length).toBe(beforeFold);
+            const foldedMarker = await send(sessionId, "surface the native checkpoint", "phase 6 native fold");
+            const body = JSON.stringify((await mainRequestForMarker(foldedMarker)).body);
+            expect(body).toContain("<conversation-checkpoint>");
+            expect(body).toContain("Long OpenCode e2e chunk");
+        } else {
         emitToolOnce(/todo.*write|write.*todo|todowrite/i, { todos: ACTIVE_TODOS });
         await send(sessionId, "turn 19: active todowrite snapshot while marker must remain pending", "phase 6 active todos");
         if (pendingBeforeDefer !== null) {
@@ -692,6 +711,7 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
             expect(JSON.stringify(syntheticReplayRequest.body)).toContain("Ship long-running OpenCode fixture");
         }
 
+        }
         // Phase 7: Auto-search hint from a seeded memory is appended and persisted for same-turn replay.
         const autoSearchMemory =
             "zebra cache ritual: when debugging long sessions, inspect prefix bytes before changing runtime code";

@@ -1,7 +1,9 @@
 /// <reference types="bun-types" />
 
 import { afterAll, beforeAll, expect, it } from "bun:test";
+import { V2StoreReader, gaDatabasePath } from '../../plugin/src/v2/store-reader';
 import { TestHarness } from "../src/harness";
+import { OpenCode2TestHarness } from '../src/opencode2-harness';
 import {
     createScenarioHarness,
     forEachHost,
@@ -121,7 +123,7 @@ forEachHost(import.meta.url, "deferred compaction marker (plan v6)", (host) => {
     afterAll(async () => {
         await h.dispose();
     });
-    it("writes pending blob in-tx on publish and holds it across defer passes", async () => {
+    it(host === "opencode2" ? "publishes a compartment and supplies a durable native checkpoint without a provider call" : "writes pending blob in-tx on publish and holds it across defer passes", async () => {
             h.mock.reset();
 
             // Mock historian: return a valid response that covers the actual
@@ -207,7 +209,21 @@ forEachHost(import.meta.url, "deferred compaction marker (plan v6)", (host) => {
             await h.sendPrompt(sessionId, "turn 12: post-trigger follow-up.");
 
             // ── ASSERTION 1: pending blob populated after publish ─────────
-        if (RUST_MODE) {
+        if (h instanceof OpenCode2TestHarness) {
+            await h.waitFor(() => h.countCompartments(sessionId) > 0, { timeoutMs: 30_000, label: "historian publication before native fold" });
+            expect(readMarkerState(h, sessionId)?.pending_compaction_marker_state).toBeNull();
+            const before = h.mock.requests().length;
+            await h.compactSession(sessionId);
+            expect(h.mock.requests().length).toBe(before);
+            const reader = new V2StoreReader(gaDatabasePath(h.dataDir, "latest", h.opencode.env));
+            try {
+                const checkpoint = reader.latestCompaction(sessionId);
+                expect(checkpoint?.data.status).toBe("completed");
+                expect(checkpoint?.data.summary).toContain("<session-history>");
+            } finally { reader.close(); }
+            await h.sendPrompt(sessionId, "small defer turn — native checkpoint remains visible");
+            expect(JSON.stringify(h.mock.lastRequest()?.body)).toContain("<conversation-checkpoint>");
+        } else if (RUST_MODE) {
             // a5b7d61d moved Rust publication and its pending delta into the
             // module transaction. `pending_m1_delta` is the authority-level
             // equivalent of the legacy context.db marker blob.

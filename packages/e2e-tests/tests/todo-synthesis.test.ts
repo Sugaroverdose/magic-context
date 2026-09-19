@@ -269,6 +269,20 @@ forEachHost(import.meta.url, "synthetic todowrite e2e", (host) => {
     afterEach(() => {
         h.mock.reset();
     });
+    if (host === "opencode2") {
+        it("declares the GA host's missing native todo surface without fabricating state", async () => {
+            const sessionId = await h.createSession();
+            setDefaultText("no native todo tool", LOW_USAGE);
+            await h.sendPrompt(sessionId, "inspect the available tools");
+            const requests = mainRequests();
+            expect(requests.length).toBeGreaterThan(0);
+            const names = (requests.at(-1)!.body.tools as Array<{ name: string }>).map((tool) => tool.name);
+            expect(names).toContain("ctx_note");
+            expect(names.some((name) => /todo.*write|write.*todo/i.test(name))).toBe(false);
+            expect(readTodoMeta(sessionId)?.last_todo_state).toBe("");
+        });
+        return;
+    }
     it("captures todowrite args into last_todo_state", async () => {
         const sessionId = await h.createSession();
         const stateJson = normalizedJson(STATE_X_TODOS);

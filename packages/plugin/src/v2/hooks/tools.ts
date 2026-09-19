@@ -1,0 +1,58 @@
+import { tool } from "@opencode-ai/plugin";
+import type { MagicContextPluginConfig } from "../../config";
+import { isCompactionEnabled, isDreamerRunnable } from "../../config/agent-disable";
+import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
+import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
+import { getObservedEpochFloor } from "../../features/magic-context/storage-meta-persisted";
+import { setCtxReduceRegisteredGlobally } from "../../hooks/magic-context/ctx-reduce-availability";
+import { ensureProjectRegisteredFromOpenCodeDirectory } from "../../plugin/embedding-bootstrap";
+import type { Database } from "../../shared/sqlite";
+import { createCtxExpandTools } from "../../tools/ctx-expand";
+import { createCtxMemoryTools } from "../../tools/ctx-memory";
+import { createCtxNoteTools } from "../../tools/ctx-note";
+import { createCtxReduceTools } from "../../tools/ctx-reduce";
+import { createCtxSearchTools } from "../../tools/ctx-search";
+import type { V2Context } from "./types";
+
+/** OpenCode 2 requires explicit tool-editor registration; it does not load the v1 tool map. */
+export async function registerTools(context: V2Context, db: Database, config: MagicContextPluginConfig) {
+    const compaction = isCompactionEnabled(config);
+    setCtxReduceRegisteredGlobally(compaction);
+    const project = {
+        db,
+        resolveProjectPath: (directory: string) => resolveProjectIdentityForSession(directory, config.allow_home_project),
+        ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
+    };
+    const definitions = {
+        ...(compaction ? createCtxReduceTools({ db, getProtectionWindow: (sessionID) => getProtectionWindowForSession(db, sessionID, getObservedEpochFloor(db, sessionID)) }) : {}),
+        ...createCtxExpandTools({ db }),
+        ...createCtxNoteTools({ ...project, dreamerEnabled: isDreamerRunnable(config) }),
+        ...createCtxSearchTools(project),
+        ...(config.memory.enabled ? createCtxMemoryTools(project) : {}),
+    };
+    const controller = new AbortController();
+    await context.tool.transform?.((editor) => {
+        for (const [name, definition] of Object.entries(definitions)) {
+            editor.add?.({
+                name,
+                description: definition.description,
+                input: tool.schema.toJSONSchema(tool.schema.object(definition.args)),
+                options: { codemode: false },
+                async execute(input, call) {
+                    const result = await definition.execute(tool.schema.object(definition.args).parse(input), {
+                        sessionID: call.sessionID,
+                        messageID: call.messageID,
+                        agent: call.agent,
+                        directory: context.location.directory,
+                        worktree: context.location.directory,
+                        abort: controller.signal,
+                        metadata: (value) => { void call.progress(value); },
+                        ask: async () => { throw new Error("This tool requires an unavailable permission request"); },
+                    });
+                    return { content: typeof result === "string" ? result : result.output };
+                },
+            });
+        }
+    });
+    return { dispose: () => controller.abort() };
+}

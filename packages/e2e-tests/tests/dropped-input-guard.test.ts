@@ -28,7 +28,7 @@ forEachHost(import.meta.url, "dropped-input guard through the plugin entry", (ho
         await h.dispose();
     });
 
-    it("refuses a bash call whose command is a copied drop placeholder", async () => {
+    it(host === "opencode2" ? "refuses a native shell call whose command is a copied drop placeholder" : "refuses a bash call whose command is a copied drop placeholder", async () => {
         const sessionId = await h.createSession();
         // A second, harmless argument proves the refusal is per-call, not a
         // coincidence of the command text: it must not appear in any output.
@@ -39,7 +39,7 @@ forEachHost(import.meta.url, "dropped-input guard through the plugin entry", (ho
             const tools = Array.isArray(body.tools) ? body.tools : [];
             const bash = tools
                 .map((t) => (t && typeof t === "object" ? (t as { name?: unknown }).name : null))
-                .find((n) => typeof n === "string" && /(^|_)bash$/.test(n)) as string | undefined;
+                .find((n) => typeof n === "string" && (h.host === "opencode2" ? n === "shell" : /(^|_)bash$/.test(n))) as string | undefined;
             if (!bash) return null;
             emitted = true;
             return {

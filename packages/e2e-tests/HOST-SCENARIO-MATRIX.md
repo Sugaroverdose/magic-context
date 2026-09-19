@@ -1,40 +1,61 @@
 # Host scenario matrix
 
-Pi/OMP status rechecked on 2026-09-19; OpenCode status captured on 2026-09-18 against OpenCode 1, OpenCode GA 2.0.5, Pi, and OMP.
-`declared-divergence` means the host is named in the manifest entry's `divergences`
-array and the cited host surface cannot express the OpenCode behavior. `product-bug`
-means the real-host run failed. OMP's earlier provisional product-bug labels
-were adjudicated by execution below.
+Status revalidated on 2026-09-19 against OpenCode 1, OpenCode GA 2.0.5, Pi, and OMP after
+per-host adjudication. `declared-divergence` means the host is named in the manifest entry's
+`divergences` array and the cited host surface cannot express the OpenCode behavior;
+`product-bug` means the real-host run still fails. A passing divergent branch is not a claim
+that the missing v1 mechanism exists on that host.
 
 | Scenario | OpenCode | OpenCode 2 | Pi | OMP |
 | --- | --- | --- | --- | --- |
-| cache invariants | pass | product-bug | pass | pass |
-| cache stability | pass | product-bug | pass | declared-divergence |
-| compaction off | pass | product-bug | pass | pass |
-| conflict disable | pass | product-bug | pass | pass |
-| context limits | pass | product-bug | pass | pass |
-| deferred compaction marker | pass | product-bug | declared-divergence | pass |
-| dropped-input guard | pass | product-bug | declared-divergence | declared-divergence |
+| cache invariants | pass | pass | pass | pass |
+| cache stability | pass | pass | pass | declared-divergence |
+| compaction off | pass | pass | pass | pass |
+| conflict disable | pass | pass | pass | pass |
+| context limits | pass | pass | pass | pass |
+| deferred compaction marker | pass | declared-divergence | declared-divergence | pass |
+| dropped-input guard | pass | pass | declared-divergence | declared-divergence |
 | drops | pass | pass | pass | pass |
-| emergency blocking | pass | product-bug | pass | pass |
-| historian success | pass | product-bug | pass | pass |
-| long-running session | pass | product-bug | pass | declared-divergence |
-| memory injection | pass | product-bug | pass | pass |
+| emergency blocking | pass | pass | pass | pass |
+| historian success | pass | pass | pass | pass |
+| long-running session | pass | declared-divergence | pass | declared-divergence |
+| memory injection | pass | pass | pass | pass |
 | notice-loop race | pass | declared-divergence | declared-divergence | declared-divergence |
-| overflow recovery | pass | product-bug | declared-divergence | pass |
-| session isolation and removal | pass | product-bug | declared-divergence | declared-divergence |
-| short-context overflow | pass | product-bug | pass | pass |
-| slow historian | pass | product-bug | pass | pass |
+| overflow recovery | pass | pass | declared-divergence | pass |
+| session isolation and removal | pass | pass | declared-divergence | declared-divergence |
+| short-context overflow | pass | pass | pass | pass |
+| slow historian | pass | pass | pass | pass |
 | smoke | pass | pass | pass | pass |
 | subagent behavior | pass | declared-divergence | declared-divergence | declared-divergence |
 | tag-owner collision | pass | pass | pass | pass |
 | tagging | pass | pass | pass | pass |
 | thinking-block safety | pass | declared-divergence | declared-divergence | declared-divergence |
-| todo synthesis | pass | product-bug | pass | pass |
-| window overlay reload | pass | product-bug | pass | pass |
+| todo synthesis | pass | declared-divergence | pass | pass |
+| window overlay reload | pass | pass | pass | pass |
 | Pi cross-harness | declared-divergence | declared-divergence | pass | declared-divergence |
 | Pi Rust degradation arc 1 | declared-divergence | declared-divergence | pass | declared-divergence |
 | Pi Rust degradation arc 4 | declared-divergence | declared-divergence | pass | declared-divergence |
+
+## OpenCode 2 repair evidence (2026-09-19)
+
+- Context limits: adapter now persists completed assistant usage on `session.execution.succeeded` and feeds the resolved model catalog into shared budget arithmetic; harness output limit matches the other hosts (8,192). Exact real-host assertion: `47.83773440489858` for 20,000 / 41,808.
+- Cache invariants: v2 now applies the shared system-guidance/hash handler; the scenario harness uses Anthropic transport like the other hosts so the existing wire oracle sees the actual provider request.
+- Long-running session: retain real notes, drops, cache replay, range-matched publication, memory, and continued-session assertions; replace unavailable native todo triggers with the verified absence contract and v1 marker drain with a zero-request GA fold.
+- Overflow recovery: inspect GA primary `http.response` errors before host retry handling, persist the shared detector's limit/recovery state, and let the existing historian path clear recovery.
+- Deferred compaction marker: execute the existing manifest divergence by requiring historian publication, no v1 pending blob, a completed GA-owned checkpoint, and zero extra provider calls for the fold.
+- Conflict disable: the equivalent GA safety property is no competing summarizer; the real compaction hook is answered locally and the next provider request retains its checkpoint.
+- Todo synthesis: GA has no native todo writer; the OC2 branch verifies the real tool inventory and empty durable todo state. A real-host tool-registration mutant makes this assertion fail.
+- Dropped-input guard: select GA's `shell` tool instead of v1 `bash`; the unchanged refusal and recovery-message assertions pass on the real host.
+- Window overlay reload: include the OC2 model key in the fixture and preserve mock usage across restart; exact initial and reloaded percentages pass.
+- Compaction off: retain memory/tool registration, pass the shared compaction-off mode, and bypass v1-only synthetic marker deletion for GA-owned checkpoints.
+- Memory injection: register the shared ctx_* implementations with the GA tool editor using JSON Schema; a real ctx_memory write is now present in a fresh session's first request.
+- Historian success: Anthropic transport allows the shared historian mock matcher to return the publication payload; real-host publication now passes.
+- Session isolation and removal: GA `session.remove` emits `session.deleted` with `data.sessionID`; subscribe to it and clear durable rows plus per-session adapter state.
+- Emergency blocking: reserved-output pressure reaches shared historian recovery while the raw host-window admission fence remains intact; successful usage above a stale catalog window is not treated as proof of imminent overflow.
+- Cache stability: restored system guidance and Anthropic wire transport allow the unchanged prefix/system byte-stability oracle to observe real main-agent requests.
+- Short-context overflow: terminal usage and catalog budgets now reach the scheduler; the unchanged accumulating-pressure recovery scenario passes.
+- Slow historian: real Anthropic transport reaches the historian matcher while unchanged foreground responsiveness assertions pass.
+- The first usage-only rerun still failed downstream scenarios, refuting a single-root explanation. Subsequent repairs address tool registration, lifecycle, system guidance, overflow errors, and host-specific carriers; no v1 assertion was removed.
 
 ## Reproduction summary
 
@@ -44,11 +65,6 @@ were adjudicated by execution below.
 - Pi manifest lane: 41 passed, 0 failed after corrections (21 files). The focused
   overlay scenario also passes. The two Pi-only Rust degradation files were not
   rerun in this adjudication; their prior record was 6 passing tests.
-- OpenCode 2 manifest lane: 12 tests passed and 29 failed across 20 selected
-  scenarios. The first contract-level reproduction is `context-limits.test.ts`:
-  `last_context_percentage` remains `0` instead of `47.83773440489858`. Historian
-  scenarios do not publish, session removal does not clear Magic Context rows,
-  and the overlay scenario also leaves pressure at `0`.
 - OMP baseline reproduced: 19 passed, 21 failed, one setup error across 20 files.
   Final manifest lane: 36 passed, 0 failed, 0 errors across 18 files; the focused
   overlay adds one passing test. Removing two declared-divergence files removes
@@ -58,7 +74,19 @@ were adjudicated by execution below.
   host-imposed divergences; later long-session OMP phases are not claimed tested.
 - Window overlay: Pi and OMP now persist `21.784593935169045` for the 100K
   overlay and `13.174536256323776` after a 160K rewrite plus reload. The stale
-  value before reload remains asserted. OpenCode 2's earlier `0` remains unfixed.
+  value before reload remains asserted. OpenCode 2 now passes the same exact assertions.
+- Pi manifest lane: 41 passed, 0 failed. The two Pi-only Rust degradation files
+  passed 6 tests. The excluded overlay scenario reproduces the product bug below.
+- OpenCode 2 manifest lane: **34 passed, 0 failed across 20 selected scenarios**
+  (187 assertions). The original baseline was 12 passed / 29 failed. The lower
+  test count reflects replacement of the unavailable native-todo cases with one
+  explicit live-host divergence test, and removal of failure-only teardown errors;
+  it is not 41 original tests silently made green. The excluded overlay scenario
+  separately passes its three exact-pressure assertions. The dedicated real-GA
+  `tests/opencode2/` regression lane is **48 passed, 0 failed** (494 assertions).
+- Shared cleanup seam safety: v1 TS pure-replay differential is byte-identical on
+  all four defer passes against `5efbe9b78b031156e44c00082fff385e48c46e46`;
+  OpenCode 1 remains 54/0 and Pi remains 41/0.
 
 Commands:
 

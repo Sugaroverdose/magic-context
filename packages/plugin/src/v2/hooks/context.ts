@@ -2,8 +2,12 @@ import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import { detectOverflow } from "../../features/magic-context/overflow-detection";
+import { recordDetectedContextLimit, recordOverflowDetected } from "../../features/magic-context/storage";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import {
+    clearSession,
+    markSessionCleanupPending,
     getOrCreateSessionMeta,
     isDatabasePersisted,
     openDatabase,
@@ -15,6 +19,7 @@ import {
     createChatMessageHook,
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
+import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
 import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
@@ -22,6 +27,9 @@ import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatt
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
 import { detectConflicts } from "../../shared/conflict-detector";
+import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
+import { refreshModelLimitsFromApi, setOutputReserveConfig, resolveLimit, isSaneLimit } from "../../shared/models-dev-cache";
+import { sessionLog } from "../../shared/logger";
 import { getDataDir } from "../../shared/data-path";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
@@ -42,6 +50,7 @@ import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { rawMessages } from "./store";
+import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
 
 export function createHostSeams(
@@ -95,7 +104,7 @@ function toolResultText(result: { content?: unknown } | undefined): string {
 export function catalogModels(listed: unknown): Array<{
     id: string;
     providerID: string;
-    limit: { context: number };
+    limit: { context: number; input?: number; output?: number };
 }> {
     const rows = Array.isArray(listed)
         ? listed
@@ -107,12 +116,12 @@ export function catalogModels(listed: unknown): Array<{
         const model = row as {
             id?: unknown;
             providerID?: unknown;
-            limit?: { context?: unknown };
+            limit?: { context?: unknown; input?: number; output?: number };
         };
         if (typeof model.id !== "string" || typeof model.providerID !== "string") return [];
         const contextLimit = model.limit?.context;
         if (typeof contextLimit !== "number" || !Number.isFinite(contextLimit)) return [];
-        return [{ id: model.id, providerID: model.providerID, limit: { context: contextLimit } }];
+        return [{ id: model.id, providerID: model.providerID, limit: { ...model.limit, context: contextLimit } }];
     });
 }
 
@@ -135,9 +144,10 @@ export function applyV2PromptSurfaceTools(
 export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
     const config = loadPluginConfigDetailed(directory).config;
-    if (!config.enabled || !isCompactionEnabled(config)) return;
+    if (!config.enabled) return;
+    const compactionOff = !isCompactionEnabled(config);
     const conflicts = detectConflicts(directory, {
-        compactionEnabled: true,
+        compactionEnabled: !compactionOff,
         hostGeneration: "v2",
     });
     if (conflicts.hasConflict) {
@@ -147,8 +157,9 @@ export async function registerContext(context: V2Context) {
         return;
     }
     const folds = new FoldOwner(context.storage);
-    const limits = new Map<string, number>();
+    setOutputReserveConfig(config.output_reserve);
     const queriedModels = new Set<string>();
+    const rawLimits = new Map<string, { context: number; input?: number; output?: number }>();
     // Draft-authoritative model/variant/agent. Not the v1 event-driven map.
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
@@ -163,6 +174,18 @@ export async function registerContext(context: V2Context) {
         // The primary context hook retains the existing fail-closed storage path.
         // Hidden work remains unavailable for this plugin instance when durable storage cannot open.
     }
+    const tools = db && isDatabasePersisted(db) ? await registerTools(context, db, config) : undefined;
+    await context.session.hook("http.response", async (draft) => {
+        if (!db || draft.kind !== "primary" || draft.response.ok) return;
+        const detection = detectOverflow(await draft.response.clone().text());
+        if (!detection.isOverflow) return;
+        const modelKey = `${draft.model.providerID}/${draft.model.id}`;
+        if (compactionOff) {
+            if (detection.reportedLimit) recordDetectedContextLimit(db, draft.sessionID, detection.reportedLimit, modelKey, detection.reportedLimitProvenance);
+        } else {
+            recordOverflowDetected(db, draft.sessionID, detection.reportedLimit, modelKey, "provider_overflow", detection.reportedLimitProvenance);
+        }
+    });
     const hiddenChildHook = new HiddenChildHook();
     await registerHiddenChildAgents(context.agent);
     let hiddenAgentsReady: Promise<void> | undefined;
@@ -239,7 +262,9 @@ export async function registerContext(context: V2Context) {
         getCount: (sessionID: string) => read(sessionID).length,
     });
     let transform: ReturnType<typeof createTransform> | undefined;
-    const refuseIfUnsafe = async (draft: SessionContext): Promise<boolean> => {
+    let systemPrompt: ReturnType<typeof createSystemPromptHashHandler> | undefined;
+    const systemPromptRefreshSessions = new Set<string>();
+    const recordUsage = async (draft: Pick<SessionContext, "sessionID" | "model">): Promise<boolean> => {
         let unsafe = false;
         try {
             db ??= openDatabase();
@@ -257,17 +282,38 @@ export async function registerContext(context: V2Context) {
                 const modelKey = `${draft.model.providerID}/${draft.model.id}`;
                 if (!queriedModels.has(modelKey)) {
                     const catalog = await Promise.resolve(context.model.list());
-                    for (const model of catalogModels(catalog))
-                        limits.set(`${model.providerID}/${model.id}`, model.limit.context);
+                    const providers = new Map<string, { id: string; models: Record<string, { limit: { context: number; input?: number; output?: number } }> }>();
+                    for (const model of catalogModels(catalog)) {
+                        rawLimits.set(`${model.providerID}/${model.id}`, model.limit);
+                        const provider = providers.get(model.providerID) ?? { id: model.providerID, models: {} };
+                        provider.models[model.id] = { limit: model.limit };
+                        providers.set(model.providerID, provider);
+                    }
+                    await refreshModelLimitsFromApi({ config: { providers: async () => ({ data: { providers: [...providers.values()] } }) } });
                     queriedModels.add(modelKey);
                 }
-                const limit = limits.get(modelKey);
+                const rawLimit = rawLimits.get(modelKey);
+                // The shared catalog rejects small limits as implausible, but a GA
+                // provider may explicitly configure a valid small context window.
+                const limit = rawLimit && !isSaneLimit(rawLimit.context)
+                    ? resolveLimit(rawLimit, draft.model.providerID, draft.model.id)
+                    : resolveContextLimit(draft.model.providerID, draft.model.id, { db, sessionID: draft.sessionID });
                 if (tokens && limit && Number.isFinite(limit) && limit > 0) {
                     const inputTokens = tokens.input + tokens.cache.read + tokens.cache.write;
-                    unsafe = inputTokens / limit >= 0.95;
+                    // Only the raw host window is an immediate admission boundary.
+                    // Reserved-output pressure still reaches the historian recovery path.
+                    unsafe = rawLimit !== undefined && inputTokens <= rawLimit.context && inputTokens / rawLimit.context >= 0.95;
                     const completed = latest?.data.time?.completed;
                     if (typeof completed === "number")
                         updateSessionMeta(db, draft.sessionID, { lastResponseTime: completed });
+                    const percentage = (inputTokens / limit) * 100;
+                    updateSessionMeta(db, draft.sessionID, {
+                        lastContextPercentage: percentage,
+                        lastInputTokens: inputTokens,
+                        lastUsageContextLimit: limit,
+                        lastObservedModelKey: modelKey,
+                    });
+                    sessionLog(draft.sessionID, `v2 usage: inputTokens=${inputTokens} contextLimit=${limit} percentage=${percentage}`);
                     usage.set(draft.sessionID, {
                         usage: { inputTokens, percentage: (inputTokens / limit) * 100 },
                         hasUsageTokens: true,
@@ -281,9 +327,45 @@ export async function registerContext(context: V2Context) {
             console.warn("[magic-context] v2 refuseIfUnsafe", error);
             unsafe = true;
         }
-        if (unsafe) await interruptBeforeProvider(context.session, draft.sessionID);
         return unsafe;
     };
+    // Context runs before generation. Persist terminal usage at execution completion
+    // so pressure is visible even when the user has not started another turn.
+    const usageController = new AbortController();
+    const usageDone = (async () => {
+        try {
+            for await (const value of context.event.subscribe({ signal: usageController.signal })) {
+                if (usageController.signal.aborted) break;
+                const event = value as { type?: string; data?: { sessionID?: string } };
+                if (!event.data?.sessionID) continue;
+                const sessionID = event.data.sessionID;
+                if (event.type === "session.deleted") {
+                    if (db) {
+                        markSessionCleanupPending(db, sessionID);
+                        clearSession(db, sessionID);
+                    }
+                    rawProviders.get(sessionID)?.();
+                    rawProviders.delete(sessionID);
+                    usage.delete(sessionID);
+                    liveModels.delete(sessionID);
+                    variants.delete(sessionID);
+                    agents.delete(sessionID);
+                    channel1.delete(sessionID);
+                    historyRefreshSessions.delete(sessionID);
+                    pendingMaterializationSessions.delete(sessionID);
+                    lastHeuristicsTurnId.delete(sessionID);
+                    systemPromptRefreshSessions.delete(sessionID);
+                    systemPrompt?.clearSession(sessionID);
+                    continue;
+                }
+                if (event.type !== "session.execution.succeeded") continue;
+                const model = liveModels.get(sessionID);
+                if (model) await recordUsage({ sessionID, model: { providerID: model.providerID, id: model.modelID } });
+            }
+        } catch (error) {
+            if (!usageController.signal.aborted) console.warn("[magic-context] v2 usage subscription failed", error);
+        }
+    })();
     const materialize = (draft: SessionContext) => {
         db ??= openDatabase();
         if (!db || !isDatabasePersisted(db)) throw new Error("context storage is not durable");
@@ -305,7 +387,7 @@ export async function registerContext(context: V2Context) {
             },
         }).m0Text;
     };
-    await context.session.hook("compaction", async (draft) => {
+    if (!compactionOff) await context.session.hook("compaction", async (draft) => {
         const reader = new V2StoreReader(
             gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
         );
@@ -360,12 +442,30 @@ export async function registerContext(context: V2Context) {
         }
         let postFold = false;
         try {
-            if (await refuseIfUnsafe(draft)) return;
+            if (await recordUsage(draft) && !compactionOff) {
+                await interruptBeforeProvider(context.session, draft.sessionID);
+                return;
+            }
             if (!db) return;
             const storage = db;
-            updateSessionMeta(db, draft.sessionID, {
-                systemPromptHash: foldDigest(JSON.stringify(draft.system)),
+            systemPrompt ??= createSystemPromptHashHandler({
+                db,
+                dreamerEnabled: config.dreamer !== undefined && !config.dreamer.disable,
+                memoryEnabled: config.memory.enabled,
+                language: config.language,
+                promptSurface: config.prompt_surface,
+                promptSurfaceRuntime,
+                systemPromptRefreshSessions,
+                historyRefreshSessions,
+                pendingMaterializationSessions,
+                lastHeuristicsTurnId,
+                injectionEnabled: config.system_prompt_injection.enabled,
+                injectionSkipSignatures: config.system_prompt_injection.skip_signatures,
             });
+            const system = { system: draft.system.map((part) => String(part.text ?? "")) };
+            await systemPrompt.handler({ sessionID: draft.sessionID, model: { providerID: draft.model.providerID, modelID: draft.model.id } }, system);
+            const originals = [...draft.system];
+            draft.system.splice(0, draft.system.length, ...system.system.map((text, index) => ({ ...originals[index], type: "text", text })));
             await preloadTokenizer();
             passDuties ??= createChatMessageHook({
                 db,
@@ -375,7 +475,7 @@ export async function registerContext(context: V2Context) {
                 historyRefreshSessions,
                 pendingMaterializationSessions,
                 lastHeuristicsTurnId,
-                systemPromptRefreshSessions: new Set(),
+                systemPromptRefreshSessions,
                 cacheTtlConfig: config.cache_ttl,
                 upgradeReminder: (sessionID) =>
                     maybeSendUpgradeReminder(
@@ -413,6 +513,10 @@ export async function registerContext(context: V2Context) {
                     executeThresholdPercentage: config.execute_threshold_percentage,
                 }),
                 contextUsageMap: usage,
+                compactionOff,
+                // GA owns its native checkpoints; this adapter never writes the v1
+                // synthetic marker rows that the shared off-transition deletes.
+                hostCleanupCompactionMarkers: () => ({ verified: true, removedLineages: 0, removedRows: 0, retainedLineages: 0 }),
                 protectedTokens: config.protected_tokens,
                 protectedTokenTierOverrides: getProtectedTokensTierOverrides(config),
                 executeThresholdPercentage: config.execute_threshold_percentage,
@@ -427,7 +531,7 @@ export async function registerContext(context: V2Context) {
                 projectPath: directory,
                 hiddenCompletionExecutor,
                 historianRunnable:
-                    hiddenCompletionExecutor !== undefined && config.historian?.disable !== true,
+                    !compactionOff && hiddenCompletionExecutor !== undefined && config.historian?.disable !== true,
                 historianModel: historianModels.primary,
                 fallbackModels: historianModels.fallbacks,
                 historianTimeoutMs: config.historian_timeout_ms,
@@ -551,6 +655,9 @@ export async function registerContext(context: V2Context) {
     });
     return {
         async dispose() {
+            tools?.dispose();
+            usageController.abort();
+            await usageDone;
             await dreamTrigger?.dispose();
             for (const release of rawProviders.values()) release();
             rawProviders.clear();

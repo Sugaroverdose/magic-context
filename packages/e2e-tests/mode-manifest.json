@@ -246,6 +246,10 @@
                 "host": "omp",
                 "reason": "OMP 18.2.6 rewrites system[0] cch attestation per request, contradicting phase-1 whole-system byte identity before later phases execute (pi-ai src/providers/anthropic.ts:685-759)",
                 "contract_ref": "packages/pi-plugin/PARITY.md#35-omp-provider-attestation-prevents-whole-system-byte-parity"
+            }, {
+                "host": "opencode2",
+                "reason": "Native todo triggers are unavailable; retain real ctx_note/ctx_reduce/publication/memory checks and assert a GA-owned checkpoint instead of a v1 marker",
+                "contract_ref": "packages/plugin/PARITY.md#native-todos"
             }]
         },
         {
@@ -286,7 +290,7 @@
                 {
                     "host": "opencode2",
                     "reason": "GA 2.0.5 does not expose OpenCode 1 noReply/ignored MessageV2 loop ordering",
-                    "contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only"
+                    "contract_ref": "packages/plugin/PARITY.md#other-existing-host-carrier-exclusions"
                 },
                 {
                     "host": "pi",
@@ -1299,7 +1303,12 @@
                 "pi",
                 "omp"
             ],
-            "behavior": true
+            "behavior": true,
+            "divergences": [{
+                "host": "opencode2",
+                "reason": "GA 2.0.5 exposes no native todowrite tool or todo state; verify the real tool inventory instead of inventing a host todo snapshot",
+                "contract_ref": "packages/plugin/PARITY.md#native-todos"
+            }]
         },
         {
             "path": "tests/window-overlay-reload.test.ts",
