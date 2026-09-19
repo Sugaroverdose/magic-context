@@ -8,6 +8,7 @@ import { computeNormalizedHash } from "../../plugin/src/features/magic-context/m
 import { resolveProjectIdentity } from "../../plugin/src/features/magic-context/memory/project-identity";
 import { computeSyntheticCallId } from "../../plugin/src/hooks/magic-context/todo-view";
 import { TestHarness } from "../src/harness";
+import { PiTestHarness } from "../src/pi-harness";
 import {
     createScenarioHarness,
     forEachHost,
@@ -649,7 +650,8 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
             }>(sessionId, pendingMarkerColumns());
             expect(
                 Boolean(markerAfterPublish?.pending_compaction_marker_state) ||
-                    Boolean(markerAfterPublish?.compaction_marker_state),
+                    Boolean(markerAfterPublish?.compaction_marker_state) ||
+                    (h instanceof PiTestHarness && await h.hasNativeCompactionMarker(matchedPublication.compartment.end_message)),
             ).toBe(true);
             pendingBeforeDefer = markerAfterPublish?.pending_compaction_marker_state ?? null;
         }
