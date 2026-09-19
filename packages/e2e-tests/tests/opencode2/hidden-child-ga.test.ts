@@ -66,11 +66,14 @@ test("OpenCode 2 hidden historian uses one reusable cheap-model child and retire
             model: { providerID: "openai", id: "mock-model-user" },
         });
 
-        const command = async (seq: number, temperature?: number) => {
+        const command = async (
+            seq: number,
+            options: { temperature?: number; maxOutputTokens?: number } = {},
+        ) => {
             const resultPath = join(host.cwd, `hidden-child-result-${seq}.json`);
             writeFileSync(
                 join(host.cwd, "hidden-child-command.json"),
-                JSON.stringify({ seq, parentSessionID: user.id, temperature }),
+                JSON.stringify({ seq, parentSessionID: user.id, ...options }),
             );
             await waitForFile(resultPath);
             return JSON.parse(readFileSync(resultPath, "utf8")) as {
@@ -81,7 +84,7 @@ test("OpenCode 2 hidden historian uses one reusable cheap-model child and retire
             };
         };
 
-        const first = await command(1, 0.25);
+        const first = await command(1, { temperature: 0.25 });
         expect(first.ok).toBe(true);
         expect(first.completion).toMatchObject({
             text: "hidden completion",
@@ -102,14 +105,25 @@ test("OpenCode 2 hidden historian uses one reusable cheap-model child and retire
         ]);
         expect(firstWire?.body.tools).toBeUndefined();
         expect(firstWire?.body.temperature).toBe(0.25);
-        expect(firstWire?.body.max_output_tokens).toBe(32768);
+        // No output cap was configured, so the carrier must leave the parameter
+        // off entirely. A subscription-login backend rejects the request outright
+        // when it is present ("Unsupported parameter: max_output_tokens").
+        expect(firstWire?.body.max_output_tokens).toBeUndefined();
         expect((await client.session.get({ sessionID: first.childID })).title).toBe(
             "Magic Context historian",
         );
 
-        const second = await command(2);
+        const second = await command(2, { maxOutputTokens: 4096 });
         expect(second.ok).toBe(true);
         expect(second.childID).toBe(first.childID);
+        const secondWire = host.mock
+            .requests()
+            .find((request) => responseInputText(request.body).includes("EXACT_HISTORIAN_CHUNK_2"));
+        expect(secondWire).toBeDefined();
+        // A configured cap reaches the wire unchanged, and an unconfigured
+        // temperature stays off it.
+        expect(secondWire?.body.max_output_tokens).toBe(4096);
+        expect(secondWire?.body.temperature).toBeUndefined();
         const rootsAfterReuse = await client.session.list({
             directory: host.cwd,
             parentID: null,

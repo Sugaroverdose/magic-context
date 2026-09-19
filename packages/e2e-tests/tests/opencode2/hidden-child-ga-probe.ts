@@ -13,6 +13,12 @@ interface Command {
     seq: number;
     parentSessionID: string;
     temperature?: number;
+    /**
+     * Output cap the user configured (`historian.maxTokens`). Absent means the
+     * user configured none, which is what the hidden carrier must put on the
+     * wire as "no cap at all".
+     */
+    maxOutputTokens?: number;
 }
 
 export default {
@@ -53,6 +59,9 @@ export default {
                     model: "openai/mock-model-cheap",
                     configuredModels: ["openai/mock-model-cheap"],
                     timeoutMs: 10_000,
+                    ...(command.maxOutputTokens === undefined
+                        ? {}
+                        : { maxOutputTokens: command.maxOutputTokens }),
                     title: "ignored shared title",
                     directory: context.location.directory,
                 });

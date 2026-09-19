@@ -1718,6 +1718,54 @@ describe("runCompartmentAgent", () => {
         expect(promptSession).toHaveBeenCalledTimes(1);
     });
 
+    it("reserves the default output budget for the producer window when no cap is configured", async () => {
+        // The hidden carrier stopped sending a default output cap on the wire
+        // (some backends reject the parameter). The chunk sizing that reserves
+        // room for the producer's own output is separate arithmetic and must
+        // keep reserving the same 32k: this source fits a 32001-token window
+        // only if nothing is reserved, so admitting it would mean the
+        // reservation was lost along with the wire parameter.
+        useTempDataHome("compartment-runner-producer-window-default-");
+        createOpenCodeDb("ses-window-default", [
+            { id: "default-1", role: "user", text: "producer source token ".repeat(2_000) },
+            { id: "default-2", role: "assistant", text: "Second eligible message" },
+            { id: "default-3", role: "user", text: "protected 1" },
+            { id: "default-4", role: "user", text: "protected 2" },
+            { id: "default-5", role: "user", text: "protected 3" },
+            { id: "default-6", role: "user", text: "protected 4" },
+            { id: "default-7", role: "user", text: "protected 5" },
+        ]);
+        const db = openDatabase();
+        const createSession = mock(async () => ({ data: { id: "ses-agent-window-default" } }));
+        const promptSession = mock(async () => ({}));
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: "/tmp/producer-window-default" } })),
+                create: createSession,
+                prompt: promptSession,
+                messages: mock(async () => ({ data: [] })),
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+
+        await runCompartmentAgentWithLease({
+            client,
+            db,
+            sessionId: "ses-window-default",
+            historianChunkTokens: 100_000,
+            historianContextLimit: 32_001,
+            model: "test/model",
+            directory: "/tmp",
+        });
+
+        expect(createSession).toHaveBeenCalledTimes(0);
+        expect(promptSession).toHaveBeenCalledTimes(0);
+        const lastError = getHistorianFailureState(db, "ses-window-default").lastError;
+        expect(lastError).toContain("producer_source_exceeds_window");
+        expect(lastError).toContain("max_output_tokens=32000");
+        expect(lastError).toContain("usable_input_tokens=1");
+    });
+
     it("records length-capped reasoning-only output with the actionable error and drain backoff", async () => {
         useTempDataHome("compartment-runner-length-capped-reasoning-");
         const sessionId = "ses-length-capped-reasoning";

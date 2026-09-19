@@ -82,6 +82,14 @@ export interface HiddenRunIdentity {
     model?: ModelInput;
     configuredModels?: readonly ModelInput[];
     timeoutMs: number;
+    /**
+     * Output cap the user configured for this run (`historian.maxTokens`), or
+     * absent when they configured none. The OpenCode 2 carrier turns a present
+     * value into a wire parameter, so the OpenCode 2 lane must pass the
+     * configured value through unchanged instead of substituting a fallback:
+     * some backends reject the parameter outright, and the chunk-sizing
+     * arithmetic that reserves output room supplies its own default separately.
+     */
     maxOutputTokens?: number;
     title: string;
     directory: string;
