@@ -759,13 +759,9 @@ export function tagMessages(
                     // Resolver pre-warms any tag-id-fallback bindings (e.g. when OpenCode
                     // re-assigns part IDs); the assigned tag below uses those bindings. Inert
                     // whitespace rows are replay-only and must never migrate onto real text.
-                    existingTagId = resolver.resolve(
-                        messageId,
-                        "message",
-                        contentId,
-                        textOrdinal,
-                        { accept: (tagNumber) => !inertWhitespaceTagNumbers.has(tagNumber) },
-                    );
+                    existingTagId = resolver.resolve(messageId, "message", contentId, textOrdinal, {
+                        accept: (tagNumber) => !inertWhitespaceTagNumbers.has(tagNumber),
+                    });
                     if (
                         existingTagId === undefined &&
                         inertWhitespaceTagNumbers.has(
@@ -872,11 +868,7 @@ export function tagMessages(
                 // largest live sessions show zero byte_size drift vs the current
                 // opencode.db output. Adding a per-part size compare here would
                 // cost every hot pass to defend an unreachable case.
-                const existingToolTag = tagger.getToolTag(
-                    sessionId,
-                    toolPart.callID,
-                    ownerMsgId,
-                );
+                const existingToolTag = tagger.getToolTag(sessionId, toolPart.callID, ownerMsgId);
                 let tagId = existingToolTag;
                 if (tagId === undefined) {
                     const reasoningBytes = getReasoningByteSize(thinkingParts);
