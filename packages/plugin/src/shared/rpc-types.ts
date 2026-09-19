@@ -5,6 +5,7 @@
 
 import type {
     DreamTaskBacklogMap,
+    DreamTaskFailureState,
     DreamTaskProgress,
 } from "../features/magic-context/dreamer/task-registry";
 import type { SynapseLaneDescriptor } from "../features/magic-context/memory/embedding-synapse";
@@ -133,6 +134,9 @@ export interface SidebarSnapshot {
     dreamerBacklog?: DreamTaskBacklogMap;
     /** Process-local task progress; absent when no Dreamer task is running. */
     dreamerProgress?: DreamTaskProgress | null;
+    /** Dreamer tasks whose last scheduled run failed. Empty when all of them are
+     *  healthy; absent on a database with no scheduler table yet. */
+    dreamerFailures?: DreamTaskFailureState[];
     recompProgress?: {
         /** "recomp" → "Recomp" labels; "upgrade" → "Upgrade" labels. */
         kind?: "recomp" | "upgrade" | "embed" | "wrapup";

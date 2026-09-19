@@ -1,4 +1,5 @@
 import type { Database } from "../../../shared/sqlite";
+import type { DreamTaskFailureState } from "./task-registry";
 
 /**
  * Per-task dreamer scheduling state (Dreamer v2). One row per (project, task):
@@ -100,6 +101,30 @@ export function getTaskScheduleStatesForProject(
         )
         .all(projectPath)
         .map(toRow);
+}
+
+/**
+ * Every dreamer task whose last scheduled run failed, in task order.
+ *
+ * The scheduler has always written `last_error`, but only the dashboard displayed it, so
+ * a task could fail on its schedule for weeks while the only in-session signal was a
+ * backlog count that never fell. The status surfaces read this to say so out loud.
+ */
+export function getFailingDreamTasks(db: Database, projectPath: string): DreamTaskFailureState[] {
+    return db
+        .prepare<[string], RawRow>(
+            `SELECT ${SELECT_COLUMNS} FROM task_schedule_state
+              WHERE project_path = ? AND last_status = 'failed'
+                AND last_error IS NOT NULL AND last_error <> ''
+              ORDER BY task`,
+        )
+        .all(projectPath)
+        .map((row) => ({
+            task: row.task,
+            error: row.last_error ?? "",
+            lastSucceededAt: row.last_run_at,
+            retryCount: row.retry_count ?? 0,
+        }));
 }
 
 /**

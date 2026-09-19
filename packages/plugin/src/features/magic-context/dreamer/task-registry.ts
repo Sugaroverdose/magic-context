@@ -78,6 +78,53 @@ export function formatDreamTaskBacklogs(
         .join("\n");
 }
 
+/** One dreamer task whose last scheduled run failed. */
+export interface DreamTaskFailureState {
+    task: string;
+    /** The scheduler's recorded failure text. */
+    error: string;
+    /** Epoch ms of the last run that SUCCEEDED, or null if none ever has. A failed run
+     *  never advances `last_run_at`, so this says how long the task has been stuck, not
+     *  when it last failed — the scheduler keeps no failure timestamp. */
+    lastSucceededAt: number | null;
+    /** Consecutive retries queued so far; reset once the retry cap pushes the task to
+     *  its next cron slot, so a long-running failure oscillates rather than climbs. */
+    retryCount: number;
+}
+
+/** How much of a scheduler failure message a status line carries before eliding. */
+const FAILURE_TEXT_BUDGET = 180;
+
+function sinceLabel(lastSucceededAt: number | null, now: number): string {
+    if (lastSucceededAt === null || lastSucceededAt <= 0) return "never succeeded";
+    const hours = Math.max(0, Math.floor((now - lastSucceededAt) / 3_600_000));
+    if (hours < 1) return "last succeeded under an hour ago";
+    if (hours < 48) return `last succeeded ${hours}h ago`;
+    return `last succeeded ${Math.floor(hours / 24)}d ago`;
+}
+
+/**
+ * One line per failing task, shared by the status surfaces.
+ *
+ * The elapsed time is measured from the last SUCCESS, not the last failure: a failed
+ * run deliberately does not advance `last_run_at`, so that is the only timestamp the
+ * scheduler keeps and "stuck since" is what a reader needs anyway.
+ */
+export function formatDreamTaskFailures(
+    failures: readonly DreamTaskFailureState[],
+    now: number = Date.now(),
+): string {
+    return failures
+        .map((failure) => {
+            const error =
+                failure.error.length > FAILURE_TEXT_BUDGET
+                    ? `${failure.error.slice(0, FAILURE_TEXT_BUDGET)}…`
+                    : failure.error;
+            return `- ${failure.task}: failing (${sinceLabel(failure.lastSucceededAt, now)}) — ${error}`;
+        })
+        .join("\n");
+}
+
 /** Process-local progress for the task currently applying a run chunk. */
 export interface DreamTaskProgress {
     task: DreamTaskName;

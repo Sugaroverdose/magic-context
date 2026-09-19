@@ -51,6 +51,7 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
     }
     if (detail.memoryMirror?.stalled) warnings.push("memory_mirror_stalled");
     if (detail.memoryAuthorityMismatch) warnings.push("memory_authority_mismatch");
+    if ((detail.dreamerFailures?.length ?? 0) > 0) warnings.push("dreamer_task_failing");
 
     return {
         inputTokens: detail.inputTokens,

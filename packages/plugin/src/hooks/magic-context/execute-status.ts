@@ -5,9 +5,13 @@ import {
 import { getCompartments } from "../../features/magic-context/compartment-storage";
 import type {
     DreamTaskBacklogMap,
+    DreamTaskFailureState,
     DreamTaskProgress,
 } from "../../features/magic-context/dreamer/task-registry";
-import { formatDreamTaskBacklogs } from "../../features/magic-context/dreamer/task-registry";
+import {
+    formatDreamTaskBacklogs,
+    formatDreamTaskFailures,
+} from "../../features/magic-context/dreamer/task-registry";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import { getPendingOps } from "../../features/magic-context/storage";
@@ -85,7 +89,11 @@ export function executeStatus(
     commitClusterTrigger?: { enabled: boolean; min_clusters: number },
     executeThresholdTokens?: { default?: number; [modelKey: string]: number | undefined },
     contextLimit?: number,
-    dreamer?: { backlog?: DreamTaskBacklogMap; progress?: DreamTaskProgress | null },
+    dreamer?: {
+        backlog?: DreamTaskBacklogMap;
+        progress?: DreamTaskProgress | null;
+        failures?: DreamTaskFailureState[];
+    },
     windowGeometry?: WindowGeometryResult,
     tailHygiene?: TailHygieneStatus,
     contextUsage?: { inputTokens: number; percentage: number },
@@ -218,16 +226,24 @@ export function executeStatus(
             );
         }
 
-        if (dreamer?.backlog && Object.keys(dreamer.backlog).length > 0) {
+        if (
+            (dreamer?.backlog && Object.keys(dreamer.backlog).length > 0) ||
+            (dreamer?.failures?.length ?? 0) > 0
+        ) {
             lines.push(
                 "",
                 "### Dreamer",
-                ...(dreamer.progress
+                ...(dreamer?.progress
                     ? [
                           `- Running: ${dreamer.progress.task} — ${dreamer.progress.processed}/${dreamer.progress.total} processed`,
                       ]
                     : []),
-                ...formatDreamTaskBacklogs(dreamer.backlog).split("\\n"),
+                // A failing scheduled task shows only as a backlog that never falls unless
+                // the scheduler's own failure text is rendered beside the counts.
+                ...((dreamer?.failures?.length ?? 0) > 0
+                    ? formatDreamTaskFailures(dreamer?.failures ?? []).split("\n")
+                    : []),
+                ...(dreamer?.backlog ? formatDreamTaskBacklogs(dreamer.backlog).split("\\n") : []),
             );
         }
 

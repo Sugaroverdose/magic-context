@@ -121,6 +121,41 @@ describe("status detail text", () => {
         }
     });
 
+    test("surfaces a failing scheduled dreamer task in the summary and the diagnostics", () => {
+        // The whole point: a task failing on every slot must not be visible only as a
+        // backlog count that never falls.
+        const detail: StatusDetail = {
+            ...STATUS_FIXTURE,
+            dreamerFailures: [
+                {
+                    task: "classify-memories",
+                    error: "Rust classify module failed: producer session busy",
+                    lastSucceededAt: Date.now() - 6 * 24 * 3_600_000,
+                    retryCount: 3,
+                },
+            ],
+        };
+        const summary = formatStatusDetailMarkdown(detail);
+        expect(summary).toContain("A background maintenance task keeps failing");
+        expect(summary).toContain("MC-S05");
+
+        const diagnostics = formatStatusDiagnosticsMarkdown(detail);
+        expect(diagnostics).toContain("classify-memories");
+        expect(diagnostics).toContain("last succeeded 6d ago");
+        expect(diagnostics).toContain("Rust classify module failed: producer session busy");
+    });
+
+    test("says nothing about the dreamer while every scheduled task is healthy", () => {
+        const healthy = formatStatusDiagnosticsMarkdown({
+            ...STATUS_FIXTURE,
+            dreamerFailures: [],
+        });
+        expect(healthy).not.toContain("Dreamer");
+        expect(
+            formatStatusDetailMarkdown({ ...STATUS_FIXTURE, dreamerFailures: [] }),
+        ).not.toContain("MC-S05");
+    });
+
     test("keeps the previous OpenCode detail behind diagnostics", () => {
         const diagnostics = formatStatusDiagnosticsMarkdown(STATUS_FIXTURE);
         expect(diagnostics).toContain("- **Active profile:** work");
