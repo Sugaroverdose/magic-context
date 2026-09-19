@@ -6673,6 +6673,19 @@ fn render_config_change(
         } else {
             effective_render_config != meta.last_render_config
         };
+    #[cfg(feature = "drive-fault")]
+    eprintln!(
+        "mc-module: render identity session={} changed={} observed={} coordinator={} transition={} tool_present={} profile={} effective={:?} persisted={:?}",
+        req.session_id,
+        changed,
+        identity_observed,
+        coordinator_identity,
+        transition_due,
+        req.tool_present,
+        req.serializer_profile,
+        effective_render_config,
+        meta.last_render_config,
+    );
     (changed, identity_observed, coordinator_identity)
 }
 

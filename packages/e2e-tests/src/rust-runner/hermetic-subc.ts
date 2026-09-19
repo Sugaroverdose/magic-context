@@ -228,7 +228,7 @@ interface BuiltBinaries {
     ckSubcBin: string;
 }
 
-let buildPromise: Promise<BuiltBinaries> | null = null;
+const buildPromises = new Map<string, Promise<BuiltBinaries>>();
 
 function rustE2eCargoEnv(): NodeJS.ProcessEnv {
     return { ...process.env, CARGO_TARGET_DIR: RUST_E2E_CARGO_TARGET_DIR };
@@ -312,19 +312,21 @@ function committedSiblingSource(subconsciousRoot: string): { root: string; sha: 
  * build always targets this checkout, even when a release preflight exported a
  * PATH fallback through `MC_E2E_CK_MC_BIN`; Cargo still reuses valid incremental
  * artifacts. Both builds use the e2e-owned target directory, avoiding either live
- * workspace's Cargo target lock. `buildPromise` serializes and memoizes the work
- * for this test process.
+ * workspace's Cargo target lock. Builds are memoized by feature set for this test process.
  */
-export async function buildHermeticBinaries(subconsciousRoot: string): Promise<BuiltBinaries> {
-    if (buildPromise) return buildPromise;
-    buildPromise = (async () => {
+export async function buildHermeticBinaries(
+    subconsciousRoot: string,
+    options: { driveFault?: boolean } = {},
+): Promise<BuiltBinaries> {
+    const buildKey = options.driveFault === true ? "drive-fault" : "default";
+    const existing = buildPromises.get(buildKey);
+    if (existing) return existing;
+    const buildPromise = (async () => {
         const cargoEnv = rustE2eCargoEnv();
         let ckMcBin = currentTreeCkMcBinary(process.env.MC_E2E_CK_MC_BIN);
-        const moduleBuild = await runCargo(
-            ["build", "--release", "-p", "mc-module"],
-            REPO_ROOT,
-            cargoEnv,
-        );
+        const moduleArgs = ["build", "--release", "-p", "mc-module"];
+        if (options.driveFault === true) moduleArgs.push("--features", "drive-fault");
+        const moduleBuild = await runCargo(moduleArgs, REPO_ROOT, cargoEnv);
         if (!moduleBuild.ok || !existsSync(ckMcBin)) {
             throw new Error(
                 `failed to build ck-mc (cargo build --release -p mc-module):\n${moduleBuild.stderr.slice(-4000)}`,
@@ -335,7 +337,7 @@ export async function buildHermeticBinaries(subconsciousRoot: string): Promise<B
         // never mistaken for the production ck-mc in Activity Monitor / ps.
         // A hardlink shares the inode (no copy cost, always current build);
         // fall back to a copy across filesystems.
-        const devNamed = join(dirname(ckMcBin), "ckdev-mc-e2e");
+        const devNamed = join(dirname(ckMcBin), `ckdev-mc-e2e-${buildKey}`);
         try {
             rmSync(devNamed, { force: true });
             linkSync(ckMcBin, devNamed);
@@ -364,6 +366,7 @@ export async function buildHermeticBinaries(subconsciousRoot: string): Promise<B
 
         return { ckMcBin, ckSubcBin: ckSubcRelease };
     })();
+    buildPromises.set(buildKey, buildPromise);
     return buildPromise;
 }
 
@@ -404,6 +407,8 @@ export interface HermeticSubcOptions {
     startTimeoutMs?: number;
     /** Start the deterministic Broca producer. Default true. */
     startProducer?: boolean;
+    /** Environment supplied only to the hermetic module process. */
+    moduleEnv?: Record<string, string>;
 }
 
 /**
@@ -433,6 +438,7 @@ export class HermeticSubcStack {
     private killedModulePid: number | null = null;
     private killedProducerPid: number | null = null;
     private producerPid: number | null = null;
+    private readonly moduleEnv: Record<string, string>;
     private catalogClient: SubcClient | null = null;
     private statusClient: SubcClient | null = null;
 
@@ -442,6 +448,7 @@ export class HermeticSubcStack {
         this.ckSubcBin = opts.ckSubcBin;
         this.startTimeoutMs = opts.startTimeoutMs;
         this.startProducer = opts.startProducer;
+        this.moduleEnv = opts.moduleEnv;
         // The plugin's Rust client reads exactly this path (getDefaultConnectionFile
         // in module-transport.ts). The daemon derives the same run directory from its
         // hermetic XDG_DATA_HOME, so no product configuration knob is needed.
@@ -463,6 +470,7 @@ export class HermeticSubcStack {
             ckSubcBin: opts.ckSubcBin,
             startTimeoutMs: opts.startTimeoutMs ?? 60_000,
             startProducer: opts.startProducer ?? true,
+            moduleEnv: opts.moduleEnv ?? {},
         });
         try {
             await stack.boot();
@@ -543,7 +551,12 @@ export class HermeticSubcStack {
 
         // Catalog registration is the readiness gate; this immediate assertion only
         // proves the daemon's file sink stayed inside the hermetic data home.
-        if (!existsSync(this.daemonFileLogPath)) {
+        const daemonLogDirectory = dirname(this.daemonFileLogPath);
+        const daemonLogCreated =
+            existsSync(this.daemonFileLogPath) ||
+            (existsSync(daemonLogDirectory) &&
+                readdirSync(daemonLogDirectory).some((name) => name.startsWith("subc.")));
+        if (!daemonLogCreated) {
             throw new Error(
                 `hermetic subc: daemon log was not created under the hermetic data home: ${this.daemonFileLogPath}`,
             );
@@ -585,6 +598,7 @@ export class HermeticSubcStack {
             stdio: ["ignore", "pipe", "pipe"],
             env: {
                 ...process.env,
+                ...this.moduleEnv,
                 NO_COLOR: "1",
                 SUBC_MODULE_ID: MODULE_ID,
                 SUBC_LAUNCH_NONCE: "",
@@ -714,14 +728,22 @@ export class HermeticSubcStack {
      * the OS release the single-writer store lease before the new module
      * re-acquires it (mirrors real_daemon.rs's restart step).
      */
-    async restartModule(): Promise<void> {
+    async restartModule(moduleEnv: Record<string, string | undefined> = {}): Promise<void> {
+        for (const [key, value] of Object.entries(moduleEnv)) {
+            if (value === undefined) delete this.moduleEnv[key];
+            else this.moduleEnv[key] = value;
+        }
         await this.killModuleAndWait();
         await sleep(200);
         await this.waitForFreshModuleRegistration();
     }
 
     /** Return a killed external module without restarting the OpenCode session. */
-    async restoreModule(): Promise<void> {
+    async restoreModule(moduleEnv: Record<string, string | undefined> = {}): Promise<void> {
+        for (const [key, value] of Object.entries(moduleEnv)) {
+            if (value === undefined) delete this.moduleEnv[key];
+            else this.moduleEnv[key] = value;
+        }
         await sleep(200);
         await this.waitForFreshModuleRegistration();
     }
