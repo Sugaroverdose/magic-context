@@ -142,6 +142,11 @@ export class OpenCode2TestHarness implements HostHarness {
         return session.id;
     }
 
+    async compactSession(sessionId: string): Promise<void> {
+        await this.clientInstance.session.compact({ sessionID: sessionId });
+        await this.clientInstance.session.wait({ sessionID: sessionId }, { signal: AbortSignal.timeout(60_000) });
+    }
+
     async removeSession(sessionId: string): Promise<void> {
         await this.clientInstance.session.remove({ sessionID: sessionId });
     }
