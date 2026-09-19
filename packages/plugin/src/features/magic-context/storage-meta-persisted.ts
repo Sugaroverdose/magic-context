@@ -17,11 +17,12 @@ import {
 import { readEpochFloorSnapshot } from "./protection-window";
 import { ensureSessionMetaRow } from "./storage-meta-shared";
 import {
-    isPersistedTrailingBlankDecision,
     type PersistedTrailingBlankDecision,
-    parseReplayDocument,
     ReplayDocumentError,
+    isPersistedTrailingBlankDecision,
+    parseReplayDocument,
     readReplayDocument,
+    readReplayTrailingBlankSubset,
     updateReplayDocument,
 } from "./storage-replay-document";
 
@@ -2606,8 +2607,10 @@ function parseTrailingBlankDecisions(
 export function getTrailingBlankDecisions(
     db: Database,
     sessionId: string,
+    messageIds?: Iterable<string>,
 ): Map<string, PersistedTrailingBlankDecision> {
     try {
+        if (messageIds) return readReplayTrailingBlankSubset(db, sessionId, messageIds);
         return new Map(Object.entries(readReplayDocument(db, sessionId, "read").trailingBlank));
     } catch (error) {
         if (error instanceof ReplayDocumentError) return new Map();
