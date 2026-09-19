@@ -1,7 +1,13 @@
 /// <reference types="bun-types" />
 
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, expect, it } from "bun:test";
 import { TestHarness } from "../src/harness";
+import {
+    createScenarioHarness,
+    forEachHost,
+    isPiFamily,
+    type ScenarioHarness,
+} from "../src/scenario-hosts";
 import { buildMockHistorianPayload } from "../src/mock-historian";
 
 /**
@@ -88,31 +94,33 @@ interface PendingRow {
     compaction_marker_state: string | null;
 }
 
-function readMarkerState(h: TestHarness, sessionId: string): PendingRow | null {
+function readMarkerState(h: ScenarioHarness, sessionId: string): PendingRow | null {
+    const pendingColumn = isPiFamily(h.host)
+        ? "pending_pi_compaction_marker_state"
+        : "pending_compaction_marker_state";
     const row = h
         .contextDb()
         .prepare(
-            "SELECT pending_compaction_marker_state, compaction_marker_state FROM session_meta WHERE session_id = ?",
+            `SELECT ${pendingColumn} AS pending_compaction_marker_state, compaction_marker_state FROM session_meta WHERE session_id = ?`,
         )
         .get(sessionId) as PendingRow | null;
     return row;
 }
 
-let h: TestHarness;
+forEachHost(import.meta.url, "deferred compaction marker (plan v6)", (host) => {
+    let h: ScenarioHarness;
 
-beforeAll(async () => {
-    h = await TestHarness.create({
-        magicContextConfig: {
-            execute_threshold_percentage: 40,
-        },
+    beforeAll(async () => {
+        h = await createScenarioHarness(host, {
+            magicContextConfig: {
+                execute_threshold_percentage: 40,
+            },
+        });
     });
-});
 
-afterAll(async () => {
-    await h.dispose();
-});
-
-describe("deferred compaction marker (plan v6)", () => {
+    afterAll(async () => {
+        await h.dispose();
+    });
     it("writes pending blob in-tx on publish and holds it across defer passes", async () => {
             h.mock.reset();
 
@@ -203,6 +211,9 @@ describe("deferred compaction marker (plan v6)", () => {
             // a5b7d61d moved Rust publication and its pending delta into the
             // module transaction. `pending_m1_delta` is the authority-level
             // equivalent of the legacy context.db marker blob.
+            if (!(h instanceof TestHarness)) {
+                throw new Error("Rust marker check requires the OpenCode 1 hermetic module stack");
+            }
             const stack = h.rustStack;
             if (!stack)
                 throw new Error("Rust marker check requires the hermetic module stack");
@@ -211,7 +222,7 @@ describe("deferred compaction marker (plan v6)", () => {
             while (Date.now() < deadline) {
                 afterPublish = await stack.moduleStatus(
                     sessionId,
-                    h.opencode.env.workdir,
+                    h.workdir,
                     "session.status",
                 );
                 if (
@@ -228,7 +239,7 @@ describe("deferred compaction marker (plan v6)", () => {
             await h.sendPrompt(sessionId, "small defer turn — no mutation expected");
             const pendingAfter = await stack.moduleStatus(
                 sessionId,
-                h.opencode.env.workdir,
+                h.workdir,
                 "session.status",
             );
             const unchanged = pendingAfter.pending_m1_delta === true;
