@@ -66,6 +66,21 @@
             "behavior": true
         },
         {
+            "path": "tests/config-dir-compaction-layers.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "OPENCODE_CONFIG_DIR adds a config directory rather than replacing the global one; OpenCode 1 config-layer precedence is the subject, so the scenario has no meaning on hosts that do not read OpenCode config",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/conflict-disable.test.ts",
             "tier": "ts-only",
             "invocation": {

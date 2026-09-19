@@ -28,6 +28,10 @@ export interface TestHarnessOptions {
     magicContextConfig?: Record<string, unknown>;
     /** Extra opencode.json config. Merged onto test defaults. */
     openCodeConfigExtra?: Record<string, unknown>;
+    /** Extra config for OpenCode's GLOBAL config dir, the layer $OPENCODE_CONFIG_DIR sits on top of. */
+    openCodeGlobalConfigExtra?: Record<string, unknown>;
+    /** Leave the default `compaction` block out of the $OPENCODE_CONFIG_DIR layer. */
+    omitConfigDirCompaction?: boolean;
     /** Override the mock model's context token limit. Default 200000. */
     modelContextLimit?: number;
     /** Set false only when the test intentionally verifies conflict-based self-disable behavior. */
@@ -139,6 +143,8 @@ export class TestHarness implements HostHarness {
             mockProviderURL: baseURL,
             magicContextConfig: options.magicContextConfig,
             openCodeConfigExtra: options.openCodeConfigExtra,
+            openCodeGlobalConfigExtra: options.openCodeGlobalConfigExtra,
+            omitConfigDirCompaction: options.omitConfigDirCompaction,
             modelContextLimit: options.modelContextLimit,
             prepareContextDatabase: expectMagicContext,
             expectedMagicContextState,

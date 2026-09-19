@@ -18,7 +18,7 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(72);
+        expect(validation.files.length).toBe(73);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -29,10 +29,10 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(25);
+        expect(ts).toHaveLength(26);
         expect(rust).toHaveLength(45);
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(1);
-        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(24);
+        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(25);
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(21);
         expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(20);
         // OMP hashes each request into its system header, breaking within-session byte identity

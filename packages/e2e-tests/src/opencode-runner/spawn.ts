@@ -86,6 +86,24 @@ export interface SpawnOptions {
     magicContextConfig?: Record<string, unknown>;
     /** Extra opencode.json provider/model config, merged with defaults. */
     openCodeConfigExtra?: Record<string, unknown>;
+    /**
+     * Extra config written to OpenCode's GLOBAL config directory
+     * (`$XDG_CONFIG_HOME/opencode/opencode.json`) instead of the
+     * `$OPENCODE_CONFIG_DIR` layer everything else uses.
+     *
+     * The harness points both env vars at the same isolated tree but at
+     * DIFFERENT directories, so this reproduces the real-user shape where a
+     * launcher exports `OPENCODE_CONFIG_DIR` and the user's own settings still
+     * live in the global directory. OpenCode reads both and lets the
+     * `$OPENCODE_CONFIG_DIR` layer win ties. Default: nothing extra.
+     */
+    openCodeGlobalConfigExtra?: Record<string, unknown>;
+    /**
+     * Drop the harness's default `compaction` block from the
+     * `$OPENCODE_CONFIG_DIR` layer, leaving `openCodeGlobalConfigExtra` as the
+     * only place compaction is configured. Default: keep it.
+     */
+    omitConfigDirCompaction?: boolean;
     /** Override the mock model's context token limit. Default 200000. */
     modelContextLimit?: number;
     /** Pre-create the isolated Magic Context DB unless the test expects the plugin to stay disabled. */
@@ -348,6 +366,8 @@ function writeConfigs(
         magicContext.subc = { connection_file: opts.userSubcConnectionFile };
     }
 
+    if (opts.omitConfigDirCompaction) delete opencodeConfig.compaction;
+
     writeFileSync(join(env.configDir, "opencode.json"), JSON.stringify(opencodeConfig, null, 2));
     if (process.env.MC_E2E_TRACE_PROVIDER === "1") {
         console.error(`[mock-config] ${JSON.stringify({ configDir: env.configDir, mockProviderURL, opencodeConfig, magicContext })}`);
@@ -366,6 +386,19 @@ function writeConfigs(
         join(userConfigDir, "magic-context.jsonc"),
         JSON.stringify(magicContext, null, 2),
     );
+
+    // Same directory, but this file is OpenCode's own global config — the layer
+    // a launcher's OPENCODE_CONFIG_DIR sits on top of rather than replacing.
+    if (opts.openCodeGlobalConfigExtra) {
+        writeFileSync(
+            join(userConfigDir, "opencode.json"),
+            JSON.stringify(
+                { $schema: "https://opencode.ai/config.json", ...opts.openCodeGlobalConfigExtra },
+                null,
+                2,
+            ),
+        );
+    }
 
     // Project-tier config: written to the hard-cutover location the loader reads,
     // `<workdir>/.cortexkit/magic-context.jsonc`. Rust mode is opted in here via
