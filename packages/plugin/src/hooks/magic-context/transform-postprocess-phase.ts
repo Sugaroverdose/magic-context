@@ -136,6 +136,7 @@ import {
     assertTailHygieneContentUnchanged,
     countRealUserMessages,
     effectiveTailHygiene,
+    formatTailHygienePrefixMismatch,
     refreshTailHygieneBaseline,
     sameTailHygieneStructuralSignature,
     type TailHygieneStructuralSignature,
@@ -2784,6 +2785,17 @@ export async function runPostTransformPhase(
                     previous,
                 });
                 logTransformTiming(args.sessionId, "pp.tailMeasure", tTailMeasure);
+                // One line per invalidation event, not one per pass: the baseline
+                // only carries a mismatch on the pass that re-measured because of it.
+                if (baseline.lastPrefixMismatch) {
+                    sessionLog(
+                        args.sessionId,
+                        formatTailHygienePrefixMismatch(
+                            baseline.lastPrefixMismatch,
+                            baseline.baselineGeneration,
+                        ),
+                    );
+                }
                 const tTailState = performance.now();
                 const structuralSignature = tailHygieneStructuralSignature(args.messages);
                 const effective = effectiveTailHygiene(baseline);

@@ -141,6 +141,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/channel2-cycle";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { evaluateChannel2 } from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
+import { formatTailHygienePrefixMismatch } from "@magic-context/core/hooks/magic-context/tail-hygiene-walk";
 import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import {
 	type DroppedTokenReduction,
@@ -3492,6 +3493,17 @@ export function registerPiContextHandler(
 						previous: getPiChannel1Baseline(sessionId),
 					});
 					const effective = effectivePiTailHygiene(baseline);
+					// One line per invalidation event, not one per pass: the baseline
+					// only carries a mismatch on the pass that re-measured because of it.
+					if (baseline.lastPrefixMismatch) {
+						sessionLog(
+							sessionId,
+							formatTailHygienePrefixMismatch(
+								baseline.lastPrefixMismatch,
+								baseline.baselineGeneration,
+							),
+						);
+					}
 					const durableGrace =
 						baseline.evaluable && !baseline.generationInvalidated
 							? captureChannel1PostReduceGraceBaseline(

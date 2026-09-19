@@ -32,6 +32,36 @@ export interface TailHygieneMeasurement {
     t: number;
     contentSignature: string;
     parts: TailHygienePartMeasurement[];
+    /** First index in `parts` that belongs to the newest message; the frozen prefix stops here. */
+    newestMessagePartStart: number;
+}
+
+/**
+ * Which measured field of a frozen prefix part stopped matching. `shorter` means
+ * the measured array no longer reaches the end of the frozen prefix at all.
+ */
+export type TailHygienePrefixMismatchField =
+    | "shorter"
+    | "key"
+    | "contentHash"
+    | "kind"
+    | "tokens"
+    | "tagNumber"
+    | "tagStatus"
+    | "protection-entered"
+    | "protection-exit-inactive"
+    | "queued-drop-inactive"
+    | "uTokens";
+
+/** First point where a defer pass stopped matching the frozen prefix. */
+export interface TailHygienePrefixMismatch {
+    /** Index into the frozen prefix; for `shorter` it is the first index the measured array lacks. */
+    partIndex: number;
+    /** Message the mismatching part belongs to, so the cause can be attributed to a message shape. */
+    messageId: string;
+    field: TailHygienePrefixMismatchField;
+    frozenParts: number;
+    measuredParts: number;
 }
 
 /**
@@ -71,6 +101,11 @@ export interface TailHygieneBaseline {
     contentSignature: string;
     /** Live mirror of the durable nudge grace state; it never contributes rendered bytes. */
     channel1PostReduceGrace?: TailHygienePostReduceGrace;
+    /**
+     * Set only on the pass that found a mismatch and re-measured, so a caller can
+     * log one line per invalidation event instead of one line per pass.
+     */
+    lastPrefixMismatch?: TailHygienePrefixMismatch;
 }
 
 interface ToolPartIdentity {
@@ -593,8 +628,10 @@ export function measureTailHygiene(input: {
     const parts: TailHygienePartMeasurement[] = [];
     let t = 0;
     let u = 0;
+    let newestMessagePartStart = 0;
     for (let messageIndex = 0; messageIndex < input.messages.length; messageIndex += 1) {
         const message = input.messages[messageIndex];
+        if (messageIndex === input.messages.length - 1) newestMessagePartStart = parts.length;
         const messageKey = messageIdentity(message, messageIndex);
         const messageSynthetic = isSyntheticMessage(message);
         for (let partIndex = 0; partIndex < message.parts.length; partIndex += 1) {
@@ -717,49 +754,114 @@ export function measureTailHygiene(input: {
         t: Math.max(0, t),
         contentSignature: contentSignature(parts),
         parts,
+        newestMessagePartStart,
     };
 }
 
-function sameMeasuredPrefix(
+function messageIdFromPartKey(key: string): string {
+    const separator = key.indexOf("\0");
+    return separator > 0 ? key.slice(0, separator) : key;
+}
+
+function prefixMismatch(
     baseline: readonly TailHygienePartMeasurement[],
     current: readonly TailHygienePartMeasurement[],
-): { valid: boolean; boundaryAdvanceU: number; queuedDropDeltaU: number } {
+    partIndex: number,
+    field: TailHygienePrefixMismatchField,
+): TailHygienePrefixComparison {
+    return {
+        valid: false,
+        boundaryAdvanceU: 0,
+        queuedDropDeltaU: 0,
+        mismatch: {
+            partIndex,
+            messageId: messageIdFromPartKey(baseline[partIndex]?.key ?? ""),
+            field,
+            frozenParts: baseline.length,
+            measuredParts: current.length,
+        },
+    };
+}
+
+/** Result of comparing a frozen prefix against the current measurement. */
+export interface TailHygienePrefixComparison {
+    valid: boolean;
+    boundaryAdvanceU: number;
+    queuedDropDeltaU: number;
+    /** Present only when the comparison failed; names the first part that stopped matching. */
+    mismatch?: TailHygienePrefixMismatch;
+}
+
+/**
+ * Lane-neutral: both TypeScript walks (OpenCode and Pi) compare their measured
+ * parts through this one implementation so their defer-window rules cannot drift.
+ */
+export function compareMeasuredTailPrefix(
+    baseline: readonly TailHygienePartMeasurement[],
+    current: readonly TailHygienePartMeasurement[],
+): TailHygienePrefixComparison {
     if (current.length < baseline.length) {
-        return { valid: false, boundaryAdvanceU: 0, queuedDropDeltaU: 0 };
+        return prefixMismatch(baseline, current, current.length, "shorter");
     }
     let boundaryAdvanceU = 0;
     let queuedDropDeltaU = 0;
     for (let index = 0; index < baseline.length; index += 1) {
         const before = baseline[index];
         const after = current[index];
-        if (
-            before.key !== after.key ||
-            before.contentHash !== after.contentHash ||
-            before.kind !== after.kind ||
-            before.tokens !== after.tokens ||
-            before.tagNumber !== after.tagNumber ||
-            before.tagStatus !== after.tagStatus
-        ) {
-            return { valid: false, boundaryAdvanceU: 0, queuedDropDeltaU: 0 };
-        }
-        if (!before.protected && after.protected) {
-            return { valid: false, boundaryAdvanceU: 0, queuedDropDeltaU: 0 };
-        }
+        const changedField = comparedField(before, after);
+        if (changedField) return prefixMismatch(baseline, current, index, changedField);
         if (before.protected && !after.protected) {
-            if (after.tagStatus !== "active") {
-                return { valid: false, boundaryAdvanceU: 0, queuedDropDeltaU: 0 };
-            }
             boundaryAdvanceU += after.uTokens;
         } else if (before.queuedForDrop !== after.queuedForDrop) {
-            if (before.tagStatus !== "active" || after.tagStatus !== "active") {
-                return { valid: false, boundaryAdvanceU: 0, queuedDropDeltaU: 0 };
-            }
             queuedDropDeltaU += after.uTokens - before.uTokens;
-        } else if (before.uTokens !== after.uTokens) {
-            return { valid: false, boundaryAdvanceU: 0, queuedDropDeltaU: 0 };
         }
     }
     return { valid: true, boundaryAdvanceU, queuedDropDeltaU };
+}
+
+/**
+ * Name the first field of a frozen part that a defer pass cannot explain, or
+ * null when the part still matches. Protection release and queue membership are
+ * explainable state moves; they are only a mismatch when the tag is no longer
+ * active, because then the U they carry cannot be attributed.
+ */
+function comparedField(
+    before: TailHygienePartMeasurement,
+    after: TailHygienePartMeasurement,
+): TailHygienePrefixMismatchField | null {
+    if (before.key !== after.key) return "key";
+    if (before.contentHash !== after.contentHash) return "contentHash";
+    if (before.kind !== after.kind) return "kind";
+    if (before.tokens !== after.tokens) return "tokens";
+    if (before.tagNumber !== after.tagNumber) return "tagNumber";
+    if (before.tagStatus !== after.tagStatus) return "tagStatus";
+    if (!before.protected && after.protected) return "protection-entered";
+    if (before.protected && !after.protected) {
+        return after.tagStatus === "active" ? null : "protection-exit-inactive";
+    }
+    if (before.queuedForDrop !== after.queuedForDrop) {
+        return before.tagStatus === "active" && after.tagStatus === "active"
+            ? null
+            : "queued-drop-inactive";
+    }
+    return before.uTokens === after.uTokens ? null : "uTokens";
+}
+
+/** One line per invalidation event: where it happened, which field moved, and what was done about it. */
+export function formatTailHygienePrefixMismatch(
+    mismatch: TailHygienePrefixMismatch,
+    baselineGeneration: number,
+): string {
+    return [
+        "tail hygiene prefix invalidated:",
+        `part_index=${mismatch.partIndex}`,
+        `message=${mismatch.messageId || "unknown"}`,
+        `field=${mismatch.field}`,
+        `frozen_parts=${mismatch.frozenParts}`,
+        `measured_parts=${mismatch.measuredParts}`,
+        "action=re-measured",
+        `generation=${baselineGeneration}`,
+    ].join(" ");
 }
 
 function sameReplayValue(before: unknown, after: unknown): boolean {
@@ -852,6 +954,47 @@ function retainBaselineMeasurement(
     }
 }
 
+/**
+ * Freeze a measurement into a baseline prefix plus this pass's delta.
+ *
+ * The newest message is deliberately left out of the frozen prefix: while it is
+ * newest its parts are still in flight (text absorbs a trailing blank, reasoning
+ * is demoted once it stops being newest, new parts arrive mid-turn), so freezing
+ * them guarantees a mismatch on the very next pass. Everything after the cut is
+ * re-measured on every pass, so the reported totals are unchanged.
+ */
+export function freezeTailHygieneMeasurement(measured: TailHygieneMeasurement): {
+    baselineU: number;
+    baselineT: number;
+    turnDeltaU: number;
+    turnDeltaT: number;
+    baselineParts: TailHygienePartMeasurement[];
+} {
+    const cut = Math.min(Math.max(0, measured.newestMessagePartStart), measured.parts.length);
+    let baselineT = 0;
+    let baselineU = 0;
+    for (let index = 0; index < cut; index += 1) {
+        baselineT += measured.parts[index].tokens;
+        baselineU += measured.parts[index].uTokens;
+    }
+    let turnDeltaT = 0;
+    let turnDeltaU = 0;
+    for (let index = cut; index < measured.parts.length; index += 1) {
+        const part = measured.parts[index];
+        turnDeltaT += part.tokens;
+        if (part.kind !== "toolOutput" || !part.protected) turnDeltaU += part.uTokens;
+    }
+    baselineT = Math.max(0, baselineT);
+    return {
+        baselineU: Math.min(Math.max(0, baselineU), baselineT),
+        baselineT,
+        turnDeltaU,
+        turnDeltaT,
+        baselineParts:
+            cut === measured.parts.length ? measured.parts : measured.parts.slice(0, cut),
+    };
+}
+
 export function refreshTailHygieneBaseline(input: {
     messages: readonly MessageLike[];
     tags: readonly TagEntry[];
@@ -893,39 +1036,30 @@ export function refreshTailHygieneBaseline(input: {
               measured,
               size: 2 * structuralSize(input.messages) + 512 * input.tags.length,
           };
-    retainBaselineMeasurement(
-        input.cacheBusting || !input.previous ? measured.parts : input.previous.baselineParts,
-        memo,
-    );
     const now = input.now ?? Date.now();
-    if (!input.cacheBusting && input.previous?.generationInvalidated) {
-        return { ...input.previous, contentSignature: measured.contentSignature };
-    }
-    if (input.cacheBusting || !input.previous) {
+    const refrozen = (mismatch?: TailHygienePrefixMismatch): TailHygieneBaseline => {
+        const frozen = freezeTailHygieneMeasurement(measured);
+        retainBaselineMeasurement(frozen.baselineParts, memo);
         return {
-            baselineU: measured.u,
-            baselineT: measured.t,
-            turnDeltaU: 0,
-            turnDeltaT: 0,
+            ...frozen,
             baselineGeneration: (input.previous?.baselineGeneration ?? 0) + 1,
             computedAt: now,
             evaluable: true,
             generationInvalidated: false,
-            baselineParts: measured.parts,
             contentSignature: measured.contentSignature,
             channel1PostReduceGrace: input.previous?.channel1PostReduceGrace,
+            lastPrefixMismatch: mismatch,
         };
-    }
+    };
+    if (input.cacheBusting || !input.previous) return refrozen();
 
-    const prefix = sameMeasuredPrefix(input.previous.baselineParts, measured.parts);
-    if (!prefix.valid) {
-        return {
-            ...input.previous,
-            evaluable: false,
-            generationInvalidated: true,
-            contentSignature: measured.contentSignature,
-        };
-    }
+    const prefix = compareMeasuredTailPrefix(input.previous.baselineParts, measured.parts);
+    // A defer pass cannot attribute this change to an append, and this walk measures
+    // the rendered tail rather than producing wire bytes, so re-measure instead of
+    // holding the stale baseline until the next cache-busting pass. Holding left the
+    // reclaim reminders unevaluable for as long as the session went without a bust.
+    if (!prefix.valid) return refrozen(prefix.mismatch);
+    retainBaselineMeasurement(input.previous.baselineParts, memo);
     let turnDeltaT = 0;
     // Queue membership is an action-state delta: it reduces the actionable token
     // backlog without changing the frozen baseline or still-rendered token total.
@@ -948,6 +1082,7 @@ export function refreshTailHygieneBaseline(input: {
         evaluable: true,
         generationInvalidated: false,
         contentSignature: measured.contentSignature,
+        lastPrefixMismatch: undefined,
     };
 }
 

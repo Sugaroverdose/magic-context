@@ -76,6 +76,45 @@ pub(crate) struct TailHygieneMeasurement {
     pub(crate) t: i64,
     pub(crate) content_signature: String,
     pub(crate) parts: Vec<TailHygienePartMeasurement>,
+    /// First index in `parts` that belongs to the newest message; the frozen prefix stops here.
+    pub(crate) newest_message_part_start: usize,
+}
+
+/// First point where a defer pass stopped matching the frozen prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TailHygienePrefixMismatch {
+    /// Index into the frozen prefix; when the measured tail is shorter, the first index it lacks.
+    pub(crate) part_index: usize,
+    /// Message the mismatching block belongs to, so a cause can be attributed to a message shape.
+    pub(crate) message_id: String,
+    pub(crate) field: &'static str,
+    pub(crate) frozen_parts: usize,
+    pub(crate) measured_parts: usize,
+}
+
+impl TailHygienePrefixMismatch {
+    /// One line per invalidation event: where it happened, which field moved, and the response.
+    pub(crate) fn diagnostic_line(&self, baseline_generation: u64) -> String {
+        format!(
+            "tail hygiene prefix invalidated: part_index={} message={} field={} frozen_parts={} measured_parts={} action=re-measured generation={}",
+            self.part_index,
+            if self.message_id.is_empty() {
+                "unknown"
+            } else {
+                self.message_id.as_str()
+            },
+            self.field,
+            self.frozen_parts,
+            self.measured_parts,
+            baseline_generation,
+        )
+    }
+}
+
+/// A refreshed baseline plus the mismatch that forced a re-measure, when there was one.
+pub(crate) struct TailHygieneRefresh {
+    pub(crate) baseline: TailHygieneBaseline,
+    pub(crate) prefix_mismatch: Option<TailHygienePrefixMismatch>,
 }
 
 /// Count distinct user messages that reached the tail as authored turns.
@@ -688,52 +727,162 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
         let _ = write!(signature_input, "{}:{}\0", part.key, part.content_hash);
     }
     let t = t.max(0);
+    // Blocks are measured one-to-one and in projection order, so the newest
+    // message's blocks are the trailing run that shares the last block's mid.
+    let mut newest_message_part_start = parts.len();
+    if let Some(newest_mid) = projection.blocks.last().map(|block| block.mid.as_str()) {
+        while newest_message_part_start > 0
+            && projection.blocks[newest_message_part_start - 1].mid == newest_mid
+        {
+            newest_message_part_start -= 1;
+        }
+    }
     TailHygieneMeasurement {
         u: u.clamp(0, t),
         t,
         content_signature: hex_digest(signature_input),
         parts,
+        newest_message_part_start,
     }
+}
+
+enum PrefixComparison {
+    Valid {
+        boundary_advance_u: i64,
+        queued_drop_delta_u: i64,
+    },
+    Mismatch(TailHygienePrefixMismatch),
+}
+
+/// Message id of a measured block, recovered from its `{mid}#{index}\0{kind}` key.
+fn message_id_from_part_key(key: &str) -> &str {
+    let block_id = key.split('\0').next().unwrap_or(key);
+    crate::ck_wire::split_block_id(block_id).map_or(block_id, |(mid, _)| mid)
+}
+
+/// Name the first field of a frozen part that a defer pass cannot explain, or None
+/// when the part still matches. Protection release and queue membership are
+/// explainable state moves; they are only a mismatch when the tag is no longer
+/// active, because then the U they carry cannot be attributed.
+fn compared_field(
+    before: &TailHygienePartMeasurement,
+    after: &TailHygienePartMeasurement,
+) -> Option<&'static str> {
+    if before.key != after.key {
+        return Some("key");
+    }
+    if before.content_hash != after.content_hash {
+        return Some("contentHash");
+    }
+    if before.kind != after.kind {
+        return Some("kind");
+    }
+    if before.tokens != after.tokens {
+        return Some("tokens");
+    }
+    if before.tag_number != after.tag_number {
+        return Some("tagNumber");
+    }
+    if before.tag_status != after.tag_status {
+        return Some("tagStatus");
+    }
+    if !before.protected && after.protected {
+        return Some("protection-entered");
+    }
+    if before.protected && !after.protected {
+        return (after.tag_status.as_deref() != Some("active"))
+            .then_some("protection-exit-inactive");
+    }
+    if before.queued_for_drop != after.queued_for_drop {
+        return (before.tag_status.as_deref() != Some("active")
+            || after.tag_status.as_deref() != Some("active"))
+        .then_some("queued-drop-inactive");
+    }
+    (before.u_tokens != after.u_tokens).then_some("uTokens")
 }
 
 fn same_measured_prefix(
     baseline: &[TailHygienePartMeasurement],
     current: &[TailHygienePartMeasurement],
-) -> Option<(i64, i64)> {
+) -> PrefixComparison {
+    let mismatch = |part_index: usize, field: &'static str| {
+        PrefixComparison::Mismatch(TailHygienePrefixMismatch {
+            part_index,
+            message_id: baseline
+                .get(part_index)
+                .map(|part| message_id_from_part_key(&part.key).to_string())
+                .unwrap_or_default(),
+            field,
+            frozen_parts: baseline.len(),
+            measured_parts: current.len(),
+        })
+    };
     if current.len() < baseline.len() {
-        return None;
+        return mismatch(current.len(), "shorter");
     }
     let mut boundary_advance_u = 0i64;
     let mut queued_drop_delta_u = 0i64;
-    for (before, after) in baseline.iter().zip(current) {
-        if before.key != after.key
-            || before.content_hash != after.content_hash
-            || before.kind != after.kind
-            || before.tokens != after.tokens
-            || before.tag_number != after.tag_number
-            || before.tag_status != after.tag_status
-            || (!before.protected && after.protected)
-        {
-            return None;
+    for (index, (before, after)) in baseline.iter().zip(current).enumerate() {
+        if let Some(field) = compared_field(before, after) {
+            return mismatch(index, field);
         }
         if before.protected && !after.protected {
-            if after.tag_status.as_deref() != Some("active") {
-                return None;
-            }
             boundary_advance_u = boundary_advance_u.saturating_add(after.u_tokens);
         } else if before.queued_for_drop != after.queued_for_drop {
-            if before.tag_status.as_deref() != Some("active")
-                || after.tag_status.as_deref() != Some("active")
-            {
-                return None;
-            }
             queued_drop_delta_u =
                 queued_drop_delta_u.saturating_add(after.u_tokens.saturating_sub(before.u_tokens));
-        } else if before.u_tokens != after.u_tokens {
-            return None;
         }
     }
-    Some((boundary_advance_u, queued_drop_delta_u))
+    PrefixComparison::Valid {
+        boundary_advance_u,
+        queued_drop_delta_u,
+    }
+}
+
+/// Frozen prefix plus the delta the freezing pass itself carries.
+struct FrozenMeasurement {
+    baseline_u: i64,
+    baseline_t: i64,
+    turn_delta_u: i64,
+    turn_delta_t: i64,
+    baseline_parts: Vec<TailHygienePartMeasurement>,
+}
+
+/// Freeze a measurement into a baseline prefix plus this pass's delta.
+///
+/// The newest message is deliberately left out of the frozen prefix: while it is
+/// newest its blocks are still in flight (text is still being appended, reasoning
+/// is demoted once it stops being newest, new blocks keep arriving), so freezing
+/// them guarantees a mismatch on the very next pass. Everything after the cut is
+/// re-measured on every pass, so the reported totals are unchanged.
+fn freeze_tail_hygiene_measurement(
+    mut parts: Vec<TailHygienePartMeasurement>,
+    newest_message_part_start: usize,
+) -> FrozenMeasurement {
+    let cut = newest_message_part_start.min(parts.len());
+    let newest = parts.split_off(cut);
+    let mut baseline_t = 0i64;
+    let mut baseline_u = 0i64;
+    for part in &parts {
+        baseline_t = baseline_t.saturating_add(part.tokens.max(0));
+        baseline_u = baseline_u.saturating_add(part.u_tokens.max(0));
+    }
+    let mut turn_delta_t = 0i64;
+    let mut turn_delta_u = 0i64;
+    for part in &newest {
+        turn_delta_t = turn_delta_t.saturating_add(part.tokens);
+        if part.kind != TailHygienePartKind::ToolOutput || !part.protected {
+            turn_delta_u = turn_delta_u.saturating_add(part.u_tokens);
+        }
+    }
+    let baseline_t = baseline_t.max(0);
+    FrozenMeasurement {
+        baseline_u: baseline_u.clamp(0, baseline_t),
+        baseline_t,
+        turn_delta_u,
+        turn_delta_t,
+        baseline_parts: parts,
+    }
 }
 
 pub(crate) fn refresh_tail_hygiene_baseline(
@@ -741,63 +890,81 @@ pub(crate) fn refresh_tail_hygiene_baseline(
     cache_busting: bool,
     previous: Option<&TailHygieneBaseline>,
     now_ms: i64,
-) -> TailHygieneBaseline {
-    if !cache_busting && previous.is_some_and(|baseline| baseline.generation_invalidated) {
-        let mut baseline = previous.expect("checked previous baseline").clone();
-        baseline.content_signature = measured.content_signature;
-        return baseline;
+) -> TailHygieneRefresh {
+    let TailHygieneMeasurement {
+        content_signature,
+        parts,
+        newest_message_part_start,
+        ..
+    } = measured;
+    // A defer pass cannot attribute an unexplainable change to an append, and this
+    // walk measures the rendered tail rather than producing wire bytes, so it
+    // re-measures instead of holding the stale baseline until the next cache-busting
+    // pass. Holding left the reclaim reminders unevaluable for as long as the session
+    // went without a bust.
+    let comparison = match previous {
+        Some(previous) if !cache_busting => {
+            Some(same_measured_prefix(&previous.baseline_parts, &parts))
+        }
+        _ => None,
+    };
+    let (valid_delta, mismatch) = match comparison {
+        Some(PrefixComparison::Valid {
+            boundary_advance_u,
+            queued_drop_delta_u,
+        }) => (Some((boundary_advance_u, queued_drop_delta_u)), None),
+        Some(PrefixComparison::Mismatch(mismatch)) => (None, Some(mismatch)),
+        None => (None, None),
+    };
+    if let (Some(previous), Some((boundary_advance_u, queued_drop_delta_u))) =
+        (previous, valid_delta)
+    {
+        let mut turn_delta_t = 0i64;
+        // Queue membership is an action-state delta: it reduces the actionable token
+        // backlog while the frozen baseline and still-rendered token total remain unchanged.
+        let mut turn_delta_u = boundary_advance_u.saturating_add(queued_drop_delta_u);
+        for part in &parts[previous.baseline_parts.len()..] {
+            turn_delta_t = turn_delta_t.saturating_add(part.tokens);
+            // Tool-output tokens are not reclaimable while their parts are protected. As new
+            // outputs extend the measured tail, include outputs that have aged out of protection.
+            if part.kind != TailHygienePartKind::ToolOutput || !part.protected {
+                turn_delta_u = turn_delta_u.saturating_add(part.u_tokens);
+            }
+        }
+        return TailHygieneRefresh {
+            baseline: TailHygieneBaseline {
+                turn_delta_u,
+                turn_delta_t,
+                evaluable: true,
+                generation_invalidated: false,
+                content_signature,
+                ..previous.clone()
+            },
+            prefix_mismatch: None,
+        };
     }
-    if cache_busting || previous.is_none() {
-        return TailHygieneBaseline {
-            baseline_u: measured.u,
-            baseline_t: measured.t,
-            turn_delta_u: 0,
-            turn_delta_t: 0,
+    let frozen = freeze_tail_hygiene_measurement(parts, newest_message_part_start);
+    TailHygieneRefresh {
+        baseline: TailHygieneBaseline {
+            baseline_u: frozen.baseline_u,
+            baseline_t: frozen.baseline_t,
+            turn_delta_u: frozen.turn_delta_u,
+            turn_delta_t: frozen.turn_delta_t,
             baseline_generation: previous
                 .map_or(0, |baseline| baseline.baseline_generation)
                 .saturating_add(1),
             computed_at_ms: now_ms,
             evaluable: true,
             generation_invalidated: false,
-            baseline_parts: measured.parts,
-            content_signature: measured.content_signature,
+            baseline_parts: frozen.baseline_parts,
+            content_signature,
             channel1_post_reduce_grace_baseline_u: previous
                 .and_then(|baseline| baseline.channel1_post_reduce_grace_baseline_u),
             channel1_post_reduce_grace_pre_level: previous
                 .map(|baseline| baseline.channel1_post_reduce_grace_pre_level.clone())
                 .unwrap_or_default(),
-        };
-    }
-
-    let previous = previous.expect("non-busting refresh has a previous baseline");
-    let Some((boundary_advance_u, queued_drop_delta_u)) =
-        same_measured_prefix(&previous.baseline_parts, &measured.parts)
-    else {
-        let mut invalidated = previous.clone();
-        invalidated.evaluable = false;
-        invalidated.generation_invalidated = true;
-        invalidated.content_signature = measured.content_signature;
-        return invalidated;
-    };
-    let mut turn_delta_t = 0i64;
-    // Queue membership is an action-state delta: it reduces the actionable token
-    // backlog while the frozen baseline and still-rendered token total remain unchanged.
-    let mut turn_delta_u = boundary_advance_u.saturating_add(queued_drop_delta_u);
-    for part in &measured.parts[previous.baseline_parts.len()..] {
-        turn_delta_t = turn_delta_t.saturating_add(part.tokens);
-        // Tool-output tokens are not reclaimable while their parts are protected. As new
-        // outputs extend the measured tail, include outputs that have aged out of protection.
-        if part.kind != TailHygienePartKind::ToolOutput || !part.protected {
-            turn_delta_u = turn_delta_u.saturating_add(part.u_tokens);
-        }
-    }
-    TailHygieneBaseline {
-        turn_delta_u,
-        turn_delta_t,
-        evaluable: true,
-        generation_invalidated: false,
-        content_signature: measured.content_signature,
-        ..previous.clone()
+        },
+        prefix_mismatch: mismatch,
     }
 }
 
@@ -902,6 +1069,16 @@ mod tests {
         }
     }
 
+    /// Refresh for assertions that only read the baseline, not the named mismatch.
+    fn refreshed_baseline(
+        measured: TailHygieneMeasurement,
+        cache_busting: bool,
+        previous: Option<&TailHygieneBaseline>,
+        now_ms: i64,
+    ) -> TailHygieneBaseline {
+        refresh_tail_hygiene_baseline(measured, cache_busting, previous, now_ms).baseline
+    }
+
     #[test]
     fn token_window_excludes_call_and_result_mass_from_channel1_u() {
         let mut messages = Vec::new();
@@ -1002,7 +1179,7 @@ mod tests {
             2,
             &HashSet::new(),
         );
-        let baseline = refresh_tail_hygiene_baseline(measured, true, None, 10);
+        let baseline = refreshed_baseline(measured, true, None, 10);
         assert_eq!(baseline.baseline_u, 0);
 
         let mut appended = base;
@@ -1017,7 +1194,7 @@ mod tests {
             2,
             &HashSet::new(),
         );
-        let defer = refresh_tail_hygiene_baseline(measured, false, Some(&baseline), 20);
+        let defer = refreshed_baseline(measured, false, Some(&baseline), 20);
         assert!(defer.evaluable);
         assert!(defer.turn_delta_t > 0);
         assert!(
@@ -1045,7 +1222,7 @@ mod tests {
             &empty,
             &empty,
         );
-        let baseline = refresh_tail_hygiene_baseline(baseline_measurement, true, None, 10);
+        let baseline = refreshed_baseline(baseline_measurement, true, None, 10);
 
         let reminder =
             "\n\n<system-reminder>\nHousekeeping backlog: spent tool outputs are reclaimable.\n</system-reminder>";
@@ -1093,8 +1270,7 @@ mod tests {
             &empty,
             &empty,
         );
-        let protected_defer =
-            refresh_tail_hygiene_baseline(protected_measurement, false, Some(&baseline), 20);
+        let protected_defer = refreshed_baseline(protected_measurement, false, Some(&baseline), 20);
         let aged_measurement = measure_tail_hygiene_with_pending_drops(
             &projection,
             &CoreState::default(),
@@ -1104,12 +1280,8 @@ mod tests {
             &empty,
             &empty,
         );
-        let aged_defer = refresh_tail_hygiene_baseline(
-            aged_measurement.clone(),
-            false,
-            Some(&protected_defer),
-            30,
-        );
+        let aged_defer =
+            refreshed_baseline(aged_measurement.clone(), false, Some(&protected_defer), 30);
 
         assert_eq!(effective_tail_hygiene(&protected_defer).0, 0);
         assert_eq!(
@@ -1146,7 +1318,7 @@ mod tests {
             0,
             &HashSet::new(),
         );
-        let baseline = refresh_tail_hygiene_baseline(initial.clone(), true, None, 10);
+        let baseline = refreshed_baseline(initial.clone(), true, None, 10);
         let queued_targets = HashSet::from(["queued#0".to_string()]);
         let queued = measure_tail_hygiene_with_pending_drops(
             &projection,
@@ -1167,7 +1339,7 @@ mod tests {
             &HashSet::new(),
         )
         .u;
-        let defer = refresh_tail_hygiene_baseline(queued.clone(), false, Some(&baseline), 20);
+        let defer = refreshed_baseline(queued.clone(), false, Some(&baseline), 20);
 
         assert_eq!(queued.t, initial.t);
         assert_eq!(queued.u, initial.u - queued_mass);
@@ -1236,11 +1408,13 @@ mod tests {
     }
 
     #[test]
-    fn non_append_mutation_invalidates_until_a_bust() {
-        let messages = vec![text("m", 1, "original")];
+    fn non_append_mutation_is_named_and_re_measured_on_the_defer_pass() {
+        // The newest message is never frozen, so the mutated message needs one after
+        // it to land inside the frozen prefix that a defer pass compares.
+        let messages = vec![text("m", 1, "original"), text("newest", 2, "newest turn")];
         let tags = vec![tag(1, "m#0")];
         let projection = project_messages(&messages).unwrap();
-        let baseline = refresh_tail_hygiene_baseline(
+        let baseline = refreshed_baseline(
             measure_tail_hygiene(
                 &projection,
                 &CoreState::default(),
@@ -1253,8 +1427,65 @@ mod tests {
             None,
             10,
         );
-        let projection = project_messages(&[text("m", 1, "changed")]).unwrap();
-        let invalid = refresh_tail_hygiene_baseline(
+        let changed = vec![
+            text("m", 1, "changed and then some"),
+            text("newest", 2, "newest turn"),
+        ];
+        let projection = project_messages(&changed).unwrap();
+        let measured = measure_tail_hygiene(
+            &projection,
+            &CoreState::default(),
+            None,
+            &tags,
+            0,
+            &HashSet::new(),
+        );
+        let re_measured =
+            refresh_tail_hygiene_baseline(measured.clone(), false, Some(&baseline), 20);
+        let mismatch = re_measured
+            .prefix_mismatch
+            .as_ref()
+            .expect("an unattributable prefix change must be named");
+
+        assert_eq!(mismatch.part_index, 0);
+        assert_eq!(mismatch.message_id, "m");
+        assert_eq!(mismatch.field, "contentHash");
+        assert!(mismatch
+            .diagnostic_line(re_measured.baseline.baseline_generation)
+            .contains("message=m field=contentHash"));
+        // The mismatch is reported and measured on this same pass instead of being
+        // held until the next cache-busting pass.
+        assert!(re_measured.baseline.evaluable);
+        assert!(!re_measured.baseline.generation_invalidated);
+        assert_eq!(
+            re_measured.baseline.baseline_generation,
+            baseline.baseline_generation + 1
+        );
+        assert_eq!(
+            effective_tail_hygiene(&re_measured.baseline),
+            (measured.u, measured.t)
+        );
+
+        // One invalidation event, one diagnostic: the next unchanged pass names none.
+        let steady =
+            refresh_tail_hygiene_baseline(measured, false, Some(&re_measured.baseline), 30);
+        assert!(steady.prefix_mismatch.is_none());
+        assert_eq!(
+            steady.baseline.baseline_generation,
+            re_measured.baseline.baseline_generation
+        );
+    }
+
+    #[test]
+    fn compaction_shrink_and_tag_loss_report_their_own_causes() {
+        let messages = vec![
+            text("first", 1, &"first mass ".repeat(200)),
+            text("second", 2, &"second mass ".repeat(200)),
+            text("newest", 3, "newest turn"),
+        ];
+        let tags = vec![tag(1, "first#0"), tag(2, "second#0")];
+        let projection = project_messages(&messages).unwrap();
+        let frozen = refreshed_baseline(
             measure_tail_hygiene(
                 &projection,
                 &CoreState::default(),
@@ -1263,12 +1494,64 @@ mod tests {
                 0,
                 &HashSet::new(),
             ),
+            true,
+            None,
+            10,
+        );
+
+        // A coverage advance folds historical messages away, so the measured tail no
+        // longer reaches the end of the frozen prefix.
+        let shrunk = project_messages(&[text("newest", 3, "newest turn")]).unwrap();
+        let shorter = refresh_tail_hygiene_baseline(
+            measure_tail_hygiene(
+                &shrunk,
+                &CoreState::default(),
+                None,
+                &tags,
+                0,
+                &HashSet::new(),
+            ),
             false,
-            Some(&baseline),
+            Some(&frozen),
             20,
         );
-        assert!(!invalid.evaluable);
-        assert!(invalid.generation_invalidated);
+        // A tag row disappearing changes what an already-frozen block contributes.
+        let untagged = refresh_tail_hygiene_baseline(
+            measure_tail_hygiene(
+                &projection,
+                &CoreState::default(),
+                None,
+                &tags[1..],
+                0,
+                &HashSet::new(),
+            ),
+            false,
+            Some(&frozen),
+            20,
+        );
+
+        assert_eq!(
+            shorter
+                .prefix_mismatch
+                .as_ref()
+                .map(|mismatch| mismatch.field),
+            Some("shorter")
+        );
+        assert_eq!(
+            untagged
+                .prefix_mismatch
+                .as_ref()
+                .map(|mismatch| (mismatch.field, mismatch.message_id.as_str())),
+            Some(("tagNumber", "first"))
+        );
+        for refreshed in [&shorter, &untagged] {
+            assert!(refreshed.baseline.evaluable);
+            assert!(!refreshed.baseline.generation_invalidated);
+            assert_eq!(
+                refreshed.baseline.baseline_generation,
+                frozen.baseline_generation + 1
+            );
+        }
     }
 
     #[derive(Debug, Deserialize)]
