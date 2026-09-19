@@ -106,10 +106,20 @@ export function createRustRefusalRecovery(options: RustRefusalRecoveryOptions) {
             schedule(sessionId, watcher);
             return;
         }
-        const stillRefusedStep =
+        // OpenCode persists the assistant shell before it records a transform error. The arm
+        // already proves this exact user turn was refused, so its unfinished assistant child is
+        // still the refused step; a completed child without the refusal error is not.
+        const matchingAssistant =
             latest?.role === "assistant" &&
-            errorContainsReconnectRefusal(latest.error) &&
-            (latest.parentID === undefined || latest.parentID === watcher.refusedUserMessageId);
+            (latest.parentID === undefined || latest.parentID === watcher.refusedUserMessageId)
+                ? latest
+                : null;
+        const stillRefusedStep =
+            matchingAssistant !== null &&
+            (errorContainsReconnectRefusal(matchingAssistant.error) ||
+                (matchingAssistant.parentID === watcher.refusedUserMessageId &&
+                    matchingAssistant.error === undefined &&
+                    matchingAssistant.completedAt === undefined));
         if (!stillRefusedStep) {
             cancel(sessionId);
             sessionLog(

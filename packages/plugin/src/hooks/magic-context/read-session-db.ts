@@ -38,6 +38,7 @@ export interface LatestPersistedMessage {
     id: string;
     role: string;
     parentID?: string;
+    completedAt?: number;
     error?: unknown;
 }
 
@@ -442,10 +443,15 @@ export function latestPersistedMessageForRecovery(
         try {
             const data = JSON.parse(row.data) as Record<string, unknown>;
             if (typeof data.role !== "string") return null;
+            const time =
+                data.time && typeof data.time === "object"
+                    ? (data.time as Record<string, unknown>)
+                    : null;
             return {
                 id: row.id,
                 role: data.role,
                 ...(typeof data.parentID === "string" ? { parentID: data.parentID } : {}),
+                ...(typeof time?.completed === "number" ? { completedAt: time.completed } : {}),
                 ...(data.error === undefined ? {} : { error: data.error }),
             };
         } catch {
