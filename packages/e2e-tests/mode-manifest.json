@@ -238,7 +238,12 @@
                 "pi",
                 "omp"
             ],
-            "behavior": true
+            "behavior": true,
+            "divergences": [{
+                "host": "opencode2",
+                "reason": "Native todo triggers are unavailable; retain real ctx_note/ctx_reduce/publication/memory checks and assert a GA-owned checkpoint instead of a v1 marker",
+                "contract_ref": "packages/plugin/PARITY.md#native-todos"
+            }]
         },
         {
             "path": "tests/memory-injection.test.ts",
