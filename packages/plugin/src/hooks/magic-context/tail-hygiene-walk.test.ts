@@ -2,6 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { computeProtectionWindow } from "../../features/magic-context/protection-window";
 import { CTX_REDUCE_KEEP } from "../../features/magic-context/reclaim-protection";
 import type { TagEntry } from "../../features/magic-context/types";
+import * as stableJson from "../../shared/stable-json";
 import { buildChannel1Reminder, decideChannel1 } from "./ctx-reduce-nudge";
 import * as formattingModule from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -933,5 +934,80 @@ describe("tail hygiene protectedTagNumbers set form (token window)", () => {
         // Non-tool message tag 5 has its eligibility decided solely by independent protections (prose text)
         const msgPart = measured.parts.find((p) => p.tagNumber === 5);
         expect(msgPart?.kind).toBe("text");
+    });
+});
+
+describe("tail baseline replay memo", () => {
+    it("reuses exact replay measurements without serializing tool input again", () => {
+        const input = {
+            messages: [
+                nativeTool("memo-owner", "memo-call", { path: "unique-memo-path" }, "memo output"),
+            ],
+            tags: [tag(1, "memo-call", "tool", { toolOwnerMessageId: "memo-owner" })],
+            protectedTagNumbers: new Set<number>(),
+            cacheBusting: false,
+        };
+        const first = refreshTailHygieneBaseline(input);
+        const serialize = spyOn(stableJson, "stableStringify");
+        try {
+            const replay = refreshTailHygieneBaseline({
+                ...structuredClone(input),
+                previous: first,
+            });
+            expect(replay).toEqual(first);
+            expect(serialize).not.toHaveBeenCalled();
+            const changed = structuredClone(input);
+            (
+                changed.messages[0].parts[0] as { state: { input: { path: string } } }
+            ).state.input.path = "unique-memo-PATh";
+            const invalidated = refreshTailHygieneBaseline({ ...changed, previous: replay });
+            expect(invalidated.generationInvalidated).toBe(true);
+            expect(invalidated.contentSignature).not.toBe(first.contentSignature);
+            expect(serialize).toHaveBeenCalled();
+        } finally {
+            serialize.mockRestore();
+        }
+    });
+
+    it("invalidates memo attribution on pending-drop, protection and tag changes", () => {
+        const input = {
+            messages: [
+                nativeTool(
+                    "memo-owner-2",
+                    "memo-call-2",
+                    { path: "file" },
+                    "large output ".repeat(200),
+                ),
+            ],
+            tags: [tag(2, "memo-call-2", "tool", { toolOwnerMessageId: "memo-owner-2" })],
+            protectedTagNumbers: new Set<number>(),
+            cacheBusting: false,
+        };
+        const first = refreshTailHygieneBaseline(input);
+        expect(effectiveTailHygiene(first).u).toBeGreaterThan(0);
+        const queued = refreshTailHygieneBaseline({
+            ...input,
+            previous: first,
+            pendingDropTagNumbers: new Set([2]),
+        });
+        expect(effectiveTailHygiene(queued).u).toBe(0);
+        const unqueued = refreshTailHygieneBaseline({ ...input, previous: queued });
+        expect(effectiveTailHygiene(unqueued).u).toBe(effectiveTailHygiene(first).u);
+        const protectedReplay = refreshTailHygieneBaseline({
+            ...input,
+            previous: unqueued,
+            protectedTagNumbers: new Set([2]),
+        });
+        expect(protectedReplay.generationInvalidated).toBe(true);
+        input.tags[0].status = "dropped";
+        const dropped = refreshTailHygieneBaseline({ ...input, previous: first });
+        expect(dropped.generationInvalidated).toBe(true);
+        const rebuilt = refreshTailHygieneBaseline({
+            ...input,
+            previous: dropped,
+            cacheBusting: true,
+        });
+        expect(rebuilt.generationInvalidated).toBe(false);
+        expect(effectiveTailHygiene(rebuilt).u).toBe(0);
     });
 });

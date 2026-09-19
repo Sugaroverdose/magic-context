@@ -762,6 +762,96 @@ function sameMeasuredPrefix(
     return { valid: true, boundaryAdvanceU, queuedDropDeltaU };
 }
 
+function sameReplayValue(before: unknown, after: unknown): boolean {
+    if (before === after) return true;
+    if (!before || !after || typeof before !== "object" || typeof after !== "object") {
+        return false;
+    }
+    if (Array.isArray(before)) {
+        if (!Array.isArray(after) || before.length !== after.length) return false;
+        for (let index = 0; index < before.length; index += 1) {
+            if (!sameReplayValue(before[index], after[index])) return false;
+        }
+        return true;
+    }
+    if (Array.isArray(after)) return false;
+    const prototype = Object.getPrototypeOf(before);
+    if (
+        (prototype !== Object.prototype && prototype !== null) ||
+        Object.getPrototypeOf(after) !== prototype
+    )
+        return false;
+    const left = before as Record<string, unknown>;
+    const right = after as Record<string, unknown>;
+    const keys = Object.keys(left);
+    if (keys.length !== Object.keys(right).length) return false;
+    for (const key of keys) {
+        if (!Object.hasOwn(right, key) || !sameReplayValue(left[key], right[key])) return false;
+    }
+    return true;
+}
+
+function sameNumbers(before: ReadonlySet<number>, after: ReadonlySet<number>): boolean {
+    if (before.size !== after.size) return false;
+    for (const number of before) if (!after.has(number)) return false;
+    return true;
+}
+
+function sameReplayMessages(
+    before: readonly MessageLike[],
+    after: readonly MessageLike[],
+): boolean {
+    if (before.length !== after.length) return false;
+    for (let index = 0; index < before.length; index += 1) {
+        const left = before[index];
+        const right = after[index];
+        if (
+            left.info.id !== right.info.id ||
+            left.info.role !== right.info.role ||
+            left.info.summary !== right.info.summary ||
+            !sameReplayValue(left.parts, right.parts)
+        )
+            return false;
+    }
+    return true;
+}
+
+interface BaselineMeasurementMemo {
+    messages: readonly MessageLike[];
+    tags: readonly TagEntry[];
+    protectedTagNumbers: ReadonlySet<number>;
+    pendingDropTagNumbers: ReadonlySet<number>;
+    measured: TailHygieneMeasurement;
+    size: number;
+}
+
+// Keep at most eight copied message/tag inputs, bounded by an estimated 32 MiB.
+// Recompute the measurement when message parts, tag ownership/status, protected
+// tag numbers, or queued drops change. Comparing copied values catches historical
+// edits through reused host objects. Only id/role/summary and parts affect token
+// accounting; unrelated host metadata is not part of this cache key.
+const baselineMeasurementMemo = new Map<TailHygienePartMeasurement[], BaselineMeasurementMemo>();
+const MAX_BASELINE_MEMO_SIZE = 32 * 1024 * 1024;
+let baselineMemoSize = 0;
+
+function retainBaselineMeasurement(
+    key: TailHygienePartMeasurement[],
+    memo: BaselineMeasurementMemo,
+): void {
+    const previous = baselineMeasurementMemo.get(key);
+    if (previous) baselineMemoSize -= previous.size;
+    baselineMeasurementMemo.delete(key);
+    if (memo.size > MAX_BASELINE_MEMO_SIZE) return;
+    baselineMeasurementMemo.set(key, memo);
+    baselineMemoSize += memo.size;
+    while (baselineMemoSize > MAX_BASELINE_MEMO_SIZE || baselineMeasurementMemo.size > 8) {
+        const oldest = baselineMeasurementMemo.keys().next().value;
+        if (!oldest) break;
+        baselineMemoSize -= baselineMeasurementMemo.get(oldest)?.size ?? 0;
+        baselineMeasurementMemo.delete(oldest);
+    }
+}
+
 export function refreshTailHygieneBaseline(input: {
     messages: readonly MessageLike[];
     tags: readonly TagEntry[];
@@ -772,7 +862,41 @@ export function refreshTailHygieneBaseline(input: {
     previous?: TailHygieneBaseline;
     now?: number;
 }): TailHygieneBaseline {
-    const measured = measureTailHygiene(input);
+    const pendingDropTagNumbers = input.pendingDropTagNumbers ?? new Set<number>();
+    const cached = input.previous
+        ? baselineMeasurementMemo.get(input.previous.baselineParts)
+        : undefined;
+    const hit =
+        !input.cacheBusting &&
+        cached &&
+        sameReplayMessages(cached.messages, input.messages) &&
+        sameReplayValue(cached.tags, input.tags) &&
+        sameNumbers(cached.protectedTagNumbers, input.protectedTagNumbers) &&
+        sameNumbers(cached.pendingDropTagNumbers, pendingDropTagNumbers);
+    const measured = hit ? cached.measured : measureTailHygiene(input);
+    const memo = hit
+        ? cached
+        : {
+              messages: structuredClone(
+                  input.messages.map((message) => ({
+                      info: {
+                          id: message.info.id,
+                          role: message.info.role,
+                          summary: message.info.summary,
+                      },
+                      parts: message.parts,
+                  })),
+              ),
+              tags: structuredClone(input.tags),
+              protectedTagNumbers: new Set(input.protectedTagNumbers),
+              pendingDropTagNumbers: new Set(pendingDropTagNumbers),
+              measured,
+              size: 2 * structuralSize(input.messages) + 512 * input.tags.length,
+          };
+    retainBaselineMeasurement(
+        input.cacheBusting || !input.previous ? measured.parts : input.previous.baselineParts,
+        memo,
+    );
     const now = input.now ?? Date.now();
     if (!input.cacheBusting && input.previous?.generationInvalidated) {
         return { ...input.previous, contentSignature: measured.contentSignature };

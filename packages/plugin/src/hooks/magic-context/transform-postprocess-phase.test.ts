@@ -264,7 +264,7 @@ function cloneMessages(messages: MessageLike[]): MessageLike[] {
 }
 
 describe("postprocess replay snapshot", () => {
-    it("serves byte-identical passes from one row read and reloads on the next pass", async () => {
+    it("serves byte-identical passes from one cached row and reloads after a database write", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-replay-snapshot";
@@ -279,8 +279,8 @@ describe("postprocess replay snapshot", () => {
 
         const preparedSql: string[] = [];
         const spiedDb = new Proxy(db, {
-            get(target, prop, receiver) {
-                if (prop !== "prepare") return Reflect.get(target, prop, receiver);
+            get(target, prop) {
+                if (prop !== "prepare") return Reflect.get(target, prop, target);
                 return (sql: string) => {
                     preparedSql.push(sql);
                     return target.prepare.call(target, sql);
@@ -315,7 +315,7 @@ describe("postprocess replay snapshot", () => {
         expect(digest(second)).toBe(digest(first));
         expect(
             preparedSql.filter((sql) => sql.includes("SELECT stale_reduce_stripped_ids")).length,
-        ).toBe(2);
+        ).toBe(1);
         expect(
             preparedSql.some((sql) =>
                 /SELECT (?:note_nudge_anchors|trailing_blank_decisions) FROM/.test(sql),
@@ -7004,4 +7004,92 @@ it("four pure defer passes preserve served bytes and durable drop state", async 
         "RIDE_REPLAY_OC",
         createHash("sha256").update(JSON.stringify(snapshots)).digest("hex"),
     );
+});
+
+describe("postprocess defer instrumentation and scaling", () => {
+    it("reports measured postprocess substages once per defer pass", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const logs: string[] = [];
+        const log = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        let clock = 0;
+        let step = 7;
+        const now = spyOn(performance, "now").mockImplementation(() => (clock += step));
+        try {
+            for (const increment of [7, 13]) {
+                step = increment;
+                logs.length = 0;
+                await runPostTransformPhase(
+                    basePostTransformArgs(db, "timed-defer", [], {
+                        channel1StateBySession: new Map(),
+                        resolvedProviderID: "anthropic",
+                    }),
+                );
+                for (const stage of [
+                    "setupAndOperations",
+                    "replaySnapshot",
+                    "placeholderNeutralize",
+                    "nudgeAndSticky",
+                    "markerReconcile",
+                    "noteAndTodoSynthesis",
+                    "frozenDecisions",
+                    "tailReads",
+                    "tailMeasure",
+                    "tailState",
+                    "tailBaseline",
+                    "tailGuard",
+                ]) {
+                    const records = logs.filter((line) => line.includes(`stage=pp.${stage} `));
+                    expect(records).toHaveLength(1);
+                    const elapsed = Number(records[0].match(/elapsed=([\d.]+)ms/)?.[1]);
+                    expect(elapsed).toBeGreaterThanOrEqual(increment);
+                    if (stage === "tailReads") expect(elapsed).toBe(increment);
+                }
+            }
+        } finally {
+            now.mockRestore();
+            log.mockRestore();
+        }
+    });
+
+    it("keeps defer per-message cost load-invariant between 200 and 2000 messages", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const log = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+        const previousEnv = process.env.NODE_ENV;
+        process.env.NODE_ENV = "production";
+        try {
+            const medians: number[] = [];
+            for (const count of [200, 2000]) {
+                const input = Array.from({ length: count }, (_, index) => ({
+                    info: { id: `load-${index}`, role: index % 2 ? "assistant" : "user" },
+                    parts: [
+                        { type: "text", text: `Actual payload ${index}: ${"sample ".repeat(100)}` },
+                    ],
+                })) as MessageLike[];
+                const state = new Map<string, Channel1State>();
+                const args = basePostTransformArgs(db, `load-${count}`, [], {
+                    channel1StateBySession: state,
+                    resolvedProviderID: "anthropic",
+                });
+                const times: number[] = [];
+                for (let pass = 0; pass < 25; pass += 1) {
+                    args.messages = cloneMessages(input);
+                    const start = performance.now();
+                    await runPostTransformPhase(args);
+                    if (pass >= 5) times.push(performance.now() - start);
+                }
+                times.sort((a, b) => a - b);
+                medians.push(times[Math.floor(times.length / 2)]);
+            }
+            expect(medians[1] / 2000 / (medians[0] / 200)).toBeLessThan(3);
+            if (process.env.MC_PERF_GATE === "1") expect(medians[1]).toBeLessThan(10);
+        } finally {
+            if (previousEnv === undefined) delete process.env.NODE_ENV;
+            else process.env.NODE_ENV = previousEnv;
+            log.mockRestore();
+        }
+    });
 });
