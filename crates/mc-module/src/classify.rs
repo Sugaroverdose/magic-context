@@ -5,6 +5,7 @@
 //! this management surface into a generic arbitrary-prompt producer.
 
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// The only task currently accepted by `dreamer.run_task`.
@@ -64,13 +65,35 @@ pub fn has_manifest_envelope(text: &str) -> bool {
 /// Mint an opaque child id without exposing the command id or project path in
 /// provider/session diagnostics. The registry, rather than this prefix, is the
 /// transform exemption authority.
-pub fn child_session_id(project: &str, command_id: &str) -> String {
+///
+/// `attempt_nonce` makes every attempt its own provider session. A producer session runs
+/// one episode at a time: a send that arrives while the previous attempt's run is still
+/// active (a parked run, or one this module stopped waiting for) is queued behind it
+/// rather than started, and the classifier has no way to drain a queued run. Reusing one
+/// id for a whole fallback chain therefore turned the SECOND model attempt into a queued
+/// prompt every time the first attempt ended without its run ending. The historian solves
+/// the same problem by putting its firing sequence in the id.
+pub fn child_session_id(project: &str, command_id: &str, attempt_nonce: u64) -> String {
     let mut hasher = Sha256::new();
     hasher.update(project.as_bytes());
     hasher.update([0]);
     hasher.update(command_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(attempt_nonce.to_be_bytes());
     let digest = hasher.finalize();
     format!("mc-dreamer:classify:{}", hex_prefix(&digest, 16))
+}
+
+static ATTEMPT_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// Mint the next attempt nonce for `child_session_id`. The counter is first raised to the
+/// current wall clock so a module that restarts in the middle of a command cannot reissue
+/// a nonce an earlier process already spent on a provider session that may still be live.
+pub fn next_attempt_nonce(now_ms: i64) -> u64 {
+    ATTEMPT_NONCE.fetch_max(now_ms.max(0) as u64, Ordering::Relaxed);
+    ATTEMPT_NONCE
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1)
 }
 
 fn hex_prefix(bytes: &[u8], count: usize) -> String {
@@ -101,13 +124,34 @@ mod tests {
     #[test]
     fn child_ids_are_stable_but_lineage_scoped() {
         assert_eq!(
-            child_session_id("project", "command"),
-            child_session_id("project", "command")
+            child_session_id("project", "command", 1),
+            child_session_id("project", "command", 1)
         );
         assert_ne!(
-            child_session_id("project", "command"),
-            child_session_id("other", "command")
+            child_session_id("project", "command", 1),
+            child_session_id("other", "command", 1)
         );
-        assert!(child_session_id("project", "command").starts_with("mc-dreamer:classify:"));
+        assert!(child_session_id("project", "command", 1).starts_with("mc-dreamer:classify:"));
+    }
+
+    #[test]
+    fn attempt_nonces_never_repeat_and_survive_a_restart_mid_command() {
+        let first = next_attempt_nonce(1_000);
+        let second = next_attempt_nonce(1_000);
+        assert!(second > first, "{second} must advance past {first}");
+        // A restarted process seeds from its own clock, which is ahead of anything the
+        // previous process could have minted.
+        let after_restart = next_attempt_nonce(9_000_000_000_000);
+        assert!(after_restart > second);
+    }
+
+    #[test]
+    fn each_attempt_gets_its_own_provider_session() {
+        // Two attempts at the same command must never share a session: the first
+        // attempt's run can still be holding it when the second one sends.
+        assert_ne!(
+            child_session_id("project", "command", 1),
+            child_session_id("project", "command", 2)
+        );
     }
 }
