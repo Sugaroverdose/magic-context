@@ -3107,6 +3107,33 @@ export const MIGRATIONS: Migration[] = [
             relabelOpenCode2HarnessRows(db);
         },
     },
+    {
+        version: 86,
+        description: "track tag identity changes per session",
+        up(db: Database): void {
+            if (!tableExists(db, "session_meta") || !tableExists(db, "tags")) return;
+            ensureColumn(db, "session_meta", "tags_version", "INTEGER NOT NULL DEFAULT 0");
+            db.exec(`
+                CREATE TRIGGER IF NOT EXISTS tags_version_ai AFTER INSERT ON tags BEGIN
+                    INSERT INTO session_meta(session_id, tags_version) VALUES(NEW.session_id, 1)
+                    ON CONFLICT(session_id) DO UPDATE SET tags_version = tags_version + 1;
+                END;
+                CREATE TRIGGER IF NOT EXISTS tags_version_ad AFTER DELETE ON tags BEGIN
+                    INSERT INTO session_meta(session_id, tags_version) VALUES(OLD.session_id, 1)
+                    ON CONFLICT(session_id) DO UPDATE SET tags_version = tags_version + 1;
+                END;
+                CREATE TRIGGER IF NOT EXISTS tags_version_au
+                AFTER UPDATE OF session_id, message_id, tag_number, type, tool_owner_message_id, status
+                ON tags BEGIN
+                    INSERT INTO session_meta(session_id, tags_version) VALUES(OLD.session_id, 1)
+                    ON CONFLICT(session_id) DO UPDATE SET tags_version = tags_version + 1;
+                    INSERT INTO session_meta(session_id, tags_version)
+                    SELECT NEW.session_id, 1 WHERE NEW.session_id != OLD.session_id
+                    ON CONFLICT(session_id) DO UPDATE SET tags_version = tags_version + 1;
+                END;
+            `);
+        },
+    },
 ];
 
 /**
