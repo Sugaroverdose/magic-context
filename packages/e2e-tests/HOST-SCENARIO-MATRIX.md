@@ -10,9 +10,9 @@ means the real-host run failed; product code was not changed in this slice.
 | cache invariants | pass | pass | pass | product-bug |
 | cache stability | pass | product-bug | pass | product-bug |
 | compaction off | pass | pass | pass | product-bug |
-| conflict disable | pass | product-bug | pass | product-bug |
+| conflict disable | pass | pass | pass | product-bug |
 | context limits | pass | pass | pass | pass |
-| deferred compaction marker | pass | product-bug | declared-divergence | product-bug |
+| deferred compaction marker | pass | declared-divergence | declared-divergence | product-bug |
 | dropped-input guard | pass | pass | declared-divergence | declared-divergence |
 | drops | pass | pass | pass | pass |
 | emergency blocking | pass | pass | pass | product-bug |
@@ -39,6 +39,8 @@ means the real-host run failed; product code was not changed in this slice.
 
 - Context limits: adapter now persists completed assistant usage on `session.execution.succeeded` and feeds the resolved model catalog into shared budget arithmetic; harness output limit matches the other hosts (8,192). Exact real-host assertion: `47.83773440489858` for 20,000 / 41,808.
 - Cache invariants: v2 now applies the shared system-guidance/hash handler; the scenario harness uses Anthropic transport like the other hosts so the existing wire oracle sees the actual provider request.
+- Deferred compaction marker: execute the existing manifest divergence by requiring historian publication, no v1 pending blob, a completed GA-owned checkpoint, and zero extra provider calls for the fold.
+- Conflict disable: the equivalent GA safety property is no competing summarizer; the real compaction hook is answered locally and the next provider request retains its checkpoint.
 - Todo synthesis: GA has no native todo writer; the OC2 branch verifies the real tool inventory and empty durable todo state. A real-host tool-registration mutant makes this assertion fail.
 - Dropped-input guard: select GA's `shell` tool instead of v1 `bash`; the unchanged refusal and recovery-message assertions pass on the real host.
 - Window overlay reload: include the OC2 model key in the fixture and preserve mock usage across restart; exact initial and reloaded percentages pass.
