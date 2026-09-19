@@ -16,7 +16,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     python3 \
     build-essential \
+    procps \
+    lsof \
     && rm -rf /var/lib/apt/lists/*
+
+# procps and lsof: the OpenCode 2 harness proves isolation by inspecting the
+# child process group's open files (pgrep/ps/lsof), the same tools the GitHub
+# runner has; without them every OpenCode 2 scenario fails before setup.
 
 # The host behavior suite launches the real OpenCode server and Pi process. Keep
 # both runtimes in the image instead of relying on anything installed on the

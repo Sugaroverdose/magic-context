@@ -34,6 +34,9 @@ if [[ "$INNER" != 1 ]]; then
         --env MC_E2E_REPO_ROOT=/workspace \
         --env E2E_OC_FILES="${E2E_OC_FILES:-}" \
         --env E2E_PI_FILES="${E2E_PI_FILES:-}" \
+        --env E2E_OC2_FILES="${E2E_OC2_FILES:-}" \
+        --env E2E_OMP_FILES="${E2E_OMP_FILES:-}" \
+        --env MC_E2E_GROUPS="${MC_E2E_GROUPS:-}" \
         --env HOME=/tmp/mc-home \
         --env XDG_CONFIG_HOME=/tmp/mc-config \
         --env XDG_DATA_HOME=/tmp/mc-data \
@@ -116,7 +119,9 @@ run_e2e_group() {
     local mode="$1" label="$2" files="$3" output status
     echo "  [e2e:$mode:$label:start] bun test..."
     status=0
-    output=$(cd "$REPO_ROOT/packages/e2e-tests" && MC_E2E_MODE="$mode" NODE_ENV="" bun test --timeout 600000 $files 2>&1) || status=$?
+    # Scenarios are written once and select their host from MC_E2E_HOST; without it a
+    # Pi-selected file that also declares OpenCode would silently run as OpenCode.
+    output=$(cd "$REPO_ROOT/packages/e2e-tests" && MC_E2E_MODE="$mode" MC_E2E_HOST="$label" NODE_ENV="" bun test --timeout 600000 $files 2>&1) || status=$?
     echo "$output"
 
     # Keep this gate identical to release.sh: a positive pass summary is
@@ -143,6 +148,8 @@ run_e2e_group() {
 # also making the standalone Docker runner deterministic.
 MANIFEST_OC_FILES=$(bun "$E2E_MANIFEST_VALIDATOR" --mode ts --harness opencode | tr '\n' ' ')
 MANIFEST_PI_FILES=$(bun "$E2E_MANIFEST_VALIDATOR" --mode ts --harness pi | tr '\n' ' ')
+MANIFEST_OC2_FILES=$(bun "$E2E_MANIFEST_VALIDATOR" --mode ts --harness opencode2 | tr '\n' ' ')
+MANIFEST_OMP_FILES=$(bun "$E2E_MANIFEST_VALIDATOR" --mode ts --harness omp | tr '\n' ' ')
 if [[ -n "${E2E_OC_FILES:-}" && "$E2E_OC_FILES" != "$MANIFEST_OC_FILES" ]]; then
     echo "Error: manifest-derived OpenCode list changed across the Docker boundary" >&2
     exit 1
@@ -151,12 +158,32 @@ if [[ -n "${E2E_PI_FILES:-}" && "$E2E_PI_FILES" != "$MANIFEST_PI_FILES" ]]; then
     echo "Error: manifest-derived Pi list changed across the Docker boundary" >&2
     exit 1
 fi
+if [[ -n "${E2E_OC2_FILES:-}" && "$E2E_OC2_FILES" != "$MANIFEST_OC2_FILES" ]]; then
+    echo "Error: manifest-derived OpenCode 2 list changed across the Docker boundary" >&2
+    exit 1
+fi
+if [[ -n "${E2E_OMP_FILES:-}" && "$E2E_OMP_FILES" != "$MANIFEST_OMP_FILES" ]]; then
+    echo "Error: manifest-derived OMP list changed across the Docker boundary" >&2
+    exit 1
+fi
 E2E_OC_FILES="$MANIFEST_OC_FILES"
 E2E_PI_FILES="$MANIFEST_PI_FILES"
+E2E_OC2_FILES="$MANIFEST_OC2_FILES"
+E2E_OMP_FILES="$MANIFEST_OMP_FILES"
 
+# MC_E2E_GROUPS narrows the gate to named groups (space-separated) for local
+# reproduction of one host lane; the release gate runs all four.
+GROUPS_TO_RUN="${MC_E2E_GROUPS:-opencode pi opencode2 omp}"
 EXIT=0
-run_e2e_group "ts" "opencode" "$E2E_OC_FILES" || EXIT=1
-run_e2e_group "ts" "pi" "$E2E_PI_FILES" || EXIT=1
+for group in $GROUPS_TO_RUN; do
+    case "$group" in
+        opencode) run_e2e_group "ts" "opencode" "$E2E_OC_FILES" || EXIT=1 ;;
+        pi) run_e2e_group "ts" "pi" "$E2E_PI_FILES" || EXIT=1 ;;
+        opencode2) run_e2e_group "ts" "opencode2" "$E2E_OC2_FILES" || EXIT=1 ;;
+        omp) run_e2e_group "ts" "omp" "$E2E_OMP_FILES" || EXIT=1 ;;
+        *) echo "Error: unknown e2e group '$group'" >&2; exit 2 ;;
+    esac
+done
 
 if [[ "$EXIT" -eq 0 ]]; then
     echo "  ✓ Containerized host e2e checks passed"

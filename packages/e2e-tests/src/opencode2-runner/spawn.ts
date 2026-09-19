@@ -379,8 +379,13 @@ export function assertOpenPaths(
 	const live = join(homedir(), ".local/share/opencode");
 	for (const path of paths) {
 		if (!path.startsWith("/")) continue; // lsof socket/pipe labels are not filesystem paths.
+		// lsof reports the process root directory as "/" (fd `rtd`) on every Linux
+		// process; it is not a file the host opened and can never be a live-store leak.
+		if (path === "/") continue;
+		// Bun extracts its embedded native addons to a temp file at startup:
+		// /private/tmp on macOS (.dylib/.node), /tmp on Linux (.so).
 		const bunLibrary =
-			/^\/private\/tmp\/\.bun-\d+-[a-f0-9]+\.(dylib|node)$/.test(path);
+			/^\/(private\/)?tmp\/\.bun-\d+-[a-f0-9]+\.(dylib|node|so)$/.test(path);
 		if (
 			under(path, live) ||
 			(!bunLibrary &&
@@ -392,6 +397,13 @@ export function assertOpenPaths(
 					"/usr/lib",
 					"/usr/share",
 					"/private/etc",
+					// Linux system read-only bases (GitHub runners): loader cache, libc, procfs.
+					"/etc",
+					"/lib",
+					"/lib64",
+					"/usr/lib64",
+					"/proc",
+					"/sys",
 					"/Library/Apple/System",
 					"/private/var/db/diagnostics",
 					"/private/var/db/uuidtext",
