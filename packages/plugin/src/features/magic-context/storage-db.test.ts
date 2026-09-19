@@ -528,8 +528,10 @@ describe("storage-db", () => {
                     return "seed";
                 });
                 const placeholders = insertedColumns.map(() => "?").join(", ");
+                // A seeded tag may already have created this row through the version trigger.
+                const insertVerb = table === "session_meta" ? "INSERT OR IGNORE" : "INSERT";
                 db.prepare(
-                    `INSERT INTO ${table} (${insertedColumns.map((column) => column.name).join(", ")}) VALUES (${placeholders})`,
+                    `${insertVerb} INTO ${table} (${insertedColumns.map((column) => column.name).join(", ")}) VALUES (${placeholders})`,
                 ).run(...values);
                 expect(
                     db

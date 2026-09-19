@@ -454,6 +454,10 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             assertV85RelabelArm(db);
             populateModuleOwnedRows(db, version, state);
             return;
+        case 86:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            populateModuleOwnedRows(db, version, state);
+            return;
         default:
             throw new Error(`populateForVersion has no arm for migration v${version}`);
     }

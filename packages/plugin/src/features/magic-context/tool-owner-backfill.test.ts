@@ -543,6 +543,39 @@ describe("runToolOwnerBackfill", () => {
         closeQuietly(mc);
     });
 
+    test("rowsUpdated ignores writes from an unrelated AFTER UPDATE trigger", () => {
+        const oc = buildOpencodeDb(
+            [{ id: "msg-1", sessionId: "ses-1", role: "assistant", timeCreated: 1000 }],
+            [
+                {
+                    id: "p1",
+                    messageId: "msg-1",
+                    type: "tool",
+                    callId: "read:1",
+                    timeCreated: 1100,
+                },
+            ],
+        );
+        oc.close();
+        const mc = createMcDb();
+        mc.exec(`
+            CREATE TABLE tag_update_audit (tag_id INTEGER NOT NULL);
+            CREATE TRIGGER throwaway_backfill_tag_update AFTER UPDATE ON tags BEGIN
+                INSERT INTO tag_update_audit(tag_id) VALUES(NEW.id);
+            END;
+        `);
+        insertTag(mc, "ses-1", "read:1", "tool", 100, 1);
+
+        const result = runToolOwnerBackfill(mc);
+
+        expect(result.sessionsCompleted).toBe(1);
+        expect(result.rowsUpdated).toBe(1);
+        expect(mc.prepare("SELECT COUNT(*) AS count FROM tag_update_audit").get()).toEqual({
+            count: 1,
+        });
+        closeQuietly(mc);
+    });
+
     test("ATTACH succeeds when the OpenCode DB path contains a single quote", () => {
         // Regression guard: the OpenCode DB path is interpolated into an
         // `ATTACH '<path>'` statement (SQLite/bun:sqlite reject a bound

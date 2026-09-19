@@ -6,7 +6,7 @@ import type { SessionMeta } from "./types";
 
 export interface SessionMetaRow {
     session_id: string;
-    last_response_time: number;
+    last_response_time: number | null;
     cache_ttl: string;
     counter: number;
     last_nudge_tokens: number;
@@ -243,7 +243,8 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
     const r = row as Record<string, unknown>;
     return (
         typeof r.session_id === "string" &&
-        typeof r.last_response_time === "number" &&
+        // session_id proves row existence; NULL here means the nullable timestamp is unset.
+        isNumberOrNull(r.last_response_time) &&
         isStringOrNull(r.cache_ttl) &&
         typeof r.counter === "number" &&
         typeof r.last_nudge_tokens === "number" &&
@@ -426,7 +427,7 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         typeof value === "string" ? value : null;
     return {
         sessionId: row.session_id,
-        lastResponseTime: row.last_response_time,
+        lastResponseTime: numOrZero(row.last_response_time),
         cacheTtl: cacheTtlRaw,
         counter: row.counter,
         lastNudgeTokens: row.last_nudge_tokens,
