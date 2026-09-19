@@ -2213,7 +2213,10 @@ async function runShadowWorker(): Promise<void> {
         try {
             const outcome = await processShadowQueueItem(item);
             if (isStillCurrent()) {
-                shadowBackfillLastWriteOutcomes.set(`${item.projectIdentity}:${item.scope}`, outcome);
+                shadowBackfillLastWriteOutcomes.set(
+                    `${item.projectIdentity}:${item.scope}`,
+                    outcome,
+                );
             }
         } catch (error) {
             if (isStillCurrent()) {

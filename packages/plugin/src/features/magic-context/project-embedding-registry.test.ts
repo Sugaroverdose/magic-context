@@ -44,8 +44,8 @@ import {
     flushShadowEmbeddingBacklog,
     getEmbeddingCoverageStatus,
     getProjectEmbeddingSnapshot,
-    getShadowBackfillStopReason,
     getShadowBackfillRemaining,
+    getShadowBackfillStopReason,
     getShadowEmbeddingMeasurementCohort,
     markProjectLoadUntrusted,
     registerProjectEmbedding,
@@ -2015,6 +2015,7 @@ describe("project embedding registry", () => {
             model: "synapse-model",
             synapse_fingerprint: "fp-retired-in-flight",
         } as unknown as EmbeddingConfig;
+        let returnedShadowVectors = 0;
         // Retire the shadow from inside the provider call. processShadowQueueItem
         // captures the registration before awaiting, so this reproduces the
         // unregister-during-embed window: without a post-await re-check the
@@ -2024,7 +2025,11 @@ describe("project embedding registry", () => {
                 new (class extends FakeEmbeddingProvider {
                     override async embedBatch(texts: string[]): Promise<Float32Array[]> {
                         unregisterProjectShadowEmbedding(projectIdentity);
-                        return texts.map((text) => new Float32Array([text.length, this.modelId.length]));
+                        const vectors = texts.map(
+                            (text) => new Float32Array([text.length, this.modelId.length]),
+                        );
+                        returnedShadowVectors += vectors.length;
+                        return vectors;
                     }
                 })("shadow"),
         );
@@ -2036,6 +2041,7 @@ describe("project embedding registry", () => {
         );
         await flushShadowEmbeddingBacklog(projectIdentity);
 
+        expect(returnedShadowVectors).toBeGreaterThan(0);
         expect(loadAllEmbeddings(db, projectIdentity, registration!.modelId).size).toBe(0);
     });
 
@@ -2055,14 +2061,17 @@ describe("project embedding registry", () => {
         for (const commit of commits) {
             saveCommitEmbedding(db, commit.sha, new Float32Array([1, 1]), primaryModelId);
         }
+        let returnedShadowVectors = 0;
         _setTestProviderFactoryForProject(
             () =>
                 new (class extends FakeEmbeddingProvider {
                     override async embedBatch(texts: string[]): Promise<Float32Array[]> {
                         unregisterProjectShadowEmbedding(projectIdentity);
-                        return texts.map(
+                        const vectors = texts.map(
                             (text) => new Float32Array([text.length, this.modelId.length]),
                         );
+                        returnedShadowVectors += vectors.length;
+                        return vectors;
                     }
                 })("shadow"),
         );
@@ -2078,6 +2087,7 @@ describe("project embedding registry", () => {
         );
         await flushShadowEmbeddingBacklog(projectIdentity);
 
+        expect(returnedShadowVectors).toBeGreaterThan(0);
         expect(countEmbeddedCommits(db, projectIdentity, registration!.modelId)).toBe(0);
     });
 
@@ -2112,6 +2122,7 @@ describe("project embedding registry", () => {
             )
             .run(sessionId, content) as { lastInsertRowid: number | bigint };
         recordMessageFtsRowid(db, sessionId, 1, ftsRow.lastInsertRowid);
+        let returnedShadowVectors = 0;
         _setTestProviderFactoryForProject((config) =>
             config.provider === "synapse"
                 ? // Only the shadow lane retires itself mid-embed; the primary lane
@@ -2119,9 +2130,11 @@ describe("project embedding registry", () => {
                   new (class extends FakeEmbeddingProvider {
                       override async embedBatch(texts: string[]): Promise<Float32Array[]> {
                           unregisterProjectShadowEmbedding(projectIdentity);
-                          return texts.map(
+                          const vectors = texts.map(
                               (text) => new Float32Array([text.length, this.modelId.length]),
                           );
+                          returnedShadowVectors += vectors.length;
+                          return vectors;
                       }
                   })(config.model)
                 : new FakeEmbeddingProvider(config.model),
@@ -2145,6 +2158,7 @@ describe("project embedding registry", () => {
 
         await flushShadowEmbeddingBacklog(projectIdentity);
 
+        expect(returnedShadowVectors).toBeGreaterThan(0);
         expect(
             countRows(
                 db,
@@ -2152,6 +2166,42 @@ describe("project embedding registry", () => {
                 registration!.chunkModelId,
             ),
         ).toBe(0);
+    });
+
+    it("assigns a fresh generation when the same shadow identity is retired and re-armed", () => {
+        const db = useTempDb();
+        const projectIdentity = "git:shadow-same-identity-rearm";
+        _setTestProviderFactoryForProject(() => new FakeEmbeddingProvider("test"));
+        registerProjectEmbedding(
+            db,
+            projectIdentity,
+            localConfig("model-primary"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/shadow-same-identity-rearm",
+        );
+        const shadowConfig = {
+            provider: "synapse",
+            model: "synapse-model",
+            synapse_fingerprint: "fp-same-identity-rearm",
+        } as unknown as EmbeddingConfig;
+        const first = registerProjectShadowEmbedding(
+            db,
+            projectIdentity,
+            shadowConfig,
+            "/tmp/shadow-same-identity-rearm",
+        );
+
+        unregisterProjectShadowEmbedding(projectIdentity);
+        const rearmed = registerProjectShadowEmbedding(
+            db,
+            projectIdentity,
+            shadowConfig,
+            "/tmp/shadow-same-identity-rearm",
+        );
+
+        expect(first).not.toBeNull();
+        expect(rearmed).not.toBeNull();
+        expect(rearmed!.generation).toBeGreaterThan(first!.generation);
     });
 
     it("does not dispose a shadow provider that is the same instance as the primary", async () => {
