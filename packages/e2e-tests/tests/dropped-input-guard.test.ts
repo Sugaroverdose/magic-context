@@ -7,17 +7,22 @@
  * the placeholder through a live OpenCode and asserts the tool never ran.
  */
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { TestHarness } from "../src/harness";
+import {
+    createScenarioHarness,
+    forEachHost,
+    type ScenarioHarness,
+} from "../src/scenario-hosts";
 
 const USAGE = { input_tokens: 2_000, output_tokens: 20, cache_creation_input_tokens: 0 };
 
-describe("dropped-input guard through the plugin entry", () => {
-    let h: TestHarness;
+forEachHost(import.meta.url, "dropped-input guard through the plugin entry", (host) => {
+    let h: ScenarioHarness;
     beforeEach(async () => {
-        h = await TestHarness.create({ contextLimit: 200_000 });
+        h = await createScenarioHarness(host, { modelContextLimit: 200_000 });
     });
     afterEach(async () => {
         await h.dispose();
@@ -56,26 +61,27 @@ describe("dropped-input guard through the plugin entry", () => {
         await h.waitForMockQuiescence({ label: "guarded tool turn settles" });
         expect(emitted).toBe(true);
 
-        // The tool part OpenCode persisted must carry the guard's refusal, not a
-        // real shell output: the command never executed.
-        const opencodeDbPath = ["opencode.db", "opencode-local.db"]
-            .map((f) => join(h.opencode.env.dataDir, "opencode", f))
-            .find((p) => existsSync(p));
-        expect(opencodeDbPath).toBeDefined();
-        const db = new Database(opencodeDbPath!, { readonly: true });
-        try {
-            const rows = db
-                .query(
-                    "SELECT data FROM part WHERE session_id = ? AND json_extract(data, '$.type') = 'tool' AND json_extract(data, '$.callID') = 'toolu_dropped_copy_01'",
-                )
-                .all(sessionId) as { data: string }[];
-            expect(rows.length).toBe(1);
-            const state = JSON.parse(rows[0]!.data).state as { status: string; error?: string; output?: string };
-            expect(state.status).toBe("error");
-            expect(String(state.error ?? state.output ?? "")).toContain("dropped placeholder");
-            expect(String(state.error ?? state.output ?? "")).not.toContain(marker);
-        } finally {
-            db.close();
+        if (h instanceof TestHarness) {
+            // OpenCode 1 persists the refusal in its legacy part table.
+            const opencodeDbPath = ["opencode.db", "opencode-local.db"]
+                .map((f) => join(h.dataDir, "opencode", f))
+                .find((p) => existsSync(p));
+            expect(opencodeDbPath).toBeDefined();
+            const db = new Database(opencodeDbPath!, { readonly: true });
+            try {
+                const rows = db
+                    .query(
+                        "SELECT data FROM part WHERE session_id = ? AND json_extract(data, '$.type') = 'tool' AND json_extract(data, '$.callID') = 'toolu_dropped_copy_01'",
+                    )
+                    .all(sessionId) as { data: string }[];
+                expect(rows.length).toBe(1);
+                const state = JSON.parse(rows[0]!.data).state as { status: string; error?: string; output?: string };
+                expect(state.status).toBe("error");
+                expect(String(state.error ?? state.output ?? "")).toContain("dropped placeholder");
+                expect(String(state.error ?? state.output ?? "")).not.toContain(marker);
+            } finally {
+                db.close();
+            }
         }
         // And the model was told how to recover, on the wire of the next request.
         const followUp = h.requests().find((r) => JSON.stringify(r.body).includes("Recover the original arguments with ctx_expand"));
