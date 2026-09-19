@@ -26458,7 +26458,12 @@ pub(crate) mod tests {
             .as_object_mut()
             .unwrap()
             .remove("rendered_m1_coverage");
-        let legacy: ModuleMeta = serde_json::from_value(value).unwrap();
+        let mut legacy: ModuleMeta = serde_json::from_value(value).unwrap();
+        // The round trip above only means to drop two blob keys. The row-stored fields do not
+        // survive it, and committing without them is the unhydrated shape the store refuses,
+        // so carry them across from the loaded state.
+        legacy.block_identity_by_mid = loaded.meta.block_identity_by_mid.clone();
+        legacy.served_output_fingerprint = loaded.meta.served_output_fingerprint.clone();
         store
             .commit("legacy-proof", loaded.row_version, &loaded.core, &legacy)
             .unwrap();

@@ -5534,6 +5534,18 @@ pub enum McStoreError {
         write_project: String,
         domain: String,
     },
+    /// A commit arrived with no block identities for a session that still has some.
+    ///
+    /// The row-stored parts of `ModuleMeta` are filled in by the store on load. A caller
+    /// that read the session some other way, or built a `ModuleMeta` from scratch, hands
+    /// over an empty map that is indistinguishable from "every identity was removed", and
+    /// applying it as a replacement would delete the session's whole identity history.
+    /// Deliberate resets clear the rows through their own path instead of committing an
+    /// empty map, so this is always a caller bug and never a state the store should apply.
+    UnhydratedBlockIdentities {
+        session_id: String,
+        stored: usize,
+    },
 }
 
 impl std::fmt::Display for McStoreError {
@@ -5592,6 +5604,11 @@ impl std::fmt::Display for McStoreError {
             } => write!(
                 f,
                 "{domain} facade route {route_project_root} is authority-managed as {authority_project}, but the write used {write_project}"
+            ),
+            McStoreError::UnhydratedBlockIdentities { session_id, stored } => write!(
+                f,
+                "session {session_id} commit carries no block identities but {stored} are stored; \
+                 the committed meta was never hydrated by the store"
             ),
         }
     }
@@ -5733,6 +5750,7 @@ enum MappingTxnOutcome {
 enum CommitOutcome {
     Committed(u64),
     CasConflict(u64),
+    UnhydratedBlockIdentities(usize),
 }
 
 enum AuthorityFinishDrainOutcome {
@@ -10411,6 +10429,12 @@ impl McStore {
                 }
             }
 
+            // Refuse before the diff runs rather than treating an unhydrated meta as a
+            // request to delete the session's identity history.
+            if let Some(stored) = refuse_unhydrated_block_identities_tx(tx, session_id, meta)? {
+                return Ok(CommitOutcome::UnhydratedBlockIdentities(stored));
+            }
+
             // The grow-mostly parts of the meta are rows, so a pass writes only the entries
             // that differ instead of re-serializing the whole history to append one.
             let row_state_writes =
@@ -10676,6 +10700,12 @@ impl McStore {
         match outcome {
             CommitOutcome::Committed(v) => Ok(v),
             CommitOutcome::CasConflict(found) => Err(McStoreError::CasConflict { expected, found }),
+            CommitOutcome::UnhydratedBlockIdentities(stored) => {
+                Err(McStoreError::UnhydratedBlockIdentities {
+                    session_id: session_id.to_string(),
+                    stored,
+                })
+            }
         }
     }
 
@@ -11779,14 +11809,16 @@ impl McStore {
                 "mc_user_hints",
                 "mc_channel1_appends",
                 "mc_overlay_frontiers",
-                "mc_block_identities",
-                "mc_served_output_fingerprints",
             ] {
                 tx.execute(
                     &format!("DELETE FROM {table} WHERE session_id = ?1"),
                     params![request.target_key],
                 )?;
             }
+            // The target is about to adopt the source's state wholesale, so its own row-stored
+            // meta goes first. This is the explicit clear: a descent really does mean "remove
+            // what is there", which a commit carrying an empty map never does.
+            clear_meta_row_state_tx(tx, request.target_key)?;
             // Session notes follow the descended conversation key. Do not copy smart notes:
             // their project-wide visibility is independent of one lineage's retained history.
             let note_projects = {
@@ -18248,8 +18280,47 @@ fn sync_served_output_fingerprints_tx(
     Ok(written)
 }
 
-/// Drop every row-stored part of a session's meta. The paths that reset a session to a
-/// default `ModuleMeta` used to wipe these fields by rewriting the blob; they call this now.
+/// Count the rows a session has under `table`.
+fn meta_row_state_count_tx(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    session_id: &str,
+) -> rusqlite::Result<usize> {
+    let count: i64 = tx.query_row(
+        &format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?1"),
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    Ok(count.max(0) as usize)
+}
+
+/// Report how many identities a session has when the commit carries none, so the caller can
+/// refuse instead of deleting them.
+///
+/// An empty map means one of two opposite things: every identity was removed, or the meta was
+/// never hydrated. The store cannot tell them apart from the value alone, and guessing wrong
+/// erases a session's whole identity history without an error. So the implicit path refuses,
+/// and the two places that really do reset a session call [`clear_meta_row_state_tx`].
+///
+/// The check is on the identities alone. They are append-only in practice and no pass empties
+/// them, whereas the served fingerprints are genuinely rebuilt each pass and may legitimately
+/// come out empty. An unhydrated meta has both empty, so checking the identities catches it
+/// and stops the commit before the served rows are touched either.
+fn refuse_unhydrated_block_identities_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    meta: &ModuleMeta,
+) -> rusqlite::Result<Option<usize>> {
+    if !meta.block_identity_by_mid.is_empty() {
+        return Ok(None);
+    }
+    let stored = meta_row_state_count_tx(tx, "mc_block_identities", session_id)?;
+    Ok((stored > 0).then_some(stored))
+}
+
+/// Drop every row-stored part of a session's meta. This is the explicit clear: the paths that
+/// reset a session to a default `ModuleMeta` used to wipe these fields by rewriting the blob,
+/// and they say so by calling this rather than by committing an empty map.
 fn clear_meta_row_state_tx(
     tx: &rusqlite::Transaction<'_>,
     session_id: &str,
@@ -19433,6 +19504,126 @@ mod tests {
         assert_eq!(reloaded.meta, meta);
         assert_eq!(reloaded.core, core);
         assert_eq!(reloaded.row_version, Some(version));
+    }
+
+    #[test]
+    fn commit_refuses_an_unhydrated_meta_instead_of_deleting_the_identity_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::default();
+        let seeded = ModuleMeta {
+            initialized: true,
+            block_identity_by_mid: identity_map(12),
+            served_output_fingerprint: vec![ServedBlockFingerprint {
+                block_id: "m000000#0".to_string(),
+                content_hash: "hash".to_string(),
+                serialized_len: 7,
+            }],
+            ..ModuleMeta::default()
+        };
+        let version = store.commit("ses", None, &core, &seeded).unwrap();
+
+        // What a caller that never went through the store's hydration hands over: the blob
+        // fields are all present, the row-stored ones are empty.
+        let unhydrated = ModuleMeta {
+            initialized: true,
+            last_render_config: "changed".to_string(),
+            ..ModuleMeta::default()
+        };
+        let result = store.commit("ses", Some(version), &core, &unhydrated);
+
+        // The surviving data is asserted first and on its own. If the refusal is ever removed
+        // the commit succeeds, and this is the assertion that has to report what that cost.
+        let reloaded = store.load("ses").unwrap();
+        assert_eq!(
+            reloaded.meta.block_identity_by_mid,
+            seeded.block_identity_by_mid,
+            "the commit deleted {} of {} stored block identities",
+            seeded.block_identity_by_mid.len() - reloaded.meta.block_identity_by_mid.len(),
+            seeded.block_identity_by_mid.len()
+        );
+        assert_eq!(
+            reloaded.meta.served_output_fingerprint, seeded.served_output_fingerprint,
+            "the commit also dropped the served fingerprints"
+        );
+        assert_eq!(
+            reloaded.row_version,
+            Some(version),
+            "a refused commit must not move the row_version"
+        );
+        assert_eq!(reloaded.meta.last_render_config, seeded.last_render_config);
+
+        let error = result.expect_err("an unhydrated commit must be refused, not applied");
+        match &error {
+            McStoreError::UnhydratedBlockIdentities { session_id, stored } => {
+                assert_eq!(session_id, "ses");
+                assert_eq!(*stored, 12);
+            }
+            other => panic!("expected an unhydrated-identities refusal, got {other:?}"),
+        }
+        assert!(
+            error.to_string().contains("ses"),
+            "the refusal must name the session: {error}"
+        );
+    }
+
+    #[test]
+    fn a_commit_may_still_empty_the_served_fingerprints_on_its_own() {
+        // Only the identities are guarded. The served vector is rebuilt from scratch every
+        // pass, so a pass that serves nothing legitimately commits an empty one.
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::default();
+        let mut meta = ModuleMeta {
+            block_identity_by_mid: identity_map(4),
+            served_output_fingerprint: vec![ServedBlockFingerprint {
+                block_id: "m000000#0".to_string(),
+                content_hash: "hash".to_string(),
+                serialized_len: 7,
+            }],
+            ..ModuleMeta::default()
+        };
+        let version = store.commit("ses", None, &core, &meta).unwrap();
+
+        meta.served_output_fingerprint.clear();
+        let next = store.commit("ses", Some(version), &core, &meta).unwrap();
+        assert!(next > version);
+
+        let reloaded = store.load("ses").unwrap();
+        assert!(reloaded.meta.served_output_fingerprint.is_empty());
+        assert_eq!(
+            reloaded.meta.block_identity_by_mid,
+            meta.block_identity_by_mid
+        );
+    }
+
+    #[test]
+    fn recomp_reset_clears_the_row_state_it_used_to_blank_through_the_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            block_identity_by_mid: identity_map(6),
+            served_output_fingerprint: vec![ServedBlockFingerprint {
+                block_id: "m000000#0".to_string(),
+                content_hash: "hash".to_string(),
+                serialized_len: 7,
+            }],
+            ..ModuleMeta::default()
+        };
+        let version = store
+            .commit("ses", None, &CoreState::default(), &meta)
+            .unwrap();
+
+        store
+            .reset_session_for_recomp("ses", Some(version))
+            .unwrap();
+
+        let reloaded = store.load("ses").unwrap();
+        assert!(
+            reloaded.meta.block_identity_by_mid.is_empty(),
+            "a deliberate reset still clears the identities"
+        );
+        assert!(reloaded.meta.served_output_fingerprint.is_empty());
     }
 
     #[test]
