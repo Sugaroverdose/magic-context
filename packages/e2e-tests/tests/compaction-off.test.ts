@@ -30,7 +30,7 @@ import { openTestDb } from "../src/test-db";
 let h: ScenarioHarness;
 
 function computeDirIdentity(directory: string): string {
-    return resolveProjectIdentity(realpathSync(pathResolve(directory)));
+    return resolveProjectIdentity(h.host === "omp" ? directory : realpathSync(pathResolve(directory)));
 }
 
 function seedMemory(h: ScenarioHarness, projectIdentity: string, content: string): void {
