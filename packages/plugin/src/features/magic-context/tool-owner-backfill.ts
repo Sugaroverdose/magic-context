@@ -451,6 +451,7 @@ function applyOwnersForSession(
            AND tool_owner_message_id = ?
          LIMIT 1`,
     );
+    const ownerForRowStmt = db.prepare("SELECT tool_owner_message_id FROM tags WHERE id = ?");
 
     let rowsUpdated = 0;
     db.transaction(() => {
@@ -462,8 +463,12 @@ function applyOwnersForSession(
             // violate the partial UNIQUE index; leave the ghost NULL so runtime
             // lazy adoption can attach it to the real observed owner later.
             if (existingOwnerStmt.get(sessionId, callId, ownerId)) continue;
-            const result = updateRowStmt.run(ownerId, orphan.id);
-            rowsUpdated += result.changes ?? 0;
+            updateRowStmt.run(ownerId, orphan.id);
+            // Verify the claimed row under the same write lock; tag triggers inflate changes.
+            const updated = ownerForRowStmt.get(orphan.id) as
+                | { tool_owner_message_id: string | null }
+                | undefined;
+            if (updated?.tool_owner_message_id === ownerId) rowsUpdated += 1;
         }
     }).immediate();
 

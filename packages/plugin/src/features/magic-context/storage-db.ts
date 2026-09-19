@@ -104,7 +104,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastMigrationOnOpenRefusal = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 85;
+export const LATEST_SUPPORTED_VERSION = 87;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1508,6 +1508,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       last_response_time INTEGER,
       cache_ttl TEXT,
       counter INTEGER DEFAULT 0,
+      tags_version INTEGER NOT NULL DEFAULT 0,
       last_nudge_tokens INTEGER DEFAULT 0,
       last_nudge_band TEXT DEFAULT '',
       last_nudge_undropped INTEGER DEFAULT 0,
@@ -1692,6 +1693,50 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
 
     CREATE INDEX IF NOT EXISTS idx_tags_session_tag_number ON tags(session_id, tag_number);
     CREATE INDEX IF NOT EXISTS idx_tags_session_message_id ON tags(session_id, message_id);
+
+    -- Clone/import paths can write tags before session bootstrap. Keep trigger-created
+    -- metadata rows aligned with the explicit defaults in ensureSessionMetaRow.
+    CREATE TRIGGER IF NOT EXISTS tags_version_ai AFTER INSERT ON tags BEGIN
+      INSERT INTO session_meta(
+        session_id, harness, last_response_time, cache_ttl, counter, tags_version,
+        last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent,
+        last_context_percentage, last_input_tokens, observed_safe_input_tokens,
+        cache_alert_sent, times_execute_threshold_reached, compartment_in_progress,
+        system_prompt_hash, cleared_reasoning_through_tag
+      ) VALUES(NEW.session_id, NEW.harness, 0, '5m', 0, 1, 0, '', '', 0, 0, 0, 0, 0, 0, 0, '', 0)
+      ON CONFLICT(session_id) DO UPDATE SET tags_version = tags_version + 1;
+    END;
+    CREATE TRIGGER IF NOT EXISTS tags_version_ad AFTER DELETE ON tags BEGIN
+      INSERT INTO session_meta(
+        session_id, harness, last_response_time, cache_ttl, counter, tags_version,
+        last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent,
+        last_context_percentage, last_input_tokens, observed_safe_input_tokens,
+        cache_alert_sent, times_execute_threshold_reached, compartment_in_progress,
+        system_prompt_hash, cleared_reasoning_through_tag
+      ) VALUES(OLD.session_id, OLD.harness, 0, '5m', 0, 1, 0, '', '', 0, 0, 0, 0, 0, 0, 0, '', 0)
+      ON CONFLICT(session_id) DO UPDATE SET tags_version = tags_version + 1;
+    END;
+    CREATE TRIGGER IF NOT EXISTS tags_version_au
+    AFTER UPDATE OF session_id, message_id, tag_number, type, tool_owner_message_id, status ON tags BEGIN
+      INSERT INTO session_meta(
+        session_id, harness, last_response_time, cache_ttl, counter, tags_version,
+        last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent,
+        last_context_percentage, last_input_tokens, observed_safe_input_tokens,
+        cache_alert_sent, times_execute_threshold_reached, compartment_in_progress,
+        system_prompt_hash, cleared_reasoning_through_tag
+      ) VALUES(OLD.session_id, OLD.harness, 0, '5m', 0, 1, 0, '', '', 0, 0, 0, 0, 0, 0, 0, '', 0)
+      ON CONFLICT(session_id) DO UPDATE SET tags_version = tags_version + 1;
+      INSERT INTO session_meta(
+        session_id, harness, last_response_time, cache_ttl, counter, tags_version,
+        last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent,
+        last_context_percentage, last_input_tokens, observed_safe_input_tokens,
+        cache_alert_sent, times_execute_threshold_reached, compartment_in_progress,
+        system_prompt_hash, cleared_reasoning_through_tag
+      )
+      SELECT NEW.session_id, NEW.harness, 0, '5m', 0, 1, 0, '', '', 0, 0, 0, 0, 0, 0, 0, '', 0
+      WHERE NEW.session_id != OLD.session_id
+      ON CONFLICT(session_id) DO UPDATE SET tags_version = tags_version + 1;
+    END;
     CREATE INDEX IF NOT EXISTS idx_pending_ops_session ON pending_ops(session_id);
     CREATE INDEX IF NOT EXISTS idx_pending_ops_session_tag_id ON pending_ops(session_id, tag_id);
     CREATE INDEX IF NOT EXISTS idx_source_contents_session ON source_contents(session_id);

@@ -1,7 +1,9 @@
 /// <reference types="bun-types" />
 
 import { expect, test } from "bun:test";
-import { isAbsolute } from "node:path";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
 import type { Database as DatabaseType } from "../../shared/sqlite";
 import { Database, withPrivilegedWriter } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -22,6 +24,8 @@ const PROJECT_PATH = "/armed-migration-replay";
 const V84_SESSION_ID = "armed-replay-session-meta-v84";
 const V85_SESSION_ID = "armed-replay-v85-o2";
 const V85_TWIN_SESSION_ID = "armed-replay-v85-twin";
+const V87_V1_SESSION_ID = "armed-replay-v87-v1-seat";
+const V86_TAG_SESSION_ID = "armed-replay-v86-tag-version";
 const STATE_TABLE_PREDICATE =
     "COALESCE((SELECT enabled FROM context_privilege_state WHERE id = 1), 0) = 0";
 const MEMORY_REFUSAL = "context.db memory writes are managed by the Rust module";
@@ -42,6 +46,8 @@ interface ReplayState {
     expectedNoteContents: Set<string>;
     memoryMirrorCursor: number;
     nextModuleMemoryId: number;
+    /** Path of the OpenCode store built for v87, once that populate step has run. */
+    openCodeStorePath: string | null;
 }
 
 function installMigrationLedgerFromSource(db: DatabaseType): void {
@@ -115,6 +121,24 @@ const CLAIMED_ARM_SIGNATURES = [
         table: "session_meta",
         column: "session_id",
         like: V84_SESSION_ID,
+    },
+    {
+        arm: "populateHarnessMislabelsAtV84",
+        table: "session_meta",
+        column: "session_id",
+        like: V85_SESSION_ID,
+    },
+    {
+        arm: "populateHarnessEvidenceAtV86",
+        table: "session_meta",
+        column: "session_id",
+        like: V87_V1_SESSION_ID,
+    },
+    {
+        arm: "populateTagVersionSessionAtV86",
+        table: "tags",
+        column: "session_id",
+        like: V86_TAG_SESSION_ID,
     },
 ] as const;
 
@@ -240,7 +264,7 @@ function assertV84SessionMetaArm(db: DatabaseType): void {
     expect(getPersistedEpochFloor(db, V84_SESSION_ID)).toBeNull();
 }
 
-function populateV85MislabelsAtV84(db: DatabaseType): void {
+function populateHarnessMislabelsAtV84(db: DatabaseType): void {
     db.exec(`
         INSERT INTO session_meta (session_id, harness, counter)
         VALUES ('${V85_SESSION_ID}', 'opencode2', 2);
@@ -251,20 +275,120 @@ function populateV85MislabelsAtV84(db: DatabaseType): void {
     `);
 }
 
-function assertV85RelabelArm(db: DatabaseType): void {
+function assertV85InertArm(db: DatabaseType): void {
+    // v85 is inert since v87: the rows it used to rewrite must survive it
+    // untouched, so the OpenCode store gets to decide them one migration later.
     expect(
         db
             .prepare("SELECT harness, counter FROM session_meta WHERE session_id = ?")
             .get(V85_SESSION_ID),
-    ).toEqual({ harness: "opencode", counter: 2 });
+    ).toEqual({ harness: "opencode2", counter: 2 });
+    expect(
+        db
+            .prepare(
+                "SELECT harness, project_path FROM session_projects WHERE session_id = ? ORDER BY harness",
+            )
+            .all(V85_TWIN_SESSION_ID),
+    ).toEqual([
+        { harness: "opencode", project_path: "/old" },
+        { harness: "opencode2", project_path: "/new" },
+    ]);
+}
+
+function populateTagVersionSessionAtV86(db: DatabaseType): void {
+    db.prepare(
+        "INSERT INTO tags (session_id, message_id, type, byte_size, tag_number, harness) VALUES (?, ?, 'message', 1, 1, 'opencode')",
+    ).run(V86_TAG_SESSION_ID, `${V86_TAG_SESSION_ID}:m0`);
+}
+
+function assertV86TagVersionArm(db: DatabaseType): void {
+    // The v86 triggers count tag identity changes per session; a row inserted
+    // right after v86 applied must already be counted.
+    expect(
+        db
+            .prepare("SELECT tags_version FROM session_meta WHERE session_id = ?")
+            .get(V86_TAG_SESSION_ID),
+    ).toEqual({ tags_version: 1 });
+}
+
+/**
+ * Give v87 the OpenCode store it decides harness labels from: one session last
+ * written by an OpenCode 2.x host and one last written by an OpenCode 1.18.x
+ * host. The store is built from the shapes captured from those real binaries, so
+ * the walk reads the schema OpenCode actually writes.
+ */
+function populateHarnessEvidenceAtV86(db: DatabaseType, state: ReplayState): void {
+    db.prepare(
+        "INSERT INTO session_meta (session_id, harness, counter) VALUES (?, 'opencode2', 3)",
+    ).run(V87_V1_SESSION_ID);
+
+    const shape = (
+        JSON.parse(
+            readFileSync(join(import.meta.dir, "__fixtures__/opencode-store-shapes.json"), "utf8"),
+        ) as {
+            shapes: Record<string, { tables: string[]; ddl: Record<string, string> }>;
+        }
+    ).shapes.migrated_v1_v2;
+    if (!shape) throw new Error("captured store shapes are missing migrated_v1_v2");
+
+    const storePath = join(
+        mkdtempSync(join(process.env.MAGIC_CONTEXT_TEST_DATA_DIR as string, "armed-host-")),
+        "opencode.db",
+    );
+    const store = new Database(storePath);
+    try {
+        for (const table of shape.tables) {
+            const ddl = shape.ddl[table];
+            if (ddl) store.exec(ddl);
+        }
+        const insertV1Session = store.prepare(
+            `INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated)
+             VALUES (?, 'global', 'armed', '/armed', 'armed', '1.18.30', ?, ?)`,
+        );
+        const insertV2Session = store.prepare(
+            `INSERT INTO session_v2 (id, project_id, slug, directory, version, time_created, time_updated)
+             VALUES (?, 'global', 'armed', '/armed', '2.0.7', ?, ?)`,
+        );
+        const insertV2Message = store.prepare(
+            `INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+             VALUES (?, ?, 'user', 1, ?, ?, '{}')`,
+        );
+        const insertV1Message = store.prepare(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, '{}')",
+        );
+        for (const sessionId of [V85_SESSION_ID, V85_TWIN_SESSION_ID]) {
+            insertV1Session.run(sessionId, 1_000, 1_000);
+            insertV2Session.run(sessionId, 1_000, 1_000);
+            insertV2Message.run(`${sessionId}-sm`, sessionId, 9_000, 9_000);
+        }
+        insertV1Session.run(V87_V1_SESSION_ID, 2_000, 2_000);
+        insertV1Message.run(`${V87_V1_SESSION_ID}-m`, V87_V1_SESSION_ID, 8_000, 8_000);
+    } finally {
+        store.close();
+    }
+
+    state.openCodeStorePath = storePath;
+    process.env.OPENCODE_DB = storePath;
+    resetOpenCodeDbPathStateForTesting();
+}
+
+function assertV87RelabelArm(db: DatabaseType): void {
+    // Each session lands on the OpenCode generation that wrote it most recently,
+    // in both directions. Where both labels already hold a row for the same
+    // session and key, the newer of the two rows survives.
+    expect(
+        db
+            .prepare("SELECT harness, counter FROM session_meta WHERE session_id = ?")
+            .get(V85_SESSION_ID),
+    ).toEqual({ harness: "opencode2", counter: 2 });
     expect(
         db
             .prepare("SELECT harness, project_path FROM session_projects WHERE session_id = ?")
             .all(V85_TWIN_SESSION_ID),
-    ).toEqual([{ harness: "opencode", project_path: "/new" }]);
+    ).toEqual([{ harness: "opencode2", project_path: "/new" }]);
     expect(
-        db.prepare("SELECT COUNT(*) AS count FROM session_meta WHERE harness = 'opencode2'").get(),
-    ).toEqual({ count: 0 });
+        db.prepare("SELECT harness FROM session_meta WHERE session_id = ?").get(V87_V1_SESSION_ID),
+    ).toEqual({ harness: "opencode" });
 }
 
 function populateModuleOwnedRows(db: DatabaseType, version: number, state: ReplayState): void {
@@ -446,12 +570,24 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
         case 84:
             if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
             assertV84SessionMetaArm(db);
-            populateV85MislabelsAtV84(db);
+            populateHarnessMislabelsAtV84(db);
             populateModuleOwnedRows(db, version, state);
             return;
         case 85:
             if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
-            assertV85RelabelArm(db);
+            assertV85InertArm(db);
+            populateModuleOwnedRows(db, version, state);
+            return;
+        case 86:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            populateTagVersionSessionAtV86(db);
+            assertV86TagVersionArm(db);
+            populateHarnessEvidenceAtV86(db, state);
+            populateModuleOwnedRows(db, version, state);
+            return;
+        case 87:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            assertV87RelabelArm(db);
             populateModuleOwnedRows(db, version, state);
             return;
         default:
@@ -499,7 +635,9 @@ test("every migration lands on populated rows and v72+ stores stay armed", () =>
         expectedNoteContents: new Set(),
         memoryMirrorCursor: 0,
         nextModuleMemoryId: 1,
+        openCodeStorePath: null,
     };
+    const originalOpenCodeDb = process.env.OPENCODE_DB;
 
     try {
         initializeDatabase(db);
@@ -522,5 +660,8 @@ test("every migration lands on populated rows and v72+ stores stay armed", () =>
         );
     } finally {
         closeQuietly(db);
+        if (originalOpenCodeDb === undefined) delete process.env.OPENCODE_DB;
+        else process.env.OPENCODE_DB = originalOpenCodeDb;
+        resetOpenCodeDbPathStateForTesting();
     }
 });

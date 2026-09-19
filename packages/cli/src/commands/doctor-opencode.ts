@@ -104,6 +104,7 @@ import {
     formatDanglingCompartmentBoundary,
     listDanglingCompartmentBoundaries,
 } from "./doctor-compartment-boundaries";
+import { reportUnresolvedHarnessRelabel } from "./doctor-harness-relabel";
 import { clearPluginCache } from "./doctor-opencode-cache";
 
 const CLI_PACKAGE_NAME = "@cortexkit/magic-context";
@@ -774,6 +775,9 @@ export async function runDoctor(
         authorityDb = openExistingContextDatabase(authorityDbPath, { readonly: true });
         if (authorityDb) {
             await reportAuthorityMarkers({ db: authorityDb, info: log.info, warn });
+            // Sessions whose OpenCode harness label the v87 repair could not verify
+            // because no OpenCode store was readable when it ran.
+            reportUnresolvedHarnessRelabel({ db: authorityDb, warn, detail: log.warn });
         } else {
             log.info("Authority: no context database found");
         }

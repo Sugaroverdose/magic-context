@@ -14,7 +14,7 @@ interface StoredTag extends TagEntry {
 // Mock DB that simulates bun:sqlite interface
 function createMockDb(options?: { failCounterWrite?: boolean; rollbackTransactions?: boolean }) {
     const tags: StoredTag[] = [];
-    const sessionMeta: Record<string, { counter: number }> = {};
+    const sessionMeta: Record<string, { counter: number; tags_version: number }> = {};
     let nextId = 1;
 
     const prepare = mock((sql: string) => {
@@ -53,12 +53,16 @@ function createMockDb(options?: { failCounterWrite?: boolean; rollbackTransactio
                         inputTokenCount: inputTokenCount ?? null,
                     };
                     tags.push(tag);
+                    if (sessionMeta[sessionId]) sessionMeta[sessionId].tags_version += 1;
                     return { lastInsertRowid: tag.rowId };
                 },
                 get: () => undefined,
             };
         }
-        if (sql.includes("SELECT counter FROM session_meta")) {
+        if (
+            sql.includes("SELECT counter FROM session_meta") ||
+            sql.includes("SELECT tags_version FROM session_meta")
+        ) {
             return {
                 get: (sessionId: string) => sessionMeta[sessionId] ?? null,
                 run: () => {},
@@ -109,7 +113,7 @@ function createMockDb(options?: { failCounterWrite?: boolean; rollbackTransactio
                         throw new Error("counter write failed");
                     }
                     if (!sessionMeta[sessionId]) {
-                        sessionMeta[sessionId] = { counter: 0 };
+                        sessionMeta[sessionId] = { counter: 0, tags_version: 0 };
                     }
                     sessionMeta[sessionId].counter = counter;
                 },
