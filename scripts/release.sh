@@ -18,6 +18,15 @@ set -euo pipefail
 #   8. CI takes over: test → build → publish npm + GitHub release
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+
+# The host and hermetic e2e lanes spawn `opencode serve` from PATH. The official
+# installer puts the binary under ~/.opencode/bin, which login shells add to PATH but
+# tool/daemon shells often do not (v0.42.6 r9: the same box that passed r8 lost the
+# entry when the tool daemon restarted). Prefer the ambient PATH; fall back to the
+# installer location before declaring it missing.
+if ! command -v opencode >/dev/null 2>&1 && [ -x "$HOME/.opencode/bin/opencode" ]; then
+  export PATH="$HOME/.opencode/bin:$PATH"
+fi
 VERSION=""
 DRY=""
 FORCE_E2E_HOST=0
