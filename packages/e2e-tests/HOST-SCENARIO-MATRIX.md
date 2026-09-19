@@ -21,7 +21,7 @@ means the real-host run failed; product code was not changed in this slice.
 | memory injection | pass | product-bug | pass | product-bug |
 | notice-loop race | pass | declared-divergence | declared-divergence | declared-divergence |
 | overflow recovery | pass | product-bug | declared-divergence | product-bug |
-| session isolation and removal | pass | product-bug | declared-divergence | declared-divergence |
+| session isolation and removal | pass | pass | declared-divergence | declared-divergence |
 | short-context overflow | pass | product-bug | pass | product-bug |
 | slow historian | pass | product-bug | pass | product-bug |
 | smoke | pass | pass | pass | pass |
@@ -40,6 +40,7 @@ means the real-host run failed; product code was not changed in this slice.
 - Context limits: adapter now persists completed assistant usage on `session.execution.succeeded` and feeds the resolved model catalog into shared budget arithmetic; harness output limit matches the other hosts (8,192). Exact real-host assertion: `47.83773440489858` for 20,000 / 41,808.
 - Cache invariants: v2 now applies the shared system-guidance/hash handler; the scenario harness uses Anthropic transport like the other hosts so the existing wire oracle sees the actual provider request.
 - Historian success: Anthropic transport allows the shared historian mock matcher to return the publication payload; real-host publication now passes.
+- Session isolation and removal: GA `session.remove` emits `session.deleted` with `data.sessionID`; subscribe to it and clear durable rows plus per-session adapter state.
 - Emergency blocking: defer pressure refusal to the shared transform so its blocking historian recovery can run before provider admission.
 - The usage repair does not explain all remaining failures: the immediate manifest rerun still finds requests filtered out by Anthropic-only wire readers, historian publication timeouts, and todo tool timeout. No assertion was relaxed.
 

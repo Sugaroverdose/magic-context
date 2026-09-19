@@ -4,6 +4,8 @@ import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import {
+    clearSession,
+    markSessionCleanupPending,
     getOrCreateSessionMeta,
     isDatabasePersisted,
     openDatabase,
@@ -311,8 +313,28 @@ export async function registerContext(context: V2Context) {
             for await (const value of context.event.subscribe({ signal: usageController.signal })) {
                 if (usageController.signal.aborted) break;
                 const event = value as { type?: string; data?: { sessionID?: string } };
-                if (event.type !== "session.execution.succeeded" || !event.data?.sessionID) continue;
+                if (!event.data?.sessionID) continue;
                 const sessionID = event.data.sessionID;
+                if (event.type === "session.deleted") {
+                    if (db) {
+                        markSessionCleanupPending(db, sessionID);
+                        clearSession(db, sessionID);
+                    }
+                    rawProviders.get(sessionID)?.();
+                    rawProviders.delete(sessionID);
+                    usage.delete(sessionID);
+                    liveModels.delete(sessionID);
+                    variants.delete(sessionID);
+                    agents.delete(sessionID);
+                    channel1.delete(sessionID);
+                    historyRefreshSessions.delete(sessionID);
+                    pendingMaterializationSessions.delete(sessionID);
+                    lastHeuristicsTurnId.delete(sessionID);
+                    systemPromptRefreshSessions.delete(sessionID);
+                    systemPrompt?.clearSession(sessionID);
+                    continue;
+                }
+                if (event.type !== "session.execution.succeeded") continue;
                 const model = liveModels.get(sessionID);
                 if (model) await recordUsage({ sessionID, model: { providerID: model.providerID, id: model.modelID } });
             }
