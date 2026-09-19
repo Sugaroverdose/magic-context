@@ -1,12 +1,12 @@
 /// <reference types="bun-types" />
 import { describe, expect, it, spyOn } from "bun:test";
-import { Database } from "../../shared/sqlite";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
 import { getTrailingBlankDecisions } from "../../features/magic-context/storage-meta-persisted";
 import { createTagger } from "../../features/magic-context/tagger";
-import { runRustModePostprocess } from "./transform-postprocess-phase";
+import { Database } from "../../shared/sqlite";
 import type { MessageLike } from "./transform-operations";
+import { runRustModePostprocess } from "./transform-postprocess-phase";
 
 function withDb(run: (db: Database) => void) {
     const db = new Database(":memory:");
