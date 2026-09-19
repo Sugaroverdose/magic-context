@@ -205,3 +205,15 @@ manufactured tool loop.
   pinning the v1-visible projection.
 - `packages/e2e-tests/tests/opencode2/` remains the deeper real-GA behavior lane
   for hook, safety, fold, hidden-completion, and store-reader contracts.
+
+## Pi / OMP host-scenario adjudication
+
+The Pi-family matrix is maintained in
+[`packages/e2e-tests/HOST-SCENARIO-MATRIX.md`](packages/e2e-tests/HOST-SCENARIO-MATRIX.md).
+This does not change the OpenCode 2 results above.
+
+| Surface | Pi / OMP result |
+| --- | --- |
+| Whole-system cache stability | OMP 18.2.6's request-body `cch` attestation changes `system[0]`; cache-stability and long-session phase 1 are declared host-imposed divergences, not relaxed assertions. [Evidence](packages/pi-plugin/PARITY.md#35-omp-provider-attestation-prevents-whole-system-byte-parity). |
+| Historian, todo, memory, compaction-off and pressure fixtures | OMP configuration filenames, shared config location, tool transport and macOS cwd spelling required harness corrections; real-host assertions remain enabled. [Adjudication](packages/pi-plugin/PARITY.md#36-omp-parity-fixtures-use-native-configuration-and-wire-conventions). |
+| Same-path window overlay | Pi/OMP product fix classifies the host model window as catalog metadata; observed overlay limits take precedence. Pi hot-reloads; OMP RPC restarts and resumes because its reload callback is a no-op. |

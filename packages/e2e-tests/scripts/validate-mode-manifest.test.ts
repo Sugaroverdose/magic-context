@@ -35,7 +35,9 @@ describe("mode manifest validator", () => {
         expect(filesForMode(validation, "ts", "opencode")).toHaveLength(24);
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(21);
         expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(20);
-        expect(filesForMode(validation, "ts", "omp")).toHaveLength(20);
+        // OMP hashes each request into its system header, breaking within-session byte identity
+        // in cache-stability and long-running-session; their manifest entries declare the omission.
+        expect(filesForMode(validation, "ts", "omp")).toHaveLength(18);
         const excluded = validation.manifest.entries
             .filter((entry) => entry.tier === "excluded")
             .map((entry) => entry.path);

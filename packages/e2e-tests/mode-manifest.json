@@ -35,10 +35,14 @@
             "hosts": [
                 "opencode",
                 "opencode2",
-                "pi",
-                "omp"
+                "pi"
             ],
-            "behavior": true
+            "behavior": true,
+            "divergences": [{
+                "host": "omp",
+                "reason": "OMP 18.2.6 rewrites system[0] cch attestation from every request body; byte-stable whole-system assertion is host-imposed (pi-ai src/providers/anthropic.ts:685-759)",
+                "contract_ref": "packages/pi-plugin/PARITY.md#35-omp-provider-attestation-prevents-whole-system-byte-parity"
+            }]
         },
         {
             "path": "tests/compaction-off.test.ts",
@@ -235,10 +239,14 @@
             "hosts": [
                 "opencode",
                 "opencode2",
-                "pi",
-                "omp"
+                "pi"
             ],
-            "behavior": true
+            "behavior": true,
+            "divergences": [{
+                "host": "omp",
+                "reason": "OMP 18.2.6 rewrites system[0] cch attestation per request, contradicting phase-1 whole-system byte identity before later phases execute (pi-ai src/providers/anthropic.ts:685-759)",
+                "contract_ref": "packages/pi-plugin/PARITY.md#35-omp-provider-attestation-prevents-whole-system-byte-parity"
+            }]
         },
         {
             "path": "tests/memory-injection.test.ts",

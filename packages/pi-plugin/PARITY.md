@@ -1040,3 +1040,42 @@ carrier: their notices are delivered through Pi UI/event surfaces instead.
 `packages/e2e-tests/tests/notice-loop-race.test.ts` therefore remains an
 OpenCode-only behavior scenario, and its manifest entry names the Pi/OMP
 omission explicitly rather than silently treating it as parity.
+
+## 35. OMP provider attestation prevents whole-system byte parity
+
+**HOST-IMPOSED, OMP 18.2.6:** the Anthropic adapter injects
+`x-anthropic-billing-header` into `system[0]` and replaces its `cch` value with
+an XXHash64-derived attestation of the entire outgoing body. Growing the message
+tail therefore changes the system bytes even when Magic Context's contribution
+is frozen. Source: [pi-ai anthropic.ts, createClaudeBillingHeader / patchCch / wrapFetchForCch](https://github.com/can1357/oh-my-pi/blob/v18.2.6/packages/ai/src/providers/anthropic.ts#L685-L759),
+also shipped in `@oh-my-pi/pi-ai@18.2.6/src/providers/anthropic.ts:685-759`.
+Real RPC requests reproduced changing `cch` values (`4527d`, `81d25`) with all
+other system bytes unchanged.
+
+The manifest declares OMP divergences for `cache-stability` and
+`long-running-session`, rather than stripping the header or weakening their
+whole-system identity assertions. The latter fails in phase 1; later OMP phases
+are **not claimed verified** by that scenario. The independent OMP cache-invariant,
+historian, todo, memory, and overflow scenarios remain enabled. Pi's long-session
+marker assertion reads either the pending SQL marker or the applied native JSONL
+marker for the exact published ordinal: Pi does not populate OpenCode's applied
+marker SQL column.
+
+## 36. OMP parity fixtures use native configuration and wire conventions
+
+| Scenarios | Classification and correction |
+| --- | --- |
+| Historian success, deferred marker, emergency blocking, slow historian, overflow recovery, conflict disable | HARNESS GAP: write OMP `config.yml` and Magic Context's shared `XDG_CONFIG_HOME/cortexkit/magic-context.jsonc`; the old Pi-only filenames did not configure OMP. Real OMP historian subprocesses publish without product spawn changes. |
+| Todo synthesis, memory injection | HARNESS GAP: disable OMP `tools.xdev` and `tools.intentTracing` for directly scripted tool replies, and recognize the actual `_todowrite` / `_ctx_memory` Anthropic wire names. IDs, payloads, replay bytes and memory content assertions remain intact. |
+| Cache invariants, compaction off | HARNESS GAP: non-git fixture memory identities must use OMP's exposed cwd, which removes `/private` on macOS, rather than a different realpath spelling. |
+| Short-context overflow | HARNESS GAP: replace exact 20-character repeated cycles with distinct same-sized records. OMP correctly rejected the old ballast as a thinking loop, so no reply mass accumulated. The real run now peaks at 93.6% of 128K, publishes historian work and drops 25 tags. |
+| Window overlay reload | PRODUCT BUG on both Pi hosts: `getContextUsage().contextWindow` is configured catalog metadata, not observed provider truth. Mark it catalog-sourced in pressure, scheduler, wrap-up and status consumers so the measured overlay wins. HARNESS GAP on OMP: add its mock model cell, and restart/resume for reload because OMP RPC leaves `ExtensionCommandContext.reload` unbound/no-op. |
+
+OMP source references, shipped in 18.2.6:
+`pi-coding-agent/src/config/settings.ts:181-194` (`config.yml`),
+`src/config/settings-schema.ts:4639-4646,4749-4778` (intent tracing and xd devices),
+`pi-ai/src/providers/anthropic.ts:886-900` (wire tool prefix),
+`pi-utils/src/dirs.ts:198-203` (`standardizeMacOSPath`), and
+`pi-coding-agent/src/extensibility/extensions/runner.ts:460,711,1261` (reload handler).
+The overlay test preserves exact 100K/160K denominators, the stale-before-reload
+assertion, and the same session ID through the OMP restart.
