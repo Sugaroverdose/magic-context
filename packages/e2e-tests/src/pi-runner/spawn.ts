@@ -132,7 +132,10 @@ export function createPiIsolatedEnv(
     configDir: realpathSync(configDir),
     dataDir: realpathSync(dataDir),
     cacheDir: realpathSync(cacheDir),
-    workdir: realpathSync(workdir),
+    // OMP standardizeMacOSPath removes /private before exposing ctx.cwd.
+    workdir: host === "omp" && process.platform === "darwin"
+      ? realpathSync(workdir).replace(/^\/private(?=\/var\/)/, "")
+      : realpathSync(workdir),
     agentDir: realpathSync(agentDir),
     pluginDir,
   };
@@ -155,6 +158,8 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
 
   const settings = {
     packages: [env.pluginDir],
+    // Scripted provider replies call tools directly, not through OMP's xd:// transport.
+    ...(host === "omp" ? { tools: { xdev: false, intentTracing: false } } : {}),
     defaultProvider: host === "omp" ? "mock" : "anthropic",
     defaultModel: host === "omp" ? "mock-model" : "claude-haiku-4-5",
     enabledModels: [modelRef],
@@ -164,7 +169,7 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
     enableInstallTelemetry: false,
     ...(opts.piSettingsExtra ?? {}),
   };
-  writeFileSync(join(env.agentDir, "settings.json"), JSON.stringify(settings, null, 2));
+  writeFileSync(join(env.agentDir, host === "omp" ? "config.yml" : "settings.json"), JSON.stringify(settings, null, 2));
 
   const models: {
     providers: Record<string, { baseUrl: string; [key: string]: unknown }>;
@@ -226,7 +231,11 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
     dreamer: { disable: true },
     ...pinMockAgents(opts.magicContextConfig, modelRef, host),
   };
-  writeFileSync(join(env.agentDir, "magic-context.jsonc"), JSON.stringify(magicContext, null, 2));
+  // Store Magic Context settings under XDG_CONFIG_HOME/cortexkit, the shared
+  // user-level location both hosts load instead of Pi's legacy agent directory.
+  const userConfigDir = join(env.configDir, "cortexkit");
+  mkdirSync(userConfigDir, { recursive: true });
+  writeFileSync(join(userConfigDir, "magic-context.jsonc"), JSON.stringify(magicContext, null, 2));
 }
 
 export function childEnv(env: PiIsolatedEnv): Record<string, string> {
