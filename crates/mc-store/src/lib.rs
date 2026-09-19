@@ -2829,6 +2829,67 @@ const MIGRATIONS: &[Migration] = &[
         END;
         "#,
     },
+    Migration {
+        version: 55,
+        // Grow-mostly per-session state moves out of the `meta` JSON blob and into rows.
+        //
+        // A SQLite row is rewritten whole on every UPDATE, so the cost of a commit is set by
+        // the size of the record it touches, not by the size of the change. `meta` held a map
+        // keyed by message id that grows with the conversation and whose existing entries never
+        // change, so appending one entry rewrote megabytes. As rows, a pass writes only the
+        // entries that actually differ.
+        //
+        // `mc_served_output_fingerprints` is keyed by position because the served vector is
+        // rebuilt each pass and compared element-wise; the stable prefix then costs nothing.
+        //
+        // `mc_cache_state_digest` records the hashes of the blob columns as they were last
+        // written, together with the row_version they belong to. A writer that bumps
+        // row_version without refreshing the digest leaves it merely untrusted, never wrong:
+        // readers compare the recorded row_version first and fall back to reading the blobs.
+        statements: r#"
+        CREATE TABLE IF NOT EXISTS mc_block_identities (
+            session_id TEXT NOT NULL,
+            mid        TEXT NOT NULL,
+            identities TEXT NOT NULL,
+            PRIMARY KEY (session_id, mid)
+        );
+        CREATE TABLE IF NOT EXISTS mc_served_output_fingerprints (
+            session_id     TEXT NOT NULL,
+            position       INTEGER NOT NULL,
+            block_id       TEXT NOT NULL,
+            content_hash   TEXT NOT NULL,
+            serialized_len INTEGER NOT NULL,
+            PRIMARY KEY (session_id, position)
+        );
+        CREATE TABLE IF NOT EXISTS mc_cache_state_digest (
+            session_id  TEXT PRIMARY KEY,
+            row_version INTEGER NOT NULL,
+            core_hash   TEXT NOT NULL,
+            meta_hash   TEXT NOT NULL
+        );
+
+        -- json_each over a missing path yields no rows, so absent keys need no guard.
+        INSERT OR REPLACE INTO mc_block_identities (session_id, mid, identities)
+        SELECT state.session_id, entry.key, entry.value
+          FROM mc_cache_state AS state,
+               json_each(json_extract(state.meta, '$.block_identity_by_mid')) AS entry;
+
+        INSERT OR REPLACE INTO mc_served_output_fingerprints
+               (session_id, position, block_id, content_hash, serialized_len)
+        SELECT state.session_id,
+               entry.key,
+               json_extract(entry.value, '$.block_id'),
+               json_extract(entry.value, '$.content_hash'),
+               json_extract(entry.value, '$.serialized_len')
+          FROM mc_cache_state AS state,
+               json_each(json_extract(state.meta, '$.served_output_fingerprint')) AS entry;
+
+        UPDATE mc_cache_state
+           SET meta = json_remove(meta, '$.block_identity_by_mid', '$.served_output_fingerprint')
+         WHERE json_type(meta, '$.block_identity_by_mid') = 'object'
+            OR json_type(meta, '$.served_output_fingerprint') = 'array';
+        "#,
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -4276,7 +4337,13 @@ pub struct ModuleMeta {
     /// Ordered block identity vectors keyed by producer message id. Each vector stores
     /// the block kind and a fingerprint of the canonical reduction-accounting bytes, so
     /// a later request that changes a live message's block layout fails closed.
-    #[serde(default)]
+    ///
+    /// Persisted as one row per message id in `mc_block_identities`, NOT inside the meta
+    /// blob: the map grows with the conversation and its existing entries never change, so
+    /// keeping it in the blob made every commit rewrite the whole history to append one
+    /// entry. `skip` keeps it out of the serialized blob; the store hydrates it on load and
+    /// writes only the entries that differ on commit.
+    #[serde(skip)]
     pub block_identity_by_mid: BTreeMap<String, Vec<BlockIdentity>>,
     /// Number of accepted live-tail identity changes. Covered and frozen identities still
     /// reject, but OpenCode may legitimately rewrite an uncovered queued message in place.
@@ -4430,7 +4497,11 @@ pub struct ModuleMeta {
     pub last_committed_pass_at_ms: i64,
     /// Fingerprints of the blocks most recently served to the provider. The vector is exactly
     /// the served block set for that pass, so it stays bounded by the output size.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// Persisted as one row per position in `mc_served_output_fingerprints`, NOT inside the
+    /// meta blob. The vector is rebuilt every pass but its leading positions almost never
+    /// move, so per-position rows let a pass write only the entries that changed.
+    #[serde(skip)]
     pub served_output_fingerprint: Vec<ServedBlockFingerprint>,
     /// Revert and shadow-hydration generations that produced the served CK fingerprints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7958,7 +8029,7 @@ impl McStore {
         self.state_load_query_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let row = self.inner.with_conn(|conn| {
-            Ok(conn
+            let state = conn
                 .query_row(
                     "SELECT row_version, core_state, meta FROM mc_cache_state WHERE session_id = ?1",
                     params![session_id],
@@ -7970,7 +8041,20 @@ impl McStore {
                         ))
                     },
                 )
-                .ok())
+                .ok();
+            // The row-stored parts of the meta are read on the same connection, so a caller
+            // never sees a blob from before a concurrent commit paired with identities from
+            // after it.
+            match state {
+                None => Ok(None),
+                Some((rv, core_json, meta_json)) => Ok(Some((
+                    rv,
+                    core_json,
+                    meta_json,
+                    load_block_identities_tx(conn, session_id)?,
+                    load_served_output_fingerprints_tx(conn, session_id)?,
+                ))),
+            }
         })?;
 
         match row {
@@ -7979,13 +8063,18 @@ impl McStore {
                 meta: ModuleMeta::default(),
                 row_version: None,
             }),
-            Some((rv, core_json, meta_json)) => Ok(LoadedState {
-                core: serde_json::from_str(&core_json)
-                    .map_err(|e| McStoreError::Serde(e.to_string()))?,
-                meta: serde_json::from_str(&meta_json)
-                    .map_err(|e| McStoreError::Serde(e.to_string()))?,
-                row_version: Some(rv),
-            }),
+            Some((rv, core_json, meta_json, identities, served)) => {
+                let mut meta: ModuleMeta = serde_json::from_str(&meta_json)
+                    .map_err(|e| McStoreError::Serde(e.to_string()))?;
+                meta.block_identity_by_mid = identities;
+                meta.served_output_fingerprint = served;
+                Ok(LoadedState {
+                    core: serde_json::from_str(&core_json)
+                        .map_err(|e| McStoreError::Serde(e.to_string()))?,
+                    meta,
+                    row_version: Some(rv),
+                })
+            }
         }
     }
 
@@ -8047,23 +8136,28 @@ impl McStore {
                 )
                 .optional()?;
             let loaded = match state {
-                Some((row_version, core_json, meta_json)) => LoadedState {
-                    core: serde_json::from_str(&core_json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            1,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?,
-                    meta: serde_json::from_str(&meta_json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            2,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?,
-                    row_version: Some(row_version),
-                },
+                Some((row_version, core_json, meta_json)) => {
+                    let mut meta: ModuleMeta =
+                        serde_json::from_str(&meta_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?;
+                    hydrate_meta_row_state(&transaction, session_id, &mut meta)?;
+                    LoadedState {
+                        core: serde_json::from_str(&core_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                1,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        meta,
+                        row_version: Some(row_version),
+                    }
+                }
                 None => LoadedState {
                     core: CoreState::default(),
                     meta: ModuleMeta::default(),
@@ -8178,23 +8272,28 @@ impl McStore {
                 )
                 .optional()?;
             let loaded = match state {
-                Some((row_version, core_json, meta_json)) => LoadedState {
-                    core: serde_json::from_str(&core_json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            1,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?,
-                    meta: serde_json::from_str(&meta_json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            2,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?,
-                    row_version: Some(row_version),
-                },
+                Some((row_version, core_json, meta_json)) => {
+                    let mut meta: ModuleMeta =
+                        serde_json::from_str(&meta_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?;
+                    hydrate_meta_row_state(&transaction, session_id, &mut meta)?;
+                    LoadedState {
+                        core: serde_json::from_str(&core_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                1,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        meta,
+                        row_version: Some(row_version),
+                    }
+                }
                 None => LoadedState {
                     core: CoreState::default(),
                     meta: ModuleMeta::default(),
@@ -10204,6 +10303,8 @@ impl McStore {
             serde_json::to_string(core).map_err(|e| McStoreError::Serde(e.to_string()))?;
         let meta_json =
             serde_json::to_string(meta).map_err(|e| McStoreError::Serde(e.to_string()))?;
+        let core_hash = cache_state_blob_hash(&core_json);
+        let meta_hash = cache_state_blob_hash(&meta_json);
         let scheduler_observation_json = scheduler_observation
             .map(serialize_scheduler_observation)
             .transpose()?;
@@ -10310,17 +10411,51 @@ impl McStore {
                 }
             }
 
-            // INSERT-or-UPDATE in the same fenced txn (bootstrap has no row to UPDATE).
-            tx.execute(
-                "INSERT INTO mc_cache_state (session_id, row_version, core_state, meta, last_activity_at)
-                  VALUES (?1, ?2, ?3, ?4, ?5)
-                  ON CONFLICT(session_id) DO UPDATE SET
-                      row_version = excluded.row_version,
-                      core_state  = excluded.core_state,
-                      meta        = excluded.meta,
-                      last_activity_at = excluded.last_activity_at",
-                params![session_id, next as i64, core_json, meta_json, current_time_ms()],
-            )?;
+            // The grow-mostly parts of the meta are rows, so a pass writes only the entries
+            // that differ instead of re-serializing the whole history to append one.
+            let row_state_writes =
+                sync_block_identities_tx(tx, session_id, &meta.block_identity_by_mid)?
+                    + sync_served_output_fingerprints_tx(
+                        tx,
+                        session_id,
+                        &meta.served_output_fingerprint,
+                    )?;
+
+            // Overlay decisions (a minted tag, a hint, a marker, a consumed drop) are durable
+            // changes in their own tables and are serialized by this same row_version, so a
+            // pass carrying any of them must take the bump even when its blobs are unchanged.
+            // The overlay frontier is excluded on purpose: it is a monotone MAX, so two
+            // writers cannot disagree about it.
+            let decision_writes = !overlays.tag_mints.is_empty()
+                || !overlays.temporal_marks.is_empty()
+                || overlays.rewrite_temporal_marks
+                || overlays.user_hint.is_some()
+                || overlays.channel1_append.is_some()
+                || !consumed_drop_ids.is_empty()
+                || !first_applied_command_ids.is_empty();
+
+            // SQLite rewrites a whole record on UPDATE, so writing an unchanged blob column
+            // costs as much as changing it. A pass whose durable state is byte-identical to
+            // what is already stored therefore leaves the row, and its row_version, alone.
+            let blobs_changed =
+                !cache_state_blobs_unchanged(tx, session_id, current, &core_hash, &meta_hash)?;
+            let accepted_version = if blobs_changed || row_state_writes > 0 || decision_writes {
+                // INSERT-or-UPDATE in the same fenced txn (bootstrap has no row to UPDATE).
+                tx.execute(
+                    "INSERT INTO mc_cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                      VALUES (?1, ?2, ?3, ?4, ?5)
+                      ON CONFLICT(session_id) DO UPDATE SET
+                          row_version = excluded.row_version,
+                          core_state  = excluded.core_state,
+                          meta        = excluded.meta,
+                          last_activity_at = excluded.last_activity_at",
+                    params![session_id, next as i64, core_json, meta_json, current_time_ms()],
+                )?;
+                record_cache_state_digest_tx(tx, session_id, next as i64, &core_hash, &meta_hash)?;
+                next
+            } else {
+                current.max(0) as u64
+            };
             // Every accepted transform owns the current-pass value: stable passes write NULL
             // rather than leaving an older divergence looking like a present observation.
             tx.execute(
@@ -10535,7 +10670,7 @@ impl McStore {
                     params![session_id, drop_id],
                 )?;
             }
-            Ok(CommitOutcome::Committed(next))
+            Ok(CommitOutcome::Committed(accepted_version))
         })?;
 
         match outcome {
@@ -11198,12 +11333,13 @@ impl McStore {
                             return Ok(LineageDescentTxnOutcome::Serde(error.to_string()))
                         }
                     };
-                    let meta = match serde_json::from_str(meta_json) {
+                    let mut meta: ModuleMeta = match serde_json::from_str(meta_json) {
                         Ok(meta) => meta,
                         Err(error) => {
                             return Ok(LineageDescentTxnOutcome::Serde(error.to_string()))
                         }
                     };
+                    hydrate_meta_row_state(tx, request.target_key, &mut meta)?;
                     (core, meta)
                 }
                 None => (CoreState::default(), ModuleMeta::default()),
@@ -11430,7 +11566,10 @@ impl McStore {
                 Err(error) => return Ok(LineageDescentTxnOutcome::Serde(error.to_string())),
             };
             let source_meta: ModuleMeta = match serde_json::from_str(&source_meta_json) {
-                Ok(meta) => meta,
+                Ok(mut meta) => {
+                    hydrate_meta_row_state(tx, &source_key, &mut meta)?;
+                    meta
+                }
                 Err(error) => return Ok(LineageDescentTxnOutcome::Serde(error.to_string())),
             };
             let prior_last = source_meta.newest_live_ordinal;
@@ -11640,6 +11779,8 @@ impl McStore {
                 "mc_user_hints",
                 "mc_channel1_appends",
                 "mc_overlay_frontiers",
+                "mc_block_identities",
+                "mc_served_output_fingerprints",
             ] {
                 tx.execute(
                     &format!("DELETE FROM {table} WHERE session_id = ?1"),
@@ -11753,6 +11894,15 @@ impl McStore {
                 "INSERT INTO mc_overlay_frontiers (session_id, max_seen_ordinal)
                  SELECT ?1, max_seen_ordinal
                    FROM mc_overlay_frontiers WHERE session_id = ?2",
+                params![request.target_key, source_key],
+            )?;
+            // The descended target adopts the source's meta, so its block identities come
+            // with it. The served fingerprints deliberately do not: the target starts with an
+            // empty served set, matching the cleared field above.
+            tx.execute(
+                "INSERT INTO mc_block_identities (session_id, mid, identities)
+                 SELECT ?1, mid, identities
+                   FROM mc_block_identities WHERE session_id = ?2",
                 params![request.target_key, source_key],
             )?;
             tx.execute(
@@ -12044,6 +12194,9 @@ impl McStore {
                 "DELETE FROM mc_historian_side_channel_outbox WHERE session_id = ?1",
                 params![session_id],
             )?;
+            // The reset writes a default ModuleMeta, which used to blank the identity map and
+            // the served fingerprints along with it. They are rows now, so drop them here.
+            clear_meta_row_state_tx(tx, session_id)?;
             let next_version = current as u64 + 1;
             tx.execute(
                 "UPDATE mc_cache_state
@@ -13010,13 +13163,16 @@ impl McStore {
                     "historian firing has no selected-range content identities".to_string(),
                 ));
             }
-            if let Some(changed) = predicate.selected_range_identities.iter().find(|selected| {
-                meta.block_identity_by_mid.get(&selected.mid) != Some(&selected.block_identities)
-            }) {
-                return Ok(PublishTxnOutcome::FenceRejected(format!(
-                    "selected historian message {} changed after firing",
-                    changed.mid
-                )));
+            // Only the selected messages are looked up: the identities are rows now, so the
+            // fence costs a handful of point reads instead of parsing the session's whole map.
+            for selected in &predicate.selected_range_identities {
+                let stored = block_identities_for_mid_tx(tx, session_id, &selected.mid)?;
+                if stored.as_ref() != Some(&selected.block_identities) {
+                    return Ok(PublishTxnOutcome::FenceRejected(format!(
+                        "selected historian message {} changed after firing",
+                        selected.mid
+                    )));
+                }
             }
 
             if meta.revert_epoch != request.expected_revert_epoch {
@@ -17920,6 +18076,269 @@ fn mural_cue_content_hash(content: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn serde_to_sql_error(error: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+/// Read the block identities a session owns, keyed by producer message id.
+///
+/// These live in `mc_block_identities` rather than in the meta blob; see the field comment
+/// on [`ModuleMeta::block_identity_by_mid`] for why.
+fn load_block_identities_tx(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> rusqlite::Result<BTreeMap<String, Vec<BlockIdentity>>> {
+    let mut statement = conn
+        .prepare_cached("SELECT mid, identities FROM mc_block_identities WHERE session_id = ?1")?;
+    let mut rows = statement.query(params![session_id])?;
+    let mut identities = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        let mid: String = row.get(0)?;
+        let json: String = row.get(1)?;
+        let vector: Vec<BlockIdentity> = serde_json::from_str(&json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        identities.insert(mid, vector);
+    }
+    Ok(identities)
+}
+
+/// Read one message's stored block identities without parsing the rest of the session's map.
+fn block_identities_for_mid_tx(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    mid: &str,
+) -> rusqlite::Result<Option<Vec<BlockIdentity>>> {
+    let json = conn
+        .query_row(
+            "SELECT identities FROM mc_block_identities WHERE session_id = ?1 AND mid = ?2",
+            params![session_id, mid],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    match json {
+        None => Ok(None),
+        Some(json) => serde_json::from_str(&json).map(Some).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        }),
+    }
+}
+
+/// Read the fingerprints of the blocks last served to the provider, in served order.
+fn load_served_output_fingerprints_tx(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> rusqlite::Result<Vec<ServedBlockFingerprint>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT block_id, content_hash, serialized_len FROM mc_served_output_fingerprints
+          WHERE session_id = ?1 ORDER BY position ASC",
+    )?;
+    let rows = statement
+        .query_map(params![session_id], |row| {
+            Ok(ServedBlockFingerprint {
+                block_id: row.get(0)?,
+                content_hash: row.get(1)?,
+                serialized_len: row.get::<_, i64>(2)?.max(0) as usize,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Fill in the parts of a loaded `ModuleMeta` that are stored as rows instead of blob keys.
+/// Every reader that uses those fields must call this; readers that only touch blob scalars
+/// deliberately skip it and pay nothing for state they never look at.
+fn hydrate_meta_row_state(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    meta: &mut ModuleMeta,
+) -> rusqlite::Result<()> {
+    meta.block_identity_by_mid = load_block_identities_tx(conn, session_id)?;
+    meta.served_output_fingerprint = load_served_output_fingerprints_tx(conn, session_id)?;
+    Ok(())
+}
+
+/// Persist `desired` by writing only the entries that differ from what is already stored.
+/// Returns how many rows were inserted, updated, or deleted.
+fn sync_block_identities_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    desired: &BTreeMap<String, Vec<BlockIdentity>>,
+) -> rusqlite::Result<usize> {
+    let mut stored: HashMap<String, String> = HashMap::new();
+    {
+        let mut statement = tx.prepare_cached(
+            "SELECT mid, identities FROM mc_block_identities WHERE session_id = ?1",
+        )?;
+        let mut rows = statement.query(params![session_id])?;
+        while let Some(row) = rows.next()? {
+            stored.insert(row.get(0)?, row.get(1)?);
+        }
+    }
+
+    let mut written = 0usize;
+    for (mid, vector) in desired {
+        let json = serde_json::to_string(vector).map_err(serde_to_sql_error)?;
+        if stored.remove(mid).as_deref() == Some(json.as_str()) {
+            continue;
+        }
+        tx.prepare_cached(
+            "INSERT INTO mc_block_identities (session_id, mid, identities)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id, mid) DO UPDATE SET identities = excluded.identities",
+        )?
+        .execute(params![session_id, mid, json])?;
+        written += 1;
+    }
+    for mid in stored.keys() {
+        written += tx
+            .prepare_cached("DELETE FROM mc_block_identities WHERE session_id = ?1 AND mid = ?2")?
+            .execute(params![session_id, mid])?;
+    }
+    Ok(written)
+}
+
+/// Persist `desired` by position, writing only the positions whose fingerprint changed.
+/// Returns how many rows were inserted, updated, or deleted.
+fn sync_served_output_fingerprints_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    desired: &[ServedBlockFingerprint],
+) -> rusqlite::Result<usize> {
+    let stored = load_served_output_fingerprints_tx(tx, session_id)?;
+    let mut written = 0usize;
+    for (position, fingerprint) in desired.iter().enumerate() {
+        if stored.get(position) == Some(fingerprint) {
+            continue;
+        }
+        tx.prepare_cached(
+            "INSERT INTO mc_served_output_fingerprints
+                 (session_id, position, block_id, content_hash, serialized_len)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(session_id, position) DO UPDATE SET
+                 block_id = excluded.block_id,
+                 content_hash = excluded.content_hash,
+                 serialized_len = excluded.serialized_len",
+        )?
+        .execute(params![
+            session_id,
+            position as i64,
+            fingerprint.block_id,
+            fingerprint.content_hash,
+            fingerprint.serialized_len as i64
+        ])?;
+        written += 1;
+    }
+    if stored.len() > desired.len() {
+        written += tx
+            .prepare_cached(
+                "DELETE FROM mc_served_output_fingerprints
+                  WHERE session_id = ?1 AND position >= ?2",
+            )?
+            .execute(params![session_id, desired.len() as i64])?;
+    }
+    Ok(written)
+}
+
+/// Drop every row-stored part of a session's meta. The paths that reset a session to a
+/// default `ModuleMeta` used to wipe these fields by rewriting the blob; they call this now.
+fn clear_meta_row_state_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM mc_block_identities WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM mc_served_output_fingerprints WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
+fn cache_state_blob_hash(json: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(json.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Whether `mc_cache_state` already holds exactly these blob bytes for the session.
+///
+/// The digest row records the two hashes together with the `row_version` they were written
+/// at. A writer that bumps `row_version` without refreshing the digest leaves the digest
+/// untrusted rather than wrong: the version comparison fails and this falls back to reading
+/// the stored blobs. A stale digest can therefore only cost one extra comparison; it can
+/// never make a needed write look unnecessary.
+fn cache_state_blobs_unchanged(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    current_row_version: i64,
+    core_hash: &str,
+    meta_hash: &str,
+) -> rusqlite::Result<bool> {
+    let digest = tx
+        .query_row(
+            "SELECT row_version, core_hash, meta_hash FROM mc_cache_state_digest
+              WHERE session_id = ?1",
+            params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((digest_version, stored_core_hash, stored_meta_hash)) = digest {
+        if digest_version == current_row_version {
+            return Ok(stored_core_hash == core_hash && stored_meta_hash == meta_hash);
+        }
+    }
+    let stored = tx
+        .query_row(
+            "SELECT core_state, meta FROM mc_cache_state WHERE session_id = ?1",
+            params![session_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    Ok(match stored {
+        Some((stored_core, stored_meta)) => {
+            cache_state_blob_hash(&stored_core) == core_hash
+                && cache_state_blob_hash(&stored_meta) == meta_hash
+        }
+        None => false,
+    })
+}
+
+fn record_cache_state_digest_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    row_version: i64,
+    core_hash: &str,
+    meta_hash: &str,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO mc_cache_state_digest (session_id, row_version, core_hash, meta_hash)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO UPDATE SET
+             row_version = excluded.row_version,
+             core_hash = excluded.core_hash,
+             meta_hash = excluded.meta_hash",
+        params![session_id, row_version, core_hash, meta_hash],
+    )?;
+    Ok(())
+}
+
 fn set_memory_mural_cue_tx(
     tx: &rusqlite::Transaction<'_>,
     context_store_uuid: &str,
@@ -18878,8 +19297,229 @@ mod tests {
         assert_eq!(loaded.core.boundary_id, "b1");
         assert_eq!(loaded.meta, meta);
 
-        let v2 = store.commit("ses_a", Some(1), &core, &meta).unwrap();
+        // The second commit changes the state it writes. A byte-identical re-commit is a
+        // different contract and is covered by
+        // `commit_with_unchanged_state_does_not_rewrite_the_cache_row`.
+        let changed_meta = ModuleMeta {
+            m1_revision: 1,
+            ..meta.clone()
+        };
+        let v2 = store
+            .commit("ses_a", Some(1), &core, &changed_meta)
+            .unwrap();
         assert_eq!(v2, 2);
+    }
+
+    /// Bytes SQLite has appended to the write-ahead log. This is the quantity the storage
+    /// layout is about: a commit costs whatever region it rewrites, not whatever it meant to
+    /// change, and the WAL is where that region actually lands on disk.
+    fn wal_bytes(dir: &std::path::Path) -> u64 {
+        std::fs::metadata(dir.join("store.db-wal"))
+            .map(|meta| meta.len())
+            .unwrap_or(0)
+    }
+
+    fn checkpoint_wal(store: &McStore) {
+        store
+            .inner
+            .with_conn(|conn| {
+                conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn identity_map(count: usize) -> BTreeMap<String, Vec<BlockIdentity>> {
+        (0..count)
+            .map(|index| {
+                (
+                    format!("m{index:06}"),
+                    vec![BlockIdentity {
+                        kind_tag: "text".to_string(),
+                        byte_fingerprint: format!("{index:064x}"),
+                    }],
+                )
+            })
+            .collect()
+    }
+
+    /// Seed a session with `map_size` block identities, then commit a pass that adds exactly
+    /// one more. Returns the bytes that second commit wrote.
+    fn wal_bytes_to_append_one_identity(map_size: usize) -> u64 {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::default();
+        let mut meta = ModuleMeta {
+            block_identity_by_mid: identity_map(map_size),
+            ..ModuleMeta::default()
+        };
+        let version = store.commit("ses", None, &core, &meta).unwrap();
+        assert!(
+            dir.path().join("store.db-wal").exists(),
+            "this measurement reads WAL growth, so the store must be journaling to a WAL"
+        );
+
+        // Drop the seeding write so the delta below contains only the second commit.
+        checkpoint_wal(&store);
+        let before = wal_bytes(dir.path());
+
+        meta.block_identity_by_mid.insert(
+            "m999999".to_string(),
+            vec![BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: "appended".to_string(),
+            }],
+        );
+        store.commit("ses", Some(version), &core, &meta).unwrap();
+        let written = wal_bytes(dir.path()).saturating_sub(before);
+
+        assert_eq!(
+            store.load("ses").unwrap().meta.block_identity_by_mid,
+            meta.block_identity_by_mid,
+            "the appended identity must survive the round trip"
+        );
+        written
+    }
+
+    #[test]
+    fn a_pass_appending_one_identity_does_not_pay_for_the_whole_map() {
+        // The cost of appending one entry must be set by the entry, not by how much history
+        // sits next to it. Holding the change fixed and varying only the size of the map it
+        // lands in is what separates "wrote one row" from "rewrote the region".
+        let small = wal_bytes_to_append_one_identity(500);
+        let large = wal_bytes_to_append_one_identity(5_000);
+        assert!(
+            large <= small + 16_384,
+            "appending one identity wrote {large} bytes into a 5000-entry map and {small} \
+             bytes into a 500-entry map; the cost is scaling with the map"
+        );
+    }
+
+    #[test]
+    fn commit_with_unchanged_state_does_not_rewrite_the_cache_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState {
+            boundary_id: "b1".to_string(),
+            ..CoreState::default()
+        };
+        let meta = ModuleMeta {
+            initialized: true,
+            // A body large enough that rewriting the row is unmistakable in the WAL.
+            last_todo_state: Some("t".repeat(400_000)),
+            ..ModuleMeta::default()
+        };
+        let version = store.commit("ses", None, &core, &meta).unwrap();
+        assert!(
+            dir.path().join("store.db-wal").exists(),
+            "this measurement reads WAL growth, so the store must be journaling to a WAL"
+        );
+
+        checkpoint_wal(&store);
+        let before = wal_bytes(dir.path());
+
+        let again = store.commit("ses", Some(version), &core, &meta).unwrap();
+        let written = wal_bytes(dir.path()).saturating_sub(before);
+
+        assert_eq!(
+            again, version,
+            "a commit that changes nothing must leave the row_version where it was"
+        );
+        assert!(
+            written < 65_536,
+            "re-committing byte-identical state wrote {written} bytes; the row was rewritten"
+        );
+        let reloaded = store.load("ses").unwrap();
+        assert_eq!(reloaded.meta, meta);
+        assert_eq!(reloaded.core, core);
+        assert_eq!(reloaded.row_version, Some(version));
+    }
+
+    #[test]
+    fn migration_55_moves_a_legacy_blob_map_into_rows_without_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+
+        let identities = identity_map(64);
+        let served = (0..16)
+            .map(|index| ServedBlockFingerprint {
+                block_id: format!("m{index:04}#0"),
+                content_hash: format!("{index:064x}"),
+                serialized_len: index * 37 + 1,
+            })
+            .collect::<Vec<_>>();
+
+        // A row exactly as a pre-migration binary wrote it: both collections inside the blob,
+        // nothing in the side tables.
+        let mut legacy_meta = serde_json::json!({
+            "initialized": true,
+            "last_render_config": "cfg",
+            "coverage_ordinal": 42,
+            "revert_epoch": 3,
+        });
+        legacy_meta["block_identity_by_mid"] = serde_json::to_value(&identities).unwrap();
+        legacy_meta["served_output_fingerprint"] = serde_json::to_value(&served).unwrap();
+        let legacy_meta_json = serde_json::to_string(&legacy_meta).unwrap();
+        let legacy_core_json = serde_json::to_string(&CoreState {
+            boundary_id: "b1".to_string(),
+            ..CoreState::default()
+        })
+        .unwrap();
+
+        let migration_55 = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 55)
+            .expect("migration 55 is bundled")
+            .statements;
+
+        store
+            .inner
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO mc_cache_state
+                         (session_id, row_version, core_state, meta, last_activity_at)
+                     VALUES ('legacy', 7, ?1, ?2, 100)",
+                    params![legacy_core_json, legacy_meta_json],
+                )?;
+                // Replay the bundled migration against the legacy row. These are the exact
+                // statements `McStore::open` runs when it upgrades an existing database, not a
+                // re-implementation of them.
+                conn.execute_batch(migration_55)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let loaded = store.load("legacy").unwrap();
+        assert_eq!(
+            loaded.meta.block_identity_by_mid, identities,
+            "every block identity must survive the move into rows"
+        );
+        assert_eq!(
+            loaded.meta.served_output_fingerprint, served,
+            "the served fingerprints must survive the move, in order"
+        );
+        assert_eq!(loaded.meta.coverage_ordinal, Some(42));
+        assert_eq!(loaded.meta.revert_epoch, 3);
+        assert_eq!(loaded.meta.last_render_config, "cfg");
+        assert!(loaded.meta.initialized);
+        assert_eq!(loaded.core.boundary_id, "b1");
+        assert_eq!(loaded.row_version, Some(7));
+
+        let stored_meta = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT meta FROM mc_cache_state WHERE session_id = 'legacy'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .unwrap();
+        assert!(
+            !stored_meta.contains("block_identity_by_mid")
+                && !stored_meta.contains("served_output_fingerprint"),
+            "the migrated blob must no longer carry the moved collections: {stored_meta}"
+        );
     }
 
     #[test]
@@ -19336,8 +19976,14 @@ mod tests {
             .commit("ses", initial.row_version, &initial.core, &initial.meta)
             .unwrap();
         let stale = store.load("ses").unwrap();
+        // Advance past `stale` with a commit that really changes the state. A byte-identical
+        // commit no longer moves the row_version, so it would leave `stale` current.
+        let advanced_meta = ModuleMeta {
+            m1_revision: stale.meta.m1_revision + 1,
+            ..stale.meta.clone()
+        };
         store
-            .commit("ses", stale.row_version, &stale.core, &stale.meta)
+            .commit("ses", stale.row_version, &stale.core, &advanced_meta)
             .unwrap();
 
         let tags = [McTagRow {
@@ -22992,6 +23638,26 @@ mod tests {
                 "project mural",
                 "SELECT data_url, content_hash FROM mc_project_mural_artifacts \
                  WHERE project_path = 'git:plan'",
+            ),
+            (
+                "block identities",
+                "SELECT mid, identities FROM mc_block_identities \
+                 WHERE session_id = 'plan-session'",
+            ),
+            (
+                "block identity fence",
+                "SELECT identities FROM mc_block_identities \
+                 WHERE session_id = 'plan-session' AND mid = 'm1'",
+            ),
+            (
+                "served output fingerprints",
+                "SELECT block_id, content_hash, serialized_len FROM mc_served_output_fingerprints \
+                 WHERE session_id = 'plan-session' ORDER BY position ASC",
+            ),
+            (
+                "cache state digest",
+                "SELECT row_version, core_hash, meta_hash FROM mc_cache_state_digest \
+                 WHERE session_id = 'plan-session'",
             ),
         ];
 
