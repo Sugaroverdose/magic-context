@@ -640,6 +640,7 @@ export interface TransformDeps {
      * delivery.
      */
     compactionOff?: boolean;
+    hostCleanupCompactionMarkers?: Parameters<typeof reconcileCompactionMode>[0]["cleanupMarkers"];
     getNotificationParams?: (
         sessionId: string,
     ) => import("./send-session-notification").NotificationParams;
@@ -856,6 +857,7 @@ export function createTransform(deps: TransformDeps) {
                 compactionOff,
                 historianRunnable: deps.historianRunnable !== false,
                 compartmentInProgress: sessionMeta.compartmentInProgress,
+                cleanupMarkers: deps.hostCleanupCompactionMarkers,
             });
             const hasTransitionEffects =
                 transition.recordToWrite !== null ||

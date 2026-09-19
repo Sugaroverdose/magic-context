@@ -142,9 +142,10 @@ export function applyV2PromptSurfaceTools(
 export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
     const config = loadPluginConfigDetailed(directory).config;
-    if (!config.enabled || !isCompactionEnabled(config)) return;
+    if (!config.enabled) return;
+    const compactionOff = !isCompactionEnabled(config);
     const conflicts = detectConflicts(directory, {
-        compactionEnabled: true,
+        compactionEnabled: !compactionOff,
         hostGeneration: "v2",
     });
     if (conflicts.hasConflict) {
@@ -365,7 +366,7 @@ export async function registerContext(context: V2Context) {
             },
         }).m0Text;
     };
-    await context.session.hook("compaction", async (draft) => {
+    if (!compactionOff) await context.session.hook("compaction", async (draft) => {
         const reader = new V2StoreReader(
             gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
         );
@@ -491,6 +492,10 @@ export async function registerContext(context: V2Context) {
                     executeThresholdPercentage: config.execute_threshold_percentage,
                 }),
                 contextUsageMap: usage,
+                compactionOff,
+                // GA owns its native checkpoints; this adapter never writes the v1
+                // synthetic marker rows that the shared off-transition deletes.
+                hostCleanupCompactionMarkers: () => ({ verified: true, removedLineages: 0, removedRows: 0, retainedLineages: 0 }),
                 protectedTokens: config.protected_tokens,
                 protectedTokenTierOverrides: getProtectedTokensTierOverrides(config),
                 executeThresholdPercentage: config.execute_threshold_percentage,
@@ -505,7 +510,7 @@ export async function registerContext(context: V2Context) {
                 projectPath: directory,
                 hiddenCompletionExecutor,
                 historianRunnable:
-                    hiddenCompletionExecutor !== undefined && config.historian?.disable !== true,
+                    !compactionOff && hiddenCompletionExecutor !== undefined && config.historian?.disable !== true,
                 historianModel: historianModels.primary,
                 fallbackModels: historianModels.fallbacks,
                 historianTimeoutMs: config.historian_timeout_ms,
