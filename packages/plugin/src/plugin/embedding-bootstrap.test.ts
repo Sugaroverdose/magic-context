@@ -36,8 +36,12 @@ function installShadowProvider(onDispose: () => void): void {
         initialize: async () => true,
         embed: async () => new Float32Array([1, 0]),
         embedBatch: async (texts: string[]) => texts.map(() => new Float32Array([1, 0])),
-        dispose: async () => {
+        // Non-async: record the flag at call time. disposeProvider is
+        // fire-and-forget, so an async body would make the assertion depend on
+        // that body running before its first await rather than on retirement.
+        dispose: () => {
             onDispose();
+            return Promise.resolve();
         },
         isLoaded: () => true,
     }));

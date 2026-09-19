@@ -114,8 +114,13 @@ describe("ensureProjectRegisteredFromPiDirectory", () => {
 			embed: async () => new Float32Array([1, 0]),
 			embedBatch: async (texts: string[]) =>
 				texts.map(() => new Float32Array([1, 0])),
-			dispose: async () => {
+			// Non-async: the flag is recorded when dispose is *called*, which is the
+			// deterministic contract. disposeProvider is fire-and-forget
+			// (`void provider.dispose()`), so an async body here would make the
+			// assertion below depend on that body running before its first await.
+			dispose: () => {
 				disposed = true;
+				return Promise.resolve();
 			},
 			isLoaded: () => true,
 		}));
@@ -214,8 +219,13 @@ describe("ensureProjectRegisteredFromPiDirectory", () => {
 			embed: async () => new Float32Array([1, 0]),
 			embedBatch: async (texts: string[]) =>
 				texts.map(() => new Float32Array([1, 0])),
-			dispose: async () => {
+			// Non-async: the flag is recorded when dispose is *called*, which is the
+			// deterministic contract. disposeProvider is fire-and-forget
+			// (`void provider.dispose()`), so an async body here would make the
+			// assertion below depend on that body running before its first await.
+			dispose: () => {
 				disposed = true;
+				return Promise.resolve();
 			},
 			isLoaded: () => true,
 		}));
