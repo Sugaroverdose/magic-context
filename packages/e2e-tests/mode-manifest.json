@@ -38,11 +38,13 @@
                 "pi"
             ],
             "behavior": true,
-            "divergences": [{
-                "host": "omp",
-                "reason": "OMP 18.2.6 rewrites system[0] cch attestation from every request body; byte-stable whole-system assertion is host-imposed (pi-ai src/providers/anthropic.ts:685-759)",
-                "contract_ref": "packages/pi-plugin/PARITY.md#35-omp-provider-attestation-prevents-whole-system-byte-parity"
-            }]
+            "divergences": [
+                {
+                    "host": "omp",
+                    "reason": "OMP 18.2.6 rewrites system[0] cch attestation from every request body; byte-stable whole-system assertion is host-imposed (pi-ai src/providers/anthropic.ts:685-759)",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#35-omp-provider-attestation-prevents-whole-system-byte-parity"
+                }
+            ]
         },
         {
             "path": "tests/compaction-off.test.ts",
@@ -242,15 +244,18 @@
                 "pi"
             ],
             "behavior": true,
-            "divergences": [{
-                "host": "omp",
-                "reason": "OMP 18.2.6 rewrites system[0] cch attestation per request, contradicting phase-1 whole-system byte identity before later phases execute (pi-ai src/providers/anthropic.ts:685-759)",
-                "contract_ref": "packages/pi-plugin/PARITY.md#35-omp-provider-attestation-prevents-whole-system-byte-parity"
-            }, {
-                "host": "opencode2",
-                "reason": "Native todo triggers are unavailable; retain real ctx_note/ctx_reduce/publication/memory checks and assert a GA-owned checkpoint instead of a v1 marker",
-                "contract_ref": "packages/plugin/PARITY.md#native-todos"
-            }]
+            "divergences": [
+                {
+                    "host": "omp",
+                    "reason": "OMP 18.2.6 rewrites system[0] cch attestation per request, contradicting phase-1 whole-system byte identity before later phases execute (pi-ai src/providers/anthropic.ts:685-759)",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#35-omp-provider-attestation-prevents-whole-system-byte-parity"
+                },
+                {
+                    "host": "opencode2",
+                    "reason": "Native todo triggers are unavailable; retain real ctx_note/ctx_reduce/publication/memory checks and assert a GA-owned checkpoint instead of a v1 marker",
+                    "contract_ref": "packages/plugin/PARITY.md#native-todos"
+                }
+            ]
         },
         {
             "path": "tests/memory-injection.test.ts",
@@ -697,6 +702,22 @@
             ]
         },
         {
+            "path": "tests/rust-classify-producer.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "the classify dreamer task gives every fallback attempt its own provider session so a parked run cannot queue the next model's send, names a queued send as a transient cause, and returns a manifest covering the whole pool on the ordinary path",
+            "contract_refs": [
+                "RUST-E2E",
+                "CLASSIFY-PRODUCER"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/rust-cold-seed-perf.test.ts",
             "tier": "rust-only",
             "invocation": {
@@ -986,6 +1007,22 @@
             ]
         },
         {
+            "path": "tests/rust-memory-update-reembed.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "a memory updated through the module facade while the module holds authority is re-embedded from its new content; the host vector is not dropped and left absent (issue 479)",
+            "contract_refs": [
+                "RUST-E2E",
+                "MEMORY-AUTHORITY-EMBED"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/rust-multi-frame-delta-perf.test.ts",
             "tier": "rust-only",
             "invocation": {
@@ -1049,6 +1086,22 @@
             ]
         },
         {
+            "path": "tests/rust-shared-memory-addressing.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "a workspace-shared memory id from another project resolves for reads, refuses permanent mutation, and a mixed batch is reported per id rather than as one unmapped refusal (issue 478)",
+            "contract_refs": [
+                "RUST-E2E",
+                "SHARED-MEMORY-ADDRESSING"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/rust-smoke.test.ts",
             "tier": "rust-only",
             "invocation": {
@@ -1079,6 +1132,21 @@
             ]
         },
         {
+            "path": "tests/rust-tail-mutation-readopt.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "existing rust-* file; hermetic Rust harness leg",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/rust-timeout-epoch-recovery.test.ts",
             "tier": "rust-only",
             "invocation": {
@@ -1089,21 +1157,6 @@
             "contract_refs": [
                 "RUST-E2E",
                 "TIMEOUT-EPOCH-RECOVERY"
-            ],
-            "hosts": [
-                "opencode"
-            ]
-        },
-        {
-            "path": "tests/rust-tail-mutation-readopt.test.ts",
-            "tier": "rust-only",
-            "invocation": {
-                "ts": false,
-                "rust": true
-            },
-            "rationale": "existing rust-* file; hermetic Rust harness leg",
-            "contract_refs": [
-                "RUST-E2E"
             ],
             "hosts": [
                 "opencode"
@@ -1320,11 +1373,13 @@
                 "omp"
             ],
             "behavior": true,
-            "divergences": [{
-                "host": "opencode2",
-                "reason": "GA 2.0.5 exposes no native todowrite tool or todo state; verify the real tool inventory instead of inventing a host todo snapshot",
-                "contract_ref": "packages/plugin/PARITY.md#native-todos"
-            }]
+            "divergences": [
+                {
+                    "host": "opencode2",
+                    "reason": "GA 2.0.5 exposes no native todowrite tool or todo state; verify the real tool inventory instead of inventing a host todo snapshot",
+                    "contract_ref": "packages/plugin/PARITY.md#native-todos"
+                }
+            ]
         },
         {
             "path": "tests/window-overlay-reload.test.ts",
