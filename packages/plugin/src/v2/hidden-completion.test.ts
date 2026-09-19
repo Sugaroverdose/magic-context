@@ -246,11 +246,9 @@ describe("OpenCode 2 hidden child completion", () => {
                 { role: "user", content: [{ type: "text", text: "calibrated chunk" }] },
             ]);
             expect(state.requests[0]?.tools).toEqual({});
-            expect(state.requests[0]?.options).toEqual({
-                maxOutputTokens: 32768,
-                maxTokens: 32768,
-                temperature: 0.25,
-            });
+            // This run configured no output cap, so the request carries only the
+            // temperature the caller asked for — and none of the host defaults.
+            expect(state.requests[0]?.options).toEqual({ temperature: 0.25 });
             expect(completion).toMatchObject({
                 text: "editor completion",
                 usage: { input: 101, output: 11, cacheRead: 7, cacheWrite: 5 },
@@ -261,6 +259,26 @@ describe("OpenCode 2 hidden child completion", () => {
                 { sessionID: "child-1", title: "Magic Context historian" },
             ]);
             await close(state.executor, handle, true);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("sends an output cap only when the run configured one", async () => {
+        const state = await setup();
+        try {
+            const uncapped = await state.executor.open(run);
+            await state.executor.attempt(uncapped, request());
+            await close(state.executor, uncapped, true);
+
+            const capped = await state.executor.open({ ...run, maxOutputTokens: 4096 });
+            await state.executor.attempt(capped, request());
+            await close(state.executor, capped, true);
+
+            expect(state.requests.map((draft) => draft.options)).toEqual([
+                {},
+                { maxOutputTokens: 4096, maxTokens: 4096 },
+            ]);
         } finally {
             state.db.close();
         }

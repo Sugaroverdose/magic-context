@@ -57,6 +57,35 @@ export function newestUserText(draft: SessionContext): string | undefined {
     return undefined;
 }
 
+/**
+ * Generation options for one hidden prompt, carrying only what the user asked
+ * for. An output cap is sent under both of OpenCode's names for the same
+ * budget: the public option is `maxOutputTokens`, while its GA
+ * GenerationOptions carrier serializes the value from `maxTokens`.
+ *
+ * Nothing is sent by default. A fixed cap used to go out on every hidden
+ * prompt, which made every run fail on backends that reject the parameter
+ * outright — an OpenAI subscription login answers "Unsupported parameter:
+ * max_output_tokens" — and the cap was never load-bearing here. Reserving room
+ * for the producer's output is arithmetic done before the run (see
+ * `producerInputTokenLimit`), and a producer that runs away is caught
+ * afterwards by the length-capped output check.
+ *
+ * `identity.maxOutputTokens` and `request.body.temperature` are authored
+ * values: absent means the user configured nothing, so neither may be filled
+ * in with a fallback on the way here.
+ */
+function authoredOptions(attempt: HiddenChildAttempt): Record<string, number> {
+    const cap = attempt.identity.maxOutputTokens;
+    const temperature = attempt.request.body.temperature;
+    return {
+        ...(typeof cap === "number" && Number.isFinite(cap) && cap > 0
+            ? { maxOutputTokens: cap, maxTokens: cap }
+            : {}),
+        ...(typeof temperature === "number" && Number.isFinite(temperature) ? { temperature } : {}),
+    };
+}
+
 function calibratedParts(attempt: HiddenChildAttempt): Array<{ type: "text"; text: string }> {
     const parts = attempt.request.body.parts;
     if (
@@ -130,18 +159,11 @@ export class HiddenChildHook {
             typeof attempt.request.body.system === "string"
                 ? attempt.request.body.system
                 : attempt.identity.system;
-        const temperature = attempt.request.body.temperature;
         draft.system = [{ type: "text", text: system }];
         draft.messages = [{ role: "user", content: calibratedParts(attempt) }];
-        draft.options = {
-            // OpenCode calls the public budget maxOutputTokens, while its GA
-            // GenerationOptions carrier serializes the same value from maxTokens.
-            maxOutputTokens: 32768,
-            maxTokens: 32768,
-            ...(typeof temperature === "number" && Number.isFinite(temperature)
-                ? { temperature }
-                : {}),
-        };
+        // Replaced wholesale, never merged: the carrier sends exactly the
+        // authored options and never inherits the host's own generation defaults.
+        draft.options = authoredOptions(attempt);
         draft.tools = {};
         attempt.shaped = true;
         return true;

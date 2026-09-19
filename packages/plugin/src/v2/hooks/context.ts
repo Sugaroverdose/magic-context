@@ -622,6 +622,10 @@ export async function registerContext(context: V2Context) {
                 historianModel: historianModels.primary,
                 fallbackModels: historianModels.fallbacks,
                 historianTimeoutMs: config.historian_timeout_ms,
+                // Raw config on purpose: absent means the user configured no
+                // output cap, and the hidden carrier only puts a cap on the wire
+                // when one was configured. The producer-window arithmetic applies
+                // its own default, so no fallback belongs here.
                 historianMaxOutputTokens: config.historian?.maxTokens,
                 historianTwoPass: config.historian?.two_pass,
                 compactionMarkerStrategy: v2CompactionMarkerStrategy,
