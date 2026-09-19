@@ -70,6 +70,7 @@ export class OpenCode2TestHarness implements HostHarness {
             // Use the other test hosts' output limit so context-pressure assertions
             // reserve the same number of output tokens on every host.
             modelOutputLimit: 8192,
+            providerID: "anthropic",
             mockResponse: options.mockDefault ?? DEFAULT_MOCK_RESPONSE,
         };
         const host = await spawnOpencode2(spawnOptions);

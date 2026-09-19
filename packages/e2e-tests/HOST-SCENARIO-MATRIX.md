@@ -7,7 +7,7 @@ means the real-host run failed; product code was not changed in this slice.
 
 | Scenario | OpenCode | OpenCode 2 | Pi | OMP |
 | --- | --- | --- | --- | --- |
-| cache invariants | pass | product-bug | pass | product-bug |
+| cache invariants | pass | pass | pass | product-bug |
 | cache stability | pass | product-bug | pass | product-bug |
 | compaction off | pass | product-bug | pass | product-bug |
 | conflict disable | pass | product-bug | pass | product-bug |
@@ -15,8 +15,8 @@ means the real-host run failed; product code was not changed in this slice.
 | deferred compaction marker | pass | product-bug | declared-divergence | product-bug |
 | dropped-input guard | pass | product-bug | declared-divergence | declared-divergence |
 | drops | pass | pass | pass | pass |
-| emergency blocking | pass | product-bug | pass | product-bug |
-| historian success | pass | product-bug | pass | product-bug |
+| emergency blocking | pass | pass | pass | product-bug |
+| historian success | pass | pass | pass | product-bug |
 | long-running session | pass | product-bug | pass | product-bug |
 | memory injection | pass | product-bug | pass | product-bug |
 | notice-loop race | pass | declared-divergence | declared-divergence | declared-divergence |
@@ -38,6 +38,9 @@ means the real-host run failed; product code was not changed in this slice.
 ## OpenCode 2 repair evidence (2026-09-19)
 
 - Context limits: adapter now persists completed assistant usage on `session.execution.succeeded` and feeds the resolved model catalog into shared budget arithmetic; harness output limit matches the other hosts (8,192). Exact real-host assertion: `47.83773440489858` for 20,000 / 41,808.
+- Cache invariants: v2 now applies the shared system-guidance/hash handler; the scenario harness uses Anthropic transport like the other hosts so the existing wire oracle sees the actual provider request.
+- Historian success: Anthropic transport allows the shared historian mock matcher to return the publication payload; real-host publication now passes.
+- Emergency blocking: defer pressure refusal to the shared transform so its blocking historian recovery can run before provider admission.
 - The usage repair does not explain all remaining failures: the immediate manifest rerun still finds requests filtered out by Anthropic-only wire readers, historian publication timeouts, and todo tool timeout. No assertion was relaxed.
 
 ## Reproduction summary

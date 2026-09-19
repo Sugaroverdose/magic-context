@@ -15,6 +15,7 @@ import {
     createChatMessageHook,
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
+import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
 import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
@@ -242,6 +243,8 @@ export async function registerContext(context: V2Context) {
         getCount: (sessionID: string) => read(sessionID).length,
     });
     let transform: ReturnType<typeof createTransform> | undefined;
+    let systemPrompt: ReturnType<typeof createSystemPromptHashHandler> | undefined;
+    const systemPromptRefreshSessions = new Set<string>();
     const recordUsage = async (draft: Pick<SessionContext, "sessionID" | "model">): Promise<boolean> => {
         let unsafe = false;
         try {
@@ -272,7 +275,8 @@ export async function registerContext(context: V2Context) {
                 const limit = resolveContextLimit(draft.model.providerID, draft.model.id, { db, sessionID: draft.sessionID });
                 if (tokens && limit && Number.isFinite(limit) && limit > 0) {
                     const inputTokens = tokens.input + tokens.cache.read + tokens.cache.write;
-                    unsafe = inputTokens / limit >= 0.95;
+                    // Let the context transform first reduce usage by awaiting the historian;
+                    // it refuses requests that remain unsafe after recovery.
                     const completed = latest?.data.time?.completed;
                     if (typeof completed === "number")
                         updateSessionMeta(db, draft.sessionID, { lastResponseTime: completed });
@@ -398,9 +402,24 @@ export async function registerContext(context: V2Context) {
             }
             if (!db) return;
             const storage = db;
-            updateSessionMeta(db, draft.sessionID, {
-                systemPromptHash: foldDigest(JSON.stringify(draft.system)),
+            systemPrompt ??= createSystemPromptHashHandler({
+                db,
+                dreamerEnabled: config.dreamer !== undefined && !config.dreamer.disable,
+                memoryEnabled: config.memory.enabled,
+                language: config.language,
+                promptSurface: config.prompt_surface,
+                promptSurfaceRuntime,
+                systemPromptRefreshSessions,
+                historyRefreshSessions,
+                pendingMaterializationSessions,
+                lastHeuristicsTurnId,
+                injectionEnabled: config.system_prompt_injection.enabled,
+                injectionSkipSignatures: config.system_prompt_injection.skip_signatures,
             });
+            const system = { system: draft.system.map((part) => String(part.text ?? "")) };
+            await systemPrompt.handler({ sessionID: draft.sessionID, model: { providerID: draft.model.providerID, modelID: draft.model.id } }, system);
+            const originals = [...draft.system];
+            draft.system.splice(0, draft.system.length, ...system.system.map((text, index) => ({ ...originals[index], type: "text", text })));
             await preloadTokenizer();
             passDuties ??= createChatMessageHook({
                 db,
@@ -410,7 +429,7 @@ export async function registerContext(context: V2Context) {
                 historyRefreshSessions,
                 pendingMaterializationSessions,
                 lastHeuristicsTurnId,
-                systemPromptRefreshSessions: new Set(),
+                systemPromptRefreshSessions,
                 cacheTtlConfig: config.cache_ttl,
                 upgradeReminder: (sessionID) =>
                     maybeSendUpgradeReminder(
