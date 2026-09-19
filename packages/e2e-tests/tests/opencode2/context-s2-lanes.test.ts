@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OpenCode } from "../../../plugin/node_modules/@opencode/client/dist/promise/client.js";
+import { OpenCode } from "@opencode/client";
 import { queuePendingOp } from "../../../plugin/src/features/magic-context/storage";
 import {
 	applyEditMarkerToInput,

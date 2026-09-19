@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OpenCode } from "../../../plugin/node_modules/@opencode/client/dist/promise/client.js";
+import { OpenCode } from "@opencode/client";
 import { seedTaskScheduleState } from "../../../plugin/src/features/magic-context/dreamer/storage-task-schedule";
 import { resolveProjectIdentity } from "../../../plugin/src/features/magic-context/memory/project-identity";
 import { insertMemory } from "../../../plugin/src/features/magic-context/memory";

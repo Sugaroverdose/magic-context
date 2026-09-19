@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OpenCode } from "../../../plugin/node_modules/@opencode/client/dist/promise/client.js";
+import { OpenCode } from "@opencode/client";
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";
 import { rawMessages } from "../../../plugin/src/v2/hooks/store";
 import { spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';

@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { OpenCode } from "../../../plugin/node_modules/@opencode/client/dist/promise/client.js";
+import { OpenCode } from "@opencode/client";
 import { MockProvider } from "../../src/mock-provider/server";
 import { assertIsolation, isolation, spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
 

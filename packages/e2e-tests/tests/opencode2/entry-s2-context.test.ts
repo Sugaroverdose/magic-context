@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { OpenCode } from "../../../plugin/node_modules/@opencode/client/dist/promise/client.js";
+import { OpenCode } from "@opencode/client";
 import { spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 
 test("I1 s2 dual-loader directory entry activates on the real GA host", async () => {

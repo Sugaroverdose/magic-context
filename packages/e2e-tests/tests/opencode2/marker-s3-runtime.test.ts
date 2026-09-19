@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import ts from "../../../plugin/node_modules/typescript";
-import { OpenCode } from "../../../plugin/node_modules/@opencode/client/dist/promise/client.js";
+import { OpenCode } from "@opencode/client";
 import { TestHarness } from "../../src/harness";
 import { spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";

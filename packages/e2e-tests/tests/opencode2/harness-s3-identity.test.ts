@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { join } from "node:path";
-import { OpenCode } from "../../../plugin/node_modules/@opencode/client/dist/promise/client.js";
+import { OpenCode } from "@opencode/client";
 import { spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
 
 test("R12 v2 setup selects opencode2 before session storage opens", async () => {

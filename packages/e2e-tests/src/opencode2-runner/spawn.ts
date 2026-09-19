@@ -29,10 +29,14 @@ export const ROOT_KEYS = [
 	"XDG_STATE_HOME",
 	"XDG_CACHE_HOME",
 ] as const;
-export const CLI = resolve(
-	import.meta.dir,
-	"../../../plugin/node_modules/.bin/opencode2",
-);
+// The GA CLI is a devDependency of packages/plugin. Bun's isolated linker puts its
+// bin under the package's own node_modules; the hoisted linker (the release e2e
+// container installs with --linker=hoisted) puts it under the workspace root. Take
+// whichever exists so the lane does not depend on the linker choice.
+export const CLI = [
+	resolve(import.meta.dir, "../../../plugin/node_modules/.bin/opencode2"),
+	resolve(import.meta.dir, "../../../../node_modules/.bin/opencode2"),
+].find((candidate) => existsSync(candidate)) ?? resolve(import.meta.dir, "../../../plugin/node_modules/.bin/opencode2");
 export const PLUGIN = resolve(import.meta.dir, "../../../plugin");
 const groups = new Set<number>();
 function killGroup(pid: number): void {

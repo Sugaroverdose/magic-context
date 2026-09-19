@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { OpenCode } from "../../plugin/node_modules/@opencode/client/dist/promise/client.js";
+import { OpenCode } from "@opencode/client";
 import type { HostCapabilities, HostHarness } from "./host-harness";
 import { assertHistorianMockRouting } from "./mock-routing";
 import type { MockResponse } from "./mock-provider/server";

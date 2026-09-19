@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OpenCode } from "../../../plugin/node_modules/@opencode/client/dist/promise/client.js";
+import { OpenCode } from "@opencode/client";
 import { LIGHT_TOOL_DESCRIPTIONS } from "../../../plugin/src/shared/prompt-surface-runtime";
 import { spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 
