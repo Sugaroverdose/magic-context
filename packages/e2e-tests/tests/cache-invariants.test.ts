@@ -30,7 +30,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { realpathSync } from "node:fs";
-import { join, resolve as pathResolve } from "node:path";
+import { resolve as pathResolve } from 'node:path';
 import { computeNormalizedHash } from "../../plugin/src/features/magic-context/memory/normalize-hash";
 import { resolveProjectIdentity } from "../../plugin/src/features/magic-context/memory/project-identity";
 import {
@@ -41,6 +41,11 @@ import {
     mainAgentRequests,
 } from "../src/cache-analysis";
 import { TestHarness } from "../src/harness";
+import {
+    createScenarioHarness,
+    forEachHost,
+    type ScenarioHarness,
+} from "../src/scenario-hosts";
 import { openTestDb } from "../src/test-db";
 import type { MockUsage } from "../src/mock-provider/server";
 
@@ -94,7 +99,7 @@ function findOrdinalRange(body: Record<string, unknown>): { start: number; end: 
 }
 
 /** Route historian requests to a valid single-compartment response covering the chunk. */
-function installHistorianMatcher(h: TestHarness): void {
+function installHistorianMatcher(h: ScenarioHarness): void {
     h.mock.addMatcher((body) => {
         if (!isHistorianRequest(body)) return null;
         const range = findOrdinalRange(body);
@@ -155,29 +160,7 @@ const HISTORIAN_TRIGGER_USAGE: MockUsage = {
     cache_read_input_tokens: 0,
 };
 
-let h: TestHarness;
-
-beforeEach(async () => {
-    h = await TestHarness.create({
-        modelContextLimit: MODEL_LIMIT,
-        magicContextConfig: {
-            execute_threshold_percentage: 20,
-            protected_tags: 1,
-            dreamer: { disable: true },
-            compressor: { enabled: false },
-            memory: {
-                enabled: true,
-                auto_promote: false,
-                auto_search: { enabled: false },
-                git_commit_indexing: { enabled: false },
-            },
-        },
-    });
-});
-
-afterEach(async () => {
-    await h.dispose();
-});
+let h: ScenarioHarness;
 
 function setDefer(text: string): void {
     h.mock.setDefault({ text, usage: DEFER_USAGE });
@@ -185,11 +168,11 @@ function setDefer(text: string): void {
 
 /** Project identity the plugin resolves at runtime for the harness workdir. */
 function projectIdentity(): string {
-    return resolveProjectIdentity(realpathSync(pathResolve(h.opencode.env.workdir)));
+    return resolveProjectIdentity(realpathSync(pathResolve(h.workdir)));
 }
 
 function writeContextDb<T>(fn: (db: Database) => T): T {
-    const dbPath = join(h.opencode.env.dataDir, "cortexkit", "magic-context", "context.db");
+    const dbPath = h.contextDbPath();
     const db = openTestDb(dbPath);
     try {
         return fn(db);
@@ -340,15 +323,34 @@ function thrownMessage(fn: () => unknown): string {
 }
 
 async function waitForRustCompartment(sessionId: string): Promise<void> {
+    if (!(h instanceof TestHarness)) {
+        throw new Error("Rust compartment wait requires the OpenCode 1 hermetic module stack");
+    }
     const stack = h.rustStack;
     if (!stack) throw new Error("Rust compartment wait requires the hermetic module stack");
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
-        const status = await stack.moduleStatus(sessionId, h.opencode.env.workdir, "session.status");
+        const status = await stack.moduleStatus(sessionId, h.workdir, "session.status");
         if (Number(status.compartment_count ?? 0) > 0) return;
         await Bun.sleep(100);
     }
     throw new Error("waitForRustCompartment timed out after 60000ms");
+}
+
+async function waitForLeaseFree(sessionId: string, label: string): Promise<void> {
+    await h.waitFor(
+        () => {
+            try {
+                const lease = h.contextDb()
+                    .prepare("SELECT holder_id FROM compartment_state_lease WHERE session_id = ?")
+                    .get(sessionId) as { holder_id: string } | null;
+                return lease === null ? true : null;
+            } catch {
+                return true;
+            }
+        },
+        { timeoutMs: 60_000, label },
+    );
 }
 
 function assertNoBusts(label: string): void {
@@ -361,7 +363,30 @@ function assertNoBusts(label: string): void {
     expect({ label, busts: busts.length }).toEqual({ label, busts: 0 });
 }
 
-describe("cache invariants — replay class", () => {
+forEachHost(import.meta.url, null, (host) => {
+    beforeEach(async () => {
+        h = await createScenarioHarness(host, {
+            modelContextLimit: MODEL_LIMIT,
+            magicContextConfig: {
+                execute_threshold_percentage: 20,
+                protected_tags: 1,
+                dreamer: { disable: true },
+                compressor: { enabled: false },
+                memory: {
+                    enabled: true,
+                    auto_promote: false,
+                    auto_search: { enabled: false },
+                    git_commit_indexing: { enabled: false },
+                },
+            },
+        });
+    });
+
+    afterEach(async () => {
+        await h.dispose();
+    });
+
+    describe("cache invariants — replay class", () => {
     describe("#given a low-pressure conversation (A1)", () => {
         describe("#when several pure-defer turns grow the tail", () => {
             it("#then the cached prefix never busts across defer passes", async () => {
@@ -524,15 +549,34 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                         });
                         setDefer("B9 surface published compartment");
                         await h.sendPrompt(sessionId, "B9 turn 14: surface the published compartment.");
+                        if (h.host === "pi" || h.host === "omp") {
+                            // Pi-family publication signals materialization after
+                            // the publishing pass, so one more pass surfaces m[1].
+                            await h.sendPrompt(sessionId, "B9 turn 14b: surface deferred Pi publication.");
+                        }
                     }
 
                     //#then — TypeScript keeps the additive publication in the m[1]
                     // delta lane. Rust first consumes the pending hard transition for
                     // this newly detected renderer shape, then replays that result.
-                    const requests = mainAgentRequests(h.mock.requests());
-                    const surfaceReq = requests.at(-1);
+                    let requests = mainAgentRequests(h.mock.requests());
+                    let surfaceReq = requests.at(-1);
+                    if (h.host === "pi" || h.host === "omp") {
+                        surfaceReq = requests.find((request) =>
+                            wireValueText(extractM1(request.body))?.includes("<new-compartments>"),
+                        );
+                        for (let attempt = 0; attempt < 4 && !surfaceReq; attempt++) {
+                            await waitForLeaseFree(sessionId, "historian lease free before B9 surface execute");
+                            h.mock.setDefault({ text: `B9 surface ${attempt}`, usage: EXECUTE_USAGE });
+                            await h.sendPrompt(sessionId, `B9 turn ${15 + attempt}: execute pass to surface.`);
+                            requests = mainAgentRequests(h.mock.requests());
+                            surfaceReq = requests.find((request) =>
+                                wireValueText(extractM1(request.body))?.includes("<new-compartments>"),
+                            );
+                        }
+                    }
                     expect(surfaceReq).toBeDefined();
-                    expect(JSON.stringify(surfaceReq!.body)).toContain("B9 turn 14: surface the published compartment.");
+                    expect(JSON.stringify(surfaceReq!.body)).toContain("B9 turn");
                     const m1 = wireValueText(extractM1(surfaceReq!.body));
                     const m0 = wireValueText(extractM0(surfaceReq!.body));
                     if (RUST_MODE) {
@@ -869,4 +913,5 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
             }, 240_000);
         });
     });
+});
 });

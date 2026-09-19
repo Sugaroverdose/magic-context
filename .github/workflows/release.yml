@@ -270,17 +270,18 @@ jobs:
       - name: Run host e2e suite (OpenCode tests only)
         env:
           NODE_ENV: ""
+          MC_E2E_MODE: ts
+          MC_E2E_HOST: opencode
         run: |
           cd packages/e2e-tests
-          # Match every test file except pi-*.test.ts, plus the cache-bust oracle
-          # unit test (src/cache-analysis.test.ts) that backs the cache-invariant
-          # suite — a regression in it would silently neuter those guards.
-           # shellcheck disable=SC2010 # The suite intentionally excludes Pi test files from this glob.
-           files=$(ls tests/*.test.ts | grep -v "/pi-" | tr '\n' ' ')
-           files="$files src/cache-analysis.test.ts"
-           echo "Running OpenCode host tests: $files"
-           # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
-           bun test --timeout 600000 $files
+          # The validated manifest selects canonical scenarios for this host.
+          set -o pipefail
+          files=$(bun scripts/validate-mode-manifest.ts --mode ts --harness opencode | tr '\n' ' ')
+          if [ -z "${files// /}" ]; then echo 'mode manifest selected no files'; exit 1; fi
+          echo "Running OpenCode host tests: $files"
+          # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
+          bun test --timeout 600000 $files
+          bun test --timeout 600000 src/cache-analysis.test.ts
 
   e2e-host-pi:
     name: E2E (Pi, host behavior)
@@ -324,9 +325,15 @@ jobs:
       - name: Run host e2e suite (Pi tests only)
         env:
           NODE_ENV: ""
+          MC_E2E_MODE: ts
+          MC_E2E_HOST: pi
         run: |
           cd packages/e2e-tests
-          bun test --timeout 600000 tests/pi-*.test.ts
+          set -o pipefail
+          files=$(bun scripts/validate-mode-manifest.ts --mode ts --harness pi | tr '\n' ' ')
+          if [ -z "${files// /}" ]; then echo 'mode manifest selected no files'; exit 1; fi
+          # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
+          bun test --timeout 600000 $files
 
   rust-e2e-preflight:
     name: Rust hermetic E2E credential preflight

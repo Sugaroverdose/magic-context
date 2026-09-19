@@ -1,10 +1,13 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { join } from "node:path";
+import { afterAll, afterEach, beforeAll, expect, it } from "bun:test";
 import { computeSyntheticCallId } from "../../plugin/src/hooks/magic-context/todo-view";
-import { TestHarness } from "../src/harness";
+import { TestHarness } from '../src/harness';
+import {
+    createScenarioHarness,
+    forEachHost,
+    type ScenarioHarness,
+} from "../src/scenario-hosts";
 import type { MockUsage } from "../src/mock-provider/server";
 import { openTestDb } from "../src/test-db";
 
@@ -49,25 +52,7 @@ const TERMINAL_TODOS: Todo[] = [
     { content: "Write tests", status: "cancelled", priority: "medium" },
 ];
 
-let h: TestHarness;
-
-beforeAll(async () => {
-    h = await TestHarness.create({
-        modelContextLimit: 100_000,
-        magicContextConfig: {
-            execute_threshold_percentage: 20,
-            dreamer: { disable: true },
-        },
-    });
-});
-
-afterAll(async () => {
-    await h.dispose();
-});
-
-afterEach(() => {
-    h.mock.reset();
-});
+let h: ScenarioHarness;
 
 function normalizedJson(todos: Todo[]): string {
     return JSON.stringify(todos.map(({ content, status, priority }) => ({ content, status, priority })));
@@ -133,7 +118,7 @@ function readTodoMeta(sessionId: string): SessionMetaTodoRow | null {
 }
 
 function contextDbPath(): string {
-    return join(h.opencode.env.dataDir, "cortexkit", "magic-context", "context.db");
+    return h.contextDbPath();
 }
 
 function updateTodoMeta(sessionId: string, sql: string): void {
@@ -266,7 +251,24 @@ function syntheticPairBytes(body: Record<string, unknown>, callId: string): stri
     return pair.bytes;
 }
 
-describe("synthetic todowrite e2e", () => {
+forEachHost(import.meta.url, "synthetic todowrite e2e", (host) => {
+    beforeAll(async () => {
+        h = await createScenarioHarness(host, {
+            modelContextLimit: 100_000,
+            magicContextConfig: {
+                execute_threshold_percentage: 20,
+                dreamer: { disable: true },
+            },
+        });
+    });
+
+    afterAll(async () => {
+        await h.dispose();
+    });
+
+    afterEach(() => {
+        h.mock.reset();
+    });
     it("captures todowrite args into last_todo_state", async () => {
         const sessionId = await h.createSession();
         const stateJson = normalizedJson(STATE_X_TODOS);
@@ -358,9 +360,15 @@ describe("synthetic todowrite e2e", () => {
     }, 120_000);
 
     it("skips todowrite capture and synthetic injection for subagents", async () => {
-        const parentId = await h.createSession();
-        const childId = await h.createChildSession(parentId, "todo-synthesis-child");
-        await h.waitFor(() => h.isSubagent(childId) === true, {
+        if (!(h instanceof TestHarness)) {
+            // Only OpenCode 1 exposes parent-linked test session creation.
+            expect(h.host).not.toBe("opencode");
+            return;
+        }
+        const openCodeHarness = h;
+        const parentId = await openCodeHarness.createSession();
+        const childId = await openCodeHarness.createChildSession(parentId, "todo-synthesis-child");
+        await openCodeHarness.waitFor(() => openCodeHarness.isSubagent(childId) === true, {
             // Same CI-runner-latency class as the waits above.
             timeoutMs: 60_000,
             label: "child is_subagent=true",

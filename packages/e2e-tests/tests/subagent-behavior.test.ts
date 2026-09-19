@@ -1,7 +1,8 @@
 /// <reference types="bun-types" />
 
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, it } from "bun:test";
 import { TestHarness } from "../src/harness";
+import { forEachHost } from "../src/scenario-hosts";
 
 /**
  * Subagent-specific behavior.
@@ -84,31 +85,30 @@ function hasTagPrefixedUserMessage(body: Record<string, unknown>): boolean {
 
 let h: TestHarness;
 
-beforeAll(async () => {
-    h = await TestHarness.create({
-        modelContextLimit: 200_000,
-        magicContextConfig: {
-            execute_threshold_percentage: 40,
-            // Reasonable protected-tail that still leaves older tags eligible
-            // for dropping once we cross execute threshold.
-            protected_tags: 5,
-            // Keep noise out of the test — no compaction markers (they touch
-            // opencode.db and aren't part of the subagent invariant set), no
-            // No dreamer or auto-search hints in subagent mode.
-            dreamer: { disable: true },
-        },
+forEachHost(import.meta.url, "subagent behavior", () => {
+    beforeAll(async () => {
+        h = await TestHarness.create({
+            modelContextLimit: 200_000,
+            magicContextConfig: {
+                execute_threshold_percentage: 40,
+                // Reasonable protected-tail that still leaves older tags eligible
+                // for dropping once we cross execute threshold.
+                protected_tags: 5,
+                // Keep noise out of the test — no compaction markers (they touch
+                // opencode.db and aren't part of the subagent invariant set), no
+                // dreamer or auto-search hints in subagent mode.
+                dreamer: { disable: true },
+            },
+        });
     });
-});
 
-afterAll(async () => {
-    await h.dispose();
-});
+    afterAll(async () => {
+        await h.dispose();
+    });
 
-afterEach(() => {
-    h.mock.reset();
-});
-
-describe("subagent behavior", () => {
+    afterEach(() => {
+        h.mock.reset();
+    });
     it(
         "session.created sets is_subagent=1 when parentID is present",
         async () => {

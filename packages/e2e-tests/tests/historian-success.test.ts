@@ -1,7 +1,11 @@
 /// <reference types="bun-types" />
 
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { TestHarness } from "../src/harness";
+import { afterAll, beforeAll, expect, it } from "bun:test";
+import {
+    createScenarioHarness,
+    forEachHost,
+    type ScenarioHarness,
+} from "../src/scenario-hosts";
 import { buildMockHistorianPayload } from "../src/mock-historian";
 import { FOLD_SKIP_REASON } from "../src/rust-scenario-support";
 
@@ -64,21 +68,20 @@ function findOrdinalRange(body: Record<string, unknown>): { start: number; end: 
     return null;
 }
 
-let h: TestHarness;
+forEachHost(import.meta.url, "historian success path", (host) => {
+    let h: ScenarioHarness;
 
-beforeAll(async () => {
-    h = await TestHarness.create({
-        magicContextConfig: {
-            execute_threshold_percentage: 40,
-        },
+    beforeAll(async () => {
+        h = await createScenarioHarness(host, {
+            magicContextConfig: {
+                execute_threshold_percentage: 40,
+            },
+        });
     });
-});
 
-afterAll(async () => {
-    await h.dispose();
-});
-
-describe("historian success path", () => {
+    afterAll(async () => {
+        await h.dispose();
+    });
     it(
         "publishes a compartment to the DB after a successful run",
         async () => {

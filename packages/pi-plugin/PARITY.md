@@ -1017,3 +1017,26 @@ Both harness twins now pre-execute a due fold off-wire and feed the shared `fold
 | `last_observed_model_key` | Write paths canonicalize it and OpenCode readers canonicalize both sides. Pi's pressure writer does not populate this OpenCode usage-attribution field, so an empty value on the incident session is expected; Pi HARD-fold identity comes from `liveModelBySession`, not this column. |
 
 Workspace fingerprints preserve the distinction between SQL `NULL` (not workspaced) and a non-empty hash. The compare normalizes only nullish values to `null`; it does not coerce `NULL` to `""`. A legacy zero-length fingerprint would therefore trigger one self-healing fold whose write stores the current `null`, not a per-pass loop.
+
+## 33. Dropped-input refusal is registered on Pi's event bus
+
+**OpenCode:** The adapter receives tool execution through the host tool hook and
+can reject copied `§N§` drop placeholders before the shell tool runs.
+
+**Pi / OMP:** The extension registers the equivalent refusal on Pi's event bus.
+The scenario asserts the same no-execution contract, but registration and error
+delivery are host-owned and therefore not byte-identical.
+
+**Contract:** `packages/e2e-tests/tests/dropped-input-guard.test.ts` runs one
+assertion set through the selected harness. The Pi-family registration carrier is
+an intentional divergence; accepting or executing the placeholder is not.
+
+## 34. Notice holding is OpenCode-only
+
+OpenCode's assistant-message transform can hold and release notice messages in
+its native run loop. Pi and OMP do not expose an equivalent notice-holding
+carrier: their notices are delivered through Pi UI/event surfaces instead.
+
+`packages/e2e-tests/tests/notice-loop-race.test.ts` therefore remains an
+OpenCode-only behavior scenario, and its manifest entry names the Pi/OMP
+omission explicitly rather than silently treating it as parity.

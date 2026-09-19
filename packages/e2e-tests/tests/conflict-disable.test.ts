@@ -1,7 +1,12 @@
 /// <reference types="bun-types" />
 
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { TestHarness } from "../src/harness";
+import { afterAll, beforeAll, expect, it } from "bun:test";
+import {
+    createScenarioHarness,
+    forEachHost,
+    isPiFamily,
+    type ScenarioHarness,
+} from "../src/scenario-hosts";
 
 /**
  * When OpenCode has auto-compaction enabled, or a conflicting plugin is
@@ -14,24 +19,27 @@ import { TestHarness } from "../src/harness";
  * the cleanest proof that no plugin machinery ran for this session.
  */
 
-let h: TestHarness;
+forEachHost(import.meta.url, "conflict detection", (host) => {
+    let h: ScenarioHarness;
 
-beforeAll(async () => {
-    h = await TestHarness.create({
-        expectMagicContext: false,
-        // Override the usual safe compaction config. Setting auto: true should
-        // trip conflict-detection inside the plugin.
-        openCodeConfigExtra: {
-            compaction: { auto: true, prune: false },
-        },
+    beforeAll(async () => {
+        h = await createScenarioHarness(
+            host,
+            isPiFamily(host)
+                ? { magicContextConfig: { enabled: false } }
+                : {
+                    expectMagicContext: false,
+                    // OpenCode hosts expose native auto-compaction as a conflict.
+                    openCodeConfigExtra: {
+                        compaction: { auto: true, prune: false },
+                    },
+                },
+        );
     });
-});
 
-afterAll(async () => {
-    await h.dispose();
-});
-
-describe("conflict detection", () => {
+    afterAll(async () => {
+        await h.dispose();
+    });
     it(
         "plugin disables itself when opencode auto-compaction is active",
         async () => {
