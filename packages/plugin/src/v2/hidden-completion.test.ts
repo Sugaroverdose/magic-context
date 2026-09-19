@@ -68,6 +68,7 @@ class Rows {
             usage?: boolean;
             error?: unknown;
             finish?: string;
+            omitFinish?: boolean;
         } = {},
     ): StoreRow<"assistant"> {
         const row: StoreRow<"assistant"> = {
@@ -77,7 +78,7 @@ class Rows {
             seq: this.seq,
             data: {
                 content: [{ type: "text", text }],
-                finish: options.finish ?? "stop",
+                ...(options.omitFinish ? {} : { finish: options.finish ?? "stop" }),
                 ...(options.error === undefined ? {} : { error: options.error }),
                 model: { providerID: "mock", id: options.modelID ?? "cheap" },
                 ...(options.usage === false
@@ -100,7 +101,33 @@ class Rows {
     }
 }
 
-async function setup(generation = "host-generation-1") {
+/**
+ * Waits for work the executor deliberately does not make its callers wait on: session removal is
+ * queued so a hidden run never blocks on host cleanup.
+ */
+async function eventually(check: () => boolean, timeoutMs = 2000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!check()) {
+        if (Date.now() >= deadline) throw new Error("Timed out waiting for queued cleanup");
+        await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+}
+
+function retiredChild(id: string, retiredAt: number) {
+    return {
+        id,
+        role: "historian" as const,
+        generation: "host-generation-1",
+        title: "Magic Context historian",
+        model: { providerID: "mock", modelID: "cheap" },
+        created_at: retiredAt - 1,
+        title_reasserted: true,
+        retired_at: retiredAt,
+        reason: "seeded",
+    };
+}
+
+async function setup(generation = "host-generation-1", capabilities: { remove?: boolean } = {}) {
     const db = new Database(":memory:");
     db.exec("CREATE TABLE schema_migrations_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     const rows = new Rows();
@@ -114,8 +141,13 @@ async function setup(generation = "host-generation-1") {
     const updates: Parameters<HiddenChildHost["update"]>[0][] = [];
     const interrupts: string[] = [];
     const requests: SessionContext[] = [];
+    const removed: string[] = [];
     let nextID = 0;
     let failPrompt = false;
+    let promptError: Error | undefined;
+    let providerError: unknown;
+    let providerErrorUnsettled = false;
+    let removeError: Error | undefined;
     let delayRowMs = 0;
     let omitUsage = false;
     let completion = "editor completion";
@@ -156,6 +188,15 @@ async function setup(generation = "host-generation-1") {
             hook.apply(draft);
             requests.push(structuredClone(draft));
             if (failPrompt) throw new Error("provider unavailable");
+            if (promptError) throw promptError;
+            if (providerError !== undefined) {
+                rows.append(input.sessionID, "", {
+                    error: providerError,
+                    usage: false,
+                    ...(providerErrorUnsettled ? { omitFinish: true } : { finish: "error" }),
+                });
+                return;
+            }
             const write = () =>
                 rows.append(input.sessionID, completion, {
                     usage: !omitUsage,
@@ -172,6 +213,16 @@ async function setup(generation = "host-generation-1") {
         async update(input) {
             updates.push(structuredClone(input));
         },
+        // The session interface an OpenCode 2 host injects has no remove, so the default fake has
+        // none either; the tests that cover cleanup opt the capability in.
+        ...(capabilities.remove
+            ? {
+                  async remove(input: { sessionID: string }) {
+                      if (removeError) throw removeError;
+                      removed.push(input.sessionID);
+                  },
+              }
+            : {}),
     };
     const create = (hostGeneration = generation) =>
         createV2HiddenCompletionExecutor(host, {
@@ -180,6 +231,8 @@ async function setup(generation = "host-generation-1") {
             hook,
             openReader: () => rows,
             generation: hostGeneration,
+            removalSpacingMs: 0,
+            log: () => {},
         });
     const executor = await create();
     return {
@@ -194,8 +247,38 @@ async function setup(generation = "host-generation-1") {
         updates,
         interrupts,
         requests,
+        removed,
+        meta: () =>
+            JSON.parse(
+                (
+                    db
+                        .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
+                        .get(hiddenChildrenMetaKey("/project")) as { value: string }
+                ).value,
+            ) as { retired_children: Array<{ id: string; reason: string }> },
+        seedRetired(children: ReturnType<typeof retiredChild>[]) {
+            db.prepare(
+                `INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+            ).run(
+                hiddenChildrenMetaKey("/project"),
+                JSON.stringify({ version: 1, active: {}, retired_children: children }),
+            );
+        },
         setFailPrompt(value: boolean) {
             failPrompt = value;
+        },
+        setPromptError(value: Error | undefined) {
+            promptError = value;
+        },
+        setProviderError(value: unknown) {
+            providerError = value;
+        },
+        setProviderErrorUnsettled(value: boolean) {
+            providerErrorUnsettled = value;
+        },
+        setRemoveError(value: Error | undefined) {
+            removeError = value;
         },
         setDelayRow(value: number) {
             delayRowMs = value;
@@ -334,6 +417,200 @@ describe("OpenCode 2 hidden child completion", () => {
                 id: "child-1",
                 reason: "hidden-run-failed",
             });
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("keeps the child when a run fails only on settled provider errors", async () => {
+        const state = await setup();
+        try {
+            state.setProviderError({ message: "Go usage limit exceeded" });
+            for (let i = 0; i < 5; i++) {
+                const handle = await state.executor.open(run);
+                expect(handle.id).toBe("child-1");
+                await expect(state.executor.attempt(handle, request("cheap"))).rejects.toThrow(
+                    "Hidden completion provider error: ",
+                );
+                await expect(state.executor.attempt(handle, request("fallback"))).rejects.toThrow(
+                    "Go usage limit exceeded",
+                );
+                // The historian caller reports promptSettled=false after any failed attempt.
+                await close(state.executor, handle, false);
+            }
+            state.setProviderError(undefined);
+            const recovered = await state.executor.open(run);
+            expect(recovered.id).toBe("child-1");
+            await state.executor.attempt(recovered, request());
+            await close(state.executor, recovered, true);
+            expect(state.creates).toHaveLength(1);
+            const meta = JSON.parse(
+                (
+                    state.db
+                        .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
+                        .get(hiddenChildrenMetaKey("/project")) as { value: string }
+                ).value,
+            );
+            expect(meta.retired_children).toHaveLength(0);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("a restarted executor reuses a child whose newest assistant is a settled provider error", async () => {
+        const state = await setup();
+        try {
+            state.setProviderError({ message: "The usage limit has been reached" });
+            const handle = await state.executor.open(run);
+            await expect(state.executor.attempt(handle, request())).rejects.toThrow();
+            await close(state.executor, handle, false);
+            state.setProviderError(undefined);
+            const restarted = await state.create();
+            const next = await restarted.open(run);
+            expect(next.id).toBe("child-1");
+            await restarted.attempt(next, request());
+            await close(restarted, next, true);
+            expect(state.creates).toHaveLength(1);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("retires a child whose newest assistant error row never settled", async () => {
+        const state = await setup();
+        try {
+            // An error recorded on a row the host has not finished says a failure happened, not
+            // that the message is over, so the child may still be mid-write and is not reusable.
+            state.setProviderError({ message: "The usage limit has been reached" });
+            state.setProviderErrorUnsettled(true);
+            const handle = await state.executor.open(run);
+            expect(handle.id).toBe("child-1");
+            await expect(state.executor.attempt(handle, request())).rejects.toThrow();
+            await close(state.executor, handle, false);
+
+            state.setProviderError(undefined);
+            state.setProviderErrorUnsettled(false);
+            const next = await state.executor.open(run);
+            expect(next.id).toBe("child-2");
+            await state.executor.attempt(next, request());
+            await close(state.executor, next, true);
+            expect(state.meta().retired_children).toMatchObject([
+                { id: "child-1", reason: "newest-assistant-not-reusable" },
+            ]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("retires the child when a dispatch failure only reads like a provider error", async () => {
+        const state = await setup();
+        try {
+            // Whether the child survives is decided by the kind of failure, never by how the
+            // failure happens to be worded.
+            state.setPromptError(new Error("Hidden completion provider error: dispatch refused"));
+            const handle = await state.executor.open(run);
+            expect(handle.id).toBe("child-1");
+            await expect(state.executor.attempt(handle, request())).rejects.toThrow();
+            await close(state.executor, handle, false);
+
+            state.setPromptError(undefined);
+            const next = await state.executor.open(run);
+            expect(next.id).toBe("child-2");
+            await state.executor.attempt(next, request());
+            await close(state.executor, next, true);
+            expect(state.meta().retired_children).toMatchObject([
+                { id: "child-1", reason: "hidden-run-failed" },
+            ]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("deletes a retired child's session and forgets the entry", async () => {
+        const state = await setup("host-generation-1", { remove: true });
+        try {
+            const first = await state.executor.open(run);
+            await state.executor.attempt(first, request());
+            await close(state.executor, first, true);
+
+            state.setFailPrompt(true);
+            const second = await state.executor.open(run);
+            await expect(state.executor.attempt(second, request())).rejects.toThrow(
+                "provider unavailable",
+            );
+            await close(state.executor, second, false);
+
+            await eventually(() => state.removed.includes("child-1"));
+            await eventually(() => state.meta().retired_children.length === 0);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("keeps a retired entry when deletion cannot reach the host", async () => {
+        const state = await setup("host-generation-1", { remove: true });
+        try {
+            state.setRemoveError(new Error("connection refused"));
+            state.setFailPrompt(true);
+            const handle = await state.executor.open(run);
+            await expect(state.executor.attempt(handle, request())).rejects.toThrow(
+                "provider unavailable",
+            );
+            await close(state.executor, handle, false);
+            expect(state.meta().retired_children).toMatchObject([{ id: "child-1" }]);
+
+            // A failed cleanup must not stop the next run from working.
+            state.setFailPrompt(false);
+            const next = await state.executor.open(run);
+            expect(next.id).toBe("child-2");
+            await state.executor.attempt(next, request());
+            await close(state.executor, next, true);
+            expect(state.removed).toEqual([]);
+            expect(state.meta().retired_children).toMatchObject([{ id: "child-1" }]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("sweeps a retired backlog left behind by an earlier process", async () => {
+        const state = await setup("host-generation-1", { remove: true });
+        try {
+            state.seedRetired([
+                retiredChild("stale-1", 1),
+                retiredChild("stale-2", 2),
+                retiredChild("stale-3", 3),
+            ]);
+            const swept = await state.create();
+            await eventually(() => state.meta().retired_children.length === 0);
+            expect(state.removed).toEqual(["stale-1", "stale-2", "stale-3"]);
+            // The sweep leaves the executor usable; it never blocks boot on cleanup.
+            const handle = await swept.open(run);
+            await swept.attempt(handle, request());
+            await close(swept, handle, true);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("bounds the retired list when deletion is unavailable", async () => {
+        const state = await setup();
+        try {
+            state.seedRetired(
+                Array.from({ length: 200 }, (_value, index) =>
+                    retiredChild(`stale-${index}`, index + 1),
+                ),
+            );
+            const bounded = await state.create();
+            state.setFailPrompt(true);
+            const handle = await bounded.open(run);
+            await expect(bounded.attempt(handle, request())).rejects.toThrow(
+                "provider unavailable",
+            );
+            await close(bounded, handle, false);
+            const retained = state.meta().retired_children;
+            expect(retained).toHaveLength(200);
+            expect(retained.at(0)?.id).toBe("stale-1");
+            expect(retained.at(-1)?.id).toBe("child-1");
         } finally {
             state.db.close();
         }

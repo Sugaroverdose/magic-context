@@ -7,6 +7,7 @@ import {
 	mkdtempSync,
 	openSync,
 	readdirSync,
+	readFileSync,
 	readSync,
 	realpathSync,
 	statSync,
@@ -150,6 +151,33 @@ export function handoff(
 	return match ? { url: match[1]!, password: match[2]! } : undefined;
 }
 
+/** Path the OpenCode client resolves the local service from; only `serve --service` writes it. */
+export function serviceRegistrationPath(env: NodeJS.ProcessEnv): string {
+	return join(env.XDG_STATE_HOME!, "opencode", "service.json");
+}
+
+/**
+ * A service-mode host keeps its password out of stdout and puts it in the registration file
+ * instead, so that file is where the handoff comes from.
+ */
+export function serviceHandoff(
+	env: NodeJS.ProcessEnv,
+): { url: string; password: string } | undefined {
+	const path = serviceRegistrationPath(env);
+	if (!existsSync(path)) return undefined;
+	try {
+		const info = JSON.parse(readFileSync(path, "utf8")) as {
+			url?: string;
+			password?: string;
+		};
+		return info.url && info.password
+			? { url: info.url, password: info.password }
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** OpenCode 2.0.5 removed awaitActivation; inventory is authoritative and plugin.updated invalidates it. */
 export async function waitForPluginActive(
 	client: PluginActivationClient,
@@ -175,6 +203,11 @@ export interface OpenCode2SpawnOptions {
 	modelOutputLimit?: number;
 	existingIsolation?: OpenCode2Isolation;
 	existingMock?: { mock: MockProvider; baseURL: string };
+	/**
+	 * Boot the way a user's TUI boots its host: `serve --service`, which registers the endpoint in
+	 * the client's discovery file. Only this mode writes that file.
+	 */
+	serviceMode?: boolean;
 }
 
 /** Event-driven, bounded startup; no readiness polling. CLI contract: AFT playbook:54-64. */
@@ -275,6 +308,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 			...(options.probeStandalone
 				? [OPENCODE2_NO_BACKGROUND_SERVICE_FLAG]
 				: []),
+			...(options.serviceMode ? ["--service"] : []),
 			"--print-logs",
 		],
 		{
@@ -321,12 +355,23 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 					() => reject(new Error(`v2 handoff timed out\n${stdout}\n${stderr}`)),
 					30000,
 				);
+				let poll: ReturnType<typeof setInterval> | undefined;
 				const finish = (error?: Error) => {
 					clearTimeout(timer);
+					if (poll) clearInterval(poll);
 					if (error) reject(error);
 				};
+				if (options.serviceMode) {
+					poll = setInterval(() => {
+						const value = serviceHandoff(fixture.env);
+						if (!value) return;
+						finish();
+						resolveReady(value);
+					}, 25);
+				}
 				child.stdout.on("data", (chunk) => {
 					stdout += chunk.toString();
+					if (options.serviceMode) return;
 					const value = handoff(stdout);
 					if (value) {
 						finish();
