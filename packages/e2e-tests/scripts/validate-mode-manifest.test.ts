@@ -18,7 +18,7 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(86);
+        expect(validation.files.length).toBe(67);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -29,13 +29,13 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(44);
+        expect(ts).toHaveLength(25);
         expect(rust).toHaveLength(40);
-        expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(22);
-        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(22);
-        expect(filesForMode(validation, "ts", "pi")).toHaveLength(22);
-        expect(filesForMode(validation, "ts", "opencode2")).toEqual(["tests/smoke.test.ts"]);
-        expect(filesForMode(validation, "ts", "omp")).toEqual(["tests/pi-smoke.test.ts"]);
+        expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(1);
+        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(24);
+        expect(filesForMode(validation, "ts", "pi")).toHaveLength(21);
+        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(20);
+        expect(filesForMode(validation, "ts", "omp")).toHaveLength(20);
         const excluded = validation.manifest.entries
             .filter((entry) => entry.tier === "excluded")
             .map((entry) => entry.path);
@@ -81,14 +81,13 @@ describe("mode manifest validator", () => {
         ).toThrow(/dead or out-of-scope/);
     });
 
-    it("derives legacy hosts and accepts explicit multi-host entries", () => {
+    it("requires explicit hosts and exposes shared behavior scenarios to each declared lane", () => {
         const smoke = validation.manifest.entries.find((entry) => entry.path === "tests/smoke.test.ts");
-        const piSmoke = validation.manifest.entries.find((entry) => entry.path === "tests/pi-smoke.test.ts");
         const ordinary = validation.manifest.entries.find((entry) => entry.path === "tests/cache-invariants.test.ts");
         const opencode2 = validation.manifest.entries.find((entry) => entry.path === "tests/opencode2/runner.test.ts");
-        expect(smoke?.hosts).toEqual(["opencode", "opencode2"]);
-        expect(piSmoke?.hosts).toEqual(["pi", "omp"]);
-        expect(ordinary?.hosts).toEqual(["opencode"]);
+        expect(validation.manifest.entries.every((entry) => entry.hosts.length > 0)).toBe(true);
+        expect(smoke?.hosts).toEqual(["opencode", "opencode2", "pi", "omp"]);
+        expect(ordinary?.hosts).toEqual(["opencode", "opencode2", "pi", "omp"]);
         expect(opencode2?.hosts).toEqual(["opencode2"]);
     });
 
@@ -110,7 +109,7 @@ describe("mode manifest validator", () => {
         expect(filesForMode(both, "rust")).toContain(entries[0]!.path);
     });
 
-    it("rejects invalid tiers, hosts, and a both-modes entry missing an invocation", () => {
+    it("rejects invalid tiers, hosts, silent behavior omissions, and a both-modes entry missing an invocation", () => {
         const entries = validation.manifest.entries;
         expect(() =>
             validateManifestDocument(
@@ -136,6 +135,18 @@ describe("mode manifest validator", () => {
                 validation.files,
             ),
         ).toThrow(/invalid hosts/);
+        const behaviorIndex = entries.findIndex((entry) => entry.behavior === true && entry.hosts.length === 4);
+        const behavior = entries[behaviorIndex]!;
+        expect(() =>
+            validateManifestDocument(
+                manifestWith([
+                    ...entries.slice(0, behaviorIndex),
+                    { ...behavior, hosts: ["opencode"], divergences: [] },
+                    ...entries.slice(behaviorIndex + 1),
+                ]),
+                validation.files,
+            ),
+        ).toThrow(/silently omits behavior hosts/);
         expect(() =>
             validateManifestDocument(
                 manifestWith([

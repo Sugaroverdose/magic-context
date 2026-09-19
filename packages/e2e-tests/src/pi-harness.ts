@@ -110,6 +110,18 @@ export class PiTestHarness implements PiHostHarness {
     return new PiTestHarness(host, mock, rpc, options.magicContextConfig?.enabled !== false);
   }
 
+  get serverUrl(): null {
+    return null;
+  }
+
+  get workdir(): string {
+    return this.env.workdir;
+  }
+
+  get dataDir(): string {
+    return this.env.dataDir;
+  }
+
   /**
    * Generate ~`tokens` tokens of varied prose ballast. Mirror of
    * TestHarness.ballast (see harness.ts): the v3 protected-tail boundary
@@ -138,13 +150,16 @@ export class PiTestHarness implements PiHostHarness {
   }
 
   async createSession(): Promise<string> {
-    let state = await this.getState();
-    if (!state.sessionId) {
-      await this.newSession();
-      state = await this.getState();
-    }
-    if (!state.sessionId) throw new Error(`${this.host} did not report a session id`);
-    return state.sessionId;
+    const state = await this.getState();
+    if (state.sessionId) return state.sessionId;
+    await this.newSession();
+    const nextState = await this.getState();
+    if (!nextState.sessionId) throw new Error(`${this.host} did not report a session id`);
+    return nextState.sessionId;
+  }
+
+  async removeSession(_sessionId: string): Promise<void> {
+    throw new Error(`${this.host} does not expose terminal session removal`);
   }
 
   async sendPrompt(
@@ -325,6 +340,10 @@ export class PiTestHarness implements PiHostHarness {
     }
   }
 
+  async reloadPlugin(): Promise<void> {
+    await this.reloadExtensions();
+  }
+
   /** Restart Pi and explicitly resume the same saved session. */
   async restart(): Promise<void> {
     const beforeRestart = await this.getState();
@@ -469,6 +488,10 @@ export class PiTestHarness implements PiHostHarness {
 
   requests() {
     return this.mock.requests();
+  }
+
+  diagnostics(): string {
+    return this.rpc.getStderr();
   }
 
   assertHistorianRequestsUseMock(): void {

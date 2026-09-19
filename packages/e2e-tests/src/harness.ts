@@ -107,6 +107,18 @@ export class TestHarness implements HostHarness {
         return this.clientInstance;
     }
 
+    get serverUrl(): string {
+        return this.opencode.url;
+    }
+
+    get workdir(): string {
+        return this.opencode.env.workdir;
+    }
+
+    get dataDir(): string {
+        return this.opencode.env.dataDir;
+    }
+
     /** Provides Rust-mode-only access to the historian and status interfaces running in the module's Rust stack. */
     get rustStack(): SpawnedOpencode["rustStack"] {
         return this.opencodeInstance.rustStack;
@@ -165,12 +177,24 @@ export class TestHarness implements HostHarness {
         }) as unknown as SdkClient;
     }
 
+    async reloadPlugin(): Promise<void> {
+        await this.restart();
+    }
+
     /** Create a session bound to the isolated workdir. Throws on failure. */
     async createSession(): Promise<string> {
         return this.createSessionWithRetry(
             () => this.client.session.create({ query: { directory: this.opencode.env.workdir } }),
             "session.create",
         );
+    }
+
+    async removeSession(sessionId: string): Promise<void> {
+        const response = await fetch(
+            `${this.opencode.url}/session/${encodeURIComponent(sessionId)}`,
+            { method: "DELETE" },
+        );
+        if (!response.ok) throw new Error(`session removal failed with HTTP ${response.status}`);
     }
 
     /**
@@ -404,16 +428,15 @@ export class TestHarness implements HostHarness {
      * Open the magic-context SQLite database in read-only mode.
      * Cached per harness so repeated calls share the handle.
      */
+    contextDbPath(): string {
+        return join(this.dataDir, "cortexkit", "magic-context", "context.db");
+    }
+
     contextDb(): Database {
         if (this.contextDbCached) return this.contextDbCached;
         // Plugin v0.16+ uses the shared cortexkit/magic-context path so OpenCode
         // and Pi can share state. See packages/plugin/src/shared/data-path.ts.
-        const dbPath = join(
-            this.opencode.env.dataDir,
-            "cortexkit",
-            "magic-context",
-            "context.db",
-        );
+        const dbPath = this.contextDbPath();
         if (!existsSync(dbPath)) {
             throw new Error(`context.db not found at ${dbPath} — plugin may not have initialized yet.`);
         }
@@ -423,13 +446,7 @@ export class TestHarness implements HostHarness {
 
     /** Whether the plugin has created its database yet. */
     hasContextDb(): boolean {
-        const dbPath = join(
-            this.opencode.env.dataDir,
-            "cortexkit",
-            "magic-context",
-            "context.db",
-        );
-        return existsSync(dbPath);
+        return existsSync(this.contextDbPath());
     }
 
     /** Poll until `predicate` returns true or `timeoutMs` elapses. */
@@ -486,6 +503,10 @@ export class TestHarness implements HostHarness {
     /** All mock requests received in this session. */
     requests() {
         return this.mock.requests();
+    }
+
+    diagnostics(): string {
+        return `stdout:\n${this.opencode.stdout()}\nstderr:\n${this.opencode.stderr()}`;
     }
 
     assertHistorianRequestsUseMock(): void {

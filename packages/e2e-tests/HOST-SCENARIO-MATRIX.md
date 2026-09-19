@@ -1,0 +1,67 @@
+# Host scenario matrix
+
+Status captured on 2026-09-18 against OpenCode 1, OpenCode GA 2.0.5, Pi, and OMP.
+`declared-divergence` means the host is named in the manifest entry's `divergences`
+array and the cited host surface cannot express the OpenCode behavior. `product-bug`
+means the real-host run failed; product code was not changed in this slice.
+
+| Scenario | OpenCode | OpenCode 2 | Pi | OMP |
+| --- | --- | --- | --- | --- |
+| cache invariants | pass | product-bug | pass | product-bug |
+| cache stability | pass | product-bug | pass | product-bug |
+| compaction off | pass | product-bug | pass | product-bug |
+| conflict disable | pass | product-bug | pass | product-bug |
+| context limits | pass | product-bug | pass | pass |
+| deferred compaction marker | pass | product-bug | declared-divergence | product-bug |
+| dropped-input guard | pass | product-bug | declared-divergence | declared-divergence |
+| drops | pass | pass | pass | pass |
+| emergency blocking | pass | product-bug | pass | product-bug |
+| historian success | pass | product-bug | pass | product-bug |
+| long-running session | pass | product-bug | pass | product-bug |
+| memory injection | pass | product-bug | pass | product-bug |
+| notice-loop race | pass | declared-divergence | declared-divergence | declared-divergence |
+| overflow recovery | pass | product-bug | declared-divergence | product-bug |
+| session isolation and removal | pass | product-bug | declared-divergence | declared-divergence |
+| short-context overflow | pass | product-bug | pass | product-bug |
+| slow historian | pass | product-bug | pass | product-bug |
+| smoke | pass | pass | pass | pass |
+| subagent behavior | pass | declared-divergence | declared-divergence | declared-divergence |
+| tag-owner collision | pass | pass | pass | pass |
+| tagging | pass | pass | pass | pass |
+| thinking-block safety | pass | declared-divergence | declared-divergence | declared-divergence |
+| todo synthesis | pass | product-bug | pass | product-bug |
+| window overlay reload | pass | product-bug | product-bug | product-bug |
+| Pi cross-harness | declared-divergence | declared-divergence | pass | declared-divergence |
+| Pi Rust degradation arc 1 | declared-divergence | declared-divergence | pass | declared-divergence |
+| Pi Rust degradation arc 4 | declared-divergence | declared-divergence | pass | declared-divergence |
+
+## Reproduction summary
+
+- OpenCode 1 manifest lane: 54 passed, 0 failed. The separately excluded overlay
+  reload scenario also passed. All 52 pre-fold test names remained present; the
+  two new canonical `drops` and `tagging` scenarios account for the increase.
+- Pi manifest lane: 41 passed, 0 failed. The two Pi-only Rust degradation files
+  passed 6 tests. The excluded overlay scenario reproduces the product bug below.
+- OpenCode 2 manifest lane: 12 tests passed and 29 failed across 20 selected
+  scenarios. The first contract-level reproduction is `context-limits.test.ts`:
+  `last_context_percentage` remains `0` instead of `47.83773440489858`. Historian
+  scenarios do not publish, session removal does not clear Magic Context rows,
+  and the overlay scenario also leaves pressure at `0`.
+- OMP manifest lane: 19 tests passed, 21 failed, and one setup error across 20
+  selected scenarios. The failures include no historian publication, no synthetic
+  todo pair, missing memory deltas in m[0]/m[1], and compaction-off behavior.
+- Window overlay focused reproduction: after writing a 100,000-token overlay,
+  Pi and OMP persist `10.427093760427093` (their 200,000-token default) instead of
+  `21.784593935169045`; OpenCode 2 persists `0`. OpenCode 1 passes, then observes
+  the 160,000-token rewrite after restart.
+
+Commands:
+
+```sh
+MC_E2E_MODE=ts MC_E2E_HOST=<host> NODE_ENV='' bun test --timeout 600000 \
+  $(bun scripts/validate-mode-manifest.ts --mode ts --harness <host>)
+MC_E2E_MODE=ts MC_E2E_HOST=<host> NODE_ENV='' bun test --timeout 600000 \
+  tests/window-overlay-reload.test.ts
+MC_E2E_MODE=rust MC_E2E_HOST=pi NODE_ENV='' bun test --timeout 600000 \
+  tests/pi-rust-degradation-arc-1.test.ts tests/pi-rust-degradation-arc-4.test.ts
+```
