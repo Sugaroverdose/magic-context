@@ -376,6 +376,31 @@ describe("task-scheduler — runDueTasksForProject", () => {
         expect(state?.nextDueAt).toBeGreaterThan(now);
     });
 
+    it("failed runs persist retrospective recovery state without moving last_run_at", async () => {
+        db = freshDb();
+        seedActiveMemory(db);
+        const now = Date.now();
+        const tasks = [cfg("curate", "0 3 * * *")];
+        planDueTasks(db, PROJECT, tasks, now);
+        forceDue(db, "curate", now);
+
+        const executor = async (): Promise<TaskExecOutcome> => ({
+            status: "failed",
+            transient: true,
+            error: "prompt is too long",
+            schedulePatch: {
+                retrospectiveWatermarkMs: 1700000000000,
+                taskStateJson: JSON.stringify({ retrospectiveOverflow: { failures: 2 } }),
+            },
+        });
+        await runDueTasksForProject({ db, projectIdentity: PROJECT, tasks, executor, now });
+
+        const state = getTaskScheduleState(db, PROJECT, "curate");
+        expect(state?.lastRunAt).toBeNull();
+        expect(state?.retrospectiveWatermarkMs).toBe(1700000000000);
+        expect(state?.taskStateJson).toContain("retrospectiveOverflow");
+    });
+
     it("completed runs persist the retrospective content watermark patch", async () => {
         db = freshDb();
         seedActiveMemory(db);

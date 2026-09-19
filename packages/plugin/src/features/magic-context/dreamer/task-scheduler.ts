@@ -43,6 +43,8 @@ export interface DreamTaskRuntimeConfig {
     timeoutMinutes: number;
     /** review-user-memories */
     promotionThreshold?: number;
+    /** retrospective source lookback; old rows are skipped by advancing its content watermark. */
+    retrospectiveRecencyDays?: number;
 }
 
 export interface TaskExecOutcome {
@@ -252,6 +254,7 @@ function recordTransientFailure(
     due: DueTask,
     finishedAt: number,
     error: string | null,
+    schedulePatch?: TaskExecOutcome["schedulePatch"],
 ): void {
     const prior = getTaskScheduleState(db, projectIdentity, due.config.task);
     const retryCount = (prior?.retryCount ?? 0) + 1;
@@ -268,6 +271,8 @@ function recordTransientFailure(
             lastStatus: "failed",
             lastError: error,
             retryCount: 0,
+            taskStateJson: schedulePatch?.taskStateJson,
+            retrospectiveWatermarkMs: schedulePatch?.retrospectiveWatermarkMs,
         });
     } else {
         // Hot-retry: keep next_due_at so the timer re-attempts next tick — but a
@@ -285,6 +290,8 @@ function recordTransientFailure(
             lastStatus: "failed",
             lastError: error,
             retryCount,
+            taskStateJson: schedulePatch?.taskStateJson,
+            retrospectiveWatermarkMs: schedulePatch?.retrospectiveWatermarkMs,
         });
     }
 }
@@ -397,7 +404,14 @@ async function runDomainGroup(
                 );
                 cb?.onRan?.(due.config.task, outcome.detail, outcome.backlog);
             } else if (outcome.transient) {
-                recordTransientFailure(db, projectIdentity, due, finishedAt, outcome.error ?? null);
+                recordTransientFailure(
+                    db,
+                    projectIdentity,
+                    due,
+                    finishedAt,
+                    outcome.error ?? null,
+                    outcome.schedulePatch,
+                );
                 cb?.onFailed?.(due.config.task, outcome.failureDetail ?? outcome.error);
             } else {
                 advanceAfterRun(
@@ -407,6 +421,7 @@ async function runDomainGroup(
                     finishedAt,
                     "failed",
                     outcome.error ?? null,
+                    outcome.schedulePatch,
                 );
                 cb?.onFailed?.(due.config.task, outcome.failureDetail ?? outcome.error);
             }

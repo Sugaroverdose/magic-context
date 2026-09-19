@@ -168,6 +168,7 @@ describe("per-harness raw config migration", () => {
         const taskRetained = {
             schedule: "0 3 * * *",
             promotion_threshold: 4,
+            recency_days: 30,
         };
         expect(Object.keys(historianRetained)).toEqual(
             PER_HARNESS_MIGRATION_INVENTORY.historian.retained,

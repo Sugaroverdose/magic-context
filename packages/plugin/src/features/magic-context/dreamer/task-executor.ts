@@ -20,9 +20,15 @@ import { extractLatestAssistantText } from "../../../shared/assistant-message-ex
 import { teardownChildSession } from "../../../shared/child-session-teardown";
 import { describeError } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
+import type { ModelInput } from "../../../shared/model-resolution";
+import { getSdkContextLimit } from "../../../shared/models-dev-cache";
 import { isRecord } from "../../../shared/record-type-guard";
 import { sanitizeDiagnosticText } from "../../../shared/redaction";
-import { modelBodyField } from "../../../shared/resolve-fallbacks";
+import {
+    modelBodyField,
+    parseProviderModel,
+    toModelEntry,
+} from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
 import { dreamFailureCode } from "../../../shared/user-facing-codes";
 import { getCompartmentEvents } from "../compartment-events";
@@ -33,6 +39,7 @@ import {
     type Memory,
 } from "../memory";
 import { runCompressCues } from "../mural/compress-cues";
+import { detectOverflow } from "../overflow-detection";
 import { recordChildInvocation } from "../subagent-token-capture";
 import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { type ClassifyModuleClient, runClassify } from "./classify";
@@ -147,6 +154,8 @@ export interface DreamTaskExecutorDeps {
     retinaHandoff?: boolean;
     /** Process-local progress callback for user-facing status displays; it never reads from or writes to the prompt/result cache. */
     onProgress?: (progress: DreamTaskProgress | null, completedTask?: DreamTaskName) => void;
+    /** Optional callback for tests and host integrations to resolve the smallest usable input window across child model attempts. */
+    resolveRetrospectiveUsableInputTokens?: (models: readonly ModelInput[]) => number | undefined;
     moduleClient?: ClassifyModuleClient & {
         authorityStatus?: (args: {
             context_store_uuid: string;
@@ -825,8 +834,18 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 return {
                     status: "completed",
                     schedulePatch:
-                        retro.retrospectiveWatermarkMs != null
-                            ? { retrospectiveWatermarkMs: retro.retrospectiveWatermarkMs }
+                        retro.retrospectiveWatermarkMs != null || retro.taskStateJson !== undefined
+                            ? {
+                                  ...(retro.retrospectiveWatermarkMs != null
+                                      ? {
+                                            retrospectiveWatermarkMs:
+                                                retro.retrospectiveWatermarkMs,
+                                        }
+                                      : {}),
+                                  ...(retro.taskStateJson !== undefined
+                                      ? { taskStateJson: retro.taskStateJson }
+                                      : {}),
+                              }
                             : undefined,
                 };
             }
@@ -843,7 +862,11 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 moduleRoute,
             });
         } catch (error) {
-            const { transient, brief } = classifyFailure(error);
+            const classified = classifyFailure(error);
+            const retrospectiveOverflow =
+                error instanceof RetrospectivePromptOverflowError ? error : null;
+            const transient = retrospectiveOverflow ? true : classified.transient;
+            const brief = classified.brief;
             const failure = dreamRunFailureDetail(error);
             recordRun("failed", brief, { failure });
             log(
@@ -854,6 +877,9 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 transient,
                 error: brief,
                 failureDetail: formatDreamRunFailure(failure),
+                ...(retrospectiveOverflow
+                    ? { schedulePatch: retrospectiveOverflow.schedulePatch }
+                    : {}),
             };
         } finally {
             deps.onProgress?.(null, config.task);
@@ -995,6 +1021,97 @@ function retrospectiveEventsForSessions(
     return events.sort((a, b) => a.createdAt - b.createdAt).slice(-20);
 }
 
+const RETROSPECTIVE_DEFAULT_USABLE_INPUT_TOKENS = 128_000;
+const RETROSPECTIVE_OVERFLOW_FAILURE_LIMIT = 2;
+const RETROSPECTIVE_MIN_RETRY_INPUT_TOKENS = 512;
+const RETROSPECTIVE_DAY_MS = 24 * 60 * 60 * 1000;
+
+interface RetrospectiveOverflowState {
+    watermarkMs: number;
+    failures: number;
+    nextUsableInputTokens: number;
+    abandonAfterMs: number;
+}
+
+class RetrospectivePromptOverflowError extends Error {
+    constructor(
+        message: string,
+        readonly schedulePatch: NonNullable<TaskExecOutcome["schedulePatch"]>,
+    ) {
+        super(message);
+        this.name = "DreamerProviderOutputFailureError";
+    }
+}
+
+function readRetrospectiveTaskState(taskStateJson: string | null | undefined): {
+    root: Record<string, unknown>;
+    overflow?: RetrospectiveOverflowState;
+} {
+    let root: Record<string, unknown> = {};
+    if (taskStateJson) {
+        try {
+            const parsed = JSON.parse(taskStateJson);
+            if (isRecord(parsed)) root = parsed;
+        } catch {
+            // A malformed task-local blob must not wedge retrospective progress.
+        }
+    }
+    const candidate = root.retrospectiveOverflow;
+    if (!isRecord(candidate)) return { root };
+    const { watermarkMs, failures, nextUsableInputTokens, abandonAfterMs } = candidate;
+    if (
+        typeof watermarkMs !== "number" ||
+        typeof failures !== "number" ||
+        typeof nextUsableInputTokens !== "number" ||
+        typeof abandonAfterMs !== "number"
+    ) {
+        return { root };
+    }
+    return {
+        root,
+        overflow: { watermarkMs, failures, nextUsableInputTokens, abandonAfterMs },
+    };
+}
+
+function writeRetrospectiveOverflowState(
+    root: Record<string, unknown>,
+    overflow: RetrospectiveOverflowState | null,
+): string {
+    const next = { ...root };
+    if (overflow) next.retrospectiveOverflow = overflow;
+    else delete next.retrospectiveOverflow;
+    return JSON.stringify(next);
+}
+
+function resolveRetrospectiveUsableInputTokens(
+    config: DreamTaskRuntimeConfig,
+    deps: DreamTaskExecutorDeps,
+): number {
+    const models: ModelInput[] = [];
+    if (config.model) models.push(config.model);
+    for (const fallback of config.fallbackModels ?? []) models.push(fallback);
+    const injected = deps.resolveRetrospectiveUsableInputTokens?.(models);
+    if (typeof injected === "number" && Number.isFinite(injected) && injected > 0) {
+        return Math.floor(injected);
+    }
+    if (models.length === 0) return RETROSPECTIVE_DEFAULT_USABLE_INPUT_TOKENS;
+
+    // The same prompt is attempted on every configured fallback. Admit against
+    // the smallest known usable input; an unknown catalog entry receives the
+    // historian's conservative 128K fallback rather than an unbounded prompt.
+    return Math.min(
+        ...models.map((model) => {
+            const entry = toModelEntry(model);
+            const parsed = entry ? parseProviderModel(entry.model) : null;
+            if (!parsed) return RETROSPECTIVE_DEFAULT_USABLE_INPUT_TOKENS;
+            return (
+                getSdkContextLimit(parsed.providerID, parsed.modelID) ??
+                RETROSPECTIVE_DEFAULT_USABLE_INPUT_TOKENS
+            );
+        }),
+    );
+}
+
 async function runRetrospectiveTask(
     config: DreamTaskRuntimeConfig,
     ctx: TaskExecutorContext,
@@ -1005,7 +1122,10 @@ async function runRetrospectiveTask(
         invocationStartedAt: number;
         moduleRoute?: DreamerModuleRoute;
     },
-): Promise<{ retrospectiveWatermarkMs: number | null }> {
+): Promise<{
+    retrospectiveWatermarkMs: number | null;
+    taskStateJson?: string;
+}> {
     const { db, projectIdentity, holderId, leaseKey } = ctx;
     const { deps, deadline, parent } = helpers;
     const provider = resolveRetrospectiveProvider(deps, db, projectIdentity);
@@ -1016,20 +1136,39 @@ async function runRetrospectiveTask(
 
     // Content watermark (max message ts actually scanned) — NOT lastRunAt, which
     // is schedule-completion time and would skip a message that arrived mid-run.
-    const watermarkMs =
-        getTaskScheduleState(db, projectIdentity, config.task)?.retrospectiveWatermarkMs ?? 0;
+    const scheduleState = getTaskScheduleState(db, projectIdentity, config.task);
+    const watermarkMs = scheduleState?.retrospectiveWatermarkMs ?? 0;
+    const taskState = readRetrospectiveTaskState(scheduleState?.taskStateJson);
+    const activeOverflow =
+        taskState.overflow?.watermarkMs === watermarkMs ? taskState.overflow : undefined;
+    const baseUsableInputTokens = resolveRetrospectiveUsableInputTokens(config, deps);
+    const usableInputTokens = activeOverflow
+        ? Math.min(baseUsableInputTokens, activeOverflow.nextUsableInputTokens)
+        : baseUsableInputTokens;
+    const recencyDays = Math.max(1, Math.floor(config.retrospectiveRecencyDays ?? 30));
+    const recencyCutoffMs = helpers.invocationStartedAt - recencyDays * RETROSPECTIVE_DAY_MS;
 
     const scan = await readRetrospectiveScanWindow(
         provider,
         projectIdentity,
         watermarkMs,
         RETROSPECTIVE_OVERLAP_USER_LINES,
+        { usableInputTokens, recencyCutoffMs },
     );
+    const clearedTaskStateJson = activeOverflow
+        ? writeRetrospectiveOverflowState(taskState.root, null)
+        : undefined;
+    const completedWindow = (
+        retrospectiveWatermarkMs: number | null,
+    ): { retrospectiveWatermarkMs: number | null; taskStateJson?: string } => ({
+        retrospectiveWatermarkMs,
+        ...(clearedTaskStateJson ? { taskStateJson: clearedTaskStateJson } : {}),
+    });
     const messages = withGlobalOrdinals(scan.messages);
     const userMessages = messages.filter((message) => message.role === "user");
     if (userMessages.length === 0) {
         log("[dreamer] retrospective: no user messages in window");
-        return { retrospectiveWatermarkMs: scan.maxScannedTs };
+        return completedWindow(scan.maxScannedTs);
     }
 
     // Only POST-watermark user lines are genuinely new; the rest are the overlap
@@ -1041,7 +1180,7 @@ async function runRetrospectiveTask(
     );
     if (postWatermarkOrdinals.size === 0) {
         log("[dreamer] retrospective: only overlap lines, nothing new");
-        return { retrospectiveWatermarkMs: scan.maxScannedTs };
+        return completedWindow(scan.maxScannedTs);
     }
 
     const abortController = new AbortController();
@@ -1126,7 +1265,7 @@ async function runRetrospectiveTask(
         const finish = (
             run: { output: unknown[] } | null,
             watermark: number | null,
-        ): { retrospectiveWatermarkMs: number | null } => {
+        ): { retrospectiveWatermarkMs: number | null; taskStateJson?: string } => {
             if (parent && run) {
                 recordChildInvocation({
                     db,
@@ -1139,7 +1278,7 @@ async function runRetrospectiveTask(
                     messages: run.output,
                 });
             }
-            return { retrospectiveWatermarkMs: watermark };
+            return completedWindow(watermark);
         };
 
         // ── Turn 1: cheap LLM gate over U: lines only ──────────────────────
@@ -1274,6 +1413,45 @@ async function runRetrospectiveTask(
             `[dreamer] retrospective: flagged=${flagged.length} learnings=${learnings.length} memory=${applied.memoryWritten} observations=${applied.observationsInserted} dropped=${applied.observationsDropped} rejected=${applied.rejected.length}`,
         );
         return finish(deepenRun, scan.maxScannedTs);
+    } catch (error) {
+        if (!detectOverflow(error).isOverflow) throw error;
+
+        const failures = (activeOverflow?.failures ?? 0) + 1;
+        const abandonAfterMs = Math.max(
+            activeOverflow?.abandonAfterMs ?? watermarkMs,
+            scan.maxScannedTs,
+        );
+        const providerMessage = describeError(error).brief;
+        if (failures >= RETROSPECTIVE_OVERFLOW_FAILURE_LIMIT) {
+            const taskStateJson = writeRetrospectiveOverflowState(taskState.root, null);
+            log(
+                `[dreamer] retrospective: child rejected source window for size ${failures} times; advancing content watermark from ${watermarkMs} to ${abandonAfterMs} so the same window is not retried forever`,
+            );
+            throw new RetrospectivePromptOverflowError(
+                `retrospective prompt overflow; abandoned repeatedly rejected source window after ${failures} attempts: ${providerMessage}`,
+                { retrospectiveWatermarkMs: abandonAfterMs, taskStateJson },
+            );
+        }
+
+        const nextUsableInputTokens = Math.max(
+            RETROSPECTIVE_MIN_RETRY_INPUT_TOKENS,
+            Math.floor(usableInputTokens / 2),
+        );
+        const overflowState: RetrospectiveOverflowState = {
+            watermarkMs,
+            failures,
+            nextUsableInputTokens,
+            abandonAfterMs,
+        };
+        log(
+            `[dreamer] retrospective: child rejected ${scan.promptTokens}-token estimated prompt for size; retrying watermark=${watermarkMs} with usable input ${usableInputTokens} -> ${nextUsableInputTokens}`,
+        );
+        throw new RetrospectivePromptOverflowError(
+            `retrospective prompt overflow; retrying with a smaller source window: ${providerMessage}`,
+            {
+                taskStateJson: writeRetrospectiveOverflowState(taskState.root, overflowState),
+            },
+        );
     } finally {
         heartbeat.stop();
         await teardownChildSession({

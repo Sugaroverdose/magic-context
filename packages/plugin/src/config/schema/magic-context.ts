@@ -156,7 +156,7 @@ export const PER_HARNESS_MIGRATION_INVENTORY = {
         migrated_execution: ["model", "fallback_models", "variant", "thinking_level"],
     },
     task: {
-        retained: ["schedule", "promotion_threshold"],
+        retained: ["schedule", "promotion_threshold", "recency_days"],
         migrated_execution: [
             "model",
             "fallback_models",
@@ -512,6 +512,15 @@ const ReviewUserMemoriesTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
 const PromotePrimersTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
     promotion_threshold: PrimerPromotionThresholdSchema,
 });
+const RetrospectiveTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
+    recency_days: z
+        .number()
+        .int()
+        .min(1)
+        .max(3650)
+        .default(30)
+        .describe("retrospective: collect source messages from only the most recent N days"),
+});
 export type DreamTaskConfig = z.infer<typeof DreamTaskConfigSchema>;
 
 /** Default schedule per task. Preserves v1 behavior: verify runs nightly;
@@ -566,8 +575,8 @@ export const DreamTasksSchema = z
         "classify-memories": DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("classify-memories")),
         ),
-        retrospective: DreamTaskBaseConfigSchema.default(() =>
-            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("retrospective")),
+        retrospective: RetrospectiveTaskConfigSchema.default(() =>
+            RetrospectiveTaskConfigSchema.parse(defaultTaskConfig("retrospective")),
         ),
         "maintain-docs": DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("maintain-docs")),

@@ -31,4 +31,19 @@ describe("per-harness dream task runtime config", () => {
         expect(timeout(opencode, "curate")).toBe(20);
         expect(timeout(pi, "curate")).toBe(27);
     });
+
+    it("threads retrospective recency metadata into both harness runtimes", () => {
+        const dreamer = {
+            tasks: {
+                retrospective: { schedule: "0 5 * * *", recency_days: 14 },
+            },
+        };
+
+        for (const harness of ["opencode", "pi"] as const) {
+            const retrospective = buildDreamTaskRuntimeConfigs(dreamer, harness).find(
+                (config) => config.task === "retrospective",
+            );
+            expect(retrospective?.retrospectiveRecencyDays).toBe(14);
+        }
+    });
 });
