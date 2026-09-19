@@ -944,8 +944,9 @@ pub const COMPARTMENT_RENDER_FORMAT_EPOCH: u32 = 2;
 pub const PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC: u32 = 3;
 /// Bumps for provider-visible byte changes local to OpenCode's AI SDK codec. Epoch 1
 /// promotes valid text attachments from opaque to text and demotes malformed media-shaped
-/// attachments to opaque so their retained ingress representation is replayed verbatim.
-pub const PROFILE_EPOCH_OPENCODE_AI_SDK: u32 = 1;
+/// attachments to opaque so their retained ingress representation is replayed verbatim. Epoch 2
+/// prevents a tag first discovered after serve from appearing until an independent bust.
+pub const PROFILE_EPOCH_OPENCODE_AI_SDK: u32 = 2;
 /// Bumps for provider-visible byte changes local to Pi's codec. Epoch 1 demotes malformed
 /// text, image, and file result children to opaque so their retained ingress representation
 /// is replayed verbatim.
@@ -18243,6 +18244,7 @@ mod tests {
     #[test]
     fn profile_render_epoch_is_profile_specific_and_zero_for_unchanged_profiles() {
         assert_eq!(MEMORY_RENDER_FORMAT_EPOCH, 2);
+        assert_eq!(PROFILE_EPOCH_OPENCODE_AI_SDK, 2);
         assert_eq!(
             profile_render_epoch(SerializerProfile::ClaudeCodeAnthropic),
             PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC

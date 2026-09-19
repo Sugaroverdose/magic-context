@@ -3647,6 +3647,7 @@ fn apply_once(
                     &temporal_marks,
                     &user_hints,
                     &channel1_appends,
+                    &loaded.meta.pending_tag_block_ids,
                     &loaded.meta.pending_user_hint_block_ids,
                 )
             });
@@ -3764,6 +3765,7 @@ fn apply_once(
                 &temporal_marks,
                 &user_hints,
                 &channel1_appends,
+                &meta.pending_tag_block_ids,
                 &meta.pending_user_hint_block_ids,
             )
         });
@@ -4607,6 +4609,19 @@ fn apply_once(
         PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
     );
     let is_bust_pass = !req.is_subagent && is_provider_prefix_mutation_pass;
+    if is_bust_pass {
+        meta.pending_tag_block_ids.clear();
+    } else if serializer_profile == Some(SerializerProfile::OpencodeAiSdk) {
+        let mint_end = pending_overlays
+            .tag_mint_start
+            .saturating_add(pending_overlays.tag_mint_count)
+            .min(tag_rows.len());
+        for row in &tag_rows[pending_overlays.tag_mint_start.min(mint_end)..mint_end] {
+            if overlay_target_was_served(&loaded.meta.served_output_fingerprint, &row.block_id) {
+                meta.pending_tag_block_ids.insert(row.block_id.clone());
+            }
+        }
+    }
     if !lineage_anchor_failure {
         meta.protected_tokens_effective = floor_resolution.persisted;
         if meta.protected_tokens_effective != loaded.meta.protected_tokens_effective {
@@ -5486,6 +5501,7 @@ fn apply_once(
             &temporal_marks,
             &user_hints,
             &channel1_appends,
+            &meta.pending_tag_block_ids,
             &meta.pending_user_hint_block_ids,
         )
     } else if auto_search_active {
@@ -8850,11 +8866,13 @@ fn tag_overlay_state(
     temporal_marks: &[TemporalMarkRow],
     user_hints: &[UserHintRow],
     appends: &[Channel1AppendRow],
+    pending_tag_block_ids: &BTreeSet<String>,
     pending_user_hint_block_ids: &BTreeSet<String>,
 ) -> TagOverlayState {
     TagOverlayState {
         tag_by_block_id: tag_rows
             .iter()
+            .filter(|row| !pending_tag_block_ids.contains(&row.block_id))
             .map(|row| (row.block_id.clone(), row.tag_number))
             .collect(),
         temporal_by_block_id: temporal_marks
@@ -9342,13 +9360,20 @@ fn eligible_authored_user_tail(req: &TransformRequest) -> Option<&CkIngressMessa
     is_authored_user_message(tail).then_some(tail)
 }
 
-fn user_hint_target_was_served(meta: &ModuleMeta, block_id: &str) -> bool {
+fn overlay_target_was_served(
+    served_output_fingerprint: &[ServedBlockFingerprint],
+    block_id: &str,
+) -> bool {
     let Some((message_id, block_index)) = split_block_id(block_id) else {
         return false;
     };
-    meta.served_output_fingerprint.iter().any(|served| {
+    served_output_fingerprint.iter().any(|served| {
         served.block_id == block_id || (block_index == 0 && served.block_id == message_id)
     })
+}
+
+fn user_hint_target_was_served(meta: &ModuleMeta, block_id: &str) -> bool {
+    overlay_target_was_served(&meta.served_output_fingerprint, block_id)
 }
 
 fn compute_active_overlay_decisions(
@@ -15259,6 +15284,23 @@ pub(crate) mod tests {
     /// message AND every block; typed-constructor fixtures (`from_parts`/`bare`)
     /// don't, which is exactly how an output-overlay bug can hide from a fixture
     /// while dropping bytes on the wire.
+    fn reasoning_item(id: &str, ordinal: u64, reasoning: &str, text: &str) -> CkIngressMessage {
+        let mut message = wire_item("assistant", id, ordinal, &[text]);
+        message.ck.content.insert(
+            0,
+            serde_json::from_value(json!({
+                "kind": {
+                    "type": "reasoning",
+                    "text": reasoning,
+                    "signature": format!("{id}-signature")
+                }
+            }))
+            .unwrap(),
+        );
+        message.ck.mark_modified();
+        message
+    }
+
     fn wire_item(role: &str, id: &str, ordinal: u64, texts: &[&str]) -> CkIngressMessage {
         let content: Vec<Value> = texts
             .iter()
@@ -28760,6 +28802,146 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn opencode_defer_does_not_first_tag_an_already_served_assistant() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut request = active_opencode_req(
+            "opencode-late-tag-defer",
+            "cfg0",
+            vec![
+                wire_item("user", "prompt", 1, &["inspect tests"]),
+                reasoning_item("target", 2, "first thought", "completed answer"),
+            ],
+        );
+        request.provider_id = Some("anthropic".to_string());
+        request.mid_turn = true;
+
+        let first = run(&s, &request, &spine());
+        assert_eq!(first.action, "HARD");
+        assert_eq!(
+            first_block_text(
+                &first
+                    .messages()
+                    .iter()
+                    .find(|message| message.meta.harness_id.as_deref() == Some("target"))
+                    .unwrap()
+                    .content[1],
+            ),
+            Some("completed answer")
+        );
+        let served_target = first
+            .messages()
+            .iter()
+            .find(|message| message.meta.harness_id.as_deref() == Some("target"))
+            .unwrap()
+            .canonical_bytes()
+            .to_vec();
+
+        request
+            .messages
+            .push(wire_item("user", "next-prompt", 3, &["continue"]));
+        request
+            .messages
+            .push(reasoning_item("newer", 4, "next thought", "new answer"));
+        let defer = run(&s, &request, &spine());
+
+        assert_eq!(defer.action, "SOFT+");
+        assert_eq!(
+            first_block_text(
+                &defer
+                    .messages()
+                    .iter()
+                    .find(|message| message.meta.harness_id.as_deref() == Some("target"))
+                    .unwrap()
+                    .content[1],
+            ),
+            Some("completed answer")
+        );
+        assert_eq!(
+            defer
+                .messages()
+                .iter()
+                .find(|message| message.meta.harness_id.as_deref() == Some("target"))
+                .unwrap()
+                .canonical_bytes(),
+            served_target.as_slice(),
+            "a defer pass must not first-apply a tag to an already served message"
+        );
+        assert!(s
+            .load_tags_for_session("opencode-late-tag-defer")
+            .unwrap()
+            .iter()
+            .any(|row| row.block_id == "target#1"));
+        assert!(s
+            .load("opencode-late-tag-defer")
+            .unwrap()
+            .meta
+            .pending_tag_block_ids
+            .contains("target#1"));
+    }
+
+    #[test]
+    fn opencode_busting_pass_first_tags_an_already_served_assistant() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut request = active_opencode_req(
+            "opencode-late-tag-bust",
+            "cfg0",
+            vec![
+                wire_item("user", "prompt", 1, &["inspect tests"]),
+                reasoning_item("target", 2, "first thought", "completed answer"),
+            ],
+        );
+        request.provider_id = Some("anthropic".to_string());
+        request.mid_turn = true;
+
+        let first = run(&s, &request, &spine());
+        assert_eq!(first.action, "HARD");
+        assert_eq!(
+            first_block_text(
+                &first
+                    .messages()
+                    .iter()
+                    .find(|message| message.meta.harness_id.as_deref() == Some("target"))
+                    .unwrap()
+                    .content[1],
+            ),
+            Some("completed answer")
+        );
+
+        request
+            .messages
+            .push(wire_item("user", "next-prompt", 3, &["continue"]));
+        request
+            .messages
+            .push(reasoning_item("newer", 4, "next thought", "new answer"));
+        request.render_config = "cfg1".to_string();
+        let bust = run(&s, &request, &spine());
+
+        assert_eq!(bust.action, "HARD");
+        assert!(first_block_text(
+            &bust
+                .messages()
+                .iter()
+                .find(|message| message.meta.harness_id.as_deref() == Some("target"))
+                .unwrap()
+                .content[1],
+        )
+        .is_some_and(|text| text.starts_with('§')));
+        assert!(s
+            .load_tags_for_session("opencode-late-tag-bust")
+            .unwrap()
+            .iter()
+            .any(|row| row.block_id == "target#1"));
+        assert!(s
+            .load("opencode-late-tag-bust")
+            .unwrap()
+            .meta
+            .pending_tag_block_ids
+            .is_empty());
+    }
+
+    #[test]
     fn tool_loop_first_sight_tag_bytes_survive_new_reasoning_assistant() {
         let golden: Value =
             serde_json::from_str(include_str!("../testdata/cc-tool-loop-tag-golden.json")).unwrap();
@@ -34894,7 +35076,7 @@ pub(crate) mod tests {
             &request.render_config,
             "mre2".to_string(),
             "cre2".to_string(),
-            "mpe1".to_string(),
+            "mpe2".to_string(),
             "tfe3".to_string(),
         );
         let new_identity = effective_render_config_with_epochs(
@@ -34902,7 +35084,7 @@ pub(crate) mod tests {
             &request.render_config,
             "mre2".to_string(),
             "cre2".to_string(),
-            "mpe1".to_string(),
+            "mpe2".to_string(),
             "tfe4".to_string(),
         );
         assert_ne!(old_identity, new_identity);
@@ -35065,7 +35247,12 @@ pub(crate) mod tests {
     #[test]
     fn tool_result_codec_profile_epochs_hard_once_then_restart_replay_identically() {
         for profile in [SerializerProfile::OpencodeAiSdk, SerializerProfile::Pi] {
-            assert_eq!(crate::profile_render_epoch(profile), 1);
+            let expected_epoch = match profile {
+                SerializerProfile::OpencodeAiSdk => 2,
+                SerializerProfile::Pi => 1,
+                _ => unreachable!(),
+            };
+            assert_eq!(crate::profile_render_epoch(profile), expected_epoch);
             let dir = tempfile::tempdir().unwrap();
             let session = format!("tool-result-epoch-{}", profile.wire_id());
             let golden: Value = serde_json::from_str(include_str!(
