@@ -5,7 +5,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HostCapabilities, PiHostHarness } from "./host-harness";
 import { assertHistorianMockRouting } from "./mock-routing";
-import { MockProvider, type MockResponse } from "./mock-provider/server";
+import {
+  type CapturedRequest,
+  MockProvider,
+  type MockResponse,
+} from "./mock-provider/server";
 import { prepareContextDatabase } from "./prepare-context-db";
 import {
   createPiIsolatedEnv,
@@ -44,6 +48,70 @@ const DEFAULT_MOCK_RESPONSE: MockResponse = {
     cache_read_input_tokens: 0,
   },
 };
+
+const RPC_EVENT_DIAGNOSTIC_TAIL = 12;
+
+function summarizeContent(content: unknown): { characters: number; preview: string } | { kind: string } {
+  let text: string | undefined;
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    text = content
+      .filter((part): part is { type?: string; text: string } =>
+        typeof part === "object" && part !== null && "text" in part && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("");
+  }
+  if (text !== undefined) {
+    return { characters: text.length, preview: text.slice(0, 160) };
+  }
+  return { kind: content === null ? "null" : typeof content };
+}
+
+function summarizeMessage(message: unknown): Record<string, unknown> {
+  if (typeof message !== "object" || message === null) return { kind: typeof message };
+  const record = message as Record<string, unknown>;
+  return {
+    ...(typeof record.role === "string" ? { role: record.role } : {}),
+    ...(typeof record.customType === "string" ? { customType: record.customType } : {}),
+    ...(typeof record.stopReason === "string" ? { stopReason: record.stopReason } : {}),
+    ...(Object.hasOwn(record, "content") ? { content: summarizeContent(record.content) } : {}),
+  };
+}
+
+function summarizeRpcEvent(event: PiRpcEvent): string {
+  const messages = Array.isArray(event.messages) ? event.messages : undefined;
+  return JSON.stringify({
+    type: event.type ?? "unknown",
+    ...(typeof event.isTerminal === "boolean" ? { isTerminal: event.isTerminal } : {}),
+    ...(messages
+      ? { messageCount: messages.length, messageTail: messages.slice(-3).map(summarizeMessage) }
+      : {}),
+    ...(Object.hasOwn(event, "message") ? { message: summarizeMessage(event.message) } : {}),
+    ...(typeof event.error === "string" ? { error: event.error.slice(0, 240) } : {}),
+  });
+}
+
+function summarizeLastMockRequest(request: CapturedRequest | null | undefined): string {
+  if (!request) return "(none)";
+  const messages = Array.isArray(request.body.messages) ? request.body.messages : [];
+  const lastUser = [...messages].reverse().find((message) => message.role === "user");
+  let bodyBytes: number | "unserializable" = "unserializable";
+  try {
+    bodyBytes = Buffer.byteLength(JSON.stringify(request.body));
+  } catch {
+    // Keep timeout reporting best-effort even if a test supplied a cyclic body.
+  }
+  return JSON.stringify({
+    path: request.path,
+    model: request.body.model ?? null,
+    bodyBytes,
+    messageCount: messages.length,
+    roles: messages.map((message) => message.role),
+    lastUser: lastUser ? summarizeMessage(lastUser) : null,
+    response: request.responseCompletedAt === undefined ? "pending" : "completed",
+  });
+}
 
 export class PiTestHarness implements PiHostHarness {
   readonly host: PiRunnerHost;
@@ -194,9 +262,12 @@ export class PiTestHarness implements PiHostHarness {
     // while still bounding tests. Individual call sites can pass smaller values.
     const timeoutMs = options.timeoutMs ?? 180_000;
     const events: PiRpcEvent[] = [];
+    const recentEvents: PiRpcEvent[] = [];
     let capturing = false;
     let submittedTurnEnded = false;
     const unsubscribe = this.rpc.onEvent((event) => {
+      recentEvents.push(event);
+      if (recentEvents.length > RPC_EVENT_DIAGNOSTIC_TAIL) recentEvents.shift();
       if (event.type === "agent_start") capturing = true;
       if (capturing) events.push(event);
       if (event.type === "agent_end" && Array.isArray(event.messages)) {
@@ -211,15 +282,18 @@ export class PiTestHarness implements PiHostHarness {
         });
       }
     });
-    // Pi emits agent_settled after extension-triggered continuations. OMP's RPC
-    // protocol has no equivalent event, so its submitted agent_end is terminal.
+    // Pi signals that a turn is fully finished with agent_settled, including after
+    // an extension starts another continuation. OMP has no agent_settled event and
+    // can emit a non-terminal agent_end before that continuation finishes, so wait
+    // for a terminal agent_end before allowing the next prompt.
     const agentEnd = this.rpc.waitForEvent(
       (event) =>
         submittedTurnEnded &&
-        event.type === (this.host === "omp" ? "agent_end" : "agent_settled"),
+        event.type === (this.host === "omp" ? "agent_end" : "agent_settled") &&
+        (this.host !== "omp" || event.isTerminal !== false),
       {
         timeoutMs,
-        label: this.host === "omp" ? "submitted turn agent_end" : "submitted turn agent_settled",
+        label: this.host === "omp" ? "submitted turn terminal agent_end" : "submitted turn agent_settled",
       },
     );
 
@@ -256,7 +330,11 @@ export class PiTestHarness implements PiHostHarness {
     } catch (error) {
       void agentEnd.catch(() => undefined);
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`${message}\n--- pi rpc stderr ---\n${this.rpc.getStderr()}`);
+      const timeoutDiagnostics = message.includes("waiting for Pi RPC event")
+        ? `\n--- pi rpc event tail ---\n${recentEvents.length > 0 ? recentEvents.map(summarizeRpcEvent).join("\n") : "(empty)"}` +
+          `\n--- last mock provider request body summary ---\n${summarizeLastMockRequest(this.mock?.lastRequest())}`
+        : "";
+      throw new Error(`${message}${timeoutDiagnostics}\n--- pi rpc stderr ---\n${this.rpc.getStderr()}`);
     } finally {
       unsubscribe();
     }
