@@ -108,17 +108,12 @@ test("OpenCode 2 hidden historian keeps one cheap-model child across provider er
 
         const command = async (
             seq: number,
-            options: { temperature?: number; maxOutputTokens?: number } = {},
+            options: { temperature?: number; maxOutputTokens?: number; generation?: string } = {},
         ) => {
             const resultPath = join(host.cwd, `hidden-child-result-${seq}.json`);
             writeFileSync(
                 join(host.cwd, "hidden-child-command.json"),
                 JSON.stringify({ seq, parentSessionID: user.id, ...options }),
-        const command = async (seq: number, temperature?: number, generation?: string) => {
-            const resultPath = join(host.cwd, `hidden-child-result-${seq}.json`);
-            writeFileSync(
-                join(host.cwd, "hidden-child-command.json"),
-                JSON.stringify({ seq, parentSessionID: user.id, temperature, generation }),
             );
             await waitForFile(resultPath);
             return JSON.parse(readFileSync(resultPath, "utf8")) as {
@@ -231,7 +226,7 @@ test("OpenCode 2 hidden historian keeps one cheap-model child across provider er
         const storePath = gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env);
         expect(storedSession(storePath, first.childID).exists).toBe(true);
         expect(storedSession(storePath, first.childID).messages).toBeGreaterThan(0);
-        const regenerated = await command(5, undefined, "ga-proof-generation-2");
+        const regenerated = await command(5, { generation: "ga-proof-generation-2" });
         expect(regenerated.ok).toBe(true);
         expect(regenerated.childID).not.toBe(first.childID);
         await eventually(() => !storedSession(storePath, first.childID).exists);
