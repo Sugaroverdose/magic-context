@@ -48,6 +48,7 @@ import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { rawMessages } from "./store";
+import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
 
 export function createHostSeams(
@@ -169,6 +170,7 @@ export async function registerContext(context: V2Context) {
         // The primary context hook retains the existing fail-closed storage path.
         // Hidden work remains unavailable for this plugin instance when durable storage cannot open.
     }
+    const tools = db && isDatabasePersisted(db) ? await registerTools(context, db, config) : undefined;
     const hiddenChildHook = new HiddenChildHook();
     await registerHiddenChildAgents(context.agent);
     let hiddenAgentsReady: Promise<void> | undefined;
@@ -627,6 +629,7 @@ export async function registerContext(context: V2Context) {
     });
     return {
         async dispose() {
+            tools?.dispose();
             usageController.abort();
             await usageDone;
             await dreamTrigger?.dispose();
