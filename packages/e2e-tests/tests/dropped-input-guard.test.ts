@@ -39,7 +39,7 @@ forEachHost(import.meta.url, "dropped-input guard through the plugin entry", (ho
             const tools = Array.isArray(body.tools) ? body.tools : [];
             const bash = tools
                 .map((t) => (t && typeof t === "object" ? (t as { name?: unknown }).name : null))
-                .find((n) => typeof n === "string" && /(^|_)bash$/.test(n)) as string | undefined;
+                .find((n) => typeof n === "string" && (h.host === "opencode2" ? n === "shell" : /(^|_)bash$/.test(n))) as string | undefined;
             if (!bash) return null;
             emitted = true;
             return {
