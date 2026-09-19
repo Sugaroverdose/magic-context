@@ -168,7 +168,7 @@ function setDefer(text: string): void {
 
 /** Project identity the plugin resolves at runtime for the harness workdir. */
 function projectIdentity(): string {
-    return resolveProjectIdentity(realpathSync(pathResolve(h.workdir)));
+    return resolveProjectIdentity(h.host === "omp" ? h.workdir : realpathSync(pathResolve(h.workdir)));
 }
 
 function writeContextDb<T>(fn: (db: Database) => T): T {
