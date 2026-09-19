@@ -1,1302 +1,1317 @@
 {
-	"schema": 1,
-	"header": "Pull-request and ordinary master CI intentionally run only the manifest-derived TS invocation. The tag release workflow runs the Rust invocation through scripts/run-rust-hermetic-e2e.sh on an explicitly enabled private-source runner; it requires sibling path-deps (../commons and ../subconscious).",
-	"entries": [
-		{
-			"path": "tests/cache-invariants.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/cache-stability.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/compaction-off.test.ts",
-			"tier": "ts-only",
-			"invocation": {
-				"ts": true,
-				"rust": false
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"TS-HARNESS"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/conflict-disable.test.ts",
-			"tier": "ts-only",
-			"invocation": {
-				"ts": true,
-				"rust": false
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"TS-HARNESS"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/context-limits.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/deferred-compaction-marker.test.ts",
-			"tier": "ts-only",
-			"invocation": {
-				"ts": true,
-				"rust": false
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"TS-HARNESS"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true,
-			"divergences": [
-				{
-					"host": "pi",
-					"reason": "Pi stages pending_pi_compaction_marker_state and owns its JSONL boundary",
-					"contract_ref": "packages/pi-plugin/PARITY.md#4-pi-owns-compaction-via-session_before_compact"
-				},
-				{
-					"host": "omp",
-					"reason": "OMP stages the Pi-compatible marker and owns its JSONL boundary",
-					"contract_ref": "packages/pi-plugin/PARITY.md#4-pi-owns-compaction-via-session_before_compact"
-				},
-				{
-					"host": "opencode2",
-					"reason": "OpenCode 2 binds the host-created durable compaction row after the GA hook returns",
-					"contract_ref": "PARITY.md#2-fold-ownership"
-				}
-			]
-		},
-		{
-			"path": "tests/dropped-input-guard.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true,
-			"divergences": [
-				{
-					"host": "pi",
-					"reason": "Pi registers the dropped-input refusal on its event bus rather than an OpenCode tool hook",
-					"contract_ref": "packages/pi-plugin/PARITY.md#33-dropped-input-refusal-is-registered-on-pis-event-bus"
-				},
-				{
-					"host": "omp",
-					"reason": "OMP uses the Pi-compatible event-bus refusal carrier rather than an OpenCode tool hook",
-					"contract_ref": "packages/pi-plugin/PARITY.md#33-dropped-input-refusal-is-registered-on-pis-event-bus"
-				}
-			]
-		},
-		{
-			"path": "tests/drops.test.ts",
-			"tier": "ts-only",
-			"invocation": {
-				"ts": true,
-				"rust": false
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"PI-HARNESS"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/emergency-blocking.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/historian-success.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/long-running-session.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/memory-injection.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/notice-loop-race.test.ts",
-			"tier": "ts-only",
-			"invocation": {
-				"ts": true,
-				"rust": false
-			},
-			"rationale": "OpenCode 1.18.x MessageV2.latest / parentID loop-exit ordering for noReply ignored notices is a host-session contract exercised on the TS OpenCode harness",
-			"contract_refs": [
-				"TS-HARNESS"
-			],
-			"hosts": [
-				"opencode"
-			],
-			"behavior": true,
-			"divergences": [
-				{
-					"host": "opencode2",
-					"reason": "GA 2.0.5 does not expose OpenCode 1 noReply/ignored MessageV2 loop ordering",
-					"contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only"
-				},
-				{
-					"host": "pi",
-					"reason": "Pi notice delivery uses UI toasts/custom entries and never appends an ignored model-visible user row",
-					"contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only"
-				},
-				{
-					"host": "omp",
-					"reason": "OMP uses the Pi-compatible notice delivery surface and has no OpenCode ignored-row loop",
-					"contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only"
-				}
-			]
-		},
-		{
-			"path": "tests/opencode2/adapters-s2-contracts.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "OpenCode 2 context adapters have their own hermetic lane invocation",
-			"contract_refs": [
-				"I5",
-				"I6",
-				"I9b",
-				"I14"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/adapters-s3-marker-policy.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "OpenCode 2 marker strategy and inverse-projection unit contracts run in the dedicated v2 lane",
-			"contract_refs": [
-				"I10"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/automatic-s3-paths.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "Automatic historian and dreamer paths run in the dedicated real GA lane",
-			"contract_refs": [
-				"R22",
-				"R36"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/context-s2-lanes.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "Real GA OpenCode 2 context-hook lane; invoked separately from v1 TS and Rust",
-			"contract_refs": [
-				"I3",
-				"I4",
-				"I5",
-				"I6",
-				"I9b",
-				"I14",
-				"I15",
-				"I16",
-				"I16a",
-				"I17"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/entry-s2-context.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "Real OpenCode 2 directory-load proof for the dual-loader entry",
-			"contract_refs": [
-				"I1"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/fold-s3-owner.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "Checkpoint ownership and restored-tail taxonomy run in the dedicated real GA lane",
-			"contract_refs": [
-				"I6a",
-				"I7",
-				"I8",
-				"R39"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/harness-s3-identity.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "Real GA OpenCode 2 boot-time harness identity proof runs in the dedicated v2 lane",
-			"contract_refs": [
-				"R12"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/hidden-child-ga.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "Real GA reusable hidden-child prompt, model, usage, title, reuse and retirement proof runs in the dedicated v2 lane",
-			"contract_refs": [
-				"R36",
-				"R44",
-				"R44a",
-				"R44b"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/marker-s3-runtime.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "Instrumented v2 marker exclusion with a real v1 control runs in the dedicated GA lane",
-			"contract_refs": [
-				"I10"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/pins.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "OpenCode v2 lane: pins the captured GA host evidence (sha256) — unit-shaped, needs no host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
-			"contract_refs": [
-				"OC2-S1"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/probes.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "OpenCode v2 lane: boots the real @opencode/cli@2.0.5 in the hermetic v2 runner (throwaway roots, fd guard); v1/v2 payload, hidden-agent and rpc-entry probes; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
-			"contract_refs": [
-				"OC2-S1"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/prompt-surface-s6.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "OpenCode v2 lane: per-model ctx_* description rewrite and draft-authoritative model tracking on the real GA host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
-			"contract_refs": [
-				"R42",
-				"R43"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/runner.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "OpenCode v2 lane: hermetic runner guards and handoff against the real GA host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
-			"contract_refs": [
-				"OC2-S1"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/opencode2/store-reader.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "OpenCode v2 lane: session_message reader against real v2 host writes; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
-			"contract_refs": [
-				"OC2-S1"
-			],
-			"hosts": [
-				"opencode2"
-			]
-		},
-		{
-			"path": "tests/overflow-recovery.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true,
-			"divergences": [
-				{
-					"host": "pi",
-					"reason": "Pi has no turn-abort primitive and forwards the best-effort reduced context after provider-proven overflow",
-					"contract_ref": "packages/pi-plugin/PARITY.md#9c-emergency-overflow-termination-follows-each-hosts-control-surface"
-				},
-				{
-					"host": "omp",
-					"reason": "OMP exposes the Pi-compatible context hook without an OpenCode session abort carrier",
-					"contract_ref": "packages/pi-plugin/PARITY.md#9c-emergency-overflow-termination-follows-each-hosts-control-surface"
-				}
-			]
-		},
-		{
-			"path": "tests/paired-session-replay.test.ts",
-			"tier": "ts-only",
-			"invocation": {
-				"ts": true,
-				"rust": false
-			},
-			"rationale": "CI-fast unit guard for paired replay byte/value-space classification vocabulary",
-			"contract_refs": [
-				"PARITY-REPLAY"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/pi-cross-harness.test.ts",
-			"tier": "ts-only",
-			"invocation": {
-				"ts": true,
-				"rust": false
-			},
-			"rationale": "cross-harness memory exchange owns one OpenCode 1 plus Pi pair; selecting either endpoint separately would duplicate the same scenario",
-			"contract_refs": [
-				"PI-HARNESS"
-			],
-			"hosts": [
-				"pi"
-			],
-			"behavior": true,
-			"divergences": [
-				{
-					"host": "opencode",
-					"reason": "the scenario already creates the OpenCode peer internally and is owned by the Pi lane",
-					"contract_ref": "PI-HARNESS"
-				},
-				{
-					"host": "opencode2",
-					"reason": "the cross-generation memory exchange is covered by the dedicated OpenCode 2 GA lane",
-					"contract_ref": "PARITY.md#identical-effective-behavior"
-				},
-				{
-					"host": "omp",
-					"reason": "this scenario specifically proves the Pi JSONL endpoint against OpenCode 1",
-					"contract_ref": "PI-HARNESS"
-				}
-			]
-		},
-		{
-			"path": "tests/pi-rust-degradation-arc-1.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "FM-PI-1 covers Pi-owned JSONL/branch-entry continuation and explicit refusal seams after a mid-session external-module fault",
-			"contract_refs": [
-				"FM-PI-1",
-				"pi-rust-degradation-trace.json"
-			],
-			"hosts": [
-				"pi"
-			],
-			"behavior": true,
-			"divergences": [
-				{
-					"host": "opencode",
-					"reason": "the drill asserts Pi-owned JSONL and external subprocess fault seams",
-					"contract_ref": "FM-PI-1"
-				},
-				{
-					"host": "opencode2",
-					"reason": "the drill asserts Pi-owned JSONL and external subprocess fault seams",
-					"contract_ref": "FM-PI-1"
-				},
-				{
-					"host": "omp",
-					"reason": "the recorded fault trace and fake executable target the pinned Pi runtime",
-					"contract_ref": "pi-rust-degradation-trace.json"
-				}
-			]
-		},
-		{
-			"path": "tests/pi-rust-degradation-arc-4.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "FM-PI-4 covers Pi-owned provider-proof emergency continuation and fail-closed refusal at the 95 percent boundary",
-			"contract_refs": [
-				"FM-PI-4",
-				"pi-rust-degradation-trace.json"
-			],
-			"hosts": [
-				"pi"
-			],
-			"behavior": true,
-			"divergences": [
-				{
-					"host": "opencode",
-					"reason": "the drill asserts Pi-owned JSONL and external subprocess fault seams",
-					"contract_ref": "FM-PI-1"
-				},
-				{
-					"host": "opencode2",
-					"reason": "the drill asserts Pi-owned JSONL and external subprocess fault seams",
-					"contract_ref": "FM-PI-1"
-				},
-				{
-					"host": "omp",
-					"reason": "the recorded fault trace and fake executable target the pinned Pi runtime",
-					"contract_ref": "pi-rust-degradation-trace.json"
-				}
-			]
-		},
-		{
-			"path": "tests/rust-cold-seed-perf.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "cold-seed handler budget on an ASTRO-shaped 10k-message seed; wall-clock, so it asserts only under MC_PERF_GATE=1 and records timings otherwise",
-			"contract_refs": [
-				"RUST-E2E"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-cold-seed-tag-surface.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "a cold state-sync seed renders every tag on its first coordinating HARD, replays byte-identically, and appends without rewriting the stable prefix",
-			"contract_refs": [
-				"RUST-E2E",
-				"COLD-SEED-TAG-SURFACE"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-cold-start-drop-seed.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "cold TS-to-Rust restart reproduces a frozen dropped-tag seed before historian publication can supersede the sentinel",
-			"contract_refs": [
-				"RUST-E2E",
-				"COLD-START-DROP-SEED"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-compaction-marker-byte-identity.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "rust-mode compaction marker advance leaves the served wire bytes identical with and without the marker; the marker only shrinks the input array",
-			"contract_refs": [
-				"RUST-E2E"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-ctx-reduce-roundtrip.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "agent drop queues in the module ledger, drains on the producer-backed bust, and remains proven after m0 supersedes the transient sentinel",
-			"contract_refs": [
-				"RUST-E2E",
-				"CTX-REDUCE-ROUNDTRIP",
-				"HISTORIAN-PRODUCER"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-dangling-boundary-seed.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "a compartment whose boundary message id is absent from the raw store must not park the rust cold seed; the boundary resolves from its neighbours and a clean session's served bytes stay byte-identical",
-			"contract_refs": [
-				"RUST-E2E"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-duplicate-tool-use-id.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "existing rust-* file; hermetic Rust harness leg",
-			"contract_refs": [
-				"RUST-E2E"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-fm-oc-1.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "FM-OC-1 confirms the external module exited after SIGKILL before exercising byte-identical LKG continuation and loud failure reporting",
-			"contract_refs": [
-				"FM-OC-1",
-				"RUST-E2E"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-fm-oc-2.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "FM-OC-2 confirms the external module exited after SIGKILL, then pins the shipped failure threshold and park-transition token",
-			"contract_refs": [
-				"FM-OC-2",
-				"RUST-E2E",
-				"RUST-SYNTHETIC-TODO-INDEPENDENT-BUST"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-fm-oc-3.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "FM-OC-3 confirms the killed module exited before replacement, then pins bounded probe recovery and monotonic row versions",
-			"contract_refs": [
-				"FM-OC-3",
-				"RUST-E2E",
-				"RUST-SYNTHETIC-TODO-INDEPENDENT-BUST"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-fm-oc-4.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "FM-OC-4 confirms external-module exit before asserting typed fail-closed refusal at the provider-proven emergency limit",
-			"contract_refs": [
-				"FM-OC-4",
-				"RUST-E2E",
-				"RUST-SYNTHETIC-TODO-INDEPENDENT-BUST"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-fm-oc-5.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "FM-OC-5 SIGSTOP/SIGCONT only exercises transport timeout classification and recovery",
-			"contract_refs": [
-				"FM-OC-5",
-				"RUST-E2E"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-fm-oc-6.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "FM-OC-6 confirms external-module exit, then asserts emergency refusal before LKG admission",
-			"contract_refs": [
-				"FM-OC-6",
-				"RUST-E2E",
-				"RUST-SYNTHETIC-TODO-INDEPENDENT-BUST"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-fold-under-pressure.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "real content pressure lands a deterministic producer-backed fold whose materialized m0 shrinks the provider wire",
-			"contract_refs": [
-				"RUST-E2E",
-				"FOLD-UNDER-PRESSURE",
-				"HISTORIAN-PRODUCER"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-historian-producer.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "hermetic Broca producer publishes deterministic v2 compartments and proves outage/strict-validation failures",
-			"contract_refs": [
-				"RUST-E2E",
-				"HISTORIAN-PRODUCER"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-maintenance-contract.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "hermetic wrapup/recomp command drill pins durable coverage, row-version, and disposition contracts",
-			"contract_refs": [
-				"RUST-E2E",
-				"MAINTENANCE-COMMANDS"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-memory-mirror-resume.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "real-module memory-mirror resume: interrupted initial drain resumes from the module feed head, stable passes issue no pull, ctx_memory reads/writes succeed after the wedge (issue 444)",
-			"contract_refs": [
-				"RUST-E2E"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-memory-off-parity.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "one hermetic persistent-data fixture runs memory-on/off transitions through both TS and Rust served-wire lanes",
-			"contract_refs": [
-				"RUST-E2E",
-				"MEMORY-OFF-TRANSFORM-PARITY"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-multi-frame-delta-perf.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "large provider-visible tail remains intact across recut-era one-page reuse and bounded multi-page retransmission",
-			"contract_refs": [
-				"RUST-E2E",
-				"BOUNDARY-DIVERGENCE-RECUT",
-				"RUST-SYNTHETIC-TODO-ANCHOR-MIRROR-BACK"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-paired-session-replay.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "same sanitized session shape is replayed through TS and Rust provider-wire lanes and diffed pass by pass",
-			"contract_refs": [
-				"RUST-E2E",
-				"PARITY-REPLAY"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-park-self-heal.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "park self-heal confirms external-module exit before driving the prolonged outage, then proves the recovered process resumes real transforms",
-			"contract_refs": [
-				"RUST-E2E"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-removal-self-heal.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "existing rust-* file; hermetic Rust harness leg",
-			"contract_refs": [
-				"RUST-E2E"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-smoke.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "existing rust-* file; hermetic Rust harness leg",
-			"contract_refs": [
-				"RUST-E2E"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-steady-state-byte-identity.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "existing rust-* file; hermetic Rust harness leg",
-			"contract_refs": [
-				"RUST-E2E"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/rust-tail-mutation-readopt.test.ts",
-			"tier": "rust-only",
-			"invocation": {
-				"ts": false,
-				"rust": true
-			},
-			"rationale": "existing rust-* file; hermetic Rust harness leg",
-			"contract_refs": [
-				"RUST-E2E"
-			],
-			"hosts": [
-				"opencode"
-			]
-		},
-		{
-			"path": "tests/session-isolation.test.ts",
-			"tier": "ts-only",
-			"invocation": {
-				"ts": true,
-				"rust": false
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"TS-HARNESS"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true,
-			"divergences": [
-				{
-					"host": "pi",
-					"reason": "Pi has no terminal session.deleted event, so durable rows survive reversible session switches",
-					"contract_ref": "packages/pi-plugin/PARITY.md#3-no-sessiondeleted-event--session_before_switch-is-reversible"
-				},
-				{
-					"host": "omp",
-					"reason": "OMP has no terminal session.deleted event, so durable rows survive reversible session switches",
-					"contract_ref": "packages/pi-plugin/PARITY.md#3-no-sessiondeleted-event--session_before_switch-is-reversible"
-				}
-			]
-		},
-		{
-			"path": "tests/short-context-overflow.test.ts",
-			"tier": "ts-only",
-			"invocation": {
-				"ts": true,
-				"rust": false
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"TS-HARNESS"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/slow-historian.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/smoke.test.ts",
-			"tier": "ts-only",
-			"invocation": {
-				"ts": true,
-				"rust": false
-			},
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"TS-HARNESS"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/subagent-behavior.test.ts",
-			"tier": "ts-only",
-			"invocation": {
-				"ts": true,
-				"rust": false
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"TS-HARNESS"
-			],
-			"hosts": [
-				"opencode"
-			],
-			"behavior": true,
-			"divergences": [
-				{
-					"host": "opencode2",
-					"reason": "GA 2.0.5 does not expose parent-linked session creation through the harness contract",
-					"contract_ref": "PARITY.md#3-hidden-completions"
-				},
-				{
-					"host": "pi",
-					"reason": "Pi has no native subagent session mode; Magic Context children are isolated subprocesses",
-					"contract_ref": "packages/pi-plugin/PARITY.md#1-pi-has-no-native-subagents--no-reduced-mode-fullfeaturemode-gate"
-				},
-				{
-					"host": "omp",
-					"reason": "OMP uses the Pi-compatible isolated child-process model rather than parent-linked sessions",
-					"contract_ref": "packages/pi-plugin/PARITY.md#1-pi-has-no-native-subagents--no-reduced-mode-fullfeaturemode-gate"
-				}
-			]
-		},
-		{
-			"path": "tests/tag-owner-collision.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/tagging.test.ts",
-			"tier": "ts-only",
-			"invocation": {
-				"ts": true,
-				"rust": false
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"PI-HARNESS"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/thinking-block-safety.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION"
-			],
-			"hosts": [
-				"opencode"
-			],
-			"behavior": true,
-			"divergences": [
-				{
-					"host": "opencode2",
-					"reason": "GA 2.0.5 owns a different provider message/store projection; its signed-thinking projection is covered in the dedicated GA lane",
-					"contract_ref": "PARITY.md#5-host-store-reader"
-				},
-				{
-					"host": "pi",
-					"reason": "Pi empties historical thinking and drops its signature through serializer-native replay rather than OpenCode empty sentinels",
-					"contract_ref": "packages/pi-plugin/PARITY.md#10-cleared-reasoning-historical-cleared--newest-native"
-				},
-				{
-					"host": "omp",
-					"reason": "OMP uses the Pi-compatible serializer-native thinking replay contract",
-					"contract_ref": "packages/pi-plugin/PARITY.md#10-cleared-reasoning-historical-cleared--newest-native"
-				}
-			]
-		},
-		{
-			"path": "tests/todo-synthesis.test.ts",
-			"tier": "both-modes",
-			"invocation": {
-				"ts": true,
-				"rust": true
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"S2-MIGRATION",
-				"ARCHITECTURE.md#synthetic-todowrite"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		},
-		{
-			"path": "tests/window-overlay-reload.test.ts",
-			"tier": "excluded",
-			"invocation": {
-				"ts": false,
-				"rust": false
-			},
-			"rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-			"contract_refs": [
-				"OVERLAY-SAME-PATH-AUTO-REFRESH",
-				"PI-EXTENSION-RELOAD"
-			],
-			"hosts": [
-				"opencode",
-				"opencode2",
-				"pi",
-				"omp"
-			],
-			"behavior": true
-		}
-	]
+    "schema": 1,
+    "header": "Pull-request and ordinary master CI intentionally run only the manifest-derived TS invocation. The tag release workflow runs the Rust invocation through scripts/run-rust-hermetic-e2e.sh on an explicitly enabled private-source runner; it requires sibling path-deps (../commons and ../subconscious).",
+    "entries": [
+        {
+            "path": "tests/cache-invariants.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/cache-stability.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/compaction-off.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/conflict-disable.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/context-limits.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/deferred-compaction-marker.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true,
+            "divergences": [
+                {
+                    "host": "pi",
+                    "reason": "Pi stages pending_pi_compaction_marker_state and owns its JSONL boundary",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#4-pi-owns-compaction-via-session_before_compact"
+                },
+                {
+                    "host": "omp",
+                    "reason": "OMP stages the Pi-compatible marker and owns its JSONL boundary",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#4-pi-owns-compaction-via-session_before_compact"
+                },
+                {
+                    "host": "opencode2",
+                    "reason": "OpenCode 2 binds the host-created durable compaction row after the GA hook returns",
+                    "contract_ref": "PARITY.md#2-fold-ownership"
+                }
+            ]
+        },
+        {
+            "path": "tests/dropped-input-guard.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true,
+            "divergences": [
+                {
+                    "host": "pi",
+                    "reason": "Pi registers the dropped-input refusal on its event bus rather than an OpenCode tool hook",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#33-dropped-input-refusal-is-registered-on-pis-event-bus"
+                },
+                {
+                    "host": "omp",
+                    "reason": "OMP uses the Pi-compatible event-bus refusal carrier rather than an OpenCode tool hook",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#33-dropped-input-refusal-is-registered-on-pis-event-bus"
+                }
+            ]
+        },
+        {
+            "path": "tests/drops.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "PI-HARNESS"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/emergency-blocking.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/historian-success.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/long-running-session.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/memory-injection.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/notice-loop-race.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "OpenCode 1.18.x MessageV2.latest / parentID loop-exit ordering for noReply ignored notices is a host-session contract exercised on the TS OpenCode harness",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ],
+            "behavior": true,
+            "divergences": [
+                {
+                    "host": "opencode2",
+                    "reason": "GA 2.0.5 does not expose OpenCode 1 noReply/ignored MessageV2 loop ordering",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only"
+                },
+                {
+                    "host": "pi",
+                    "reason": "Pi notice delivery uses UI toasts/custom entries and never appends an ignored model-visible user row",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only"
+                },
+                {
+                    "host": "omp",
+                    "reason": "OMP uses the Pi-compatible notice delivery surface and has no OpenCode ignored-row loop",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only"
+                }
+            ]
+        },
+        {
+            "path": "tests/opencode2/adapters-s2-contracts.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode 2 context adapters have their own hermetic lane invocation",
+            "contract_refs": [
+                "I5",
+                "I6",
+                "I9b",
+                "I14"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/adapters-s3-marker-policy.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode 2 marker strategy and inverse-projection unit contracts run in the dedicated v2 lane",
+            "contract_refs": [
+                "I10"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/automatic-s3-paths.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Automatic historian and dreamer paths run in the dedicated real GA lane",
+            "contract_refs": [
+                "R22",
+                "R36"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/context-s2-lanes.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Real GA OpenCode 2 context-hook lane; invoked separately from v1 TS and Rust",
+            "contract_refs": [
+                "I3",
+                "I4",
+                "I5",
+                "I6",
+                "I9b",
+                "I14",
+                "I15",
+                "I16",
+                "I16a",
+                "I17"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/entry-s2-context.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Real OpenCode 2 directory-load proof for the dual-loader entry",
+            "contract_refs": [
+                "I1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/fold-s3-owner.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Checkpoint ownership and restored-tail taxonomy run in the dedicated real GA lane",
+            "contract_refs": [
+                "I6a",
+                "I7",
+                "I8",
+                "R39"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/harness-s3-identity.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Real GA OpenCode 2 boot-time harness identity proof runs in the dedicated v2 lane",
+            "contract_refs": [
+                "R12"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/hidden-child-ga.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Real GA reusable hidden-child prompt, model, usage, title, reuse and retirement proof runs in the dedicated v2 lane",
+            "contract_refs": [
+                "R36",
+                "R44",
+                "R44a",
+                "R44b"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/marker-s3-runtime.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Instrumented v2 marker exclusion with a real v1 control runs in the dedicated GA lane",
+            "contract_refs": [
+                "I10"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/pins.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: pins the captured GA host evidence (sha256) \u2014 unit-shaped, needs no host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/probes.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: boots the real @opencode/cli@2.0.5 in the hermetic v2 runner (throwaway roots, fd guard); v1/v2 payload, hidden-agent and rpc-entry probes; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/prompt-surface-s6.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: per-model ctx_* description rewrite and draft-authoritative model tracking on the real GA host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "contract_refs": [
+                "R42",
+                "R43"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/runner.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: hermetic runner guards and handoff against the real GA host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/store-reader.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: session_message reader against real v2 host writes; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/overflow-recovery.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true,
+            "divergences": [
+                {
+                    "host": "pi",
+                    "reason": "Pi has no turn-abort primitive and forwards the best-effort reduced context after provider-proven overflow",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#9c-emergency-overflow-termination-follows-each-hosts-control-surface"
+                },
+                {
+                    "host": "omp",
+                    "reason": "OMP exposes the Pi-compatible context hook without an OpenCode session abort carrier",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#9c-emergency-overflow-termination-follows-each-hosts-control-surface"
+                }
+            ]
+        },
+        {
+            "path": "tests/paired-session-replay.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "CI-fast unit guard for paired replay byte/value-space classification vocabulary",
+            "contract_refs": [
+                "PARITY-REPLAY"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/pi-cross-harness.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "cross-harness memory exchange owns one OpenCode 1 plus Pi pair; selecting either endpoint separately would duplicate the same scenario",
+            "contract_refs": [
+                "PI-HARNESS"
+            ],
+            "hosts": [
+                "pi"
+            ],
+            "behavior": true,
+            "divergences": [
+                {
+                    "host": "opencode",
+                    "reason": "the scenario already creates the OpenCode peer internally and is owned by the Pi lane",
+                    "contract_ref": "PI-HARNESS"
+                },
+                {
+                    "host": "opencode2",
+                    "reason": "the cross-generation memory exchange is covered by the dedicated OpenCode 2 GA lane",
+                    "contract_ref": "PARITY.md#identical-effective-behavior"
+                },
+                {
+                    "host": "omp",
+                    "reason": "this scenario specifically proves the Pi JSONL endpoint against OpenCode 1",
+                    "contract_ref": "PI-HARNESS"
+                }
+            ]
+        },
+        {
+            "path": "tests/pi-rust-degradation-arc-1.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "FM-PI-1 covers Pi-owned JSONL/branch-entry continuation and explicit refusal seams after a mid-session external-module fault",
+            "contract_refs": [
+                "FM-PI-1",
+                "pi-rust-degradation-trace.json"
+            ],
+            "hosts": [
+                "pi"
+            ],
+            "behavior": true,
+            "divergences": [
+                {
+                    "host": "opencode",
+                    "reason": "the drill asserts Pi-owned JSONL and external subprocess fault seams",
+                    "contract_ref": "FM-PI-1"
+                },
+                {
+                    "host": "opencode2",
+                    "reason": "the drill asserts Pi-owned JSONL and external subprocess fault seams",
+                    "contract_ref": "FM-PI-1"
+                },
+                {
+                    "host": "omp",
+                    "reason": "the recorded fault trace and fake executable target the pinned Pi runtime",
+                    "contract_ref": "pi-rust-degradation-trace.json"
+                }
+            ]
+        },
+        {
+            "path": "tests/pi-rust-degradation-arc-4.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "FM-PI-4 covers Pi-owned provider-proof emergency continuation and fail-closed refusal at the 95 percent boundary",
+            "contract_refs": [
+                "FM-PI-4",
+                "pi-rust-degradation-trace.json"
+            ],
+            "hosts": [
+                "pi"
+            ],
+            "behavior": true,
+            "divergences": [
+                {
+                    "host": "opencode",
+                    "reason": "the drill asserts Pi-owned JSONL and external subprocess fault seams",
+                    "contract_ref": "FM-PI-1"
+                },
+                {
+                    "host": "opencode2",
+                    "reason": "the drill asserts Pi-owned JSONL and external subprocess fault seams",
+                    "contract_ref": "FM-PI-1"
+                },
+                {
+                    "host": "omp",
+                    "reason": "the recorded fault trace and fake executable target the pinned Pi runtime",
+                    "contract_ref": "pi-rust-degradation-trace.json"
+                }
+            ]
+        },
+        {
+            "path": "tests/rust-adapter-perf.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "rust adapter overhead profile (elapsed minus module handler_total) on a seeded 1,500-message session with an optional copied-state snapshot; wall-clock, so it asserts only under MC_PERF_GATE=1 and records timings otherwise",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-cold-seed-perf.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "cold-seed handler budget on an ASTRO-shaped 10k-message seed; wall-clock, so it asserts only under MC_PERF_GATE=1 and records timings otherwise",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-cold-seed-tag-surface.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "a cold state-sync seed renders every tag on its first coordinating HARD, replays byte-identically, and appends without rewriting the stable prefix",
+            "contract_refs": [
+                "RUST-E2E",
+                "COLD-SEED-TAG-SURFACE"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-cold-start-drop-seed.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "cold TS-to-Rust restart reproduces a frozen dropped-tag seed before historian publication can supersede the sentinel",
+            "contract_refs": [
+                "RUST-E2E",
+                "COLD-START-DROP-SEED"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-compaction-marker-byte-identity.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "rust-mode compaction marker advance leaves the served wire bytes identical with and without the marker; the marker only shrinks the input array",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-ctx-reduce-roundtrip.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "agent drop queues in the module ledger, drains on the producer-backed bust, and remains proven after m0 supersedes the transient sentinel",
+            "contract_refs": [
+                "RUST-E2E",
+                "CTX-REDUCE-ROUNDTRIP",
+                "HISTORIAN-PRODUCER"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-dangling-boundary-seed.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "a compartment whose boundary message id is absent from the raw store must not park the rust cold seed; the boundary resolves from its neighbours and a clean session's served bytes stay byte-identical",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-duplicate-tool-use-id.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "existing rust-* file; hermetic Rust harness leg",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-fm-oc-1.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "FM-OC-1 confirms the external module exited after SIGKILL before exercising byte-identical LKG continuation and loud failure reporting",
+            "contract_refs": [
+                "FM-OC-1",
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-fm-oc-2.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "FM-OC-2 confirms the external module exited after SIGKILL, then pins the shipped failure threshold and park-transition token",
+            "contract_refs": [
+                "FM-OC-2",
+                "RUST-E2E",
+                "RUST-SYNTHETIC-TODO-INDEPENDENT-BUST"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-fm-oc-3.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "FM-OC-3 confirms the killed module exited before replacement, then pins bounded probe recovery and monotonic row versions",
+            "contract_refs": [
+                "FM-OC-3",
+                "RUST-E2E",
+                "RUST-SYNTHETIC-TODO-INDEPENDENT-BUST"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-fm-oc-4.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "FM-OC-4 confirms external-module exit before asserting typed fail-closed refusal at the provider-proven emergency limit",
+            "contract_refs": [
+                "FM-OC-4",
+                "RUST-E2E",
+                "RUST-SYNTHETIC-TODO-INDEPENDENT-BUST"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-fm-oc-5.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "FM-OC-5 SIGSTOP/SIGCONT only exercises transport timeout classification and recovery",
+            "contract_refs": [
+                "FM-OC-5",
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-fm-oc-6.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "FM-OC-6 confirms external-module exit, then asserts emergency refusal before LKG admission",
+            "contract_refs": [
+                "FM-OC-6",
+                "RUST-E2E",
+                "RUST-SYNTHETIC-TODO-INDEPENDENT-BUST"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-fold-under-pressure.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "real content pressure lands a deterministic producer-backed fold whose materialized m0 shrinks the provider wire",
+            "contract_refs": [
+                "RUST-E2E",
+                "FOLD-UNDER-PRESSURE",
+                "HISTORIAN-PRODUCER"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-historian-producer.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "hermetic Broca producer publishes deterministic v2 compartments and proves outage/strict-validation failures",
+            "contract_refs": [
+                "RUST-E2E",
+                "HISTORIAN-PRODUCER"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-maintenance-contract.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "hermetic wrapup/recomp command drill pins durable coverage, row-version, and disposition contracts",
+            "contract_refs": [
+                "RUST-E2E",
+                "MAINTENANCE-COMMANDS"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-memory-mirror-resume.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "real-module memory-mirror resume: interrupted initial drain resumes from the module feed head, stable passes issue no pull, ctx_memory reads/writes succeed after the wedge (issue 444)",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-memory-off-parity.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "one hermetic persistent-data fixture runs memory-on/off transitions through both TS and Rust served-wire lanes",
+            "contract_refs": [
+                "RUST-E2E",
+                "MEMORY-OFF-TRANSFORM-PARITY"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-multi-frame-delta-perf.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "large provider-visible tail remains intact across recut-era one-page reuse and bounded multi-page retransmission",
+            "contract_refs": [
+                "RUST-E2E",
+                "BOUNDARY-DIVERGENCE-RECUT",
+                "RUST-SYNTHETIC-TODO-ANCHOR-MIRROR-BACK"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-paired-session-replay.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "same sanitized session shape is replayed through TS and Rust provider-wire lanes and diffed pass by pass",
+            "contract_refs": [
+                "RUST-E2E",
+                "PARITY-REPLAY"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-park-self-heal.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "park self-heal confirms external-module exit before driving the prolonged outage, then proves the recovered process resumes real transforms",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-removal-self-heal.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "existing rust-* file; hermetic Rust harness leg",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-smoke.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "existing rust-* file; hermetic Rust harness leg",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-steady-state-byte-identity.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "existing rust-* file; hermetic Rust harness leg",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-tail-mutation-readopt.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "existing rust-* file; hermetic Rust harness leg",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/session-isolation.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true,
+            "divergences": [
+                {
+                    "host": "pi",
+                    "reason": "Pi has no terminal session.deleted event, so durable rows survive reversible session switches",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#3-no-sessiondeleted-event--session_before_switch-is-reversible"
+                },
+                {
+                    "host": "omp",
+                    "reason": "OMP has no terminal session.deleted event, so durable rows survive reversible session switches",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#3-no-sessiondeleted-event--session_before_switch-is-reversible"
+                }
+            ]
+        },
+        {
+            "path": "tests/short-context-overflow.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/slow-historian.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/smoke.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/subagent-behavior.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ],
+            "behavior": true,
+            "divergences": [
+                {
+                    "host": "opencode2",
+                    "reason": "GA 2.0.5 does not expose parent-linked session creation through the harness contract",
+                    "contract_ref": "PARITY.md#3-hidden-completions"
+                },
+                {
+                    "host": "pi",
+                    "reason": "Pi has no native subagent session mode; Magic Context children are isolated subprocesses",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#1-pi-has-no-native-subagents--no-reduced-mode-fullfeaturemode-gate"
+                },
+                {
+                    "host": "omp",
+                    "reason": "OMP uses the Pi-compatible isolated child-process model rather than parent-linked sessions",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#1-pi-has-no-native-subagents--no-reduced-mode-fullfeaturemode-gate"
+                }
+            ]
+        },
+        {
+            "path": "tests/tag-owner-collision.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/tagging.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "PI-HARNESS"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/thinking-block-safety.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode"
+            ],
+            "behavior": true,
+            "divergences": [
+                {
+                    "host": "opencode2",
+                    "reason": "GA 2.0.5 owns a different provider message/store projection; its signed-thinking projection is covered in the dedicated GA lane",
+                    "contract_ref": "PARITY.md#5-host-store-reader"
+                },
+                {
+                    "host": "pi",
+                    "reason": "Pi empties historical thinking and drops its signature through serializer-native replay rather than OpenCode empty sentinels",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#10-cleared-reasoning-historical-cleared--newest-native"
+                },
+                {
+                    "host": "omp",
+                    "reason": "OMP uses the Pi-compatible serializer-native thinking replay contract",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#10-cleared-reasoning-historical-cleared--newest-native"
+                }
+            ]
+        },
+        {
+            "path": "tests/todo-synthesis.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "S2-MIGRATION",
+                "ARCHITECTURE.md#synthetic-todowrite"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        },
+        {
+            "path": "tests/window-overlay-reload.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "contract_refs": [
+                "OVERLAY-SAME-PATH-AUTO-REFRESH",
+                "PI-EXTENSION-RELOAD"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi",
+                "omp"
+            ],
+            "behavior": true
+        }
+    ]
 }
