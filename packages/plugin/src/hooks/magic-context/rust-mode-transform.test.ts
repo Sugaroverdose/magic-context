@@ -6097,7 +6097,7 @@ describe("delta prefix-mutation guard", () => {
     });
 });
 
-describe("Rust silent transform resend", () => {
+describe("Rust stalled transform probe", () => {
     const abortableSilence = (signal?: AbortSignal): Promise<never> =>
         new Promise((_resolve, reject) => {
             signal?.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), {
@@ -6105,8 +6105,8 @@ describe("Rust silent transform resend", () => {
             });
         });
 
-    it("serves the pass from one resend after a healthy probe and logs it once", async () => {
-        const sessionId = `rust-silent-resend-${Date.now()}`;
+    it("waits for the original transform after a healthy probe without sending a duplicate", async () => {
+        const sessionId = `rust-stall-probe-${Date.now()}`;
         sessions.push(sessionId);
         const db = makeDb();
         installRawProvider(sessionId);
@@ -6123,7 +6123,8 @@ describe("Rust silent transform resend", () => {
                 if (method !== "transform") return { ok: true };
                 const request = body as Record<string, unknown>;
                 transformBodies.push(request);
-                if (request.resend !== true) return abortableSilence(signal);
+                await Bun.sleep(30);
+                if (signal?.aborted) throw signal.reason ?? new Error("aborted");
                 return {
                     decision: "SOFT+",
                     served_from: "transform",
@@ -6134,7 +6135,7 @@ describe("Rust silent transform resend", () => {
         const transform = createRustModeTransform(makeDeps(db, moduleClient), {
             moduleClient,
             moduleTimeoutMs: 100,
-            silentResendAfterMsForTests: 10,
+            stallProbeAfterMsForTests: 10,
             healthProbeTimeoutMsForTests: 20,
         });
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
@@ -6144,30 +6145,24 @@ describe("Rust silent transform resend", () => {
 
             expect(output.messages).toEqual(input);
             expect(healthProbes).toBe(1);
-            expect(transformBodies).toHaveLength(2);
+            expect(transformBodies).toHaveLength(1);
             expect(transformBodies[0]!.resend).toBeUndefined();
-            expect(transformBodies[1]!.resend).toBe(true);
-            expect(transformBodies[1]!.original_attempt_id).toBe(transformBodies[0]!.attempt_id);
-            expect(transformBodies[1]!.attempt_id).not.toBe(transformBodies[0]!.attempt_id);
-            const resendLogs = logSpy.mock.calls.filter(
+            const suppressionLogs = logSpy.mock.calls.filter(
                 ([loggedSession, message]) =>
                     loggedSession === sessionId &&
-                    String(message).startsWith("rust silent resend "),
+                    String(message).includes("duplicate resend suppressed"),
             );
-            expect(resendLogs).toHaveLength(1);
-            expect(String(resendLogs[0]![1])).toContain(
+            expect(suppressionLogs).toHaveLength(1);
+            expect(String(suppressionLogs[0]![1])).toContain(
                 `original_attempt=${transformBodies[0]!.attempt_id}`,
-            );
-            expect(String(resendLogs[0]![1])).toContain(
-                `resend_attempt=${transformBodies[1]!.attempt_id}`,
             );
         } finally {
             logSpy.mockRestore();
         }
     });
 
-    it("does not resend when the health probe fails and preserves the refusal", async () => {
-        const sessionId = `rust-silent-probe-failure-${Date.now()}`;
+    it("keeps waiting when the health probe fails and preserves the refusal", async () => {
+        const sessionId = `rust-stall-probe-failure-${Date.now()}`;
         sessions.push(sessionId);
         const db = makeDb();
         installRawProvider(sessionId);
@@ -6201,7 +6196,7 @@ describe("Rust silent transform resend", () => {
         const transform = createRustModeTransform(deps, {
             moduleClient,
             moduleTimeoutMs: 50,
-            silentResendAfterMsForTests: 10,
+            stallProbeAfterMsForTests: 10,
             healthProbeTimeoutMsForTests: 20,
         });
 

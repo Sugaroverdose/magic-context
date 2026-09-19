@@ -1079,6 +1079,22 @@
             ]
         },
         {
+            "path": "tests/rust-timeout-epoch-recovery.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "a timed-out transform is not silently duplicated; after raw fallback the stale tag-feature epoch is folded once and the following pass is soft",
+            "contract_refs": [
+                "RUST-E2E",
+                "TIMEOUT-EPOCH-RECOVERY"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/rust-tail-mutation-readopt.test.ts",
             "tier": "rust-only",
             "invocation": {

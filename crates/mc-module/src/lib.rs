@@ -9317,6 +9317,13 @@ impl McHandler {
                 }
             }
         }
+        #[cfg(feature = "drive-fault")]
+        if maybe_apply_transform_timeout_fault().await {
+            return HandlerOutcome::Error {
+                code: "drive_transform_timeout".to_string(),
+                message: "drive fault stalled this transform before execution".to_string(),
+            };
+        }
         let store = match self.store_for_request().await {
             Ok(store) => store,
             Err(refusal) => return refusal.into_outcome(),
@@ -14492,22 +14499,20 @@ fn replay_dream_task_response(response_json: &str) -> HandlerOutcome {
 // SAFETY: Deliberate fault injection for the joint CC rig drive — see the `drive-fault`
 // feature note in Cargo.toml for why this ships in the binary at all.
 //
-// Why it exists: the claude-code-anthropic ("CC") transform leg carries no organic
-// traffic, so its mismatch / "raw-only fence" error paths — the consumer's reaction to a
-// response whose echoed fingerprint or message array does not match what it submitted —
-// can only be exercised by a rig drive. To induce those paths the drive needs OUR
-// transform response to be deliberately malformed; the CC-leg peer correctly refuses to
-// carry fault scaffolding on its own side, so the corruption lives here.
+// Why it exists: mismatch, raw-only fence, and timeout recovery paths require faults at
+// the module boundary that normal traffic cannot trigger deterministically. The drive
+// needs this module to malform a response or stall a transform before execution; the
+// protocol peer correctly carries no fault scaffolding, so the injection lives here.
 //
 // Why it is safe: this whole block is compiled ONLY under `--features drive-fault`. A
 // default deploy build has no corruption path at all — that structural absence is the
 // dormancy proof, so there is no runtime-reachable arm a stray env var could trigger.
-// Even under the feature the arm is inert unless MC_DRIVE_FAULT selects it, and it is
-// scoped to transform responses only: respond_transform is the sole transform-response
-// serializer, and facade tools and status/wrapup ops never route through it.
+// Even under the feature the arm is inert unless MC_DRIVE_FAULT selects it. Faults are
+// scoped to the transform request/response path; facade tools and status/wrapup ops do
+// not route through these gates.
 //
 // Additionally, the fault self-disarms after MC_DRIVE_FAULT_COUNT firings (default 1)
-// via a fetch_sub claim on DRIVE_FAULT_REMAINING. This prevents the fault from
+// via a fetch_update claim on DRIVE_FAULT_REMAINING. This prevents the fault from
 // corrupting a recovery pass in the fence+recover drive arc — the only other disarm
 // would be a restart, which injects a variable the arc must not contain. Total WARN
 // lines in logs will equal exactly N, so miscounts are visible.
@@ -14520,6 +14525,7 @@ enum DriveFault {
     FingerprintSkew,
     OmitCkMessages,
     Channel2Arm,
+    TransformTimeout,
 }
 
 /// Map the raw MC_DRIVE_FAULT value to a fault arm. Pure (no env access) so the
@@ -14532,6 +14538,7 @@ fn parse_drive_fault(raw: Option<&str>) -> Option<DriveFault> {
         Some("fingerprint_skew") => Some(DriveFault::FingerprintSkew),
         Some("omit_ck_messages") => Some(DriveFault::OmitCkMessages),
         Some("channel2_arm") => Some(DriveFault::Channel2Arm),
+        Some("transform_timeout") => Some(DriveFault::TransformTimeout),
         _ => None,
     }
 }
@@ -14569,11 +14576,37 @@ fn drive_fault() -> Option<DriveFault> {
         let fault = parse_drive_fault(std::env::var("MC_DRIVE_FAULT").ok().as_deref());
         // Initialize the remaining fault count alongside the arm selection.
         // This runs exactly once per process (OnceLock), so DRIVE_FAULT_REMAINING
-        // is set before any respond_transform call can read it.
+        // is set before any request or response fault can read it.
         let count = parse_drive_fault_count(std::env::var("MC_DRIVE_FAULT_COUNT").ok().as_deref());
         DRIVE_FAULT_REMAINING.store(count, std::sync::atomic::Ordering::Relaxed);
         fault
     })
+}
+
+#[cfg(feature = "drive-fault")]
+fn claim_drive_fault() -> bool {
+    use std::sync::atomic::Ordering;
+    matches!(
+        DRIVE_FAULT_REMAINING.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1)),
+        Ok(previous) if previous > 0
+    )
+}
+
+#[cfg(feature = "drive-fault")]
+async fn maybe_apply_transform_timeout_fault() -> bool {
+    if drive_fault() != Some(DriveFault::TransformTimeout) || !claim_drive_fault() {
+        return false;
+    }
+    let delay_ms = std::env::var("MC_DRIVE_FAULT_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(16_000);
+    eprintln!(
+        "mc-module: WARN MC_DRIVE_FAULT=transform_timeout active — stalling transform request by {delay_ms} ms for drive"
+    );
+    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    true
 }
 
 /// Corrupt a transform response per the selected fault arm and log one loud WARN per
@@ -14621,6 +14654,9 @@ fn apply_drive_fault(response: &mut transform::TransformResponse, fault: DriveFa
                 "mc-module: WARN MC_DRIVE_FAULT=channel2_arm active — directive force-armed for drive"
             );
         }
+        DriveFault::TransformTimeout => {
+            unreachable!("transform-timeout faults are consumed before transform execution")
+        }
     }
 }
 
@@ -14640,15 +14676,8 @@ fn respond_transform(
     // total WARN lines in logs will equal exactly N.
     #[cfg(feature = "drive-fault")]
     if let Some(fault) = drive_fault() {
-        // Claim one firing: fetch_update atomically decrements only if the count is > 0.
-        // If the count was already 0, checked_sub returns None and we skip — no underflow.
-        // If the count was > 0, the previous value is returned as Ok(prev) and we fire.
-        use std::sync::atomic::Ordering;
-        match DRIVE_FAULT_REMAINING
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-        {
-            Ok(prev) if prev > 0 => apply_drive_fault(&mut response, fault),
-            _ => {} // exhausted — response passes through cleanly
+        if fault != DriveFault::TransformTimeout && claim_drive_fault() {
+            apply_drive_fault(&mut response, fault);
         }
     }
     if response.status == transform::TransformStatus::Ok && request.tail_delta.is_some() {
@@ -20701,6 +20730,10 @@ mod tests {
         assert_eq!(
             parse_drive_fault(Some("omit_ck_messages")),
             Some(DriveFault::OmitCkMessages)
+        );
+        assert_eq!(
+            parse_drive_fault(Some("transform_timeout")),
+            Some(DriveFault::TransformTimeout)
         );
         // Unset, empty, and unrecognized values all leave the response untouched.
         assert_eq!(parse_drive_fault(None), None);

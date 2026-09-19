@@ -46,8 +46,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # path was explicitly rejected: a forgotten var in prod would silently raw-fence
 # every CC session forever). The drive builds a SEPARATE binary with
 # `--features drive-fault`; that binary's only diff vs the deploy SHA is this flag,
-# and under it MC_DRIVE_FAULT selects an arm (fingerprint_skew | omit_ck_messages)
-# so the drive can flip arms between passes without rebuilding.
+# and under it MC_DRIVE_FAULT selects an arm (fingerprint_skew | omit_ck_messages |
+# channel2_arm | transform_timeout) so a drive can select one fault without rebuilding.
 #
 # Do NOT add drive-fault to a default feature set, and do NOT add new fault arms
 # without the matching absence-proof note here and the fault-shape tests in lib.rs.

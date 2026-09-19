@@ -164,7 +164,7 @@ export const RUST_PARK_RETRY_INTERVAL = 5;
 export const RUST_EMERGENCY_WALL_PCT = 95;
 export const RUST_PARK_PROBE_PRESSURE_BYPASS_PCT = 90;
 const RUST_SEND_TIMEOUT_MS = 15_000;
-export const RUST_SILENT_RESEND_AFTER_MS = 10_000;
+export const RUST_STALL_PROBE_AFTER_MS = 10_000;
 export const RUST_HEALTH_PROBE_TIMEOUT_MS = 2_000;
 // A frozen defer prevents an immediate LKG/module/LKG double bust. After eight healthy module
 // passes or sixteen new raw messages, continued replay adds more stale-snapshot risk than value.
@@ -471,8 +471,8 @@ export interface RustModeTransformOptions {
     disableHotPathIoCachesForTests?: boolean;
     /** Test-only callback after a capture is accepted, reporting the reused digest prefix length. */
     onLkgCaptureForTests?: (reusedPrefix: number) => void;
-    /** Test-only override for the silent-request resend threshold. */
-    silentResendAfterMsForTests?: number;
+    /** Test-only override for the stalled-request health-probe threshold. */
+    stallProbeAfterMsForTests?: number;
     /** Test-only override for the health-probe deadline. */
     healthProbeTimeoutMsForTests?: number;
 }
@@ -1816,32 +1816,32 @@ export function createRustModeTransform(
         }
     };
 
-    const callTransformWithSilentResend = async (
+    const callTransformWithStallProbe = async (
         args: Parameters<RustModeModuleClient["call"]>[0],
         attemptTimeoutMs: number,
     ): Promise<unknown> => {
         const startedAtMs = Date.now();
         const deadlineMs = startedAtMs + attemptTimeoutMs;
-        const silentAfterMs = options.silentResendAfterMsForTests ?? RUST_SILENT_RESEND_AFTER_MS;
+        const probeAfterMs = options.stallProbeAfterMsForTests ?? RUST_STALL_PROBE_AFTER_MS;
         const probeTimeoutMs = options.healthProbeTimeoutMsForTests ?? RUST_HEALTH_PROBE_TIMEOUT_MS;
         const originalAttemptId = randomUUID();
         const originalBody = isRecord(args.body)
             ? { ...args.body, attempt_id: originalAttemptId }
             : args.body;
         const original = callModule({ ...args, body: originalBody }, attemptTimeoutMs);
-        if (attemptTimeoutMs <= silentAfterMs) return original;
+        if (attemptTimeoutMs <= probeAfterMs) return original;
 
-        let silentTimer: ReturnType<typeof setTimeout> | undefined;
+        let stallTimer: ReturnType<typeof setTimeout> | undefined;
         const first = await Promise.race([
             original.then(
                 (response) => ({ kind: "response" as const, response }),
                 (error) => ({ kind: "error" as const, error }),
             ),
-            new Promise<{ kind: "silent" }>((resolve) => {
-                silentTimer = setTimeout(() => resolve({ kind: "silent" }), silentAfterMs);
+            new Promise<{ kind: "stalled" }>((resolve) => {
+                stallTimer = setTimeout(() => resolve({ kind: "stalled" }), probeAfterMs);
             }),
         ]);
-        if (first.kind !== "silent") clearTimeout(silentTimer);
+        if (first.kind !== "stalled") clearTimeout(stallTimer);
         if (first.kind === "response") return first.response;
         if (first.kind === "error") throw first.error;
 
@@ -1868,29 +1868,13 @@ export function createRustModeTransform(
             return original;
         }
 
-        const remainingMs = Math.max(0, deadlineMs - Date.now());
-        if (remainingMs <= 0) return original;
-        const resendAttemptId = randomUUID();
         sessionLog(
             args.sessionId,
-            `rust silent resend original_attempt=${originalAttemptId} resend_attempt=${resendAttemptId} silent_gap_ms=${Date.now() - startedAtMs}`,
+            `rust transform still pending after healthy probe original_attempt=${originalAttemptId} stall_ms=${Date.now() - startedAtMs}; duplicate resend suppressed`,
         );
-        const resendBody = isRecord(args.body)
-            ? {
-                  ...args.body,
-                  attempt_id: resendAttemptId,
-                  original_attempt_id: originalAttemptId,
-                  resend: true,
-              }
-            : args.body;
-        return callModule(
-            {
-                ...args,
-                body: resendBody,
-                bypassSessionLane: true,
-            },
-            remainingMs,
-        );
+        // A healthy status response does not prove the original mutating transform stopped.
+        // Keep its single deadline instead of overlapping a second request against stale state.
+        return original;
     };
 
     const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
@@ -3106,7 +3090,7 @@ export function createRustModeTransform(
                             attemptClass,
                         };
                         moduleResponse = page.transform_page_complete
-                            ? await callTransformWithSilentResend(callArgs, attemptTimeoutMs)
+                            ? await callTransformWithStallProbe(callArgs, attemptTimeoutMs)
                             : await callModule(callArgs, attemptTimeoutMs);
                     } catch (error) {
                         if (paged && isTransformPageAttemptMismatch(error)) {

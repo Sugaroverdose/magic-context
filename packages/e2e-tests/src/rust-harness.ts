@@ -70,6 +70,8 @@ export interface RustTestHarnessOptions {
     startHistorianProducer?: boolean;
     /** Copy an existing module store into the isolated data directory before ck-mc starts. */
     seedModuleStorePath?: string;
+    /** Build the hermetic module with the otherwise-absent drive-fault feature. */
+    driveFaultBinary?: boolean;
 }
 
 export interface SdkClient {
@@ -206,7 +208,9 @@ export class RustTestHarness {
             );
         }
 
-        const { ckMcBin, ckSubcBin } = await buildHermeticBinaries(prereqs.subconsciousRoot);
+        const { ckMcBin, ckSubcBin } = await buildHermeticBinaries(prereqs.subconsciousRoot, {
+            driveFault: options.driveFaultBinary,
+        });
 
         const mock = new MockProvider();
         const { baseURL } = await mock.start();
