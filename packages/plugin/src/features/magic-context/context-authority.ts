@@ -1333,6 +1333,40 @@ interface MirrorPageStatements {
     contextStoreUuid: string | null;
 }
 
+/**
+ * Projects whose host memory rows lost an embedding to a mirror-back page.
+ *
+ * A module-side edit reaches the host as a snapshot with a new content hash,
+ * and the mirror drops the stale embedding for that row (see `applyMemoryRow`).
+ * Nothing else notices: the row still renders and `get` still returns it, it
+ * just stops being semantically findable. Recording the project here lets the
+ * mirror's callers re-embed it while the module still holds authority, instead
+ * of waiting for authority to drain back to TypeScript.
+ *
+ * Kept in memory on purpose. The durable fact is the missing embedding row, and
+ * the ordinary unembedded-memory sweeps still find it after a restart; this set
+ * only makes the common case heal immediately.
+ */
+const memoryEmbeddingInvalidations = new WeakMap<Database, Set<string>>();
+
+function recordMemoryEmbeddingInvalidation(db: Database, projectPath: string): void {
+    if (!projectPath) return;
+    const pending = memoryEmbeddingInvalidations.get(db);
+    if (pending) pending.add(projectPath);
+    else memoryEmbeddingInvalidations.set(db, new Set([projectPath]));
+}
+
+/**
+ * Take the projects whose embeddings a mirror-back page invalidated, clearing
+ * the record. Callers that drain the mirror re-embed those projects.
+ */
+export function takeMemoryEmbeddingInvalidatedProjects(db: Database): string[] {
+    const pending = memoryEmbeddingInvalidations.get(db);
+    if (!pending || pending.size === 0) return [];
+    memoryEmbeddingInvalidations.delete(db);
+    return [...pending];
+}
+
 function ensureMemoryRepairState(db: Database): void {
     db.exec(`
         CREATE TABLE IF NOT EXISTS mirror_memory_repair_state (
@@ -1928,6 +1962,15 @@ function applyMemoryRow(db: Database, feed: ChangefeedRow, statements: MirrorPag
         : previousHash;
     if (previousHash !== appliedHash && appliedHash !== undefined) {
         statements.deleteMemoryEmbeddings.run(contextId);
+        // The vector described the old content and had to go. Flag the project so
+        // the drain's caller re-embeds the new content instead of leaving the row
+        // out of scored recall for as long as the module holds authority.
+        recordMemoryEmbeddingInvalidation(
+            db,
+            has("project_path")
+                ? rowString(projectedRow, "project_path")
+                : (existing?.project_path ?? moduleProject),
+        );
     }
     // Mapping snapshots replace the whole side table. An array is a durable mapping (an empty
     // array is the file-independent sentinel); null is a mapping tombstone and leaves no rows.

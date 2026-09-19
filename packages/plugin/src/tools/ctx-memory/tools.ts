@@ -33,6 +33,7 @@ import {
     getProjectEmbeddingSnapshot,
 } from "../../features/magic-context/memory/embedding";
 import { invalidateMemory } from "../../features/magic-context/memory/embedding-cache";
+import { createMemoryVisibilityPolicy } from "../../features/magic-context/memory/memory-visibility";
 import { computeNormalizedHash } from "../../features/magic-context/memory/normalize-hash";
 import {
     hasMemoryClassifiedAtColumn,
@@ -41,15 +42,8 @@ import {
 import {
     normalizeStoredProjectPath,
     queueMemoryMutation,
-    storedPathBelongsToIdentity,
 } from "../../features/magic-context/storage";
-import {
-    expandWorkspaceIdentitySetWithAliases,
-    resolveStoredPathWorkspaceIdentity,
-    resolveWorkspaceIdentitySet,
-    resolveWorkspaceShareCategories,
-    storedPathBelongsToWorkspace,
-} from "../../features/magic-context/workspaces";
+import { planRustMemoryRouting, routeHostMemoryIds } from "../../plugin/memory-id-translation";
 import {
     isRustAuthorityDrainingError,
     toolCallIdFromContext,
@@ -324,10 +318,6 @@ function projectIdentityForStoredPath(rawProjectPath: string): string {
     return normalizeStoredProjectPath(rawProjectPath);
 }
 
-function memoryBelongsToProject(memory: Memory, projectPath: string): boolean {
-    return storedPathBelongsToIdentity(memory.projectPath, projectPath);
-}
-
 function preflightCurateMutation(args: {
     db: CtxMemoryToolDeps["db"];
     params: CtxMemoryArgs;
@@ -547,6 +537,8 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     : { skip: null, successor: null };
             if (curatePreflight.skip) return curatePreflight.skip;
 
+            const visibility = createMemoryVisibilityPolicy(deps.db, projectPath);
+
             {
                 const marker = getAuthorityManagedMarker(deps.db, projectPath);
                 let authorityState: "TS" | "PREPARING" | "MODULE" | "DRAINING" | null = null;
@@ -585,6 +577,34 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                                       category: curatePreflight.successor.category,
                                   }
                                 : args;
+                        // <project-memory> renders workspace-shared memories from
+                        // other projects, which the module never mirrors. Classify
+                        // every requested id first so those are served from the host
+                        // read model (reads) or refused as read-only (mutations),
+                        // instead of failing the whole batch on the first one.
+                        const routing = routeHostMemoryIds({
+                            db: deps.db,
+                            projectIdentity: projectPath,
+                            hostIds: moduleArgs.ids ?? [],
+                            visibility,
+                        });
+                        const plan = planRustMemoryRouting({
+                            action: moduleArgs.action ?? "",
+                            routes: routing.routes,
+                        });
+                        if (plan.refusal) return plan.refusal;
+                        const hostServed = plan.hostReadIds.map((hostId) =>
+                            routing.hostReadable.get(hostId),
+                        );
+                        const localBlocks = [
+                            ...hostServed
+                                .filter((memory): memory is Memory => memory !== undefined)
+                                .map((memory) => formatMemoryList([memory])),
+                            ...plan.unaddressableLines,
+                        ];
+                        if (plan.skipModuleCall) {
+                            return localBlocks.join("\n\n");
+                        }
                         const text = moduleMemoryText(
                             await memoryBackend({
                                 ...(commandId ? { commandId } : {}),
@@ -601,7 +621,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                                     | "get",
                                 content: moduleArgs.content,
                                 category: moduleArgs.category,
-                                ids: moduleArgs.ids,
+                                ids: moduleArgs.ids ? plan.moduleHostIds : undefined,
                                 reason: moduleArgs.reason,
                                 limit:
                                     moduleArgs.action === "list"
@@ -610,7 +630,8 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                             }),
                             moduleArgs,
                         );
-                        return text ?? memoryAuthorityRefusal(args);
+                        if (text === null) return memoryAuthorityRefusal(args);
+                        return localBlocks.length > 0 ? [text, ...localBlocks].join("\n\n") : text;
                     } catch (error) {
                         if (isRustAuthorityDrainingError(error)) {
                             return memoryAuthorityRefusal(args);
@@ -626,63 +647,17 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return memoryAuthorityRefusal(args);
                 }
             }
-            const workspaceIdentitySet = resolveWorkspaceIdentitySet(deps.db, projectPath);
-            const expandedWorkspace = expandWorkspaceIdentitySetWithAliases(
-                deps.db,
-                workspaceIdentitySet.identities,
-            );
-            const workspaceVisibleIdentities =
-                workspaceIdentitySet.identities.length > 1
-                    ? expandedWorkspace.expandedIdentities
-                    : workspaceIdentitySet.identities;
-            const targetIdentityForStoredPath = (rawProjectPath: string) =>
-                workspaceIdentitySet.identities.length > 1
-                    ? (resolveStoredPathWorkspaceIdentity(
-                          rawProjectPath,
-                          workspaceIdentitySet.identities,
-                          expandedWorkspace.canonicalIdentityByStoredPath,
-                      ) ?? projectIdentityForStoredPath(rawProjectPath))
-                    : projectIdentityForStoredPath(rawProjectPath);
-            // The workspace's share-category policy matches the render path.
-            // null means there is no workspace filter; a workspaced caller gets
-            // an explicit list where [] shares no foreign categories.
-            const toolShareCategories =
-                workspaceIdentitySet.identities.length > 1
-                    ? resolveWorkspaceShareCategories(deps.db, projectPath)
-                    : null;
             // Visibility is the READ contract: own memories are visible in every
             // category, while foreign workspace memories are visible only in
             // categories the workspace explicitly shares. Mutations by primary
-            // agents use memoryOwnedByTool below so shared visibility never
-            // grants write access to another project.
-            const memoryVisibleToTool = (memory: Memory): boolean => {
-                if (workspaceIdentitySet.identities.length <= 1) {
-                    return memoryBelongsToProject(memory, projectPath);
-                }
-                if (
-                    !storedPathBelongsToWorkspace(
-                        memory.projectPath,
-                        workspaceIdentitySet.identities,
-                        workspaceVisibleIdentities,
-                        expandedWorkspace.canonicalIdentityByStoredPath,
-                    )
-                ) {
-                    return false;
-                }
-                const isOwn = targetIdentityForStoredPath(memory.projectPath) === projectPath;
-                if (isOwn) return true;
-                return (
-                    (memory.status === "active" || memory.status === "permanent") &&
-                    (memory.expiresAt === null || memory.expiresAt > Date.now()) &&
-                    memory.shareable === 1 &&
-                    ["project", "ecosystem", "universe"].includes(memory.scope) &&
-                    (toolShareCategories?.includes(memory.category) ?? false)
-                );
-            };
-            const memoryOwnedByTool = (memory: Memory): boolean =>
-                workspaceIdentitySet.identities.length > 1
-                    ? targetIdentityForStoredPath(memory.projectPath) === projectPath
-                    : memoryBelongsToProject(memory, projectPath);
+            // agents use memoryOwnedByTool so shared visibility never grants
+            // write access to another project. Both predicates come from the
+            // shared policy the Rust-mode facade uses, so the two surfaces
+            // cannot drift apart on who may read or edit what.
+            const targetIdentityForStoredPath = (rawProjectPath: string): string =>
+                visibility.identityFor(rawProjectPath);
+            const memoryVisibleToTool = (memory: Memory): boolean => visibility.visible(memory);
+            const memoryOwnedByTool = (memory: Memory): boolean => visibility.owned(memory);
             const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
             if (
                 embeddingSnapshot
@@ -921,7 +896,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     if (inactive) {
                         return inactiveMemoryError(inactive.id, "merging");
                     }
-                } else if (workspaceIdentitySet.identities.length > 1) {
+                } else if (visibility.workspaced) {
                     // The dreamer keeps its cross-PROJECT merge power (#5971) OUTSIDE
                     // a workspace (the branch above leaves non-workspace dreamer
                     // merges unrestricted). But INSIDE a workspace, per-category

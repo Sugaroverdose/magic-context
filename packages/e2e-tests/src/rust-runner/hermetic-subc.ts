@@ -419,7 +419,7 @@ export class HermeticSubcStack {
     private readonly runtimeDir: string;
     private readonly daemonConfigDir: string;
     private readonly daemonLogPath: string;
-    private readonly daemonFileLogPath: string;
+    private readonly daemonLogDir: string;
     private readonly moduleLogPath: string;
     private readonly producerLogPath: string;
     private readonly pidFilePath: string;
@@ -449,7 +449,7 @@ export class HermeticSubcStack {
         this.connectionFile = join(this.runtimeDir, "subc-connection.json");
         this.daemonConfigDir = join(this.dataDir, "cortexkit", "_hermetic-daemon-config");
         this.daemonLogPath = join(this.dataDir, "cortexkit", "_hermetic-daemon.log");
-        this.daemonFileLogPath = join(this.runtimeDir, "logs", "subc.log");
+        this.daemonLogDir = join(this.runtimeDir, "logs");
         this.moduleLogPath = join(this.dataDir, "cortexkit", "_hermetic-module.log");
         this.producerLogPath = join(this.dataDir, "cortexkit", "_hermetic-broca.log");
         this.pidFilePath = join(this.dataDir, "cortexkit", RUST_E2E_PID_FILE);
@@ -480,7 +480,7 @@ export class HermeticSubcStack {
         // this stack, not a dead predecessor, accepted the module.
         rmSync(this.connectionFile, { force: true });
         rmSync(this.daemonLogPath, { force: true });
-        rmSync(this.daemonFileLogPath, { force: true });
+        rmSync(this.daemonLogDir, { recursive: true, force: true });
         rmSync(this.moduleLogPath, { force: true });
         rmSync(this.producerLogPath, { force: true });
         this.pidFileCreatedAtMs = Date.now();
@@ -542,10 +542,18 @@ export class HermeticSubcStack {
         }
 
         // Catalog registration is the readiness gate; this immediate assertion only
-        // proves the daemon's file sink stayed inside the hermetic data home.
-        if (!existsSync(this.daemonFileLogPath)) {
+        // proves the daemon's file sink stayed inside the hermetic data home. The
+        // file name is the daemon's business and has changed across versions (it
+        // date-stamps its log as of ck-subc 0.18.21), so assert the directory it
+        // wrote into rather than one exact name.
+        const daemonLogFiles = existsSync(this.daemonLogDir)
+            ? readdirSync(this.daemonLogDir).filter(
+                  (name) => name.startsWith("subc") && name.endsWith(".log"),
+              )
+            : [];
+        if (daemonLogFiles.length === 0) {
             throw new Error(
-                `hermetic subc: daemon log was not created under the hermetic data home: ${this.daemonFileLogPath}`,
+                `hermetic subc: no daemon log (subc*.log) was created under the hermetic data home: ${this.daemonLogDir}`,
             );
         }
     }
