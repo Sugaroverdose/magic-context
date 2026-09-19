@@ -1991,6 +1991,53 @@ describe("project embedding registry", () => {
         expect(loadAllEmbeddings(db, projectIdentity, repeated!.modelId).size).toBe(3);
     });
 
+    it("discards shadow vectors when the registration is retired while the provider call is in flight", async () => {
+        const db = useTempDb();
+        const projectIdentity = "git:shadow-retired-in-flight";
+        registerProjectEmbedding(
+            db,
+            projectIdentity,
+            localConfig("model-primary"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/shadow-retired-in-flight",
+        );
+        for (let i = 0; i < 3; i++) {
+            const memory = insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "CONSTRAINTS",
+                content: `retired shadow memory ${i}`,
+            });
+            saveEmbedding(db, memory.id, new Float32Array([i, 1]), currentModelId(projectIdentity));
+        }
+        const shadowConfig = {
+            provider: "synapse",
+            model: "synapse-model",
+            synapse_fingerprint: "fp-retired-in-flight",
+        } as unknown as EmbeddingConfig;
+        // Retire the shadow from inside the provider call. processShadowQueueItem
+        // captures the registration before awaiting, so this reproduces the
+        // unregister-during-embed window: without a post-await re-check the
+        // returned vectors are written under a registration that no longer exists.
+        _setTestProviderFactoryForProject(
+            () =>
+                new (class extends FakeEmbeddingProvider {
+                    override async embedBatch(texts: string[]): Promise<Float32Array[]> {
+                        unregisterProjectShadowEmbedding(projectIdentity);
+                        return texts.map((text) => new Float32Array([text.length, this.modelId.length]));
+                    }
+                })("shadow"),
+        );
+        const registration = registerProjectShadowEmbedding(
+            db,
+            projectIdentity,
+            shadowConfig,
+            "/tmp/shadow-retired-in-flight",
+        );
+        await flushShadowEmbeddingBacklog(projectIdentity);
+
+        expect(loadAllEmbeddings(db, projectIdentity, registration!.modelId).size).toBe(0);
+    });
+
     it("does not dispose a shadow provider that is the same instance as the primary", async () => {
         const shared = new FakeEmbeddingProvider("shared");
         _setTestProviderFactoryForProject(() => shared);

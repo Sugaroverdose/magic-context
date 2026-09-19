@@ -1981,6 +1981,14 @@ async function processShadowQueueItem(item: ShadowQueueItem): Promise<ShadowBack
             db,
             "memory",
         );
+        // The provider call above can take seconds (or minutes on a cold model
+        // load). unregisterProjectShadowEmbedding may have retired this shadow
+        // while we were waiting, so re-check the live registration before
+        // writing any vectors.
+        const live = shadowRegistrations.get(item.projectIdentity);
+        if (!live || live.generation !== registration.generation) {
+            return { writes: 0, refusalReason: "registration_retired_during_embed" };
+        }
         let writes = 0;
         let hashGuardRejected = false;
         db.transaction(() => {
@@ -2035,6 +2043,11 @@ async function processShadowQueueItem(item: ShadowQueueItem): Promise<ShadowBack
             db,
             "commit",
         );
+        // Re-check after the provider round-trip; see the memory scope above.
+        const live = shadowRegistrations.get(item.projectIdentity);
+        if (!live || live.generation !== registration.generation) {
+            return { writes: 0, refusalReason: "registration_retired_during_embed" };
+        }
         let writes = 0;
         db.transaction(() => {
             for (const row of rows) {
@@ -2113,6 +2126,11 @@ async function processShadowQueueItem(item: ShadowQueueItem): Promise<ShadowBack
         })),
     );
     const embedded = await embedShadowItems(registration, items, db, "chunk");
+    // Re-check after the provider round-trip; see the memory scope above.
+    const live = shadowRegistrations.get(item.projectIdentity);
+    if (!live || live.generation !== registration.generation) {
+        return { writes: 0, refusalReason: "registration_retired_during_embed" };
+    }
     let writes = 0;
     let partialVectorSet = false;
     for (const item of prepared) {
