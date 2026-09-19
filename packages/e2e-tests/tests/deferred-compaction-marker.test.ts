@@ -123,7 +123,7 @@ forEachHost(import.meta.url, "deferred compaction marker (plan v6)", (host) => {
     afterAll(async () => {
         await h.dispose();
     });
-    it("writes pending blob in-tx on publish and holds it across defer passes", async () => {
+    it(host === "opencode2" ? "publishes a compartment and supplies a durable native checkpoint without a provider call" : "writes pending blob in-tx on publish and holds it across defer passes", async () => {
             h.mock.reset();
 
             // Mock historian: return a valid response that covers the actual

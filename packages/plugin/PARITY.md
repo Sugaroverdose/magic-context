@@ -18,3 +18,14 @@ Existing host-imposed differences also include [native fold ownership](../../PAR
 | --- | --- | --- |
 | Publication does not write a v1 pending marker; the host creates the compaction row | Host-imposed | GA `SessionCompaction.result` returns a summary, not a chosen sequence cut; `Context.session` has no `compact` method. See the [fold-ownership surface](../../PARITY.md#2-fold-ownership). The deferred-marker scenario requires a real published compartment and a completed native row with no additional provider call. |
 | Native auto-compaction is not treated as a conflicting second summarizer | Chosen integration on the imposed hook carrier | The adapter answers the host's compaction hook locally. The conflict scenario explicitly requests a real native fold, requires zero competing model calls, and observes the checkpoint on the subsequent wire request. |
+
+## Other existing host-carrier exclusions
+
+These rows were already declared before this repair; they are not newly waived failing
+assertions from the selected 20-scenario lane.
+
+| Scenario | Imposed or chosen | GA surface |
+| --- | --- | --- |
+| Parented subagent behavior | Host-imposed | GA `Context.session.create` has no parent-link input; hidden work uses unparented roots. The dedicated GA hidden-child test continues to pass. See [hidden completions](../../PARITY.md#3-hidden-completions). |
+| Ignored-notice loop race | Host-imposed | `@opencode/plugin@2.0.5/dist/promise/session.d.ts` exposes `SessionPrompt.delivery` and synthetic delivery, not v1 `noReply`/ignored MessageV2 rows and parentID loop-exit ordering. |
+| V1 signed-thinking store projection | Host-imposed carrier difference | GA stores ordered `session_message` JSON and provider metadata, not v1 message/part rows. The v1-store scenario remains excluded rather than querying a fabricated legacy store. This does not waive signed-thinking preservation. See [host store reader](../../PARITY.md#5-host-store-reader). |

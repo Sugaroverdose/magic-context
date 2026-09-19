@@ -283,7 +283,7 @@
                 {
                     "host": "opencode2",
                     "reason": "GA 2.0.5 does not expose OpenCode 1 noReply/ignored MessageV2 loop ordering",
-                    "contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only"
+                    "contract_ref": "packages/plugin/PARITY.md#other-existing-host-carrier-exclusions"
                 },
                 {
                     "host": "pi",

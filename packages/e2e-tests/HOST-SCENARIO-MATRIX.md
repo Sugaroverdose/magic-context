@@ -1,14 +1,17 @@
 # Host scenario matrix
 
-Status captured on 2026-09-18 against OpenCode 1, OpenCode GA 2.0.5, Pi, and OMP.
+OpenCode 2 status revalidated on 2026-09-19 against GA 2.0.5. OpenCode 1 and Pi
+manifest lanes were also revalidated; OMP retains the 2026-09-18 baseline.
 `declared-divergence` means the host is named in the manifest entry's `divergences`
 array and the cited host surface cannot express the OpenCode behavior. `product-bug`
-means the real-host run failed; product code was not changed in this slice.
+means the real-host run still fails. OpenCode 2 repairs and host-carrier adjudications
+are listed below; a passing divergent branch is not a claim that the missing v1
+mechanism exists on the GA host.
 
 | Scenario | OpenCode | OpenCode 2 | Pi | OMP |
 | --- | --- | --- | --- | --- |
 | cache invariants | pass | pass | pass | product-bug |
-| cache stability | pass | product-bug | pass | product-bug |
+| cache stability | pass | pass | pass | product-bug |
 | compaction off | pass | pass | pass | product-bug |
 | conflict disable | pass | pass | pass | product-bug |
 | context limits | pass | pass | pass | pass |
@@ -22,8 +25,8 @@ means the real-host run failed; product code was not changed in this slice.
 | notice-loop race | pass | declared-divergence | declared-divergence | declared-divergence |
 | overflow recovery | pass | pass | declared-divergence | product-bug |
 | session isolation and removal | pass | pass | declared-divergence | declared-divergence |
-| short-context overflow | pass | product-bug | pass | product-bug |
-| slow historian | pass | product-bug | pass | product-bug |
+| short-context overflow | pass | pass | pass | product-bug |
+| slow historian | pass | pass | pass | product-bug |
 | smoke | pass | pass | pass | pass |
 | subagent behavior | pass | declared-divergence | declared-divergence | declared-divergence |
 | tag-owner collision | pass | pass | pass | pass |
@@ -50,8 +53,11 @@ means the real-host run failed; product code was not changed in this slice.
 - Memory injection: register the shared ctx_* implementations with the GA tool editor using JSON Schema; a real ctx_memory write is now present in a fresh session's first request.
 - Historian success: Anthropic transport allows the shared historian mock matcher to return the publication payload; real-host publication now passes.
 - Session isolation and removal: GA `session.remove` emits `session.deleted` with `data.sessionID`; subscribe to it and clear durable rows plus per-session adapter state.
-- Emergency blocking: defer pressure refusal to the shared transform so its blocking historian recovery can run before provider admission.
-- The usage repair does not explain all remaining failures: the immediate manifest rerun still finds requests filtered out by Anthropic-only wire readers, historian publication timeouts, and todo tool timeout. No assertion was relaxed.
+- Emergency blocking: reserved-output pressure reaches shared historian recovery while the raw host-window admission fence remains intact; successful usage above a stale catalog window is not treated as proof of imminent overflow.
+- Cache stability: restored system guidance and Anthropic wire transport allow the unchanged prefix/system byte-stability oracle to observe real main-agent requests.
+- Short-context overflow: terminal usage and catalog budgets now reach the scheduler; the unchanged accumulating-pressure recovery scenario passes.
+- Slow historian: real Anthropic transport reaches the historian matcher while unchanged foreground responsiveness assertions pass.
+- The first usage-only rerun still failed downstream scenarios, refuting a single-root explanation. Subsequent repairs address tool registration, lifecycle, system guidance, overflow errors, and host-specific carriers; no v1 assertion was removed.
 
 ## Reproduction summary
 
@@ -60,18 +66,23 @@ means the real-host run failed; product code was not changed in this slice.
   two new canonical `drops` and `tagging` scenarios account for the increase.
 - Pi manifest lane: 41 passed, 0 failed. The two Pi-only Rust degradation files
   passed 6 tests. The excluded overlay scenario reproduces the product bug below.
-- OpenCode 2 manifest lane: 12 tests passed and 29 failed across 20 selected
-  scenarios. The first contract-level reproduction is `context-limits.test.ts`:
-  `last_context_percentage` remains `0` instead of `47.83773440489858`. Historian
-  scenarios do not publish, session removal does not clear Magic Context rows,
-  and the overlay scenario also leaves pressure at `0`.
+- OpenCode 2 manifest lane: **34 passed, 0 failed across 20 selected scenarios**
+  (187 assertions). The original baseline was 12 passed / 29 failed. The lower
+  test count reflects replacement of the unavailable native-todo cases with one
+  explicit live-host divergence test, and removal of failure-only teardown errors;
+  it is not 41 original tests silently made green. The excluded overlay scenario
+  separately passes its three exact-pressure assertions. The dedicated real-GA
+  `tests/opencode2/` regression lane is **48 passed, 0 failed** (494 assertions).
+- Shared cleanup seam safety: v1 TS pure-replay differential is byte-identical on
+  all four defer passes against `5efbe9b78b031156e44c00082fff385e48c46e46`;
+  OpenCode 1 remains 54/0 and Pi remains 41/0.
 - OMP manifest lane: 19 tests passed, 21 failed, and one setup error across 20
   selected scenarios. The failures include no historian publication, no synthetic
   todo pair, missing memory deltas in m[0]/m[1], and compaction-off behavior.
 - Window overlay focused reproduction: after writing a 100,000-token overlay,
-  Pi and OMP persist `10.427093760427093` (their 200,000-token default) instead of
-  `21.784593935169045`; OpenCode 2 persists `0`. OpenCode 1 passes, then observes
-  the 160,000-token rewrite after restart.
+  Pi and OMP retain the baseline `10.427093760427093` (their 200,000-token default)
+  instead of `21.784593935169045`. OpenCode 1 and repaired OpenCode 2 pass, then
+  observe the 160,000-token rewrite after restart.
 
 Commands:
 

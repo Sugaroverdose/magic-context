@@ -470,7 +470,7 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
     // (95% emergency notification re-firing) is fixed and locked in
     // by transform-compartment-phase.test.ts ("95% emergency
     // notification idempotency" describe block).
-    it.skipIf(Boolean(process.env.CI))("exercises execute, notes, reduce, historian, todo synthesis, and auto-search over one realistic session", async () => {
+    it.skipIf(Boolean(process.env.CI))(host === "opencode2" ? "exercises execute, notes, reduce, historian, native folds, and auto-search without native todos" : "exercises execute, notes, reduce, historian, todo synthesis, and auto-search over one realistic session", async () => {
         await resetMock("start long-running session");
 
         const historianCaptures: HistorianCapture[] = [];
