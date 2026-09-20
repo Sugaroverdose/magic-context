@@ -353,7 +353,7 @@ function checkCompaction(
         return { auto: false, prune: false };
     }
 
-    const merged = readCompactionFromConfigFiles(directory);
+    const merged = readCompactionFromConfigFiles(directory, hostGeneration);
     if (isRelevantCompactionBlock(merged, hostGeneration)) {
         return resolvedCompactionBlock(merged, hostGeneration);
     }
@@ -379,10 +379,10 @@ function checkCompaction(
 }
 
 /**
- * Every config file OpenCode merges for this project, ordered from LOWEST to
- * HIGHEST precedence. Verified against the opencode 1.18.30 binary
- * (`Config.loadInstanceState`) and confirmed on a live host with
- * `opencode debug config`:
+ * Every readable config file OpenCode merges for this project, ordered from
+ * LOWEST to HIGHEST precedence.
+ *
+ * OpenCode 1.18.30 (`Config.loadInstanceState`) uses:
  *
  *   1. `$XDG_CONFIG_HOME/opencode/` — `config.json`, `opencode.json`, `opencode.jsonc`
  *   2. `$OPENCODE_CONFIG`          — the explicit single-file override
@@ -390,36 +390,52 @@ function checkCompaction(
  *   4. the project's `.opencode/` directory
  *   5. `~/.opencode/` and `$OPENCODE_CONFIG_DIR` (see getOpenCodeConfigDirs)
  *
- * Step 5 outranking the project files looks surprising but is what OpenCode
- * does: it merges the project files first and the directory list afterwards.
+ * OpenCode 2.x orders the corresponding groups as well-known, global
+ * supplementary, explicit, direct, then project supplementary. See
+ * `packages/core/src/config.ts:220-236` at 7e70f7e1ab. Consequently project
+ * `.opencode` files outrank global supplementary directories only on v2.
  *
- * Remote, org, and managed-enterprise layers are NOT readable from here. That
- * is exactly why an empty result is reported as inconclusive rather than as
- * the host default.
+ * Remote, org, managed-enterprise, and content layers are NOT readable from
+ * here. That is why an empty result is inconclusive rather than the host
+ * default.
  */
-function openCodeConfigFileChain(directory: string): string[] {
+function openCodeConfigFileChain(
+    directory: string,
+    hostGeneration: OpenCodeHostGeneration,
+): string[] {
     const globalDir = getOpenCodeGlobalConfigDir();
-    const files = [
+    const wellKnown = [
         join(globalDir, "config.json"),
         join(globalDir, "opencode.json"),
         join(globalDir, "opencode.jsonc"),
     ];
-
+    const globalSupplementary = getOpenCodeConfigDirs()
+        .filter((dir) => dir !== globalDir)
+        .flatMap((dir) => [join(dir, "opencode.json"), join(dir, "opencode.jsonc")]);
     const explicitConfig = process.env.OPENCODE_CONFIG?.trim();
-    if (explicitConfig) files.push(explicitConfig);
-
-    files.push(
-        join(directory, "opencode.json"),
-        join(directory, "opencode.jsonc"),
+    const explicit = explicitConfig ? [explicitConfig] : [];
+    const direct = [join(directory, "opencode.json"), join(directory, "opencode.jsonc")];
+    const projectSupplementary = [
         join(directory, ".opencode", "opencode.json"),
         join(directory, ".opencode", "opencode.jsonc"),
-    );
+    ];
 
-    for (const dir of getOpenCodeConfigDirs()) {
-        if (dir === globalDir) continue;
-        files.push(join(dir, "opencode.json"), join(dir, "opencode.jsonc"));
-    }
-
+    const files =
+        hostGeneration === "v2"
+            ? [
+                  ...wellKnown,
+                  ...globalSupplementary,
+                  ...explicit,
+                  ...direct,
+                  ...projectSupplementary,
+              ]
+            : [
+                  ...wellKnown,
+                  ...explicit,
+                  ...direct,
+                  ...projectSupplementary,
+                  ...globalSupplementary,
+              ];
     return [...new Set(files)];
 }
 
@@ -431,9 +447,12 @@ type CompactionBlock = NonNullable<OpenCodeConfig["compaction"]>;
  * block) is what OpenCode does, so a global `auto: false` and a project-level
  * `prune: true` both survive instead of one silently erasing the other.
  */
-function readCompactionFromConfigFiles(directory: string): CompactionBlock {
+function readCompactionFromConfigFiles(
+    directory: string,
+    hostGeneration: OpenCodeHostGeneration,
+): CompactionBlock {
     const merged: CompactionBlock = {};
-    for (const filePath of openCodeConfigFileChain(directory)) {
+    for (const filePath of openCodeConfigFileChain(directory, hostGeneration)) {
         let block: CompactionBlock | undefined;
         try {
             block = readJsoncFile<OpenCodeConfig>(filePath)?.compaction;

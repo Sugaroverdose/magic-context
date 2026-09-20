@@ -26,10 +26,19 @@ function resolveHomeDir(): string {
  * back to `~/.config/opencode` (on every platform, Windows included — OpenCode
  * does not use %APPDATA%).
  *
- * This directory is NOT affected by `OPENCODE_CONFIG_DIR`. OpenCode computes
- * it once from XDG at startup and always reads it; `OPENCODE_CONFIG_DIR` adds
- * one more directory on top rather than replacing this one. See
+ * This helper names the loader's XDG layer, not every OpenCode surface called
+ * "config". In 1.18.30, `Global.Path.config` is the pure-XDG path
+ * (`packages/core/src/global.ts:13`) and the loader merges it once at
+ * `packages/opencode/src/config/config.ts:412-413`. Its later directories loop
+ * accepts only `.opencode` paths or the exact `OPENCODE_CONFIG_DIR` value
+ * (`config.ts:437-441`), so the XDG layer is skipped there and the env path is
+ * merged last. The detector mirrors that loader order via
  * {@link getOpenCodeConfigDirs}.
+ *
+ * Service consumers see a different value: `Global.make()` injects
+ * `Flag.OPENCODE_CONFIG_DIR ?? Path.config` as `config`
+ * (`packages/core/src/global.ts:64`), so setting the env var replaces the
+ * service's value even though the loader still merges the XDG layer.
  */
 export function getOpenCodeGlobalConfigDir(): string {
     if (process.platform === "win32") {

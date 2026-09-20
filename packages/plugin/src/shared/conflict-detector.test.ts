@@ -723,6 +723,28 @@ describe("detectConflicts", () => {
             expect(result.hasConflict).toBe(false);
         });
 
+        it("v1 keeps global supplementary config above the project .opencode overlay", () => {
+            writeCompaction(launcherDir, "opencode.json", { auto: false });
+            writeCompaction(join(projectDir, ".opencode"), "opencode.json", { auto: true });
+            const result = detectConflicts(projectDir, {
+                compactionEnabled: true,
+                hostGeneration: "v1",
+            });
+            expect(result.nativeCompaction.auto).toBe(false);
+            expect(result.conflicts.compactionAuto).toBe(false);
+        });
+
+        it("v2 ranks the project .opencode overlay above global supplementary config", () => {
+            writeCompaction(launcherDir, "opencode.json", { auto: false });
+            writeCompaction(join(projectDir, ".opencode"), "opencode.json", { auto: true });
+            const result = detectConflicts(projectDir, {
+                compactionEnabled: true,
+                hostGeneration: "v2",
+            });
+            expect(result.nativeCompaction.auto).toBe(true);
+            expect(result.conflicts.compactionAuto).toBe(false);
+        });
+
         it("reads the global directory's legacy config.json layer", () => {
             writeCompaction(globalDir, "config.json", { auto: true });
             const result = detectConflicts(projectDir, { compactionEnabled: true });
