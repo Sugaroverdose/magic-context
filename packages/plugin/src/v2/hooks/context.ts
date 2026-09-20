@@ -63,11 +63,13 @@ import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
 import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { startDreamTrigger } from "./dream-trigger";
 import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
+import { modelLimitCacheWarm, warmModelLimitCacheFromCatalog } from "./model-limit-cache";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { rawMessages } from "./store";
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
+import { resolveUsageReading } from "./usage-reading";
 
 export function createHostSeams(
     context: V2Context,
@@ -324,13 +326,9 @@ export async function registerContext(context: V2Context) {
                 gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
             );
             try {
-                const latest = reader
-                    .history(draft.sessionID)
-                    .filter((row) => row.type === "assistant")
-                    .at(-1);
-                const tokens = latest?.data.tokens;
-                const modelKey = `${draft.model.providerID}/${draft.model.id}`;
-                if (!queriedModels.has(modelKey)) {
+                const latest = reader.latestAssistant(draft.sessionID);
+                const draftModelKey = `${draft.model.providerID}/${draft.model.id}`;
+                if (!queriedModels.has(draftModelKey)) {
                     const catalog = await Promise.resolve(context.model.list());
                     const providers = new Map<
                         string,
@@ -358,42 +356,52 @@ export async function registerContext(context: V2Context) {
                             }),
                         },
                     });
-                    queriedModels.add(modelKey);
+                    queriedModels.add(draftModelKey);
                 }
-                const rawLimit = rawLimits.get(modelKey);
-                // The shared catalog rejects small limits as implausible, but a GA
-                // provider may explicitly configure a valid small context window.
-                const limit =
-                    rawLimit && !isSaneLimit(rawLimit.context)
-                        ? resolveLimit(rawLimit, draft.model.providerID, draft.model.id)
-                        : resolveContextLimit(draft.model.providerID, draft.model.id, {
-                              db,
+                const usageDb = db;
+                const limitFor = (providerID: string, modelID: string) => {
+                    const modelKey = `${providerID}/${modelID}`;
+                    const rawLimit = rawLimits.get(modelKey);
+                    // The shared catalog rejects unusually small limits, but a
+                    // provider may explicitly configure a valid small context window.
+                    return rawLimit && !isSaneLimit(rawLimit.context)
+                        ? (resolveLimit(rawLimit, providerID, modelID) ?? 0)
+                        : resolveContextLimit(providerID, modelID, {
+                              db: usageDb,
                               sessionID: draft.sessionID,
                           });
-                if (tokens && limit && Number.isFinite(limit) && limit > 0) {
-                    const inputTokens = tokens.input + tokens.cache.read + tokens.cache.write;
-                    // Only the raw host window is an immediate admission boundary.
-                    // Reserved-output pressure still reaches the historian recovery path.
+                };
+                const reading = resolveUsageReading({
+                    rowModel: latest?.data.model,
+                    draftModel: { providerID: draft.model.providerID, id: draft.model.id },
+                    tokens: latest?.data.tokens,
+                    completed: latest?.data.time?.completed,
+                    limitFor,
+                });
+                if (reading) {
+                    // Mark the request unsafe only when the outgoing model appears
+                    // in the catalog; compare usage with its admission limit, which
+                    // reserves room for the response.
                     unsafe =
-                        rawLimit !== undefined &&
-                        inputTokens <= rawLimit.context &&
-                        inputTokens / rawLimit.context >= 0.95;
-                    const completed = latest?.data.time?.completed;
-                    if (typeof completed === "number")
-                        updateSessionMeta(db, draft.sessionID, { lastResponseTime: completed });
-                    const percentage = (inputTokens / limit) * 100;
-                    updateSessionMeta(db, draft.sessionID, {
+                        rawLimits.has(draftModelKey) &&
+                        reading.inputTokens / reading.admissionLimit >= 0.95;
+                    if (reading.completed !== undefined)
+                        updateSessionMeta(usageDb, draft.sessionID, {
+                            lastResponseTime: reading.completed,
+                        });
+                    const percentage = (reading.inputTokens / reading.limit) * 100;
+                    updateSessionMeta(usageDb, draft.sessionID, {
                         lastContextPercentage: percentage,
-                        lastInputTokens: inputTokens,
-                        lastUsageContextLimit: limit,
-                        lastObservedModelKey: modelKey,
+                        lastInputTokens: reading.inputTokens,
+                        lastUsageContextLimit: reading.limit,
+                        lastObservedModelKey: reading.modelKey ?? draftModelKey,
                     });
                     sessionLog(
                         draft.sessionID,
-                        `v2 usage: inputTokens=${inputTokens} contextLimit=${limit} percentage=${percentage}`,
+                        `v2 usage: inputTokens=${reading.inputTokens} contextLimit=${reading.limit} percentage=${percentage}`,
                     );
                     usage.set(draft.sessionID, {
-                        usage: { inputTokens, percentage: (inputTokens / limit) * 100 },
+                        usage: { inputTokens: reading.inputTokens, percentage },
                         hasUsageTokens: true,
                         updatedAt: Date.now(),
                     });
@@ -511,6 +519,7 @@ export async function registerContext(context: V2Context) {
             modelID: draft.model.id,
         });
         variants.set(draft.sessionID, draft.model.variant);
+        if (!modelLimitCacheWarm()) void warmModelLimitCacheFromCatalog(context);
         agents.set(draft.sessionID, draft.agent);
         applyV2PromptSurfaceTools(draft, promptSurfaceRuntime, config.prompt_surface);
         if (context.tool.transform) {
@@ -765,6 +774,9 @@ export async function registerContext(context: V2Context) {
             console.warn("[magic-context] v2 context unavailable", error);
         }
     });
+    // Warm eagerly for cold sidebar/status reads; a failed startup warm releases
+    // its latch and the context hook above retries after the host catalog settles.
+    void warmModelLimitCacheFromCatalog(context);
     // OpenCode 2 never runs the v1 server() lane. Start the RPC surface here so
     // the terminal TUI can read the v2 lane's draft-authoritative session state.
     const rpcLiveSessionState: LiveSessionState = {

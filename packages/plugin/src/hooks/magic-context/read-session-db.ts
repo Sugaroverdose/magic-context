@@ -594,22 +594,62 @@ export function getMessageTimesFromOpenCodeDb(
 export function findLastAssistantModelFromOpenCodeDb(
     sessionId: string,
 ): { providerID: string; modelID: string; agent?: string } | null {
+    const resolution = resolveOpenCodeDbPath();
     try {
-        return withReadOnlySessionDb((db) => {
-            const row = db
-                .prepare(
-                    `SELECT json_extract(data, '$.providerID') as providerID,
-                            json_extract(data, '$.modelID') as modelID,
-                            json_extract(data, '$.agent') as agent
-                     FROM message
-                     WHERE session_id = ?
-                       AND json_extract(data, '$.role') = 'assistant'
-                       AND json_extract(data, '$.providerID') IS NOT NULL
-                       AND json_extract(data, '$.modelID') IS NOT NULL
-                     ORDER BY time_created DESC
-                     LIMIT 1`,
-                )
-                .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null;
+        if (!openCodeDbPathExists(resolution)) {
+            throw new Error(`OpenCode session database is unavailable at ${resolution.path}`);
+        }
+        const db = new Database(resolution.path, { readonly: true });
+        try {
+            const queryV2 = (): (AssistantModelRow & { agent?: string | null }) | null =>
+                db
+                    .prepare(
+                        `SELECT json_extract(data, '$.model.providerID') as providerID,
+                                json_extract(data, '$.model.id') as modelID,
+                                json_extract(data, '$.agent') as agent
+                         FROM session_message
+                         WHERE session_id = ?
+                           AND type = 'assistant'
+                           AND json_extract(data, '$.model.providerID') IS NOT NULL
+                           AND json_extract(data, '$.model.id') IS NOT NULL
+                         ORDER BY seq DESC
+                         LIMIT 1`,
+                    )
+                    .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null;
+            const queryV1 = (): (AssistantModelRow & { agent?: string | null }) | null =>
+                db
+                    .prepare(
+                        `SELECT json_extract(data, '$.providerID') as providerID,
+                                json_extract(data, '$.modelID') as modelID,
+                                json_extract(data, '$.agent') as agent
+                         FROM message
+                         WHERE session_id = ?
+                           AND json_extract(data, '$.role') = 'assistant'
+                           AND json_extract(data, '$.providerID') IS NOT NULL
+                           AND json_extract(data, '$.modelID') IS NOT NULL
+                         ORDER BY time_created DESC
+                         LIMIT 1`,
+                    )
+                    .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null;
+
+            // Because OpenCode 1.18 also creates session_message, the table's
+            // presence cannot identify the store generation. Use the shared guard
+            // for both queries; it recognizes migrated v2 stores by session_v2.
+            let row: (AssistantModelRow & { agent?: string | null }) | null = null;
+            try {
+                assertOpenCodeStoreGeneration(db, "v2", resolution.path);
+                row = queryV2();
+            } catch {
+                // If this is v1 or does not match the expected v2 schema, try v1 next.
+            }
+            if (!row) {
+                try {
+                    assertOpenCodeStoreGeneration(db, "v1", resolution.path);
+                    row = queryV1();
+                } catch {
+                    // The v1 guard rejects native v2 schemas, so no fallback applies.
+                }
+            }
             if (!row || typeof row.providerID !== "string" || typeof row.modelID !== "string") {
                 return null;
             }
@@ -620,9 +660,11 @@ export function findLastAssistantModelFromOpenCodeDb(
                 modelID: row.modelID,
                 ...(agent ? { agent } : {}),
             };
-        });
+        } finally {
+            closeQuietly(db);
+        }
     } catch (error) {
-        logProbeFailureOnce(resolveOpenCodeDbPath(), error);
+        logProbeFailureOnce(resolution, error);
         return null;
     }
 }

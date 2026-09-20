@@ -58,7 +58,9 @@ test("session_message_reader seq pages idle boundaries and checkpoint window", (
 			JSON.stringify(row.data),
 		);
 	const reader = new V2StoreReader(path);
-	const id = rows[0]!.session_id;
+	const firstRow = rows[0];
+	if (!firstRow) throw new Error("host row fixture is empty");
+	const id = firstRow.session_id;
 	try {
 		expect(JSON.stringify(reader.window(id))).toBe(JSON.stringify(rows));
 		expect(() =>
@@ -114,6 +116,48 @@ test("session_message_reader seq pages idle boundaries and checkpoint window", (
 		writer.close();
 	}
 	expect(() => new V2StoreReader(join(root, "missing.db"))).toThrow();
+});
+
+test("latestAssistant selects the newest assistant row by seq and ignores other types", () => {
+	const { root } = isolation();
+	const path = join(root, "latest-assistant.db");
+	const writer = new Database(path);
+	writer.exec(
+		"CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT)",
+	);
+	const insert = writer.prepare("INSERT INTO session_message VALUES (?, ?, ?, ?, ?)");
+	// Insertion order is shuffled so rowid cannot accidentally substitute for seq.
+	insert.run(
+		"m4",
+		"ses-A",
+		"assistant",
+		4,
+		JSON.stringify({ model: { providerID: "p", id: "new" } }),
+	);
+	insert.run("m2", "ses-A", "user", 2, JSON.stringify({}));
+	insert.run(
+		"m1",
+		"ses-A",
+		"assistant",
+		1,
+		JSON.stringify({ model: { providerID: "p", id: "old" } }),
+	);
+	insert.run(
+		"m3",
+		"ses-B",
+		"assistant",
+		3,
+		JSON.stringify({ model: { providerID: "p", id: "other" } }),
+	);
+	const reader = new V2StoreReader(path);
+	try {
+		expect(reader.latestAssistant("ses-A")?.id).toBe("m4");
+		expect(reader.latestAssistant("ses-B")?.id).toBe("m3");
+		expect(reader.latestAssistant("ses-missing")).toBeUndefined();
+	} finally {
+		reader.close();
+		writer.close();
+	}
 });
 
 test("I11 v1/v2 readers feed the same transform core with pinned host differences", () => {
