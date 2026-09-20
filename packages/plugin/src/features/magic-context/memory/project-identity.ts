@@ -558,6 +558,37 @@ export function directoryHasGitMetadata(directory: string): boolean {
     return gitRootDirectory(path.resolve(directory)) !== null;
 }
 
+/**
+ * Explain to an agent (and the user reading its tool output) why a session has no
+ * project identity. The tools only see `undefined` from the resolver; without this
+ * they reported "Could not resolve project identity" and agents blamed the absence
+ * of a git repository, which is not a cause — non-git directories resolve to a
+ * `dir:` identity. The one deliberate refusal is a session running in the home
+ * directory itself.
+ */
+export function describeUnresolvedProjectIdentity(directory: string): string {
+    const resolvedDirectory = path.resolve(directory);
+    const canonicalHome = canonicalUserHomeDirectory();
+    const canonicalDirectory = (() => {
+        try {
+            return realpathSync.native(resolvedDirectory);
+        } catch {
+            return resolvedDirectory;
+        }
+    })();
+    if (
+        canonicalDirectory === canonicalHome ||
+        gitRootDirectory(canonicalDirectory) === canonicalHome
+    ) {
+        return (
+            `this session runs in your home directory (${canonicalHome}), which Magic Context does not treat as a project. ` +
+            "Start OpenCode inside a project folder, or set `allow_home_project: true` in the user-level " +
+            "magic-context.jsonc (~/.config/cortexkit/) to give home sessions their own memory."
+        );
+    }
+    return `the session directory ${resolvedDirectory} could not be read as a project.`;
+}
+
 export function resolveProjectIdentityForSession(
     directory: string,
     allowHomeProject = false,

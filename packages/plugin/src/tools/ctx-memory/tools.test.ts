@@ -866,6 +866,14 @@ describe("createCtxMemoryTools", () => {
             expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
                 { mutationType: "archive", targetMemoryId: memory.id },
             ]);
+            // The get header must not call an archived row "active"; the STATUS column tells the truth.
+            const fetched = await tools.ctx_memory.execute(
+                { action: "get", ids: [memory.id] },
+                toolContext(),
+            );
+            expect(fetched).toContain("Found 1 memory:");
+            expect(fetched).not.toContain("active memory");
+            expect(fetched).toContain("archived");
         });
 
         it("archives a batch of memories in one call, all-or-nothing", async () => {

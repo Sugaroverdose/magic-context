@@ -4,7 +4,10 @@ import {
     embedTextForProject,
     getProjectEmbeddingSnapshot,
 } from "../../features/magic-context/memory/embedding";
-import { directoryHasGitMetadata } from "../../features/magic-context/memory/project-identity";
+import {
+    describeUnresolvedProjectIdentity,
+    directoryHasGitMetadata,
+} from "../../features/magic-context/memory/project-identity";
 import {
     createUnifiedSearchDiagnostics,
     formatSearchResults,
@@ -126,7 +129,7 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             // runs `opencode -s <id>` from outside the project.
             const projectPath = deps.resolveProjectPath(toolContext.directory);
             if (!projectPath) {
-                return "Error: Could not resolve project identity for search.";
+                return `Error: Could not resolve project identity for search: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
             }
             await deps.ensureProjectRegistered?.(toolContext.directory, deps.db);
             const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);

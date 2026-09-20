@@ -35,6 +35,7 @@ import {
 import { invalidateMemory } from "../../features/magic-context/memory/embedding-cache";
 import { createMemoryVisibilityPolicy } from "../../features/magic-context/memory/memory-visibility";
 import { computeNormalizedHash } from "../../features/magic-context/memory/normalize-hash";
+import { describeUnresolvedProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import {
     hasMemoryClassifiedAtColumn,
     hasMemoryShareableColumn,
@@ -178,8 +179,11 @@ function formatMemoryList(memories: Memory[]): string {
             row.content,
         ].join(" | ");
 
+    // `get` returns rows of any status, so the header only claims "active" when it is true
+    // of every row; the STATUS column carries the rest.
+    const allActive = memories.every((memory) => memory.status === "active");
     return [
-        `Found ${rows.length} active ${rows.length === 1 ? "memory" : "memories"}:`,
+        `Found ${rows.length} ${allActive ? "active " : ""}${rows.length === 1 ? "memory" : "memories"}:`,
         "",
         formatRow(headers),
         [
@@ -497,7 +501,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             // runs `opencode -s <id>` from outside the project.
             const projectPath = deps.resolveProjectPath(toolContext.directory);
             if (!projectPath) {
-                return "Error: Could not resolve project identity for memory action.";
+                return `Error: Could not resolve project identity for memory action: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
             }
             await deps.ensureProjectRegistered?.(toolContext.directory, deps.db);
             const activeCurateCategory =

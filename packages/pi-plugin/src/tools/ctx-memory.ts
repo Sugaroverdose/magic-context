@@ -238,8 +238,10 @@ function formatMemoryList(memories: Memory[]): string {
 			r.updated.padEnd(widths.updated),
 			r.content,
 		].join(" | ");
+	// `get` returns rows of any status; claim "active" only when every row is.
+	const allActive = memories.every((memory) => memory.status === "active");
 	return [
-		`Found ${rows.length} active ${rows.length === 1 ? "memory" : "memories"}:`,
+		`Found ${rows.length} ${allActive ? "active " : ""}${rows.length === 1 ? "memory" : "memories"}:`,
 		"",
 		fmt(headers),
 		[

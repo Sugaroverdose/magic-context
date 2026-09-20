@@ -12621,10 +12621,13 @@ impl McHandler {
                         } else {
                             ""
                         };
+                        // `get` returns rows of any status; claim "active" only when every row is.
+                        let all_active = rows.iter().all(|memory| memory.status == "active");
                         mcp_text_result(
                             format!(
-                                "Found {} active {}:\n\n{body}{mirror_note}",
+                                "Found {} {}{}:\n\n{body}{mirror_note}",
                                 rows.len(),
+                                if all_active { "active " } else { "" },
                                 if rows.len() == 1 {
                                     "memory"
                                 } else {

@@ -1,6 +1,7 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 
 import { getAuthorityManagedMarker } from "../../features/magic-context/context-authority";
+import { describeUnresolvedProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { getLastIndexedOrdinal } from "../../features/magic-context/message-index";
 import {
     compileSurfaceCondition,
@@ -440,7 +441,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                         return "Error: Smart notes require dreamer to be enabled. Enable dreamer in magic-context.jsonc to use surface_condition.";
                     }
                     if (!projectIdentity) {
-                        return "Error: Could not resolve project identity for smart note.";
+                        return `Error: Could not resolve project identity for smart note: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
                     }
                     const smartSurfaceCondition = args.surface_condition.trim();
                     const compilation = await compileSurfaceCondition(smartSurfaceCondition, {
@@ -464,7 +465,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
 
             if (action === "dismiss") {
                 if (!projectIdentity) {
-                    return "Error: Could not resolve project identity for note dismiss.";
+                    return `Error: Could not resolve project identity for note dismiss: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
                 }
                 const ids = noteIds as number[];
                 if (ids.length === 1) {
@@ -502,7 +503,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                     return "Error: Provide 'content' and/or 'surface_condition' to update.";
                 }
                 if (!projectIdentity) {
-                    return "Error: Could not resolve project identity for note update.";
+                    return `Error: Could not resolve project identity for note update: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
                 }
                 const updated = updateNote(deps.db, noteId, updates, {
                     projectPath: projectIdentity,
