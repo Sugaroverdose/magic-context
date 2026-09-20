@@ -1006,7 +1006,7 @@ dependencies = [
 
 [[package]]
 name = "subc-cgroup"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tokio",
 ]
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "subc-core"
-version = "0.20.0"
+version = "0.20.2"
 dependencies = [
  "base64",
  "cortexkit-log",
@@ -1061,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "subc-daemon"
-version = "0.20.0"
+version = "0.20.2"
 dependencies = [
  "cortexkit-log",
  "cortexkit-paths",
