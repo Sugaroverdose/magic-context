@@ -27,12 +27,13 @@ import { Database } from "bun:sqlite";
  *
  * By default the process stays alive and scans every 60 seconds. Use --once from
  * launchd/cron or for a manual pass. --send is the only switch that opens subc;
- * without it, each new event is printed as one JSON line.
+ * without it, each new event is printed as one JSON line. Sending delivers a
+ * high-urgency registry peer message through prefrontal-core's agent.deliver op.
  */
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
-import { SubcClient } from "@cortexkit/subc-client";
+import { type ManagedCallOptions, SubcClient } from "@cortexkit/subc-client";
 
 import { getDataDir, getMagicContextStorageDir } from "../src/shared/data-path";
 import { resolveOpenCodeDbPath } from "../src/shared/opencode-db-path";
@@ -50,8 +51,12 @@ const DEFAULT_INTERVAL_MS = 60_000;
 const MIN_INTERVAL_MS = 60_000;
 const MAX_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_LOOKBACK_MS = 5 * 60_000;
-const DEFAULT_WAKE_MODULE_ID = "prefrontal";
-const WAKE_EVENT_METHOD = "wake.event_record";
+const DEFAULT_WAKE_MODULE_ID = "prefrontal-core";
+const DEFAULT_WAKE_AGENT_ID = "agent_b613e5cf2ee55b8c";
+const DEFAULT_WAKE_FROM_AGENT = "mc-cache-bust-sentinel";
+const SENTINEL_FROM_SESSION_ID = "health-sentinel-mc";
+const SENTINEL_FROM_HARNESS = "magic-context";
+const AGENT_DELIVER_METHOD = "agent.deliver";
 const PI_ANALYZER_MODULE = "../../pi-plugin/scripts/analyze-pi-cache-busts";
 
 export type CacheBustHarness = "opencode" | "pi";
@@ -66,6 +71,8 @@ export interface CacheBustSentinelOptions {
     rustStorePath: string;
     connectionFile: string;
     wakeModuleId: string;
+    wakeAgentId: string;
+    wakeFromAgent: string;
     anthropicDir?: string;
     openaiDir?: string;
     piDir?: string;
@@ -100,12 +107,28 @@ export interface CacheBustEvent {
     };
 }
 
-export type WakeEventRecordReply =
-    | { accepted: true; fire_id: string }
-    | {
-          accepted: false;
-          reason: "unowned_session" | "dedup" | "superseded";
-      };
+export interface AgentDeliverRequest {
+    agent_id: string;
+    delivery_id: string;
+    body: {
+        kind: "peer_message";
+        from_agent: string;
+        from_session_id: "health-sentinel-mc";
+        from_harness: "magic-context";
+        content: string;
+    };
+    urgency: "high";
+    expected_residence_epoch?: number;
+}
+
+export interface AgentDeliverReply {
+    disposition: "delivered" | "queued";
+    committed_order: number;
+}
+
+export type AgentDeliverOutcome =
+    | (AgentDeliverReply & { accepted: true; contractViolation?: true })
+    | (AgentDeliverReply & { accepted: false; reason: "dedup" });
 
 export interface CacheBustTransport {
     record(event: CacheBustEvent): Promise<unknown>;
@@ -128,10 +151,16 @@ interface SentWindowState {
     eventIds: string[];
 }
 
+interface SentDeliveryState {
+    disposition: AgentDeliverReply["disposition"];
+    committedOrder: number;
+}
+
 export interface CacheBustSentinelState {
     version: 1;
     sessions: Record<string, SessionWatermarkState>;
     windows: Record<string, SentWindowState>;
+    deliveries: Record<string, SentDeliveryState>;
 }
 
 export interface BustWindow {
@@ -150,9 +179,8 @@ export interface SentinelCounters {
     skippedSeen: number;
     dryRun: number;
     accepted: number;
-    unownedSession: number;
     dedup: number;
-    superseded: number;
+    sendRefused: number;
 }
 
 interface SentinelRunDeps {
@@ -185,7 +213,7 @@ export class CacheBustSentinelInputError extends Error {
 }
 
 function defaultState(): CacheBustSentinelState {
-    return { version: STATE_VERSION, sessions: {}, windows: {} };
+    return { version: STATE_VERSION, sessions: {}, windows: {}, deliveries: {} };
 }
 
 function finiteNonnegative(value: unknown): number | undefined {
@@ -209,7 +237,8 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
     const root = recordValue(parsed);
     const sessions = recordValue(root?.sessions);
     const windows = recordValue(root?.windows);
-    if (root?.version !== STATE_VERSION || !sessions || !windows) {
+    const deliveries = root?.deliveries === undefined ? {} : recordValue(root.deliveries);
+    if (root?.version !== STATE_VERSION || !sessions || !windows || !deliveries) {
         throw new CacheBustSentinelInputError(`unsupported sentinel state at ${path}`);
     }
 
@@ -248,6 +277,23 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
             eventIds: [...row.eventIds],
         };
     }
+    for (const [deliveryId, raw] of Object.entries(deliveries)) {
+        const row = recordValue(raw);
+        const committedOrder = finiteNonnegative(row?.committedOrder);
+        if (
+            (row?.disposition !== "delivered" && row?.disposition !== "queued") ||
+            committedOrder === undefined ||
+            !Number.isSafeInteger(committedOrder)
+        ) {
+            throw new CacheBustSentinelInputError(
+                `invalid delivery state ${deliveryId} in ${path}`,
+            );
+        }
+        state.deliveries[deliveryId] = {
+            disposition: row.disposition,
+            committedOrder,
+        };
+    }
     return state;
 }
 
@@ -276,6 +322,8 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
         "--rust-store",
         "--connection-file",
         "--wake-module-id",
+        "--wake-agent-id",
+        "--wake-from-agent",
         "--anthropic-dir",
         "--openai-dir",
         "--pi-dir",
@@ -321,6 +369,8 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
             values.get("--connection-file") ??
             join(getDataDir(), "cortexkit", "run", "subc-connection.json"),
         wakeModuleId: values.get("--wake-module-id") ?? DEFAULT_WAKE_MODULE_ID,
+        wakeAgentId: values.get("--wake-agent-id") ?? DEFAULT_WAKE_AGENT_ID,
+        wakeFromAgent: values.get("--wake-from-agent") ?? DEFAULT_WAKE_FROM_AGENT,
         anthropicDir: values.get("--anthropic-dir"),
         openaiDir: values.get("--openai-dir"),
         piDir: values.get("--pi-dir"),
@@ -738,32 +788,116 @@ export function eventForWindow(
     return event;
 }
 
-export function parseWakeEventRecordReply(value: unknown): WakeEventRecordReply {
-    const row = recordValue(value);
-    if (row?.accepted === true && typeof row.fire_id === "string" && row.fire_id.length > 0) {
-        return { accepted: true, fire_id: row.fire_id };
+export function agentDeliverRequest(
+    event: CacheBustEvent,
+    agentId: string,
+    fromAgent: string,
+): AgentDeliverRequest {
+    return {
+        agent_id: agentId,
+        delivery_id: event.vendor_event_id,
+        body: {
+            kind: "peer_message",
+            from_agent: fromAgent,
+            from_session_id: SENTINEL_FROM_SESSION_ID,
+            from_harness: SENTINEL_FROM_HARNESS,
+            content: `${event.session_id}: cache bust detected in directory ${event.directory} at ${event.payload.at}; rewritten_tokens=${event.payload.rewritten_tokens}; divergence_class=${event.payload.divergence_class}; first_divergence=${event.payload.first_divergence}; analyzer_cmd=${event.payload.analyzer_cmd}`,
+        },
+        urgency: "high",
+    };
+}
+
+export function parseAgentDeliverReply(
+    value: unknown,
+    previous?: AgentDeliverReply,
+): AgentDeliverOutcome {
+    const envelope = recordValue(value);
+    const result = recordValue(envelope?.result);
+    if (result && envelope && Object.keys(envelope).length !== 1) {
+        throw new CacheBustSentinelInputError(
+            `malformed ${AGENT_DELIVER_METHOD} reply: ${JSON.stringify(value)}`,
+        );
     }
+    const row = result ?? envelope;
+    const keys = row ? Object.keys(row).sort() : [];
     if (
-        row?.accepted === false &&
-        (row.reason === "unowned_session" || row.reason === "dedup" || row.reason === "superseded")
+        !row ||
+        keys.length !== 2 ||
+        keys[0] !== "committed_order" ||
+        keys[1] !== "disposition" ||
+        !Number.isSafeInteger(row.committed_order) ||
+        (row.committed_order as number) < 0
     ) {
-        return { accepted: false, reason: row.reason };
+        throw new CacheBustSentinelInputError(
+            `malformed ${AGENT_DELIVER_METHOD} reply: ${JSON.stringify(value)}`,
+        );
     }
-    throw new CacheBustSentinelInputError(
-        `malformed ${WAKE_EVENT_METHOD} reply: ${JSON.stringify(value)}`,
-    );
+    if (row.disposition === "idempotency_conflict") {
+        throw new CacheBustSentinelInputError(
+            `${AGENT_DELIVER_METHOD} idempotency_conflict: a delivery id was reused with different content`,
+        );
+    }
+    if (row.disposition !== "delivered" && row.disposition !== "queued") {
+        throw new CacheBustSentinelInputError(
+            `malformed ${AGENT_DELIVER_METHOD} reply: ${JSON.stringify(value)}`,
+        );
+    }
+    const reply: AgentDeliverReply = {
+        disposition: row.disposition,
+        committed_order: row.committed_order as number,
+    };
+    if (!previous) return { ...reply, accepted: true };
+    if (reply.committed_order < previous.committed_order) {
+        throw new CacheBustSentinelInputError(
+            `${AGENT_DELIVER_METHOD} committed_order regressed from ${previous.committed_order} to ${reply.committed_order}`,
+        );
+    }
+    if (reply.committed_order === previous.committed_order) {
+        return { ...reply, accepted: false, reason: "dedup" };
+    }
+    return { ...reply, accepted: true, contractViolation: true };
+}
+
+export interface SubcWakeClient {
+    call(
+        moduleId: string,
+        method: string,
+        params?: unknown,
+        options?: ManagedCallOptions,
+    ): Promise<unknown>;
+    close(): void;
+}
+
+export type SubcWakeClientFactory = (options: {
+    connectionFile: string;
+    handshakeTimeoutMs: number;
+}) => Promise<SubcWakeClient>;
+
+const connectSubcWakeClient: SubcWakeClientFactory = async (options) =>
+    await SubcClient.connect(options);
+
+function errorCode(error: unknown): string | undefined {
+    if (!error || typeof error !== "object" || !("code" in error)) return undefined;
+    return typeof error.code === "string" ? error.code : undefined;
+}
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }
 
 export class SubcWakeEventTransport implements CacheBustTransport {
-    private clientPromise: Promise<SubcClient> | null = null;
+    private clientPromise: Promise<SubcWakeClient> | null = null;
 
     constructor(
         private readonly connectionFile: string,
         private readonly moduleId = DEFAULT_WAKE_MODULE_ID,
+        private readonly agentId = DEFAULT_WAKE_AGENT_ID,
+        private readonly fromAgent = DEFAULT_WAKE_FROM_AGENT,
+        private readonly connect: SubcWakeClientFactory = connectSubcWakeClient,
     ) {}
 
-    private client(): Promise<SubcClient> {
-        this.clientPromise ??= SubcClient.connect({
+    private client(): Promise<SubcWakeClient> {
+        this.clientPromise ??= this.connect({
             connectionFile: this.connectionFile,
             handshakeTimeoutMs: 2_000,
         });
@@ -776,15 +910,29 @@ export class SubcWakeEventTransport implements CacheBustTransport {
             isAbsolute(event.directory) && existsSync(event.directory)
                 ? event.directory
                 : process.cwd();
-        return await client.call(this.moduleId, WAKE_EVENT_METHOD, event, {
-            identity: {
-                project_root: projectRoot,
-                harness: "magic-context",
-                session: event.session_id,
-            },
-            consumerIdentity: null,
-            timeoutMs: 15_000,
-        });
+        try {
+            return await client.call(
+                this.moduleId,
+                AGENT_DELIVER_METHOD,
+                agentDeliverRequest(event, this.agentId, this.fromAgent),
+                {
+                    identity: {
+                        project_root: projectRoot,
+                        harness: "magic-context",
+                        session: event.session_id,
+                    },
+                    consumerIdentity: null,
+                    timeoutMs: 15_000,
+                },
+            );
+        } catch (error) {
+            if (errorCode(error) === "idempotency_conflict") {
+                throw new CacheBustSentinelInputError(
+                    `${AGENT_DELIVER_METHOD} idempotency_conflict for delivery_id=${event.vendor_event_id}: the same cache-bust window produced different content`,
+                );
+            }
+            throw error;
+        }
     }
 
     async close(): Promise<void> {
@@ -804,20 +952,14 @@ function emptyCounters(): SentinelCounters {
         skippedSeen: 0,
         dryRun: 0,
         accepted: 0,
-        unownedSession: 0,
         dedup: 0,
-        superseded: 0,
+        sendRefused: 0,
     };
 }
 
-function recordReply(counters: SentinelCounters, reply: WakeEventRecordReply): void {
-    if (reply.accepted) {
-        counters.accepted += 1;
-        return;
-    }
-    if (reply.reason === "unowned_session") counters.unownedSession += 1;
-    else if (reply.reason === "dedup") counters.dedup += 1;
-    else counters.superseded += 1;
+function recordReply(counters: SentinelCounters, reply: AgentDeliverOutcome): void {
+    if (reply.accepted) counters.accepted += 1;
+    else counters.dedup += 1;
 }
 
 function updateOpenWindowState(
@@ -856,7 +998,12 @@ export async function runSentinelOnce(
     counters.sessions = sessions.length;
     const transport = options.send
         ? (deps.transport ??
-          new SubcWakeEventTransport(options.connectionFile, options.wakeModuleId))
+          new SubcWakeEventTransport(
+              options.connectionFile,
+              options.wakeModuleId,
+              options.wakeAgentId,
+              options.wakeFromAgent,
+          ))
         : null;
 
     try {
@@ -909,12 +1056,56 @@ export async function runSentinelOnce(
                     counters.dryRun += 1;
                     continue;
                 }
-                const reply = parseWakeEventRecordReply(await transport.record(event));
+                let wireReply: unknown;
+                try {
+                    wireReply = await transport.record(event);
+                } catch (error) {
+                    const code = errorCode(error);
+                    if (code !== "peer_delivery_refused") throw error;
+                    counters.sendRefused += 1;
+                    stderr(
+                        JSON.stringify({
+                            event_id: event.vendor_event_id,
+                            outcome: `send_refused:${code}`,
+                            error: errorMessage(error),
+                            counters,
+                        }),
+                    );
+                    continue;
+                }
+                const priorDelivery = state.deliveries[event.vendor_event_id];
+                const reply = parseAgentDeliverReply(
+                    wireReply,
+                    priorDelivery
+                        ? {
+                              disposition: priorDelivery.disposition,
+                              committed_order: priorDelivery.committedOrder,
+                          }
+                        : undefined,
+                );
                 recordReply(counters, reply);
+                if (reply.accepted) {
+                    state.deliveries[event.vendor_event_id] = {
+                        disposition: reply.disposition,
+                        committedOrder: reply.committed_order,
+                    };
+                    saveSentinelState(options.stateFile, state);
+                }
+                if (reply.accepted && reply.contractViolation) {
+                    stderr(
+                        JSON.stringify({
+                            kind: "agent_deliver_contract_violation",
+                            delivery_id: event.vendor_event_id,
+                            previous_committed_order: priorDelivery?.committedOrder,
+                            reply: wireReply,
+                        }),
+                    );
+                }
                 stderr(
                     JSON.stringify({
                         event_id: event.vendor_event_id,
-                        reply,
+                        reply: wireReply,
+                        outcome: reply,
                         counters,
                     }),
                 );
