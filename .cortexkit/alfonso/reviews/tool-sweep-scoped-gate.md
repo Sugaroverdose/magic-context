@@ -2,6 +2,8 @@
 
 ## Verdict: BLOCK
 
+Updated after merging master `955f54750c03af5339cb70179242489c4fc14166`, including marker atomicity change `41e112a0`. Sequence 11 below passes the new ordinary/refusal paths with both mutation controls red, but independently reproduces a second pre-fix-to-fixed upgrade prefix bust. Both cache-path changes gate the same dist rebuild; the combined verdict remains **BLOCK**. Earlier sequence evidence is retained with its original revision identified; sequence 10 was rerun after this merge and still fails.
+
 Two product defects were executed, not inferred: pre-fix marker-seam upgrade loses a previously served reasoning-only assistant on the first fixed-build defer; clone inheritance discards the adoption marker. A third distinction matters: even fixed-to-fixed restart preserves provider bytes but does **not** preserve the raw transform served array at this seam (an empty dropped-tool shell disappears). No product edits are included.
 
 This is not a complete ten-sequence certification. HARD publication/fold and two-process mid-defer concurrency remain unexecuted. The matrix below explicitly distinguishes actual executions, narrower coverage, and gaps. The observed upgrade failure alone blocks shipment under the requested invariant.
@@ -158,3 +160,106 @@ The upgrade/clone defects are unmutated reds, not claimed as mutation controls. 
 - Passing targeted transform, policy, Pi and old-reader checks; existing real-host seam regression passes after mutation restoration.
 - Upgrade and raw restart pins intentionally red when enabled with the environment shown. Clone defect is an executable todo, matching the nearby existing known-defect convention. No passing test was rewritten into the opposite claim.
 - The report and test/harness changes are the deliverable; there are no product changes, no architecture edits, and no broad build/lint claim.
+
+## Sequence 11: marker drain / delivered trim atomicity
+
+### Executed revisions and harness
+
+`git merge master` was performed from a clean gate branch; master resolved to `955f54750c03af5339cb70179242489c4fc14166`. `git merge-base --is-ancestor 41e112a0 HEAD` returned success. No product changes were made by this follow-up: the new product implementation is inherited from that merge.
+
+A separate detached worktree at `/tmp/marker-gate-prefixed-954` holds `e27fc7f03b1c9f1a359d8c4ce88f340b3c4486c6`, before the atomic marker/trim fix but after scoped-sweep adoption. Frozen dependency install passed there. All three arms below use OpenCode 1.18.30, the actual TS plugin, actual host/context SQLite stores, and actual marker application—not mocked marker strategies.
+
+### 11a. Fixed-to-fixed dropped-boundary arm — PASS
+
+Command:
+
+```sh
+bun test packages/e2e-tests/scripts/ckios-reasoning-only-probe.test.ts
+```
+
+Named test: **dropped marker boundary must not advance before the served prefix is trimmed** (now an ordinary enabled test from master).
+
+Captured `/tmp/marker-final-green-954.log:6-7`:
+
+```
+MARKER_GATE dropped-boundary A=3c942dca884841e71c21a2ffce5815f6b0e20bc81411385b02d817682f568a33 B_prefix=3c942dca884841e71c21a2ffce5815f6b0e20bc81411385b02d817682f568a33 first_divergence=-1
+(pass) dropped marker boundary must not advance before the served prefix is trimmed
+```
+
+The existing assertion also verifies the served prefix does not retain `[dropped §3§]`. Hashes here are provider-message prefixes with cache-control omitted. This statement does not claim raw hook equality.
+
+### 11b. Pre-fix drain A → fixed-build defer B — RED, BLOCK
+
+Command:
+
+```sh
+MC_GATE_BOUNDARY=1 MC_PROBE_EXPECT_ADOPTED=1 \
+MC_PROBE_UPGRADE_FROM=/tmp/marker-gate-prefixed-954/packages/plugin/src/index.ts \
+  bun test packages/e2e-tests/scripts/tool-sweep-upgrade-gate.test.ts
+```
+
+Named red: **marker boundary upgrade preserves pre-fix priced drain prefix**.
+
+The test verifies the seeded boundary is an assistant containing a tool part; exactly one tool tag owns that assistant and is `status=dropped, drop_mode=full`. Before reaching the equality assertion it proves pre-fix A logged `decision=execute` and marker application at ordinal 6, the ledger already contains scoped-sweep adoption, and fixed B logged `decision=defer`. The old process is terminated and the fixed process reuses its exact host/context DB directories.
+
+Captured `/tmp/marker-upgrade-final-954.log:4,14-18`:
+
+```
+aSha256=eb70b689dd32b491c2a83e20b227d485b1f9542cf9144c98cdfff8ec42dc4755
+bPrefixSha256=b12474fd3383f00ce2c3cc357cca193fab52d119773c1a0df900d6e2edd86829
+firstDivergence=1 targetA=53 targetB=49
+hookASha256=72bbe23243a3fbc1176a81ffb43c7c8661f82b758743da16921bc62ae7cbfe02
+hookBPrefixSha256=8fc0ceec05ce5d3ed3c071f48c4532f4b73ea6a8dfcc7c9b26251e69ee5eab73
+hookFirstDivergence=3
+(fail) marker boundary upgrade preserves pre-fix priced drain prefix
+```
+
+Eleven assertions ran; only the final provider-prefix assertion failed. Full captures, including the boundary-owner/tag proof, are retained at `/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/scoped-upgrade-gate-g492jI/`.
+
+This is independent of the missing scoped-sweep marker in sequence 10: adoption is already present here, and the reasoning target survives, but moves four provider entries left. The old code priced and committed a boundary without removing all older served rows. The upgraded host's defer reflects the persisted marker and omits those previously served rows. Correct future atomic drains do not retroactively price that transition. An upgrade replay/migration strategy must address already-committed marker state versus the durable last-served prefix; simply refusing future unproven drains does not satisfy this historical-byte gate.
+
+### 11c. Unprovable trim refusal → next provable pass → defer — PASS
+
+Command:
+
+```sh
+bun test packages/e2e-tests/scripts/tool-sweep-marker-refusal-gate.test.ts
+```
+
+Named test: **marker refusal preserves persisted row until next provable pass advances once**.
+
+The before-plugin injects one id-less user row into index 2 of A only. This intentionally invalidates immutable source-order proof outside the permitted synthetic head. It does not mock the transform, SQLite persistence, or marker strategy. A remains a priced pass. Its response reports high usage so the immediately following clean pass can price a successful trim. A final low-usage defer checks no second marker advancement.
+
+Captured `/tmp/marker-final-green-954.log:10-14`:
+
+```
+MARKER_GATE pass=0 sha256=07b137f17377b41ec39d574cd936c9f7106dee0d56c01799e9c1e3043f673eca first_divergence=-1
+MARKER_GATE pass=1 sha256=266ea38bc619bc68710e76c03cfcdafe271a3b0b93a355d391921d90fb3c3a4c first_divergence=1
+MARKER_GATE pass=2 sha256=ce3208ccaa237e6165feaf40f88a2d2d891f43f2d728997e3837bfaf0281c476 first_divergence=-1
+(pass) marker refusal preserves persisted row until next provable pass advances once
+```
+
+The complete serialized marker columns are asserted equal before/after refusal: `compaction_marker_state` stays the empty string; the exact pending ordinal-6 blob stays unchanged. On retry, pending becomes null and persisted `boundaryOrdinal` becomes 6. After the subsequent defer, both serialized columns equal the retry snapshot exactly. The log contains exactly one `compaction-marker drain: applied at ordinal 6`.
+
+Self-describing refusal records were captured in the first successful run at `/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/marker-refusal-gate-MHedte/marker-dropped-boundary.log:1820,1825,1887`:
+
+- `prefix trim: boundary ...; pass=priced; no in-pass trim applied (source message at index 2 has no stable id outside the synthetic head)`.
+- `compaction-marker drain: refusing ordinal 6 because prefix trim through ... was not proven; preserving deferred history refresh signal`.
+- One subsequent `compaction-marker drain: applied at ordinal 6`.
+
+Final restored-product artifacts: `/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/marker-refusal-gate-K8Kdw2/`. The changing complete pass-2 hash includes newly appended messages; its previous-prefix divergence is `-1`, not a claim that whole arrays of different lengths match.
+
+### Sequence 11 mutation proofs
+
+1. **Exact-ID-only rollback:** force `trimToPreparedPrefix` to take its exact-live-ID fallback rather than immutable source-order proof. `inject-compartments.ts` changed +1/-1 with `NON-VACUITY BREAK`; staged live state was clean first. `/tmp/marker-mut-exact-id-954.log:13-17`: **dropped marker boundary must not advance before the served prefix is trimmed** fails because A still contains `[dropped §3§]`. Exactly one failure, one unrelated test filtered. Restored via checkout plus touch; unstaged diff empty afterward.
+2. **Commit despite non-applied trim:** change `deliveredPrefixWasTrimmedThroughPendingBoundary` so a delivered result with status other than `applied` can prove the boundary. `transform-postprocess-phase.ts` changed +1/-1 with `NON-VACUITY BREAK`; staged live state was clean first. `/tmp/marker-mut-refusal-954.log:18-28`: **marker refusal preserves persisted row until next provable pass advances once** fails at the *persisted state comparison*, not merely the log assertion: marker advanced from empty to ordinal 6 and pending was cleared on the refused pass. Exactly one failure. Restored via checkout plus touch; unstaged diff empty afterward.
+
+Both ordinary host tests and the refusal/retry test then passed together: `/tmp/marker-final-green-954.log:16-19`, `3 pass, 0 fail, 20 expect() calls`.
+
+### Combined rebuild gate
+
+The original scoped-sweep upgrade was rerun after merging the second fix. `/tmp/scoped-upgrade-postmerge-954.log:4,18` still shows provider divergence 50, target `51 → -1`, and the same `bee64...` versus `5dfa...` hashes. Therefore neither the first BLOCK nor the second upgrade red is stale evidence against only the superseded base.
+
+E2E TypeScript check was rerun after the final new assertions. `/tmp/marker-e2e-tsc-final-954.log` contains the same twelve baseline diagnostics in unrelated rust-harness/opencode2/retina resolution/command-handler paths; none name changed gate scripts. The executable host gates run the changed scripts directly. No product files or package manifests/lockfiles are changed by this follow-up, beyond the explicitly requested merge of master.
+
+Final tightening: the upgrade test now checks only log bytes appended **after** the pre-restart capture for `decision=defer`, and rejects `decision=execute` in that suffix. `/tmp/marker-upgrade-restart-proof-954.log:4,18-22` still fails at provider-prefix equality after 12 assertions, with identical provider hashes and divergence index 1. Artifact directory: `/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/scoped-upgrade-gate-jnDaBA/`. `bun run --cwd packages/plugin typecheck` passed on merged master; final E2E tsc retains only the documented baseline errors. Comment review found no unclear new comments.

@@ -35,9 +35,11 @@ for (const lane of ["plain", "mc", "marker", "marker-drops", "marker-dropped-bou
     const { baseURL } = await mock.start();
     mock.setDefault({ text: "finished", usage: { input_tokens: 1000, output_tokens: 1 } });
     mock.addMatcher(body => JSON.stringify(body.messages).includes("Generate a title for this conversation:") ? { text: "Fixture", usage: { input_tokens: 10, output_tokens: 1 } } : null);
+    const refuseTrim = process.env.MC_PROBE_REFUSE_TRIM === "1";
     const probes = ["before", "after"].map(stage => {
         const path = `${output}/${lane}-${stage}-plugin.ts`;
-        writeFileSync(path, `import { appendFileSync } from 'node:fs';\nexport default async () => ({ 'experimental.chat.messages.transform': async (_input, output) => { appendFileSync(${JSON.stringify(`${output}/${lane}-${stage}.jsonl`)}, JSON.stringify(output.messages) + '\\n'); } });\n`);
+        const refusalInjection = refuseTrim && stage === "before" ? `if (!injected && output.messages.some(m => m.parts.some(p => p.type === 'text' && p.text.includes(${JSON.stringify(notice)})))) { injected = true; output.messages.splice(2, 0, { info: { role: 'user' }, parts: [{ type: 'text', text: 'unprovable trim fixture' }] }); }` : "";
+        writeFileSync(path, `import { appendFileSync } from 'node:fs';\nlet injected = false;\nexport default async () => ({ 'experimental.chat.messages.transform': async (_input, output) => { ${refusalInjection} appendFileSync(${JSON.stringify(`${output}/${lane}-${stage}.jsonl`)}, JSON.stringify(output.messages) + '\\n'); } });\n`);
         return `file://${path}`;
     });
     const upgradePlugin = process.env.MC_PROBE_UPGRADE_FROM;
@@ -104,15 +106,32 @@ for (const lane of ["plain", "mc", "marker", "marker-drops", "marker-dropped-bou
                     queuePendingOp(storageDb, id, tag.tag_number, "drop", Date.now());
                     db.query("UPDATE tags SET status = 'dropped', drop_mode = 'full' WHERE session_id = ? AND tag_number = ?").run(id, tag.tag_number);
                 }
+                if (lane === "marker-dropped-boundary") writeFileSync(`${output}/${lane}-boundary-fixture.json`, JSON.stringify({ boundary: history[endOrdinal - 1], tags: db.query("SELECT status, drop_mode, tool_owner_message_id FROM tags WHERE session_id = ? AND type = 'tool' AND tool_owner_message_id = ?").all(id, history[endOrdinal - 1].info.id) }, null, 2));
             } finally { db.close(); }
         }
+        const captureMarkerState = (label: string) => {
+            const db = openTestDb(resolve(host.env.dataDir, "cortexkit/magic-context/context.db"));
+            try {
+                const state = db.query("SELECT pending_compaction_marker_state, compaction_marker_state FROM session_meta WHERE session_id = ?").get(id);
+                writeFileSync(`${output}/${lane}-${label}-state.json`, JSON.stringify(state, null, 2));
+            } finally { db.close(); }
+        };
+        if (refuseTrim) captureMarkerState("before-refusal");
         const first = mock.requests().length;
         mock.script([
             { content: [{ type: "thinking", thinking: "NEWEST_THINKING", signature: "new-signature" }, { type: "tool_use", id: "tool-second", name: "bash", input: { command: "printf next", description: "fixture next" } }], stop_reason: "tool_use", usage: { input_tokens: 1000, output_tokens: 1 } },
             { text: "done", usage: { input_tokens: 1000, output_tokens: 1 } },
         ]);
-        if (upgradePlugin) mock.script([{ text: "upgrade boundary", usage: { input_tokens: 1000, output_tokens: 1 } }]);
+        if (upgradePlugin || refuseTrim) mock.script([{ text: "upgrade boundary", usage: { input_tokens: refuseTrim ? 140000 : 1000, output_tokens: 1 } }]);
         await prompt(notice, true);
+        if (refuseTrim) {
+            captureMarkerState("after-refusal");
+            await prompt("retry with provable source order", true);
+            captureMarkerState("after-retry");
+            await prompt("verify marker does not advance twice", true);
+            captureMarkerState("after-defer");
+            await Bun.sleep(750);
+        }
         if (upgradePlugin) {
             const env = host.env;
             // Let the 500ms logger flush scheduler and marker-drain records before shutdown.
