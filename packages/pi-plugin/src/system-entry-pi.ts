@@ -48,9 +48,11 @@ export function piPrefixInsertionIndex(messages: readonly unknown[]): number {
  *
  * Pi 0.86 `dist/utils/transcript.js:31-35` only examines `messages[0]` for the
  * initial system message, and lines 195-200 use that message's tools for
- * addition-capable transports. Its current tool and prompt folds skip non-system
- * messages (lines 43-45 and 62-64), so moving the displaced leading non-system
- * run below the selected system preserves Pi's effective system state.
+ * addition-capable transports. Its tool and prompt folds skip non-system messages
+ * (lines 43-45 and 62-64), but lines 101-103 preserve array order for transports
+ * that accept mid-conversation systems. Promoting the system therefore changes
+ * its order relative to displaced users; the index-zero initial-tools contract
+ * takes priority, while those users keep their relative order before MC history.
  */
 export function placePiInitialSystemAtHead(messages: unknown[]): number {
 	let firstSystemIndex = -1;
