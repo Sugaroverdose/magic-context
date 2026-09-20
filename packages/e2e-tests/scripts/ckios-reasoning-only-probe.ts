@@ -62,8 +62,9 @@ for (const lane of ["plain", "mc", "marker"].filter(lane => !process.env.MC_PROB
             const boundary = history[2].info.id;
             const db = openTestDb(resolve(host.env.dataDir, "cortexkit/magic-context/context.db"));
             try {
-                appendCompartments(db, id, [{ sequence: 0, startMessage: 1, endMessage: 3, startMessageId: history[0].info.id, endMessageId: boundary, title: "Compacted fixture", content: "Older fixture history." }]);
-                setPendingCompactionMarkerState(db, id, { ordinal: 3, endMessageId: boundary, publishedAt: Date.now() });
+                const storageDb = db as unknown as Parameters<typeof appendCompartments>[0];
+                appendCompartments(storageDb, id, [{ sequence: 0, startMessage: 1, endMessage: 3, startMessageId: history[0].info.id, endMessageId: boundary, title: "Compacted fixture", content: "Older fixture history." }]);
+                setPendingCompactionMarkerState(storageDb, id, { ordinal: 3, endMessageId: boundary, publishedAt: Date.now() });
             } finally { db.close(); }
             // Reload the plugin so startup restores the pending marker's deferred signals.
             await client.instance.dispose({ query: { directory: host.env.workdir }, throwOnError: true });
