@@ -401,6 +401,8 @@ export interface TagMessagesOptions {
      * per session, so message shape stays stable.
      */
     skipPrefixInjection?: boolean;
+    /** Prune only tool-drop owners; callers enable this after persisting cache-safe session adoption. */
+    scopedToolSweep?: boolean;
     /** @internal diagnostic hook used by cache-stability/perf tests. */
     onToolOwnerFallbackLookup?: (lookup: ToolOwnerFallbackLookup) => void;
 }
@@ -458,7 +460,7 @@ export function tagMessages(
     // FIFO logic and double-pop the queue. Parts are object references
     // (the same `unknown` instance walked twice in the loop).
     const ownerByPartKey = new Map<unknown, { ownerMsgId: string; callId: string }>();
-    const batch = new ToolMutationBatch(messages);
+    const batch = new ToolMutationBatch(messages, options.scopedToolSweep);
     // Inert whitespace rows are replayed by (message, whitespace rank), not by
     // session-wide number membership: after a part-id remap the ordinal fallback
     // offers whichever inert row sits at the current ordinal, and two inert parts
