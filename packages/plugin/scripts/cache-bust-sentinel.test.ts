@@ -17,6 +17,8 @@ import {
 import {
     __test,
     type ActiveCacheBustSession,
+    agentDeliverRequest,
+    type AgentDeliverReply,
     type CacheBustEvent,
     CacheBustSentinelInputError,
     type CacheBustSentinelOptions,
@@ -25,9 +27,11 @@ import {
     groupBustWindows,
     loadSentinelState,
     loadSessionDecisions,
-    parseWakeEventRecordReply,
+    parseAgentDeliverReply,
+    parseSentinelArgs,
     runSentinelOnce,
-    type WakeEventRecordReply,
+    saveSentinelState,
+    SubcWakeEventTransport,
 } from "./cache-bust-sentinel";
 
 const temporaryDirectories: string[] = [];
@@ -72,7 +76,9 @@ function options(stateFile: string): CacheBustSentinelOptions {
         databasePath: join(stateFile, "missing-context.db"),
         rustStorePath: join(stateFile, "missing-store.db"),
         connectionFile: join(stateFile, "missing-subc.json"),
-        wakeModuleId: "prefrontal",
+        wakeModuleId: "prefrontal-core",
+        wakeAgentId: "agent_b613e5cf2ee55b8c",
+        wakeFromAgent: "mc-cache-bust-sentinel",
     };
 }
 
@@ -355,11 +361,175 @@ describe("MC decision store joins", () => {
     });
 });
 
-describe("wake.event_record reply contract", () => {
-    test("rejects malformed replies as typed input errors", () => {
-        expect(() => parseWakeEventRecordReply({ accepted: false, reason: "retry" })).toThrow(
-            CacheBustSentinelInputError,
+describe("agent.deliver contract", () => {
+    test("parses delivered, queued, and replayed committed orders", () => {
+        expect(
+            parseAgentDeliverReply({
+                result: { disposition: "delivered", committed_order: 41 },
+            }),
+        ).toEqual({ disposition: "delivered", committed_order: 41, accepted: true });
+        expect(parseAgentDeliverReply({ disposition: "queued", committed_order: 42 })).toEqual({
+            disposition: "queued",
+            committed_order: 42,
+            accepted: true,
+        });
+        expect(
+            parseAgentDeliverReply(
+                { result: { disposition: "delivered", committed_order: 41 } },
+                { disposition: "queued", committed_order: 41 },
+            ),
+        ).toEqual({
+            disposition: "delivered",
+            committed_order: 41,
+            accepted: false,
+            reason: "dedup",
+        });
+    });
+
+    test("rejects conflicts, unknown dispositions, and extra reply keys", () => {
+        expect(() =>
+            parseAgentDeliverReply({
+                result: {
+                    disposition: "idempotency_conflict",
+                    committed_order: 41,
+                },
+            }),
+        ).toThrow("idempotency_conflict");
+        expect(() =>
+            parseAgentDeliverReply({ disposition: "recorded", committed_order: 41 }),
+        ).toThrow(CacheBustSentinelInputError);
+        expect(() =>
+            parseAgentDeliverReply({
+                disposition: "delivered",
+                committed_order: 41,
+                extra: true,
+            }),
+        ).toThrow(CacheBustSentinelInputError);
+    });
+
+    test("sends the exact snake-case request fixture and keeps route identity in call options", async () => {
+        const state = __test.defaultState();
+        const [window] = groupBustWindows([request(50_000)]);
+        const event = eventForWindow(window, "/tmp", state) as CacheBustEvent;
+        const content =
+            "ses_sentinel: cache bust detected in directory /tmp at 1970-01-01T00:00:50.000Z; rewritten_tokens=123; divergence_class=unaccounted_rewrite; first_divergence=message[4] role=assistant; analyzer_cmd=cd packages/plugin && bun scripts/analyze-cache-busts.ts --session ses_sentinel";
+        const fixture = {
+            agent_id: "agent_fixture",
+            delivery_id: cacheBustWindowId("ses_sentinel", 50_000),
+            body: {
+                kind: "peer_message" as const,
+                from_agent: "mc-cache-bust-sentinel",
+                from_session_id: "health-sentinel-mc" as const,
+                from_harness: "magic-context" as const,
+                content,
+            },
+            urgency: "high" as const,
+        };
+        const calls: Array<{
+            moduleId: string;
+            method: string;
+            params: unknown;
+            options: unknown;
+        }> = [];
+        let closed = false;
+        const transport = new SubcWakeEventTransport(
+            "fixture-connection.json",
+            "prefrontal-core",
+            "agent_fixture",
+            "mc-cache-bust-sentinel",
+            async () => ({
+                async call(moduleId, method, params, callOptions) {
+                    calls.push({ moduleId, method, params, options: callOptions });
+                    return { result: { disposition: "delivered", committed_order: 41 } };
+                },
+                close() {
+                    closed = true;
+                },
+            }),
         );
+
+        expect(
+            agentDeliverRequest(event, "agent_fixture", "mc-cache-bust-sentinel"),
+        ).toEqual(fixture);
+        expect(Object.keys(fixture)).toEqual(["agent_id", "delivery_id", "body", "urgency"]);
+        expect(Object.keys(fixture.body)).toEqual([
+            "kind",
+            "from_agent",
+            "from_session_id",
+            "from_harness",
+            "content",
+        ]);
+        expect(await transport.record(event)).toEqual({
+            result: { disposition: "delivered", committed_order: 41 },
+        });
+        await transport.close();
+
+        expect(calls).toEqual([
+            {
+                moduleId: "prefrontal-core",
+                method: "agent.deliver",
+                params: fixture,
+                options: {
+                    identity: {
+                        project_root: "/tmp",
+                        harness: "magic-context",
+                        session: "ses_sentinel",
+                    },
+                    consumerIdentity: null,
+                    timeoutMs: 15_000,
+                },
+            },
+        ]);
+        expect(closed).toBe(true);
+    });
+
+    test("pins either missing peer-message stamp field to the captured sender refusal", () => {
+        const state = __test.defaultState();
+        const [window] = groupBustWindows([request(50_000)]);
+        const event = eventForWindow(window, "/tmp", state) as CacheBustEvent;
+        const complete = agentDeliverRequest(
+            event,
+            "agent_b613e5cf2ee55b8c",
+            "mc-cache-bust-sentinel",
+        );
+        const refusal = {
+            code: "peer_delivery_refused",
+            message:
+                "managed call failed: registry peer delivery refused: peer-message-sender-unstamped",
+        };
+
+        for (const missing of ["from_session_id", "from_harness"] as const) {
+            const body = { ...complete.body } as Partial<typeof complete.body>;
+            delete body[missing];
+            const outcome =
+                typeof body.from_session_id === "string" &&
+                body.from_session_id.length > 0 &&
+                typeof body.from_harness === "string" &&
+                body.from_harness.length > 0
+                    ? null
+                    : refusal;
+
+            expect(outcome, missing).toEqual(refusal);
+        }
+    });
+
+    test("defaults registry ids and accepts target and sender overrides", () => {
+        const defaults = parseSentinelArgs(["bun", "cache-bust-sentinel.ts", "--once"]);
+        const override = parseSentinelArgs([
+            "bun",
+            "cache-bust-sentinel.ts",
+            "--once",
+            "--wake-agent-id",
+            "agent_override",
+            "--wake-from-agent",
+            "agent_sender_override",
+        ]);
+
+        expect(defaults.wakeModuleId).toBe("prefrontal-core");
+        expect(defaults.wakeAgentId).toBe("agent_b613e5cf2ee55b8c");
+        expect(defaults.wakeFromAgent).toBe("mc-cache-bust-sentinel");
+        expect(override.wakeAgentId).toBe("agent_override");
+        expect(override.wakeFromAgent).toBe("agent_sender_override");
     });
 });
 
@@ -453,7 +623,7 @@ describe("cache-bust sentinel runs", () => {
         });
     });
 
-    test("calls the transport once per window and counts every disposition", async () => {
+    test("counts delivered and queued dispositions as accepted", async () => {
         const directory = temporaryDirectory("cache-bust-sentinel-send-");
         const runOptions = {
             ...options(join(directory, "state.json")),
@@ -461,20 +631,18 @@ describe("cache-bust sentinel runs", () => {
             lookbackMs: 1_000_000,
         };
         const calls: CacheBustEvent[] = [];
-        const replies: WakeEventRecordReply[] = [
-            { accepted: true, fire_id: "fire-1" },
-            { accepted: false, reason: "unowned_session" },
-            { accepted: false, reason: "dedup" },
-            { accepted: false, reason: "superseded" },
+        const replies: AgentDeliverReply[] = [
+            { disposition: "delivered", committed_order: 41 },
+            { disposition: "queued", committed_order: 42 },
         ];
 
         const counters = await runSentinelOnce(runOptions, {
-            now: () => 800_000,
+            now: () => 400_000,
             listActiveSessions: () => [activeSession],
             loadDecisions: () => [],
             analyzeSession: async () => ({
-                requests: [request(100_000), request(300_001), request(500_002), request(700_003)],
-                highWaterMarkMs: 700_003,
+                requests: [request(100_000), request(300_001)],
+                highWaterMarkMs: 300_001,
                 directory: "/tmp/sentinel-project",
             }),
             transport: {
@@ -487,14 +655,120 @@ describe("cache-bust sentinel runs", () => {
             stderr: () => {},
         });
 
-        expect(calls).toHaveLength(4);
+        expect(calls).toHaveLength(2);
         expect(counters).toMatchObject({
-            bustWindows: 4,
-            unaccountedWindows: 4,
-            accepted: 1,
-            unownedSession: 1,
-            dedup: 1,
-            superseded: 1,
+            bustWindows: 2,
+            unaccountedWindows: 2,
+            accepted: 2,
+            dedup: 0,
         });
+    });
+
+    test("counts an advanced replay disposition as dedup by committed order", async () => {
+        const directory = temporaryDirectory("cache-bust-sentinel-dedup-");
+        const stateFile = join(directory, "state.json");
+        const runOptions = {
+            ...options(stateFile),
+            send: true,
+            lookbackMs: 1_000,
+        };
+        const calls: CacheBustEvent[] = [];
+        const deps = {
+            now: () => 1_000,
+            listActiveSessions: () => [activeSession],
+            loadDecisions: () => [],
+            analyzeSession: async () => ({
+                requests: [request(900)],
+                highWaterMarkMs: 900,
+                directory: "/tmp/sentinel-project",
+            }),
+            transport: {
+                async record(event: CacheBustEvent) {
+                    calls.push(event);
+                    return {
+                        disposition: calls.length === 1 ? "queued" : "delivered",
+                        committed_order: 77,
+                    } as const;
+                },
+            },
+            stdout: () => {},
+            stderr: () => {},
+        };
+
+        const first = await runSentinelOnce(runOptions, deps);
+        const replayState = loadSentinelState(stateFile);
+        replayState.sessions = {};
+        replayState.windows = {};
+        saveSentinelState(stateFile, replayState);
+        const replay = await runSentinelOnce(runOptions, deps);
+
+        expect(calls.map((event) => event.vendor_event_id)).toEqual([
+            cacheBustWindowId("ses_sentinel", 900),
+            cacheBustWindowId("ses_sentinel", 900),
+        ]);
+        expect(first).toMatchObject({ accepted: 1, dedup: 0 });
+        expect(replay).toMatchObject({ accepted: 0, dedup: 1 });
+    });
+
+    test("counts both unstamped-sender refusals and never retries their delivery ids", async () => {
+        const directory = temporaryDirectory("cache-bust-sentinel-refused-");
+        const stateFile = join(directory, "state.json");
+        const runOptions = {
+            ...options(stateFile),
+            send: true,
+            lookbackMs: 1_000_000,
+        };
+        const calls: string[] = [];
+        const logs: string[] = [];
+        const deps = {
+            now: () => 400_000,
+            listActiveSessions: () => [activeSession],
+            loadDecisions: () => [],
+            analyzeSession: async () => ({
+                requests: [request(100_000), request(300_001)],
+                highWaterMarkMs: 300_001,
+                directory: "/tmp/sentinel-project",
+            }),
+            transport: {
+                async record(event: CacheBustEvent) {
+                    calls.push(event.vendor_event_id);
+                    throw Object.assign(
+                        new Error(
+                            "managed call failed: registry peer delivery refused: peer-message-sender-unstamped",
+                        ),
+                        { code: "peer_delivery_refused" },
+                    );
+                },
+            },
+            stdout: () => {},
+            stderr: (line: string) => logs.push(line),
+        };
+
+        const first = await runSentinelOnce(runOptions, deps);
+        const retryState = loadSentinelState(stateFile);
+        retryState.sessions = {};
+        saveSentinelState(stateFile, retryState);
+        const retry = await runSentinelOnce(runOptions, deps);
+        const refusals = logs
+            .map((line) => JSON.parse(line) as Record<string, unknown>)
+            .filter((line) => line.outcome === "send_refused:peer_delivery_refused");
+
+        expect(first).toMatchObject({ sendRefused: 2, accepted: 0, dedup: 0 });
+        expect(refusals).toEqual([
+            {
+                event_id: cacheBustWindowId("ses_sentinel", 100_000),
+                outcome: "send_refused:peer_delivery_refused",
+                error: "managed call failed: registry peer delivery refused: peer-message-sender-unstamped",
+                counters: expect.objectContaining({ sendRefused: 1 }),
+            },
+            {
+                event_id: cacheBustWindowId("ses_sentinel", 300_001),
+                outcome: "send_refused:peer_delivery_refused",
+                error: "managed call failed: registry peer delivery refused: peer-message-sender-unstamped",
+                counters: expect.objectContaining({ sendRefused: 2 }),
+            },
+        ]);
+        expect(retry).toMatchObject({ sendRefused: 0, skippedSeen: 2 });
+        expect(calls).toHaveLength(2);
     });
 });
