@@ -9,9 +9,40 @@ export interface V2TuiRoute {
     readonly sessionID?: string;
 }
 
+/**
+ * One resolved colour from the OpenCode 2 theme. `@opentui/core`'s RGBA keeps
+ * its channels as 0..1 floats; only those four fields are read here, so the
+ * shape is declared structurally instead of depending on the optional
+ * `@opencode/theme` peer package (it is not installed in this workspace).
+ */
+export interface V2ThemeColor {
+    readonly r: number;
+    readonly g: number;
+    readonly b: number;
+    readonly a: number;
+}
+
+/**
+ * The part of `@opencode/theme/tui`'s `ResolvedTheme` the sidebar reads. Every
+ * level is optional because the plugin must still paint on a host whose theme
+ * resolves a different token set than the pinned 2.0.5 one.
+ */
+export interface V2ResolvedTheme {
+    readonly hue?: Readonly<Record<string, Readonly<Record<string, V2ThemeColor>>>>;
+    readonly text?: {
+        readonly default?: V2ThemeColor;
+        readonly subdued?: V2ThemeColor;
+        readonly feedback?: Readonly<Record<string, { readonly default?: V2ThemeColor }>>;
+    };
+    readonly background?: { readonly default?: V2ThemeColor };
+    readonly border?: { readonly default?: V2ThemeColor };
+}
+
 export interface V2TuiContext {
     readonly location?: V2TuiLocation;
     readonly renderer: { requestRender(): void };
+    /** `Context.theme` on GA 2.0.5/2.0.11; absent on hosts that publish no theme. */
+    readonly theme?: V2ResolvedTheme;
     readonly data: {
         readonly listen: (handler: (event: { details: unknown }) => void) => () => void;
         readonly location: { default(): V2TuiLocation };

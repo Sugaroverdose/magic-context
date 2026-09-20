@@ -1,0 +1,153 @@
+/**
+ * Mounts the OpenCode 1 sidebar component on the OpenCode 2 `sidebar.content`
+ * slot, so both host generations render the same sidebar from the same
+ * RPC-backed data layer.
+ *
+ * The component itself is loaded from `src/tui-compiled/`, the Solid-transformed
+ * copy of `src/tui/` produced by `scripts/build-tui.ts`. Two properties of that
+ * copy are what make it usable here:
+ *
+ *  - OpenCode's bundler plugin skips the Solid compile-time transform for files
+ *    under `node_modules`, which is where an installed plugin lives. The raw
+ *    `.tsx` source would therefore evaluate its JSX children once and freeze on
+ *    the first paint; the precompiled copy has the transform already applied.
+ *  - Its runtime imports name the `opentui:runtime-module:*` virtual modules
+ *    that OpenCode registers process-wide, so the component binds the host's
+ *    single Solid/OpenTUI runtime instead of loading a second copy out of this
+ *    package. Two Solid instances in one process do not share reactive
+ *    ownership, and the renderables would not belong to the host's tree.
+ */
+import { eventSessionID } from "./events";
+import {
+    type CompiledSidebarComponent,
+    type CompiledSidebarData,
+    loadCompiledSidebar,
+    type V1SidebarApi,
+    type V1Theme,
+} from "./load-compiled-sidebar.mjs";
+import type { V2ResolvedTheme, V2TuiContext } from "./types";
+
+export interface V1SidebarMount {
+    /** Renders the v1 component for one paint of the v2 `sidebar.content` slot. */
+    render(input: { readonly sessionID: string }): unknown;
+    /** Asks the mounted component to fetch a snapshot now, out of band. */
+    refresh(): void;
+    dispose(): void;
+}
+
+/**
+ * Colour tokens moved between host generations: OpenCode 1 handed the sidebar a
+ * flat table (`theme.accent`, `theme.textMuted`, …) while OpenCode 2 resolves a
+ * token tree (`@opencode/theme/tui` `ResolvedTheme`: `text.default`,
+ * `text.subdued`, `text.feedback.error.default`, `hue.accent[500]`, …). This
+ * maps the eight tokens the sidebar reads. A host that resolves none of them
+ * still gets a readable sidebar from the hex fallbacks rather than an
+ * exception from a missing colour.
+ */
+function flattenTheme(theme: V2ResolvedTheme | undefined): V1Theme {
+    const feedback = theme?.text?.feedback;
+    return {
+        text: theme?.text?.default ?? "#ffffff",
+        textMuted: theme?.text?.subdued ?? "#9a9a9a",
+        accent: theme?.hue?.accent?.[500] ?? "#5f87ff",
+        background: theme?.background?.default ?? "#000000",
+        borderActive: theme?.border?.default ?? "#9a9a9a",
+        error: feedback?.error?.default ?? "#ff5f5f",
+        warning: feedback?.warning?.default ?? "#ffaf5f",
+        success: feedback?.success?.default ?? "#5fd75f",
+    };
+}
+
+/**
+ * True when the import failed because the host does not register the OpenTUI
+ * runtime modules. That is the only failure this module is allowed to answer
+ * with the plain-text fallback; anything else is a real defect and rethrows.
+ */
+export function isMissingOpenTuiRuntime(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return (
+        message.includes("opentui:runtime-module:") &&
+        /Cannot find|Could not resolve|Module not found|Unable to resolve/.test(message)
+    );
+}
+
+function createV1Api(context: V2TuiContext, directory: string): V1SidebarApi {
+    return {
+        state: { path: { directory } },
+        renderer: { requestRender: () => context.renderer.requestRender() },
+        event: {
+            // OpenCode 1's event names ("message.updated", "session.updated",
+            // "message.removed") do not exist on OpenCode 2, whose stream uses
+            // "session.status", "session.idle", "session.step.ended" and so on.
+            // Rather than guess a per-name mapping that would silently stop
+            // updating when the host renames an event, every subscription is fed
+            // every v2 event that carries a session id, projected into the v1
+            // shape. The component debounces its refresh, so the three
+            // subscriptions collapse into one fetch.
+            on: (_type, handler) =>
+                context.data.listen(({ details }) => {
+                    const sessionID = eventSessionID(details);
+                    if (!sessionID) return;
+                    handler({
+                        properties: { sessionID, info: { id: sessionID, sessionID } },
+                    });
+                }),
+        },
+    };
+}
+
+/**
+ * Loads and mounts the v1 sidebar, or returns `null` when the host provides no
+ * OpenTUI runtime registry to load it through.
+ */
+export async function mountV1Sidebar(
+    context: V2TuiContext,
+    directory: string,
+): Promise<V1SidebarMount | null> {
+    let compiled: CompiledSidebarComponent;
+    let data: CompiledSidebarData;
+    try {
+        ({ component: compiled, data } = await loadCompiledSidebar());
+    } catch (error) {
+        if (!isMissingOpenTuiRuntime(error)) throw error;
+        return null;
+    }
+
+    // The compiled tree carries its own copy of the RPC data layer, so its
+    // client has to be initialised separately from the one `setupWithJsx`
+    // creates for the status/recomp dialogs. Without this the component's
+    // fetches return the empty snapshot and every row reads zero.
+    data.initRpcClient(directory);
+
+    const slot = compiled.createSidebarContentSlot(createV1Api(context, directory));
+    return {
+        render: (input) =>
+            slot.slots.sidebar_content(
+                {
+                    // Read through a getter so a theme change repaints: the
+                    // component wraps this in a memo, and the host's theme is a
+                    // reactive store.
+                    get theme() {
+                        return {
+                            get current() {
+                                return flattenTheme(context.theme);
+                            },
+                        };
+                    },
+                },
+                {
+                    // `input` is the slot's reactive props object; reading
+                    // `sessionID` lazily keeps the component subscribed to
+                    // session switches.
+                    get session_id() {
+                        return input.sessionID;
+                    },
+                },
+            ),
+        refresh: () => compiled.refreshSidebarSnapshot(),
+        dispose: () => {
+            slot.dispose();
+            data.closeRpc();
+        },
+    };
+}

@@ -16,6 +16,8 @@ import {
     startNotificationSocket,
     stopNotificationSocket,
 } from "../../tui/data/notification-socket";
+import { eventSessionID } from "./events";
+import { mountV1Sidebar, type V1SidebarMount } from "./sidebar-mount";
 import type { V2KeymapLayer, V2SidebarState, V2TuiContext } from "./types";
 
 const SIDEBAR_REFRESH_MS = 1_000;
@@ -28,7 +30,17 @@ function compactTokens(value: number): string {
     return String(value);
 }
 
-/** Exported for test access; mirrors the v1 sidebar's compaction-off rows. */
+/**
+ * Plain-text projection of the sidebar snapshot, used only when the real v1
+ * component cannot be loaded because the host registers no OpenTUI runtime
+ * modules (`opentui:runtime-module:*`). That arm is reachable on a host that
+ * boots the TUI without OpenTUI's runtime-plugin support installed — for
+ * example a future or cut-down OpenCode 2 TUI, or any embedding of this setup
+ * outside the packaged host. GA 2.0.5 and 2.0.11 both register the modules, so
+ * on those hosts the v1 component is what paints.
+ *
+ * Exported for test access; mirrors the v1 sidebar's compaction-off rows.
+ */
 export function sidebarText(snapshot: SidebarSnapshot | undefined): string {
     if (!snapshot) return "Magic Context · loading…";
     if (snapshot.compaction_enabled === false) {
@@ -81,25 +93,6 @@ export function statusText(detail: StatusDetail): string {
 function currentSessionID(context: V2TuiContext): string | null {
     const route = context.ui.router.current();
     return route.type === "session" && route.sessionID ? route.sessionID : null;
-}
-
-function eventSessionID(event: unknown): string | undefined {
-    if (typeof event !== "object" || event === null) return undefined;
-    const record = event as Record<string, unknown>;
-    const data =
-        typeof record.data === "object" && record.data !== null
-            ? (record.data as Record<string, unknown>)
-            : record;
-    for (const key of ["sessionID", "sessionId", "id"]) {
-        if (typeof data[key] === "string") return data[key];
-    }
-    const info = data.info;
-    if (typeof info === "object" && info !== null) {
-        const nested = info as Record<string, unknown>;
-        if (typeof nested.sessionID === "string") return nested.sessionID;
-        if (typeof nested.id === "string") return nested.id;
-    }
-    return undefined;
 }
 
 type JsxFactory = (type: string, props: Record<string, unknown>) => unknown;
@@ -199,11 +192,29 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         return started;
     };
 
+    // One sidebar: the OpenCode 1 component, mounted on the v2 slot through the
+    // host's own OpenTUI runtime. `mountV1Sidebar` returns null only when the
+    // host registers no runtime modules to load it through, which is the single
+    // case the plain-text projection covers.
+    let mountedSidebar: V1SidebarMount | null = await mountV1Sidebar(context, directory);
     const unregisterSlot = context.ui.slot({
         append: "sidebar.content",
-        render: ({ sessionID }) => {
-            void refresh(sessionID);
-            return jsx("text", { children: sidebarText(sidebar.snapshots[sessionID]) });
+        render: (input) => {
+            const mounted = mountedSidebar;
+            if (mounted) {
+                try {
+                    return mounted.render(input);
+                } catch (error) {
+                    // A component that throws mid-paint would take the host's
+                    // sidebar down with it. Degrade to the text projection for
+                    // the rest of this TUI session and say so once.
+                    mountedSidebar = null;
+                    mounted.dispose();
+                    console.warn("[magic-context] v2 sidebar component failed; using text", error);
+                }
+            }
+            void refresh(input.sessionID);
+            return jsx("text", { children: sidebarText(sidebar.snapshots[input.sessionID]) });
         },
     });
 
@@ -285,7 +296,11 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         });
     }
 
+    // Only the text projection needs the sidebar snapshot store; the mounted
+    // component keeps its own snapshot and subscribes to the same event stream
+    // itself.
     const stopListening = context.data.listen(({ details }) => {
+        if (mountedSidebar) return;
         const sessionID = eventSessionID(details);
         if (sessionID) void refresh(sessionID, true);
     });
@@ -315,7 +330,8 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         }
         if (notification.payload.action === "show-recomp-dialog") return showRecomp(target);
         if (notification.payload.action === "refresh-sidebar" && target) {
-            await refresh(target, true);
+            if (mountedSidebar) mountedSidebar.refresh();
+            else await refresh(target, true);
             return true;
         }
         if (notification.payload.action === "show-result-dialog") {
@@ -336,6 +352,8 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
 
     return () => {
         unregisterSlot();
+        mountedSidebar?.dispose();
+        mountedSidebar = null;
         unregisterKeymapSlot?.();
         stopListening();
         stopNotificationSocket();
