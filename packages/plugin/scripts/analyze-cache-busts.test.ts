@@ -71,6 +71,10 @@ function bodyWithBreakpointMessage(text: string): unknown {
     };
 }
 
+function bodyWithModelAndBreakpoint(model: string, text: string): unknown {
+    return { model, ...(bodyWithBreakpointMessage(text) as object) };
+}
+
 function bodyWithTail(text: string, tailBreakpoint = false): unknown {
     const tail = { type: "text", text } as { type: string; text: string; cache_control?: unknown };
     if (tailBreakpoint) tail.cache_control = { type: "ephemeral" };
@@ -118,6 +122,121 @@ function snapshotsFor(dir: string, session: string) {
 }
 
 describe("analyze-cache-bust dump discovery", () => {
+    test("classifies an Anthropic zero read and wire-model swap as a provider full miss", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-provider-full-miss-"));
+        tempDirs.push(dir);
+        const session = "ses_brocaFullMiss";
+        const previousAt = "2026-09-20T16:25:56.000Z";
+        const currentAt = "2026-09-20T16:26:06.000Z";
+        writeDump(
+            dir,
+            "2026-09-20T16-25-56-000Z-000001-ses_brocaFullMiss",
+            previousAt,
+            session,
+            bodyWithModelAndBreakpoint("claude-opus-5", "cached prefix"),
+            responseUsage({ input_tokens: 4_855, cache_read_input_tokens: 589_294 }),
+        );
+        writeDump(
+            dir,
+            "2026-09-20T16-26-06-000Z-000002-ses_brocaFullMiss",
+            currentAt,
+            session,
+            bodyWithModelAndBreakpoint("claude-opus-4-8", "provider fallback"),
+            responseUsage({
+                input_tokens: 4_855,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 589_294,
+            }),
+        );
+
+        const rows = __test.analyzeSnapshots(snapshotsFor(dir, session), [
+            {
+                timestampMs: Date.parse(currentAt),
+                decision: "defer",
+                canonicalDecision: "defer",
+                materialized: false,
+                materializeReason: null,
+                emergency: false,
+                droppedTokens: 0,
+                droppedCount: 0,
+                inputTokens: 4_855,
+                flush: false,
+                source: "fixture",
+            },
+        ]);
+
+        expect(rows[1]?.divergenceClass).toBe("provider_full_miss");
+        expect(rows[1]?.previous?.wireModel).toBe("claude-opus-5");
+        expect(rows[1]?.current.wireModel).toBe("claude-opus-4-8");
+
+        const run = Bun.spawnSync([
+            process.execPath,
+            join(import.meta.dir, "analyze-cache-busts.ts"),
+            "--session",
+            session,
+            "--dir",
+            dir,
+            "--all-rows",
+        ]);
+        expect(run.exitCode).toBe(0);
+        expect(run.stdout.toString()).toContain(
+            "wireModel=claude-opus-5 → claude-opus-4-8",
+        );
+    });
+
+    test("skips an unmetered pass as a baseline for the next real short-read bust", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-usage-missing-baseline-"));
+        tempDirs.push(dir);
+        const session = "ses_usageMissingBaseline";
+        const body = bodyWithBreakpointMessage("changed");
+        writeDump(
+            dir,
+            "2026-09-20T16-00-00-000Z-000001-ses_usageMissingBaseline",
+            "2026-09-20T16:00:00.000Z",
+            session,
+            body,
+            responseUsage({ input_tokens: 100, cache_read_input_tokens: 20_000 }),
+        );
+        writeDump(
+            dir,
+            "2026-09-20T16-00-01-000Z-000002-ses_usageMissingBaseline",
+            "2026-09-20T16:00:01.000Z",
+            session,
+            bodyWithBreakpointMessage("in flight"),
+            responseUsage({ input_tokens: 0, cache_read_input_tokens: 0 }),
+        );
+        writeDump(
+            dir,
+            "2026-09-20T16-00-02-000Z-000003-ses_usageMissingBaseline",
+            "2026-09-20T16:00:02.000Z",
+            session,
+            bodyWithBreakpointMessage("short read"),
+            responseUsage({ input_tokens: 100, cache_read_input_tokens: 100 }),
+        );
+
+        const rows = __test.analyzeSnapshots(snapshotsFor(dir, session), [
+            {
+                timestampMs: Date.parse("2026-09-20T16:00:02.000Z"),
+                decision: "defer",
+                canonicalDecision: "defer",
+                materialized: false,
+                materializeReason: null,
+                emergency: false,
+                droppedTokens: 0,
+                droppedCount: 0,
+                inputTokens: 100,
+                flush: false,
+                source: "fixture",
+            },
+        ]);
+
+        expect(rows[1]?.verdict).toBe("UNMETERED");
+        expect(rows[1]?.divergenceClass).toBe("usage_missing");
+        expect(rows[2]?.prevTotal).toBe(20_100);
+        expect(rows[2]?.verdict).toBe("BUST");
+        expect(rows[2]?.divergenceClass).toBe("unaccounted_defer_pass");
+    });
+
     test("reminder strip golden agrees with the Rust block-strip parser", () => {
         const fixture = JSON.parse(
             readFileSync(

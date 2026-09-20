@@ -59,7 +59,10 @@ function request(
         timestampMs,
         verdict,
         rewrittenTokens: verdict === "BUST" ? 123 : undefined,
-        divergenceClass: verdict === "BUST" ? (divergenceClass as never) : undefined,
+        divergenceClass:
+            verdict === "BUST" || divergenceClass === "usage_missing"
+                ? (divergenceClass as never)
+                : undefined,
         firstDivergence: "message[4] role=assistant",
         analyzerCmd:
             "cd packages/plugin && bun scripts/analyze-cache-busts.ts --session ses_sentinel",
@@ -146,6 +149,30 @@ describe("cache-bust attribution contract", () => {
                     ?.accounted,
             );
         }
+    });
+
+    test("classifies a zero provider read as a full miss but keeps a short read unaccounted", () => {
+        const fullMiss = classifyCacheBust({
+            divergenceIndex: 4,
+            previousMessageCount: 20,
+            providerComparableRead: 0,
+            previousTotal: 594_149,
+            previousModel: "claude-opus-5",
+            currentModel: "claude-opus-4-8",
+            decision: decision({ decision: "defer", canonicalDecision: "defer" }),
+        });
+        expect(fullMiss).toBe("provider_full_miss");
+        expect(isUnaccountedCacheBustClass(fullMiss)).toBe(false);
+
+        expect(
+            classifyCacheBust({
+                divergenceIndex: 4,
+                previousMessageCount: 20,
+                providerComparableRead: 1,
+                previousTotal: 594_149,
+                decision: decision({ decision: "defer", canonicalDecision: "defer" }),
+            }),
+        ).toBe("unaccounted_defer_pass");
     });
 
     test("accounts all ten long-turn post-restart rows by request time", () => {
@@ -264,6 +291,52 @@ describe("cache-bust windows and ids", () => {
             [122_000],
             [242_001],
         ]);
+    });
+
+    test("does not emit a wake for a provider full miss", async () => {
+        const directory = temporaryDirectory("cache-bust-provider-full-miss-");
+        const events: string[] = [];
+        const counters = await runSentinelOnce(
+            options(join(directory, "state.json")),
+            {
+                now: () => 2_000,
+                listActiveSessions: () => [{ ...activeSession, activityMs: 2_000 }],
+                analyzeSession: async () => ({
+                    requests: [request(1_800, "BUST", "provider_full_miss")],
+                    highWaterMarkMs: 1_800,
+                    directory: "/tmp/provider-full-miss",
+                }),
+                stdout: (line) => events.push(line),
+            },
+        );
+
+        expect(events).toEqual([]);
+        expect(counters.accountedWindows).toBe(1);
+        expect(counters.unaccountedWindows).toBe(0);
+    });
+
+    test("does not evaluate a bust window while its newest request is unmetered", async () => {
+        const directory = temporaryDirectory("cache-bust-in-flight-");
+        const events: string[] = [];
+        const counters = await runSentinelOnce(
+            options(join(directory, "state.json")),
+            {
+                now: () => 3_000,
+                listActiveSessions: () => [{ ...activeSession, activityMs: 3_000 }],
+                analyzeSession: async () => ({
+                    requests: [
+                        request(2_800, "BUST", "unaccounted_defer_pass"),
+                        request(2_900, "UNMETERED", "usage_missing"),
+                    ],
+                    highWaterMarkMs: 1_000,
+                    directory: "/tmp/in-flight",
+                }),
+                stdout: (line) => events.push(line),
+            },
+        );
+
+        expect(events).toEqual([]);
+        expect(counters.unaccountedWindows).toBe(0);
     });
 
     test("does not hide a later unaccounted BUST inside an accounted window", () => {

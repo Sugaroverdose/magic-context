@@ -19,6 +19,8 @@ import { Database } from "bun:sqlite";
  * | accounted_ctx_reduce | yes | matched pass applies drops at an agent ctx_reduce landing |
  * | accounted_drop_applied | yes | matched pass records applied drops |
  * | accounted_soft_m1_execute | yes | matched canonical execute pass refreshes m1 |
+ * | usage_missing | yes | provider cache read and direct input are both 0 or usage is absent; in-flight/unmetered pass is never a bust baseline |
+ * | provider_full_miss | yes | provider cache read is exactly 0 with prevTotal ≥ 10,000; ordinary short reads stay unaccounted; show wire model prev → cur when it changes |
  * | unaccounted_defer_pass | no | matched canonical defer pass, including a tiny mid-history first_render seam, diverges |
  * | accounted_provider_system_prompt_change | yes | matched non-defer pass has a user-visible provider change |
  * | unaccounted_double_bust | no | matched otherwise-unattributed pass repeats the previous divergence offset |
@@ -696,6 +698,13 @@ export function groupBustWindows(
         : undefined;
     let previousWasBust = Boolean(seed);
     for (const request of ordered) {
+        if (request.divergenceClass === "usage_missing") {
+            // When the newest request is still in flight, do not start or continue
+            // a window; keep its watermark at the most recent request that reported usage.
+            current = undefined;
+            previousWasBust = false;
+            continue;
+        }
         if (request.verdict !== "BUST") {
             if (current?.rows.length) windows.push(current);
             current = undefined;

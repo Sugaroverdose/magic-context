@@ -13,6 +13,8 @@ export type CacheBustDivergenceClass =
     | "accounted_force_band"
     | "accounted_drop_applied"
     | "accounted_provider_system_prompt_change"
+    | "usage_missing"
+    | "provider_full_miss"
     | "unaccounted_defer_pass"
     | "unaccounted_double_bust"
     | "unaccounted_tail_rewrite"
@@ -66,6 +68,14 @@ export interface CacheBustAttributionInput {
     contentEvidence?: string;
     compactionSeam?: boolean;
     inheritedFold?: boolean;
+    /** Provider cache-read component, excluding Anthropic direct input tokens. */
+    providerComparableRead?: number;
+    /** Direct/uncached input component of the current request. */
+    directInput?: number;
+    /** Total provider meter on the preceding request. */
+    previousTotal?: number;
+    previousModel?: string;
+    currentModel?: string;
     decision?: CacheBustDecisionAttribution;
 }
 
@@ -140,6 +150,16 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
         divergenceClass: "accounted_soft_m1_execute",
         accounted: true,
         rule: "matched canonical execute pass refreshes m1",
+    },
+    {
+        divergenceClass: "usage_missing",
+        accounted: true,
+        rule: "provider cache read and direct input are both 0 or usage is absent; the pass is in flight/unmetered and never becomes a bust baseline",
+    },
+    {
+        divergenceClass: "provider_full_miss",
+        accounted: true,
+        rule: "provider cache read is exactly 0 with prevTotal ≥ 10,000; ordinary short reads stay unaccounted; show wire model prev → cur when it changes",
     },
     {
         divergenceClass: "unaccounted_defer_pass",
@@ -218,21 +238,30 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
 
     const canonicalDecision = (decision.canonicalDecision ?? decision.decision).toLowerCase();
     const materializeReason = decision.materializeReason?.toLowerCase() ?? null;
-    if (decision.flush || materializeReason === "explicit_flush") return "accounted_ctx_flush";
-    if (decision.emergency && decision.droppedCount > 0) return "accounted_force_band";
-    if (
+    const isTinyFirstRenderDefer =
         materializeReason === "first_render" &&
         canonicalDecision === "defer" &&
         !input.inheritedFold &&
         input.firstDivergenceSize !== undefined &&
         input.firstDivergenceSize <= 256 &&
-        input.divergenceIndex < Math.max(0, input.previousMessageCount - 2)
-    ) {
-        return "unaccounted_defer_pass";
+        input.divergenceIndex < Math.max(0, input.previousMessageCount - 2);
+    const previousTotal = input.previousTotal ?? input.promptTokens;
+    const usageMissing = input.providerComparableRead === 0 && input.directInput === 0;
+    const providerFullMiss =
+        input.providerComparableRead === 0 &&
+        previousTotal !== undefined &&
+        previousTotal >= 10_000;
+    if (decision.flush || materializeReason === "explicit_flush") return "accounted_ctx_flush";
+    if (decision.emergency && decision.droppedCount > 0) return "accounted_force_band";
+    if (isTinyFirstRenderDefer && (usageMissing || providerFullMiss)) {
+        return usageMissing ? "usage_missing" : "provider_full_miss";
     }
+    if (isTinyFirstRenderDefer) return "unaccounted_defer_pass";
     // A scheduler-only defer does not show that a compaction actually ran. Nearby
     // old marker text or a changed billing header cannot prove that mutation.
     if (decision.source === "transform scheduler log" && canonicalDecision === "defer") {
+        if (usageMissing) return "usage_missing";
+        if (providerFullMiss) return "provider_full_miss";
         return "unaccounted_defer_pass";
     }
     if (
@@ -242,6 +271,7 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
     ) {
         return "accounted_hard_marker_drain";
     }
+    if (usageMissing) return "usage_missing";
     if (decision.materialized) {
         if (materializeReason === "model_change") return "accounted_hard_model_change";
         if (materializeReason === "system_hash") return "accounted_hard_system_hash";
@@ -261,6 +291,8 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
     }
     if (canonicalDecision === "execute") return "accounted_soft_m1_execute";
     if (isSystemRow) return "accounted_hard_system_hash";
+    if (usageMissing) return "usage_missing";
+    if (providerFullMiss) return "provider_full_miss";
     if (canonicalDecision === "defer") return "unaccounted_defer_pass";
     if (
         input.previousProvider &&
