@@ -280,7 +280,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 return;
             }
 
-            // Flag our own hidden children (historian/dreamer/memory-migration)
+            // Flag our own hidden children (historian/dreamer)
             // by their `magic-context-` title prefix so the
             // transform + system-prompt hooks can fully exempt them. In-memory
             // only — these sessions never span a restart.

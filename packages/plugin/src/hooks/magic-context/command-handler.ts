@@ -42,7 +42,7 @@ import {
 import { resolveContextWindowGeometry } from "./event-resolvers";
 import { executeFlush } from "./execute-flush";
 import { executeStatus } from "./execute-status";
-import { RUST_PARTIAL_RECOMP_REFUSAL, RUST_SESSION_UPGRADE_REFUSAL } from "./maintenance-authority";
+import { RUST_PARTIAL_RECOMP_REFUSAL } from "./maintenance-authority";
 import { MAX_WRAPUP_REQUEST_BUDGET_MS } from "./module-transport";
 import type { RustModeModuleClient } from "./rust-mode-transform";
 import type { NotificationParams } from "./send-session-notification";
@@ -153,7 +153,6 @@ const commandArgumentValidators: Record<MagicContextBuiltinCommandName, (raw: st
         },
         "ctx-recomp": (raw) => parseRecompArgs(raw).kind !== "error",
         "ctx-wrapup": (raw) => parseWrapupArgs(raw).ok,
-        "ctx-session-upgrade": (raw) => raw.trim() === "",
         "ctx-flush": (raw) => raw.trim() === "",
         "ctx-dream": (raw) => {
             const requested = raw.trim();
@@ -322,45 +321,14 @@ function executeRecompUpgradeStub(db: Database, sessionId: string): string {
         return "## Magic Recomp Upgrade\n\nNothing to upgrade: this session has no legacy compartments.";
     }
 
-    // Legacy --upgrade flag is superseded by the /ctx-session-upgrade command.
+    // The legacy --upgrade flag no longer has a separate runner: a plain recomp
+    // rebuilds legacy compartments into the current format.
     return [
         "## Magic Recomp Upgrade",
         "",
         `Found ${legacyCount} legacy compartment${legacyCount === 1 ? "" : "s"} for this session.`,
-        "The `--upgrade` flag is deprecated. Run `/ctx-session-upgrade` to upgrade this session.",
+        "The `--upgrade` flag is deprecated. Run `/ctx-recomp` to rebuild them in the current format.",
     ].join("\n");
-}
-
-/**
- * Execute /ctx-session-upgrade: upgrade THIS session to the v2 history format.
- *
- * Two halves (locked design):
- *  1. Compartment upgrade — run a full recomp, which rebuilds every legacy v1
- *     compartment into the v2 tiered/scored shape (legacy=0). This is just the
- *     normal full-recomp path; recomp already produces v2 compartments.
- *  2. Memory migration (E3.2) — re-evaluate project memories into the 5-category
- *     taxonomy via a transient historian-model prompt, once per project. Wired
- *     in a follow-up; this command runs the compartment upgrade today and notes
- *     the pending migration step.
- *
- * Session-scoped: recomp rebuilds THIS session's compartments. The memory
- * migration is project-scoped and idempotent (guarded once-per-project).
- */
-async function executeSessionUpgrade(
-    deps: {
-        /** Runs the full session upgrade (compartment recomp → once-per-project
-         *  memory migration) via the shared orchestrator. Optional: unavailable
-         *  when no historian model is configured. The orchestrator gives the
-         *  command path identical model fallback + live progress + terminal
-         *  state as the RPC dialog path (dogfood 2026-05-30 unification). */
-        runUpgrade?: (sessionId: string) => Promise<string>;
-    },
-    sessionId: string,
-): Promise<string> {
-    if (!deps.runUpgrade) {
-        return "## Session Upgrade\n\nUpgrade is unavailable because the recomp handler is not configured.";
-    }
-    return deps.runUpgrade(sessionId);
 }
 
 export type ManualDreamSummary = ManualRunResult;
@@ -507,10 +475,6 @@ export function createMagicContextCommandHandler(deps: {
     ) => Promise<string>;
     /** Runs /ctx-wrapup over the live raw tail, keeping the newest N raw messages. */
     executeWrapup?: (sessionId: string, options: { messagesToKeep: number }) => Promise<string>;
-    /** Runs the once-per-project 5-cat memory migration for /ctx-session-upgrade.
-     *  Optional: when unavailable, /ctx-session-upgrade still upgrades compartments
-     *  via recomp and skips the memory re-evaluation. */
-    runUpgrade?: (sessionId: string) => Promise<string>;
     /** `/ctx-embed start` — backfill this session's compartment embeddings. */
     executeEmbedHistory?: (
         sessionId: string,
@@ -562,7 +526,6 @@ export function createMagicContextCommandHandler(deps: {
     const isRecompCommand = (command: string): boolean => command === "ctx-recomp";
     const isWrapupCommand = (command: string): boolean => command === "ctx-wrapup";
     const isDreamCommand = (command: string): boolean => command === "ctx-dream";
-    const isSessionUpgradeCommand = (command: string): boolean => command === "ctx-session-upgrade";
     const isEmbedCommand = (command: string): boolean => command === "ctx-embed";
     const rustMode = deps.transformMode === "rust" && deps.rustModeModuleClient;
     const callRust = async (
@@ -593,18 +556,9 @@ export function createMagicContextCommandHandler(deps: {
             const isRecomp = isRecompCommand(input.command);
             const isWrapup = isWrapupCommand(input.command);
             const isDream = isDreamCommand(input.command);
-            const isSessionUpgrade = isSessionUpgradeCommand(input.command);
             const isEmbed = isEmbedCommand(input.command);
 
-            if (
-                !isStatus &&
-                !isFlush &&
-                !isRecomp &&
-                !isWrapup &&
-                !isDream &&
-                !isSessionUpgrade &&
-                !isEmbed
-            ) {
+            if (!isStatus && !isFlush && !isRecomp && !isWrapup && !isDream && !isEmbed) {
                 return;
             }
 
@@ -1005,20 +959,6 @@ export function createMagicContextCommandHandler(deps: {
                             result = warningLines.join("\n");
                         }
                     }
-                }
-            }
-
-            if (isSessionUpgrade) {
-                // TUI-no-session edge: before the first message, the prompt may
-                // not be bound to a session. Resolve defensively — nothing to
-                // upgrade without a session id.
-                if (!sessionId) {
-                    result =
-                        "## Session Upgrade\n\nThis prompt is not attached to a session yet — send a message first, then run `/ctx-session-upgrade`.";
-                } else if (rustMode) {
-                    result = `## Session Upgrade — Unavailable\n\n${RUST_SESSION_UPGRADE_REFUSAL}`;
-                } else {
-                    result = await executeSessionUpgrade(deps, sessionId);
                 }
             }
 

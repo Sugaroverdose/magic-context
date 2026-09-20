@@ -438,8 +438,8 @@ export async function sendIgnoredMessage(
     params: NotificationParams,
     // When true, always persist as an ignored message instead of using the TUI
     // toast path, so the content remains in scrollback. Use this for outcomes of
-    // long-running background work, such as a session-upgrade result, when a
-    // transient five-second toast may be missed.
+    // long-running background work, such as a recomp result, when a transient
+    // five-second toast may be missed.
     forcePersist = false,
 ): Promise<NotificationDeliveryDisposition> {
     // TUI notifications are already out-of-band and do not create a user row.

@@ -224,8 +224,8 @@ function queueMemoryUpdate(targetId: number, newContent: string): void {
 
 /**
  * Bump the project memory epoch — the cross-process HARD-bust signal an external
- * (dashboard) memory mutation or a session upgrade fires. Unlike the in-session
- * supersede-delta path (B11), this MUST force a full m[0] re-materialization.
+ * (dashboard) memory mutation fires. Unlike the in-session supersede-delta path
+ * (B11), this MUST force a full m[0] re-materialization.
  */
 function bumpProjectEpoch(): void {
     writeContextDb((db) => {

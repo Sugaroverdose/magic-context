@@ -716,13 +716,11 @@ export function getMemoriesByProject(
  * Load ALL `active` memories for a project, INCLUDING expired ones.
  *
  * `getMemoriesByProject` filters out rows whose `expires_at` has passed (correct
- * for the RENDER path — expired memories shouldn't be injected). But the memory
- * MIGRATION (`/ctx-session-upgrade`) does a destructive delete+reinsert of the
- * `active` pool, and it MUST operate on the full active set: if it only saw
- * unexpired rows, it would delete those and leave expired `active` rows orphaned
- * — a partial, inconsistent wipe (root cause, dogfood 2026-05-31: 831 unexpired
- * deleted, 27 expired KNOWN_ISSUES stranded). Migration is a re-categorization,
- * so it re-evaluates every active row regardless of TTL.
+ * for the RENDER path — expired memories shouldn't be injected). A caller that
+ * REWRITES the `active` pool in place must instead see the full active set: if
+ * it only saw unexpired rows, it would rewrite those and leave expired `active`
+ * rows orphaned — a partial, inconsistent wipe (root cause, dogfood 2026-05-31:
+ * 831 unexpired deleted, 27 expired KNOWN_ISSUES stranded).
  */
 
 function sqlPlaceholders(values: readonly unknown[]): string {

@@ -379,9 +379,9 @@ const SectionHeader = props => (() => {
   return _el$12;
 })();
 
-// Live recomp / session-upgrade progress. Renders while an upgrade runs (and
-// briefly after it finishes) so a multi-minute rebuild is visible instead of a
-// single missed toast (dogfood 2026-05-30).
+// Live recomp progress. Renders while a rebuild runs (and briefly after it
+// finishes) so a multi-minute rebuild is visible instead of a single missed
+// toast (dogfood 2026-05-30).
 const RecompProgressSection = props => {
   // CRITICAL: read `props.progress` reactively on every access — do NOT
   // destructure it into a local `const p = props.progress` at creation time.

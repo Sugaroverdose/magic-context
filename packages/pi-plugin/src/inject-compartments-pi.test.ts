@@ -908,7 +908,7 @@ describe("injectM0M1Pi", () => {
 
 			// A LEGACY compartment (no p1 tier → legacy=1) flips upgrade_state
 			// "ready"→"legacy", which is a genuine HARD trigger (the session now
-			// needs /ctx-session-upgrade). This is NOT the new-compartment path — a
+			// needs a /ctx-recomp rebuild). This is NOT the new-compartment path — a
 			// v2 compartment (with p1) is a SOFT m[1] delta and does NOT re-
 			// materialize m[0] (see the SOFT-delta test below). Asserting the legacy
 			// HARD path here keeps the upgrade-detection contract pinned.

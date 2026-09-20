@@ -641,7 +641,7 @@ const STRICT_TOOL_ALLOWLIST_ENTRIES: readonly (readonly [
 	["dreamer-retrospective", ["ctx_search"]],
 	["smart-note-compiler", []],
 	// Pi's live historian runner uses this Magic Context-specific id for first
-	// pass, repair, two-pass editor, recomp, and memory-migration prompts. It
+	// pass, repair, two-pass editor, and recomp prompts. It
 	// summarizes/offloads host-rendered input and may inspect local files, but it
 	// must not mutate source or memory. Keep only read-only Pi built-ins plus
 	// aft_search (no aft_outline/aft_zoom, no ctx_* tools).

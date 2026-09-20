@@ -47,9 +47,9 @@ import {
 	resolveExecuteThresholdDetail,
 } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { formatBytes } from "@magic-context/core/hooks/magic-context/format-bytes";
+import { countCompartmentsNeedingUpgrade } from "@magic-context/core/hooks/magic-context/legacy-compartments";
 import { computeM0BlockTokens } from "@magic-context/core/hooks/magic-context/m0-token-breakdown";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
-import { countCompartmentsNeedingUpgrade } from "@magic-context/core/hooks/magic-context/upgrade-reminder";
 import {
 	formatCacheTtlDisplay,
 	resolveCacheTtlDisplay,
@@ -184,9 +184,9 @@ export interface StatusDialogDetail {
 	tailHygiene?: TailHygieneStatus;
 	newWorkTokens: number;
 	totalInputTokens: number;
-	/** Compartments still needing a v2 upgrade (legacy or tierless). */
+	/** Compartments still needing a rebuild into the current format (legacy or tierless). */
 	upgradeNeededCount: number;
-	/** A detached /ctx-recomp or /ctx-session-upgrade is running in background. */
+	/** A detached /ctx-recomp is running in background. */
 	recompInFlight: boolean;
 	hasDeprecatedProtectedTags: boolean;
 	compactionEnabled: boolean;
@@ -515,14 +515,14 @@ function renderInner(
 				: ""
 		}`,
 	);
-	// Upgrade status — Pi has no sidebar, so the recomp/upgrade state surfaces
-	// here. Shows when a detached recomp/upgrade is running, or when legacy/
-	// tierless compartments still need /ctx-session-upgrade.
+	// Upgrade status — Pi has no sidebar, so the recomp state surfaces here.
+	// Shows when a detached recomp is running, or when legacy/tierless
+	// compartments still need a rebuild.
 	if (s.recompInFlight) {
-		lines.push(`Upgrade: ${theme.fg("warning", "recomp/upgrade running…")}`);
+		lines.push(`Upgrade: ${theme.fg("warning", "recomp running…")}`);
 	} else if (s.upgradeNeededCount > 0) {
 		lines.push(
-			`Upgrade: ${theme.fg("warning", `${s.upgradeNeededCount} compartment${s.upgradeNeededCount === 1 ? "" : "s"} need upgrade`)} · run /ctx-session-upgrade`,
+			`Upgrade: ${theme.fg("warning", `${s.upgradeNeededCount} compartment${s.upgradeNeededCount === 1 ? "" : "s"} need upgrade`)} · run /ctx-recomp`,
 		);
 	} else {
 		lines.push(`Upgrade: ${theme.fg("accent", "up to date")}`);

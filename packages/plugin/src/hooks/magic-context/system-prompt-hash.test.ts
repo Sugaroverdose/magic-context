@@ -33,7 +33,6 @@ import {
     REVIEW_USER_MEMORIES_SYSTEM_PROMPT,
 } from "../../features/magic-context/dreamer/task-prompts";
 import { VERIFY_SYSTEM_PROMPT } from "../../features/magic-context/dreamer/verify-prompt";
-import { MIGRATION_SYSTEM_PROMPT } from "../../features/magic-context/memory/memory-migration";
 import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "../../features/magic-context/smart-notes/compiler-prompt";
 import {
     closeDatabase,
@@ -661,7 +660,6 @@ describe("system-prompt-hash skips Magic Context internal child agents", () => {
             ["historian", COMPARTMENT_AGENT_SYSTEM_PROMPT],
             ["historian-recomp", COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT],
             ["historian-editor", HISTORIAN_EDITOR_SYSTEM_PROMPT],
-            ["memory-migration", MIGRATION_SYSTEM_PROMPT],
         ] as const;
 
         for (const [label, prompt] of prompts) {

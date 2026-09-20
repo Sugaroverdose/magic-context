@@ -193,7 +193,6 @@ Unless specified otherwise, TypeScript paths are relative to `packages/plugin/` 
 - `src/hooks/magic-context/wrapup-orchestrator.ts`: Orchestrate the manual `/ctx-wrapup` history compaction loop across sequential token-capped chunks.
 - `src/hooks/magic-context/reference-retrieval.ts` (+ `reference-seeds.generated.ts`): 4 rotating seed compartments + last-6 recency references for the historian prompt.
 - `src/hooks/magic-context/historian-prompt.generated.ts`: Generated v8.7.4 historian system prompt (source: `src/hooks/magic-context/historian-prompt.source.md`; re-exported via `compartment-prompt.ts`).
-- `src/features/magic-context/memory/memory-migration.ts`: `/ctx-session-upgrade` 9-cat→5-cat memory re-eval (active-only, permanent-safe, epoch-bumping).
 - `src/features/magic-context/dreamer/memory-claim-safety.ts`: Classify directive-shaped `PROJECT_RULES` and enforce host-level refusal gates for directive updates/archives and content-loss rewrites during verify.
 - `src/features/magic-context/dreamer/storage-dream-runs.ts`: Persist structured dreamer child run failure facts (`DreamRunFailureDetail` with closed-vocabulary `failure_class`, model attempts, redacted provider errors, timeouts) in `tasks_json`.
 - `src/hooks/magic-context/maintenance-authority.ts`: Maintenance command authority resolution and module routing checks.

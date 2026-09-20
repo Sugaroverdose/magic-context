@@ -1006,10 +1006,10 @@ function readCurrentMarkersFromCompartments(
 		sessionFactsVersion: getSessionFactsVersion(db, state.sessionId),
 		materializedAt: Date.now(),
 		// Dynamic upgrade state (parity with OpenCode getUpgradeState): suffix
-		// "legacy" when any legacy=1 compartment remains, else "ready". This makes
-		// `/ctx-session-upgrade` (legacy→v2 conversion) flip the marker so m[0]
-		// re-materializes with the upgraded tiered content. A static const would
-		// leave Pi serving stale legacy-rendered m[0] after an upgrade.
+		// "legacy" when any legacy=1 compartment remains, else "ready". A recomp
+		// that rebuilds legacy rows into tiered ones flips the marker so m[0]
+		// re-materializes with the rebuilt content. A static const would leave Pi
+		// serving stale legacy-rendered m[0] after the rebuild.
 		upgradeState: `${PI_M0_UPGRADE_STATE}:${
 			compartments.some((c) => c.legacy === 1) ? "legacy" : "ready"
 		}`,

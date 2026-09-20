@@ -23,11 +23,6 @@ export function getMagicContextBuiltinCommands(compactionEnabled = true) {
                 ? "Compact older live history while keeping the newest messages raw"
                 : unavailableInCompactionOff("ctx-wrapup"),
         },
-        "ctx-session-upgrade": {
-            template: "ctx-session-upgrade",
-            description:
-                "Upgrade this session to the latest history format: rebuild compartments and migrate project memories",
-        },
         "ctx-flush": {
             template: "ctx-flush",
             description: compactionEnabled

@@ -79,7 +79,6 @@ import {
 } from "@magic-context/core/hooks/magic-context/note-nudger";
 import { preloadTokenizer } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { normalizeTodoStateJson } from "@magic-context/core/hooks/magic-context/todo-view";
-import { maybeSendUpgradeReminder } from "@magic-context/core/hooks/magic-context/upgrade-reminder";
 import {
 	beginBootQuietPeriod,
 	scheduleAfterBootQuiet,
@@ -120,7 +119,6 @@ import {
 } from "./commands/ctx-embed";
 import { registerCtxFlushCommand } from "./commands/ctx-flush";
 import { registerCtxRecompCommand } from "./commands/ctx-recomp";
-import { registerCtxSessionUpgradeCommand } from "./commands/ctx-session-upgrade";
 import { registerCtxStatusCommand } from "./commands/ctx-status";
 import { registerCtxWrapupCommand } from "./commands/ctx-wrapup";
 import {
@@ -1562,7 +1560,6 @@ async function startPiMagicContextRuntime(
 	// uses model-invisible custom entries when the runtime can render them.
 	const recompRunner = new PiSubagentRunner();
 	const wrapupRunner = new PiSubagentRunner();
-	const upgradeRunner = new PiSubagentRunner();
 	registerCtxStatusCommand(pi, {
 		db,
 		projectIdentity,
@@ -1699,52 +1696,6 @@ async function startPiMagicContextRuntime(
 		},
 	});
 	info("registered /ctx-wrapup");
-
-	// E6b/E6c: /ctx-session-upgrade — full recomp (legacy→v2 tiered) + once-per-
-	// project memory migration into the 5-category taxonomy. Own runner instance
-	// for the same isolation reasons as /ctx-recomp.
-	registerCtxSessionUpgradeCommand(pi, {
-		db,
-		runner: upgradeRunner,
-		historianModel: bootProjectDeps.historianConfig?.model,
-		historianChunkTokens: deriveHistorianChunkTokens(
-			resolveHistorianContextLimit(bootProjectDeps.historianConfig?.model),
-		),
-		historianFallbacks: bootProjectDeps.historianConfig?.fallbackModels,
-		historianTimeoutMs: bootProjectDeps.config.historian_timeout_ms,
-		historianThinkingLevel: bootProjectDeps.historianConfig?.thinkingLevel,
-		language: bootProjectDeps.config.language,
-		memoryEnabled: bootProjectDeps.config.memory.enabled,
-		allowHomeProject: bootProjectDeps.config.allow_home_project,
-		autoPromote: bootProjectDeps.config.memory.auto_promote,
-		compactionOff,
-		userMemoriesEnabled: userMemoryCollectionEnabled(
-			bootProjectDeps.config.dreamer,
-		),
-		resolveRuntimeDeps: (ctx) => {
-			const current = resolveCurrentProjectDeps(ctx);
-			return {
-				db,
-				runner: upgradeRunner,
-				historianModel: current.historianConfig?.model,
-				historianChunkTokens: deriveHistorianChunkTokens(
-					resolveHistorianContextLimit(current.historianConfig?.model),
-				),
-				historianFallbacks: current.historianConfig?.fallbackModels,
-				historianTimeoutMs: current.config.historian_timeout_ms,
-				historianThinkingLevel: current.historianConfig?.thinkingLevel,
-				language: current.config.language,
-				memoryEnabled: current.config.memory.enabled,
-				allowHomeProject: current.config.allow_home_project,
-				autoPromote: current.config.memory.auto_promote,
-				compactionOff,
-				userMemoriesEnabled: userMemoryCollectionEnabled(
-					current.config.dreamer,
-				),
-			};
-		},
-	});
-	info("registered /ctx-session-upgrade");
 
 	registerCtxDreamCommand(pi, {
 		db,
@@ -1939,35 +1890,6 @@ async function startPiMagicContextRuntime(
 					}
 				} catch {
 					// Best-effort: a read failure must not block agent start.
-				}
-
-				// E6d: one-time upgrade reminder for sessions with legacy (pre-v2)
-				// compartments. Model-invisible (ctx.ui.notify), self-gating via the
-				// durable + per-process guards in the shared helper. Only when the
-				// historian can run (so /ctx-session-upgrade is actionable).
-				if (
-					!compactionOff &&
-					ctx.hasUI &&
-					effectiveProjectDeps.historianConfig?.model
-				) {
-					void maybeSendUpgradeReminder(
-						{
-							client: null,
-							db,
-							sendStatusNotification: async (_client, _sid, text) => {
-								ctx.ui.notify(text, "info");
-								return "sent";
-							},
-							getNotificationParams: () => ({}),
-							// Pi's ctx.ui.notify is a TRANSIENT toast (no scrollback),
-							// so the durable stamp must not suppress after one missed
-							// toast — re-prompt each Pi start until the session upgrades.
-							deliveryPersists: false,
-						},
-						sessionId,
-					).catch(() => {
-						// Never block agent start on reminder delivery.
-					});
 				}
 			}
 

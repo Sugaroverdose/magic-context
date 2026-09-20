@@ -110,7 +110,7 @@ export interface CompartmentPromptInputs {
      *  disabled there is no fact store, so emitting facts is pure waste
      *  (and they would never be rendered). Defaults to enabled. */
     memoryEnabled?: boolean;
-    /** Recomp/session-upgrade structural rebuilds must use the extraction-free prompt. */
+    /** Recomp structural rebuilds must use the extraction-free prompt. */
     extractionFree?: boolean;
 }
 

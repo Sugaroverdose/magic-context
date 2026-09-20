@@ -523,8 +523,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // historian_runs telemetry: one row per SUCCESSFUL recomp pass. Failure
             // early-returns above are already captured in subagent_invocations; we
             // keep recomp instrumentation to the clean per-pass success point to
-            // avoid destabilizing this delicate multi-pass path. run_kind="recomp"
-            // also covers /ctx-session-upgrade (upgrade = full recomp + migration).
+            // avoid destabilizing this delicate multi-pass path.
             {
                 const passComps = validatedPass.compartments ?? [];
                 const passFacts = validatedPass.facts ?? [];

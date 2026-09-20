@@ -396,7 +396,7 @@ export function prepareCompartmentInjection(
     // v2 faithful facts: session_facts is retired as a render source. Facts are
     // promoted to project memory and render via <project-memory>. We no longer
     // read or render session_facts here (matching the runner's removed write
-    // side); legacy pre-v2 rows are left un-rendered until /ctx-session-upgrade.
+    // side); legacy pre-v2 rows are left un-rendered.
     const facts: SessionFact[] = [];
 
     let memoryBlock: string | undefined;

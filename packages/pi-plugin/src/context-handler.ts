@@ -5317,7 +5317,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				sessionLog(args.sessionId, warning),
 		});
 	let protectionFloorResolution = resolveProtectionFloor();
-	let shouldRunHeuristics =
+	const shouldRunHeuristics =
 		args.heuristics !== undefined &&
 		isCacheBustingPass &&
 		(rideSignals.publishedHistory ||

@@ -1,15 +1,20 @@
 import { jsx } from "@opentui/solid/jsx-runtime";
 import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
+import { flushLogger, log } from "../../shared/logger";
 import type { SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../../tui/compaction-off";
 import {
+    type CommandRpcResult,
     closeRpc,
     getCompartmentCount,
     initRpcClient,
     loadSidebarSnapshot,
     loadStatusDetail,
     requestDream,
+    requestEmbed,
+    requestFlush,
     requestRecomp,
+    requestWrapup,
 } from "../../tui/data/context-db";
 import {
     type SocketNotification,
@@ -218,8 +223,41 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         },
     });
 
-    // The keymap layer owns /ctx-status + /ctx-recomp + /ctx-dream. OpenCode 2
-    // runs plugin setup() outside the TUI component tree, where
+    // Every /ctx-* command this host can reach goes through the keymap layer:
+    // OpenCode 2 has no `command.execute.before` hook, so the server-side command
+    // handler the OpenCode 1 plugin uses never runs here. Each `run` calls the
+    // RPC handler that does the same server-side work and reports back through a
+    // dialog or toast, because this host has no ignored-message chat carrier.
+    const runCommandRpc = async (
+        title: string,
+        call: (sessionID: string) => Promise<CommandRpcResult>,
+        pending?: string,
+    ): Promise<boolean> => {
+        const target = currentSessionID(context);
+        if (!target) {
+            context.ui.toast.show({ message: "No active session", variant: "warning" });
+            return false;
+        }
+        const result = await call(target);
+        if (!result.ok) {
+            context.ui.toast.show({
+                message: result.error ?? `${title} request failed`,
+                variant: "error",
+            });
+            return false;
+        }
+        // A started background run has no text yet; its outcome arrives later as a
+        // show-result-dialog notification.
+        if (result.started) {
+            context.ui.toast.show({ message: pending ?? `${title} started`, variant: "info" });
+            return true;
+        }
+        if (currentSessionID(context) !== target) return false;
+        await context.ui.dialog.alert({ title, message: result.message ?? "" });
+        return true;
+    };
+
+    // OpenCode 2 runs plugin setup() outside the TUI component tree, where
     // context.keymap.layer() throws "Keymap.Provider is missing" (the provider is
     // a Solid context). Try the direct call first (hosts that do run setup
     // in-tree), then fall back to the app slot: its render executes inside the
@@ -258,6 +296,72 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
                     await showDream(input?.trim() || undefined);
                 },
             },
+            {
+                id: "magic-context.flush",
+                title: "Magic Context: Flush",
+                group: "Magic Context",
+                palette: true,
+                slash: { name: "ctx-flush" },
+                run: async () => {
+                    const flushed = await runCommandRpc("Flush", requestFlush);
+                    if (flushed) void refresh(currentSessionID(context) ?? "", true);
+                },
+            },
+            {
+                id: "magic-context.embed",
+                title: "Magic Context: Embed",
+                group: "Magic Context",
+                palette: true,
+                slash: { name: "ctx-embed", arguments: true },
+                run: async (input) => {
+                    const argument = input?.trim().toLowerCase() ?? "";
+                    if (argument !== "" && argument !== "start" && argument !== "pause") {
+                        context.ui.toast.show({
+                            message:
+                                "Usage: /ctx-embed (status), /ctx-embed start, or /ctx-embed pause",
+                            variant: "warning",
+                        });
+                        return;
+                    }
+                    const action = argument === "" ? "status" : argument;
+                    await runCommandRpc(
+                        "Embed",
+                        (sessionID) => requestEmbed(sessionID, action, directory),
+                        "Embedding started; the summary appears when it finishes",
+                    );
+                },
+            },
+            {
+                id: "magic-context.wrapup",
+                title: "Magic Context: Wrapup",
+                group: "Magic Context",
+                palette: true,
+                slash: { name: "ctx-wrapup", arguments: true },
+                run: async (input) => {
+                    const argument = input?.trim() ?? "";
+                    if (argument !== "" && !/^\d+$/.test(argument)) {
+                        context.ui.toast.show({
+                            message:
+                                "Usage: /ctx-wrapup [messages_to_keep] where messages_to_keep is a positive integer",
+                            variant: "warning",
+                        });
+                        return;
+                    }
+                    const messagesToKeep = argument === "" ? 20 : Number.parseInt(argument, 10);
+                    if (messagesToKeep <= 0) {
+                        context.ui.toast.show({
+                            message: "messages_to_keep must be a positive integer",
+                            variant: "warning",
+                        });
+                        return;
+                    }
+                    await runCommandRpc(
+                        "Wrapup",
+                        (sessionID) => requestWrapup(sessionID, messagesToKeep),
+                        "Wrapup started; the summary appears when it finishes",
+                    );
+                },
+            },
         ],
     });
     let keymapLayerRegistered = false;
@@ -267,6 +371,20 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         try {
             context.keymap.layer(buildKeymapLayer);
             keymapLayerRegistered = true;
+            // The accepted layer is the only place that knows which slash commands
+            // this host actually got, so report them from it. Anything missing here
+            // is missing from the host's command palette too. It goes to the
+            // diagnostic log as well as the console because a TUI host owns the
+            // screen and drops plugin console output.
+            const registered = `registered slash commands: ${buildKeymapLayer()
+                .commands.map((command) => command.slash.name)
+                .join(" ")}`;
+            log(`[magic-context] ${registered}`);
+            // Startup lines are worth an immediate write: a TUI that exits or is
+            // killed before the next buffer flush would otherwise leave no record
+            // of which commands this host received.
+            flushLogger();
+            console.info(`[magic-context] ${registered}`);
             return true;
         } catch (error) {
             if (!(error instanceof Error) || error.message !== "Keymap.Provider is missing")
@@ -288,7 +406,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
                 if (!registered && !keymapGapLogged) {
                     keymapGapLogged = true;
                     console.warn(
-                        "[magic-context] OpenCode 2 keymap.layer is unavailable; /ctx-status, /ctx-recomp and /ctx-dream were not registered",
+                        "[magic-context] OpenCode 2 keymap.layer is unavailable; /ctx-status, /ctx-recomp, /ctx-dream, /ctx-flush, /ctx-embed and /ctx-wrapup were not registered",
                     );
                 }
                 return null;

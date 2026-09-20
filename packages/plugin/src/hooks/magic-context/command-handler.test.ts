@@ -873,7 +873,7 @@ describe("createMagicContextCommandHandler", () => {
             );
         });
 
-        it("points /ctx-recomp --upgrade at the new /ctx-session-upgrade command", async () => {
+        it("points /ctx-recomp --upgrade at a plain rebuild", async () => {
             insertLegacyCompartment(db, "ses-upgrade-legacy");
             const sendNotification = mock(async () => {});
             const executeRecomp = mock(async () => "## Magic Recomp\n\nRebuilt state.");
@@ -896,11 +896,13 @@ describe("createMagicContextCommandHandler", () => {
                 "__CONTEXT_MANAGEMENT_CTX-RECOMP_HANDLED__",
             );
 
-            // Deprecated flag does not run recomp itself; it redirects to the command.
+            // Deprecated flag does not run recomp itself; it points at /ctx-recomp.
             expect(executeRecomp).not.toHaveBeenCalled();
             expect(sendNotification).toHaveBeenCalledWith(
                 "ses-upgrade-legacy",
-                expect.stringContaining("/ctx-session-upgrade"),
+                expect.stringContaining(
+                    "The `--upgrade` flag is deprecated. Run `/ctx-recomp` to rebuild them in the current format.",
+                ),
                 {},
             );
         });
@@ -1045,15 +1047,13 @@ describe("createMagicContextCommandHandler", () => {
             );
         });
 
-        it("refuses Rust partial recomp and session upgrade without touching either authority store", async () => {
+        it("refuses Rust partial recomp without touching either authority store", async () => {
             const sendNotification = mock(async () => {});
             const moduleCall = mock(async () => ({ disposition: "started" }));
-            const runUpgrade = mock(async () => "TS upgrade ran");
             const handler = createMagicContextCommandHandler({
                 db,
                 transformMode: "rust",
                 rustModeModuleClient: { call: moduleCall },
-                runUpgrade,
                 sendNotification,
             });
 
@@ -1069,26 +1069,12 @@ describe("createMagicContextCommandHandler", () => {
                 ),
                 "__CONTEXT_MANAGEMENT_CTX-RECOMP_HANDLED__",
             );
-            await expectSentinel(
-                handler["command.execute.before"](
-                    {
-                        command: "ctx-session-upgrade",
-                        sessionID: "ses-rust-maintenance",
-                        arguments: "",
-                    },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-SESSION-UPGRADE_HANDLED__",
-            );
 
             expect(moduleCall).not.toHaveBeenCalled();
-            expect(runUpgrade).not.toHaveBeenCalled();
             const text = (sendNotification.mock.calls as unknown as Array<[string, string]>)
                 .map(([, notification]) => notification)
                 .join("\n");
-            expect(text).toContain("(MC-C06)");
-            expect(text).toContain("Run /ctx-recomp instead. (MC-C07)");
+            expect(text).toContain("Run /ctx-recomp without a range. (MC-C06)");
             expect(text).not.toContain("standard mode");
             for (const forbidden of ["authority", "MODULE", "drain", "facade", "changefeed"]) {
                 expect(text).not.toContain(forbidden);
@@ -1353,76 +1339,6 @@ describe("createMagicContextCommandHandler", () => {
             );
         });
     });
-
-    describe("ctx-session-upgrade", () => {
-        it("runs the managed upgrade (recomp + migration) and throws the sentinel", async () => {
-            insertLegacyCompartment(db, "ses-su-legacy");
-            const sendNotification = mock(async () => {});
-            // The command path now delegates to the unified `runUpgrade` (shared
-            // recomp-orchestrator: full recomp → once-per-project memory
-            // migration), so it gets the same fallback + progress as the RPC
-            // dialog path. The command handler just invokes it and reports.
-            const runUpgrade = mock(
-                async () => "## Session Upgrade — Complete\n\nRebuilt 1 compartment.",
-            );
-            const handler = createMagicContextCommandHandler({
-                db,
-                runUpgrade,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    {
-                        command: "ctx-session-upgrade",
-                        sessionID: "ses-su-legacy",
-                        arguments: "",
-                    },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-SESSION-UPGRADE_HANDLED__",
-            );
-
-            expect(runUpgrade).toHaveBeenCalledWith("ses-su-legacy");
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-su-legacy",
-                expect.stringContaining("Session Upgrade"),
-                {},
-            );
-        });
-
-        it("reports a no-session message when the prompt has no session id", async () => {
-            const sendNotification = mock(async () => {});
-            const executeRecomp = mock(async () => "rebuilt");
-            const handler = createMagicContextCommandHandler({
-                db,
-                executeRecomp,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    {
-                        command: "ctx-session-upgrade",
-                        sessionID: "",
-                        arguments: "",
-                    },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-SESSION-UPGRADE_HANDLED__",
-            );
-
-            expect(executeRecomp).not.toHaveBeenCalled();
-            expect(sendNotification).toHaveBeenCalledWith(
-                "",
-                expect.stringContaining("not attached to a session"),
-                {},
-            );
-        });
-    });
-
     describe("ctx-dream", () => {
         it("runs all enabled tasks, sends summary, and throws the sentinel", async () => {
             const sendNotification = mock(async () => {});

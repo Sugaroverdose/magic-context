@@ -30,7 +30,6 @@ import { setRawMessageProvider } from "../../hooks/magic-context/read-session-ch
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
-import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
 import { detectConflicts } from "../../shared/conflict-detector";
 import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
@@ -571,7 +570,6 @@ export async function registerContext(context: V2Context) {
                 return;
             }
             if (!db) return;
-            const storage = db;
             systemPrompt ??= createSystemPromptHashHandler({
                 db,
                 dreamerEnabled: config.dreamer !== undefined && !config.dreamer.disable,
@@ -615,19 +613,6 @@ export async function registerContext(context: V2Context) {
                 lastHeuristicsTurnId,
                 systemPromptRefreshSessions,
                 cacheTtlConfig: config.cache_ttl,
-                upgradeReminder: (sessionID) =>
-                    maybeSendUpgradeReminder(
-                        {
-                            db: storage,
-                            client: undefined,
-                            getNotificationParams: () => ({}),
-                            sendStatusNotification: async (_client, id, text) => {
-                                pushNotification("toast", { message: text, variant: "info" }, id);
-                                return "queued";
-                            },
-                        },
-                        sessionID,
-                    ),
             });
             await passDuties({
                 sessionID: draft.sessionID,
@@ -828,6 +813,7 @@ export async function registerContext(context: V2Context) {
         channel1StateBySession: channel1,
         historyRefreshSessions,
         pendingMaterializationSessions,
+        systemPromptRefreshSessions,
     });
     const storageDir = getMagicContextStorageDir();
     const rpcServer = new MagicContextRpcServer(storageDir, directory);

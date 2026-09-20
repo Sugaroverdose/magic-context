@@ -14,7 +14,7 @@ import { renderUserStatusSummary, statusSummaryFromDetail } from "../shared/stat
 import { renderUserFacingFailure, userFacingFailureCode } from "../shared/user-facing-codes";
 import { createSidebarContentSlot, kickRecompProgressRefresh, refreshSidebarSnapshot } from "./slots/sidebar-content";
 import packageJson from "../../package.json";
-import { closeRpc, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp, requestUpgrade } from "./data/context-db";
+import { closeRpc, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp } from "./data/context-db";
 import { startNotificationSocket, stopNotificationSocket } from "./data/notification-socket";
 import { formatCacheTtlDisplay } from "../shared/cache-ttl-display";
 import { formatConfigParseStatusLine } from "../shared/config-diagnostics";
@@ -1121,53 +1121,6 @@ async function showRecompDialog(api, targetSessionId = getSessionId(api)) {
   }));
   return true;
 }
-function showUpgradeDialog(api, resume, targetSessionId = getSessionId(api)) {
-  const sessionId = targetSessionId;
-  if (!sessionId) {
-    // No active session — nothing to upgrade. Silently skip (the server only
-    // enqueues this for sessions with legacy compartments, but the TUI may
-    // have switched sessions before the poller fired).
-    return false;
-  }
-  if (getSessionId(api) !== sessionId) return false;
-  const title = resume ? "🎆 Resume the interrupted upgrade?" : "🎆 Historian V2 is released!";
-  const message = resume ? [`An earlier upgrade to the new historian format was interrupted. ${resume.stagedCount} compartment${resume.stagedCount === 1 ? " was" : "s were"} already rebuilt (through message ${resume.stagedThrough}). Resuming continues from where it left off — nothing already rebuilt is reprocessed.`, "", "Resuming will:", "• Rebuild the remaining compartments into the new layered format", "• Re-organize this project's memories into the new taxonomy (once per project)", "", "The historian runs in the background and you can keep working. You can also resume via /ctx-session-upgrade later.", "", "Resume the upgrade now?"].join("\n") : ["This session's compartments are written by the old historian. The session is still usable with its old compartments, however it's strongly advised to upgrade them to the new format. This means every compartment needs to be reprocessed by the new historian, which might take a while depending on how big your session is.", "", "Running the upgrade will:", "• Rebuild this session's compartments into the new layered format", "• Re-organize this project's memories into the new taxonomy (once per project)", "", "The historian runs in the background and you can keep working while older compartments are reprocessed. You can also upgrade via /ctx-session-upgrade later.", "", "Run the upgrade now?"].join("\n");
-  api.ui.dialog.replace(() => _$createComponent(api.ui.DialogConfirm, {
-    title: title,
-    message: message,
-    onConfirm: async () => {
-      const started = await requestUpgrade(sessionId);
-      if (!started) {
-        showToast(api, {
-          message: "Session upgrade request failed",
-          variant: "error"
-        });
-        return;
-      }
-      // The RPC call fires no message event, so start the sidebar's
-      // progress poll only after the server accepts the request.
-      kickRecompProgressRefresh();
-      showToast(api, {
-        message: resume ? "Resuming session upgrade — running in the background" : "Session upgrade started — running in the background",
-        variant: "info"
-      });
-      void dismissUpgradeReminder(sessionId);
-    },
-    onCancel: () => {
-      // Explicit decline → set the durable stamp so we don't re-prompt
-      // on every restart. The fix for stamp-on-display trapping a
-      // never-upgraded session (dogfood 2026-05-30) relies on THIS
-      // being the only place the TUI path stamps.
-      void dismissUpgradeReminder(sessionId);
-      showToast(api, {
-        message: "Upgrade skipped — run /ctx-session-upgrade anytime",
-        variant: "info",
-        durationOverrideMs: 4000
-      });
-    }
-  }));
-  return true;
-}
 async function showStatusDialog(api, targetSessionId = getSessionId(api), initialDiagnostics = false) {
   const sessionId = targetSessionId;
   if (!sessionId) {
@@ -1630,13 +1583,6 @@ const tui = async (api, _options, meta) => {
     }
     if (action === "show-recomp-dialog") {
       return stillActive() && (await showRecompDialog(api, requestedSessionId));
-    }
-    if (action === "show-upgrade-dialog") {
-      const resume = n.payload?.resume === true ? {
-        stagedCount: Number(n.payload?.stagedCount ?? 0),
-        stagedThrough: Number(n.payload?.stagedThrough ?? 0)
-      } : undefined;
-      return stillActive() && showUpgradeDialog(api, resume, requestedSessionId);
     }
     if (action === "show-embed-dialog") {
       return stillActive() && (await showEmbedDialog(api, requestedSessionId));

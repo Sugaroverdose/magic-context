@@ -157,11 +157,6 @@ export const USER_FACING_FAILURES = {
         sentence: "Partial history compression is not available in the current mode.",
         action: "Run /ctx-recomp without a range.",
     },
-    session_upgrade_unavailable: {
-        code: "MC-C07",
-        sentence: "Session upgrade is not available in the current mode.",
-        action: "Run /ctx-recomp instead.",
-    },
     smart_note_conditions_unavailable: {
         code: "MC-C08",
         sentence: "Conditional notes are not available in the current mode.",
@@ -218,7 +213,6 @@ export type CapabilityRefusal =
     | "note_access"
     | "context_cleanup"
     | "partial_history"
-    | "session_upgrade"
     | "smart_note_condition"
     | "history_compression"
     | "context_service";
@@ -230,7 +224,6 @@ const CAPABILITY_FAILURES: Record<CapabilityRefusal, UserFacingFailureKey> = {
     note_access: "note_access_unavailable",
     context_cleanup: "context_cleanup_paused",
     partial_history: "partial_history_unavailable",
-    session_upgrade: "session_upgrade_unavailable",
     smart_note_condition: "smart_note_conditions_unavailable",
     history_compression: "history_compression_paused",
     context_service: "context_service_unavailable",
