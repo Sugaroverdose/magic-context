@@ -1,15 +1,30 @@
 # CKIOS reasoning-only defer disappearance
 
-## Status: not reproduced; no replay-semantic fix
+## Status: primary reproduced and fixed; secondary marker defect isolated
 
 The staged September 20, 2026 requests for `ses_06be916fbffezpvuoIO3ac4yMZ`
 prove a historical tail rewrite: A at 12:48:01 contains assistant
 `msg_0bedb7d8f001FvFOQdZoGqywkr`; B at 12:48:26 does not. The neighboring
 user tool result and synthetic completion notice consequently merge at index
-332. This investigation does **not** establish which stage removed that assistant.
-There is no original TS transform-entry capture for B.
+332. The primary disappearance is reproduced by the global emptiness sweep in
+`ToolMutationBatch.finalize`. There is no original TS transform-entry capture
+for B, but the real-host reproduction matches the served-array asymmetry and
+explains why no persisted decision names the target.
 
-## Executed discriminators
+The priced marker-seam pass tags `messagesBeforeInitialPrepare`, a separate
+shallow array. Batch finalization splices the reasoning-only row out of that
+copy, not the served array. The defer pass tags the live array and the same
+global sweep now removes the unrelated reasoning-only assistant. Newest
+status is correlated, not causal: there is no newest-assistant exemption in
+this sweep. A full tool removal elsewhere in the window triggers it.
+
+The fix limits pruning to batch-affected messages. Adoption is persisted as
+`@tool-sweep-scoped` in the session-owned `merged_reasoning_stripped_ids` ledger
+only with early priced-pass permission. Before adoption, defers replay legacy
+bytes; after adoption, fresh objects and restart retain the reasoning-only
+row. Existing readers ignore the non-ID control entry. No model gate applies.
+
+## Initial discriminators (before the full-tool replay arm)
 
 - A real `createTransform` test uses `[step-start, reasoning, step-finish]`,
   `finish=stop`, completed time, and `anthropic/claude-opus-5`. It executes A,
@@ -69,15 +84,33 @@ The authorized read-only context.db query found:
   replay targets cannot be identified by intersecting newer IDs. Naming them
   without the original B hook input would be speculation.
 
-## Remaining evidence needed
+## Decisive full-tool replay arm
 
-Capture original hook input and output around an affected pass, including the
-host marker projection, or reproduce from a contemporaneous full host/context
-DB snapshot. Neither the reduced real transform nor the real-host dual arm
-removes the target. Therefore no claim is made that a next priced pass now
-removes it, no speculative exemption/SDK-filter change is shipped, and there
-is no live-predicate mutation proof. The existing latest-assistant thinking
-rule and provider bytes are unchanged.
+`MC_PROBE_LANE=marker-drops` adds 25 completed tool turns and one persisted
+full-drop tag to an assistant-ended marker seam. Before the fix, A's hook input
+contains the reasoning-only target at index 30 and output at index 29; B's
+input contains it at index 29 and output omits it. Wire A contains it at index
+51; B does not. Captures: `/tmp/ckios-probe-pool951-marker-drops-v5/`.
+After the fix, the named real-host regression checks complete A-prefix SHA256
+against B, excluding only moving provider cache-control metadata.
+
+A real `createTransform` regression separately verifies legacy pre-flag defers,
+priced adoption/restoration, marker persistence, and post-restart defer replay.
+Reverting the scoped predicate to the global sweep must make the regression
+red. Reasoning-only rows are unrelated to tool removal and are not scheduled
+for later demotion merely because a newer assistant arrives. Thus no new
+latest-assistant thinking mutation is introduced for Fable or any other model.
+
+Pi's `transcript-pi.ts` already records only changed empty rows in
+`emptyRemovedMessages`; `finalizeToolRemovals` removes only members of that set.
+`heuristic-cleanup-pi.ts` selects targets but has no global emptiness sweep.
+No Pi change is needed.
+
+The second own-session specimen exposed a separate missing-boundary trim defect.
+The real-host `marker-dropped-boundary` arm reproduces it after the primary fix;
+its named todo regression remains deliberately red when enabled. The follow-up
+brief is `.cortexkit/alfonso/prompts/p1-marker-boundary-removed-before-trim.md`.
+A diagnostic now logs missing trim anchors instead of silently skipping.
 
 ## Attribution repair
 

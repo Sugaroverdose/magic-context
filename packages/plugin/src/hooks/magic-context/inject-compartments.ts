@@ -3198,6 +3198,12 @@ function trimToPreparedPrefix(
         ? options.messages.findIndex((message) => message.info.id === boundary)
         : -1;
     if (index >= 0) options.messages.splice(0, index + 1);
+    else if (boundary) {
+        sessionLog(
+            options.sessionId,
+            `prefix trim: boundary ${boundary} absent from current messages; pass=${options.isCacheBustingPass ? "priced" : "defer"}; no in-pass trim applied`,
+        );
+    }
     if (
         prepared.m0RematerializedThisPass ||
         (options.isCacheBustingPass && !prepared.materializationContentionRetryExhausted)
