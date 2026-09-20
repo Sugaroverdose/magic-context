@@ -10,6 +10,7 @@ import {
     formatOpenCodeDbDoctorLine,
     formatOpenCodeDbMissingBanner,
     formatOpenCodeDbMissingStatusLine,
+    hasV1MessageTables,
     openCodeDbPathExists,
     resetOpenCodeDbPathStateForTesting,
     resolveOpenCodeDbPath,
@@ -253,7 +254,7 @@ describe("resolveOpenCodeDbPath", () => {
         }
     });
 
-    it("accepts a v1 store migrated to OpenCode 2 for v2 readers, and still for v1 readers", () => {
+    it("reports v1 message capability on a migrated store accepted by both readers", () => {
         const { openCodeDir } = useDataHome();
         const migratedPath = join(openCodeDir, "migrated-v2.db");
         const migrated = new Database(migratedPath);
@@ -291,6 +292,7 @@ describe("resolveOpenCodeDbPath", () => {
             ]) {
                 migrated.exec(`CREATE TABLE ${table}(id TEXT)`);
             }
+            expect(hasV1MessageTables(migrated)).toBe(true);
             expect(() => assertOpenCodeStoreGeneration(migrated, "v2", migratedPath)).not.toThrow();
             expect(() => assertOpenCodeStoreGeneration(migrated, "v1", migratedPath)).not.toThrow();
         } finally {
@@ -318,6 +320,7 @@ describe("resolveOpenCodeDbPath", () => {
             ]) {
                 freshV2.exec(`CREATE TABLE ${table}(id TEXT)`);
             }
+            expect(hasV1MessageTables(freshV2)).toBe(false);
             expect(detectOpenCodeStoreGeneration(freshV2)).toBe("v2");
             expect(() => assertOpenCodeStoreGeneration(freshV2, "v2", freshV2Path)).not.toThrow();
             expect(() => assertOpenCodeStoreGeneration(freshV2, "v1", freshV2Path)).toThrow(
