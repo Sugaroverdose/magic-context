@@ -201,7 +201,9 @@ function seedMeta(database: Database, values: Record<string, unknown>): void {
 	// Upsert rather than insert: seeded tags fire migration v86's tags trigger, which
 	// creates the session's metadata row before this helper runs. Production never
 	// plain-inserts here either — every writer goes through the shared upsert helpers.
-	const assignments = columns.map((column) => `${column} = excluded.${column}`).join(", ");
+	const assignments = columns
+		.map((column) => `${column} = excluded.${column}`)
+		.join(", ");
 	database
 		.prepare(
 			`INSERT INTO session_meta (session_id, harness, ${columns.join(", ")}) VALUES (?, ?, ${placeholders})
