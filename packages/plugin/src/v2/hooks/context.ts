@@ -1,6 +1,7 @@
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
+import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
 import { createScheduler } from "../../features/magic-context/scheduler";
@@ -35,6 +36,7 @@ import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-remi
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
 import { detectConflicts } from "../../shared/conflict-detector";
 import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
+import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import {
@@ -58,6 +60,7 @@ import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { removeHostSession } from "../host-service";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
+import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { startDreamTrigger } from "./dream-trigger";
 import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
 import { adaptPayload, HEAD_IDS } from "./payload";
@@ -784,6 +787,91 @@ export async function registerContext(context: V2Context) {
         rustModeModuleClient: undefined,
         hiddenCompletionExecutor,
         storageDir,
+    });
+    // The v2 TUI reaches manual dreaming through RPC because this host has no
+    // command-template path. The run continues in the background and reports its
+    // result through the notification socket.
+    const manualDreamer =
+        config.dreamer && config.dreamer.disable !== true ? config.dreamer : undefined;
+    rpcServer.handle("dream", async (params) => {
+        const sessionId = String(params.sessionId ?? "");
+        if (!sessionId) return { ok: false, error: "no session" };
+        if (!manualDreamer || !hiddenCompletionExecutor) {
+            pushNotification(
+                "toast",
+                { message: "Dreaming is not configured for this project.", variant: "warning" },
+                sessionId,
+            );
+            return { ok: false, error: "dreamer unavailable" };
+        }
+        const requested = resolveManualDreamTask(params.task);
+        if (requested.error) {
+            pushNotification("toast", { message: requested.error, variant: "warning" }, sessionId);
+            return { ok: false, error: requested.error };
+        }
+        db ??= openDatabase();
+        if (!db || !isDatabasePersisted(db)) {
+            pushNotification(
+                "toast",
+                {
+                    message: "Dreaming is unavailable: context storage is not durable.",
+                    variant: "error",
+                },
+                sessionId,
+            );
+            return { ok: false, error: "storage unavailable" };
+        }
+        const runDb = db;
+        const runExecutor = hiddenCompletionExecutor;
+        void runManualDreamNow({
+            db: runDb,
+            dreamer: manualDreamer,
+            projectIdentity: resolveProjectIdentity(directory) ?? directory,
+            directory,
+            language: config.language,
+            mural: config.mural,
+            executor: runExecutor,
+            sessionId,
+            ...(requested.task !== undefined ? { task: requested.task } : {}),
+        })
+            .then(({ summary, unsupportedTasks }) => {
+                // When an explicitly requested task is unsupported, omit the
+                // otherwise misleading "No enabled dream tasks" empty summary.
+                const hasSummaryContent =
+                    summary.ran.length > 0 ||
+                    summary.failed.length > 0 ||
+                    summary.skippedNoWork.length > 0 ||
+                    summary.deferredBusy.length > 0 ||
+                    Object.keys(summary.backlogBefore ?? {}).length > 0 ||
+                    Object.keys(summary.backlogAfter ?? {}).length > 0;
+                const message = [
+                    hasSummaryContent || unsupportedTasks.length === 0
+                        ? summarizeManualDream(summary)
+                        : undefined,
+                    unsupportedTasks.length > 0
+                        ? `Unsupported on this host (no tool loop): ${unsupportedTasks.join(", ")}`
+                        : undefined,
+                ]
+                    .filter((line) => line !== undefined)
+                    .join("\n\n");
+                pushNotification(
+                    "action",
+                    {
+                        action: "show-result-dialog",
+                        title: "Magic Context dream run",
+                        message,
+                    },
+                    sessionId,
+                );
+            })
+            .catch((error) => {
+                pushNotification(
+                    "toast",
+                    { message: `Dream run failed: ${getErrorMessage(error)}`, variant: "error" },
+                    sessionId,
+                );
+            });
+        return { ok: true };
     });
     // Start the RPC server asynchronously after plugin construction returns so
     // Bun.serve and its discovery-file write do not consume the host's deadline.
