@@ -32784,9 +32784,14 @@ mod tests {
             .connect_failure_commit_hook
             .lock()
             .expect("connect failure commit hook mutex") = Some(Box::new(move || {
+            // Simulate a concurrent writer by advancing the row_version. The committed state
+            // must actually differ: a byte-identical commit leaves the row, and its version,
+            // untouched and would not create the conflict this test needs.
             let loaded = conflict_store.load("ses").unwrap();
+            let mut meta = loaded.meta.clone();
+            meta.tail_identity_re_adopt_count += 1;
             conflict_store
-                .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+                .commit("ses", loaded.row_version, &loaded.core, &meta)
                 .unwrap();
         }));
 
@@ -32841,9 +32846,13 @@ mod tests {
             .lock()
             .expect("connect failure commit hook mutex") = Some(Box::new(move || {
             if hook_calls_for_hook.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Same as above: the conflicting commit has to change something, otherwise
+                // the row_version does not move and no conflict is produced.
                 let loaded = conflict_store.load("ses").unwrap();
+                let mut meta = loaded.meta.clone();
+                meta.tail_identity_re_adopt_count += 1;
                 conflict_store
-                    .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+                    .commit("ses", loaded.row_version, &loaded.core, &meta)
                     .unwrap();
             }
         }));
