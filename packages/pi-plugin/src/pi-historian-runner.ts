@@ -139,6 +139,7 @@ import {
 	convertEntriesToRawMessages,
 	SYNTH_USER_ID_PREFIX,
 } from "./read-session-pi";
+import { isPiSystemEntry } from "./system-entry-pi";
 
 const HISTORIAN_AGENT_NAME = "magic-context-historian";
 const DEFAULT_HISTORIAN_TIMEOUT_MS = 600_000;
@@ -1739,6 +1740,8 @@ export function buildPiCompactionSummary(
  * by a real entry that can. Folded tool-result slots are different: their
  * synthesized id represents kept-tail content, so advancing past one would drop
  * that content; leave the marker pending until a safe boundary is available.
+ * System slots keep their ordinals but cannot anchor the kept conversation tail;
+ * Pi's compaction snapshot preserves their effective state instead.
  */
 export function findFirstKeptEntryId(
 	entries: readonly unknown[],
@@ -1746,7 +1749,7 @@ export function findFirstKeptEntryId(
 ): string | null {
 	const target = lastCompactedOrdinal + 1;
 	for (const message of convertEntriesToRawMessages(entries)) {
-		if (message.ordinal < target) continue;
+		if (message.ordinal < target || isPiSystemEntry(message)) continue;
 		if (message.id.startsWith(SYNTH_USER_ID_PREFIX)) return null;
 		if (message.id.length === 0) continue;
 		return message.id;

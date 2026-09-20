@@ -72,8 +72,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RawMessage } from "@magic-context/core/hooks/magic-context/read-session-raw";
 
-import { isPiSystemEntry } from "./system-entry-pi";
-
 /**
  * Prefix for the synthetic-user RawMessage id emitted when a run of `toolResult`
  * entries is folded into a user turn (the toolResult→assistant transition). The
@@ -325,7 +323,6 @@ function convertEntriesToRawMessageRange(
 		if (!isMessageEntry(entry)) continue;
 
 		const msg = entry.message;
-		if (isPiSystemEntry(msg)) continue;
 		const role = (msg as { role?: string }).role;
 		if (role === "toolResult") {
 			const synthesized = synthesizeToolResultParts(msg);
@@ -386,6 +383,9 @@ function convertEntriesToRawMessageRange(
 			continue;
 		}
 
+		// Protocol entries retain canonical ordinals so persisted boundaries do not
+		// shift. Their empty content projection keeps system prompts and tool
+		// declarations out of historian prose while chunk coverage absorbs the slot.
 		if (
 			appendMessage(
 				entry.id,

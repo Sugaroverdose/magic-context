@@ -9,6 +9,10 @@ import {
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
+import {
+	readSessionChunk,
+	withRawMessageProvider,
+} from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import * as logger from "@magic-context/core/shared/logger";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import {
@@ -93,12 +97,21 @@ describe("Pi system entry preservation", () => {
 			{ role: "user", content: "question", timestamp: 1 },
 			delta,
 		].map((message, index) => ({ type: "message", id: `e${index}`, message }));
+		const raw = convertEntriesToRawMessages(entries);
+		const sessionId = "system-historian-content";
+		const chunk = withRawMessageProvider(
+			sessionId,
+			{ readMessages: () => raw },
+			() => readSessionChunk(sessionId, 10000),
+		);
+		expect(chunk.text).toContain("question");
+		expect(chunk.text).not.toContain(initial.content);
+		expect(chunk.text).not.toContain(delta.content);
 		expect(
-			convertEntriesToRawMessages(entries).map(({ id, ordinal }) => ({
-				id,
-				ordinal,
-			})),
-		).toEqual([{ id: "e1", ordinal: 1 }]);
+			raw
+				.filter(isPiSystemEntry)
+				.every((message) => message.parts.length === 0),
+		).toBe(true);
 	});
 });
 
@@ -111,8 +124,8 @@ describe("Pi 0.86 provider contract", () => {
 				{
 					sequence: 0,
 					startMessage: 1,
-					endMessage: 1,
-					startMessageId: "u0",
+					endMessage: 2,
+					startMessageId: "s0",
 					endMessageId: "u0",
 					title: "old",
 					content: "folded history",
@@ -159,7 +172,7 @@ describe("Pi 0.86 provider contract", () => {
 		const sessionId = manager.getSessionId();
 		const db = createTestDb();
 		try {
-			manager.appendMessage(initial);
+			const s0 = manager.appendMessage(initial);
 			const u0 = manager.appendMessage(userMessage("old", 1));
 			manager.appendMessage(delta);
 			manager.appendMessage({
@@ -210,8 +223,8 @@ describe("Pi 0.86 provider contract", () => {
 				{
 					sequence: 0,
 					startMessage: 1,
-					endMessage: 1,
-					startMessageId: u0,
+					endMessage: 2,
+					startMessageId: s0,
 					endMessageId: u0,
 					title: "old",
 					content: "folded history",
@@ -220,7 +233,7 @@ describe("Pi 0.86 provider contract", () => {
 			setPendingPiCompactionMarkerState(db, sessionId, {
 				firstKeptEntryId: tail,
 				endMessageId: u0,
-				ordinal: 1,
+				ordinal: 2,
 				tokensBefore: 70000,
 				summary: "MC marker",
 				publishedAt: Date.now(),

@@ -40,8 +40,11 @@ from the pinned aliases). Paths beginning `pi-ai/` are inside
   in the kept window, then append post-marker entries without filtering.
 * `.../dist/core/extensions/runner.js:551-553`: the runtime extension context
   returns the actual session manager. MC's existing
-  `context-handler.ts::resolvePiAppendCompaction` binds its `appendCompaction`
-  method reflectively (it is not in Pi's readonly public interface).
+  drain reaches `SessionManager.appendCompaction` by reflectively binding the real
+  manager at `context-handler.ts:4259` (`return sm.appendCompaction.bind(sm)`),
+  **not** via `ctx.compact()` or a `session_before_compact` `{compaction}` return;
+  therefore the constructor populates the snapshot, but this depends on a runtime
+  object whose public type is readonly.
   `compaction-marker-manager-pi.ts::applyDeferredPiCompactionMarker` calls that
   method, **not a direct journal writer**. The 0.86.0 physical-session regression
   proves that this route records the host system snapshot. If a future host stops
@@ -68,12 +71,12 @@ redundant guards to every assistant/user operation.
 | Shared `tagTranscript` / Pi `tools/ctx-reduce.ts` / pending and persisted drop application | Operate on transcript/tag targets | System entries never acquire new tags or targets. Requested nonexistent system tag rejected; no pending operation. Existing stale persisted tags cannot acquire a mutable system target |
 | `heuristic-cleanup-pi.ts`, shared emergency planner, age reclaim | Target-based cleanup; tool fingerprinting reads assistant/toolResult | Exclusion at transcript boundary prevents targeting. Tests supply usagePercentage=95, 95,000 input / 65,000 ceiling; mixed interleaved fixture proves actual tool reclamation and exact system bytes survive |
 | `tail-hygiene-walk-pi.ts` | Already classified role=system as synthetic | Uses shared predicate now; zero reclaimable t/u and excluded zero-token parts are asserted |
-| `read-session-pi.ts::convertEntriesToRawMessageRange` | Unknown role emitted as empty raw message and consumed an ordinal | System entries no longer consume foldable ordinals or historian chunk space. They are protocol state, not historian prose. Session journal remains authoritative; no tool definitions are sent to the summarizer |
-| `pi-historian-runner.ts::findFirstKeptEntryId` | Derives boundary from raw conversion | System entries cannot be selected as new foldable boundaries because conversion excludes them. Existing supplied boundaries are host-handled: snapshot carries the complete pre-marker state even if a kept-window system is skipped |
+| `read-session-pi.ts::convertEntriesToRawMessageRange` | Unknown role emitted as empty raw message and consumed an ordinal | Keep the exact master ordinal assignment and emit role=system slots with empty parts through the existing generic arm. Exclude protocol content from historian prose, not from canonical numbering; chunk metadata absorbs system slots for coverage |
+| `pi-historian-runner.ts::findFirstKeptEntryId` | Derives boundary from raw conversion | Explicitly skip system roles when choosing firstKeptEntryId without changing any raw ordinal. Existing supplied boundaries are host-handled: snapshot carries the complete pre-marker state even if a kept-window system is skipped |
 | `compaction-marker-manager-pi.ts` and context-handler drain | Calls real host `appendCompaction`; old projection assumed summary only | Keep host consolidation per parent ruling. On the successful drain pass, adopt its system snapshot immediately; remove MC-owned summary at offset 1 on later reads, mirror two-entry alignment, skip already-consolidated system entries in kept-window id projection |
 | `pi-lkg.ts` | Serialized full arrays but prefix shaving could discard system-owned entries; old slots could replay lost declarations | Preserve system entries in prefix filter; do not label head system as synthetic ownership. Reject legacy slots missing current system entries. Full snapshot, shaving, and legacy rejection tests plus mutations |
 | `native-replay-pi.ts` / `native-replay-state-pi.ts` | State replay already assistant-only; low-level envelope helpers accepted arbitrary roles | Low-level envelope lookup also excludes system, so even an opaque provider payload is unchanged; targeted mutation test |
-| `clone-inheritance.ts::createCloneFilter` | Copies MC state, not source message arrays; uses raw conversion | No source system rewriting. Message tags/boundary ordinals inherit only foldable raw messages after conversion exclusion; normal clone suite passes |
+| `clone-inheritance.ts::createCloneFilter` | Copies MC state, not source message arrays; uses raw conversion | No source system rewriting. Canonical raw numbering remains identical to master, including system slots, so inherited boundary ordinals stay stable; normal clone suite passes |
 | `strip-placeholders-pi.ts` | Explicit assistant-only removal | Verified guard retained; no system deletion |
 | `temporal-awareness-pi.ts` | Only user content receives/loses temporal markers | Verified user-role guards; system bytes unchanged |
 | `pi-todo-inject.ts` | Assistant-only anchors and paired result insertion | Verified assistant guards; no system mutation |
@@ -113,13 +116,21 @@ transition fixture printed identical pre/defer1/defer2/restart SHA-256
 
 ## Verification
 
-* Red-first: the initial three new tests all failed on the original trim,
-  transcript view, and historian ordinal behavior.
+* Red-first: initial trim and transcript-view regressions failed before the fix.
+  The first delivery's ordinal exclusion was incorrect and has been removed.
+  Four new ordinal/persistence tests failed on that delivery and pass after restoring
+  canonical numbering; the existing historian exclusion test now fences prose,
+  not removal of ordinal slots.
 * `bun run typecheck` at repository root: passed.
 * Biome **2.5.1**, both packages: plugin passed; Pi full lint has an unchanged
   formatting error at `src/clone-inheritance.test.ts:204` and 41 warnings.
-  Changed-file lint passed with only two pre-existing context-handler warnings.
-* Full Pi suite: **1205 pass, 1 skip, 0 fail** (1206 tests / 99 files).
+  Checking the master version directly with the same Biome 2.5.1 also fails:
+  `git show master:packages/pi-plugin/src/clone-inheritance.test.ts | packages/pi-plugin/node_modules/.bin/biome check --stdin-file-path=packages/pi-plugin/src/clone-inheritance.test.ts`.
+  Master `59d2ef9c3b293b491adb39971cfd598439b98022` has the same file as the task
+  base, so this is not caused by the lock/package edits. Left unchanged.
+  Changed-file lint passed; the prior delivery has only two pre-existing
+  context-handler warnings.
+* Full Pi suite: **1209 pass, 1 skip, 0 fail** (1210 tests / 100 files).
 * `bun run build` in Pi package: passed.
 * `bun test tests/pi-*.test.ts` in e2e package: **7 pass, 0 fail**, host resolver
   **0.86.0**. First attempt required building Pi dist; rerun after build passed.
@@ -127,7 +138,7 @@ transition fixture printed identical pre/defer1/defer2/restart SHA-256
   required. Its typecheck and pinned lint passed.
 * AFT inspection had unavailable LSP producers; tsc is the authoritative check.
 * Root frozen install and post-alias frozen install passed. Aliases are test-only.
-* Ten independent mutations each failed exactly its selected named test; every
+* Twelve independent mutations each failed exactly its selected named test; every
   mutant was staged-safe, marked `NON-VACUITY BREAK`, restored, touched, and
   verified with empty unstaged diff. Details: `issue-485-mutations.json`.
 
@@ -137,3 +148,46 @@ parts. The emergency exclusion test verifies that there is no system mutation
 target; the separate mixed fixture additionally requires actual tool reclamation
 at 95 percent with unchanged interleaved system entries.
 It does not claim that emergency can reclaim any system tokens.
+
+## Canonical ordinal compatibility correction
+
+System entries **must consume their historical raw ordinal**, even though their
+content is not summary material. Skipping an entry renumbers persisted boundaries
+and is not a valid way to exempt it from folding. The original generic conversion
+arm now remains authoritative: a system entry produces a raw message with its
+original id, role, version and ordinal, and `parts: []`.
+
+The checked-in `src/fixtures/system-ordinals-pi.master.json` was generated by
+executing the actual converter from master commit
+`59d2ef9c3b293b491adb39971cfd598439b98022`, source blob
+`06e2f4cd18fefd7ba93ddabbb7f20dde26bca237`; its expected numbering was not written
+by hand. Reproduce with `bun scripts/generate-system-ordinal-golden.ts` from the
+Pi package. The script reads that git object inside this worktree, imports a
+temporary sibling module so its dependencies resolve normally, writes the golden,
+and removes the temporary module. It never reads the parent checkout.
+
+`system-ordinals-pi.test.ts` proves:
+
+1. Full serialized raw messages match the master golden, and every tested page
+   has identical ordinal/id/role coordinates. Two system entries are present,
+   including a delta between a tool result and the user that receives it.
+2. Real historian chunk construction retains leading and mid-span system slots
+   in coverage metadata, excludes both system prompts from prose, and passes
+   `validateChunkCoverage` without renumbering.
+3. A compartment seeded using the pre-fix golden endpoints selects the same raw
+   ids. Its persisted end watermark resumes at the same next message; actual
+   `ctx_expand(message=...)` resolves the same original user, and trim preserves
+   both systems while removing the correct summarized conversation prefix.
+4. Native marker boundary selection skips a system slot but keeps the next user's
+   original ordinal.
+
+Mutation #3 now hydrates system content in the raw-to-historian projection instead
+of returning empty parts. The same named test, `historian never treats system
+entries as foldable ordinals`, fails because `Base instructions` appears in the
+historian's `[1] S:` text. Its name refers to content to summarize, not removal
+from canonical ordinal space. Additional mutations prove the master golden rejects
+renumbering and boundary selection rejects a system first-kept entry.
+
+No shared-core hunk was required: the shared chunk reader already absorbs empty
+mid-span message metadata into contiguous coverage, and its existing validator
+accepts that coverage unchanged.
