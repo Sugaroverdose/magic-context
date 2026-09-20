@@ -48,7 +48,7 @@ test("analyzer and sentinel discriminate unaccounted_defer_pass from no_mc_pass_
     const withLog = analyzeOpenCodeCacheBustSession({ ...options, mcLogPath: logPath });
     expect(withLog.requests[1]?.divergenceClass).toBe("unaccounted_defer_pass");
     const events: string[] = [];
-    await runSentinelOnce({ once: true, send: false, intervalMs: 60000, lookbackMs: 120000, stateFile: join(dir, "state.json"), databasePath: join(dir, "absent.db"), rustStorePath: join(dir, "absent-rust.db"), connectionFile: join(dir, "absent.json"), wakeModuleId: "prefrontal", anthropicDir: dir, openaiDir: join(dir, "missing"), mcLogPath: logPath }, {
+    await runSentinelOnce({ once: true, send: false, intervalMs: 60000, lookbackMs: 120000, stateFile: join(dir, "state.json"), databasePath: join(dir, "absent.db"), rustStorePath: join(dir, "absent-rust.db"), connectionFile: join(dir, "absent.json"), wakeModuleId: "prefrontal-core", wakeAgentId: "agent_b613e5cf2ee55b8c", wakeFromAgent: "mc-cache-bust-sentinel", anthropicDir: dir, openaiDir: join(dir, "missing"), mcLogPath: logPath }, {
         now: () => bTime + 1000,
         listActiveSessions: () => [{ sessionId: session, harness: "opencode", projectPath: "fixture", directory: dir, activityMs: bTime }],
         loadDecisions: () => [execute], stdout: line => events.push(line),
