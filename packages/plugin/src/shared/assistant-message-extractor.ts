@@ -3,6 +3,8 @@ type MessageTime = { created?: number };
 type MessageInfo = {
     role?: string;
     time?: MessageTime;
+    error?: unknown;
+    finish?: string;
 };
 
 type MessagePart = {
@@ -14,6 +16,11 @@ type SessionMessage = {
     info?: MessageInfo;
     parts?: unknown;
 };
+
+export interface AssistantFailure {
+    error: unknown;
+    finish: string | null;
+}
 
 import { isRecord } from "./record-type-guard";
 
@@ -33,6 +40,15 @@ function asSessionMessage(value: unknown): SessionMessage | null {
                                     : undefined,
                         }
                       : undefined,
+                  error: info.error,
+                  finish:
+                      typeof info.finish === "string"
+                          ? info.finish
+                          : typeof info.finish_reason === "string"
+                            ? info.finish_reason
+                            : typeof info.finishReason === "string"
+                              ? info.finishReason
+                              : undefined,
               }
             : undefined,
         parts,
@@ -54,16 +70,20 @@ function getTextParts(message: SessionMessage): MessagePart[] {
         .filter((part) => part.type === "text" && Boolean(part.text));
 }
 
-export function extractLatestAssistantText(messages: unknown): string | null {
+function getLatestAssistantMessage(messages: unknown): SessionMessage | null {
     if (!Array.isArray(messages) || messages.length === 0) return null;
 
-    const assistantMessages = messages
-        .map(asSessionMessage)
-        .filter((message): message is SessionMessage => message !== null)
-        .filter((message) => message.info?.role === "assistant")
-        .sort((a, b) => getCreatedTime(b) - getCreatedTime(a));
+    return (
+        messages
+            .map(asSessionMessage)
+            .filter((message): message is SessionMessage => message !== null)
+            .filter((message) => message.info?.role === "assistant")
+            .sort((a, b) => getCreatedTime(b) - getCreatedTime(a))[0] ?? null
+    );
+}
 
-    const latest = assistantMessages[0];
+export function extractLatestAssistantText(messages: unknown): string | null {
+    const latest = getLatestAssistantMessage(messages);
     if (!latest) return null;
 
     return (
@@ -71,6 +91,16 @@ export function extractLatestAssistantText(messages: unknown): string | null {
             .map((part) => part.text)
             .join("\n") || null
     );
+}
+
+/** Return an error persisted on the newest assistant row, including its settlement reason. */
+export function extractLatestAssistantFailure(messages: unknown): AssistantFailure | null {
+    const latest = getLatestAssistantMessage(messages);
+    if (!latest || latest.info?.error === undefined || latest.info.error === null) return null;
+    return {
+        error: latest.info.error,
+        finish: latest.info.finish ?? null,
+    };
 }
 
 export function hasLengthCappedOutput(value: unknown): boolean {

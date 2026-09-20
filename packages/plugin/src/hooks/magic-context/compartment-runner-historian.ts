@@ -12,6 +12,7 @@ import {
 import type { PluginContext } from "../../plugin/types";
 import * as shared from "../../shared";
 import {
+    extractLatestAssistantFailure,
     extractLatestAssistantText,
     hasLengthCappedOutput,
 } from "../../shared/assistant-message-extractor";
@@ -103,6 +104,37 @@ function historianMessageCreatedAt(message: Record<string, unknown>): number {
     return typeof message.info.time.created === "number" ? message.info.time.created : 0;
 }
 
+function describeAssistantFailure(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === "string") return error;
+    if (!isRecord(error)) return String(error);
+
+    const data = isRecord(error.data) ? error.data : undefined;
+    const name = typeof error.name === "string" ? error.name : undefined;
+    const message =
+        typeof error.message === "string"
+            ? error.message
+            : typeof data?.message === "string"
+              ? data.message
+              : undefined;
+    const provider = typeof data?.providerID === "string" ? data.providerID : undefined;
+    const status =
+        typeof data?.statusCode === "number" || typeof data?.statusCode === "string"
+            ? String(data.statusCode)
+            : undefined;
+    const label = [name, message].filter(Boolean).join(": ");
+    const context = [provider ? `provider=${provider}` : null, status ? `status=${status}` : null]
+        .filter(Boolean)
+        .join(", ");
+    if (label) return context ? `${label} (${context})` : label;
+
+    try {
+        return JSON.stringify(error);
+    } catch {
+        return String(error);
+    }
+}
+
 export function createV1HiddenCompletionExecutor(
     client: PluginContext["client"] | undefined,
     db: Database,
@@ -138,6 +170,15 @@ export function createV1HiddenCompletionExecutor(
             const messages = shared.normalizeSDKResponse(response, [] as unknown[], {
                 preferResponseOnMissingData: true,
             });
+            const assistantFailure = extractLatestAssistantFailure(messages);
+            if (assistantFailure) {
+                const finish = assistantFailure.finish
+                    ? ` (finish=${assistantFailure.finish})`
+                    : "";
+                throw new Error(
+                    `Historian host recorded an assistant error${finish}: ${describeAssistantFailure(assistantFailure.error)}`,
+                );
+            }
             const text = extractLatestAssistantText(messages);
             return {
                 messages,
