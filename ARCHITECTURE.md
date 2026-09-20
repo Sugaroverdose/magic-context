@@ -87,7 +87,7 @@ The compacted history renders into TWO synthetic `user`-role message slots at th
 - **Pressure backstop refold:** on a cache-busting pass, if no natural HARD bust has arrived but m[1] has grown large — gated by the m[1]/m[0] size ratio (with a small-m[0] floor) OR an absolute m[1] token cap (~20% of history budget) OR a large memory-mutation count.
 - `applyMarkersToState` updates ALL `state.cachedM0*` fields post-materialize (guards against an infinite re-materialize loop). `/ctx-flush` is SOFT (drives m[1] refresh + heuristics, not an m[0] fold).
 
-**Memory mutations route through m[1], not the epoch.** In-session `ctx_memory` mutations do NOT bump `project_memory_epoch`: additive writes surface via the `maxMemoryId` watermark; non-additive (`update`/`archive`/`merge`) record a `memory_mutation_log` row rendered as a `<memory-updates>` delta. Both reconcile into m[0] on the next natural hard bust. The epoch is bumped only by **dashboard** mutations and `/ctx-session-upgrade` migration (an external editor can't otherwise signal a running session).
+**Memory mutations route through m[1], not the epoch.** In-session `ctx_memory` mutations do NOT bump `project_memory_epoch`: additive writes surface via the `maxMemoryId` watermark; non-additive (`update`/`archive`/`merge`) record a `memory_mutation_log` row rendered as a `<memory-updates>` delta. Both reconcile into m[0] on the next natural hard bust. The epoch is bumped only by **dashboard** mutations (an external editor can't otherwise signal a running session).
 
 <!-- mc:protected END -->
 
