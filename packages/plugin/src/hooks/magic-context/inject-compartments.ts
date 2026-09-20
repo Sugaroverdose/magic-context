@@ -852,6 +852,8 @@ export interface M0M1RenderOptions {
     allowFreshContentionFallback?: boolean;
     /** Exact off-wire prefix chosen before reduction gates; do not decide again at delivery. */
     preparedPrefix?: InjectM0M1Result;
+    /** Preserve the original host message order so prefix trimming can still identify the boundary after replay or pruning removes rows. */
+    prefixTrimSourceOrder?: PrefixTrimSourceOrder;
     /** Persisted pair captured before a fallible preflight. Contention may recover
      * from it, but must not adopt a newer row written while the preflight ran. */
     contentionFallbackPrefix?: InjectM0M1Result;
@@ -898,6 +900,16 @@ export interface MaterializeM0Result {
     renderedMemoryIds: number[];
 }
 
+export type PrefixTrimStatus = "not-attempted" | "not-required" | "applied" | "refused";
+
+export interface PrefixTrimSourceOrder {
+    /** Stable IDs in the exact order supplied by the host before this transform mutates the array. */
+    messageIds: readonly string[];
+    /** ID-less synthetic users are valid only as one contiguous leading block. */
+    syntheticHeadCount: number;
+    invalidReason: string | null;
+}
+
 export interface InjectM0M1Result {
     injected: boolean;
     prependedMessageCount: number;
@@ -908,6 +920,7 @@ export interface InjectM0M1Result {
     m1Text: string | null;
     preparedMessages?: MessageLike[];
     preparedTrimBoundaryId?: string | null;
+    prefixTrimStatus?: PrefixTrimStatus;
 }
 
 export class MaterializeContentionError extends Error {
@@ -3183,6 +3196,56 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
     };
 }
 
+function isSyntheticPrefixHead(message: MessageLike): boolean {
+    if (
+        message.info.id !== undefined ||
+        message.info.role !== "user" ||
+        message.parts.length === 0
+    ) {
+        return false;
+    }
+    return message.parts.every((part) => (part as { synthetic?: boolean }).synthetic === true);
+}
+
+/**
+ * Freeze the host's source order before tag replay and tool pruning mutate the live array.
+ * The IDs are evidence only: delivery trims surviving live objects and never restores old parts.
+ */
+export function capturePrefixTrimSourceOrder(
+    messages: readonly MessageLike[],
+): PrefixTrimSourceOrder {
+    const messageIds: string[] = [];
+    const seen = new Set<string>();
+    let syntheticHeadCount = 0;
+    let sawPersistedRow = false;
+    let invalidReason: string | null = null;
+
+    for (const [index, message] of messages.entries()) {
+        const id = message.info.id;
+        if (typeof id !== "string" || id.length === 0) {
+            if (!sawPersistedRow && isSyntheticPrefixHead(message)) {
+                syntheticHeadCount += 1;
+                continue;
+            }
+            invalidReason = `source message at index ${index} has no stable id outside the synthetic head`;
+            break;
+        }
+        sawPersistedRow = true;
+        if (seen.has(id)) {
+            invalidReason = `source message id ${id} appears more than once`;
+            break;
+        }
+        seen.add(id);
+        messageIds.push(id);
+    }
+
+    return Object.freeze({
+        messageIds: Object.freeze(messageIds),
+        syntheticHeadCount,
+        invalidReason,
+    });
+}
+
 function trimToPreparedPrefix(
     options: M0M1RenderOptions,
     prepared: Pick<
@@ -3191,24 +3254,83 @@ function trimToPreparedPrefix(
         | "m0RematerializedThisPass"
         | "materializationContentionRetryExhausted"
     >,
-): void {
-    if (options.compactionOff || !options.messages) return;
+): PrefixTrimStatus {
+    if (options.compactionOff || !options.messages) return "not-attempted";
     const boundary = prepared.preparedTrimBoundaryId;
-    const index = boundary
-        ? options.messages.findIndex((message) => message.info.id === boundary)
-        : -1;
-    if (index >= 0) options.messages.splice(0, index + 1);
-    else if (boundary) {
-        sessionLog(
-            options.sessionId,
-            `prefix trim: boundary ${boundary} absent from current messages; pass=${options.isCacheBustingPass ? "priced" : "defer"}; no in-pass trim applied`,
-        );
+    let status: PrefixTrimStatus = "not-required";
+
+    if (boundary) {
+        const sourceOrder = options.prefixTrimSourceOrder;
+        if (sourceOrder) {
+            const refuse = (reason: string): PrefixTrimStatus => {
+                sessionLog(
+                    options.sessionId,
+                    `prefix trim: boundary ${boundary}; pass=${options.isCacheBustingPass ? "priced" : "defer"}; no in-pass trim applied (${reason})`,
+                );
+                return "refused";
+            };
+            if (sourceOrder.invalidReason) {
+                status = refuse(sourceOrder.invalidReason);
+            } else {
+                const sourcePosition = new Map<string, number>();
+                sourceOrder.messageIds.forEach((id, index) => {
+                    sourcePosition.set(id, index);
+                });
+                const boundaryPosition = sourcePosition.get(boundary);
+                if (boundaryPosition === undefined) {
+                    status = refuse("boundary absent from immutable source order");
+                } else {
+                    let lastSourcePosition = -1;
+                    let sawPersistedRow = false;
+                    let liveOrderError: string | null = null;
+                    const retained: MessageLike[] = [];
+                    for (const [index, message] of options.messages.entries()) {
+                        const id = message.info.id;
+                        if (typeof id !== "string" || id.length === 0) {
+                            if (!sawPersistedRow && isSyntheticPrefixHead(message)) continue;
+                            liveOrderError = `live message at index ${index} has no stable id outside the synthetic head`;
+                            break;
+                        }
+                        sawPersistedRow = true;
+                        const position = sourcePosition.get(id);
+                        if (position === undefined) {
+                            liveOrderError = `live message ${id} is absent from immutable source order`;
+                            break;
+                        }
+                        if (position <= lastSourcePosition) {
+                            liveOrderError = `live message ${id} violates immutable source order`;
+                            break;
+                        }
+                        lastSourcePosition = position;
+                        if (position > boundaryPosition) retained.push(message);
+                    }
+                    if (liveOrderError) status = refuse(liveOrderError);
+                    else {
+                        options.messages.splice(0, options.messages.length, ...retained);
+                        status = "applied";
+                    }
+                }
+            }
+        } else {
+            const index = options.messages.findIndex((message) => message.info.id === boundary);
+            if (index >= 0) {
+                options.messages.splice(0, index + 1);
+                status = "applied";
+            } else {
+                sessionLog(
+                    options.sessionId,
+                    `prefix trim: boundary ${boundary} absent from current messages; pass=${options.isCacheBustingPass ? "priced" : "defer"}; no in-pass trim applied`,
+                );
+                status = "refused";
+            }
+        }
     }
     if (
         prepared.m0RematerializedThisPass ||
         (options.isCacheBustingPass && !prepared.materializationContentionRetryExhausted)
     )
         clearInjectionCache(options.sessionId);
+    return status;
 }
 
 /** Capture a complete persisted pair and its boundary before a fallible preflight. */
@@ -3254,11 +3376,16 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     const prepared = options.preparedPrefix;
     if (prepared?.preparedMessages) {
         const head = prepared.preparedMessages;
+        let prefixTrimStatus: PrefixTrimStatus = "not-attempted";
         if (options.messages) {
-            trimToPreparedPrefix(options, prepared);
+            prefixTrimStatus = trimToPreparedPrefix(options, prepared);
             options.messages.unshift(...structuredClone(head));
         }
-        return { ...prepared, prependedMessageCount: options.messages ? head.length : 0 };
+        return {
+            ...prepared,
+            prependedMessageCount: options.messages ? head.length : 0,
+            prefixTrimStatus,
+        };
     }
     // Callers normally pass getOrCreateSessionMeta(), which already contains the
     // persisted mural payload. Keep compatibility with lean process-local states
@@ -3522,32 +3649,30 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             ? contentionReplayBoundary
             : readCachedBaselineState(options.db, options.sessionId).boundary;
     const preparedMessages: MessageLike[] = [];
-    let prependedMessageCount = 0;
-    {
-        const muralForWire = options.state.cachedM0MuralDataUrl
-            ? {
-                  enabled: true,
-                  supportsVision: true,
-                  dataUrl: options.state.cachedM0MuralDataUrl,
-                  contentHash: options.state.cachedM0MuralHash ?? undefined,
-              }
-            : undefined;
-        prependedMessageCount = prependM0M1Messages(
-            options.sessionId,
-            preparedMessages,
-            m0Text,
-            m1Text,
-            muralForWire,
-        );
-        if (options.messages) {
-            trimToPreparedPrefix(options, {
-                m0RematerializedThisPass: rematerialized,
-                materializationContentionRetryExhausted: contentionExhausted,
-                preparedTrimBoundaryId,
-            });
-            options.messages.unshift(...structuredClone(preparedMessages));
-        } else prependedMessageCount = 0;
-    }
+    const muralForWire = options.state.cachedM0MuralDataUrl
+        ? {
+              enabled: true,
+              supportsVision: true,
+              dataUrl: options.state.cachedM0MuralDataUrl,
+              contentHash: options.state.cachedM0MuralHash ?? undefined,
+          }
+        : undefined;
+    let prependedMessageCount = prependM0M1Messages(
+        options.sessionId,
+        preparedMessages,
+        m0Text,
+        m1Text,
+        muralForWire,
+    );
+    let prefixTrimStatus: PrefixTrimStatus = "not-attempted";
+    if (options.messages) {
+        prefixTrimStatus = trimToPreparedPrefix(options, {
+            m0RematerializedThisPass: rematerialized,
+            materializationContentionRetryExhausted: contentionExhausted,
+            preparedTrimBoundaryId,
+        });
+        options.messages.unshift(...structuredClone(preparedMessages));
+    } else prependedMessageCount = 0;
 
     return {
         injected: true,
@@ -3559,5 +3684,6 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         m1Text,
         preparedMessages,
         preparedTrimBoundaryId,
+        prefixTrimStatus,
     };
 }

@@ -96,6 +96,7 @@ import {
 } from "./final-wire-token-estimate";
 import type { LiveModelBySession } from "./hook-handlers";
 import {
+    capturePrefixTrimSourceOrder,
     mustMaterialize,
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,
@@ -1457,6 +1458,9 @@ export function createTransform(deps: TransformDeps) {
         //
         const historyRefreshExplicitBeforePrepare = deps.historyRefreshSessions.has(sessionId);
         const deferredHistoryWasPendingAtPassStart = deferredHistoryRefreshSessions.has(sessionId);
+        const prefixTrimSourceOrder = deferredHistoryWasPendingAtPassStart
+            ? capturePrefixTrimSourceOrder(messages)
+            : undefined;
         const earlyActiveRunBlocksMaterialization =
             (getActiveCompartmentRun(sessionId) !== undefined ||
                 sessionMeta.compartmentInProgress) &&
@@ -2359,6 +2363,7 @@ export function createTransform(deps: TransformDeps) {
             protectedCount: protectionWindow.status.protectedCount,
             emergencyCeilingTokens,
             pendingCompartmentInjection,
+            prefixTrimSourceOrder,
             hiddenMessagesAtCompactionSeam,
             trimmedMessagesAtCompactionBoundary,
             didMutateFromFlushedStatuses,
