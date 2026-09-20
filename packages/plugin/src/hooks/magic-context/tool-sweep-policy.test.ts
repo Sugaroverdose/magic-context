@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { stripReasoningFromMergedAssistants } from "./strip-content";
+import type { MessageLike } from "./tag-messages";
 import { ToolMutationBatch } from "./tool-drop-target";
 import { TOOL_SWEEP_SCOPED_MARKER } from "./tool-sweep-policy";
-import type { MessageLike } from "./tag-messages";
 
 test("legacy merged-reasoning reader ignores the scoped-sweep control entry", () => {
     expect(TOOL_SWEEP_SCOPED_MARKER).toBe("@tool-sweep-scoped");
