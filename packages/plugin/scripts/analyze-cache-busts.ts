@@ -43,6 +43,8 @@ import {
     normalizeRequestBody,
 } from "./cache-bust-body-sources";
 
+import { withSchedulerLogFallback } from "./cache-bust-scheduler-log";
+
 type Json = Record<string, unknown>;
 type ByteVerdict = "BUST" | "STABLE";
 type MeterVerdict = ByteVerdict | "LATENCY" | "UNMETERED";
@@ -68,6 +70,7 @@ interface Args {
     allBusts: boolean;
     allRows: boolean;
     help: boolean;
+    mcLogPath?: string;
 }
 
 interface MeterUsage {
@@ -120,6 +123,8 @@ export interface OpenCodeCacheBustAnalysisOptions {
     anthropicDir?: string;
     openaiDir?: string;
     decisions?: readonly CacheBustDecisionAttribution[];
+    /** Use scheduler lines when a pass has no DB row; null disables this additional evidence source. */
+    mcLogPath?: string | null;
 }
 
 interface DumpCandidate {
@@ -144,6 +149,7 @@ function parseArgs(argv: string[]): Args {
     };
     const valueOptions = new Set([
         "--session",
+        "--mc-log",
         "--dir",
         "--anthropic-dir",
         "--openai-dir",
@@ -187,6 +193,7 @@ function parseArgs(argv: string[]): Args {
           ];
     return {
         sessionPrefix: getOpt("--session") ?? positionalSession,
+        mcLogPath: getOpt("--mc-log"),
         sources,
         since: getOpt("--since"),
         until: getOpt("--until"),
@@ -553,6 +560,7 @@ function openCodeAnalyzerCommand(
         "--show-diff",
         "--all-rows",
     ];
+    if (options.mcLogPath) args.push("--mc-log", shellQuote(options.mcLogPath));
     if (options.anthropicDir) {
         args.push("--anthropic-dir", shellQuote(options.anthropicDir));
     }
@@ -620,7 +628,7 @@ export function analyzeOpenCodeCacheBustSession(
             : boundedSnapshots.slice(
                   options.sinceExclusiveMs === undefined ? 0 : Math.max(0, firstNewIndex - 2),
               );
-    const rows = analyzeSnapshots(analysisSnapshots, options.decisions);
+    const rows = analyzeSnapshots(analysisSnapshots, withSchedulerLogFallback(options.decisions ?? [], options.sessionId, options.mcLogPath));
     const requests: AnalyzedCacheRequest[] = rows.flatMap((row) => {
         const timestampMs = Date.parse(row.current.createdAt);
         if (!Number.isFinite(timestampMs) || !inWindow(timestampMs)) return [];
@@ -877,6 +885,7 @@ Sources (both searched by default):
              WebSocket captures can have no response file and are UNMETERED.
 
 Options:
+  --mc-log <path>       scheduler log fallback (default: MAGIC_CONTEXT_LOG_PATH or harness log)
   --dir <path>          inspect one explicit directory (legacy override)
   --anthropic-dir <p>   override the Anthropic source
   --openai-dir <path>   override the OpenAI source
@@ -915,7 +924,7 @@ function main(): void {
         );
         console.log("");
     }
-    const rows = analyzeSnapshots(snaps);
+    const rows = analyzeSnapshots(snaps, withSchedulerLogFallback([], snaps[0].session, opts.mcLogPath));
     const provider = snaps[0].provider;
     const meterRule =
         snaps.find((snapshot) => snapshot.usage)?.usage?.rule ??

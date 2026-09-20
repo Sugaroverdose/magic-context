@@ -265,7 +265,10 @@ export class ToolMutationBatch {
     private affectedMessages = new Set<MessageLike>();
     private messages: MessageLike[];
 
-    constructor(messages: MessageLike[]) {
+    constructor(
+        messages: MessageLike[],
+        private readonly scopedSweep = false,
+    ) {
         this.messages = messages;
     }
 
@@ -282,7 +285,13 @@ export class ToolMutationBatch {
         }
 
         for (let i = this.messages.length - 1; i >= 0; i -= 1) {
-            if (!this.messages[i].parts.some(hasMeaningfulPart)) {
+            // Tool removal must not delete unrelated reasoning-only turns. Existing
+            // sessions switch from the old global scan only on a cache-busting pass,
+            // because restoring previously removed messages also changes cached bytes.
+            if (
+                (!this.scopedSweep || this.affectedMessages.has(this.messages[i])) &&
+                !this.messages[i].parts.some(hasMeaningfulPart)
+            ) {
                 this.messages.splice(i, 1);
             }
         }

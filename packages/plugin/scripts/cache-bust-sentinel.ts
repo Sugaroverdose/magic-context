@@ -73,6 +73,7 @@ export interface CacheBustSentinelOptions {
     wakeModuleId: string;
     wakeAgentId: string;
     wakeFromAgent: string;
+    mcLogPath?: string;
     anthropicDir?: string;
     openaiDir?: string;
     piDir?: string;
@@ -325,6 +326,7 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
         "--wake-agent-id",
         "--wake-from-agent",
         "--anthropic-dir",
+        "--mc-log",
         "--openai-dir",
         "--pi-dir",
         "--omp-dir",
@@ -372,6 +374,7 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
         wakeAgentId: values.get("--wake-agent-id") ?? DEFAULT_WAKE_AGENT_ID,
         wakeFromAgent: values.get("--wake-from-agent") ?? DEFAULT_WAKE_FROM_AGENT,
         anthropicDir: values.get("--anthropic-dir"),
+        mcLogPath: values.get("--mc-log"),
         openaiDir: values.get("--openai-dir"),
         piDir: values.get("--pi-dir"),
         ompDir: values.get("--omp-dir"),
@@ -654,6 +657,7 @@ async function analyzeActiveSession(
             sinceExclusiveMs,
             untilInclusiveMs: Date.now(),
             anthropicDir: options.anthropicDir,
+            mcLogPath: options.mcLogPath,
             openaiDir: options.openaiDir,
             decisions,
         });

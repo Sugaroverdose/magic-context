@@ -127,6 +127,7 @@ import {
     stripClearedReasoning,
 } from "./strip-content";
 import { injectTemporalMarkers } from "./temporal-awareness";
+import { useScopedToolSweep } from "./tool-sweep-policy";
 import { runCompartmentPhase } from "./transform-compartment-phase";
 import {
     contextUsagePassSnapshot,
@@ -1945,8 +1946,14 @@ export function createTransform(deps: TransformDeps) {
                     messagesBeforeInitialPrepare && hiddenMessagesAtCompactionSeam.length > 0
                         ? messagesBeforeInitialPrepare
                         : messages;
+                const scopedToolSweep = useScopedToolSweep(
+                    db,
+                    sessionId,
+                    isCacheBusting || canConsumeDeferredEarly,
+                );
                 const result = tagMessages(sessionId, messagesForTagging, deps.tagger, db, {
                     skipPrefixInjection,
+                    scopedToolSweep,
                 });
                 targets = result.targets;
                 reasoningByMessage = result.reasoningByMessage;
