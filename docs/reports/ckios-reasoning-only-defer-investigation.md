@@ -24,7 +24,17 @@ There is no original TS transform-entry capture for B.
   hook inputs and outputs. Both arms retain the target at wire index 3 in A
   and B. MC serves `[text " ", thinking, text " "]` on both. Tail cache-control
   markers move normally. This does not recreate the original 285 pending ops,
-  81 auto-drops, or marker drain from ordinal 20800 to 21398.
+  81 auto-drops, or original marker drain from ordinal 20800 to 21398.
+- The probe also has a `marker` arm (`MC_PROBE_LANE=marker`). It seeds a
+  compartment and pending marker below the target, reloads deferred signals,
+  warms live usage, and prices A at 96.5%/185000 tokens. The log confirms
+  `decision=execute` and `compaction-marker drain: applied at ordinal 3`.
+  B is `decision=defer` at 0.5%/1000 tokens and its hook input contains the
+  host-trimmed marker projection. The target survives both hook outputs and
+  both wire bodies at index 5. Pending marker state is null after the drain.
+  This arm used the exact staged reasoning text/signature and notice text;
+  only inert `printf` tool commands were executed. Captures:
+  `/tmp/ckios-probe-pool951-marker-v4/`.
 - Direct installed `@ai-sdk/anthropic` 3.0.82 capture retained historical
   whitespace/thinking/whitespace assistants and lone whitespace/empty-text
   assistants. This SDK-only experiment is not evidence about OpenCode's
@@ -53,7 +63,11 @@ The authorized read-only context.db query found:
   `processed_image_stripped_ids`, and `merged_reasoning_stripped_ids`. Its only
   session-meta occurrence is `trailing_blank_decisions: strip`, matching the
   staged snapshot. There is no target-specific persisted neutralization to
-  seed in the requested final store-side arm.
+  seed in the requested final store-side arm. No stripped-placeholder ID in
+  the read-only current store sorts newer than boundary
+  `msg_0bc7d0493001eZJVUThylqRw00`; consequently the two original sentinel
+  replay targets cannot be identified by intersecting newer IDs. Naming them
+  without the original B hook input would be speculation.
 
 ## Remaining evidence needed
 
