@@ -85,6 +85,7 @@ import {
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY_WITH_VERSION,
     OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
 } from "../lib/opencode-plugin-cache";
+import { pluginConfigKeyFor, readPluginEntries } from "../lib/opencode-plugin-registration";
 import { inspectPinnedOpenCodePluginSchemaFences } from "../lib/opencode-plugin-schema-fence";
 import { detectConfigPaths } from "../lib/paths";
 import { confirm, intro, log, outro, selectOne, spinner, text } from "../lib/prompts";
@@ -1187,13 +1188,25 @@ export async function runDoctor(
             // tuples (or stripping options) would silently drop user config.
             // matchesPluginEntry / isDevPathPluginEntry are imported from
             // ../adapters/opencode and accept both strings and tuples.
-            const rawPlugins: unknown[] = Array.isArray(config?.plugin) ? config.plugin : [];
-            const existingIdx = rawPlugins.findIndex(
-                (entry) => matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
+            // OpenCode 2 loads the legacy `plugin` array and its native `plugins`
+            // array together, so an entry under either key is a live registration
+            // and a fresh entry must go under the running host's own key.
+            const registrationKey = pluginConfigKeyFor(hostGeneration);
+            const allEntries = readPluginEntries(config);
+            const found = allEntries.find(
+                ({ entry }) =>
+                    matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
             );
+            // The array doctor edits: the one holding the existing entry, else the
+            // host generation's own key for a fresh registration.
+            const targetKey = found?.key ?? registrationKey;
+            const rawPlugins: unknown[] = Array.isArray(config?.[targetKey])
+                ? (config[targetKey] as unknown[])
+                : [];
+            const existingIdx = found ? found.index : -1;
             if (
-                rawPlugins.some(
-                    (entry) =>
+                allEntries.some(
+                    ({ entry }) =>
                         isLocalPathPluginEntry(entry) &&
                         String(entry).includes("magic-context") &&
                         !isDevPathPluginEntry(entry),
@@ -1251,7 +1264,7 @@ export async function runDoctor(
                         } else {
                             rawPlugins[existingIdx] = PLUGIN_ENTRY_WITH_VERSION;
                         }
-                        config.plugin = rawPlugins;
+                        config[targetKey] = rawPlugins;
                         writeFileAtomic(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
                         pass(
                             `Upgraded plugin entry in ${configName}: ${oldEntryStr} → ${PLUGIN_ENTRY_WITH_VERSION}`,
@@ -1263,7 +1276,7 @@ export async function runDoctor(
                 // Auto-add plugin entry — preserves comments AND every existing
                 // tuple/options entry the user already had.
                 rawPlugins.push(PLUGIN_ENTRY_WITH_VERSION);
-                config.plugin = rawPlugins;
+                config[targetKey] = rawPlugins;
                 writeFileAtomic(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
                 pass(`Added plugin to ${configName}`);
                 fixed++;
@@ -1327,80 +1340,89 @@ export async function runDoctor(
         }
     }
 
-    // 6. Check tui.json
-    const tuiAdded = ensureTuiPluginEntry();
-    if (tuiAdded) {
-        pass("Added TUI sidebar plugin to tui.json");
-        warn("Restart OpenCode to see the sidebar");
-        fixed++;
-    } else if (existsSync(paths.tuiConfig)) {
-        // Check for pinned version in tui config. Same tuple/dev-path rules
-        // as the main opencode config — preserve every entry shape on write.
-        try {
-            const tuiRaw = readFileSync(paths.tuiConfig, "utf-8");
-            const tuiConfig = parse(tuiRaw) as Record<string, unknown>;
-            const tuiRawPlugins: unknown[] = Array.isArray(tuiConfig?.plugin)
-                ? tuiConfig.plugin
-                : [];
-            const tuiIdx = tuiRawPlugins.findIndex(
-                (entry) => matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
-            );
-            if (
-                tuiRawPlugins.some(
+    // 6. Check tui.json. OpenCode 2 loads the sidebar from the plugin entry itself
+    // (its host resolves a `tui` entrypoint next to `server`), so tui.json is a
+    // 1.x-only surface and writing it on a 2.x host would register nothing.
+    if (hostGeneration === "v2") {
+        pass("TUI sidebar loads from the plugin entry on OpenCode 2 (tui.json not used)");
+    } else {
+        const tuiAdded = ensureTuiPluginEntry();
+        if (tuiAdded) {
+            pass("Added TUI sidebar plugin to tui.json");
+            warn("Restart OpenCode to see the sidebar");
+            fixed++;
+        } else if (existsSync(paths.tuiConfig)) {
+            // Check for pinned version in tui config. Same tuple/dev-path rules
+            // as the main opencode config — preserve every entry shape on write.
+            try {
+                const tuiRaw = readFileSync(paths.tuiConfig, "utf-8");
+                const tuiConfig = parse(tuiRaw) as Record<string, unknown>;
+                const tuiRawPlugins: unknown[] = Array.isArray(tuiConfig?.plugin)
+                    ? tuiConfig.plugin
+                    : [];
+                const tuiIdx = tuiRawPlugins.findIndex(
                     (entry) =>
-                        isLocalPathPluginEntry(entry) &&
-                        String(entry).includes("magic-context") &&
-                        !isDevPathPluginEntry(entry),
-                )
-            ) {
-                warn(
-                    "An unverifiable local TUI plugin path was ignored because its package name is not Magic Context",
+                        matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
+                );
+                if (
+                    tuiRawPlugins.some(
+                        (entry) =>
+                            isLocalPathPluginEntry(entry) &&
+                            String(entry).includes("magic-context") &&
+                            !isDevPathPluginEntry(entry),
+                    )
+                ) {
+                    warn(
+                        "An unverifiable local TUI plugin path was ignored because its package name is not Magic Context",
+                    );
+                }
+                const tuiEntryAsString = (entry: unknown): string => {
+                    if (typeof entry === "string") return entry;
+                    if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
+                    return "";
+                };
+                if (tuiIdx >= 0) {
+                    const tuiEntry = tuiRawPlugins[tuiIdx];
+                    const tuiEntryStr = tuiEntryAsString(tuiEntry);
+                    if (isDevPathPluginEntry(tuiEntry)) {
+                        pass(`TUI sidebar plugin configured (dev path: ${tuiEntryStr})`);
+                    } else {
+                        const tuiPinned = isPinnedOpenCodePluginSpecifier(tuiEntryStr);
+                        if (tuiPinned && !options.force) {
+                            reportAutoUpdateStall(tuiEntryStr);
+                            warn(
+                                `TUI plugin pinned to ${tuiEntryStr} — use 'doctor --force' to upgrade`,
+                            );
+                        } else if (tuiPinned && options.force) {
+                            // Preserve tuple options when upgrading.
+                            if (Array.isArray(tuiEntry) && tuiEntry.length >= 1) {
+                                const replacement = [...tuiEntry];
+                                replacement[0] = PLUGIN_ENTRY_WITH_VERSION;
+                                tuiRawPlugins[tuiIdx] = replacement;
+                            } else {
+                                tuiRawPlugins[tuiIdx] = PLUGIN_ENTRY_WITH_VERSION;
+                            }
+                            tuiConfig.plugin = tuiRawPlugins;
+                            writeFileAtomic(paths.tuiConfig, `${stringify(tuiConfig, null, 2)}\n`);
+                            pass(
+                                `Upgraded TUI plugin: ${tuiEntryStr} → ${PLUGIN_ENTRY_WITH_VERSION}`,
+                            );
+                            fixed++;
+                        } else {
+                            pass("TUI sidebar plugin configured");
+                        }
+                    }
+                } else {
+                    fail("TUI sidebar plugin is missing after the repair attempt");
+                }
+            } catch (error) {
+                fail(
+                    `Could not verify TUI sidebar config: ${error instanceof Error ? error.message : String(error)}`,
                 );
             }
-            const tuiEntryAsString = (entry: unknown): string => {
-                if (typeof entry === "string") return entry;
-                if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
-                return "";
-            };
-            if (tuiIdx >= 0) {
-                const tuiEntry = tuiRawPlugins[tuiIdx];
-                const tuiEntryStr = tuiEntryAsString(tuiEntry);
-                if (isDevPathPluginEntry(tuiEntry)) {
-                    pass(`TUI sidebar plugin configured (dev path: ${tuiEntryStr})`);
-                } else {
-                    const tuiPinned = isPinnedOpenCodePluginSpecifier(tuiEntryStr);
-                    if (tuiPinned && !options.force) {
-                        reportAutoUpdateStall(tuiEntryStr);
-                        warn(
-                            `TUI plugin pinned to ${tuiEntryStr} — use 'doctor --force' to upgrade`,
-                        );
-                    } else if (tuiPinned && options.force) {
-                        // Preserve tuple options when upgrading.
-                        if (Array.isArray(tuiEntry) && tuiEntry.length >= 1) {
-                            const replacement = [...tuiEntry];
-                            replacement[0] = PLUGIN_ENTRY_WITH_VERSION;
-                            tuiRawPlugins[tuiIdx] = replacement;
-                        } else {
-                            tuiRawPlugins[tuiIdx] = PLUGIN_ENTRY_WITH_VERSION;
-                        }
-                        tuiConfig.plugin = tuiRawPlugins;
-                        writeFileAtomic(paths.tuiConfig, `${stringify(tuiConfig, null, 2)}\n`);
-                        pass(`Upgraded TUI plugin: ${tuiEntryStr} → ${PLUGIN_ENTRY_WITH_VERSION}`);
-                        fixed++;
-                    } else {
-                        pass("TUI sidebar plugin configured");
-                    }
-                }
-            } else {
-                fail("TUI sidebar plugin is missing after the repair attempt");
-            }
-        } catch (error) {
-            fail(
-                `Could not verify TUI sidebar config: ${error instanceof Error ? error.message : String(error)}`,
-            );
+        } else {
+            fail("Could not create or verify the TUI sidebar config");
         }
-    } else {
-        fail("Could not create or verify the TUI sidebar config");
     }
 
     // 7. Check user memories + dreamer compatibility.

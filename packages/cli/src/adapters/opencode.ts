@@ -1,14 +1,24 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, parse as parsePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+    type OpenCodeHostGeneration,
+    openCodeHostGenerationFromVersion,
+} from "@magic-context/core/shared/opencode-db-path";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { detectOpenCode } from "../lib/opencode-detect";
+import { getOpenCodeVersion } from "../lib/opencode-helpers";
 import {
     getOpenCodePluginPackageJsonPaths,
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY,
     OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
 } from "../lib/opencode-plugin-cache";
+import {
+    type OpenCodePluginConfigKey,
+    pluginConfigKeyFor,
+    readPluginEntries,
+} from "../lib/opencode-plugin-registration";
 import {
     detectConfigPaths,
     dirSizeBytes,
@@ -22,10 +32,44 @@ import type {
     PluginEntryResult,
 } from "./types";
 
+export interface OpenCodeAdapterOptions {
+    /**
+     * Which config key a fresh registration is written under. OpenCode 2 reads
+     * `plugins` natively and still loads the legacy `plugin` array, so the writer
+     * must target the running host's own key or the plugin loads twice.
+     */
+    hostGeneration?: OpenCodeHostGeneration;
+}
+
 export class OpenCodeAdapter implements HarnessAdapter {
     readonly kind = "opencode" as const;
     readonly displayName = "OpenCode";
     readonly pluginPackageName = PLUGIN_NAME;
+    private readonly hostGeneration: OpenCodeHostGeneration | undefined;
+    private resolvedWriteKey: OpenCodePluginConfigKey | undefined;
+
+    constructor(options: OpenCodeAdapterOptions = {}) {
+        this.hostGeneration = options.hostGeneration;
+    }
+
+    /**
+     * Resolved on first write, not at construction: the registry instantiates
+     * adapters at import time and running `opencode --version` there would cost
+     * every command a process spawn. A Desktop-only install has no runnable
+     * binary to version; it keeps the 1.x key until Desktop ships a 2.x line.
+     */
+    private get writeKey(): OpenCodePluginConfigKey {
+        if (this.resolvedWriteKey) return this.resolvedWriteKey;
+        const generation =
+            this.hostGeneration ??
+            (() => {
+                const detection = detectOpenCode();
+                if (detection.kind !== "cli") return "v1" as const;
+                return openCodeHostGenerationFromVersion(getOpenCodeVersion(detection.binary));
+            })();
+        this.resolvedWriteKey = pluginConfigKeyFor(generation);
+        return this.resolvedWriteKey;
+    }
 
     isInstalled(): boolean {
         // A Desktop-only install (no CLI on PATH) still counts as installed:
@@ -40,9 +84,9 @@ export class OpenCodeAdapter implements HarnessAdapter {
         try {
             const raw = readFileSync(paths.opencodeConfig, "utf-8");
             const cfg = parseJsonc(raw) as Record<string, unknown> | null;
-            const plugin = cfg?.plugin;
-            if (!Array.isArray(plugin)) return false;
-            return plugin.some((entry) => matchesPluginEntry(entry, PLUGIN_NAME));
+            return readPluginEntries(cfg).some(({ entry }) =>
+                matchesPluginEntry(entry, PLUGIN_NAME),
+            );
         } catch {
             return false;
         }
@@ -67,7 +111,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
                 // Brand-new opencode.jsonc with our plugin entry.
                 const initial = {
                     $schema: "https://opencode.ai/config.json",
-                    plugin: [PLUGIN_ENTRY],
+                    [this.writeKey]: [PLUGIN_ENTRY],
                 };
                 ensureDir(target);
                 writeFileAtomic(target, `${JSON.stringify(initial, null, 4)}\n`);
@@ -90,18 +134,23 @@ export class OpenCodeAdapter implements HarnessAdapter {
                 };
             }
 
-            const plugin = Array.isArray(cfg.plugin) ? cfg.plugin : [];
-            const existingIdx = plugin.findIndex((e) => matchesPluginEntry(e, PLUGIN_NAME));
-            const existingDevIdx = plugin.findIndex((e) => isDevPathPluginEntry(e));
+            // Both keys are read: OpenCode 2 loads `plugin` and `plugins` together,
+            // so an entry under either is a live registration.
+            const entries = readPluginEntries(cfg);
+            const existing = entries.find(({ entry }) => matchesPluginEntry(entry, PLUGIN_NAME));
+            const existingDev = entries.find(({ entry }) => isDevPathPluginEntry(entry));
 
             // Local dev-path entries are recognized so we don't double-add
             // an @latest entry on top, but they are NEVER replaced by setup.
             // Replacing a developer worktree path with the npm package would
             // silently swap their local plugin instance for the published
             // one — a surprising behavior change setup must avoid.
-            if (existingIdx === -1 && existingDevIdx === -1) {
-                plugin.push(PLUGIN_ENTRY);
-                cfg.plugin = plugin;
+            if (!existing && !existingDev) {
+                const list = Array.isArray(cfg[this.writeKey])
+                    ? (cfg[this.writeKey] as unknown[])
+                    : [];
+                list.push(PLUGIN_ENTRY);
+                cfg[this.writeKey] = list;
                 writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
                 return {
                     ok: true,
@@ -111,8 +160,8 @@ export class OpenCodeAdapter implements HarnessAdapter {
                 };
             }
 
-            if (existingDevIdx !== -1) {
-                const devEntry = String(plugin[existingDevIdx]);
+            if (existingDev) {
+                const devEntry = String(existingDev.entry);
                 return {
                     ok: true,
                     action: "already_present",
@@ -122,10 +171,11 @@ export class OpenCodeAdapter implements HarnessAdapter {
             }
 
             // Already present as an npm entry — check whether it's pinned to an old version.
-            const current = plugin[existingIdx];
+            // The upgrade rewrites the entry in place, under the key it was found in.
+            const found = existing as NonNullable<typeof existing>;
+            const current = found.entry;
             if (typeof current === "string" && current !== PLUGIN_ENTRY) {
-                plugin[existingIdx] = PLUGIN_ENTRY;
-                cfg.plugin = plugin;
+                (cfg[found.key] as unknown[])[found.index] = PLUGIN_ENTRY;
                 writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
                 return {
                     ok: true,
@@ -165,7 +215,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
         try {
             const raw = readFileSync(target, "utf-8");
             const cfg = parseJsonc(raw) as Record<string, unknown> | null;
-            if (cfg === null || typeof cfg !== "object" || !Array.isArray(cfg.plugin)) {
+            if (cfg === null || typeof cfg !== "object") {
                 return {
                     ok: true,
                     action: "already_present",
@@ -173,10 +223,17 @@ export class OpenCodeAdapter implements HarnessAdapter {
                     configPath: target,
                 };
             }
-            const pluginArr = cfg.plugin as unknown[];
-            const before = pluginArr.length;
-            cfg.plugin = pluginArr.filter((e) => !matchesPluginEntry(e, PLUGIN_NAME));
-            if ((cfg.plugin as unknown[]).length === before) {
+            let removed = false;
+            for (const key of ["plugin", "plugins"] as const) {
+                const list = cfg[key];
+                if (!Array.isArray(list)) continue;
+                const kept = list.filter((e) => !matchesPluginEntry(e, PLUGIN_NAME));
+                if (kept.length !== list.length) {
+                    cfg[key] = kept;
+                    removed = true;
+                }
+            }
+            if (!removed) {
                 return {
                     ok: true,
                     action: "already_present",
