@@ -291,6 +291,8 @@ import {
 	adoptPiCompactionSystemSnapshot,
 	isPiSystemEntry,
 	isPiSystemMessageEntry,
+	type PiEffectiveSystemState,
+	resolvePiEffectiveSystemState,
 } from "./system-entry-pi";
 import { clearPiSystemPromptSession } from "./system-prompt";
 import {
@@ -4970,6 +4972,18 @@ async function runCompactionOffPipeline(
 
 async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	if (args.compactionOff) return runCompactionOffPipeline(args);
+	let foldingSystemState: PiEffectiveSystemState | null = null;
+	try {
+		// Capture the provider-visible system state before transforming the served
+		// array. A pending compaction marker must compare this input state with the
+		// system state that Pi persists in its session.
+		foldingSystemState = resolvePiEffectiveSystemState(args.messages);
+	} catch (error) {
+		sessionLog(
+			args.sessionId,
+			`Pi folding-input system state could not be resolved; native marker drain will remain pending: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 	const forceMaterializationPercentage =
 		args.forceMaterializationPercentage ??
 		escalationBands(65).forceMaterializationPercentage;
@@ -6499,11 +6513,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					args.sessionId,
 					`Pi compaction-marker drain skipped: pending ordinal ${pending.ordinal} is newer than rendered boundary ${boundary?.ordinal ?? "<none>"} endMessageId=${boundary?.endMessageId ?? "<none>"} (m[1] coverage ${m1Coverage?.ordinal ?? "<none>"} endMessageId=${m1Coverage?.endMessageId ?? "<none>"}); preserving deferred signals`,
 				);
-			} else if (!args.appendCompaction || !args.readBranchEntries) {
+			} else if (
+				!args.appendCompaction ||
+				!args.readBranchEntries ||
+				!foldingSystemState
+			) {
 				suppressDeferredHistoryDrain = true;
+				preserveDeferredMaterializationForMarkerDrain = true;
 				sessionLog(
 					args.sessionId,
-					"Pi compaction-marker drain skipped: sessionManager appendCompaction/getBranch unavailable; preserving deferred-history signal",
+					"Pi compaction-marker drain skipped: sessionManager appendCompaction/getBranch or folding system state unavailable; preserving deferred signals",
 				);
 			} else {
 				const outcome = applyDeferredPiCompactionMarker(
@@ -6515,15 +6534,53 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					args.sessionId,
 					pending,
 				);
-				if (outcome.kind === "applied") {
-					if (
-						adoptPiCompactionSystemSnapshot(
-							args.messages,
-							args.readBranchEntries(),
-						) &&
-						injectionResult
-					) {
-						injectionResult.syntheticLeadingCount = 3;
+				let markerEquivalent = outcome.kind === "stale-skip";
+				if (outcome.kind === "applied" || outcome.kind === "already-current") {
+					const syntheticHistoryMessages = injectionResult
+						? args.messages.slice(
+								Math.max(0, injectionResult.syntheticLeadingCount - 2),
+								injectionResult.syntheticLeadingCount,
+							)
+						: [];
+					const adoption = adoptPiCompactionSystemSnapshot(
+						args.messages,
+						args.readBranchEntries(),
+						outcome.compactionId,
+						foldingSystemState,
+						syntheticHistoryMessages,
+					);
+					if (adoption.kind === "adopted") {
+						markerEquivalent = true;
+						if (injectionResult) {
+							const lastSynthetic = syntheticHistoryMessages.at(-1);
+							const lastSyntheticIndex = lastSynthetic
+								? args.messages.indexOf(lastSynthetic as never)
+								: -1;
+							if (lastSyntheticIndex >= 0) {
+								injectionResult.syntheticLeadingCount = lastSyntheticIndex + 1;
+							}
+						}
+					} else {
+						suppressDeferredHistoryDrain = true;
+						preserveDeferredMaterializationForMarkerDrain = true;
+						if (adoption.kind === "divergent") {
+							const promptLengthDelta =
+								adoption.persistedPromptLength - adoption.foldingPromptLength;
+							// appendCompaction has already persisted this entry. Pi exposes no
+							// retraction API, and 0.86 session-manager.js:187-190 re-emits
+							// [systemMessage, summary]. Keep MC's fold for this pass and retain
+							// the pending marker so the next pass rechecks the then-current
+							// journal instead of trusting the persisted snapshot.
+							sessionLog(
+								args.sessionId,
+								`Pi compaction-marker equivalence refused compactionId=${outcome.compactionId}: foldingOnlyTools=${JSON.stringify(adoption.foldingOnlyTools)} persistedOnlyTools=${JSON.stringify(adoption.persistedOnlyTools)} changedTools=${JSON.stringify(adoption.changedTools)} promptLengthDelta=${promptLengthDelta} (folding=${adoption.foldingPromptLength}, persisted=${adoption.persistedPromptLength}); persisted entry cannot be retracted, pending marker retained for next-pass journal recheck`,
+							);
+						} else {
+							sessionLog(
+								args.sessionId,
+								`Pi compaction-marker equivalence unavailable for compactionId=${outcome.compactionId}: ${adoption.reason}; preserving deferred signals`,
+							);
+						}
 					}
 				}
 				if (outcome.kind === "waiting-for-entry") {
@@ -6535,6 +6592,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						`Pi compaction-marker drain retryable failure: ${outcome.error.message}`,
 					);
 				} else if (
+					markerEquivalent &&
 					clearPendingPiCompactionMarkerStateIf(
 						args.db,
 						args.sessionId,
@@ -6542,7 +6600,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					)
 				) {
 					consumeDeferredHistoryRefresh(args.sessionId);
-				} else {
+				} else if (markerEquivalent) {
 					casLost = true;
 					sessionLog(
 						args.sessionId,

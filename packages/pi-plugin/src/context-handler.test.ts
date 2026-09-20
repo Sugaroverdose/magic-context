@@ -4932,11 +4932,24 @@ describe("registerPiContextHandler", () => {
 				messages as never,
 			) as never as {
 				sessionManager: {
+					getBranch: () => unknown[];
 					appendCompaction?: (...args: unknown[]) => string | undefined;
 				};
 			};
+			const branchEntries = ctx.sessionManager.getBranch();
+			ctx.sessionManager.getBranch = () => branchEntries;
 			if (args.appendCompaction) {
-				ctx.sessionManager.appendCompaction = args.appendCompaction;
+				ctx.sessionManager.appendCompaction = (...appendArgs) => {
+					const compactionId = args.appendCompaction?.(...appendArgs);
+					if (typeof compactionId === "string") {
+						branchEntries.push({
+							type: "compaction",
+							id: compactionId,
+							firstKeptEntryId: appendArgs[1],
+						});
+					}
+					return compactionId;
+				};
 			}
 			if (args.contextPercent !== undefined) {
 				(ctx as { getContextUsage: () => unknown }).getContextUsage = () => ({

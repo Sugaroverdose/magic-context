@@ -93,7 +93,7 @@ import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 import {
 	isPiSystemEntry,
 	type PiSystemEntry,
-	piPrefixInsertionIndex,
+	placePiInitialSystemAtHead,
 } from "./system-entry-pi";
 
 /**
@@ -2492,7 +2492,7 @@ function prependM0M1Messages(
 	m1: string,
 	mural?: { enabled: boolean; supportsVision: boolean; dataUrl?: string },
 	timestampHint?: number,
-): void {
+): number {
 	const firstTimestamp = timestampHint ?? piMessages[0]?.timestamp;
 	const baseTimestamp =
 		typeof firstTimestamp === "number" ? firstTimestamp : Date.now();
@@ -2507,8 +2507,9 @@ function prependM0M1Messages(
 		{ type: "text", text: m0 },
 		...(muralImage ? [muralImage] : []),
 	];
+	const insertionIndex = placePiInitialSystemAtHead(piMessages);
 	piMessages.splice(
-		piPrefixInsertionIndex(piMessages),
+		insertionIndex,
 		0,
 		{
 			role: "user",
@@ -2521,6 +2522,7 @@ function prependM0M1Messages(
 			timestamp: baseTimestamp - 1,
 		},
 	);
+	return insertionIndex;
 }
 
 // Cached bytes and their boundary come from one row. Replaying them must not
@@ -2556,11 +2558,8 @@ function replayCompletePiPrefix(
 		: 0;
 	const head: PiAgentMessage[] = [];
 	prependM0M1Messages(head, m0, m1, mural, messages[0]?.timestamp);
-	messages.splice(
-		piPrefixInsertionIndex(messages),
-		0,
-		...structuredClone(head),
-	);
+	const insertionIndex = placePiInitialSystemAtHead(messages);
+	messages.splice(insertionIndex, 0, ...structuredClone(head));
 	const result: PiM0M1InjectionResult = {
 		injected: true,
 		compartmentCount: compartments.length,
@@ -2577,7 +2576,7 @@ function replayCompletePiPrefix(
 			trimBoundaryId,
 		),
 		m1RenderedCoverage: null,
-		syntheticLeadingCount: piPrefixInsertionIndex(messages) + 2,
+		syntheticLeadingCount: insertionIndex + 2,
 	};
 	if (state.freezePrefixForPass)
 		state.preparedPrefix = { result, messages: head, trimBoundaryId };
@@ -2630,7 +2629,7 @@ export function injectM0M1Pi(
 			head[0].timestamp = timestamp - 2;
 			head[1].timestamp = timestamp - 1;
 		}
-		const insertionIndex = piPrefixInsertionIndex(piMessages);
+		const insertionIndex = placePiInitialSystemAtHead(piMessages);
 		piMessages.splice(insertionIndex, 0, ...head);
 		return {
 			...prepared.result,
@@ -2937,7 +2936,7 @@ export function injectM0M1Pi(
 	// that omission already changes provider-visible bytes, remove the false text
 	// claiming an image follows and keep the fallback internally consistent.
 	if (!muralWire) m0 = stripMemoryMuralBlock(m0);
-	prependM0M1Messages(piMessages, m0, m1, muralWire);
+	const insertionIndex = prependM0M1Messages(piMessages, m0, m1, muralWire);
 	logSession(
 		state.sessionId,
 		`injected m[0]/m[1] into Pi messages (${m0.length} + ${m1.length} bytes, materialized=${materialized}${decision.reason ? ` reason=${decision.reason}` : ""})`,
@@ -2991,17 +2990,15 @@ export function injectM0M1Pi(
 		contentionExhausted,
 		renderedBoundary,
 		m1RenderedCoverage,
-		// Skip provider-system entries and the two injected history users when reclaiming the tail.
-		syntheticLeadingCount: piPrefixInsertionIndex(piMessages) + 2,
+		// Skip entries before the retained message tail and Magic Context's two
+		// synthetic history messages.
+		syntheticLeadingCount: insertionIndex + 2,
 	};
 	if (state.freezePrefixForPass)
 		state.preparedPrefix = {
 			result,
 			messages: structuredClone(
-				piMessages.slice(
-					piPrefixInsertionIndex(piMessages),
-					piPrefixInsertionIndex(piMessages) + 2,
-				),
+				piMessages.slice(insertionIndex, insertionIndex + 2),
 			),
 			trimBoundaryId,
 		};
