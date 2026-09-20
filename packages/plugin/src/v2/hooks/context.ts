@@ -2,6 +2,7 @@ import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
+import { isFailClosedBlockingError } from "../../features/magic-context/fail-closed-block";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
 import { createScheduler } from "../../features/magic-context/scheduler";
@@ -17,6 +18,7 @@ import {
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import { assertExecutableToolInput } from "../../hooks/magic-context/dropped-input-guard";
+import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import {
     createChatMessageHook,
@@ -60,6 +62,7 @@ import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { removeHostSession } from "../host-service";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
+import { DeletedSessionTombstones } from "./deleted-session-tombstones";
 import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { startDreamTrigger } from "./dream-trigger";
 import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
@@ -70,6 +73,10 @@ import { rawMessages } from "./store";
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
 import { resolveUsageReading } from "./usage-reading";
+
+export function isBlockingV2TransformError(error: unknown): boolean {
+    return error instanceof EmergencyFailClosedError || isFailClosedBlockingError(error);
+}
 
 export function createHostSeams(
     context: V2Context,
@@ -314,6 +321,8 @@ export async function registerContext(context: V2Context) {
     let transform: ReturnType<typeof createTransform> | undefined;
     let systemPrompt: ReturnType<typeof createSystemPromptHashHandler> | undefined;
     const systemPromptRefreshSessions = new Set<string>();
+    const tagger = createTagger();
+    const deletedSessions = new DeletedSessionTombstones();
     const recordUsage = async (
         draft: Pick<SessionContext, "sessionID" | "model">,
     ): Promise<boolean> => {
@@ -426,6 +435,7 @@ export async function registerContext(context: V2Context) {
                 if (!event.data?.sessionID) continue;
                 const sessionID = event.data.sessionID;
                 if (event.type === "session.deleted") {
+                    deletedSessions.add(sessionID);
                     if (db) {
                         markSessionCleanupPending(db, sessionID);
                         clearSession(db, sessionID);
@@ -442,6 +452,7 @@ export async function registerContext(context: V2Context) {
                     lastHeuristicsTurnId.delete(sessionID);
                     systemPromptRefreshSessions.delete(sessionID);
                     systemPrompt?.clearSession(sessionID);
+                    tagger.cleanup(sessionID);
                     continue;
                 }
                 if (event.type !== "session.execution.succeeded") continue;
@@ -473,6 +484,9 @@ export async function registerContext(context: V2Context) {
                 systemHash: foldDigest(JSON.stringify(draft.system)),
                 toolSetHash: "",
                 modelKey: `${draft.model.providerID}/${draft.model.id}`,
+                // materializeM0 does not read cacheExpired. mustMaterialize owns
+                // expiry decisions on the transform path; this fold always renders
+                // fresh bytes and keys its markers from the system and model hashes.
                 cacheExpired: false,
                 lastResponseTime: state.lastResponseTime,
             },
@@ -514,6 +528,9 @@ export async function registerContext(context: V2Context) {
         });
     await context.session.hook("context", async (draft) => {
         if (hiddenChildHook.apply(draft)) return;
+        // A deletion that races an in-flight pass must not let that pass rebuild
+        // the state just cleared by the one deletion event.
+        if (deletedSessions.has(draft.sessionID)) return;
         liveModels.set(draft.sessionID, {
             providerID: draft.model.providerID,
             modelID: draft.model.id,
@@ -618,7 +635,7 @@ export async function registerContext(context: V2Context) {
                 );
             transform ??= createTransform({
                 db,
-                tagger: createTagger(),
+                tagger,
                 scheduler: createScheduler({
                     executeThresholdPercentage: config.execute_threshold_percentage,
                 }),
@@ -763,15 +780,29 @@ export async function registerContext(context: V2Context) {
             }
         } catch (error) {
             if (error instanceof V2ContextRefusal) throw error;
-            if (postFold) {
+            if (isBlockingV2TransformError(error)) {
+                // These errors mean the shared transform cannot prove a safe prompt.
+                // Native compaction owns recovery when Magic Context compaction is off.
+                if (!compactionOff) {
+                    await interruptBeforeProvider(context.session, draft.sessionID);
+                    throw new V2ContextRefusal("Magic Context refused to send an unsafe prompt.", {
+                        cause: error,
+                    });
+                }
+                console.warn(
+                    "[magic-context] compaction-off: fail-closed inert, passing through",
+                    error,
+                );
+            } else if (postFold) {
                 await interruptBeforeProvider(context.session, draft.sessionID);
                 throw new V2ContextRefusal(
                     "Magic Context could not restore the unarchived host history.",
                     { cause: error },
                 );
+            } else {
+                // Another plugin can poison the shared draft. Do not fail an otherwise viable turn.
+                console.warn("[magic-context] v2 context unavailable", error);
             }
-            // Another plugin can poison the shared draft. Do not fail an otherwise viable turn.
-            console.warn("[magic-context] v2 context unavailable", error);
         }
     });
     // Warm eagerly for cold sidebar/status reads; a failed startup warm releases
@@ -900,6 +931,7 @@ export async function registerContext(context: V2Context) {
             tools?.dispose();
             usageController.abort();
             await usageDone;
+            deletedSessions.clear();
             await dreamTrigger?.dispose();
             for (const release of rawProviders.values()) release();
             rawProviders.clear();
