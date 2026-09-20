@@ -41,6 +41,7 @@ import {
     MEMORY_RENDER_FORMAT_EPOCH,
 } from "./compartment-render-epoch";
 import {
+    capturePrefixTrimSourceOrder,
     clearInjectionCache,
     getVisibleMemoryIds,
     injectM0M1,
@@ -617,6 +618,76 @@ describe("prepareCompartmentInjection — transition from empty to compartment",
         expect(cached?.memoryCount).toBe(busted?.memoryCount);
         // Empty boundary id ⇒ no splice
         expect(deferMessages.length).toBe(2);
+    });
+});
+
+describe("prepared prefix source-order trimming", () => {
+    const message = (id: string, role: "user" | "assistant"): MessageLike => ({
+        info: { id, role, sessionID: SESSION_ID },
+        parts: [{ type: "text", text: id }],
+    });
+    const syntheticHead = (): MessageLike => ({
+        info: { role: "user", sessionID: SESSION_ID },
+        parts: [{ type: "text", text: "old synthetic prefix", synthetic: true }],
+    });
+    const preparedPrefix = (boundary: string) => ({
+        injected: true,
+        prependedMessageCount: 0,
+        m0RematerializedThisPass: false,
+        materializationContentionRetryExhausted: false,
+        decision: { value: false, reason: "cache_hit" },
+        m0Bytes: Buffer.from("m0"),
+        m1Text: "m1",
+        preparedMessages: [
+            {
+                info: { role: "user", sessionID: SESSION_ID },
+                parts: [{ type: "text", text: "new prefix", synthetic: true }],
+            } as MessageLike,
+        ],
+        preparedTrimBoundaryId: boundary,
+    });
+
+    it("trims surviving rows through a deleted assistant boundary without resurrecting it", () => {
+        db = makeDb();
+        const source = [
+            syntheticHead(),
+            message("before", "user"),
+            message("assistant-boundary", "assistant"),
+            message("after", "user"),
+        ];
+        const evidence = capturePrefixTrimSourceOrder(source);
+        const live = [syntheticHead(), source[1]!, source[3]!];
+
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            messages: live,
+            preparedPrefix: preparedPrefix("assistant-boundary"),
+            prefixTrimSourceOrder: evidence,
+        });
+
+        expect(result.prefixTrimStatus).toBe("applied");
+        expect(live.map((entry) => entry.info.id)).toEqual([undefined, "after"]);
+        expect(live[0]?.parts[0]).toMatchObject({ text: "new prefix", synthetic: true });
+    });
+
+    it("refuses a trim when the boundary is absent from the immutable source order", () => {
+        db = makeDb();
+        const source = [message("before", "user"), message("after", "assistant")];
+        const live = structuredClone(source);
+
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            messages: live,
+            preparedPrefix: preparedPrefix("missing-boundary"),
+            prefixTrimSourceOrder: capturePrefixTrimSourceOrder(source),
+        });
+
+        expect(result.prefixTrimStatus).toBe("refused");
+        expect(live.map((entry) => entry.info.id)).toEqual([undefined, "before", "after"]);
     });
 });
 

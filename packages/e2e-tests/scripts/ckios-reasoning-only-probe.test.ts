@@ -31,10 +31,9 @@ test("marker-seam full-tool replay preserves the reasoning-only assistant on def
     }
 }, 240_000);
 
-// Replaying a dropped tool can delete the row used to locate the prefix cutoff,
-// yet the host's persisted boundary advances. The next request then loses old rows.
-// Run this file with --todo -t 'dropped marker boundary' to expose the failed assertion.
-test.todo("dropped marker boundary must not advance before the served prefix is trimmed", () => {
+// Replaying a dropped tool can delete the row used to locate the prefix cutoff.
+// The immutable source order still proves which surviving rows precede that cutoff.
+test("dropped marker boundary must not advance before the served prefix is trimmed", () => {
     const output = mkdtempSync(join(tmpdir(), "ckios-dropped-boundary-"));
     try {
         execFileSync(process.execPath, [join(import.meta.dir, "ckios-reasoning-only-probe.ts"), output], {

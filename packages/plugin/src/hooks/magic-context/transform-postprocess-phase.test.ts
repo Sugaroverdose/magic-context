@@ -59,7 +59,11 @@ import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
 import * as compartmentInjection from "./inject-compartments";
-import { injectM0M1, type M0HardSignals } from "./inject-compartments";
+import {
+    capturePrefixTrimSourceOrder,
+    injectM0M1,
+    type M0HardSignals,
+} from "./inject-compartments";
 import * as readSessionFormatting from "./read-session-formatting";
 import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
 import { stripStructuralNoise } from "./strip-structural-noise";
@@ -1219,6 +1223,13 @@ describe("deferred compaction marker representation", () => {
                     memoryCount: 0,
                     rebuiltFromDb: true,
                 },
+                prefixTrimSourceOrder: capturePrefixTrimSourceOrder([
+                    {
+                        info: { id: "msg-boundary", role: "user", sessionID: sessionId },
+                        parts: [{ type: "text", text: "covered" }],
+                    } as MessageLike,
+                    ...foldMessages,
+                ]),
                 m0M1: {
                     projectDirectory: dataHome,
                     injectDocs: false,
@@ -2997,6 +3008,13 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                     memoryCount: 0,
                     rebuiltFromDb: true,
                 },
+                prefixTrimSourceOrder: capturePrefixTrimSourceOrder([
+                    {
+                        info: { id: "msg-fold-boundary", role: "user", sessionID: sessionId },
+                        parts: [{ type: "text", text: "covered" }],
+                    } as MessageLike,
+                    ...hardMessages,
+                ]),
                 m0M1: {
                     projectPath: FOLD_PROJECT,
                     projectDirectory: FOLD_PROJECT,

@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+
 import {
     replaceAllCompartmentState,
     replaceAllCompartments,
@@ -25,6 +26,7 @@ import {
     getLastNudgeUndropped,
     getOrCreateSessionMeta,
     getOverflowState,
+    getPendingCompactionMarkerState,
     getPendingOps,
     getTagById,
     getTagsBySession,
@@ -36,6 +38,7 @@ import {
     recordOverflowDetected,
     setChannel1NudgeState,
     setLastNudgeUndropped,
+    setPendingCompactionMarkerState,
     updateCavemanDepth,
     updateSessionMeta,
     updateTagDropMode,
@@ -43,7 +46,9 @@ import {
 } from "../../features/magic-context/storage";
 import {
     getEmergencyInputSample,
+    type getPersistedCompactionMarkerState,
     setEmergencyDropSample,
+    setPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
 import { createTagger } from "../../features/magic-context/tagger";
 import { recordToolDefinition } from "../../features/magic-context/tool-definition-tokens";
@@ -58,6 +63,8 @@ import * as loggerModule from "../../shared/logger";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import type { MarkerUpdateOutcome } from "./compaction-marker-manager";
+import { injectM0M1 } from "./inject-compartments";
 import { getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { __ignoredNotificationTest } from "./send-session-notification";
 import { clearMessageTokensCache, createTransform } from "./transform";
@@ -92,6 +99,7 @@ type TestMessage = {
         tools?: Record<string, unknown>;
         finish?: string;
         time?: { created: number; completed: number };
+        summary?: boolean;
     };
     parts: TestPart[];
 };
@@ -271,6 +279,245 @@ describe("createTransform", () => {
         expect(sha(replay.slice(0, priced.length))).toBe(sha(priced));
         expect(replay.some((message) => message.info.id === "sweep-tool")).toBe(false);
     });
+    async function runMarkerBoundaryFixture(options: {
+        name: string;
+        deleteBoundary?: boolean;
+        sourceAlreadyHostTrimmed?: boolean;
+        sourceBoundaryMissing?: boolean;
+        applyOutcome?: "applied" | "retryable-failure" | "concurrent-winner";
+    }) {
+        useTempDataHome(`context-transform-marker-boundary-${options.name}-`);
+        const sessionId = `ses-marker-boundary-${options.name}`;
+        const directory = makeTempDir(`marker-boundary-project-${options.name}-`);
+        const db = openDatabase();
+        const baseCompartment = {
+            sequence: 0,
+            startMessage: 1,
+            endMessage: 1,
+            startMessageId: "base",
+            endMessageId: "base",
+            title: "Baseline",
+            content: "Baseline history",
+        };
+        const targetCompartment = {
+            sequence: 1,
+            startMessage: 2,
+            endMessage: 3,
+            startMessageId: "middle",
+            endMessageId: "assistant-boundary",
+            title: "Advanced",
+            content: "Advanced history",
+        };
+        const startsAlreadyCovered =
+            options.sourceAlreadyHostTrimmed === true || options.sourceBoundaryMissing === true;
+        replaceAllCompartments(
+            db,
+            sessionId,
+            startsAlreadyCovered ? [baseCompartment, targetCompartment] : [baseCompartment],
+        );
+        injectM0M1({
+            db,
+            sessionId,
+            state: getOrCreateSessionMeta(db, sessionId),
+            projectDirectory: directory,
+            injectDocs: false,
+            memoryEnabled: false,
+        });
+
+        let decision: "execute" | "defer" = "defer";
+        const deferredHistoryRefreshSessions = new Set<string>();
+        const reconciledStates: Array<ReturnType<typeof getPersistedCompactionMarkerState>> = [];
+        const applyDeferred = mock(
+            (
+                markerDb: typeof db,
+                markerSessionId: string,
+                pending: { ordinal: number; endMessageId: string; publishedAt: number },
+            ): MarkerUpdateOutcome => {
+                if (options.applyOutcome === "retryable-failure") {
+                    return { kind: "retryable-failure", error: new Error("persist failed") };
+                }
+                if (options.applyOutcome === "concurrent-winner") {
+                    setPersistedCompactionMarkerState(markerDb, markerSessionId, {
+                        boundaryMessageId: "winner-user",
+                        summaryMessageId: "winner-summary",
+                        compactionPartId: "winner-compaction",
+                        summaryPartId: "winner-part",
+                        boundaryOrdinal: pending.ordinal + 1,
+                        targetEndMessageId: "winner-target",
+                    });
+                    return { kind: "already-current" };
+                }
+                return { kind: "applied", markerOrdinal: pending.ordinal };
+            },
+        );
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: () => decision },
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    sessionId,
+                    { usage: { percentage: 30, inputTokens: 60_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            directory,
+            injectDocs: false,
+            memoryConfig: { enabled: false, injectionBudgetTokens: 0, autoPromote: false },
+            historyRefreshSessions: new Set(),
+            deferredHistoryRefreshSessions,
+            pendingMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            clearReasoningAge: 1000,
+            protectedTokens: 0,
+            historianRunnable: false,
+            compactionMarkerStrategy: {
+                applyDeferred,
+                reconcile: (_messages, state) => {
+                    reconciledStates.push(state);
+                    return false;
+                },
+            },
+        });
+        const source = (): TestMessage[] => [
+            {
+                info: { id: "base", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "base" }],
+            },
+            {
+                info: { id: "middle", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "middle" }],
+            },
+            {
+                info: { id: "assistant-boundary", role: "assistant" },
+                parts: options.deleteBoundary
+                    ? [
+                          {
+                              type: "tool",
+                              tool: "bash",
+                              callID: "boundary-call",
+                              state: { status: "completed", output: "spent" },
+                          },
+                      ]
+                    : [{ type: "text", text: "assistant boundary" }],
+            },
+            {
+                info: { id: "tail", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "retained tail" }],
+            },
+        ];
+
+        if (options.deleteBoundary) {
+            await transform({}, { messages: structuredClone(source()) });
+            const boundaryTag = getTagsBySession(db, sessionId).find(
+                (tag) => tag.messageId === "boundary-call",
+            );
+            expect(boundaryTag).toBeDefined();
+            updateTagStatus(db, sessionId, boundaryTag!.tagNumber, "dropped");
+            updateTagDropMode(db, sessionId, boundaryTag!.tagNumber, "full");
+        }
+        if (!startsAlreadyCovered) {
+            replaceAllCompartments(db, sessionId, [baseCompartment, targetCompartment]);
+        }
+        if (options.sourceAlreadyHostTrimmed) {
+            setPersistedCompactionMarkerState(db, sessionId, {
+                boundaryMessageId: "marker-user",
+                summaryMessageId: "marker-summary",
+                compactionPartId: "marker-compaction",
+                summaryPartId: "marker-summary-part",
+                boundaryOrdinal: 3,
+                targetEndMessageId: "assistant-boundary",
+            });
+        }
+        setPendingCompactionMarkerState(db, sessionId, {
+            ordinal: 3,
+            endMessageId: "assistant-boundary",
+            publishedAt: 1,
+        });
+        deferredHistoryRefreshSessions.add(sessionId);
+        decision = "execute";
+        const messages = options.sourceAlreadyHostTrimmed
+            ? [
+                  {
+                      info: {
+                          id: "marker-summary",
+                          role: "assistant",
+                          sessionID: sessionId,
+                          summary: true,
+                      },
+                      parts: [{ type: "text", text: "marker" }],
+                  },
+                  source()[3]!,
+              ]
+            : options.sourceBoundaryMissing
+              ? [source()[3]!]
+              : source();
+        await transform({}, { messages });
+        return {
+            applyDeferred,
+            db,
+            deferredHistoryRefreshSessions,
+            messages,
+            reconciledStates,
+            sessionId,
+        };
+    }
+
+    it("trims through a boundary deleted by tool replay before draining the marker", async () => {
+        const result = await runMarkerBoundaryFixture({ name: "deleted", deleteBoundary: true });
+        expect(result.applyDeferred).toHaveBeenCalledTimes(1);
+        expect(result.messages.map((message) => message.info.id).filter(Boolean)).toEqual(["tail"]);
+        expect(getPendingCompactionMarkerState(result.db, result.sessionId)).toBeNull();
+        expect(result.deferredHistoryRefreshSessions.has(result.sessionId)).toBe(false);
+    });
+
+    it("accepts an already host-trimmed boundary only when the source carries its marker", async () => {
+        const result = await runMarkerBoundaryFixture({
+            name: "already-host-trimmed",
+            sourceAlreadyHostTrimmed: true,
+        });
+        expect(result.applyDeferred).toHaveBeenCalledTimes(1);
+        expect(getPendingCompactionMarkerState(result.db, result.sessionId)).toBeNull();
+        expect(result.messages.some((message) => message.info.id === "assistant-boundary")).toBe(
+            false,
+        );
+    });
+
+    it("refuses marker drain when the immutable source lacks the pending boundary", async () => {
+        const result = await runMarkerBoundaryFixture({
+            name: "missing-source",
+            sourceBoundaryMissing: true,
+        });
+        expect(result.applyDeferred).not.toHaveBeenCalled();
+        expect(getPendingCompactionMarkerState(result.db, result.sessionId)).not.toBeNull();
+        expect(result.deferredHistoryRefreshSessions.has(result.sessionId)).toBe(true);
+    });
+
+    it("trims an assistant-ended seam in canonical source order", async () => {
+        const result = await runMarkerBoundaryFixture({ name: "assistant-seam" });
+        expect(result.applyDeferred).toHaveBeenCalledTimes(1);
+        expect(result.messages.map((message) => message.info.id).filter(Boolean)).toEqual(["tail"]);
+    });
+
+    it("reconciles the concurrent marker winner after a proven trim", async () => {
+        const result = await runMarkerBoundaryFixture({
+            name: "concurrent-winner",
+            applyOutcome: "concurrent-winner",
+        });
+        expect(result.applyDeferred).toHaveBeenCalledTimes(1);
+        expect(result.reconciledStates.at(-1)?.boundaryOrdinal).toBe(4);
+        expect(getPendingCompactionMarkerState(result.db, result.sessionId)).toBeNull();
+    });
+
+    it("preserves marker and refresh signals when persistence fails after a proven trim", async () => {
+        const result = await runMarkerBoundaryFixture({
+            name: "persistence-failure",
+            applyOutcome: "retryable-failure",
+        });
+        expect(result.applyDeferred).toHaveBeenCalledTimes(1);
+        expect(getPendingCompactionMarkerState(result.db, result.sessionId)).not.toBeNull();
+        expect(result.deferredHistoryRefreshSessions.has(result.sessionId)).toBe(true);
+    });
+
     it("holds completed reasoning-only assistants after demotion on defer", async () => {
         useTempDataHome("context-transform-reasoning-only-demotion-");
         const sessionId = "ses-reasoning-only-demotion";

@@ -1,3 +1,4 @@
+import { compareOpenCodeMessagesByCanonicalOrder } from "../../features/magic-context/compaction-marker";
 import { newestCtxReduceTagNumbers } from "../../features/magic-context/reclaim-protection";
 import {
     addProcessedImageStrippedIds,
@@ -94,6 +95,7 @@ import {
     type M0M1State,
     type MaterializeDecision,
     mustMaterialize,
+    type PrefixTrimSourceOrder,
     type PreparedCompartmentInjection,
     prepareCachedM0M1Replay,
     renderCompartmentInjection,
@@ -820,6 +822,54 @@ function pendingMarkerCoveredByConsumedBoundary(
     return pending.ordinal <= injection.compartmentEndMessage;
 }
 
+function deliveredPrefixWasTrimmedThroughPendingBoundary(
+    deliveredPrefix: InjectM0M1Result | undefined,
+    sourceOrder: PrefixTrimSourceOrder | undefined,
+    pending: PendingCompactionMarker,
+): boolean {
+    if (
+        deliveredPrefix?.prefixTrimStatus !== "applied" ||
+        typeof deliveredPrefix.preparedTrimBoundaryId !== "string" ||
+        deliveredPrefix.preparedTrimBoundaryId.length === 0
+    ) {
+        return false;
+    }
+    if (deliveredPrefix.preparedTrimBoundaryId === pending.endMessageId) return true;
+    if (!sourceOrder || sourceOrder.invalidReason) return false;
+    const deliveredPosition = sourceOrder.messageIds.indexOf(
+        deliveredPrefix.preparedTrimBoundaryId,
+    );
+    const pendingPosition = sourceOrder.messageIds.indexOf(pending.endMessageId);
+    return deliveredPosition >= 0 && pendingPosition >= 0 && deliveredPosition >= pendingPosition;
+}
+
+function sourceAlreadyReflectsCoveringMarker(
+    sessionId: string,
+    sourceOrder: PrefixTrimSourceOrder | undefined,
+    marker: PersistedCompactionMarkerState | null,
+    pending: PendingCompactionMarker,
+): boolean {
+    if (!sourceOrder || sourceOrder.invalidReason || !marker) return false;
+    const higherMarkerTarget =
+        marker.boundaryOrdinal > pending.ordinal && marker.targetEndMessageId
+            ? compareOpenCodeMessagesByCanonicalOrder(
+                  sessionId,
+                  marker.targetEndMessageId,
+                  pending.endMessageId,
+              )
+            : null;
+    const markerCoversPending =
+        higherMarkerTarget !== null && higherMarkerTarget > 0
+            ? true
+            : marker.boundaryOrdinal === pending.ordinal &&
+              marker.targetEndMessageId === pending.endMessageId;
+    if (!markerCoversPending) return false;
+    return (
+        sourceOrder.messageIds.includes(marker.summaryMessageId) &&
+        !sourceOrder.messageIds.includes(pending.endMessageId)
+    );
+}
+
 export function clearPendingCompactionMarkerAfterSuccessfulDrain(args: {
     db: ContextDatabase;
     sessionId: string;
@@ -933,6 +983,8 @@ interface RunPostTransformPhaseArgs {
      */
     emergencyCeilingTokens?: number;
     pendingCompartmentInjection: PreparedCompartmentInjection | null;
+    /** Save host-order IDs before tag replay or tool pruning can remove the message that marks the prefix-trimming boundary. */
+    prefixTrimSourceOrder?: PrefixTrimSourceOrder;
     /**
      * Messages trimmed while this transform rebuilds history. OpenCode rebuilds
      * the next request from the boundary written later in this pass, so some rows
@@ -1986,6 +2038,7 @@ export async function runPostTransformPhase(
                 temporalAwareness: args.m0M1.temporalAwareness,
                 isCacheBustingPass,
                 preparedPrefix,
+                prefixTrimSourceOrder: args.prefixTrimSourceOrder,
                 allowFreshContentionFallback: forceMaterialization || emergencyDropEligible,
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,
@@ -2253,13 +2306,34 @@ export async function runPostTransformPhase(
     if (historyWasConsumedThisPass && args.deferredHistoryWasPendingAtPassStart) {
         const pending = replaySnapshot?.pendingCompactionMarker ?? null;
         if (pending) {
-            if (
-                !pendingMarkerCoveredByConsumedBoundary(pending, args.pendingCompartmentInjection)
-            ) {
+            const pendingCovered = pendingMarkerCoveredByConsumedBoundary(
+                pending,
+                args.pendingCompartmentInjection,
+            );
+            const trimWasProven =
+                !m0M1Enabled ||
+                deliveredPrefixWasTrimmedThroughPendingBoundary(
+                    deliveredPrefix,
+                    args.prefixTrimSourceOrder,
+                    pending,
+                ) ||
+                sourceAlreadyReflectsCoveringMarker(
+                    args.sessionId,
+                    args.prefixTrimSourceOrder,
+                    persistedCompactionMarkerState,
+                    pending,
+                );
+            if (!pendingCovered) {
                 suppressV12HistoryDrain = true;
                 sessionLog(
                     args.sessionId,
                     `compaction-marker drain: pending ordinal ${pending.ordinal} is newer than consumed boundary ${args.pendingCompartmentInjection?.compartmentEndMessage ?? "<none>"}; preserving deferred history refresh signal`,
+                );
+            } else if (!trimWasProven) {
+                suppressV12HistoryDrain = true;
+                sessionLog(
+                    args.sessionId,
+                    `compaction-marker drain: refusing ordinal ${pending.ordinal} because prefix trim through ${args.pendingCompartmentInjection?.compartmentEndMessageId ?? "<none>"} was not proven; preserving deferred history refresh signal`,
                 );
             } else {
                 const outcome = (
