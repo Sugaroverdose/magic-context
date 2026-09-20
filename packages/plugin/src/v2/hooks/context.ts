@@ -25,10 +25,6 @@ import {
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
-import {
-    createLiveSessionState,
-    type LiveSessionState,
-} from "../../hooks/magic-context/live-session-state";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
 import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
@@ -69,6 +65,7 @@ import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
 import { modelLimitCacheWarm, warmModelLimitCacheFromCatalog } from "./model-limit-cache";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
+import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { rawMessages } from "./store";
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
@@ -336,6 +333,7 @@ export async function registerContext(context: V2Context) {
             );
             try {
                 const latest = reader.latestAssistant(draft.sessionID);
+                const latestCompaction = reader.latestCompaction(draft.sessionID);
                 const draftModelKey = `${draft.model.providerID}/${draft.model.id}`;
                 if (!queriedModels.has(draftModelKey)) {
                     const catalog = await Promise.resolve(context.model.list());
@@ -388,12 +386,25 @@ export async function registerContext(context: V2Context) {
                     limitFor,
                 });
                 if (reading) {
-                    // Mark the request unsafe only when the outgoing model appears
-                    // in the catalog; compare usage with its admission limit, which
-                    // reserves room for the response.
+                    // The provider's raw 95% wall always refuses. Below that wall,
+                    // use the outgoing model's output-reserved admission limit; a newer
+                    // host compaction may cross that tighter limit and still be sent once
+                    // so its reduced input-token usage can be measured.
+                    const rawContextLimit = rawLimits.get(draftModelKey)?.context;
+                    const providerHardPressure =
+                        typeof rawContextLimit === "number" &&
+                        Number.isFinite(rawContextLimit) &&
+                        rawContextLimit > 0 &&
+                        reading.inputTokens / rawContextLimit >= 0.95;
+                    const hostCompactionReducedUsage =
+                        latestCompaction !== undefined &&
+                        latest !== undefined &&
+                        latestCompaction.seq >= latest.seq;
                     unsafe =
-                        rawLimits.has(draftModelKey) &&
-                        reading.inputTokens / reading.admissionLimit >= 0.95;
+                        providerHardPressure ||
+                        (!hostCompactionReducedUsage &&
+                            rawContextLimit !== undefined &&
+                            reading.inputTokens / reading.admissionLimit >= 0.95);
                     if (reading.completed !== undefined)
                         updateSessionMeta(usageDb, draft.sessionID, {
                             lastResponseTime: reading.completed,
@@ -810,15 +821,14 @@ export async function registerContext(context: V2Context) {
     void warmModelLimitCacheFromCatalog(context);
     // OpenCode 2 never runs the v1 server() lane. Start the RPC surface here so
     // the terminal TUI can read the v2 lane's draft-authoritative session state.
-    const rpcLiveSessionState: LiveSessionState = {
-        ...createLiveSessionState(),
+    const rpcLiveSessionState = createV2RpcLiveSessionState({
         liveModelBySession: liveModels,
         variantBySession: variants,
         agentBySession: agents,
         channel1StateBySession: channel1,
         historyRefreshSessions,
         pendingMaterializationSessions,
-    };
+    });
     const storageDir = getMagicContextStorageDir();
     const rpcServer = new MagicContextRpcServer(storageDir, directory);
     let rpcStopped = false;
