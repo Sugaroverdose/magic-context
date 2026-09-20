@@ -103,7 +103,10 @@ function piContentText(content: PiSystemEntry["content"]): string {
 		.join("\n");
 }
 
-function piToolIdentity(tool: unknown): { name: string; identity: string } {
+export function piToolIdentity(tool: unknown): {
+	name: string;
+	identity: string;
+} {
 	if (!isRecord(tool) || typeof tool.name !== "string") {
 		throw new Error("Pi system tool declaration has no string name");
 	}
@@ -118,7 +121,14 @@ function piToolIdentity(tool: unknown): { name: string; identity: string } {
 	return { name: tool.name, identity: JSON.stringify(declaration) };
 }
 
-/** Resolve the same effective tool declarations and prompt text as Pi 0.86. */
+/**
+ * Resolve the same effective tool declarations and prompt text as Pi 0.86.
+ *
+ * This is a local mirror because the runtime plugin must still load on Pi 0.85,
+ * whose pi-ai package does not export these resolvers. The test "mirrors installed
+ * Pi 0.86 system resolvers across protocol fixtures" differentially pins this
+ * implementation to the installed getCurrentTools/getCurrentSystemPrompt behavior.
+ */
 export function resolvePiEffectiveSystemState(
 	messages: readonly unknown[],
 ): PiEffectiveSystemState {

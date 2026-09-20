@@ -32,7 +32,11 @@ import { __test, injectM0M1Pi } from "./inject-compartments-pi";
 import { clearNativeReasoning } from "./native-replay-pi";
 import { createPiLkgCoordinator } from "./pi-lkg";
 import { convertEntriesToRawMessages } from "./read-session-pi";
-import { isPiSystemEntry } from "./system-entry-pi";
+import {
+	isPiSystemEntry,
+	piToolIdentity,
+	resolvePiEffectiveSystemState,
+} from "./system-entry-pi";
 import { measurePiTailHygiene } from "./tail-hygiene-walk-pi";
 import {
 	assistantMessage,
@@ -116,6 +120,110 @@ describe("Pi system entry preservation", () => {
 });
 
 describe("Pi 0.86 provider contract", () => {
+	it("mirrors installed Pi 0.86 system resolvers across protocol fixtures", () => {
+		const gateTool = (name: string) => ({
+			name,
+			description: name,
+			parameters: { type: "object", properties: {} },
+		});
+		const gateInitial = {
+			role: "system" as const,
+			content: "BASE_GATE_PROMPT",
+			toolsAdded: [gateTool("read"), gateTool("edit"), gateTool("bash")],
+			timestamp: 0,
+		};
+		const racingExtension = {
+			role: "system" as const,
+			content: "RACING_EXTENSION",
+			toolsRemoved: [{ name: "read" }],
+			timestamp: 10,
+		};
+		const systemMessage = {
+			role: "system" as const,
+			content: "BASE_GATE_PROMPT\n\nRACING_EXTENSION",
+			toolsAdded: [gateTool("edit"), gateTool("bash")],
+			timestamp: 11,
+		};
+		const fixtures: { label: string; messages: unknown[] }[] = [
+			{
+				label: "initial plus delta",
+				messages: [structuredClone(initial), structuredClone(delta)],
+			},
+			{
+				label: "tools removed",
+				messages: [
+					structuredClone(initial),
+					{
+						role: "system",
+						content: "",
+						toolsRemoved: [{ name: "tool0" }],
+						timestamp: 3,
+					},
+				],
+			},
+			{
+				label: "sections set and null",
+				messages: [
+					{
+						role: "system",
+						content: "SECTION_BASE",
+						sections: { policy: "keep", removed: "remove" },
+						timestamp: 0,
+					},
+					{
+						role: "system",
+						content: "",
+						sections: { policy: "replaced", removed: null },
+						timestamp: 1,
+					},
+				],
+			},
+			{
+				label: "empty system content",
+				messages: [{ role: "system", content: "", timestamp: 0 }],
+			},
+			{
+				label: "foreign system without tools",
+				messages: [
+					{ role: "system", content: "FOREIGN ".repeat(20_000), timestamp: 0 },
+				],
+			},
+			{
+				label: "racing extension",
+				messages: [
+					structuredClone(gateInitial),
+					structuredClone(racingExtension),
+				],
+			},
+			{
+				label: "persisted systemMessage and summary head",
+				messages: [
+					structuredClone(systemMessage),
+					{
+						role: "compactionSummary",
+						summary: "MC marker",
+						tokensBefore: 70_000,
+						timestamp: 12,
+					},
+				],
+			},
+		];
+
+		for (const { label, messages } of fixtures) {
+			const installedTools = getCurrentTools(messages as never)
+				.map(piToolIdentity)
+				.sort((left, right) =>
+					left.name === right.name
+						? left.identity.localeCompare(right.identity)
+						: left.name.localeCompare(right.name),
+				);
+			expect(resolvePiEffectiveSystemState(messages), label).toEqual({
+				tools: installedTools,
+				prompt: getCurrentSystemPrompt(messages as never),
+			});
+		}
+	});
+
 	it("fold and four defer passes retain the initial request tools and prompt", () => {
 		const db = createTestDb();
 		const sessionId = `sys-fold-${crypto.randomUUID()}`;
