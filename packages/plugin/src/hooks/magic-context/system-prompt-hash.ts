@@ -83,23 +83,22 @@ function isInternalOpenCodeAgent(systemPromptContent: string): boolean {
 
 /**
  * Detect Magic Context's OWN hidden child agents by their system-prompt
- * openers. These children (historian/dreamer/memory-migration) load a
- * fixed agent identity and must NOT receive the MC guidance block — it's wasted
- * spend and a contradictory second identity frame ("You are Historian…" plus
- * "You are the user's long-term partner…").
+ * openers. These children (historian/dreamer) load a fixed agent identity and
+ * must NOT receive the MC guidance block — it's wasted spend and a
+ * contradictory second identity frame ("You are Historian…" plus "You are the
+ * user's long-term partner…").
  *
  * This is the timing-independent companion to the `internalChildSessions` flag:
  * the flag is set at `session.created` (may race the very first system.transform
  * by event-delivery latency), whereas this signature is present in the prompt
- * content on pass 1 with zero timing dependency. Memory-migration loads the
- * historian agent prompt, so the historian opener covers it.
+ * content on pass 1 with zero timing dependency.
  *
  * Literal substrings (not fuzzy) so an upstream prompt edit fails open (resumes
  * injection) rather than silently mis-detecting.
  */
 export function isMagicContextInternalAgent(systemPromptContent: string): boolean {
     return (
-        // HISTORIAN_AGENT (also used by memory-migration)
+        // HISTORIAN_AGENT
         systemPromptContent.includes(
             "You are Historian — the hippocampus of a long-running coding agent.",
         ) ||
@@ -170,7 +169,7 @@ export function createSystemPromptHashHandler(deps: {
     injectionSkipSignatures?: string[];
     /**
      * Process-scoped set of Magic Context's OWN hidden child sessions
-     * (historian/dreamer/memory-migration), flagged by title prefix at
+     * (historian/dreamer), flagged by title prefix at
      * `session.created`. When the active session is in this set we skip ALL
      * injection — these children have their own fixed agent identity/prompt and
      * never benefit from the MC guidance block. Belt to the prompt-signature
@@ -255,7 +254,7 @@ export function createSystemPromptHashHandler(deps: {
         }
 
         // ── Skip Magic Context's OWN hidden children ──
-        // historian/dreamer/memory-migration must not get the MC
+        // historian/dreamer must not get the MC
         // guidance block (wasted spend + contradictory identity frame). Two
         // signals: the title-prefix flag (set at session.created) and the
         // prompt-signature (timing-independent, reliable on pass 1). Either

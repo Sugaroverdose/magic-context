@@ -369,9 +369,9 @@ const SectionHeader = (props: { theme: TuiThemeCurrent; title: string }) => (
     </box>
 )
 
-// Live recomp / session-upgrade progress. Renders while an upgrade runs (and
-// briefly after it finishes) so a multi-minute rebuild is visible instead of a
-// single missed toast (dogfood 2026-05-30).
+// Live recomp progress. Renders while a rebuild runs (and briefly after it
+// finishes) so a multi-minute rebuild is visible instead of a single missed
+// toast (dogfood 2026-05-30).
 const RecompProgressSection = (props: {
     theme: TuiThemeCurrent
     progress: NonNullable<SidebarSnapshot["recompProgress"]>
@@ -898,7 +898,7 @@ const SidebarContent = (props: {
                 value={String(s()?.compartmentCount ?? 0)}
             />
 
-            {/* Recomp / session-upgrade live progress */}
+            {/* Recomp live progress */}
             <Show when={s()?.recompProgress}>
                 {(progress) => (
                     <RecompProgressSection theme={props.theme} progress={progress()} />

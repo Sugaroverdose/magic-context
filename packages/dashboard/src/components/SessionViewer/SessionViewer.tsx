@@ -1195,7 +1195,7 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
                               <span
                                 class="pill amber"
                                 style={{ "margin-left": "6px" }}
-                                title="Legacy pre-v2 compartment — no paraphrase tiers; renders degraded. Run /ctx-session-upgrade to rebuild."
+                                title="Legacy pre-v2 compartment — no paraphrase tiers; renders degraded. Run /ctx-recomp to rebuild."
                               >
                                 legacy
                               </span>

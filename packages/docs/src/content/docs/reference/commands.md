@@ -3,7 +3,7 @@ title: Commands
 description: Slash commands to inspect Magic Context, flush queues, rebuild or wrap up history, and run dreamer.
 ---
 
-You run these slash commands in your harness chat or command box. They execute in the plugin, not in the model. Names are registered as `ctx-status`, `ctx-flush`, `ctx-recomp`, `ctx-wrapup`, `ctx-dream`, `ctx-embed`, and `ctx-session-upgrade` (type them with a leading `/`).
+You run these slash commands in your harness chat or command box. They execute in the plugin, not in the model. Names are registered as `ctx-status`, `ctx-flush`, `ctx-recomp`, `ctx-wrapup`, `ctx-dream`, and `ctx-embed` (type them with a leading `/`).
 
 ## Is something stuck?
 
@@ -12,7 +12,7 @@ You run these slash commands in your harness chat or command box. They execute i
 3. **`/ctx-recomp`** — Rebuild compartments from raw history with the historian model; slow on long sessions. Use `/ctx-recomp <start>-<end>` for a partial range when only part of the timeline is wrong.
 4. **`/ctx-wrapup [messages_to_keep]`** — Deliberately compact older live history while keeping the newest N messages raw.
 
-Use **`/ctx-session-upgrade`** for legacy session format upgrades, not `/ctx-recomp --upgrade` (deprecated). If `compaction.enabled` is `false`, `/ctx-recomp`, `/ctx-wrapup`, `/ctx-flush`, and `/ctx-session-upgrade` refuse instead of changing compacted history; status, recall, and embedding commands remain available.
+Use **`/ctx-recomp`** to rebuild compartments left in an older history layout; the `/ctx-recomp --upgrade` flag is deprecated and does nothing on its own. If `compaction.enabled` is `false`, `/ctx-recomp`, `/ctx-wrapup`, and `/ctx-flush` refuse instead of changing compacted history; status, recall, and embedding commands remain available.
 
 ## /ctx-status
 
@@ -44,7 +44,7 @@ Use **`/ctx-session-upgrade`** for legacy session format upgrades, not `/ctx-rec
 | --- | --- |
 | (none) | Full rebuild to the protected tail. |
 | `<start>-<end>` | Partial rebuild, e.g. `/ctx-recomp 1-11322`. |
-| `--upgrade` | Deprecated — run `/ctx-session-upgrade`. |
+| `--upgrade` | Deprecated — run `/ctx-recomp` with no arguments. |
 
 :::caution
 Uses historian-model tokens; full recomp on long sessions can take a long time.
@@ -86,12 +86,3 @@ Magic Context also auto-embeds the active session's missing compartments in the 
 **When to use it.** After changing your embedding model (which re-embeds under the new model), or to check whether `/ctx-search` semantic recall covers this session's older history.
 
 **What you'll see.** On OpenCode TUI, a status dialog (and a live **Embed** progress bar in the sidebar while a run is active); on Desktop/Web, a text status. On Pi, a status message.
-
-
-## /ctx-session-upgrade
-
-**What it does.** Upgrades **this session** to the current history layout (full recomp of legacy compartments) and runs **once-per-project** memory category migration when available.
-
-**When to use it.** After upgrades when compartments are legacy or docs recommend upgrading session history.
-
-**What you'll see.** `## Session Upgrade` / recomp progress in chat. Requires an attached session (send a message first if needed). Pi keeps the REPL usable while historian work runs in the background.

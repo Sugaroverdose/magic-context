@@ -414,15 +414,15 @@ OpenCode gates m[1] recompute on `isCacheBustingPass` (`shouldApplyPendingOps ||
 
 ---
 
-## 11b. Recomp / upgrade run detached in the background (mechanism differs, behaviour matches)
+## 11b. Recomp runs detached in the background (mechanism differs, behaviour matches)
 
-`/ctx-recomp` and `/ctx-session-upgrade` run DETACHED on both harnesses — the
-REPL/TUI stays responsive while the multi-pass historian recomp runs — but the
-mechanism differs because the process models differ:
+`/ctx-recomp` runs DETACHED on both harnesses — the REPL/TUI stays responsive
+while the multi-pass historian recomp runs — but the mechanism differs because
+the process models differ:
 
-- **OpenCode** runs `void runManagedRecomp(...)` / `void runManagedUpgrade(...)`
-  in its separate server process; the TUI client keeps accepting input and shows
-  a live progress bar via RPC polling.
+- **OpenCode** runs `void runManagedRecomp(...)` in its separate server process;
+  the TUI client keeps accepting input and shows a live progress bar via RPC
+  polling.
 - **Pi** is a single-process REPL where the command handler IS the turn, so an
   inline `await` froze all input. Pi instead spawns the recomp via
   `spawnPiRecompRun` (mirroring `spawnPiHistorianRun`): the handler returns
@@ -469,10 +469,10 @@ from the presence of legacy compartments at render time
 (`current.upgradeState !== snapshotMarkers.upgradeState`).
 
 This is **parity**, not a divergence. (Earlier revisions of this doc described
-Pi's marker as a pinned constant — that is stale: Pi gained its own legacy→v2
-`/ctx-session-upgrade` flow and the marker was made dynamic to refold m[0] when a
-session crosses from legacy to upgraded. Pi's detached recomp/upgrade —
-divergence #11b — additionally re-signals materialization through its own path.)
+Pi's marker as a pinned constant — that is stale: the marker was made dynamic so
+m[0] refolds when a recomp rebuilds a session's legacy compartments into the
+current layout. Pi's detached recomp — divergence #11b — additionally re-signals
+materialization through its own path.)
 
 ---
 

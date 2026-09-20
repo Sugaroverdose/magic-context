@@ -12,9 +12,9 @@ import type {
 import type { NotificationParams } from "./send-session-notification";
 
 /**
- * Live progress for a running recomp / session-upgrade, surfaced in the TUI
- * sidebar + /ctx-status so users can watch a long rebuild instead of staring at
- * a single "started" toast. Lives in `LiveSessionState.recompProgressBySession`
+ * Live progress for a running recomp, surfaced in the TUI sidebar + /ctx-status
+ * so users can watch a long rebuild instead of staring at a single "started"
+ * toast. Lives in `LiveSessionState.recompProgressBySession`
  * (process-local, in-memory — if the process restarts mid-recomp the recomp
  * itself is interrupted, so losing the progress entry is correct).
  *
@@ -25,14 +25,14 @@ import type { NotificationParams } from "./send-session-notification";
  */
 export interface RecompProgress {
     sessionId: string;
-    /** Which user-facing flow this progress belongs to. `/ctx-recomp` rebuilds
-     *  compartments and is labeled "Recomp"; `/ctx-session-upgrade` (legacy→v2 +
-     *  memory migration) is labeled "Upgrade". Without this the sidebar/status
-     *  hardcoded "Upgrade" wording for BOTH, so a plain recomp showed
-     *  "Recomp / ✗ Upgrade failed" — a self-contradiction (dogfood 2026-06-04,
-     *  a 0-compartment session in a project whose other sessions had them).
-     *  Optional + defaults to "recomp" so runner-emitted per-pass entries (which
-     *  don't know the flow) inherit the kind set by setRecompStarting. */
+    /** Which user-facing flow this progress belongs to, so the sidebar/status
+     *  wording follows the flow that started the run instead of hardcoding one
+     *  verb for all of them (dogfood 2026-06-04: a plain recomp showed
+     *  "Recomp / ✗ Upgrade failed", a self-contradiction). Optional + defaults
+     *  to "recomp" so runner-emitted per-pass entries (which don't know the
+     *  flow) inherit the kind set by setRecompStarting. "upgrade" is no longer
+     *  produced — the session-upgrade flow is gone — and the renderers keep its
+     *  arm only so an in-flight entry from an older process still labels. */
     kind?: "recomp" | "upgrade" | "embed" | "wrapup";
     /** "skipped" is a TRANSIENT non-failure outcome: the incremental historian
      *  briefly held the compartment-state lease (or another process is mutating

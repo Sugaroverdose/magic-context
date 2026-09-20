@@ -195,9 +195,6 @@ export function createChatMessageHook(args: {
     systemPromptRefreshSessions: SystemPromptRefreshSessions;
     pendingMaterializationSessions: PendingMaterializationSessions;
     lastHeuristicsTurnId: LastHeuristicsTurnId;
-    /** E5 — one-time session upgrade reminder. Optional: only wired when the
-     *  historian can run (so an upgrade is actually possible). Self-gates. */
-    upgradeReminder?: (sessionId: string) => Promise<void>;
     /** The native slash-command handler, reused when Desktop removes the slash. */
     commandHandler?: MagicContextCommandHandler;
     cacheTtlConfig?: MagicContextConfig["cache_ttl"];
@@ -240,12 +237,6 @@ export function createChatMessageHook(args: {
                     modelId: input.model?.modelID,
                 },
             );
-        }
-
-        // E5: fire-and-forget one-time upgrade reminder for legacy sessions.
-        // Self-gating + model-invisible, so it never affects the prompt prefix.
-        if (args.upgradeReminder) {
-            void args.upgradeReminder(sessionId);
         }
 
         if (input.model?.providerID && input.model.modelID) {

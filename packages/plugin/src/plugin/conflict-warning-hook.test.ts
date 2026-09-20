@@ -108,7 +108,9 @@ describe("conflict-warning notifications", () => {
         const allowed = new Map([
             ["hooks/magic-context/hook.ts", 1],
 
-            ["plugin/rpc-handlers.ts", 2],
+            // The RPC `recomp` handler is the only remaining one: the session-upgrade
+            // handler that also posted one was removed with its command.
+            ["plugin/rpc-handlers.ts", 1],
         ]);
         const actual = new Map<string, number>();
         const call = new RegExp(["sendIgnoredMessage", "\\s*\\("].join(""), "g");

@@ -7,7 +7,7 @@ import { once } from "node:events";
 import { chmodSync, createWriteStream, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-import { isCompactionEnabled } from "../config/agent-disable";
+import { COMPACTION_ENABLED_PATH, isCompactionEnabled } from "../config/agent-disable";
 import type { MagicContextConfig } from "../config/schema/magic-context";
 import {
     getAuthorityManagedMarker,
@@ -52,18 +52,23 @@ import {
     type WorkMetricsCarry,
 } from "../features/magic-context/work-metrics";
 import type { HiddenCompletionExecutor } from "../hooks/magic-context/compartment-runner-types";
+import {
+    type EmbedHistoryDeps,
+    pauseEmbedHistoryDrain,
+    runEmbedHistoryDrain,
+} from "../hooks/magic-context/embed-history-runner";
 import { getEmbedDrainUiStatus } from "../hooks/magic-context/embed-session-state";
 import {
     resolveContextLimit,
     resolveContextWindowGeometry,
     resolveExecuteThresholdDetail,
 } from "../hooks/magic-context/event-resolvers";
+import { executeFlush } from "../hooks/magic-context/execute-flush";
 import { formatEmbedStatusText } from "../hooks/magic-context/format-embed-status";
 import { getLiveNotificationParams } from "../hooks/magic-context/hook-handlers";
 import type { LiveSessionState } from "../hooks/magic-context/live-session-state";
 import { getLkgSlotHeapStats } from "../hooks/magic-context/lkg-slot";
 import { computeM0BlockTokens } from "../hooks/magic-context/m0-token-breakdown";
-import { RUST_SESSION_UPGRADE_REFUSAL } from "../hooks/magic-context/maintenance-authority";
 import { getCompartmentMirrorHeapStats } from "../hooks/magic-context/module-state-sync";
 import {
     findLastAssistantModelFromOpenCodeDb,
@@ -88,6 +93,7 @@ import { resolveCacheTtlDisplay } from "../shared/cache-ttl-display";
 import type { ConfigParseFailure } from "../shared/config-diagnostics";
 import { getMagicContextStorageDir } from "../shared/data-path";
 import { getLoggerDiagnostics, log } from "../shared/logger";
+import { pushNotification } from "../shared/rpc-notifications";
 import type { MagicContextRpcServer } from "../shared/rpc-server";
 import type {
     DebugHeapSnapshotResponse,
@@ -103,6 +109,7 @@ import {
     resolveTailHygieneStatus,
     type WireTailHygieneBaseline,
 } from "../shared/tail-hygiene-status";
+import { renderCapabilityRefusal } from "../shared/user-facing-codes";
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
 
 // Per-process incremental work-metrics state, keyed by session. The RPC server
@@ -1442,9 +1449,9 @@ export function registerRpcHandlers(
         return { count: buildCompartmentCount(db, sessionId, moduleStatus) };
     });
 
-    // Under TypeScript authority, the RPC dialogs share the same recomp/upgrade
-    // orchestrators as /ctx-* commands. Rust authority branches below: recomp goes
-    // to session.recomp, while session upgrade refuses because the module owns state.
+    // Under TypeScript authority, the RPC dialogs share the same recomp
+    // orchestrator as the /ctx-* commands. Rust authority branches below: recomp
+    // goes to session.recomp because the module owns state.
     const buildManagedCtx = async (
         db: NonNullable<ReturnType<typeof getDb>>,
     ): Promise<ManagedRecompContext> => {
@@ -1471,10 +1478,6 @@ export function registerRpcHandlers(
             autoPromote: config.memory?.auto_promote ?? true,
             historianModel: historianModel.primary,
             fallbackModels: historianModel.fallbacks,
-            runMigration:
-                args.client !== undefined &&
-                config.memory?.enabled !== false &&
-                !!historianModel.primary?.model,
             userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
             historianTwoPass: config.historian?.two_pass === true,
             getNotificationParams,
@@ -1513,56 +1516,140 @@ export function registerRpcHandlers(
         return { ok: true };
     });
 
-    // TUI-triggered `/ctx-session-upgrade`: full recomp + once-per-project memory
-    // migration. Fired from the upgrade dialog's "Run upgrade now" action.
-    rpcServer.handle("upgrade", async (params) => {
+    // The three handlers below exist for a host whose only command seam is the
+    // TUI (OpenCode 2 registers /ctx-* through its keymap layer, and its lane
+    // never runs the OpenCode 1 `command.execute.before` hook). Each performs the
+    // same server-side work as the matching command branch and returns its text,
+    // so the caller can render it in a dialog or toast instead of a chat row.
+    const compactionOffRefusal = (command: string): string =>
+        `Magic Context compaction is disabled (${COMPACTION_ENABLED_PATH}: false) — /${command} manages compacted history and has no effect in this mode.`;
+
+    /** Show a completed background run's text on whichever TUI is listening. */
+    const pushResultDialog = (sessionId: string, title: string, message: string): void => {
+        pushNotification("action", { action: "show-result-dialog", title, message }, sessionId);
+    };
+
+    rpcServer.handle("flush", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         if (!sessionId) return { ok: false, error: "no session" };
+        if (!compactionEnabled) return { ok: true, message: compactionOffRefusal("ctx-flush") };
+        let message: string;
+        if (config.transform_mode === "rust" && rustModeModuleClient) {
+            try {
+                const response = await rustModeModuleClient.call({
+                    sessionId,
+                    projectRoot: String(params.directory ?? directory),
+                    method: "session.flush",
+                    body: { method: "session.flush", v: 1, session_id: sessionId },
+                });
+                const value = (response ?? {}) as Record<string, unknown>;
+                message =
+                    value.armed === false
+                        ? "No pending operations to flush."
+                        : "Flushed: Changes take effect on next message.";
+            } catch (error) {
+                log("[rpc] flush failed:", error);
+                return { ok: false, error: renderCapabilityRefusal("context_cleanup") };
+            }
+        } else {
+            const db = getDb();
+            if (!db) return { ok: false, error: "db unavailable" };
+            message = executeFlush(db, sessionId);
+        }
+        // The user asked for a full refresh, so signal all three one-shot sets:
+        // rebuild <session-history>, re-read the system-prompt adjuncts, and force
+        // the queued drops to materialize. That makes the next request a priced
+        // pass instead of leaving the flush invisible until one happens anyway.
+        liveSessionState.historyRefreshSessions.add(sessionId);
+        liveSessionState.systemPromptRefreshSessions.add(sessionId);
+        liveSessionState.pendingMaterializationSessions.add(sessionId);
+        return { ok: true, message };
+    });
+
+    rpcServer.handle("wrapup", async (params) => {
+        const sessionId = String(params.sessionId ?? "");
+        if (!sessionId) return { ok: false, error: "no session" };
+        if (!compactionEnabled) return { ok: true, message: compactionOffRefusal("ctx-wrapup") };
+        const requested = Number(params.messagesToKeep ?? 20);
+        const messagesToKeep = Number.isSafeInteger(requested) && requested > 0 ? requested : 20;
         if (config.transform_mode === "rust") {
-            return { ok: false, error: RUST_SESSION_UPGRADE_REFUSAL };
+            return { ok: false, error: renderCapabilityRefusal("history_compression") };
         }
         const db = getDb();
         if (!db) return { ok: false, error: "db unavailable" };
 
-        const { runManagedUpgrade } = await import("../hooks/magic-context/recomp-orchestrator");
-        const { sendIgnoredMessage } = await import(
-            "../hooks/magic-context/send-session-notification"
-        );
-        log(`[rpc] session-upgrade requested for session ${sessionId}`);
-        const ctx = await buildManagedCtx(db);
-        void runManagedUpgrade(ctx, sessionId)
-            .then((message) => {
-                void sendIgnoredMessage(
-                    args.client,
+        const { runManagedWrapup } = await import("../hooks/magic-context/wrapup-orchestrator");
+        const model = liveSessionState.liveModelBySession.get(sessionId);
+        const contextLimit = model
+            ? resolveContextLimit(model.providerID, model.modelID, { db, sessionID: sessionId })
+            : 128_000;
+        const ctx = {
+            ...(await buildManagedCtx(db)),
+            contextLimit,
+            executeThresholdPercentage: resolveExecuteThresholdDetail(
+                config.execute_threshold_percentage ?? 65,
+                model ? `${model.providerID}/${model.modelID}` : undefined,
+                65,
+                {
+                    tokensConfig: config.execute_threshold_tokens,
+                    contextLimit,
                     sessionId,
-                    message,
-                    getNotificationParams(sessionId),
-                    true, // force-persist: a multi-minute upgrade's outcome must stay visible
-                ).catch(() => {});
-            })
-            .catch((error: unknown) => log("[rpc] session-upgrade failed:", error));
-        return { ok: true };
+                },
+            ).percentage,
+            hasPendingNaturalBust: (sid: string) =>
+                liveSessionState.historyRefreshSessions.has(sid) ||
+                liveSessionState.systemPromptRefreshSessions.has(sid) ||
+                liveSessionState.pendingMaterializationSessions.has(sid),
+        };
+        log(`[rpc] wrapup requested for session ${sessionId} (keep ${messagesToKeep})`);
+        // Fire-and-forget: a wrapup runs the historian over the live tail and can
+        // take minutes, which is far longer than an RPC caller can wait.
+        void runManagedWrapup(ctx, sessionId, { messagesToKeep })
+            .then((message) => pushResultDialog(sessionId, "Wrapup", message))
+            .catch((error: unknown) => log("[rpc] wrapup failed:", error));
+        return { ok: true, started: true };
     });
 
-    // The user made an explicit choice on the upgrade dialog (Confirm or Cancel).
-    // Set the durable stamp so the FRESH reminder won't re-show. We deliberately
-    // do NOT stamp when the dialog is merely displayed — a display that the user
-    // closed/ctrl-c'd before acting must re-show on the next process (dogfood
-    // 2026-05-30). Resume prompts are staging-driven and unaffected by this stamp.
-    rpcServer.handle("dismiss-upgrade-reminder", async (params) => {
+    rpcServer.handle("embed", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         if (!sessionId) return { ok: false, error: "no session" };
         const db = getDb();
         if (!db) return { ok: false, error: "db unavailable" };
+        const action = String(params.action ?? "status");
+        const embedDeps: EmbedHistoryDeps = {
+            db,
+            resolveDirectory: (id) =>
+                liveSessionState.sessionDirectoryBySession.get(id) ??
+                String(params.directory ?? directory),
+            memoryEnabled: config.memory?.enabled !== false,
+            allowHomeProject: config.allow_home_project,
+            recompProgressBySession: liveSessionState.recompProgressBySession,
+        };
+        if (action === "pause") {
+            return { ok: true, message: pauseEmbedHistoryDrain(embedDeps, sessionId) };
+        }
+        if (action === "start") {
+            log(`[rpc] embed start requested for session ${sessionId}`);
+            // Same reason as wrapup: a backfill over a long session's compartments
+            // outlives the request, so the outcome arrives as a dialog.
+            void runEmbedHistoryDrain(embedDeps, sessionId)
+                .then((message) => pushResultDialog(sessionId, "Embed", message))
+                .catch((error: unknown) => log("[rpc] embed start failed:", error));
+            return { ok: true, started: true };
+        }
         try {
-            const { updateSessionMeta } = await import(
-                "../features/magic-context/storage-meta-session"
-            );
-            updateSessionMeta(db, sessionId, { upgradeRemindedAt: Date.now() });
-            return { ok: true };
+            return {
+                ok: true,
+                message: buildEmbedDetail(
+                    db,
+                    sessionId,
+                    String(params.directory ?? directory),
+                    liveSessionState,
+                ).statusText,
+            };
         } catch (error) {
-            log("[rpc] dismiss-upgrade-reminder failed:", error);
-            return { ok: false, error: String(error) };
+            log("[rpc] embed status error:", error);
+            return { ok: false, error: "unavailable" };
         }
     });
 

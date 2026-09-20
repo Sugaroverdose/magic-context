@@ -125,10 +125,10 @@ export interface SidebarSnapshot {
     newWorkTokens?: number | null;
     totalInputTokens?: number | null;
     /**
-     * Live recomp / session-upgrade progress for this session, or null when no
-     * recomp is running (and no recent terminal state is being shown). Drives the
-     * sidebar "Recomp"/"Upgrade" progress bar and the /ctx-status dialog. Mirrors
-     * the runtime `RecompProgress` shape from compartment-runner-types.ts.
+     * Live recomp progress for this session, or null when no recomp is running
+     * (and no recent terminal state is being shown). Drives the sidebar progress
+     * bar and the /ctx-status dialog. Mirrors the runtime `RecompProgress` shape
+     * from compartment-runner-types.ts.
      */
     /** Read-only per-task candidate counts; populated by the server RPC. */
     dreamerBacklog?: DreamTaskBacklogMap;
