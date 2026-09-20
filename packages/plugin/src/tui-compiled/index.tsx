@@ -9,6 +9,7 @@ import { createComponent as _$createComponent } from "opentui:runtime-module:%40
 /** @jsxImportSource @opentui/solid */
 // @ts-nocheck
 import { createMemo, createSignal } from "opentui:runtime-module:solid-js";
+import { formatMemoryImportanceHistogram } from "../shared/status-detail-text";
 import { renderUserStatusSummary, statusSummaryFromDetail } from "../shared/status-summary";
 import { renderUserFacingFailure, userFacingFailureCode } from "../shared/user-facing-codes";
 import { createSidebarContentSlot, kickRecompProgressRefresh, refreshSidebarSnapshot } from "./slots/sidebar-content";
@@ -767,6 +768,18 @@ const StatusDialog = props => {
               l: "Injected",
               get v() {
                 return String(s().memoryBlockCount);
+              },
+              get fg() {
+                return t().textMuted;
+              }
+            }), null);
+            _$insert(_el$58, _$createComponent(R, {
+              get t() {
+                return t();
+              },
+              l: "Importance",
+              get v() {
+                return formatMemoryImportanceHistogram(s().memoryImportanceHistogram);
               },
               get fg() {
                 return t().textMuted;

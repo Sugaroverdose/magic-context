@@ -20,7 +20,13 @@ import {
 	getActiveUserMemories,
 	insertUserMemory,
 } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
-import { COMPARTMENT_RENDER_EPOCH } from "@magic-context/core/hooks/magic-context/compartment-render-epoch";
+import {
+	COMPARTMENT_RENDER_EPOCH,
+	encodeCachedM0UpgradeIdentity,
+	MEMORY_RENDER_FORMAT_EPOCH,
+} from "@magic-context/core/hooks/magic-context/compartment-render-epoch";
+import { renderMemoryBlockV2 } from "@magic-context/core/hooks/magic-context/inject-compartments";
+import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
 	__test,
@@ -145,6 +151,56 @@ describe("workspace memory sharing", () => {
 			const m0 = renderM0Pi(state, db, "");
 			expect(m0).toContain("own malformed Pi memory remains visible");
 			expect(m0).not.toContain("foreign malformed Pi memory is hidden");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+});
+
+describe("Pi memory budget selection", () => {
+	it("selects the verified memory when an importance-50 budget admits one", () => {
+		const db = createTestDb();
+		const dir = mkdtempSync(join(tmpdir(), "mc-pi-memory-recency-"));
+		try {
+			const projectIdentity = resolveProjectIdentity(dir);
+			const neverVerified = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONSTRAINTS",
+				content: "memory alpha record",
+				importance: 50,
+			});
+			const verifiedYesterday = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONSTRAINTS",
+				content: "memory bravo record",
+				importance: 50,
+			});
+			db.prepare(
+				"UPDATE memories SET last_seen_at = 1000, verified_at = CASE WHEN id = ? THEN 2000 ELSE NULL END WHERE id IN (?, ?)",
+			).run(verifiedYesterday.id, neverVerified.id, verifiedYesterday.id);
+			const memories = getMemoriesByProject(db, projectIdentity);
+			const budget = Math.max(
+				...memories.map((memory) =>
+					estimateTokens(renderMemoryBlockV2([memory])),
+				),
+			);
+
+			const m0 = renderM0Pi(
+				{
+					sessionId: "pi-memory-recency",
+					projectIdentity,
+					projectDirectory: dir,
+					injectionBudgetTokens: budget,
+				},
+				db,
+				"",
+				1,
+				memories,
+			);
+
+			expect(m0).toContain("memory bravo record");
+			expect(m0).not.toContain("memory alpha record");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 			closeQuietly(db);
@@ -748,6 +804,95 @@ describe("injectM0M1Pi", () => {
 				reason: null,
 			});
 		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("replays the pre-epoch memory order on defer and applies recency on one natural HARD", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-memory-epoch-"));
+		try {
+			const projectIdentity = resolveProjectIdentity(cwd);
+			const neverVerified = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONSTRAINTS",
+				content: "memory alpha record",
+				importance: 50,
+			});
+			const verifiedYesterday = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONSTRAINTS",
+				content: "memory bravo record",
+				importance: 50,
+			});
+			db.prepare(
+				"UPDATE memories SET last_seen_at = 1000, verified_at = CASE WHEN id = ? THEN 2000 ELSE NULL END WHERE id IN (?, ?)",
+			).run(verifiedYesterday.id, neverVerified.id, verifiedYesterday.id);
+			const memories = getMemoriesByProject(db, projectIdentity);
+			const budget = Math.max(
+				...memories.map((memory) =>
+					estimateTokens(renderMemoryBlockV2([memory])),
+				),
+			);
+			const state = {
+				sessionId: "ses-pi-memory-epoch",
+				projectIdentity,
+				projectDirectory: cwd,
+				injectionBudgetTokens: budget,
+				hardSignals: {
+					systemHash: "system",
+					modelKey: "provider/old",
+					cacheExpired: false,
+					lastResponseTime: 0,
+				},
+			};
+			injectM0M1Pi(state, db, [userMessage("first", 10)] as never);
+			const oldMemory = memories.find(
+				(memory) => memory.id === neverVerified.id,
+			);
+			if (!oldMemory) throw new Error("pre-epoch memory fixture missing");
+			const oldM0 = Buffer.from(
+				`<session-history></session-history>\n\n${renderMemoryBlockV2([oldMemory])}`,
+			);
+			db.prepare(
+				"UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_upgrade_state = ? WHERE session_id = ?",
+			).run(
+				oldM0,
+				encodeCachedM0UpgradeIdentity(
+					"pi-m0m1-v2:ready",
+					COMPARTMENT_RENDER_EPOCH,
+					false,
+					`m${budget}-h60000`,
+					null,
+				),
+				state.sessionId,
+			);
+
+			expect(mustMaterializePi(state, db)).toEqual({
+				value: false,
+				reason: null,
+			});
+			const deferMessages = [userMessage("defer", 11)];
+			const defer = injectM0M1Pi(state, db, deferMessages as never);
+			expect(defer.m0Materialized).toBe(false);
+			expect(textOf(deferMessages[0] as never)).toBe(oldM0.toString("utf8"));
+			expect(
+				getOrCreateSessionMeta(db, state.sessionId).cachedM0UpgradeState,
+			).not.toContain(MEMORY_RENDER_FORMAT_EPOCH);
+
+			state.hardSignals.modelKey = "provider/new";
+			const hardMessages = [userMessage("hard", 12)];
+			const hard = injectM0M1Pi(state, db, hardMessages as never);
+			const hardText = textOf(hardMessages[0] as never);
+			expect(hard.m0Materialized).toBe(true);
+			expect(hard.m0Reason).toBe("model_change");
+			expect(hardText).toContain("memory bravo record");
+			expect(hardText).not.toContain("memory alpha record");
+			expect(
+				getOrCreateSessionMeta(db, state.sessionId).cachedM0UpgradeState,
+			).toContain(MEMORY_RENDER_FORMAT_EPOCH);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
 			closeQuietly(db);
 		}
 	});

@@ -24,6 +24,10 @@ import {
     type DreamTaskFailureState,
 } from "../features/magic-context/dreamer/task-registry";
 import { getLocalEmbeddingNativeMemoryStats } from "../features/magic-context/memory/embedding-local";
+import {
+    emptyMemoryImportanceHistogram,
+    getActiveMemoryImportanceHistogram,
+} from "../features/magic-context/memory/memory-diagnostics";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { getMessageIndexQueueHeapStats } from "../features/magic-context/message-index-async";
 import { getMural } from "../features/magic-context/mural/storage-mural";
@@ -710,6 +714,7 @@ export function buildStatusDetail(
     const moduleFeedHead = moduleStatus?.memory_mirror?.feed_head;
     const detail: StatusDetail = {
         ...base,
+        memoryImportanceHistogram: emptyMemoryImportanceHistogram(),
         hostBackendsModuleSide: rustMode,
         memoryMirror: rustMode ? getMemoryMirrorStatus(db, moduleFeedHead) : undefined,
         memoryAuthorityMismatch:
@@ -768,6 +773,12 @@ export function buildStatusDetail(
             context_db_schema_version: getPersistedSchemaVersion(db),
             plugin_supported_version: LATEST_SUPPORTED_VERSION,
         };
+        if (base.projectIdentity) {
+            detail.memoryImportanceHistogram = getActiveMemoryImportanceHistogram(
+                db,
+                base.projectIdentity,
+            );
+        }
         const muralConfig = config?.mural as { enabled?: boolean } | undefined;
         if (muralConfig?.enabled && base.projectIdentity) {
             const row = getMural(db, base.projectIdentity);

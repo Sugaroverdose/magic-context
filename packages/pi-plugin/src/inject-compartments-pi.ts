@@ -66,6 +66,7 @@ import {
 	COMPARTMENT_RENDER_EPOCH,
 	decodeCachedM0UpgradeIdentity,
 	encodeCachedM0UpgradeIdentity,
+	MEMORY_RENDER_FORMAT_EPOCH,
 } from "@magic-context/core/hooks/magic-context/compartment-render-epoch";
 import {
 	DEFAULT_HISTORY_BUDGET_TOKENS,
@@ -333,14 +334,9 @@ export const __test = {
 const PI_M1_PLACEHOLDER =
 	"<session-history-since>(no new content since last materialization)</session-history-since>";
 const MAX_FORCED_MEMORIES_PER_DELTA = 10;
-// Pi uses a STATIC upgrade-state marker, intentionally diverging from OpenCode's
-// dynamic getUpgradeState(db, sessionId). OpenCode flips this per-session when a
-// `/ctx-session-upgrade` recomp transitions legacy→v2, forcing an m[0] refold.
-// Pi has no equivalent per-session upgrade-state transition wired into the m[0]
-// markers yet, so a static const is internally consistent (stored marker and
-// current marker always match → never falsely triggers, never misses a real Pi
-// transition because there is none). Revisit if Pi gains a session-upgrade flow
-// that must invalidate m[0].
+// Pi prefixes its dynamic legacy/ready marker with this stable renderer identity.
+// readCurrentMarkers adds the compartment-derived suffix so a session upgrade
+// invalidates m[0] exactly once.
 const PI_M0_UPGRADE_STATE = "pi-m0m1-v2";
 const EMPTY_MAX_COMPARTMENT_SEQ = -1;
 
@@ -545,10 +541,12 @@ export interface PiM0SnapshotMarkers {
 	materializedAt: number;
 	upgradeState: string;
 	compartmentRenderEpoch: string | null;
+	/** Records the renderer used by cached bytes; written on a natural HARD but never triggers one. */
+	memoryRenderEpoch: string | null;
 	lastBaselineEndMessageId: string | null;
-	// HARD-bust markers (parity with OpenCode M0SnapshotMarkers): provider-side
-	// cache-eviction signals. systemHash/modelKey come from runtime; Pi has no
-	// Captured from PiM0HardSignals at the injection call site.
+	// HARD-bust markers (parity with OpenCode M0SnapshotMarkers) are captured
+	// from PiM0HardSignals. Pi has no tool-set hash because it has no equivalent
+	// tool-definition hook.
 	systemHash: string;
 	modelKey: string;
 	// Pi sessions can switch projects in-process (`/cd`). NULL on legacy cached
@@ -921,6 +919,7 @@ function getCachedMarkers(
 		materializedAt: meta.cachedM0MaterializedAt,
 		upgradeState: cachedUpgradeIdentity.upgradeState ?? "",
 		compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
+		memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
 		// The boundary that was persisted WITH these cached m[0] bytes (may be
 		// null for a legitimately-boundaryless baseline — see the guard above).
 		lastBaselineEndMessageId: cachedBoundary,
@@ -1015,6 +1014,7 @@ function readCurrentMarkersFromCompartments(
 			compartments.some((c) => c.legacy === 1) ? "legacy" : "ready"
 		}`,
 		compartmentRenderEpoch: COMPARTMENT_RENDER_EPOCH,
+		memoryRenderEpoch: MEMORY_RENDER_FORMAT_EPOCH,
 		lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
 		systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
 		modelKey: piModelRefToCanonical(
@@ -1069,8 +1069,9 @@ export function mustMaterializePi(
 	if (cached === null) {
 		return { value: true, reason: "cache_invalid" };
 	}
-	// A renderer-format change must fold cached m[0] exactly once. The fold
-	// persists this component with the rendered bytes, consuming the trigger.
+	// Compartment byte-shape changes fold cached m[0] exactly once. Memory
+	// selection epochs are ride-only: they persist on the next natural HARD so a
+	// defer pass cannot change an existing session's frozen prefix.
 	if (cached.compartmentRenderEpoch !== current.compartmentRenderEpoch) {
 		return piMaterializeMismatch(
 			"compartment_render_epoch",
@@ -1502,6 +1503,7 @@ function readFrozenM0InputsPi(
 				compartments.some((c) => c.legacy === 1) ? "legacy" : "ready"
 			}`,
 			compartmentRenderEpoch: COMPARTMENT_RENDER_EPOCH,
+			memoryRenderEpoch: MEMORY_RENDER_FORMAT_EPOCH,
 			lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
 			systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
 			modelKey: piModelRefToCanonical(
@@ -1756,6 +1758,7 @@ export function materializeM0Pi(
 				snapshotMarkers.compartmentRenderEpoch,
 				snapshotMarkers.muralEnabled,
 				snapshotMarkers.renderBudgetIdentity,
+				snapshotMarkers.memoryRenderEpoch,
 			),
 			systemHash: snapshotMarkers.systemHash,
 			modelKey: snapshotMarkers.modelKey,
@@ -2234,6 +2237,7 @@ function markersFromCachedPiRow(
 		sessionFactsVersion: row.cached_m0_session_facts_version,
 		upgradeState: cachedUpgradeIdentity.upgradeState ?? "",
 		compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
+		memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
 		lastBaselineEndMessageId:
 			typeof row.cached_m0_last_baseline_end_message_id === "string" &&
 			row.cached_m0_last_baseline_end_message_id.length > 0

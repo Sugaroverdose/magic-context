@@ -2,6 +2,7 @@
 // @ts-nocheck
 import { createMemo, createSignal } from "solid-js"
 import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
+import { formatMemoryImportanceHistogram } from '../shared/status-detail-text';
 import { renderUserStatusSummary, statusSummaryFromDetail } from "../shared/status-summary"
 import { renderUserFacingFailure, userFacingFailureCode } from '../shared/user-facing-codes';
 import {
@@ -421,6 +422,12 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail; diagnostics?:
                             </box>
                             <R t={t()} l="Active" v={String(s().memoryCount)} fg={t().accent} />
                             <R t={t()} l="Injected" v={String(s().memoryBlockCount)} fg={t().textMuted} />
+                            <R
+                                t={t()}
+                                l="Importance"
+                                v={formatMemoryImportanceHistogram(s().memoryImportanceHistogram)}
+                                fg={t().textMuted}
+                            />
                         </box>
                         <box flexDirection="column" flexGrow={1} flexBasis={0}>
                             <text fg={t().text}><b>Reductions</b></text>

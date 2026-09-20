@@ -38,6 +38,7 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     COMPARTMENT_RENDER_EPOCH,
     encodeCachedM0UpgradeIdentity,
+    MEMORY_RENDER_FORMAT_EPOCH,
 } from "./compartment-render-epoch";
 import {
     clearInjectionCache,
@@ -175,8 +176,14 @@ afterEach(() => {
     tempDirs.length = 0;
 });
 
-function renderMemory(id: number, category: string, content: string, importance = 50): Memory {
-    return { id, category, content, importance } as unknown as Memory;
+function renderMemory(
+    id: number,
+    category: string,
+    content: string,
+    importance = 50,
+    recency: { lastSeenAt?: number | null; verifiedAt?: number | null } = {},
+): Memory {
+    return { id, category, content, importance, ...recency } as unknown as Memory;
 }
 
 describe("compact project-memory wire", () => {
@@ -209,6 +216,29 @@ describe("compact project-memory wire", () => {
 </Z_LEGACY>
 </project-memory>`);
         expect(renderMemoryLineV2(memories[0]!)).toBe("#9: last");
+    });
+
+    it("selects the verified memory when an importance-50 budget admits one", () => {
+        const neverVerified = renderMemory(1, "CONSTRAINTS", "memory alpha record", 50, {
+            lastSeenAt: 1_000,
+            verifiedAt: null,
+        });
+        const verifiedYesterday = renderMemory(2, "CONSTRAINTS", "memory bravo record", 50, {
+            lastSeenAt: 1_000,
+            verifiedAt: 2_000,
+        });
+        const budget = Math.max(
+            estimateTokens(renderMemoryBlockV2([neverVerified])),
+            estimateTokens(renderMemoryBlockV2([verifiedYesterday])),
+        );
+
+        const trimmed = trimMemoriesToBudgetV2(
+            SESSION_ID,
+            [neverVerified, verifiedYesterday],
+            budget,
+        );
+
+        expect(trimmed.selected.map((memory) => memory.id)).toEqual([verifiedYesterday.id]);
     });
 
     it("measures the complete grouped block so a dropped category has no tag overhead", () => {
@@ -1132,6 +1162,101 @@ describe("m[0]/m[1] materialization", () => {
                 projectDirectory,
             }),
         ).toEqual({ value: false, reason: null });
+    });
+
+    it("replays the pre-epoch memory order on defer and applies recency on one natural HARD", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const neverVerified = insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "CONSTRAINTS",
+            content: "memory alpha record",
+            importance: 50,
+        });
+        const verifiedYesterday = insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "CONSTRAINTS",
+            content: "memory bravo record",
+            importance: 50,
+        });
+        db.prepare(
+            "UPDATE memories SET last_seen_at = 1000, verified_at = CASE WHEN id = ? THEN 2000 ELSE NULL END WHERE id IN (?, ?)",
+        ).run(verifiedYesterday.id, neverVerified.id, verifiedYesterday.id);
+        const memories = getMemoriesByProject(db, PROJECT_PATH);
+        const budget = Math.max(
+            ...memories.map((memory) => estimateTokens(renderMemoryBlockV2([memory]))),
+        );
+        const initialState = readStateFromMeta();
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state: initialState,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            memoryInjectionBudgetTokens: budget,
+            hardSignals: {
+                systemHash: "system",
+                modelKey: "provider/old",
+                cacheExpired: false,
+                lastResponseTime: 0,
+            },
+        });
+        const oldMemory = memories.find((memory) => memory.id === neverVerified.id);
+        if (!oldMemory) throw new Error("pre-epoch memory fixture missing");
+        const oldM0 = Buffer.from(
+            `<session-history></session-history>\n\n${renderMemoryBlockV2([oldMemory])}`,
+        );
+        db.prepare(
+            "UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_upgrade_state = ? WHERE session_id = ?",
+        ).run(
+            oldM0,
+            encodeCachedM0UpgradeIdentity(
+                "ready",
+                COMPARTMENT_RENDER_EPOCH,
+                false,
+                `m${budget}-h60000`,
+                null,
+            ),
+            SESSION_ID,
+        );
+        const state = readStateFromMeta();
+        const stableSignals = {
+            systemHash: "system",
+            modelKey: "provider/old",
+            cacheExpired: false,
+            lastResponseTime: 0,
+        };
+
+        const defer = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            memoryInjectionBudgetTokens: budget,
+            hardSignals: stableSignals,
+        });
+
+        expect(defer.m0RematerializedThisPass).toBe(false);
+        expect(defer.m0Bytes).toEqual(oldM0);
+        expect(state.cachedM0UpgradeState).not.toContain(MEMORY_RENDER_FORMAT_EPOCH);
+
+        const hard = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            memoryInjectionBudgetTokens: budget,
+            hardSignals: { ...stableSignals, modelKey: "provider/new" },
+        });
+        const hardText = hard.m0Bytes?.toString("utf8") ?? "";
+
+        expect(hard.m0RematerializedThisPass).toBe(true);
+        expect(hard.decision.reason).toBe("model_change");
+        expect(hardText).toContain("memory bravo record");
+        expect(hardText).not.toContain("memory alpha record");
+        expect(state.cachedM0UpgradeState).toContain(MEMORY_RENDER_FORMAT_EPOCH);
     });
 
     it("keeps single-project m[0]/m[1] bytes identical with the no-workspace context", () => {

@@ -1,12 +1,15 @@
 export const COMPARTMENT_RENDER_EPOCH = "cre2";
+export const MEMORY_RENDER_FORMAT_EPOCH = "mre3";
 
 const EPOCH_COMPONENT_PREFIX = "|compartment-render:";
+const MEMORY_EPOCH_COMPONENT_PREFIX = "|memory-render:";
 const MURAL_COMPONENT_PREFIX = "|mural-enabled:";
 const BUDGET_COMPONENT_PREFIX = "|render-budgets:";
 
 export interface CachedM0UpgradeIdentity {
     upgradeState: string | null;
     compartmentRenderEpoch: string | null;
+    memoryRenderEpoch: string | null;
     muralEnabled: boolean | null;
     renderBudgetIdentity: string | null;
 }
@@ -20,10 +23,14 @@ export function encodeCachedM0UpgradeIdentity(
     compartmentRenderEpoch: string | null = COMPARTMENT_RENDER_EPOCH,
     muralEnabled: boolean | null = null,
     renderBudgetIdentity: string | null = null,
+    memoryRenderEpoch: string | null = MEMORY_RENDER_FORMAT_EPOCH,
 ): string | null {
     let encoded = upgradeState ?? "";
     if (compartmentRenderEpoch !== null) {
         encoded += `${EPOCH_COMPONENT_PREFIX}${compartmentRenderEpoch}`;
+    }
+    if (memoryRenderEpoch !== null) {
+        encoded += `${MEMORY_EPOCH_COMPONENT_PREFIX}${memoryRenderEpoch}`;
     }
     if (muralEnabled !== null) {
         encoded += `${MURAL_COMPONENT_PREFIX}${muralEnabled ? "1" : "0"}`;
@@ -48,12 +55,14 @@ export function decodeCachedM0UpgradeIdentity(value: string | null): CachedM0Upg
         return {
             upgradeState: null,
             compartmentRenderEpoch: null,
+            memoryRenderEpoch: null,
             muralEnabled: null,
             renderBudgetIdentity: null,
         };
     }
     const componentIndexes = [
         value.indexOf(EPOCH_COMPONENT_PREFIX),
+        value.indexOf(MEMORY_EPOCH_COMPONENT_PREFIX),
         value.indexOf(MURAL_COMPONENT_PREFIX),
         value.indexOf(BUDGET_COMPONENT_PREFIX),
     ].filter((index) => index >= 0);
@@ -63,6 +72,7 @@ export function decodeCachedM0UpgradeIdentity(value: string | null): CachedM0Upg
     return {
         upgradeState: upgradeState.length > 0 ? upgradeState : null,
         compartmentRenderEpoch: component(value, EPOCH_COMPONENT_PREFIX),
+        memoryRenderEpoch: component(value, MEMORY_EPOCH_COMPONENT_PREFIX),
         muralEnabled: muralComponent === "1" ? true : muralComponent === "0" ? false : null,
         renderBudgetIdentity: component(value, BUDGET_COMPONENT_PREFIX),
     };

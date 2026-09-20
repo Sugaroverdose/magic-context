@@ -35019,6 +35019,50 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn memory_render_epoch_takes_one_hard_then_replays_byte_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let request = active_opencode_req(
+            "memory-render-epoch",
+            "rust-mode/gfull",
+            vec![wire_item("user", "m1", 1, &["stable bytes"])],
+        );
+        run(&s, &request, &spine());
+        let mut loaded = s.load(&request.session_id).unwrap();
+        loaded.meta.last_render_config = effective_render_config_with_epochs(
+            &s,
+            &request.render_config,
+            "mre2".to_string(),
+            format!("cre{}", crate::COMPARTMENT_RENDER_FORMAT_EPOCH),
+            String::new(),
+            String::new(),
+        );
+        s.commit(
+            &request.session_id,
+            loaded.row_version,
+            &loaded.core,
+            &loaded.meta,
+        )
+        .unwrap();
+
+        let hard = run(&s, &request, &spine());
+        assert_eq!(hard.action, "HARD");
+        assert!(s
+            .load(&request.session_id)
+            .unwrap()
+            .meta
+            .last_render_config
+            .contains(&format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH)));
+
+        let replay = run(&s, &request, &spine());
+        assert_eq!(replay.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_vec(hard.messages()).unwrap(),
+            serde_json::to_vec(replay.messages()).unwrap()
+        );
+    }
+
+    #[test]
     fn cc_profile_epoch_bump_takes_exactly_one_hard_when_client_config_frozen() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -35092,7 +35136,7 @@ pub(crate) mod tests {
         let old_identity = effective_render_config_with_epochs(
             &s,
             &request.render_config,
-            "mre2".to_string(),
+            format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
             "cre2".to_string(),
             "mpe2".to_string(),
             "tfe3".to_string(),
@@ -35100,7 +35144,7 @@ pub(crate) mod tests {
         let new_identity = effective_render_config_with_epochs(
             &s,
             &request.render_config,
-            "mre2".to_string(),
+            format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
             "cre2".to_string(),
             "mpe2".to_string(),
             "tfe4".to_string(),
@@ -35358,7 +35402,7 @@ pub(crate) mod tests {
 
     #[test]
     fn global_memory_render_epoch_hards_all_profiles_once_then_stabilizes() {
-        assert_eq!(crate::MEMORY_RENDER_FORMAT_EPOCH, 2);
+        assert_eq!(crate::MEMORY_RENDER_FORMAT_EPOCH, 3);
         for profile in [
             SerializerProfile::OwnedLlmRunner,
             SerializerProfile::Pi,

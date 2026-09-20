@@ -4837,6 +4837,10 @@ pub struct StoredMemory {
     /// of memory corrections (a superseded memory renders as "X → Y").
     pub superseded_by_memory_id: Option<i64>,
     pub updated_at: i64,
+    /// Advanced when exact content is observed again.
+    pub last_seen_at: Option<i64>,
+    /// Advanced when verification confirms the memory.
+    pub verified_at: Option<i64>,
 }
 
 /// A complete `mc_memories` row for tool-side guards and lossless mutations. The render
@@ -13749,7 +13753,7 @@ impl McStore {
         let rows = self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, host_row_id, project_path, category, content, importance, status, expires_at,
-                        superseded_by_memory_id, updated_at
+                        superseded_by_memory_id, updated_at, last_seen_at, verified_at
                  FROM mc_memories
                  WHERE project_path = ?1
                    AND status IN ('active', 'permanent')
@@ -13769,6 +13773,8 @@ impl McStore {
                         expires_at: r.get(7)?,
                         superseded_by_memory_id: r.get(8)?,
                         updated_at: r.get(9)?,
+                        last_seen_at: r.get(10)?,
+                        verified_at: r.get(11)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -14077,7 +14083,7 @@ impl McStore {
         let rows = self.inner.with_conn(|conn| {
             let sql = format!(
 "SELECT id, host_row_id, {path_column}, category, content, importance, status, expires_at,
-                         superseded_by_memory_id, updated_at
+                         superseded_by_memory_id, updated_at, last_seen_at, verified_at
                    FROM {table}
                   WHERE {pool_filter}
                   ORDER BY COALESCE(importance, 50) DESC, id ASC"
@@ -14096,6 +14102,8 @@ impl McStore {
                         expires_at: r.get(7)?,
                         superseded_by_memory_id: r.get(8)?,
                         updated_at: r.get(9)?,
+                        last_seen_at: r.get(10)?,
+                        verified_at: r.get(11)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -14127,7 +14135,7 @@ impl McStore {
             );
             let sql = format!(
 "SELECT id, host_row_id, {path_column}, category, content, importance, status, expires_at,
-                         superseded_by_memory_id, updated_at
+                         superseded_by_memory_id, updated_at, last_seen_at, verified_at
                    FROM {table}
                   WHERE {pool_filter}
                   ORDER BY COALESCE(importance, 50) DESC, id ASC"
@@ -14146,6 +14154,8 @@ impl McStore {
                         expires_at: row.get(7)?,
                         superseded_by_memory_id: row.get(8)?,
                         updated_at: row.get(9)?,
+                        last_seen_at: row.get(10)?,
+                        verified_at: row.get(11)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;

@@ -10,8 +10,9 @@ describe("legacy upgrade-identity crossing (R3 F7)", () => {
         // Rows written before mural/budget joined the identity decode to null
         // components; the mustMaterialize comparison must adopt, not fold the
         // fleet once at upgrade.
-        const legacy = encodeCachedM0UpgradeIdentity("upgrade-v2", "cre2");
+        const legacy = encodeCachedM0UpgradeIdentity("upgrade-v2", "cre2", null, null, null);
         const decoded = decodeCachedM0UpgradeIdentity(legacy);
+        expect(decoded.memoryRenderEpoch).toBeNull();
         expect(decoded.muralEnabled).toBeNull();
         expect(decoded.renderBudgetIdentity).toBeNull();
     });
@@ -19,6 +20,7 @@ describe("legacy upgrade-identity crossing (R3 F7)", () => {
     test("a recorded mural component round-trips and discriminates", () => {
         const recorded = encodeCachedM0UpgradeIdentity("upgrade-v2", "cre2", true, "m15000-h96000");
         const decoded = decodeCachedM0UpgradeIdentity(recorded);
+        expect(decoded.memoryRenderEpoch).toBe("mre3");
         expect(decoded.muralEnabled).toBe(true);
         expect(decoded.renderBudgetIdentity).toBe("m15000-h96000");
     });
