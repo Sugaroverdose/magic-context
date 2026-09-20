@@ -45,10 +45,7 @@
 
 import { existsSync } from "node:fs";
 import { log } from "../../shared/logger";
-import {
-    assertOpenCodeStoreGeneration,
-    resolveOpenCodeDbPath,
-} from "../../shared/opencode-db-path";
+import { hasV1MessageTables, resolveOpenCodeDbPath } from "../../shared/opencode-db-path";
 import type { Database } from "../../shared/sqlite";
 
 /**
@@ -155,7 +152,11 @@ export function runToolOwnerBackfill(db: Database): BackfillResult {
     const escapedDbPath = opencodeDbPath.replaceAll("'", "''");
     db.exec(`ATTACH '${escapedDbPath}' AS oc_backfill`);
     try {
-        assertOpenCodeStoreGeneration(db, "v1", opencodeDbPath, "oc_backfill");
+        if (!hasV1MessageTables(db, "oc_backfill")) {
+            throw new Error(
+                `OpenCode store at ${opencodeDbPath} has no v1 message tables; nothing to backfill`,
+            );
+        }
         backfillToolOwnersInChunks(db, result);
     } finally {
         // DETACH is safe even if ATTACH partially failed; SQLite

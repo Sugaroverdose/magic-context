@@ -220,6 +220,15 @@ function schemaTableNames(
     return new Set(rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])));
 }
 
+/** Whether the schema has the legacy message tables required by v1-only readers. */
+export function hasV1MessageTables(
+    db: OpenCodeStoreSchemaDatabase,
+    schema: "main" | "oc_backfill" = "main",
+): boolean {
+    const tables = schemaTableNames(db, schema);
+    return tables.has("message") && tables.has("part");
+}
+
 /**
  * Detect the persisted host schema.
  *

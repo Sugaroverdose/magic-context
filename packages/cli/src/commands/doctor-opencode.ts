@@ -848,6 +848,7 @@ export async function runDoctor(
                     contextDb,
                     sessionDb,
                     /\d/.test(activeInstallation.version) ? hostGeneration : undefined,
+                    (line) => log.info(line),
                 );
                 if (dangling.length === 0) {
                     pass("Compartment boundary ids resolve in the OpenCode session store");
