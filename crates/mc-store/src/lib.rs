@@ -2890,6 +2890,32 @@ const MIGRATIONS: &[Migration] = &[
             OR json_type(meta, '$.served_output_fingerprint') = 'array';
         "#,
     },
+    Migration {
+        version: 56,
+        // Re-shape the digest row around what it is actually for.
+        //
+        // v55 stored hashes of the two blob columns so a commit could tell whether they had
+        // changed without reading them. Comparing the bytes directly in SQL turned out to be
+        // both cheaper and unconditionally sound, so the hashes are gone.
+        //
+        // What is left needs a digest, and it is the expensive comparison: establishing that a
+        // session's block identities and served fingerprints are unchanged otherwise means
+        // reading and re-serializing every stored row. `row_state_fingerprint` covers both
+        // collections, so the common pass proves they did not change with one small read.
+        //
+        // The `row_version` beside it is the trust fence, unchanged in spirit from v55: a
+        // writer that bumps row_version without refreshing this row leaves it untrusted rather
+        // than wrong, and the next commit falls back to the full comparison. The table is a
+        // pure cache, so dropping and rebuilding it loses nothing.
+        statements: "
+        DROP TABLE IF EXISTS mc_cache_state_digest;
+        CREATE TABLE mc_cache_state_digest (
+            session_id           TEXT PRIMARY KEY,
+            row_version          INTEGER NOT NULL,
+            row_state_fingerprint TEXT NOT NULL
+        );
+    ",
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -10321,8 +10347,7 @@ impl McStore {
             serde_json::to_string(core).map_err(|e| McStoreError::Serde(e.to_string()))?;
         let meta_json =
             serde_json::to_string(meta).map_err(|e| McStoreError::Serde(e.to_string()))?;
-        let core_hash = cache_state_blob_hash(&core_json);
-        let meta_hash = cache_state_blob_hash(&meta_json);
+        let fingerprint = row_state_fingerprint(meta);
         let scheduler_observation_json = scheduler_observation
             .map(serialize_scheduler_observation)
             .transpose()?;
@@ -10436,14 +10461,22 @@ impl McStore {
             }
 
             // The grow-mostly parts of the meta are rows, so a pass writes only the entries
-            // that differ instead of re-serializing the whole history to append one.
-            let row_state_writes =
+            // that differ instead of re-serializing the whole history to append one. Finding
+            // WHICH entries differ means reading every stored row, so a pass that changed
+            // none of them proves that from its fingerprint and skips the comparison
+            // entirely; that is the common case and it must not cost a walk of the session.
+            let row_state_unchanged =
+                row_state_digest_matches_tx(tx, session_id, current, &fingerprint)?;
+            let row_state_writes = if row_state_unchanged {
+                0
+            } else {
                 sync_block_identities_tx(tx, session_id, &meta.block_identity_by_mid)?
                     + sync_served_output_fingerprints_tx(
                         tx,
                         session_id,
                         &meta.served_output_fingerprint,
-                    )?;
+                    )?
+            };
 
             // Overlay decisions (a minted tag, a hint, a marker, a consumed drop) are durable
             // changes in their own tables and are serialized by this same row_version, so a
@@ -10462,7 +10495,7 @@ impl McStore {
             // costs as much as changing it. A pass whose durable state is byte-identical to
             // what is already stored therefore leaves the row, and its row_version, alone.
             let blobs_changed =
-                !cache_state_blobs_unchanged(tx, session_id, current, &core_hash, &meta_hash)?;
+                !cache_state_blobs_unchanged(tx, session_id, &core_json, &meta_json)?;
             let accepted_version = if blobs_changed || row_state_writes > 0 || decision_writes {
                 // INSERT-or-UPDATE in the same fenced txn (bootstrap has no row to UPDATE).
                 tx.execute(
@@ -10475,9 +10508,15 @@ impl McStore {
                           last_activity_at = excluded.last_activity_at",
                     params![session_id, next as i64, core_json, meta_json, current_time_ms()],
                 )?;
-                record_cache_state_digest_tx(tx, session_id, next as i64, &core_hash, &meta_hash)?;
+                record_row_state_digest_tx(tx, session_id, next as i64, &fingerprint)?;
                 next
             } else {
+                // Nothing moved, so the digest now describes the version the session is
+                // already at. Recording it here is what lets the pass after an untrusted
+                // digest take the fast path again.
+                if !row_state_unchanged {
+                    record_row_state_digest_tx(tx, session_id, current.max(0), &fingerprint)?;
+                }
                 current.max(0) as u64
             };
             // Every accepted transform owns the current-pass value: stable passes write NULL
@@ -18336,76 +18375,154 @@ fn clear_meta_row_state_tx(
     Ok(())
 }
 
-fn cache_state_blob_hash(json: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(json.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
 /// Whether `mc_cache_state` already holds exactly these blob bytes for the session.
 ///
-/// The digest row records the two hashes together with the `row_version` they were written
-/// at. A writer that bumps `row_version` without refreshing the digest leaves the digest
-/// untrusted rather than wrong: the version comparison fails and this falls back to reading
-/// the stored blobs. A stale digest can therefore only cost one extra comparison; it can
-/// never make a needed write look unnecessary.
+/// The comparison is pushed into SQLite so it is a `memcmp` over pages the same pass has
+/// already read, rather than a hash of several megabytes of freshly serialized JSON. It reads
+/// the stored bytes every time and is therefore unconditionally correct: there is no cached
+/// answer here that could go stale.
 fn cache_state_blobs_unchanged(
     tx: &rusqlite::Transaction<'_>,
     session_id: &str,
-    current_row_version: i64,
-    core_hash: &str,
-    meta_hash: &str,
+    core_json: &str,
+    meta_json: &str,
 ) -> rusqlite::Result<bool> {
-    let digest = tx
+    Ok(tx
         .query_row(
-            "SELECT row_version, core_hash, meta_hash FROM mc_cache_state_digest
-              WHERE session_id = ?1",
-            params![session_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
+            "SELECT core_state = ?2 AND meta = ?3 FROM mc_cache_state WHERE session_id = ?1",
+            params![session_id, core_json, meta_json],
+            |row| row.get::<_, bool>(0),
         )
-        .optional()?;
-    if let Some((digest_version, stored_core_hash, stored_meta_hash)) = digest {
-        if digest_version == current_row_version {
-            return Ok(stored_core_hash == core_hash && stored_meta_hash == meta_hash);
-        }
-    }
-    let stored = tx
-        .query_row(
-            "SELECT core_state, meta FROM mc_cache_state WHERE session_id = ?1",
-            params![session_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()?;
-    Ok(match stored {
-        Some((stored_core, stored_meta)) => {
-            cache_state_blob_hash(&stored_core) == core_hash
-                && cache_state_blob_hash(&stored_meta) == meta_hash
-        }
-        None => false,
-    })
+        .optional()?
+        .unwrap_or(false))
 }
 
-fn record_cache_state_digest_tx(
+/// Fingerprint the two collections that live in rows rather than in the blob.
+///
+/// Every field is length-prefixed, so no two different maps can produce the same byte stream
+/// by running their contents together. Nothing is serialized to JSON: the point of this
+/// function is to be much cheaper than the row comparison it lets a pass skip.
+///
+/// The bytes are gathered into one buffer and hashed in a single call rather than fed to the
+/// hasher field by field. A session with ten thousand message ids has tens of thousands of
+/// fields, and at that count the per-call overhead of the hasher costs several times more
+/// than hashing the bytes does.
+fn row_state_fingerprint(meta: &ModuleMeta) -> String {
+    fn push_field(buffer: &mut Vec<u8>, value: &str) {
+        buffer.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        buffer.extend_from_slice(value.as_bytes());
+    }
+
+    // Roughly what a message id plus one identity vector occupies, so the common session
+    // fills the buffer without regrowing it.
+    let mut buffer = Vec::with_capacity(
+        128 * (meta.block_identity_by_mid.len() + meta.served_output_fingerprint.len()) + 64,
+    );
+    buffer.extend_from_slice(&(meta.block_identity_by_mid.len() as u64).to_le_bytes());
+    for (mid, identities) in &meta.block_identity_by_mid {
+        push_field(&mut buffer, mid);
+        buffer.extend_from_slice(&(identities.len() as u64).to_le_bytes());
+        for identity in identities {
+            push_field(&mut buffer, &identity.kind_tag);
+            push_field(&mut buffer, &identity.byte_fingerprint);
+        }
+    }
+    buffer.extend_from_slice(&(meta.served_output_fingerprint.len() as u64).to_le_bytes());
+    for served in &meta.served_output_fingerprint {
+        push_field(&mut buffer, &served.block_id);
+        push_field(&mut buffer, &served.content_hash);
+        buffer.extend_from_slice(&(served.serialized_len as u64).to_le_bytes());
+    }
+
+    format!("{:032x}", row_state_hash_128(&buffer))
+}
+
+/// A 128-bit content hash for [`row_state_fingerprint`].
+///
+/// Deliberately not SHA-256. This value is only ever compared against one the same code
+/// wrote for the same session moments earlier, so it is a consistency check on our own data
+/// rather than a boundary anyone can attack, and it runs on every transform pass fleet-wide.
+/// SHA-256 has no hardware path in this build and measures around 200 MB/s, which made
+/// hashing a large session's identities cost more than serializing the whole cache state.
+///
+/// Two independent accumulators are mixed differently and concatenated, and each is
+/// avalanched at the end so a one-bit change in the input reaches every output bit. A
+/// collision would let one pass skip writing identity rows that had in fact changed, leaving
+/// them stale until the next change; at 128 bits that is not a risk worth paying SHA-256 per
+/// pass to avoid.
+fn row_state_hash_128(bytes: &[u8]) -> u128 {
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    const MURMUR_C1: u64 = 0xff51_afd7_ed55_8ccd;
+    const MURMUR_C2: u64 = 0xc4ce_b9fe_1a85_ec53;
+
+    let mut a: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut b: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mix = |word: u64, a: &mut u64, b: &mut u64| {
+        *a = (*a ^ word).wrapping_mul(FNV_PRIME);
+        *b = b.rotate_left(31).wrapping_add(word).wrapping_mul(MURMUR_C1);
+        *b ^= *b >> 33;
+    };
+
+    let (words, remainder) = bytes.as_chunks::<8>();
+    for word in words {
+        mix(u64::from_le_bytes(*word), &mut a, &mut b);
+    }
+    // The trailing partial word carries the total length, so inputs that differ only by
+    // trailing zero bytes cannot land on the same value.
+    let mut tail = [0u8; 8];
+    tail[..remainder.len()].copy_from_slice(remainder);
+    mix(
+        u64::from_le_bytes(tail) ^ (bytes.len() as u64),
+        &mut a,
+        &mut b,
+    );
+
+    a ^= a >> 33;
+    a = a.wrapping_mul(MURMUR_C2);
+    a ^= a >> 29;
+    b ^= b >> 32;
+    b = b.wrapping_mul(MURMUR_C2);
+    b ^= b >> 31;
+    (u128::from(a) << 64) | u128::from(b)
+}
+
+/// Whether the session's row-stored collections already hold exactly this content.
+///
+/// A true answer lets the commit skip reading and re-serializing every stored row, which is
+/// the whole cost of a pass that changed nothing. The digest is trusted only when it records
+/// the `row_version` the session is actually at: any writer that bumps the version without
+/// refreshing this row — an older binary during a rollback window, for instance — leaves the
+/// digest untrusted rather than wrong, and the caller falls back to the full comparison.
+fn row_state_digest_matches_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    current_row_version: i64,
+    fingerprint: &str,
+) -> rusqlite::Result<bool> {
+    Ok(tx
+        .query_row(
+            "SELECT row_version = ?2 AND row_state_fingerprint = ?3
+               FROM mc_cache_state_digest WHERE session_id = ?1",
+            params![session_id, current_row_version, fingerprint],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+fn record_row_state_digest_tx(
     tx: &rusqlite::Transaction<'_>,
     session_id: &str,
     row_version: i64,
-    core_hash: &str,
-    meta_hash: &str,
+    fingerprint: &str,
 ) -> rusqlite::Result<()> {
     tx.execute(
-        "INSERT INTO mc_cache_state_digest (session_id, row_version, core_hash, meta_hash)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO mc_cache_state_digest (session_id, row_version, row_state_fingerprint)
+         VALUES (?1, ?2, ?3)
          ON CONFLICT(session_id) DO UPDATE SET
              row_version = excluded.row_version,
-             core_hash = excluded.core_hash,
-             meta_hash = excluded.meta_hash",
-        params![session_id, row_version, core_hash, meta_hash],
+             row_state_fingerprint = excluded.row_state_fingerprint",
+        params![session_id, row_version, fingerprint],
     )?;
     Ok(())
 }
@@ -19624,6 +19741,142 @@ mod tests {
             "a deliberate reset still clears the identities"
         );
         assert!(reloaded.meta.served_output_fingerprint.is_empty());
+    }
+
+    /// Do to the store exactly what a rolled-back binary does: it knows nothing about the
+    /// identity rows or the digest, so it bumps `row_version` and rewrites the blob on its
+    /// own, re-minting a map into the blob that no longer matches the rows.
+    fn simulate_pre_v55_binary_commit(store: &McStore, session_id: &str, blob_identities: usize) {
+        store
+            .inner
+            .with_conn(|conn| {
+                let meta_json: String = conn.query_row(
+                    "SELECT meta FROM mc_cache_state WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get(0),
+                )?;
+                let mut meta: Value = serde_json::from_str(&meta_json).unwrap();
+                let minted = identity_map(blob_identities);
+                meta.as_object_mut().unwrap().insert(
+                    "block_identity_by_mid".to_string(),
+                    serde_json::to_value(&minted).unwrap(),
+                );
+                conn.execute(
+                    "UPDATE mc_cache_state
+                        SET row_version = row_version + 1, meta = ?2
+                      WHERE session_id = ?1",
+                    params![session_id, serde_json::to_string(&meta).unwrap()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_rollback_window_cannot_leave_a_digest_claiming_the_rows_are_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::default();
+        let mut meta = ModuleMeta {
+            block_identity_by_mid: identity_map(5),
+            ..ModuleMeta::default()
+        };
+        store.commit("ses", None, &core, &meta).unwrap();
+
+        // The rollback window: an older binary commits without touching the rows or the
+        // digest, leaving a digest that still records the pre-rollback row_version.
+        simulate_pre_v55_binary_commit(&store, "ses", 2);
+
+        // Hydration reads the rows, not the map the old binary left in the blob.
+        let loaded = store.load("ses").unwrap();
+        assert_eq!(
+            loaded.meta.block_identity_by_mid, meta.block_identity_by_mid,
+            "the rows are the truth after a rollback window, not the re-minted blob"
+        );
+
+        // A commit that really does add an identity must still be applied. If the stale
+        // digest were trusted, the comparison that finds the new entry would be skipped.
+        meta.block_identity_by_mid.insert(
+            "m999999".to_string(),
+            vec![BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: "after-rollback".to_string(),
+            }],
+        );
+        store
+            .commit("ses", loaded.row_version, &core, &meta)
+            .unwrap();
+
+        let after = store.load("ses").unwrap();
+        assert_eq!(
+            after.meta.block_identity_by_mid, meta.block_identity_by_mid,
+            "the identity added after the rollback window must be persisted"
+        );
+        assert_eq!(after.meta.block_identity_by_mid.len(), 6);
+    }
+
+    #[test]
+    fn a_stale_digest_still_converges_when_the_rows_already_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::default();
+        let meta = ModuleMeta {
+            block_identity_by_mid: identity_map(5),
+            ..ModuleMeta::default()
+        };
+        store.commit("ses", None, &core, &meta).unwrap();
+        simulate_pre_v55_binary_commit(&store, "ses", 2);
+
+        // The first commit back on the new binary still rewrites the blob once, because the
+        // old binary re-added a `block_identity_by_mid` key that this binary does not write.
+        // That is the convergence pass.
+        let rolled_back = store.load("ses").unwrap();
+        let converged = store
+            .commit(
+                "ses",
+                rolled_back.row_version,
+                &rolled_back.core,
+                &rolled_back.meta,
+            )
+            .unwrap();
+        assert_eq!(
+            converged,
+            rolled_back.row_version.unwrap() + 1,
+            "the convergence pass rewrites the blob the old binary left behind"
+        );
+
+        // The pass after it is the steady one: same state, nothing to write, no bump.
+        let loaded = store.load("ses").unwrap();
+        let unchanged = store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        assert_eq!(
+            unchanged,
+            loaded.row_version.unwrap(),
+            "a commit that changes nothing must not move the row_version"
+        );
+
+        let digest = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT row_version, row_state_fingerprint FROM mc_cache_state_digest
+                      WHERE session_id = 'ses'",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            digest.0,
+            loaded.row_version.unwrap() as i64,
+            "the digest must be refreshed to the version the session is actually at"
+        );
+        assert_eq!(digest.1, row_state_fingerprint(&loaded.meta));
+        assert_eq!(
+            store.load("ses").unwrap().meta.block_identity_by_mid,
+            meta.block_identity_by_mid
+        );
     }
 
     #[test]
@@ -23847,7 +24100,7 @@ mod tests {
             ),
             (
                 "cache state digest",
-                "SELECT row_version, core_hash, meta_hash FROM mc_cache_state_digest \
+                "SELECT row_version, row_state_fingerprint FROM mc_cache_state_digest \
                  WHERE session_id = 'plan-session'",
             ),
         ];
