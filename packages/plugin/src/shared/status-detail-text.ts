@@ -8,13 +8,25 @@ import {
     openCodeDbPathExists,
     resolveOpenCodeDbPath,
 } from "./opencode-db-path";
-import type { StatusDetail } from "./rpc-types";
+import type { MemoryImportanceHistogram, StatusDetail } from "./rpc-types";
 import { RUST_MODE_HOST_PATHS_LINE } from "./rust-mode-status";
 import { renderUserStatusSummary, statusSummaryFromDetail } from "./status-summary";
 import { renderUserFacingFailure } from "./user-facing-codes";
 
 function formatCount(value: number): string {
     return Math.round(value).toLocaleString();
+}
+
+export function formatMemoryImportanceHistogram(histogram: MemoryImportanceHistogram): string {
+    const bands = histogram.bands;
+    return [
+        `0–19 ${formatCount(bands["0-19"])}`,
+        `20–39 ${formatCount(bands["20-39"])}`,
+        `40–59 ${formatCount(bands["40-59"])}`,
+        `60–79 ${formatCount(bands["60-79"])}`,
+        `80–100 ${formatCount(bands["80-100"])}`,
+        `${formatCount(histogram.unclassified)} unclassified of ${formatCount(histogram.total)}`,
+    ].join(" · ");
 }
 
 function formatCacheLane(detail: StatusDetail): string {
@@ -74,6 +86,7 @@ export function formatStatusDiagnosticsMarkdown(detail: StatusDetail): string {
               ]
             : []),
         `- **Memory:** ${formatCount(detail.memoryCount)} active; ${formatCount(detail.memoryBlockCount)} injected`,
+        `- **Memory importance:** ${formatMemoryImportanceHistogram(detail.memoryImportanceHistogram)}`,
         `- **Tags:** ${formatCount(detail.activeTags)} active, ${formatCount(detail.droppedTags)} dropped; ${formatCount(detail.pendingOpsCount)} pending drops`,
         `- **Execute threshold:** ${detail.executeThreshold.toFixed(1)}%${detail.executeThresholdClamped ? " (clamped)" : ""}`,
     ];

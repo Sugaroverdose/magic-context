@@ -928,8 +928,9 @@ impl Drop for TransformDispatchTicket<'_> {
 /// with their hardcoded fallbacks, so a diverged epoch map cannot silently skip the
 /// safety fold.
 /// Bumps when the shared project-memory render changes. Epoch 1 is the compact,
-/// category-grouped `#id: fact` format and applies to every serializer profile.
-pub const MEMORY_RENDER_FORMAT_EPOCH: u32 = 2;
+/// category-grouped `#id: fact` format; epoch 3 applies reinforcement recency when
+/// an importance band exceeds the render budget. Applies to every serializer profile.
+pub const MEMORY_RENDER_FORMAT_EPOCH: u32 = 3;
 /// Bumps when the shared compartment render changes. Epoch 1 replaces rendered
 /// `<compartment>` elements with markdown headings in m0 and m1; epoch 2 sanitizes
 /// historian-authored titles before placing them inside the session-history wrapper.
@@ -18298,7 +18299,7 @@ mod tests {
 
     #[test]
     fn profile_render_epoch_is_profile_specific_and_zero_for_unchanged_profiles() {
-        assert_eq!(MEMORY_RENDER_FORMAT_EPOCH, 2);
+        assert_eq!(MEMORY_RENDER_FORMAT_EPOCH, 3);
         assert_eq!(PROFILE_EPOCH_OPENCODE_AI_SDK, 2);
         assert_eq!(
             profile_render_epoch(SerializerProfile::ClaudeCodeAnthropic),

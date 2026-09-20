@@ -22,7 +22,10 @@ import {
 	type DreamTaskFailureState,
 	formatDreamTaskFailures,
 } from "@magic-context/core/features/magic-context/dreamer/task-registry";
-import { getMemoryCount } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import {
+	emptyMemoryImportanceHistogram,
+	getActiveMemoryImportanceHistogram,
+} from "@magic-context/core/features/magic-context/memory/memory-diagnostics";
 import { getEmbeddingCoverageStatus } from "@magic-context/core/features/magic-context/project-embedding-registry";
 import {
 	getProtectionWindowForSession,
@@ -59,7 +62,11 @@ import {
 	formatThresholdClampNote,
 	formatThresholdPercent,
 } from "@magic-context/core/shared/format-threshold";
-import type { TailHygieneStatus } from "@magic-context/core/shared/rpc-types";
+import type {
+	MemoryImportanceHistogram,
+	TailHygieneStatus,
+} from "@magic-context/core/shared/rpc-types";
+import { formatMemoryImportanceHistogram } from "@magic-context/core/shared/status-detail-text";
 import type { UserStatusSummary } from "@magic-context/core/shared/status-summary";
 import { renderUserStatusSummary } from "@magic-context/core/shared/status-summary";
 import {
@@ -129,6 +136,7 @@ export interface StatusDialogDetail {
 	lastCompartmentRange: string | null;
 	memoryCount: number;
 	memoryBlockCount: number;
+	memoryImportanceHistogram: MemoryImportanceHistogram;
 	sessionNoteCount: number;
 	readySmartNoteCount: number;
 	pendingOpsCount: number;
@@ -384,6 +392,7 @@ export function formatPiStatusDiagnostics(s: StatusDialogDetail): string {
 		...(s.tailHygiene ? [`Hygiene: ${formatTailHygiene(s.tailHygiene)}`] : []),
 		`Tags: ${s.activeTags} active · ${s.droppedTags} dropped · ${s.totalTags} total`,
 		`Pending drops: ${s.pendingOpsCount}`,
+		`Memory importance: ${formatMemoryImportanceHistogram(s.memoryImportanceHistogram)}`,
 		`Protected tokens: ${fmt(s.protectedTokens.protectedMass)} (${s.protectedTokens.protectedCount} tags / floor ${fmt(s.protectedTokens.floor)})`,
 		`History block tokens: ${fmt(s.historyBlockTokens)}`,
 		`Compression budget: ${s.compressionBudget ? `${fmt(s.compressionBudget)} (${s.compressionUsage} used)` : "unavailable"}`,
@@ -490,6 +499,9 @@ function renderInner(
 		`Counts: ${s.compartmentCount} compartments · ${s.memoryCount} memories (${s.memoryBlockCount} injected) · ${
 			s.sessionNoteCount + s.readySmartNoteCount
 		} notes`,
+	);
+	lines.push(
+		`Memory importance: ${formatMemoryImportanceHistogram(s.memoryImportanceHistogram)}`,
 	);
 	lines.push(`Active profile: ${s.activeProfile ?? "none"}`);
 	lines.push(
@@ -807,6 +819,10 @@ export function buildPiStatusDetail(
 				? "ready"
 				: "waiting";
 	const historyBudgetPercentage = deps.historyBudgetPercentage ?? 0.15;
+	const memoryImportanceHistogram = safeRead(
+		() => getActiveMemoryImportanceHistogram(deps.db, deps.projectIdentity),
+		emptyMemoryImportanceHistogram(),
+	);
 	const compressionBudget =
 		contextLimit > 0
 			? Math.floor(
@@ -827,11 +843,9 @@ export function buildPiStatusDetail(
 			const last = compartments.at(-1);
 			return last ? `${last.startMessage}-${last.endMessage}` : null;
 		})(),
-		memoryCount: safeRead(
-			() => getMemoryCount(deps.db, deps.projectIdentity),
-			0,
-		),
+		memoryCount: memoryImportanceHistogram.total,
 		memoryBlockCount,
+		memoryImportanceHistogram,
 		sessionNoteCount: safeRead(
 			() =>
 				getNotes(deps.db, {

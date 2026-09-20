@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
+import { insertMemory } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import { setSessionWorkMetrics } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import {
 	insertTag,
@@ -109,6 +110,51 @@ describe("Pi status dialog", () => {
 				"ses-status-profile",
 			);
 			expect(detail.activeProfile).toBe("work");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("renders the exact active-memory importance distribution and unclassified denominator", () => {
+		const db = createTestDb();
+		try {
+			const projectIdentity = resolveProjectIdentity(process.cwd());
+			const rows = [5, 25, 50, 65, 100].map((importance, index) =>
+				insertMemory(db, {
+					projectPath: projectIdentity,
+					category: "CONSTRAINTS",
+					content: `status-memory-${index}`,
+					importance,
+				}),
+			);
+			const classifiedRows = [rows[0], rows[1], rows[3], rows[4]];
+			if (classifiedRows.some((row) => row === undefined)) {
+				throw new Error("histogram fixture rows missing");
+			}
+			db.prepare(
+				"UPDATE memories SET classified_at = 123 WHERE id IN (?, ?, ?, ?)",
+			).run(...classifiedRows.map((row) => row.id));
+			const detail = buildPiStatusDetail(
+				{ getAllTools: () => [] } as never,
+				fakeContext("ses-status-histogram") as never,
+				{ db, projectIdentity },
+				"ses-status-histogram",
+			);
+
+			expect(detail.memoryImportanceHistogram).toEqual({
+				total: 5,
+				unclassified: 1,
+				bands: {
+					"0-19": 1,
+					"20-39": 1,
+					"40-59": 1,
+					"60-79": 1,
+					"80-100": 1,
+				},
+			});
+			expect(formatPiStatusDiagnostics(detail)).toContain(
+				"Memory importance: 0–19 1 · 20–39 1 · 40–59 1 · 60–79 1 · 80–100 1 · 1 unclassified of 5",
+			);
 		} finally {
 			closeQuietly(db);
 		}

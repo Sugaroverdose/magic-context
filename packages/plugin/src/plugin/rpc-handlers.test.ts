@@ -212,6 +212,45 @@ describe("buildStatusDetail — active profile", () => {
     });
 });
 
+describe("buildStatusDetail — memory importance histogram", () => {
+    test("returns the exact active distribution and unclassified denominator", () => {
+        const db = createTestDb();
+        try {
+            const projectIdentity = resolveProjectIdentity(process.cwd());
+            const rows = [5, 25, 50, 65, 100].map((importance, index) =>
+                insertMemory(db, {
+                    projectPath: projectIdentity,
+                    category: "CONSTRAINTS",
+                    content: `rpc-status-memory-${index}`,
+                    importance,
+                }),
+            );
+            db.prepare("UPDATE memories SET classified_at = 123 WHERE id IN (?, ?, ?, ?)").run(
+                rows[0]!.id,
+                rows[1]!.id,
+                rows[3]!.id,
+                rows[4]!.id,
+            );
+
+            const detail = buildStatusDetail(db, "ses-memory-histogram", process.cwd());
+
+            expect(detail.memoryImportanceHistogram).toEqual({
+                total: 5,
+                unclassified: 1,
+                bands: {
+                    "0-19": 1,
+                    "20-39": 1,
+                    "40-59": 1,
+                    "60-79": 1,
+                    "80-100": 1,
+                },
+            });
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
 describe("buildStatusDetail — protected-token floor", () => {
     test("uses the durable first-observed floor for pre-snapshot sessions after restart", () => {
         const db = createTestDb();

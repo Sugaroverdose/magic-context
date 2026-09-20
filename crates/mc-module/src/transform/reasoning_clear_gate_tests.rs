@@ -114,11 +114,17 @@ fn load_pre_fix_reasoning_fixture(dir: &std::path::Path) -> (McStore, TransformR
     request.messages =
         crate::codec::decode_opencode(request.native_messages.as_ref().unwrap()).messages;
     let db = store(dir);
-    // The captured database predates the tool-result codec epoch. Advance only that
-    // identity component so these fixtures continue to isolate reasoning replay behavior.
+    // The captured database predates the tool-result codec and memory-render epochs.
+    // Advance those identity components so these fixtures continue to isolate reasoning
+    // replay behavior rather than pricing unrelated renderer upgrades.
     let mut loaded = db.load(&request.session_id).unwrap();
     let profile_epoch = crate::profile_render_epoch(SerializerProfile::OpencodeAiSdk);
     let profile_component = format!("mpe{profile_epoch}");
+    let current_memory_epoch = format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH);
+    loaded.meta.last_render_config = loaded
+        .meta
+        .last_render_config
+        .replace("mre:4:mre2", &format!("mre:4:{current_memory_epoch}"));
     let tagger_delimiter = ";tfe:";
     assert!(!loaded.meta.last_render_config.contains(";mpe:"));
     assert!(loaded.meta.last_render_config.contains(tagger_delimiter));

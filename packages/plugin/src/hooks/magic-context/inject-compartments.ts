@@ -10,6 +10,7 @@ import {
     type SessionFact,
 } from "../../features/magic-context/compartment-storage";
 import { V2_MEMORY_CATEGORIES } from "../../features/magic-context/memory/constants";
+import { compareMemorySelectionPriority } from "../../features/magic-context/memory/memory-selection";
 import {
     getMaxMemoryIdForProjects,
     getMemoriesByProject,
@@ -54,6 +55,7 @@ import {
     COMPARTMENT_RENDER_EPOCH,
     decodeCachedM0UpgradeIdentity,
     encodeCachedM0UpgradeIdentity,
+    MEMORY_RENDER_FORMAT_EPOCH,
 } from "./compartment-render-epoch";
 import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
@@ -750,6 +752,8 @@ export interface M0SnapshotMarkers {
     sessionFactsVersion: number;
     upgradeState: string | null;
     compartmentRenderEpoch: string | null;
+    /** Records the renderer used by cached bytes; written on a natural HARD but never triggers one. */
+    memoryRenderEpoch: string | null;
     // HARD-bust markers are captured from runtime signals at the injectM0M1
     // call site (NOT a pure DB read), so readCurrentM0SnapshotMarkers takes
     // them as inputs. The tool-set hash is retained for attribution only: its
@@ -1048,16 +1052,6 @@ function memoryCanonicalIdentity(memory: Memory, workspace: WorkspaceRenderConte
         workspace.identities,
         workspace.canonicalIdentityByStoredPath,
     );
-}
-
-function memorySelectionOrder(left: Memory, right: Memory): number {
-    if (left.status === "permanent" && right.status !== "permanent") return -1;
-    if (right.status === "permanent" && left.status !== "permanent") return 1;
-    const leftImportance = left.importance ?? Number.NEGATIVE_INFINITY;
-    const rightImportance = right.importance ?? Number.NEGATIVE_INFINITY;
-    const importanceDiff = rightImportance - leftImportance;
-    if (importanceDiff !== 0) return importanceDiff;
-    return left.id - right.id;
 }
 
 function memoryRenderOrder(left: Memory, right: Memory): number {
@@ -1412,6 +1406,7 @@ function readCurrentM0SnapshotMarkersUncached(args: M0SnapshotMarkerReadArgs): {
             sessionFactsVersion: getSessionFactsVersion(args.db, args.sessionId),
             upgradeState: getUpgradeState(args.db, args.sessionId),
             compartmentRenderEpoch: COMPARTMENT_RENDER_EPOCH,
+            memoryRenderEpoch: MEMORY_RENDER_FORMAT_EPOCH,
             systemHash: hard.systemHash,
             toolSetHash: hard.toolSetHash ?? "",
             modelKey: piModelRefToCanonical(hard.modelKey),
@@ -1518,6 +1513,7 @@ function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null
         sessionFactsVersion: state.cachedM0SessionFactsVersion,
         upgradeState: cachedUpgradeIdentity.upgradeState,
         compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
+        memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
         systemHash: state.cachedM0SystemHash ?? "",
         toolSetHash: state.cachedM0ToolSetHash ?? "",
         modelKey: state.cachedM0ModelKey ?? "",
@@ -1591,6 +1587,8 @@ export function mustMaterialize(args: {
     if (cachedUpgradeIdentity.compartmentRenderEpoch !== current.compartmentRenderEpoch) {
         return { value: true, reason: "compartment_render_epoch" };
     }
+    // The memory-render epoch is intentionally NOT compared here. Selection changes
+    // affect m[0] bytes only when the next natural HARD rebuilds the frozen prefix.
     // Null components are legacy rows encoded before mural/budget joined the
     // identity: adopt silently (the values persist on the next natural HARD)
     // rather than folding the whole fleet once at upgrade. Only a real change
@@ -1730,7 +1728,7 @@ export function trimMemoriesToBudgetV2(
     budgetTokens: number,
     renderOptions: MemoryRenderOptions = {},
 ): TrimMemoriesResultV2 {
-    const selectionOrder = [...memories].sort(memorySelectionOrder);
+    const selectionOrder = [...memories].sort(compareMemorySelectionPriority);
     const selected: Memory[] = [];
     const accounting = createMemoryBlockAccounting(renderOptions);
 
@@ -1779,7 +1777,7 @@ export function trimWorkspaceMemoriesToBudgetV2(
 
     for (const memory of memories
         .filter((candidate) => candidate.status === "permanent")
-        .sort(memorySelectionOrder)) {
+        .sort(compareMemorySelectionPriority)) {
         trySelect(memory);
     }
 
@@ -1797,7 +1795,7 @@ export function trimWorkspaceMemoriesToBudgetV2(
 
     for (const identity of workspace.identities) {
         let memberTokens = 0;
-        const candidates = (byIdentity.get(identity) ?? []).sort(memorySelectionOrder);
+        const candidates = (byIdentity.get(identity) ?? []).sort(compareMemorySelectionPriority);
         for (const memory of candidates) {
             if (selectedIds.has(memory.id)) continue;
             const cost = accounting.candidateCost(memory);
@@ -1812,7 +1810,7 @@ export function trimWorkspaceMemoriesToBudgetV2(
 
     const remaining = memories
         .filter((memory) => !selectedIds.has(memory.id))
-        .sort(memorySelectionOrder);
+        .sort(compareMemorySelectionPriority);
     for (const memory of remaining) {
         trySelect(memory);
     }
@@ -2123,6 +2121,7 @@ function applyMarkersToState(
         markers.compartmentRenderEpoch,
         markers.muralEnabled,
         markers.renderBudgetIdentity,
+        markers.memoryRenderEpoch,
     );
     // Runtime markers must be mirrored into flat state because the next
     // mustMaterialize pass reads cachedM0SystemHash/ToolSetHash/ModelKey directly
@@ -2370,6 +2369,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             sessionFactsVersion: getSessionFactsVersion(options.db, options.sessionId),
             upgradeState: getUpgradeState(options.db, options.sessionId),
             compartmentRenderEpoch: COMPARTMENT_RENDER_EPOCH,
+            memoryRenderEpoch: MEMORY_RENDER_FORMAT_EPOCH,
             // HARD-bust markers are flight-constant (system/tool/model identity of
             // THIS request) — they cannot change mid-materialization-transaction,
             // so carry the captured values and exclude them from the stale check.
@@ -2440,6 +2440,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
                 snapshotMarkers.compartmentRenderEpoch,
                 snapshotMarkers.muralEnabled,
                 snapshotMarkers.renderBudgetIdentity,
+                snapshotMarkers.memoryRenderEpoch,
             ),
             systemHash: snapshotMarkers.systemHash,
             toolSetHash: snapshotMarkers.toolSetHash,
@@ -2847,6 +2848,7 @@ function markersFromCachedRow(row: CachedM0M1Row): M0SnapshotMarkers | null {
         sessionFactsVersion: row.cached_m0_session_facts_version,
         upgradeState: cachedUpgradeIdentity.upgradeState,
         compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
+        memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
         systemHash: row.cached_m0_system_hash ?? "",
         toolSetHash: row.cached_m0_tool_set_hash ?? "",
         modelKey: row.cached_m0_model_key ?? "",
@@ -2908,6 +2910,7 @@ function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
         markers.compartmentRenderEpoch,
         markers.muralEnabled,
         markers.renderBudgetIdentity,
+        markers.memoryRenderEpoch,
     );
     state.cachedM0SystemHash = markers.systemHash;
     state.cachedM0ToolSetHash = markers.toolSetHash;

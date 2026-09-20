@@ -12,6 +12,17 @@ const STATUS_FIXTURE: StatusDetail = {
     compartmentCount: 12,
     memoryCount: 8,
     memoryBlockCount: 3,
+    memoryImportanceHistogram: {
+        total: 7_986,
+        unclassified: 1_181,
+        bands: {
+            "0-19": 101,
+            "20-39": 202,
+            "40-59": 6_303,
+            "60-79": 707,
+            "80-100": 673,
+        },
+    },
     pendingOpsCount: 2,
     historianRunning: true,
     compartmentInProgress: true,
@@ -161,6 +172,9 @@ describe("status detail text", () => {
         expect(diagnostics).toContain("- **Active profile:** work");
         expect(diagnostics).toContain("- **Tags:** 4 active, 1 dropped; 2 pending drops");
         expect(diagnostics).toContain("- **Execute threshold:** 65.0%");
+        expect(diagnostics).toContain(
+            "- **Memory importance:** 0–19 101 · 20–39 202 · 40–59 6,303 · 60–79 707 · 80–100 673 · 1,181 unclassified of 7,986",
+        );
     });
 
     test("keeps internal vocabulary and identifiers out of the summary", () => {

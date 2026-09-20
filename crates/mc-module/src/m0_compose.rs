@@ -168,11 +168,25 @@ fn memory_selection_order(
     if left_permanent != right_permanent {
         return right_permanent.cmp(&left_permanent);
     }
-    right
+    let left_reinforced_at = left.last_seen_at.into_iter().chain(left.verified_at).max();
+    let right_reinforced_at = right
+        .last_seen_at
+        .into_iter()
+        .chain(right.verified_at)
+        .max();
+    let importance_order = right
         .importance
         .unwrap_or(i32::MIN)
-        .cmp(&left.importance.unwrap_or(i32::MIN))
-        .then_with(|| left.id.cmp(&right.id))
+        .cmp(&left.importance.unwrap_or(i32::MIN));
+    if importance_order != Ordering::Equal {
+        return importance_order;
+    }
+    match (left_reinforced_at, right_reinforced_at) {
+        (None, None) => left.id.cmp(&right.id),
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(left_at), Some(right_at)) => right_at.cmp(&left_at),
+    }
 }
 
 fn memory_candidate_cost(
@@ -217,8 +231,9 @@ fn admit_memory(
 }
 
 /// Select the same grouped-block candidates as TypeScript: permanent memories first,
-/// then importance descending and id (the durable recency tie-break) ascending. Workspace
-/// renders additionally reserve an equal floor for each member before filling leftovers.
+/// then importance and latest re-observation/verification descending, with id only when
+/// both recency timestamps are absent. Workspace renders additionally reserve an equal floor for each
+/// member before filling leftovers.
 pub(crate) fn trim_memories_to_budget(
     memories: Vec<mc_store::StoredMemory>,
     membership: Option<&mc_store::WorkspaceMembership>,
@@ -629,6 +644,50 @@ mod tests {
             importance: 50,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn importance_50_budget_selects_the_verified_memory() {
+        let never_verified = mc_store::StoredMemory {
+            id: 1,
+            category: "CONSTRAINTS".to_string(),
+            content: "memory alpha record".to_string(),
+            importance: Some(50),
+            status: "active".to_string(),
+            last_seen_at: Some(1_000),
+            verified_at: None,
+            ..Default::default()
+        };
+        let verified_yesterday = mc_store::StoredMemory {
+            id: 2,
+            category: "CONSTRAINTS".to_string(),
+            content: "memory bravo record".to_string(),
+            importance: Some(50),
+            status: "active".to_string(),
+            last_seen_at: Some(1_000),
+            verified_at: Some(2_000),
+            ..Default::default()
+        };
+        let estimate = |text: &str| text.len();
+        let categories = HashSet::new();
+        let sources = HashMap::new();
+        let budget = estimate("<project-memory>\n</project-memory>")
+            + memory_candidate_cost(&never_verified, &categories, &sources, estimate).max(
+                memory_candidate_cost(&verified_yesterday, &categories, &sources, estimate),
+            ) as usize;
+
+        let selected = trim_memories_to_budget(
+            vec![never_verified, verified_yesterday],
+            None,
+            &sources,
+            budget as f64,
+            estimate,
+        );
+
+        assert_eq!(
+            selected.iter().map(|memory| memory.id).collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]

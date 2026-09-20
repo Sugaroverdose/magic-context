@@ -150,7 +150,21 @@ export interface SidebarSnapshot {
     } | null;
 }
 
+export interface MemoryImportanceHistogram {
+    total: number;
+    unclassified: number;
+    bands: {
+        "0-19": number;
+        "20-39": number;
+        "40-59": number;
+        "60-79": number;
+        "80-100": number;
+    };
+}
+
 export interface StatusDetail extends SidebarSnapshot {
+    /** ACTIVE-memory importance distribution; unclassified is a subset of total. */
+    memoryImportanceHistogram: MemoryImportanceHistogram;
     /** True when Rust authority has rerouted host tool and historian paths to the module. */
     hostBackendsModuleSide?: boolean;
     /** Host cursor compared with the module changefeed frontier. */
