@@ -43,6 +43,23 @@ class LegacyAggregateToolTokenCache extends CountingToolTokenCache {
 }
 
 describe("createPiTranscript", () => {
+    it("scoped gate Pi finalization preserves unrelated reasoning-only assistant", () => {
+        const db = createTestDb();
+        try {
+            const sessionId = "ses-scoped-pi";
+            const reasoning = { ...assistantMessage("", 13), content: [{ type: "thinking", thinking: "signed reasoning", thinkingSignature: "signature" }] };
+            const messages = [assistantToolCall("scoped-call", "Read", { path: "x" }), toolResultMessage("scoped-call", "spent"), reasoning];
+            const transcript = createPiTranscript(messages, sessionId);
+            const tagger = createTagger();
+            tagger.initFromDb(sessionId, db);
+            const { targets } = tagTranscript(sessionId, transcript, tagger, db);
+            expect([...targets.values()][0]?.drop()).toBe("removed");
+            transcript.commit();
+            transcript.finalizeToolRemovals();
+            expect(transcript.getOutputMessages()).toEqual([reasoning]);
+            console.log("SCOPED_GATE Pi removed tool arc; unrelated reasoning retained");
+        } finally { closeQuietly(db); }
+    });
 	it("round-trips Pi messages through transcript mutation and commit", () => {
 		const messages = [userMessage("hello", 10), assistantMessage("world", 11)];
 		const transcript = createPiTranscript(messages, "ses-transcript");

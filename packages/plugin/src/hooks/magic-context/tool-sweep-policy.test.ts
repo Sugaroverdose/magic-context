@@ -41,3 +41,16 @@ test("scoped batch removes its empty owner but leaves unrelated reasoning and bl
     batch.finalize();
     expect(messages).toEqual([thinking, blank]);
 });
+
+test("scoped gate mixed owner retains surviving text while full owner is spliced", () => {
+    const tool = () => ({ type: "tool", callID: "call", state: { status: "completed", output: "spent" } });
+    const full: MessageLike = { info: { id: "full", role: "assistant" }, parts: [tool()] };
+    const mixed: MessageLike = { info: { id: "mixed", role: "assistant" }, parts: [tool(), { type: "text", text: "survivor" }] };
+    const messages = [full, mixed];
+    const batch = new ToolMutationBatch(messages, true);
+    for (const message of messages) batch.markForRemoval({ message, part: message.parts[0], kind: "result" });
+    batch.finalize();
+    expect(messages).toEqual([mixed]);
+    expect(mixed.parts).toEqual([{ type: "text", text: "survivor" }]);
+    console.log("SCOPED_GATE full owner spliced; mixed owner survives");
+});

@@ -164,18 +164,20 @@ function toolOutput(message: TestMessage, index: number): string {
 }
 
 describe("createTransform", () => {
-    it("adopts scoped tool sweeping only on a priced pass and preserves reasoning-only replay", async () => {
+    it.each(["soft-execute", "explicit-flush", "force-band"])("adopts scoped tool sweeping only on a priced pass and preserves reasoning-only replay (%s)", async (kind) => {
         useTempDataHome("context-transform-scoped-sweep-");
         const sessionId = "ses-scoped-sweep";
         const db = openDatabase();
+        const historyRefreshSessions = new Set<string>();
+        const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>();
         let decision: "execute" | "defer" = "defer";
         const makeTransform = () =>
             createTransform({
                 tagger: createTagger(),
                 scheduler: { shouldExecute: () => decision },
-                contextUsageMap: new Map(),
+                contextUsageMap,
                 db,
-                historyRefreshSessions: new Set(),
+                historyRefreshSessions,
                 pendingMaterializationSessions: new Set(),
                 lastHeuristicsTurnId: new Map(),
                 clearReasoningAge: 1000,
@@ -246,7 +248,17 @@ describe("createTransform", () => {
         expect(legacy.some((message) => message.info.id === "sweep-thinking")).toBe(false);
         const sha = (value: unknown) =>
             createHash("sha256").update(JSON.stringify(value)).digest("hex");
-        expect(sha(await run())).toBe(sha(legacy));
+        const capture = (label: string, messages: TestMessage[], previous: TestMessage[]) => {
+            const index = Array.from({ length: Math.max(messages.length, previous.length) }, (_, i) => i)
+                .find((i) => JSON.stringify(messages[i]) !== JSON.stringify(previous[i])) ?? -1;
+            console.log(`SCOPED_GATE ${label} sha256=${sha(messages)} first_divergence=${index}`);
+        };
+        capture("legacy-1", legacy, legacy);
+        for (let pass = 2; pass <= 3; pass++) {
+            const replay = await run();
+            capture(`legacy-${pass}`, replay, legacy);
+            expect(sha(replay)).toBe(sha(legacy));
+        }
         const marker = () =>
             String(
                 (
@@ -258,8 +270,11 @@ describe("createTransform", () => {
                 ).ids,
             ).includes("@tool-sweep-scoped");
         expect(marker()).toBe(false);
-        decision = "execute";
+        if (kind === "soft-execute") decision = "execute";
+        if (kind === "explicit-flush") historyRefreshSessions.add(sessionId);
+        if (kind === "force-band") contextUsageMap.set(sessionId, { usage: { percentage: 99, inputTokens: 190000 }, updatedAt: Date.now() });
         const priced = await run();
+        capture(kind, priced, legacy);
         expect(
             priced
                 .find((message) => message.info.id === "sweep-thinking")
@@ -267,7 +282,14 @@ describe("createTransform", () => {
         ).toBe(true);
         expect(marker()).toBe(true);
         decision = "defer";
+        historyRefreshSessions.clear();
+        contextUsageMap.clear();
         transform = makeTransform();
+        for (let pass = 1; pass <= 3; pass++) {
+            const replay = await run();
+            capture(`adopted-defer-${pass}`, replay, priced);
+            expect(sha(replay)).toBe(sha(priced));
+        }
         source.push({
             info: { id: "sweep-newest", role: "assistant" },
             parts: [
