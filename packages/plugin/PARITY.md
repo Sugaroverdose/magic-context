@@ -19,6 +19,13 @@ Existing host-imposed differences also include [native fold ownership](../../PAR
 | Publication does not write a v1 pending marker; the host creates the compaction row | Host-imposed | GA `SessionCompaction.result` returns a summary, not a chosen sequence cut; `Context.session` has no `compact` method. See the [fold-ownership surface](../../PARITY.md#2-fold-ownership). The deferred-marker scenario requires a real published compartment and a completed native row with no additional provider call. |
 | Native auto-compaction is not treated as a conflicting second summarizer | Chosen integration on the imposed hook carrier | The adapter answers the host's compaction hook locally. The conflict scenario explicitly requests a real native fold, requires zero competing model calls, and observes the checkpoint on the subsequent wire request. |
 
+## Known gaps on OpenCode 2
+
+| Gap | Imposed or chosen | Host surface and evidence |
+| --- | --- | --- |
+| A model-echoed `§N§` at the start of an assistant reply is persisted and rendered verbatim | Host-imposed | OpenCode 1.x fires `experimental.text.complete` once per completed assistant text; `src/hooks/magic-context/text-complete.ts` strips the echoed tag there before the host persists the part (the tag is visible while streaming and gone on completion). OpenCode 2 has no equivalent seam: every `session` trigger site in `@opencode/core@2.0.5` and `2.0.11` (`prompt`, `context`, `compaction`, `generate`, `title`, `model.request`, `http.request`, `http.response`, `retry`, `experimental.ws.*`) is on the outbound path, `session.update` cannot rewrite messages, and the TUI renders `part.text.trim()` with no part-level render seam. The wire is unchanged (the next request strips and re-tags the echo exactly as on 1.x), so only the transcript view differs, most visibly on weak models that echo often. Rewriting the provider stream in `http.response` would work but couples us to every provider wire format and is not taken. Resolution: an upstream hook equivalent to `experimental.text.complete`; until then this is a documented OpenCode 2 limitation. |
+| The sidebar is hidden by default and renders a plain-text projection of the v1 snapshot | Chosen (interim) | `sidebar.content` is toggled with `ctrl+x b` on the host. `src/v2/tui/index.ts` `sidebarText` renders four lines from the same `SidebarSnapshot` the v1 component uses; mounting the v1 component on the v2 slot is in progress. |
+
 ## Other existing host-carrier exclusions
 
 These rows were already declared before this repair; they are not newly waived failing
