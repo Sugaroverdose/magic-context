@@ -18381,6 +18381,12 @@ fn clear_meta_row_state_tx(
 /// already read, rather than a hash of several megabytes of freshly serialized JSON. It reads
 /// the stored bytes every time and is therefore unconditionally correct: there is no cached
 /// answer here that could go stale.
+///
+/// This depends on `core_state` and `meta` comparing under SQLite's default BINARY collation,
+/// which is a byte comparison. Neither column declares a `COLLATE`, and adding one — NOCASE
+/// in particular — would silently turn this into a looser comparison and let a genuinely
+/// changed blob look unchanged. Any collation added to those columns has to come with a
+/// change here.
 fn cache_state_blobs_unchanged(
     tx: &rusqlite::Transaction<'_>,
     session_id: &str,
@@ -18407,6 +18413,13 @@ fn cache_state_blobs_unchanged(
 /// hasher field by field. A session with ten thousand message ids has tens of thousands of
 /// fields, and at that count the per-call overhead of the hasher costs several times more
 /// than hashing the bytes does.
+///
+/// The result is `identities:served:bytes:hash`, not the hash alone. The three counts are
+/// already computed by the walk above, so they cost nothing, and carrying them means the
+/// only comparison anyone can write — string equality on the whole token — checks them too.
+/// A hash collision would have to coincide with matching entry counts AND a matching total
+/// length to be mistaken for equality. They are part of the value rather than columns beside
+/// it precisely so that a later reader cannot compare the hash and forget the rest.
 fn row_state_fingerprint(meta: &ModuleMeta) -> String {
     fn push_field(buffer: &mut Vec<u8>, value: &str) {
         buffer.extend_from_slice(&(value.len() as u64).to_le_bytes());
@@ -18434,7 +18447,13 @@ fn row_state_fingerprint(meta: &ModuleMeta) -> String {
         buffer.extend_from_slice(&(served.serialized_len as u64).to_le_bytes());
     }
 
-    format!("{:032x}", row_state_hash_128(&buffer))
+    format!(
+        "{}:{}:{}:{:032x}",
+        meta.block_identity_by_mid.len(),
+        meta.served_output_fingerprint.len(),
+        buffer.len(),
+        row_state_hash_128(&buffer)
+    )
 }
 
 /// A 128-bit content hash for [`row_state_fingerprint`].
@@ -19770,6 +19789,81 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    fn meta_with_identities(entries: &[(&str, &str, &str)]) -> ModuleMeta {
+        ModuleMeta {
+            block_identity_by_mid: entries
+                .iter()
+                .map(|(mid, kind_tag, byte_fingerprint)| {
+                    (
+                        (*mid).to_string(),
+                        vec![BlockIdentity {
+                            kind_tag: (*kind_tag).to_string(),
+                            byte_fingerprint: (*byte_fingerprint).to_string(),
+                        }],
+                    )
+                })
+                .collect(),
+            ..ModuleMeta::default()
+        }
+    }
+
+    /// Split `identities:served:bytes:hash` into the scalars the widening added and the hash
+    /// they back up.
+    fn fingerprint_parts(fingerprint: &str) -> (String, String) {
+        let (scalars, hash) = fingerprint
+            .rsplit_once(':')
+            .expect("a fingerprint carries its scalars ahead of the hash");
+        (scalars.to_string(), hash.to_string())
+    }
+
+    fn fingerprint_byte_length(scalars: &str) -> String {
+        scalars
+            .rsplit_once(':')
+            .expect("the scalars carry the total byte length last")
+            .1
+            .to_string()
+    }
+
+    #[test]
+    fn a_row_state_fingerprint_separates_maps_by_content_count_and_length() {
+        // Same number of entries, same total length, one byte of content different. Neither
+        // scalar can tell these apart, so this half is the hash doing its job.
+        let left = meta_with_identities(&[("m1", "text", "aaaa"), ("m2", "text", "bbbb")]);
+        let right = meta_with_identities(&[("m1", "text", "aaab"), ("m2", "text", "bbbb")]);
+        let (left_scalars, left_hash) = fingerprint_parts(&row_state_fingerprint(&left));
+        let (right_scalars, right_hash) = fingerprint_parts(&row_state_fingerprint(&right));
+        assert_eq!(
+            left_scalars, right_scalars,
+            "this pair is constructed to agree on every count and on the total length"
+        );
+        assert_ne!(
+            left_hash, right_hash,
+            "maps differing only in content must not share a fingerprint"
+        );
+        assert_ne!(row_state_fingerprint(&left), row_state_fingerprint(&right));
+
+        // Different number of entries, identical total length. Each entry costs 32 bytes of
+        // framing plus its content, so one entry carrying 32 more content bytes than two
+        // entries carry between them lands on the same total.
+        let one_entry = meta_with_identities(&[("a", "t", &"x".repeat(36))]);
+        let two_entries = meta_with_identities(&[("a", "t", "u"), ("b", "t", "u")]);
+        let (one_scalars, _) = fingerprint_parts(&row_state_fingerprint(&one_entry));
+        let (two_scalars, _) = fingerprint_parts(&row_state_fingerprint(&two_entries));
+        assert_eq!(
+            fingerprint_byte_length(&one_scalars),
+            fingerprint_byte_length(&two_scalars),
+            "this pair is constructed to agree on the total length"
+        );
+        assert_ne!(
+            one_scalars, two_scalars,
+            "the entry count must separate maps the total length cannot"
+        );
+        assert_ne!(
+            row_state_fingerprint(&one_entry),
+            row_state_fingerprint(&two_entries)
+        );
     }
 
     #[test]
