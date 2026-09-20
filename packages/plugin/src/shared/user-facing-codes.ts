@@ -120,7 +120,7 @@ export const USER_FACING_FAILURES = {
     configuration_warning: {
         code: "MC-S03",
         sentence: "Some configuration settings could not be applied.",
-        action: "Fix the configuration warning shown in /ctx-status diagnostics, then restart.",
+        action: "Fix the configuration warning shown in /ctx-status, then restart.",
     },
     status_log_unavailable: {
         code: "MC-S04",
@@ -185,7 +185,7 @@ export const USER_FACING_FAILURES = {
     dreamer_task_failing: {
         code: "MC-S05",
         sentence: "A background maintenance task keeps failing on its schedule.",
-        action: "Run /ctx-status diagnostics to see which task and why.",
+        action: "Check the Magic Context log for the failing task and its error.",
     },
 } as const;
 

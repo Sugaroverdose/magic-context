@@ -237,7 +237,11 @@ describe("Pi Magic Context commands", () => {
 		expect(sent[0]?.data.text).not.toContain("##");
 	});
 
-	it("surfaces the active profile in /ctx-status text and dialog data", async () => {
+	// Was "surfaces the active profile in /ctx-status text and dialog data": the
+	// profile line lived in the diagnostics text, which was deleted along with
+	// the argument that reached it. The structured dialog data still carries the
+	// profile.
+	it("surfaces the active profile in /ctx-status dialog data", async () => {
 		const db = createDb();
 		const { pi, handlers, sent } = createMockPi();
 		registerCtxStatusCommand(pi as never, {
@@ -246,10 +250,22 @@ describe("Pi Magic Context commands", () => {
 			activeProfile: "work",
 		});
 
+		await handlers.get("ctx-status")?.("", createCtx());
+
+		expect(sent[0]?.data.details).toMatchObject({ activeProfile: "work" });
+	});
+
+	it("refuses an argument now that /ctx-status has one view", async () => {
+		const db = createDb();
+		const { pi, handlers, sent } = createMockPi();
+		registerCtxStatusCommand(pi as never, {
+			db,
+			projectIdentity: "/tmp/project",
+		});
+
 		await handlers.get("ctx-status")?.("diagnostics", createCtx());
 
-		expect(sent[0]?.data.text).toContain("Active profile: work");
-		expect(sent[0]?.data.details).toMatchObject({ activeProfile: "work" });
+		expect(sent[0]?.data.text).toBe("Usage: /ctx-status");
 	});
 
 	it("presents /ctx-status through the live RPC command context", async () => {

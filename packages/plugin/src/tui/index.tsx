@@ -1,25 +1,16 @@
 /** @jsxImportSource @opentui/solid */
 // @ts-nocheck
-import { createMemo, createSignal } from "solid-js"
-import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
-import { formatMemoryImportanceHistogram } from '../shared/status-detail-text';
-import { renderUserStatusSummary, statusSummaryFromDetail } from "../shared/status-summary"
+import { createMemo } from "solid-js"
+import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
+import { StatusDialog } from "./dialogs/status-dialog"
 import { renderUserFacingFailure, userFacingFailureCode } from '../shared/user-facing-codes';
 import {
     createSidebarContentSlot,
     kickRecompProgressRefresh,
     refreshSidebarSnapshot,
 } from "./slots/sidebar-content"
-import packageJson from "../../package.json"
 import { closeRpc, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp, type EmbedDetail, type StatusDetail } from "./data/context-db"
 import { startNotificationSocket, stopNotificationSocket, type SocketNotification } from "./data/notification-socket"
-import { formatCacheTtlDisplay } from "../shared/cache-ttl-display"
-import { formatConfigParseStatusLine } from "../shared/config-diagnostics"
-import { formatThresholdPercent } from "../shared/format-threshold"
-import { formatTailHygiene } from "../shared/tail-hygiene-status"
-import { RUST_MODE_HOST_PATHS_LINE } from "../shared/rust-mode-status"
-import { formatWindowDerivationLine } from "../shared/window-geometry"
-import { compactionOffSidebarRows, nativeCompactionContextLabel } from "./compaction-off"
 import { isCompactionEnabled } from "../config/agent-disable"
 import { loadPluginConfig } from "../config"
 import { detectConflicts } from "../shared/conflict-detector"
@@ -134,366 +125,6 @@ function getSessionId(api: TuiPluginApi): string | null {
     return null
 }
 
-const R = (props: { t: TuiThemeCurrent; l: string; v: string; fg?: string }) => (
-    <box width="100%" flexDirection="row" justifyContent="space-between">
-        <text fg={props.t.textMuted}>{props.l}</text>
-        <text fg={props.fg ?? props.t.text}>{props.v}</text>
-    </box>
-)
-
-const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail; diagnostics?: boolean }) => {
-    const theme = createMemo(() => (props.api as any).theme.current)
-    const [diagnostics, setDiagnostics] = createSignal(props.diagnostics === true)
-    const t = () => theme()
-    const s = () => props.s
-    const summaryLines = () =>
-        renderUserStatusSummary(statusSummaryFromDetail(s()), "plain").split("\n").slice(1)
-    const compactionOff = () => s().compaction_enabled === false
-
-    // Prefer the RPC-provided model context limit (what the sidebar shows) so the
-    // two surfaces never disagree. Fall back to deriving from usage% only when the
-    // RPC limit is absent (0) — and that derivation is itself undefined at 0%, so
-    // it stays "?" rather than showing a number inconsistent with the sidebar.
-    const contextLimit = () =>
-        s().contextLimit > 0
-            ? s().contextLimit
-            : s().usagePercentage > 0
-              ? Math.round(s().inputTokens / (s().usagePercentage / 100))
-              : 0
-
-    const elapsed = () => (s().lastResponseTime > 0 ? Date.now() - s().lastResponseTime : 0)
-
-    // Token breakdown segments — same colors as sidebar. Kept in sync with
-    // slots/sidebar-content.tsx so the status dialog and sidebar read identically.
-    const COLORS = {
-        // Cool / structured — injected by the plugin into message[0]
-        system: "#c084fc",
-        docs: "#22d3ee",
-        compartments: "#60a5fa",
-        facts: "#fbbf24",
-        memories: "#34d399",
-        profile: "#a3e635",
-        // Warm / user-facing — chat and tool traffic
-        conversation: "#f87171",
-        toolCalls: "#fb923c",
-        toolDefs: "#f472b6",
-    }
-
-    const breakdownSegments = () => {
-        const d = s()
-        const total = d.inputTokens || 1
-        const segs: Array<{ label: string; tokens: number; color: string; detail?: string }> = []
-
-        if (d.systemPromptTokens > 0)
-            segs.push({ label: "System", tokens: d.systemPromptTokens, color: COLORS.system })
-        if (d.docsTokens > 0)
-            segs.push({ label: "Docs", tokens: d.docsTokens, color: COLORS.docs })
-        if (!compactionOff() && d.compartmentTokens > 0)
-            segs.push({
-                label: "Compartments",
-                tokens: d.compartmentTokens,
-                color: COLORS.compartments,
-                detail: `(${d.compartmentCount})`,
-            })
-        if (d.factTokens > 0)
-            segs.push({
-                label: "Facts",
-                tokens: d.factTokens,
-                color: COLORS.facts,
-            })
-        if (d.memoryTokens > 0)
-            segs.push({
-                label: "Memories",
-                tokens: d.memoryTokens,
-                color: COLORS.memories,
-                detail: `(${d.memoryBlockCount})`,
-            })
-        if (d.profileTokens > 0)
-            segs.push({ label: "User Profile", tokens: d.profileTokens, color: COLORS.profile })
-
-        if (d.conversationTokens > 0)
-            segs.push({ label: "Conversation", tokens: d.conversationTokens, color: COLORS.conversation })
-        if (d.toolCallTokens > 0)
-            segs.push({ label: "Tool Calls", tokens: d.toolCallTokens, color: COLORS.toolCalls })
-        if (d.toolDefinitionTokens > 0)
-            segs.push({ label: "Tool Defs", tokens: d.toolDefinitionTokens, color: COLORS.toolDefs })
-
-        return { segs, total }
-    }
-
-    // The status-dialog breakdown bar uses flex layout (same approach as the
-    // sidebar breakdown). Each segment becomes a colored box with
-    // flexGrow=tokens and flexBasis=0, parent has width="100%", so opentui
-    // distributes the dialog's full width proportionally regardless of the
-    // dialog's actual rendered width.
-    const barSegments = () => breakdownSegments().segs.filter((seg) => seg.tokens > 0)
-
-    return (
-        <box flexDirection="column" width="100%" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-            {/* Title */}
-            <box justifyContent="center" width="100%" marginBottom={1} flexDirection="row" gap={2}>
-                <text fg={t().accent}><b>⚡ Magic Context Status</b></text>
-                <text fg={t().textMuted}>v{packageJson.version}</text>
-            </box>
-
-            <box
-                width="100%"
-                justifyContent="flex-end"
-                onMouseDown={() => setDiagnostics(!diagnostics())}
-            >
-                <text fg={diagnostics() ? t().accent : t().textMuted}>
-                    {diagnostics() ? "[x]" : "[ ]"} Diagnostics
-                </text>
-            </box>
-
-            {!diagnostics() ? (
-                <box flexDirection="column" width="100%">
-                    {summaryLines().map((line) => <text>{line}</text>)}
-                </box>
-            ) : (<>
-            {s().configParseFailures.map((failure) => (
-                <text fg={t().error}>{formatConfigParseStatusLine(failure)}</text>
-            ))}
-
-            <box flexDirection="row" justifyContent="space-between" width="100%">
-                {compactionOff() ? (
-                    <text fg={t().accent}>
-                        <b>{nativeCompactionContextLabel(s())}</b>
-                    </text>
-                ) : (
-                    <text fg={s().usagePercentage >= 80 ? t().error : s().usagePercentage >= 65 ? t().warning : t().accent}>
-                        <b>{s().usagePercentage.toFixed(1)}%</b> / {formatThresholdPercent(s().executeThreshold)}%{s().executeThresholdClamped ? "*" : ""}
-                    </text>
-                )}
-                <text fg={compactionOff() ? t().accent : s().usagePercentage >= 80 ? t().error : s().usagePercentage >= 65 ? t().warning : t().accent}>
-                    {fmt(s().inputTokens)} / {contextLimit() > 0 ? fmt(contextLimit()) : "?"} tokens
-                </text>
-            </box>
-            {s().windowGeometry && (
-                <text fg={t().textMuted}>
-                    {formatWindowDerivationLine(s().inputTokens, s().windowGeometry!)}
-                </text>
-            )}
-
-            {/* Segmented breakdown bar: flex row of colored boxes filling
-                the dialog width. See barSegments comment above. */}
-            <box width="100%" flexDirection="row" height={1}>
-                {barSegments().map((seg) => (
-                    <box
-                        key={seg.label}
-                        flexGrow={Math.max(1, seg.tokens)}
-                        flexBasis={0}
-                        height={1}
-                        backgroundColor={seg.color}
-                    />
-                ))}
-            </box>
-
-            {/* Breakdown legend */}
-            <box flexDirection="column">
-                {breakdownSegments().segs.map((seg) => {
-                    const pct = ((seg.tokens / breakdownSegments().total) * 100).toFixed(1)
-                    return (
-                        <box key={seg.label} width="100%" flexDirection="row" justifyContent="space-between">
-                            <text fg={seg.color}>{seg.label} {seg.detail ?? ""}</text>
-                            <text fg={t().textMuted}>{fmt(seg.tokens)} ({pct}%)</text>
-                        </box>
-                    )
-                })}
-                <text fg={t().textMuted}>Conversation includes reasoning; hygiene excludes it</text>
-                {s().tailHygiene !== undefined && (
-                    <R
-                        t={t()}
-                        l="Hygiene"
-                        v={formatTailHygiene(s().tailHygiene!)}
-                        fg={s().tailHygiene!.evaluable ? t().accent : t().warning}
-                    />
-                )}
-            </box>
-
-            {/* Recomp live progress (full width, only while running or just
-                finished — dogfood 2026-05-30). */}
-            {!compactionOff() && s().recompProgress && (() => {
-                const p = s().recompProgress!
-                // Label follows the flow that started the run, so a plain
-                // /ctx-recomp never reads as an "Upgrade" (dogfood 2026-06-04).
-                const verb = p.kind === "upgrade" ? "Upgrade" : p.kind === "embed" ? "Embed" : "Recomp"
-                return (
-                <box marginTop={1} width="100%" flexDirection="column">
-                    <text fg={t().text}><b>{verb}</b></text>
-                    {(() => {
-                        if (p.phase === "recomp") {
-                            const frac = p.totalMessages > 0 ? p.processedMessages / p.totalMessages : 0
-                            const width = 24
-                            const filled = Math.round(Math.max(0, Math.min(1, frac)) * width)
-                            const bar = p.totalMessages > 0
-                                ? `[${"█".repeat(filled)}${"░".repeat(width - filled)}]`
-                                : "(starting…)"
-                            const activeLabel = p.kind === "upgrade" ? "upgrading" : p.kind === "embed" ? "embedding" : "comparting"
-                            return (
-                                <>
-                                    <R t={t()} l={activeLabel} v={p.totalMessages > 0 ? `${bar} ${Math.round(frac * 100)}%` : bar} fg={t().warning} />
-                                    {p.note ? <R t={t()} l="Status" v={p.note} fg={t().textMuted} /> : null}
-                                    {p.kind === "embed"
-                                        ? <R t={t()} l="Compartments" v={`${p.processedMessages}/${p.totalMessages} embedded`} fg={t().textMuted} />
-                                        : <R t={t()} l="Compartments" v={`${p.compartmentsCreated} (${p.passCount} pass${p.passCount === 1 ? "" : "es"})`} fg={t().textMuted} />}
-                                </>
-                            )
-                        }
-                        if (p.phase === "migration") return <R t={t()} l="Status" v={p.note ?? "Migrating memories ⟳"} fg={t().warning} />
-                        if (p.phase === "done") return <R t={t()} l="Status" v={`✓ ${verb} complete`} fg={t().accent} />
-                        if (p.phase === "skipped") return <R t={t()} l="Status" v={p.message ?? `${verb} stopped early`} fg={t().textMuted} />
-                        return <R t={t()} l="Status" v={`✗ ${verb} failed${p.message ? `: ${p.message}` : ""}`} fg={t().error} />
-                    })()}
-                </box>
-                )
-            })()}
-
-            {s().hostBackendsModuleSide && (
-                <box marginTop={1} width="100%" flexDirection="column">
-                    <text fg={t().text}><b>Rust Mode</b></text>
-                    <text fg={t().textMuted}>{RUST_MODE_HOST_PATHS_LINE}</text>
-                </box>
-            )}
-
-            <box flexDirection="row" width="100%" marginTop={1} gap={4}>
-                {compactionOff() ? (
-                    <box flexDirection="column" flexGrow={1} flexBasis={0}>
-                        <text fg={t().text}><b>Knowledge</b></text>
-                        {compactionOffSidebarRows(s()).map((row) => (
-                            <R
-                                t={t()}
-                                l={row.label}
-                                v={row.value}
-                                fg={row.label === "Memories" ? t().accent : t().textMuted}
-                            />
-                        ))}
-                        {s().readySmartNoteCount > 0 && (
-                            <R t={t()} l="Smart Notes" v={`${s().readySmartNoteCount} ready`} fg={t().accent} />
-                        )}
-                        {s().lastDreamerRunAt && (
-                            <R t={t()} l="Dreamer" v={`last ${relTime(s().lastDreamerRunAt!)}`} fg={t().textMuted} />
-                        )}
-                    </box>
-                ) : (
-                    <>
-                        <box flexDirection="column" flexGrow={1} flexBasis={0}>
-                            <text fg={t().text}><b>Tags</b></text>
-                            <R
-                                t={t()}
-                                l="Active"
-                                v={
-                                    s().tagCountsAuthoritative === false
-                                        ? "n/a (module total only)"
-                                        : `${s().activeTags} (~${fmtBytes(s().activeBytes)})`
-                                }
-                            />
-                            <R
-                                t={t()}
-                                l="Dropped"
-                                v={
-                                    s().tagCountsAuthoritative === false
-                                        ? "n/a (module total only)"
-                                        : String(s().droppedTags)
-                                }
-                            />
-                            <R t={t()} l="Total" v={String(s().totalTags)} fg={t().textMuted} />
-                            <box marginTop={1}>
-                                <text fg={t().text}><b>Pending Queue</b></text>
-                            </box>
-                            <R t={t()} l="Drops" v={String(s().pendingOpsCount)} fg={s().pendingOpsCount > 0 ? t().warning : t().textMuted} />
-                            <box marginTop={1}>
-                                <text fg={t().text}><b>Cache TTL</b></text>
-                            </box>
-                            <R
-                                t={t()}
-                                l="Configured"
-                                v={formatCacheTtlDisplay({
-                                    value: s().cacheTtl,
-                                    source: s().cacheTtlSource,
-                                    modelKey: s().cacheTtlModelKey,
-                                }).replace(/^Cache TTL: /, "")}
-                            />
-                            <R t={t()} l="Last response" v={s().lastResponseTime > 0 ? `${Math.round(elapsed() / 1000)}s ago` : "never"} />
-                            <R t={t()} l="Remaining" v={s().cacheExpired ? "expired" : s().cacheNeverExpires ? "never (MC never assumes expiry — external cache-keep)" : `${Math.round(s().cacheRemainingMs / 1000)}s`} fg={s().cacheExpired ? t().warning : t().textMuted} />
-                            <R t={t()} l="Auto-execute" v={s().cacheExpired ? "yes (expired)" : s().cacheNeverExpires ? `at ≥${formatThresholdPercent(s().executeThreshold)}%` : `at TTL or ≥${formatThresholdPercent(s().executeThreshold)}%`} fg={t().textMuted} />
-                            <box marginTop={1}>
-                                <text fg={t().text}><b>Memory</b></text>
-                            </box>
-                            <R t={t()} l="Active" v={String(s().memoryCount)} fg={t().accent} />
-                            <R t={t()} l="Injected" v={String(s().memoryBlockCount)} fg={t().textMuted} />
-                            <R
-                                t={t()}
-                                l="Importance"
-                                v={formatMemoryImportanceHistogram(s().memoryImportanceHistogram)}
-                                fg={t().textMuted}
-                            />
-                        </box>
-                        <box flexDirection="column" flexGrow={1} flexBasis={0}>
-                            <text fg={t().text}><b>Reductions</b></text>
-                            <R t={t()} l="Execute threshold" v={`${formatThresholdPercent(s().executeThreshold)}%${s().executeThresholdClamped ? "*" : ""}`} />
-                            <R t={t()} l="Last reduce anchor" v={`${fmt(s().lastNudgeTokens)} tok`} />
-                            <box marginTop={1}>
-                                <text fg={t().text}><b>Context Details</b></text>
-                            </box>
-                            <R t={t()} l="Protected tags" v={String(s().protectedTagCount)} fg={t().textMuted} />
-                            <R t={t()} l="Subagent" v={s().isSubagent ? "yes" : "no"} fg={t().textMuted} />
-                            <box marginTop={1}>
-                                <text fg={t().text}><b>History Compression</b></text>
-                            </box>
-                            {typeof s().boundaryPresent === "boolean" && (
-                                <R t={t()} l="Boundary" v={s().boundaryPresent ? "present" : "absent"} />
-                            )}
-                            {s().coverageOrdinal !== undefined && (
-                                <R t={t()} l="Coverage ordinal" v={s().coverageOrdinal == null ? "none" : String(s().coverageOrdinal)} />
-                            )}
-                            {typeof s().boundaryPresent === "boolean" && (
-                                <R t={t()} l="Compartments" v={String(s().compartmentCount)} />
-                            )}
-                            <R t={t()} l="History block" v={`~${fmt(s().historyBlockTokens)} tok`} />
-                            {s().compressionBudget != null && (
-                                <R t={t()} l="Budget" v={`~${fmt(s().compressionBudget!)} tok (${s().compressionUsage} used)`} />
-                            )}
-                            {s().lastDreamerRunAt && (
-                                <R t={t()} l="Dreamer" v={`last ${relTime(s().lastDreamerRunAt!)}`} fg={t().textMuted} />
-                            )}
-                        </box>
-                    </>
-                )}
-            </box>
-
-            {/* Error (full width, conditional) */}
-            {s().lastTransformError && (
-                <box marginTop={1} width="100%">
-                    <text fg={t().error}>{renderUserFacingFailure("transform_update_failed")}</text>
-                </box>
-            )}
-
-            <box marginTop={1} width="100%">
-                <text fg={t().text}><b>Logger</b></text>
-                <R
-                    t={t()}
-                    l="Swallowed writes"
-                    v={String(s().loggerDiagnostics?.swallowedWriteCount ?? 0)}
-                    fg={(s().loggerDiagnostics?.swallowedWriteCount ?? 0) > 0 ? t().error : t().textMuted}
-                />
-                {s().loggerDiagnostics?.lastErrorMessage && (
-                    <R t={t()} l="Warning" v={renderUserFacingFailure("status_unavailable")} fg={t().error} />
-                )}
-                {s().loggerDiagnostics?.lastErrorTime && (
-                    <R t={t()} l="Last error time" v={s().loggerDiagnostics.lastErrorTime} fg={t().textMuted} />
-                )}
-            </box>
-            </>)}
-
-            {/* Footer */}
-            <box marginTop={1} justifyContent="flex-end" width="100%">
-                <text fg={t().textMuted}>Esc to close</text>
-            </box>
-        </box>
-    )
-}
-
 function getModelKeyFromMessages(api: TuiPluginApi, sessionId: string): string | undefined {
     try {
         const msgs = api.state.session.messages(sessionId)
@@ -568,7 +199,6 @@ async function showRecompDialog(api: TuiPluginApi, targetSessionId = getSessionI
 async function showStatusDialog(
     api: TuiPluginApi,
     targetSessionId = getSessionId(api),
-    initialDiagnostics = false,
 ): Promise<boolean> {
     const sessionId = targetSessionId
     if (!sessionId) {
@@ -591,9 +221,7 @@ async function showStatusDialog(
         return false
     }
 
-    api.ui.dialog.replace(() => (
-        <StatusDialog api={api} s={result.detail} diagnostics={initialDiagnostics} />
-    ))
+    api.ui.dialog.replace(() => <StatusDialog api={api} s={result.detail} />)
     return true
 }
 
@@ -1082,10 +710,7 @@ const tui: TuiPlugin = async (api, _options, meta) => {
         const stillActive = () =>
             getRpcGeneration() === generation && getSessionId(api) === requestedSessionId
         if (action === "show-status-dialog") {
-            return (
-                stillActive() &&
-                (await showStatusDialog(api, requestedSessionId, n.payload?.diagnostics === true))
-            )
+            return stillActive() && (await showStatusDialog(api, requestedSessionId))
         }
         if (action === "show-recomp-dialog") {
             return stillActive() && (await showRecompDialog(api, requestedSessionId))

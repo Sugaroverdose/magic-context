@@ -64,7 +64,7 @@ describe("user-facing failure codes", () => {
             "Finish the provider setup, or set a fallback provider in the embedding settings, then run /ctx-embed start again. (MC-E06)",
         );
         expect(renderUserFacingFailure("configuration_warning")).toContain(
-            "Fix the configuration warning shown in /ctx-status diagnostics, then restart. (MC-S03)",
+            "Fix the configuration warning shown in /ctx-status, then restart. (MC-S03)",
         );
         expect(renderUserFacingFailure("partial_history_unavailable")).toContain(
             "Run /ctx-recomp without a range. (MC-C06)",

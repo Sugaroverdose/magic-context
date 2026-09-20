@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { StatusDetail } from "./rpc-types";
-import { formatStatusDetailMarkdown, formatStatusDiagnosticsMarkdown } from "./status-detail-text";
+import { formatStatusDetailMarkdown } from "./status-detail-text";
 
 const STATUS_FIXTURE: StatusDetail = {
     sessionId: "ses_status",
@@ -123,16 +123,7 @@ describe("status detail text", () => {
         expect(rendered).not.toContain("Reclaimable: 0");
     });
 
-    test("renders summary and diagnostics from one snapshot with matching status values", () => {
-        const summary = formatStatusDetailMarkdown(STATUS_FIXTURE);
-        const diagnostics = formatStatusDiagnosticsMarkdown(STATUS_FIXTURE);
-        for (const value of ["75.0%", "65.0%", "1h (config for anthropic/claude-opus-5)"]) {
-            expect(summary).toContain(value);
-            expect(diagnostics).toContain(value);
-        }
-    });
-
-    test("surfaces a failing scheduled dreamer task in the summary and the diagnostics", () => {
+    test("surfaces a failing scheduled dreamer task in the summary", () => {
         // The whole point: a task failing on every slot must not be visible only as a
         // backlog count that never falls.
         const detail: StatusDetail = {
@@ -149,32 +140,12 @@ describe("status detail text", () => {
         const summary = formatStatusDetailMarkdown(detail);
         expect(summary).toContain("A background maintenance task keeps failing");
         expect(summary).toContain("MC-S05");
-
-        const diagnostics = formatStatusDiagnosticsMarkdown(detail);
-        expect(diagnostics).toContain("classify-memories");
-        expect(diagnostics).toContain("last succeeded 6d ago");
-        expect(diagnostics).toContain("Rust classify module failed: producer session busy");
     });
 
     test("says nothing about the dreamer while every scheduled task is healthy", () => {
-        const healthy = formatStatusDiagnosticsMarkdown({
-            ...STATUS_FIXTURE,
-            dreamerFailures: [],
-        });
-        expect(healthy).not.toContain("Dreamer");
         expect(
             formatStatusDetailMarkdown({ ...STATUS_FIXTURE, dreamerFailures: [] }),
         ).not.toContain("MC-S05");
-    });
-
-    test("keeps the previous OpenCode detail behind diagnostics", () => {
-        const diagnostics = formatStatusDiagnosticsMarkdown(STATUS_FIXTURE);
-        expect(diagnostics).toContain("- **Active profile:** work");
-        expect(diagnostics).toContain("- **Tags:** 4 active, 1 dropped; 2 pending drops");
-        expect(diagnostics).toContain("- **Execute threshold:** 65.0%");
-        expect(diagnostics).toContain(
-            "- **Memory importance:** 0–19 101 · 20–39 202 · 40–59 6,303 · 60–79 707 · 80–100 673 · 1,181 unclassified of 7,986",
-        );
     });
 
     test("keeps internal vocabulary and identifiers out of the summary", () => {
@@ -206,7 +177,7 @@ describe("status detail text", () => {
         expect(summary).toContain("(MC-H01)");
     });
 
-    test("shows stalled mirror and authority mismatch codes in summary and diagnostics", () => {
+    test("shows stalled mirror and authority mismatch codes in the summary", () => {
         const detail = {
             ...STATUS_FIXTURE,
             hostBackendsModuleSide: true,
@@ -223,13 +194,9 @@ describe("status detail text", () => {
             memoryAuthorityMismatch: true,
         };
         const summary = formatStatusDetailMarkdown(detail);
-        const diagnostics = formatStatusDiagnosticsMarkdown(detail);
 
         expect(summary).toContain("(MC-M01)");
         expect(summary).toContain("(MC-M02)");
-        expect(diagnostics).toContain("cursor 3,726 / 4,850");
-        expect(diagnostics).toContain("stalled (MC-M01)");
-        expect(diagnostics).toContain("(MC-M02)");
     });
 
     test("does not expose module routing in the summary", () => {

@@ -23,6 +23,7 @@ import {
 } from "../../tui/data/notification-socket";
 import { eventSessionID } from "./events";
 import { mountV1Sidebar, type V1SidebarMount } from "./sidebar-mount";
+import { mountV1StatusDialog, type V1StatusDialogMount } from "./status-dialog-mount";
 import type { V2KeymapLayer, V2SidebarState, V2TuiContext } from "./types";
 
 const SIDEBAR_REFRESH_MS = 1_000;
@@ -73,7 +74,15 @@ export function sidebarText(snapshot: SidebarSnapshot | undefined): string {
     ].join("\n");
 }
 
-/** Exported for test access. */
+/**
+ * Plain-text projection of the status snapshot, used only when the real v1
+ * dialog component cannot be mounted — a host that publishes no component
+ * dialog surface, or one that registers no OpenTUI runtime modules
+ * (`opentui:runtime-module:*`). GA 2.0.5 and 2.0.11 do both, so on those hosts
+ * the v1 dialog is what paints.
+ *
+ * Exported for test access.
+ */
 export function statusText(detail: StatusDetail): string {
     const context =
         detail.contextLimit > 0
@@ -127,7 +136,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         }
     };
 
-    const showStatus = async (diagnostics = false, target = currentSessionID(context)) => {
+    const showStatus = async (target = currentSessionID(context)) => {
         if (!target) {
             context.ui.toast.show({ message: "No active session", variant: "warning" });
             return false;
@@ -141,8 +150,21 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
             });
             return false;
         }
+        const mounted = statusDialog;
+        if (mounted) {
+            try {
+                mounted.show(result.detail);
+                return true;
+            } catch (error) {
+                // A component that throws while opening would leave the host
+                // with a dead dialog surface. Degrade to the text dialog for the
+                // rest of this TUI session and say so once.
+                statusDialog = null;
+                console.warn("[magic-context] v2 status dialog failed; using text", error);
+            }
+        }
         await context.ui.dialog.alert({
-            title: diagnostics ? "Magic Context diagnostics" : "Magic Context status",
+            title: "Magic Context status",
             message: statusText(result.detail),
         });
         return true;
@@ -202,6 +224,11 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
     // host registers no runtime modules to load it through, which is the single
     // case the plain-text projection covers.
     let mountedSidebar: V1SidebarMount | null = await mountV1Sidebar(context, directory);
+    // One status view: the OpenCode 1 dialog component, mounted on the v2 dialog
+    // surface through the host's own OpenTUI runtime. `mountV1StatusDialog`
+    // returns null only for a host that cannot render a component dialog, which
+    // is the single case the plain-text projection covers.
+    let statusDialog: V1StatusDialogMount | null = await mountV1StatusDialog(context);
     const unregisterSlot = context.ui.slot({
         append: "sidebar.content",
         render: (input) => {
@@ -271,9 +298,9 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
                 title: "Magic Context: Status",
                 group: "Magic Context",
                 palette: true,
-                slash: { name: "ctx-status", arguments: true },
-                run: async (input) => {
-                    await showStatus(input?.trim().toLowerCase() === "diagnostics");
+                slash: { name: "ctx-status" },
+                run: async () => {
+                    await showStatus();
                 },
             },
             {
@@ -444,7 +471,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         }
         if (notification.type !== "action") return false;
         if (notification.payload.action === "show-status-dialog") {
-            return showStatus(notification.payload.diagnostics === true, target);
+            return showStatus(target);
         }
         if (notification.payload.action === "show-recomp-dialog") return showRecomp(target);
         if (notification.payload.action === "refresh-sidebar" && target) {
@@ -472,6 +499,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         unregisterSlot();
         mountedSidebar?.dispose();
         mountedSidebar = null;
+        statusDialog = null;
         unregisterKeymapSlot?.();
         stopListening();
         stopNotificationSocket();

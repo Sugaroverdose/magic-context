@@ -16,13 +16,13 @@ Use **`/ctx-recomp`** to rebuild compartments left in an older history layout; t
 
 ## /ctx-status
 
-**What it does.** Session status: tags, pending queue, cache TTL, execute threshold, compartments, last transform error, and related fields.
+**What it does.** Session status: context pressure and its breakdown by category, tags, reductions, pending queue, cache TTL, history compression, and memory. It takes no arguments — there is one view, the same on every harness.
 
 **When to use it.** Whenever you need a snapshot of Magic Context health.
 
 **What you'll see.**
 
-- **OpenCode TUI:** Opens a **native status dialog** (full report is not pasted into chat).
+- **OpenCode TUI (1 and 2):** Opens a **native status dialog** (full report is not pasted into chat).
 - **OpenCode Desktop:** `## Magic Status` message in chat.
 - **Pi:** **Status overlay** when UI is available; otherwise a `/ctx-status` chat message.
 

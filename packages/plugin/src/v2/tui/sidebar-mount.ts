@@ -44,7 +44,7 @@ export interface V1SidebarMount {
  * still gets a readable sidebar from the hex fallbacks rather than an
  * exception from a missing colour.
  */
-function flattenTheme(theme: V2ResolvedTheme | undefined): V1Theme {
+export function flattenTheme(theme: V2ResolvedTheme | undefined): V1Theme {
     const feedback = theme?.text?.feedback;
     return {
         text: theme?.text?.default ?? "#ffffff",
