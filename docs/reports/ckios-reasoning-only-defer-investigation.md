@@ -78,3 +78,27 @@ removes the target. Therefore no claim is made that a next priced pass now
 removes it, no speculative exemption/SDK-filter change is shipped, and there
 is no live-predicate mutation proof. The existing latest-assistant thinking
 rule and provider bytes are unchanged.
+
+## Attribution repair
+
+The analyzer and sentinel now share a scheduler-log fallback for TS passes
+without durable decision rows. `--mc-log <path>` selects an explicit captured
+log; otherwise the standard OpenCode MC log path is used. Durable rows from
+the same pass retain precedence and their richer fold/drop attribution. No
+transform code or DB-write path changes: **zero additional writes per pass**.
+Reading/parsing the staged log averaged 0.118 ms over 100 warm offline calls
+on this machine; this is analyzer cost, not transform latency.
+
+The staged body copies (with generated adjacent metadata, never live dumps)
+now classify B as `unaccounted_defer_pass`, with 189320 rewritten tokens.
+A is unmetered in this reduced artifact set because its predecessor's response
+is not staged. The API fixture separately verifies that A's supplied
+`execute`/`pressure_refold` row wins over its scheduler line. Scheduler-only
+defers cannot be accounted merely by nearby old marker text or a changed
+billing header: that text is not evidence of an applied mutation. Existing
+richer-row classifier behavior remains unchanged.
+
+The discrimination test drives both the real analyzer and the sentinel's
+default analyzer path. Neutralizing the fallback makes it fail with
+`no_mc_pass_row`; neutralizing the conservative scheduler-only classification
+makes it fail with `accounted_hard_marker_drain`. Both controls are restored.

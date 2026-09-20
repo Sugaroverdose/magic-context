@@ -230,6 +230,11 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
     ) {
         return "unaccounted_defer_pass";
     }
+    // A scheduler-only defer does not show that a compaction actually ran. Nearby
+    // old marker text or a changed billing header cannot prove that mutation.
+    if (decision.source === "transform scheduler log" && canonicalDecision === "defer") {
+        return "unaccounted_defer_pass";
+    }
     if (
         materializeReason === "marker_drain" ||
         input.compactionSeam ||

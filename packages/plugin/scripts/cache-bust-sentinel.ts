@@ -66,6 +66,7 @@ export interface CacheBustSentinelOptions {
     rustStorePath: string;
     connectionFile: string;
     wakeModuleId: string;
+    mcLogPath?: string;
     anthropicDir?: string;
     openaiDir?: string;
     piDir?: string;
@@ -277,6 +278,7 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
         "--connection-file",
         "--wake-module-id",
         "--anthropic-dir",
+        "--mc-log",
         "--openai-dir",
         "--pi-dir",
         "--omp-dir",
@@ -322,6 +324,7 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
             join(getDataDir(), "cortexkit", "run", "subc-connection.json"),
         wakeModuleId: values.get("--wake-module-id") ?? DEFAULT_WAKE_MODULE_ID,
         anthropicDir: values.get("--anthropic-dir"),
+        mcLogPath: values.get("--mc-log"),
         openaiDir: values.get("--openai-dir"),
         piDir: values.get("--pi-dir"),
         ompDir: values.get("--omp-dir"),
@@ -604,6 +607,7 @@ async function analyzeActiveSession(
             sinceExclusiveMs,
             untilInclusiveMs: Date.now(),
             anthropicDir: options.anthropicDir,
+            mcLogPath: options.mcLogPath,
             openaiDir: options.openaiDir,
             decisions,
         });
