@@ -15,7 +15,7 @@
  * stdin is under Bun, so stdin is /dev/null.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { assertOpenPaths, CLI, PLUGIN } from "./spawn";
 
@@ -42,6 +42,7 @@ function wrapperBinaries(): string[] {
 		resolve(PLUGIN, "../../node_modules"),
 		CLI,
 		which("script"),
+		which("expect"),
 		"/bin/sh",
 	]
 		.filter((path) => path.length > 0 && existsSync(path))
@@ -112,6 +113,22 @@ export interface TuiCaptureOptions {
 	readonly root: string;
 	readonly cwd: string;
 	readonly sessionID: string;
+	/**
+	 * Keystrokes typed into the TUI once it has booted, in order, with a pause
+	 * between them. Anything a user reaches by typing — a slash command, a dialog
+	 * — needs these: `script` gives the TUI a PTY but no keyboard, because its own
+	 * stdin must be /dev/null (see above). A capture that asks for keys is driven
+	 * by `expect`, which owns both the PTY and its input.
+	 */
+	readonly keys?: readonly string[];
+	/**
+	 * Text that says the TUI has finished booting, waited for before the first
+	 * keystroke. Defaults to the footer hint an OpenCode 2 TUI paints once it is
+	 * interactive.
+	 */
+	readonly readyMarker?: string;
+	/** Seconds to keep reading after `readyMarker` before the first keystroke. */
+	readonly settleSeconds?: number;
 	/** Capture stops as soon as every marker is present in the stripped text. */
 	readonly markers: readonly (string | RegExp)[];
 	readonly timeoutMs?: number;
@@ -149,6 +166,68 @@ export function ptyCaptureAvailable(): boolean {
 	return existsSync("/usr/bin/script") || existsSync("/bin/script");
 }
 
+const EXPECT_BINARIES = ["/usr/bin/expect", "/bin/expect", "/usr/local/bin/expect"];
+
+/** `expect` is what types into the PTY; without it a keyed capture cannot run. */
+export function ptyInputAvailable(): boolean {
+	return EXPECT_BINARIES.some((path) => existsSync(path));
+}
+
+/**
+ * A Tcl quoted word. Besides `\`, `"`, `$` and brackets, control characters
+ * have to be written as escapes rather than embedded raw: a carriage return
+ * inside the quoted string is read as a line ending, which silently truncates
+ * the command instead of sending Enter to the TUI.
+ */
+function tclQuote(value: string): string {
+	const escaped = value.replace(/[\\"$[\]]|[\u0000-\u001f]/g, (character) => {
+		if (character === "\r") return "\\r";
+		if (character === "\n") return "\\n";
+		if (character === "\t") return "\\t";
+		const code = character.charCodeAt(0);
+		return code < 0x20
+			? `\\x${code.toString(16).padStart(2, "0")}`
+			: `\\${character}`;
+	});
+	return `"${escaped}"`;
+}
+
+/**
+ * An expect program that boots the TUI on its own PTY, waits for the host to
+ * finish painting, then types each key with a pause so the TUI can react to it.
+ * `expect` only reads the child's output while it is waiting for a pattern, and
+ * that is also when it writes the log file — so every pause is written as a
+ * pattern that cannot match: it reads for the whole timeout, then continues.
+ */
+function expectProgram(
+	options: TuiCaptureOptions,
+	logPath: string,
+	command: string,
+): string {
+	const never = "__opencode2_tui_capture_never_matches__";
+	const pause = (seconds: number) => [
+		`set timeout ${seconds}`,
+		`expect ${tclQuote(never)}`,
+	];
+	return [
+		`log_file -a ${tclQuote(logPath)}`,
+		`spawn /bin/sh -c ${tclQuote(command)}`,
+		"set timeout 90",
+		`expect ${tclQuote(options.readyMarker ?? "ctrl+p")}`,
+		// The footer appears before the session and the plugins have finished
+		// loading, and a keystroke typed into a TUI that is still starting is
+		// dropped. This settle is what makes the first key land.
+		...pause(options.settleSeconds ?? 12),
+		...(options.keys ?? []).flatMap((key) => [
+			`send -- ${tclQuote(key)}`,
+			...pause(4),
+		]),
+		...pause(10),
+		"exit 0",
+		"",
+	].join("\n");
+}
+
 export async function captureTui(options: TuiCaptureOptions): Promise<TuiCapture> {
 	const rows = options.rows ?? 48;
 	const cols = options.cols ?? 200;
@@ -157,12 +236,28 @@ export async function captureTui(options: TuiCaptureOptions): Promise<TuiCapture
 		`stty rows ${rows} cols ${cols}`,
 		`exec ${JSON.stringify(CLI)} --standalone --print-logs --session ${JSON.stringify(options.sessionID)}`,
 	].join("; ");
-	const child = spawn("script", scriptArguments(command, logPath), {
-		cwd: options.cwd,
-		env: options.env,
-		detached: true,
-		stdio: ["ignore", "pipe", "pipe"],
-	});
+	const driven = (options.keys?.length ?? 0) > 0;
+	if (driven && !ptyInputAvailable())
+		throw new Error("Cannot type into the TUI: expect is not installed");
+	const programPath = join(options.root, "opencode2-tui.exp");
+	if (driven) writeFileSync(programPath, expectProgram(options, logPath, command));
+	const child = driven
+		? spawn(
+				EXPECT_BINARIES.find((path) => existsSync(path)) as string,
+				["-f", programPath],
+				{
+					cwd: options.cwd,
+					env: options.env,
+					detached: true,
+					stdio: ["ignore", "pipe", "pipe"],
+				},
+			)
+		: spawn("script", scriptArguments(command, logPath), {
+				cwd: options.cwd,
+				env: options.env,
+				detached: true,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
 	let stdout = "";
 	child.stdout.on("data", (chunk) => {
 		stdout += chunk.toString();

@@ -7,6 +7,7 @@ import {
 	updateTagTokenCount,
 } from "@magic-context/core/features/magic-context/storage-tags";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { buildStatusView } from "@magic-context/core/shared/status-view";
 import {
 	clearPiChannel1State,
 	setPiChannel1Baseline,
@@ -18,11 +19,23 @@ import {
 } from "../test-utils.test";
 import {
 	buildPiStatusDetail,
-	formatPiStatusDiagnostics,
 	formatPiStatusSummary,
+	renderPiStatusOverlay,
 	type StatusDialogDetail,
 	showStatusDialog,
+	statusViewSourceFromPiDetail,
 } from "./status-dialog";
+
+/**
+ * A theme that colours nothing, so assertions read the text the overlay draws
+ * rather than the escape sequences around it.
+ */
+function plainTheme() {
+	return {
+		fg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+	} as never;
+}
 
 describe("Pi status dialog", () => {
 	it("displays usage against the output-reserved safe window", () => {
@@ -152,9 +165,11 @@ describe("Pi status dialog", () => {
 					"80-100": 1,
 				},
 			});
-			expect(formatPiStatusDiagnostics(detail)).toContain(
-				"Memory importance: 0–19 1 · 20–39 1 · 40–59 1 · 60–79 1 · 80–100 1 · 1 unclassified of 5",
-			);
+			// The distribution is data the status surfaces no longer draw: the
+			// single view dropped the Importance histogram row.
+			expect(
+				renderPiStatusOverlay(detail, plainTheme(), 74).join("\n"),
+			).not.toContain("Importance");
 		} finally {
 			closeQuietly(db);
 		}
@@ -207,7 +222,6 @@ describe("Pi status dialog", () => {
 				embedding: { state: "off", indexed: 0, total: 0 },
 			} satisfies StatusDialogDetail;
 			const summary = formatPiStatusSummary(statusFixture);
-			const diagnostics = formatPiStatusDiagnostics(statusFixture);
 			expect(summary).toBe(`Magic Context Status
 Context: 1.0% of usable context (1,000 / 100,000 tokens)
 Cache lifetime: 1h (config for anthropic/claude-opus-5)
@@ -224,7 +238,6 @@ Warning: History compression could not finish this turn. It will retry automatic
 				"1h (config for anthropic/claude-opus-5)",
 			]) {
 				expect(summary).toContain(value);
-				expect(diagnostics).toContain(value);
 			}
 			for (const forbidden of [
 				"session-secret",
@@ -316,7 +329,10 @@ Warning: History compression could not finish this turn. It will retry automatic
 		}
 	});
 
-	it("toggles from the summary to diagnostics with D", async () => {
+	// Replaces "toggles from the summary to diagnostics with D": /ctx-status no
+	// longer has a summary/diagnostics split, so there is no second view for D to
+	// reach and the one view is what every keystroke other than close leaves alone.
+	it("draws one view, with no diagnostics toggle for D to flip", async () => {
 		const db = createTestDb();
 		try {
 			const rendered: string[][] = [];
@@ -361,10 +377,11 @@ Warning: History compression could not finish this turn. It will retry automatic
 			});
 			const before = rendered[0]?.join("\n") ?? "";
 			const after = rendered[1]?.join("\n") ?? "";
-			expect(before).toContain("Diagnostics: off");
-			expect(before).not.toContain("Protected tokens");
-			expect(after).toContain("Diagnostics: on");
-			expect(after).toContain("Protected tokens");
+			expect(before).toBe(after);
+			expect(before).not.toContain("Diagnostics");
+			// The full view is drawn immediately, with no second mode behind a key.
+			expect(before).toContain("Context Details");
+			expect(before).toContain("Cache TTL");
 		} finally {
 			closeQuietly(db);
 		}
@@ -418,28 +435,27 @@ Warning: History compression could not finish this turn. It will retry automatic
 				getSystemPrompt: () => "system prompt",
 			};
 
-			await showStatusDialog(
-				{ getAllTools: () => [] } as never,
-				ctx as never,
-				{
-					db,
-					projectIdentity: resolveProjectIdentity(process.cwd()),
-				},
-				true,
-			);
+			await showStatusDialog({ getAllTools: () => [] } as never, ctx as never, {
+				db,
+				projectIdentity: resolveProjectIdentity(process.cwd()),
+			});
 
 			const text = rendered.flat().join("\n");
-			expect(text).toContain("Hygiene 65.1% · 65,100 / 100,000 tok");
-			expect(text).toContain(
-				"Conversation includes model Reasoning; hygiene excludes it",
-			);
+			expect(text).toContain("Hygiene");
+			expect(text).toContain("65.1% · 65,100 / 100,000 tok");
+			// The footnote explaining that Conversation counts reasoning while
+			// hygiene does not is no longer drawn anywhere.
+			expect(text).not.toContain("hygiene excludes it");
 		} finally {
 			clearPiChannel1State(sessionId);
 			closeQuietly(db);
 		}
 	});
 
-	it("renders stored work metrics", async () => {
+	// Was "renders stored work metrics": the Pi-only Work tokens line is gone,
+	// because the single view draws the same rows on every host and OpenCode
+	// never had it. The metrics themselves are still collected and stored.
+	it("keeps stored work metrics in the detail and off the one view", async () => {
 		const db = createTestDb();
 		try {
 			const sessionId = "ses-status-work";
@@ -472,20 +488,28 @@ Warning: History compression could not finish this turn. It will retry automatic
 				getSystemPrompt: () => "system prompt",
 			};
 
-			await showStatusDialog(
+			await showStatusDialog({ getAllTools: () => [] } as never, ctx as never, {
+				db,
+				projectIdentity: resolveProjectIdentity(process.cwd()),
+			});
+
+			const detail = buildPiStatusDetail(
 				{ getAllTools: () => [] } as never,
 				ctx as never,
-				{
-					db,
-					projectIdentity: resolveProjectIdentity(process.cwd()),
-				},
-				true,
+				{ db, projectIdentity: resolveProjectIdentity(process.cwd()) },
+				sessionId,
 			);
+			expect({
+				newWorkTokens: detail.newWorkTokens,
+				totalInputTokens: detail.totalInputTokens,
+			}).toEqual({ newWorkTokens: 1200, totalInputTokens: 9800 });
 
 			const text = rendered.flat().join("\n");
-			expect(text).toContain("Work tokens 1.2K new · 9.8K total input");
-			expect(text).toContain("Window ");
-			expect(text).not.toContain("Context:");
+			expect(text).not.toContain("Work tokens");
+			// The window derivation is now drawn as the shared line every host
+			// prints verbatim, instead of Pi's own "Window …" rewrite of it.
+			expect(text).toContain("Context:");
+			expect(text).toContain("usable");
 		} finally {
 			closeQuietly(db);
 		}
@@ -647,7 +671,12 @@ Warning: History compression could not finish this turn. It will retry automatic
 		}
 	});
 
-	it("renders protectedTokens in dialog UI and does not contain 'Protected tags'", async () => {
+	// Was "renders protectedTokens in dialog UI and does not contain 'Protected
+	// tags'". Pi's own protected-tokens line was replaced by the Context Details
+	// section every host now draws, whose rows are Protected tags and Subagent.
+	// The protection-window value object is unchanged and the row draws its
+	// protectedCount, but the protected mass and floor are no longer rendered.
+	it("renders the shared Context Details rows instead of a Pi-only protected-tokens line", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-status-ui-render";
 		try {
@@ -692,20 +721,88 @@ Warning: History compression could not finish this turn. It will retry automatic
 				getSystemPrompt: () => "system prompt",
 			};
 
-			await showStatusDialog(
-				{ getAllTools: () => [] } as never,
-				ctx as never,
-				{
-					db,
-					projectIdentity: resolveProjectIdentity(process.cwd()),
-					floor: 16_000,
-				},
-				true,
-			);
+			await showStatusDialog({ getAllTools: () => [] } as never, ctx as never, {
+				db,
+				projectIdentity: resolveProjectIdentity(process.cwd()),
+				floor: 16_000,
+			});
 
 			const text = rendered.flat().join("\n");
-			expect(text).toContain("Protected tokens");
-			expect(text).not.toContain("Protected tags");
+			expect(text).toContain("Protected tags");
+			expect(text).not.toContain("Protected tokens");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("draws the shared sections, in order, with the shared labels", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-status-shared-sections";
+			insertTag(db, sessionId, "m1", "tool", 4_000, 1);
+			const detail = buildPiStatusDetail(
+				{ getAllTools: () => [] } as never,
+				{
+					...fakeContext(sessionId),
+					getContextUsage: () => ({
+						tokens: 40_000,
+						percent: 20,
+						contextWindow: 200_000,
+					}),
+					getSystemPrompt: () => "system prompt",
+				} as never,
+				{ db, projectIdentity: resolveProjectIdentity(process.cwd()) },
+				sessionId,
+			);
+			const view = buildStatusView(statusViewSourceFromPiDetail(detail), {
+				version: "0.0.0",
+			});
+			const lines = renderPiStatusOverlay(detail, plainTheme(), 74);
+
+			// Section titles appear in the model's order, and every row label the
+			// model carries is drawn — so a row cannot exist on OpenCode and be
+			// missing here.
+			const titles = view.sections.map((section) => section.title);
+			expect(titles).toEqual([
+				"Tags",
+				"Reductions",
+				"Pending Queue",
+				"Context Details",
+				"Cache TTL",
+				"History Compression",
+				"Memory",
+			]);
+			expect(
+				titles.map((title) => lines.findIndex((line) => line === title)),
+			).toEqual(
+				[...titles.map((title) => lines.findIndex((line) => line === title))]
+					.slice()
+					.sort((a, b) => a - b),
+			);
+			expect(titles.every((title) => lines.includes(title))).toBe(true);
+			for (const section of view.sections) {
+				for (const row of section.rows) {
+					expect(lines.some((line) => line.startsWith(row.label))).toBe(true);
+				}
+			}
+
+			const text = lines.join("\n");
+			expect(text).toContain("⚡ Magic Context Status");
+			expect(text).toContain("Esc to close");
+			// Rows and modes that the one status view no longer carries.
+			for (const gone of [
+				"Diagnostics",
+				"Logger",
+				"Importance",
+				"Memory importance",
+				"unclassified of",
+				"hygiene excludes it",
+				"Work tokens",
+				"Protected tokens",
+				"Press D",
+			]) {
+				expect(text).not.toContain(gone);
+			}
 		} finally {
 			closeQuietly(db);
 		}

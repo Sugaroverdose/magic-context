@@ -2,6 +2,7 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 	Theme,
+	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,
@@ -20,7 +21,6 @@ import { getDreamTaskBacklogs } from "@magic-context/core/features/magic-context
 import {
 	CANONICAL_DREAM_TASKS,
 	type DreamTaskFailureState,
-	formatDreamTaskFailures,
 } from "@magic-context/core/features/magic-context/dreamer/task-registry";
 import {
 	emptyMemoryImportanceHistogram,
@@ -42,11 +42,7 @@ import {
 import { getNotes } from "@magic-context/core/features/magic-context/storage-notes";
 import { getTagsBySession } from "@magic-context/core/features/magic-context/storage-tags";
 import { getEmbedDrainUiStatus } from "@magic-context/core/hooks/magic-context/embed-session-state";
-import {
-	MAX_EXECUTE_THRESHOLD,
-	resolveExecuteThresholdDetail,
-} from "@magic-context/core/hooks/magic-context/event-resolvers";
-import { formatBytes } from "@magic-context/core/hooks/magic-context/format-bytes";
+import { resolveExecuteThresholdDetail } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { computeM0BlockTokens } from "@magic-context/core/hooks/magic-context/m0-token-breakdown";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { countCompartmentsNeedingUpgrade } from "@magic-context/core/hooks/magic-context/upgrade-reminder";
@@ -54,49 +50,28 @@ import {
 	formatCacheTtlDisplay,
 	resolveCacheTtlDisplay,
 } from "@magic-context/core/shared/cache-ttl-display";
-import {
-	type ConfigParseFailure,
-	formatConfigParseStatusLine,
-} from "@magic-context/core/shared/config-diagnostics";
-import {
-	formatThresholdClampNote,
-	formatThresholdPercent,
-} from "@magic-context/core/shared/format-threshold";
+import type { ConfigParseFailure } from "@magic-context/core/shared/config-diagnostics";
 import type {
 	MemoryImportanceHistogram,
 	TailHygieneStatus,
 } from "@magic-context/core/shared/rpc-types";
-import { formatMemoryImportanceHistogram } from "@magic-context/core/shared/status-detail-text";
-import type { UserStatusSummary } from "@magic-context/core/shared/status-summary";
 import { renderUserStatusSummary } from "@magic-context/core/shared/status-summary";
 import {
-	formatTailHygiene,
-	resolveTailHygieneStatus,
-} from "@magic-context/core/shared/tail-hygiene-status";
-import { renderUserFacingFailure } from "@magic-context/core/shared/user-facing-codes";
-import {
-	formatWindowDerivationLine,
-	type WindowGeometryResult,
-} from "@magic-context/core/shared/window-geometry";
+	buildStatusView,
+	type StatusBarSegment,
+	type StatusRow,
+	type StatusTone,
+	type StatusViewSource,
+} from "@magic-context/core/shared/status-view";
+import { resolveTailHygieneStatus } from "@magic-context/core/shared/tail-hygiene-status";
+import type { UserFacingFailureKey } from "@magic-context/core/shared/user-facing-codes";
+import type { WindowGeometryResult } from "@magic-context/core/shared/window-geometry";
 import packageJson from "../../package.json";
 import { resolveSessionId } from "../commands/pi-command-utils";
 import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
 import { resolvePiWindowGeometry } from "../pi-context-limit";
 import { resolvePiPressureSnapshot } from "../pi-pressure";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
-
-// Mirror packages/plugin/src/tui/slots/sidebar-content.tsx COLORS so the Pi
-// dialog and the OpenCode sidebar render the same category palette.
-const COLORS = {
-	system: "#c084fc", // Purple
-	docs: "#22d3ee", // Cyan — <project-docs>
-	compartments: "#60a5fa", // Blue
-	memories: "#34d399", // Green
-	profile: "#a3e635", // Lime — <user-profile>
-	conversation: "#f87171", // Red
-	toolCalls: "#fb923c", // Orange
-	toolDefs: "#f472b6", // Pink
-};
 
 /** Refresh cadence while dialog is open. */
 const REFRESH_INTERVAL_MS = 1000;
@@ -209,7 +184,6 @@ export async function showStatusDialog(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	deps: StatusDialogDeps,
-	initialDiagnostics = false,
 ): Promise<void> {
 	const sessionId = resolveSessionId(ctx);
 	if (!sessionId) throw new Error("No active Pi session is available.");
@@ -224,7 +198,6 @@ export async function showStatusDialog(
 				theme,
 				tui,
 				done,
-				initialDiagnostics,
 			}),
 		{
 			overlay: true,
@@ -241,7 +214,6 @@ interface StatusDialogProps {
 	theme: Theme;
 	tui: TUI;
 	done: (value: undefined) => void;
-	initialDiagnostics: boolean;
 }
 
 /**
@@ -256,11 +228,9 @@ class StatusDialogComponent implements Component {
 	private detail: StatusDialogDetail;
 	private refreshTimer: ReturnType<typeof setInterval> | null = null;
 	private closed = false;
-	private diagnostics: boolean;
 
 	constructor(props: StatusDialogProps) {
 		this.props = props;
-		this.diagnostics = props.initialDiagnostics;
 		this.detail = buildPiStatusDetail(
 			props.pi,
 			props.ctx,
@@ -284,11 +254,6 @@ class StatusDialogComponent implements Component {
 	}
 
 	handleInput(data: string): void {
-		if (matchesKey(data, "d")) {
-			this.diagnostics = !this.diagnostics;
-			this.props.tui.requestRender();
-			return;
-		}
 		if (
 			matchesKey(data, "escape") ||
 			matchesKey(data, "ctrl+c") ||
@@ -318,11 +283,10 @@ class StatusDialogComponent implements Component {
 		// renderInner so the segmented bar can fill the available row width
 		// instead of being capped at a hardcoded 56 chars.
 		const innerWidth = Math.max(20, width - 4);
-		const inner = renderInner(
+		const inner = renderPiStatusOverlay(
 			this.detail,
 			this.props.theme,
 			innerWidth,
-			this.diagnostics,
 		);
 		return drawBorder(inner, width, this.props.theme);
 	}
@@ -335,8 +299,9 @@ class StatusDialogComponent implements Component {
 	}
 }
 
-export function formatPiStatusSummary(s: StatusDialogDetail): string {
-	const warnings: UserStatusSummary["warnings"] = [];
+/** Failure codes every Pi status surface prints as a warning. */
+function piStatusWarnings(s: StatusDialogDetail): UserFacingFailureKey[] {
+	const warnings: UserFacingFailureKey[] = [];
 	if (s.lastTransformError) warnings.push("transform_update_failed");
 	if (s.historianFailureCount > 0) warnings.push("historian_unavailable");
 	if (s.dreamer.failures.length > 0) warnings.push("dreamer_task_failing");
@@ -344,6 +309,11 @@ export function formatPiStatusSummary(s: StatusDialogDetail): string {
 		warnings.push("configuration_warning");
 	}
 	if (s.embedding.state === "stopped") warnings.push("embedding_unavailable");
+	return warnings;
+}
+
+/** Chat-text status for a Pi host without an interactive UI to draw a dialog on. */
+export function formatPiStatusSummary(s: StatusDialogDetail): string {
 	return renderUserStatusSummary(
 		{
 			inputTokens: s.inputTokens,
@@ -372,223 +342,147 @@ export function formatPiStatusSummary(s: StatusDialogDetail): string {
 			memoryCount: s.memoryCount,
 			noteCount: s.sessionNoteCount + s.readySmartNoteCount,
 			embedding: s.embedding,
-			warnings,
+			warnings: piStatusWarnings(s),
 		},
 		"plain",
 	);
 }
 
-export function formatPiStatusDiagnostics(s: StatusDialogDetail): string {
-	const summary = formatPiStatusSummary(s).replace(
-		"Magic Context Status",
-		"Magic Context Diagnostics",
-	);
-	return [
-		summary,
-		"",
-		`Session: ${s.sessionId}`,
-		`Active profile: ${s.activeProfile ?? "none"}`,
-		`Work tokens: ${fmt(s.newWorkTokens)} new · ${fmt(s.totalInputTokens)} total input`,
-		...(s.tailHygiene ? [`Hygiene: ${formatTailHygiene(s.tailHygiene)}`] : []),
-		`Tags: ${s.activeTags} active · ${s.droppedTags} dropped · ${s.totalTags} total`,
-		`Pending drops: ${s.pendingOpsCount}`,
-		`Memory importance: ${formatMemoryImportanceHistogram(s.memoryImportanceHistogram)}`,
-		`Protected tokens: ${fmt(s.protectedTokens.protectedMass)} (${s.protectedTokens.protectedCount} tags / floor ${fmt(s.protectedTokens.floor)})`,
-		`History block tokens: ${fmt(s.historyBlockTokens)}`,
-		`Compression budget: ${s.compressionBudget ? `${fmt(s.compressionBudget)} (${s.compressionUsage} used)` : "unavailable"}`,
-		`Subagent: ${s.isSubagent ? "yes" : "no"}`,
-		// The scheduler's own failure text. Without it a task can fail on every slot
-		// for weeks and show up only as a backlog count that never falls.
-		...(s.dreamer.failures.length > 0
-			? [
-					"Dreamer: scheduled tasks failing",
-					formatDreamTaskFailures(s.dreamer.failures),
-				]
-			: []),
-	].join("\n");
+/**
+ * Pi's detail in the shape the shared status model reads. Every field the view
+ * needs already carries the OpenCode spelling except these five, which Pi keeps
+ * under its own names.
+ */
+export function statusViewSourceFromPiDetail(
+	s: StatusDialogDetail,
+): StatusViewSource {
+	return {
+		...s,
+		protectedTagCount: s.protectedTokens.protectedCount,
+		compactionEnabled: s.compactionEnabled,
+		// Pi carries "no expiry" as an infinite remaining time rather than a flag.
+		cacheNeverExpires: s.cacheRemainingMs === Number.POSITIVE_INFINITY,
+		lastDreamerRunAt: s.dreamer.lastRunAt,
+		warnings: piStatusWarnings(s),
+	};
 }
 
-function renderInner(
+/** Pi's theme colour for each shared tone. */
+const PI_TONE_COLORS: Record<StatusTone, ThemeColor> = {
+	accent: "accent",
+	text: "text",
+	muted: "muted",
+	warning: "warning",
+	error: "error",
+};
+
+/**
+ * One label/value row: the label is padded to its section's fixed column so it
+ * can never be squeezed into a mid-word wrap, and the value is flush right.
+ */
+function renderStatusRow(
+	row: StatusRow,
+	labelWidth: number,
+	width: number,
+	theme: Theme,
+): string {
+	const label = row.label.padEnd(labelWidth);
+	const value = row.value.padStart(Math.max(1, width - label.length));
+	return `${theme.fg("muted", label)}${theme.fg(PI_TONE_COLORS[row.tone], value)}`;
+}
+
+/** Two already-coloured cells pushed to opposite edges of one row. */
+function renderSplitRow(left: string, right: string, width: number): string {
+	const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
+	return `${left}${" ".repeat(gap)}${right}`;
+}
+
+/** The overlay's content lines, before the border is drawn around them. */
+export function renderPiStatusOverlay(
 	s: StatusDialogDetail,
 	theme: Theme,
 	innerWidth: number,
-	diagnostics: boolean,
 ): string[] {
-	const pctColor =
-		s.usagePercentage >= 80
-			? "error"
-			: s.usagePercentage >= 65
-				? "warning"
-				: "accent";
+	// Which rows exist, their labels, order and colours come from the shared
+	// model, so this overlay and the OpenCode dialog cannot drift apart. Only
+	// the drawing is Pi's own.
+	const view = buildStatusView(statusViewSourceFromPiDetail(s), {
+		version: packageJson.version,
+	});
 	const lines: string[] = [];
 
-	// Header
 	lines.push(
-		`${theme.fg("accent", theme.bold("⚡ Magic Context Status"))}   ${theme.fg(
-			"muted",
-			`v${packageJson.version}`,
-		)}`,
+		renderSplitRow(
+			theme.fg("accent", theme.bold(view.title)),
+			theme.fg("muted", view.version),
+			innerWidth,
+		),
 	);
-	lines.push(
-		theme.fg("muted", `[D] Diagnostics: ${diagnostics ? "on" : "off"}`),
-	);
-	if (!diagnostics) {
-		lines.push("", ...formatPiStatusSummary(s).split("\n").slice(1));
-		lines.push(
-			"",
-			theme.fg("muted", "Press D for diagnostics · Escape to close"),
-		);
-		return lines;
-	}
 	lines.push("");
-	for (const failure of s.configParseFailures) {
-		lines.push(theme.fg("error", formatConfigParseStatusLine(failure)));
-	}
-	if (s.hasDeprecatedProtectedTags) {
-		lines.push(
+	lines.push(
+		renderSplitRow(
 			theme.fg(
-				"warning",
-				'Config: DEPRECATED KEY — "protected_tags" is deprecated and ignored; use "protected_tokens" instead.',
+				PI_TONE_COLORS[view.headline.left.tone],
+				theme.bold(view.headline.left.text),
+			),
+			theme.fg(
+				PI_TONE_COLORS[view.headline.right.tone],
+				view.headline.right.text,
+			),
+			innerWidth,
+		),
+	);
+	if (view.windowLine) lines.push(theme.fg("muted", view.windowLine));
+
+	const bar = renderBar(view.bar, s.inputTokens, innerWidth);
+	if (bar) lines.push(bar);
+	for (const row of view.breakdown) {
+		lines.push(
+			renderSplitRow(
+				colorHex(row.color, row.label),
+				theme.fg("muted", row.value),
+				innerWidth,
 			),
 		);
 	}
-	if (s.configParseFailures.length > 0 || s.hasDeprecatedProtectedTags)
+	if (view.hygiene) {
+		lines.push(renderStatusRow(view.hygiene, 9, innerWidth, theme));
+	}
+
+	// Pi has no sidebar, so a detached recomp/upgrade run and a pending
+	// /ctx-session-upgrade have nowhere else to surface. This is live run state
+	// rather than status content, which is why it is not one of the shared
+	// sections.
+	const upgrade: StatusRow | null = s.recompInFlight
+		? { label: "Upgrade", value: "recomp/upgrade running…", tone: "warning" }
+		: s.upgradeNeededCount > 0
+			? {
+					label: "Upgrade",
+					value: `${s.upgradeNeededCount} compartment${
+						s.upgradeNeededCount === 1 ? "" : "s"
+					} · run /ctx-session-upgrade`,
+					tone: "warning",
+				}
+			: null;
+	if (upgrade) lines.push(renderStatusRow(upgrade, 9, innerWidth, theme));
+
+	for (const section of view.sections) {
 		lines.push("");
-
-	// Context summary
-	lines.push(
-		`Context  ${theme.fg(
-			pctColor,
-			theme.bold(`${s.usagePercentage.toFixed(1)}%`),
-		)} · ${fmt(s.inputTokens)} / ${s.contextLimit > 0 ? fmt(s.contextLimit) : "?"} tokens`,
-	);
-	if (s.windowGeometry) {
-		lines.push(
-			formatWindowDerivationLine(s.inputTokens, s.windowGeometry).replace(
-				/^Context:.* — window /,
-				"Window ",
-			),
-		);
-	}
-	lines.push(
-		`Work tokens ${fmt(s.newWorkTokens)} new · ${fmt(s.totalInputTokens)} total input`,
-	);
-	if (s.tailHygiene !== undefined) {
-		lines.push(`Hygiene ${formatTailHygiene(s.tailHygiene)}`);
+		lines.push(theme.fg("text", theme.bold(section.title)));
+		for (const row of section.rows) {
+			lines.push(renderStatusRow(row, section.labelWidth, innerWidth, theme));
+		}
 	}
 
-	// Segmented bar (fills the full inner content width)
-	lines.push(renderBar(s, innerWidth));
-
-	// Legend
-	for (const seg of breakdownSegments(s)) {
-		const pct = ((seg.tokens / (s.inputTokens || 1)) * 100).toFixed(1);
-		const left = colorHex(
-			seg.color,
-			`${seg.label}${seg.detail ? ` ${seg.detail}` : ""}`,
-		);
-		const right = theme.fg("muted", `${fmt(seg.tokens)} (${pct}%)`);
-		lines.push(`${left}   ${right}`);
-	}
-	lines.push("* Conversation includes model Reasoning; hygiene excludes it.");
-	lines.push("");
-
-	// Quick counts + historian. v2: facts retired (promoted to memories), so the
-	// facts count is dropped from the line.
-	lines.push(
-		`Counts: ${s.compartmentCount} compartments · ${s.memoryCount} memories (${s.memoryBlockCount} injected) · ${
-			s.sessionNoteCount + s.readySmartNoteCount
-		} notes`,
-	);
-	lines.push(
-		`Memory importance: ${formatMemoryImportanceHistogram(s.memoryImportanceHistogram)}`,
-	);
-	lines.push(`Active profile: ${s.activeProfile ?? "none"}`);
-	lines.push(
-		`Historian: ${
-			s.historianRunning
-				? theme.fg("warning", "running")
-				: theme.fg("accent", "idle")
-		}${
-			s.historianFailureCount > 0
-				? ` · ${theme.fg("error", `last failure ${s.historianLastFailureAt ? relTime(s.historianLastFailureAt) : "unknown"}`)}`
-				: ""
-		}`,
-	);
-	// Upgrade status — Pi has no sidebar, so the recomp/upgrade state surfaces
-	// here. Shows when a detached recomp/upgrade is running, or when legacy/
-	// tierless compartments still need /ctx-session-upgrade.
-	if (s.recompInFlight) {
-		lines.push(`Upgrade: ${theme.fg("warning", "recomp/upgrade running…")}`);
-	} else if (s.upgradeNeededCount > 0) {
-		lines.push(
-			`Upgrade: ${theme.fg("warning", `${s.upgradeNeededCount} compartment${s.upgradeNeededCount === 1 ? "" : "s"} need upgrade`)} · run /ctx-session-upgrade`,
-		);
-	} else {
-		lines.push(`Upgrade: ${theme.fg("accent", "up to date")}`);
-	}
-	lines.push(`Pending drops: ${s.pendingOpsCount}`);
-	lines.push(
-		`${formatCacheTtlDisplay({ value: s.cacheTtl, source: s.cacheTtlSource, modelKey: s.cacheTtlModelKey })} · last response ${
-			s.lastResponseTime > 0
-				? `${Math.round((Date.now() - s.lastResponseTime) / 1000)}s ago`
-				: "never"
-		} · ${
-			s.cacheExpired
-				? theme.fg("warning", "expired")
-				: s.cacheRemainingMs === Number.POSITIVE_INFINITY
-					? "never (MC never assumes expiry — external cache-keep)"
-					: `${Math.round(s.cacheRemainingMs / 1000)}s remaining`
-		}`,
-	);
-	lines.push("");
-
-	// Tags
-	lines.push(theme.fg("muted", "Tags"));
-	lines.push(
-		`Active ${s.activeTags} (~${formatBytes(s.activeBytes)}) · Dropped ${s.droppedTags} · Total ${s.totalTags}`,
-	);
-
-	// Context / thresholds
-	lines.push(theme.fg("muted", "Context"));
-	lines.push(
-		`Execute threshold ${formatThresholdPercent(s.executeThreshold)}%${formatThresholdClampNote(
-			{
-				clamped: s.executeThresholdClamped,
-				mode: s.executeThresholdMode,
-				configuredValue: s.executeThresholdConfigured,
-				contextLimit: s.contextLimit,
-				maxPercentage: MAX_EXECUTE_THRESHOLD,
-			},
-		)}`,
-	);
-	lines.push(
-		`Protected tokens ${fmt(s.protectedTokens.protectedMass)} tok (${s.protectedTokens.protectedCount} tags / floor ${fmt(s.protectedTokens.floor)}) · Subagent ${s.isSubagent ? "yes" : "no"} · History block ~${fmt(s.historyBlockTokens)} tok${
-			s.compressionBudget
-				? ` · Budget ~${fmt(s.compressionBudget)} tok (${s.compressionUsage} used)`
-				: ""
-		}`,
-	);
-
-	if (s.lastTransformError)
-		lines.push(
-			theme.fg("error", renderUserFacingFailure("transform_update_failed")),
-		);
-	if (s.historianLastError)
-		lines.push(
-			theme.fg("error", renderUserFacingFailure("historian_unavailable")),
-		);
-	if (s.dreamer.failures.length > 0) {
-		lines.push(theme.fg("muted", "Dreamer"));
-		for (const line of formatDreamTaskFailures(s.dreamer.failures).split(
-			"\n",
-		)) {
-			lines.push(theme.fg("error", line));
+	if (view.warnings.length > 0) {
+		lines.push("");
+		for (const warning of view.warnings) {
+			lines.push(theme.fg(warning.tone, warning.text));
 		}
 	}
 
 	lines.push("");
-	lines.push(theme.fg("muted", "Press Escape to close"));
+	lines.push(theme.fg("muted", view.footer));
 	return lines;
 }
 
@@ -967,80 +861,23 @@ function safeStringify(value: unknown): string {
 	}
 }
 
-function breakdownSegments(s: StatusDialogDetail): Array<{
-	label: string;
-	tokens: number;
-	color: string;
-	detail?: string;
-}> {
-	const segs: Array<{
-		label: string;
-		tokens: number;
-		color: string;
-		detail?: string;
-	}> = [];
-	// Category order/labels/colors mirror OpenCode's sidebar
-	// (packages/plugin/src/tui/slots/sidebar-content.tsx) for cross-harness
-	// parity. v2: Facts is retired (promoted to memories); Docs and User Profile
-	// are their own m[0] buckets.
-	if (s.systemPromptTokens > 0)
-		segs.push({
-			label: "System",
-			tokens: s.systemPromptTokens,
-			color: COLORS.system,
-		});
-	if (s.docsTokens > 0)
-		segs.push({ label: "Docs", tokens: s.docsTokens, color: COLORS.docs });
-	if (s.compartmentTokens > 0)
-		segs.push({
-			label: "Compartments",
-			tokens: s.compartmentTokens,
-			color: COLORS.compartments,
-			detail: `(${s.compartmentCount})`,
-		});
-	if (s.memoryTokens > 0)
-		segs.push({
-			label: "Memories",
-			tokens: s.memoryTokens,
-			color: COLORS.memories,
-			detail: `(${s.memoryBlockCount})`,
-		});
-	if (s.profileTokens > 0)
-		segs.push({
-			label: "User Profile",
-			tokens: s.profileTokens,
-			color: COLORS.profile,
-		});
-	if (s.conversationTokens > 0)
-		segs.push({
-			label: "Conversation*",
-			tokens: s.conversationTokens,
-			color: COLORS.conversation,
-		});
-	if (s.toolCallTokens > 0)
-		segs.push({
-			label: "Tool Calls",
-			tokens: s.toolCallTokens,
-			color: COLORS.toolCalls,
-		});
-	if (s.toolDefinitionTokens > 0)
-		segs.push({
-			label: "Tool Defs",
-			tokens: s.toolDefinitionTokens,
-			color: COLORS.toolDefs,
-		});
-	return segs;
-}
-
-function renderBar(s: StatusDialogDetail, innerWidth: number): string {
+/**
+ * Draws the breakdown bar with block characters, one coloured run per segment,
+ * filling the row. Pi's renderer emits truecolor escapes (see `colorHex`), so
+ * the bar carries the same category colours as the legend below it.
+ */
+function renderBar(
+	segments: readonly StatusBarSegment[],
+	inputTokens: number,
+	innerWidth: number,
+): string {
 	// Fill the full inner content row. Clamp to a sensible minimum so
 	// extremely narrow terminals still render a visible bar instead of
 	// collapsing all segments to width 1.
 	const barWidth = Math.max(20, innerWidth);
-	const segs = breakdownSegments(s);
-	if (segs.length === 0) return "";
-	const widths = segs.map((seg) =>
-		Math.max(1, Math.round((seg.tokens / (s.inputTokens || 1)) * barWidth)),
+	if (segments.length === 0) return "";
+	const widths = segments.map((seg) =>
+		Math.max(1, Math.round((seg.tokens / (inputTokens || 1)) * barWidth)),
 	);
 	let sum = widths.reduce((a, b) => a + b, 0);
 	while (sum > barWidth) {
@@ -1055,8 +892,8 @@ function renderBar(s: StatusDialogDetail, innerWidth: number): string {
 		widths[maxIdx] = (widths[maxIdx] ?? 0) + 1;
 		sum++;
 	}
-	return segs
-		.map((seg, i) => colorHex(seg.color, "█".repeat(widths[i] ?? 0)))
+	return segments
+		.map((seg, i) => colorHex(seg.color, "\u2588".repeat(widths[i] ?? 0)))
 		.join("");
 }
 
@@ -1099,31 +936,10 @@ function safeRead<T>(fn: () => T, fallback: T): T {
 	}
 }
 
-function fmt(n: number): string {
-	const abs = Math.abs(n);
-	if (abs >= 1_000_000) return `${trim1(n / 1_000_000)}M`;
-	if (abs >= 1_000) return `${trim1(n / 1_000)}K`;
-	return String(Math.round(n));
-}
-
-function trim1(n: number): string {
-	const rounded = n.toFixed(1);
-	return rounded.endsWith(".0") ? rounded.slice(0, -2) : rounded;
-}
-
 function colorHex(hex: string, text: string): string {
 	const clean = hex.replace("#", "");
 	const r = Number.parseInt(clean.slice(0, 2), 16);
 	const g = Number.parseInt(clean.slice(2, 4), 16);
 	const b = Number.parseInt(clean.slice(4, 6), 16);
 	return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
-}
-
-function relTime(ts: number): string {
-	const seconds = Math.max(0, Math.round((Date.now() - ts) / 1000));
-	if (seconds < 60) return `${seconds}s ago`;
-	const minutes = Math.round(seconds / 60);
-	if (minutes < 60) return `${minutes}m ago`;
-	const hours = Math.round(minutes / 60);
-	return `${hours}h ago`;
 }

@@ -80,6 +80,14 @@ export interface V2TuiContext {
             }): void;
         };
         readonly dialog: {
+            /**
+             * Renders a plugin-owned component as the dialog surface. GA 2.0.5
+             * and 2.0.11 publish it next to alert/confirm/prompt; it is optional
+             * here so a host without it still gets the text dialog.
+             */
+            show?(component: () => unknown, onClose?: () => void): void;
+            /** Sizes the dialog surface before `show`; "medium" is the host default. */
+            set?(options: { readonly size?: string; readonly centered?: boolean }): void;
             alert(options: { readonly title: string; readonly message: string }): Promise<void>;
             confirm(options: {
                 readonly title: string;

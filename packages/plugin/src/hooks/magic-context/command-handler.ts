@@ -21,10 +21,7 @@ import type { ConfigParseFailure } from "../../shared/config-diagnostics";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
 import type { StatusDetail } from "../../shared/rpc-types";
 import type { Database } from "../../shared/sqlite";
-import {
-    formatStatusDetailMarkdown,
-    formatStatusDiagnosticsMarkdown,
-} from "../../shared/status-detail-text";
+import { formatStatusDetailMarkdown } from "../../shared/status-detail-text";
 import {
     resolveTailHygieneStatus,
     type WireTailHygieneBaseline,
@@ -294,26 +291,6 @@ function formatRustOperationMessage(
         default:
             return `## Magic Recomp — Failed\n\n${renderCapabilityRefusal("history_compression")}`;
     }
-}
-
-function formatRustStatusText(value: Record<string, unknown>): string {
-    const usage =
-        value.usage && typeof value.usage === "object"
-            ? (value.usage as Record<string, unknown>)
-            : {};
-    const tokens =
-        typeof usage.current_total_input_tokens === "number" ? usage.current_total_input_tokens : 0;
-    const limit = typeof usage.context_limit_tokens === "number" ? usage.context_limit_tokens : 0;
-    const coverage = value.coverage_ordinal == null ? "none" : String(value.coverage_ordinal);
-    const boundary = value.boundary_present === true ? "present" : "absent";
-    const compartments = typeof value.compartment_count === "number" ? value.compartment_count : 0;
-    return [
-        "### Module Cache",
-        `- Usage: ${tokens.toLocaleString()}${limit > 0 ? ` / ${limit.toLocaleString()} tokens` : " tokens"}`,
-        `- Boundary: ${boundary}`,
-        `- Coverage ordinal: ${coverage}`,
-        `- Compartments: ${compartments}`,
-    ].join("\n");
 }
 
 function executeRecompUpgradeStub(db: Database, sessionId: string): string {
@@ -714,7 +691,6 @@ export function createMagicContextCommandHandler(deps: {
             }
 
             if (isStatus) {
-                const statusDiagnostics = input.arguments.trim().toLowerCase() === "diagnostics";
                 let rustStatus: Record<string, unknown> | undefined;
                 if (rustMode) {
                     try {
@@ -729,11 +705,7 @@ export function createMagicContextCommandHandler(deps: {
                 }
                 if (isTuiConnected(sessionId)) {
                     // In TUI, push an RPC action so the TUI poller shows a native dialog
-                    pushNotification(
-                        "action",
-                        { action: "show-status-dialog", diagnostics: statusDiagnostics },
-                        sessionId,
-                    );
+                    pushNotification("action", { action: "show-status-dialog" }, sessionId);
                     sessionLog(sessionId, "command ctx-status: pushed show-status-dialog to TUI");
                     throwSentinel(input.command);
                 }
@@ -749,9 +721,7 @@ export function createMagicContextCommandHandler(deps: {
                     if (rustMode && !rustStatus) {
                         combinedStatus = `## Magic Status — Unavailable\n\n${renderUserFacingFailure("status_unavailable")}`;
                     } else if (detail) {
-                        combinedStatus = statusDiagnostics
-                            ? formatStatusDiagnosticsMarkdown(detail)
-                            : formatStatusDetailMarkdown(detail);
+                        combinedStatus = formatStatusDetailMarkdown(detail);
                     } else {
                         // Compatibility for isolated handler consumers that have not yet
                         // supplied the shared TUI status builder.
@@ -804,19 +774,11 @@ export function createMagicContextCommandHandler(deps: {
                                 cacheTtlConfig: deps.cacheTtlConfig ?? "5m",
                                 cacheTtlConfigured: deps.cacheTtlConfigured === true,
                                 configParseFailures: deps.configParseFailures ?? [],
-                                diagnostics: statusDiagnostics,
+                                diagnostics: false,
                                 compactionEnabled: !deps.compactionOff,
                             },
                         );
-                        const moduleStatus =
-                            rustStatus && statusDiagnostics
-                                ? `\n\n${formatRustStatusText(rustStatus)}`
-                                : "";
-                        const modeStatus =
-                            deps.compactionOff && statusDiagnostics
-                                ? `**Compaction:** disabled (${COMPACTION_ENABLED_PATH}: false) — native compaction owns the context window.\n\n`
-                                : "";
-                        combinedStatus = `${modeStatus}${statusOutput}${moduleStatus}`;
+                        combinedStatus = statusOutput;
                     }
                 } catch (error) {
                     sessionLog(

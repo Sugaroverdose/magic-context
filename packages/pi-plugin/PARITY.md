@@ -144,6 +144,39 @@ compartments that need upgrading.
 
 ---
 
+## 6b. `/ctx-status` is one view, built from one shared model
+
+`/ctx-status` takes no arguments on either harness and has no diagnostics mode:
+the summary/diagnostics split, the OpenCode dialog's `[ ] Diagnostics` checkbox
+and Pi's `[D]` toggle were all removed on 2026-09-20.
+
+**Shared:** `packages/plugin/src/shared/status-view.ts` owns the content — the
+title, the pressure headline, the window-derivation line, the coloured category
+breakdown, the `Hygiene` row, the seven sections (Tags, Reductions, Pending
+Queue, Context Details, Cache TTL, History Compression, Memory) in that order,
+and the warning block. Both harnesses build their view from it, so a row cannot
+exist on one and be missing on the other. Colours travel as semantic tones that
+each host resolves against its own theme; only the category palette is fixed
+hex, because it identifies a category across the status view and the sidebar.
+
+**OpenCode:** draws it with the Solid/OpenTUI dialog component
+(`src/tui/dialogs/status-dialog.tsx`), two columns when the terminal is at least
+76 columns wide and one column below that.
+
+**Pi:** draws the same model with its own line renderer, always in one column,
+and fills the breakdown bar with block characters in truecolor ANSI.
+
+Two live-run rows stay host-local because they report a run rather than status
+content, and each host has only its own: OpenCode keeps the recomp/upgrade
+progress block fed by its RPC progress snapshot, and Pi keeps a single `Upgrade`
+row (a detached run, or compartments awaiting `/ctx-session-upgrade`) because it
+has no sidebar to carry it. Pi's former `Work tokens`, `Counts`, `Historian`,
+`Active profile`, `Memory importance` and `Protected tokens` lines are gone;
+the protection-window value object behind the last one is unchanged and its
+protected-tag count is drawn as the shared `Protected tags` row.
+
+---
+
 ## 6a. Project-identity dubious-ownership warnings
 
 **OpenCode:** when git refuses a repository as dubious ownership, the shared
