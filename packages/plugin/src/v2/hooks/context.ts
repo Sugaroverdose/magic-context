@@ -22,14 +22,19 @@ import {
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
+import {
+    createLiveSessionState,
+    type LiveSessionState,
+} from "../../hooks/magic-context/live-session-state";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
 import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
+import { registerRpcHandlers } from "../../plugin/rpc-handlers";
 import { detectConflicts } from "../../shared/conflict-detector";
-import { getDataDir } from "../../shared/data-path";
+import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
 import { sessionLog } from "../../shared/logger";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import {
@@ -45,6 +50,7 @@ import {
     type PromptSurfaceRuntime,
 } from "../../shared/prompt-surface-runtime";
 import { pushNotification } from "../../shared/rpc-notifications";
+import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
@@ -756,8 +762,41 @@ export async function registerContext(context: V2Context) {
             console.warn("[magic-context] v2 context unavailable", error);
         }
     });
+    // OpenCode 2 never runs the v1 server() lane. Start the RPC surface here so
+    // the terminal TUI can read the v2 lane's draft-authoritative session state.
+    const rpcLiveSessionState: LiveSessionState = {
+        ...createLiveSessionState(),
+        liveModelBySession: liveModels,
+        variantBySession: variants,
+        agentBySession: agents,
+        channel1StateBySession: channel1,
+        historyRefreshSessions,
+        pendingMaterializationSessions,
+    };
+    const storageDir = getMagicContextStorageDir();
+    const rpcServer = new MagicContextRpcServer(storageDir, directory);
+    let rpcStopped = false;
+    registerRpcHandlers(rpcServer, {
+        directory,
+        config,
+        client: undefined,
+        liveSessionState: rpcLiveSessionState,
+        rustModeModuleClient: undefined,
+        hiddenCompletionExecutor,
+        storageDir,
+    });
+    // Start the RPC server asynchronously after plugin construction returns so
+    // Bun.serve and its discovery-file write do not consume the host's deadline.
+    setTimeout(() => {
+        if (rpcStopped) return;
+        void rpcServer
+            .start()
+            .catch((error) => console.warn("[magic-context] v2 RPC server failed to start", error));
+    }, 0);
     return {
         async dispose() {
+            rpcStopped = true;
+            rpcServer.stop();
             tools?.dispose();
             usageController.abort();
             await usageDone;

@@ -47,6 +47,7 @@ import {
     emptyWorkMetricsCarry,
     type WorkMetricsCarry,
 } from "../features/magic-context/work-metrics";
+import type { HiddenCompletionExecutor } from "../hooks/magic-context/compartment-runner-types";
 import { getEmbedDrainUiStatus } from "../hooks/magic-context/embed-session-state";
 import {
     resolveContextLimit,
@@ -1308,6 +1309,7 @@ export function registerRpcHandlers(
         client: unknown;
         liveSessionState: LiveSessionState;
         rustModeModuleClient?: RustModeModuleClient;
+        hiddenCompletionExecutor?: HiddenCompletionExecutor;
         storageDir?: string;
         getDebugMemoryHolders?: () => RuntimeDebugMemoryHolders | undefined;
     },
