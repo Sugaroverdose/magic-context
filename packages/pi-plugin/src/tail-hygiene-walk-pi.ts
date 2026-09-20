@@ -12,6 +12,7 @@ import {
 	type TailHygienePrefixMismatch,
 } from "@magic-context/core/hooks/magic-context/tail-hygiene-walk";
 import { PI_CTX_REDUCE_KEEP } from "./heuristic-cleanup-pi";
+import { isPiSystemEntry } from "./system-entry-pi";
 
 const TAG_PREFIX = /^§(\d+)§\s*/;
 const SYNTHETIC_TODO_PREFIX = "mc_synthetic_todo_";
@@ -182,7 +183,11 @@ function isSyntheticMessage(
 	if (input.syntheticMessages?.has(message)) return true;
 	if (message.syntheticTodoMarker === true) return true;
 	const role = typeof message.role === "string" ? message.role : "";
-	return role === "system" || role === "custom" || role === "compactionSummary";
+	return (
+		isPiSystemEntry(message) ||
+		role === "custom" ||
+		role === "compactionSummary"
+	);
 }
 
 /**

@@ -383,6 +383,9 @@ function convertEntriesToRawMessageRange(
 			continue;
 		}
 
+		// Protocol entries retain canonical ordinals so persisted boundaries do not
+		// shift. Their empty content projection keeps system prompts and tool
+		// declarations out of historian prose while chunk coverage absorbs the slot.
 		if (
 			appendMessage(
 				entry.id,

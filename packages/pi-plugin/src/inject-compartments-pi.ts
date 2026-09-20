@@ -18,7 +18,7 @@
  *   - `prepareCompartmentInjection` honors its own injection cache. On
  *     defer passes (`isCacheBusting=false`) the cached prepared block is
  *     replayed, the boundary trim is re-applied, and we just re-write the
- *     cached block into Pi message[0]. Provider prompt cache stays stable.
+ *     cached block after the leading system entries. Provider prompt cache stays stable.
  *   - On cache-busting passes (historian/compressor publish, /ctx-flush)
  *     the cache is rebuilt and the new block is written. Caller is
  *     responsible for setting `isCacheBusting` correctly via the shared
@@ -90,6 +90,11 @@ import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provid
 import { sessionLog as logSession } from "@magic-context/core/shared/logger";
 import { logSlowWriteTransaction } from "@magic-context/core/shared/write-transaction-timing";
 import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
+import {
+	isPiSystemEntry,
+	type PiSystemEntry,
+	piPrefixInsertionIndex,
+} from "./system-entry-pi";
 
 /**
  * Pi message shapes — kept structurally compatible with
@@ -113,7 +118,11 @@ type PiToolResultMessage = {
 	content: unknown[];
 	timestamp?: number;
 };
-type PiAgentMessage = PiUserMessage | PiAssistantMessage | PiToolResultMessage;
+type PiAgentMessage =
+	| PiUserMessage
+	| PiAssistantMessage
+	| PiToolResultMessage
+	| PiSystemEntry;
 
 /** Resolve a live Pi message to the stable ID stored with its compartment boundary. */
 function resolveStableId(
@@ -125,8 +134,8 @@ function resolveStableId(
 }
 
 /**
- * Mutate `piMessages` in place: remove every message whose synthesized
- * id appears at or before the cutoff. Preserves the rest of the array.
+ * Mutate `piMessages` in place: remove non-system messages whose synthesized
+ * id appears at or before the cutoff. Preserve all system entries and the tail.
  *
  * Mirrors the `messages.splice(0, cutoffIndex+1)` behavior the shared
  * `prepareCompartmentInjection` does on its (OpenCode) MessageLike[].
@@ -154,6 +163,7 @@ function trimPiMessagesToBoundary(
 	entryIds: readonly (string | undefined)[] | undefined,
 	cutoffMessageId: string,
 	trimMutableEntryIds = false,
+	sessionId?: string,
 ): number {
 	if (cutoffMessageId.length === 0) return 0;
 	// Resolve a synthetic-user (folded toolResult) cutoff to the real entry id
@@ -182,7 +192,16 @@ function trimPiMessagesToBoundary(
 	// preserves the non-contiguous same-turn cleanup while avoiding cross-turn
 	// over-removal.
 	const remove = new Set<number>();
-	for (let i = 0; i <= cutoffIndex; i++) remove.add(i);
+	let preserved = 0;
+	for (let i = 0; i <= cutoffIndex; i++) {
+		if (isPiSystemEntry(piMessages[i])) preserved++;
+		else remove.add(i);
+	}
+	if (preserved > 0)
+		logSession(
+			sessionId ?? "unknown",
+			`pi system entries preserved across fold: ${preserved}`,
+		);
 
 	let changed = true;
 	while (changed) {
@@ -729,10 +748,10 @@ export interface PiM0M1InjectionResult extends PiInjectionResult {
 	 */
 	m1RenderedCoverage: PiRenderedCompartmentBoundary | null;
 	/**
-	 * Number of synthetic, id-less messages prepended at the FRONT of the array
-	 * by this injection (the m[0] + m[1] pair). These never resolve to a real
-	 * SessionEntry id, so downstream anchor-GC must exclude them from its
-	 * "all messages resolved" denominator or pruning never runs.
+	 * Length of the non-reclaimable leading span: native system entries followed
+	 * by the injected m[0] + m[1] pair. Anchor-GC skips this span because the
+	 * injected users and native compaction snapshot have no message-entry id.
+	 * LKG ownership still retains real ids for native system entries.
 	 */
 	syntheticLeadingCount: number;
 }
@@ -2488,7 +2507,9 @@ function prependM0M1Messages(
 		{ type: "text", text: m0 },
 		...(muralImage ? [muralImage] : []),
 	];
-	piMessages.unshift(
+	piMessages.splice(
+		piPrefixInsertionIndex(piMessages),
+		0,
 		{
 			role: "user",
 			content: m0Content,
@@ -2525,11 +2546,21 @@ function replayCompletePiPrefix(
 	if (!mural) m0 = stripMemoryMuralBlock(m0);
 	const trimBoundaryId = row.cached_m0_last_baseline_end_message_id;
 	const skippedVisibleMessages = trimBoundaryId
-		? trimPiMessagesToBoundary(messages, entryIds, trimBoundaryId)
+		? trimPiMessagesToBoundary(
+				messages,
+				entryIds,
+				trimBoundaryId,
+				false,
+				state.sessionId,
+			)
 		: 0;
 	const head: PiAgentMessage[] = [];
 	prependM0M1Messages(head, m0, m1, mural, messages[0]?.timestamp);
-	messages.unshift(...structuredClone(head));
+	messages.splice(
+		piPrefixInsertionIndex(messages),
+		0,
+		...structuredClone(head),
+	);
 	const result: PiM0M1InjectionResult = {
 		injected: true,
 		compartmentCount: compartments.length,
@@ -2546,7 +2577,7 @@ function replayCompletePiPrefix(
 			trimBoundaryId,
 		),
 		m1RenderedCoverage: null,
-		syntheticLeadingCount: 2,
+		syntheticLeadingCount: piPrefixInsertionIndex(messages) + 2,
 	};
 	if (state.freezePrefixForPass)
 		state.preparedPrefix = { result, messages: head, trimBoundaryId };
@@ -2583,7 +2614,13 @@ export function injectM0M1Pi(
 	if (state.preparedPrefix) {
 		const prepared = state.preparedPrefix;
 		const skippedVisibleMessages = prepared.trimBoundaryId
-			? trimPiMessagesToBoundary(piMessages, entryIds, prepared.trimBoundaryId)
+			? trimPiMessagesToBoundary(
+					piMessages,
+					entryIds,
+					prepared.trimBoundaryId,
+					false,
+					state.sessionId,
+				)
 			: 0;
 		const head = structuredClone(prepared.messages);
 		// Timestamps are Pi envelope metadata, not cached provider content. Keep
@@ -2593,8 +2630,13 @@ export function injectM0M1Pi(
 			head[0].timestamp = timestamp - 2;
 			head[1].timestamp = timestamp - 1;
 		}
-		piMessages.unshift(...head);
-		return { ...prepared.result, skippedVisibleMessages };
+		const insertionIndex = piPrefixInsertionIndex(piMessages);
+		piMessages.splice(insertionIndex, 0, ...head);
+		return {
+			...prepared.result,
+			skippedVisibleMessages,
+			syntheticLeadingCount: insertionIndex + 2,
+		};
 	}
 	// One snapshot for the WHOLE decision: the materialize decision and every
 	// cache replay normalize against this same publish sequence. The snapshot is
@@ -2880,7 +2922,13 @@ export function injectM0M1Pi(
 		}
 	}
 	const skippedVisibleMessages = trimBoundaryId
-		? trimPiMessagesToBoundary(piMessages, entryIds, trimBoundaryId)
+		? trimPiMessagesToBoundary(
+				piMessages,
+				entryIds,
+				trimBoundaryId,
+				false,
+				state.sessionId,
+			)
 		: 0;
 	const muralWire = m0.includes("<memory-mural>")
 		? muralForWire(state.sessionId)
@@ -2943,13 +2991,18 @@ export function injectM0M1Pi(
 		contentionExhausted,
 		renderedBoundary,
 		m1RenderedCoverage,
-		// prependM0M1Messages always unshifts exactly the m[0] + m[1] pair.
-		syntheticLeadingCount: 2,
+		// Skip provider-system entries and the two injected history users when reclaiming the tail.
+		syntheticLeadingCount: piPrefixInsertionIndex(piMessages) + 2,
 	};
 	if (state.freezePrefixForPass)
 		state.preparedPrefix = {
 			result,
-			messages: structuredClone(piMessages.slice(0, 2)),
+			messages: structuredClone(
+				piMessages.slice(
+					piPrefixInsertionIndex(piMessages),
+					piPrefixInsertionIndex(piMessages) + 2,
+				),
+			),
 			trimBoundaryId,
 		};
 	return result;
