@@ -90,6 +90,8 @@ type TestMessage = {
         providerID?: string;
         modelID?: string;
         tools?: Record<string, unknown>;
+        finish?: string;
+        time?: { created: number; completed: number };
     };
     parts: TestPart[];
 };
@@ -154,6 +156,105 @@ function toolOutput(message: TestMessage, index: number): string {
 }
 
 describe("createTransform", () => {
+    it("holds completed reasoning-only assistants after demotion on defer", async () => {
+        useTempDataHome("context-transform-reasoning-only-demotion-");
+        const sessionId = "ses-reasoning-only-demotion";
+        let decision: "execute" | "defer" = "execute";
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: () => decision },
+            liveModelBySession: new Map([
+                [sessionId, { providerID: "anthropic", modelID: "claude-opus-5" }],
+            ]),
+            contextUsageMap: new Map(),
+            db: openDatabase(),
+            historyRefreshSessions: new Set(),
+            pendingMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            clearReasoningAge: 50,
+            protectedTokens: 0,
+            historianRunnable: false,
+        });
+        const messages: TestMessage[] = [
+            {
+                info: {
+                    id: "user",
+                    role: "user",
+                    sessionID: sessionId,
+                    providerID: "anthropic",
+                    modelID: "claude-opus-5",
+                },
+                parts: [{ type: "text", text: "start" }],
+            },
+            {
+                info: { id: "previous", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "bash",
+                        callID: "previous-call",
+                        state: { status: "completed", output: "done" },
+                    },
+                ],
+            },
+            {
+                info: {
+                    id: "msg_0bedb7d8f001FvFOQdZoGqywkr",
+                    role: "assistant",
+                    providerID: "anthropic",
+                    modelID: "claude-opus-5",
+                    finish: "stop",
+                    time: { created: 1789908450703, completed: 1789908461333 },
+                },
+                parts: [
+                    { type: "step-start", text: "" },
+                    { type: "reasoning", text: "signed reasoning only" },
+                    { type: "step-finish", text: "" },
+                ],
+            },
+            {
+                info: { id: "notice", role: "user" },
+                parts: [
+                    {
+                        type: "text",
+                        text: "<system-reminder>[BACKGROUND BASH COMPLETED]</system-reminder>",
+                    },
+                ],
+            },
+        ];
+        const a = { messages: structuredClone(messages) };
+        await transform({}, a);
+        decision = "defer";
+        messages.push({
+            info: { id: "newest", role: "assistant" },
+            parts: [
+                { type: "reasoning", text: "new thinking" },
+                {
+                    type: "tool",
+                    tool: "bash",
+                    callID: "new-call",
+                    state: { status: "completed", output: "done" },
+                },
+            ],
+        });
+        const b = { messages: structuredClone(messages) };
+        await transform({}, b);
+        const target = (output: typeof a) =>
+            output.messages.find((m) => m.info.id === "msg_0bedb7d8f001FvFOQdZoGqywkr");
+        expect(target(a)?.parts.some((p) => p.type === "reasoning")).toBe(true);
+        expect(target(b)).toEqual(target(a));
+        expect(target(b)?.parts).toEqual([
+            { type: "text", text: "" },
+            { type: "reasoning", text: "signed reasoning only" },
+            { type: "text", text: "" },
+        ]);
+        const sha = (value: unknown) =>
+            createHash("sha256").update(JSON.stringify(value)).digest("hex");
+        expect(sha(b.messages.slice(0, a.messages.length))).toBe(sha(a.messages));
+        expect(b.messages.findIndex((m) => m.info.id === "notice")).toBe(
+            b.messages.findIndex((m) => m.info.id === "msg_0bedb7d8f001FvFOQdZoGqywkr") + 1,
+        );
+    });
     it("logs both nudge gate verdicts on every evaluable TypeScript pass", async () => {
         useTempDataHome("context-transform-nudge-observability-");
         const sessionId = "ses-nudge-observability";
