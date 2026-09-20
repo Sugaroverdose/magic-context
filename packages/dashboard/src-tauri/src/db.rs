@@ -321,10 +321,16 @@ fn opencode_store_generation(
             |row| row.get(0),
         )
     };
+    // OpenCode 1.18.x already ships session_message and session_v2 beside its own
+    // message/part tables, so only the ABSENCE of the 1.x message tables identifies an
+    // OpenCode 2 store. Mirrors the plugin's detectOpenCodeStoreGeneration.
+    if table_exists("message")? && table_exists("part")? {
+        return Ok(OpenCodeStoreGeneration::V1);
+    }
     if table_exists("session_message")? {
         return Ok(OpenCodeStoreGeneration::V2);
     }
-    if table_exists("message")? || table_exists("session")? || table_exists("project")? {
+    if table_exists("session")? || table_exists("project")? {
         return Ok(OpenCodeStoreGeneration::V1);
     }
     Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
@@ -378,6 +384,63 @@ fn opencode_db_missing_message(resolution: &OpenCodeDbResolution) -> String {
         "Magic Context cannot find OpenCode's session database (looked for {}). History compaction (historian) and the mid-turn valve are disabled until it is found; set OPENCODE_DB if OpenCode stores it elsewhere.",
         opencode_db_probe_descriptions(resolution).join(", ")
     )
+}
+
+#[cfg(test)]
+mod opencode_store_generation_tests {
+    use super::*;
+
+    fn store_with(tables: &[&str]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        for table in tables {
+            conn.execute_batch(&format!("CREATE TABLE {table} (id TEXT PRIMARY KEY)"))
+                .unwrap();
+        }
+        conn
+    }
+
+    // Table set observed on a live OpenCode 1.18.30 store: the 1.x host already ships
+    // session_message and session_v2 beside its own message/part tables, so the
+    // presence of session_message must not classify the store as OpenCode 2.
+    #[test]
+    fn v1_store_carrying_session_message_stays_v1() {
+        let conn = store_with(&[
+            "message",
+            "part",
+            "project",
+            "session",
+            "session_message",
+            "session_v2",
+        ]);
+        assert_eq!(
+            opencode_store_generation(&conn).unwrap(),
+            OpenCodeStoreGeneration::V1
+        );
+    }
+
+    #[test]
+    fn v2_store_without_v1_message_tables_is_v2() {
+        let conn = store_with(&["project", "session_message", "session_v2", "workspace"]);
+        assert_eq!(
+            opencode_store_generation(&conn).unwrap(),
+            OpenCodeStoreGeneration::V2
+        );
+    }
+
+    #[test]
+    fn v1_store_without_session_message_is_v1() {
+        let conn = store_with(&["message", "part", "project", "session"]);
+        assert_eq!(
+            opencode_store_generation(&conn).unwrap(),
+            OpenCodeStoreGeneration::V1
+        );
+    }
+
+    #[test]
+    fn schemaless_store_is_refused() {
+        let conn = store_with(&[]);
+        assert!(opencode_store_generation(&conn).is_err());
+    }
 }
 
 #[cfg(test)]
