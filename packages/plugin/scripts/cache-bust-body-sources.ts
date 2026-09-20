@@ -29,6 +29,7 @@ export interface NormalizedRequestBody {
 export interface PiBodySnapshot {
     sequence: number;
     path: string;
+    wireModel?: string;
     messages: NormalizedMessage[];
 }
 
@@ -301,6 +302,8 @@ export function loadPiBodySnapshots(directory: string | undefined): Map<number, 
             snapshots.set(Number.parseInt(match[1], 10), {
                 sequence: Number.parseInt(match[1], 10),
                 path,
+                wireModel:
+                    typeof body.model === "string" && body.model.length > 0 ? body.model : undefined,
                 messages: normalizeRequestBody(body, "openai").messages,
             });
         } catch {

@@ -79,6 +79,21 @@
         "input": {}
     },
     {
+        "class": "usage_missing",
+        "decision": { "decision": "defer", "canonicalDecision": "defer" },
+        "input": { "providerComparableRead": 0, "directInput": 0, "previousTotal": 594149 }
+    },
+    {
+        "class": "provider_full_miss",
+        "decision": { "decision": "defer", "canonicalDecision": "defer" },
+        "input": {
+            "providerComparableRead": 0,
+            "previousTotal": 594149,
+            "previousModel": "claude-opus-5",
+            "currentModel": "claude-opus-4-8"
+        }
+    },
+    {
         "class": "unaccounted_defer_pass",
         "decision": { "decision": "defer", "canonicalDecision": "defer" },
         "input": {}

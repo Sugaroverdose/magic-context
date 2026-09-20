@@ -92,6 +92,7 @@ interface Snapshot {
     session: string;
     messagesCount: number;
     provider: BodyProvider;
+    wireModel?: string;
     sourceDir: string;
     segments: Segment[];
     usage?: MeterUsage;
@@ -253,6 +254,10 @@ function buildSegments(
             id: `message[${index}] ${describeNormalizedMessage(message)}`,
         })),
     };
+}
+
+function wireModel(body: Json): string | undefined {
+    return typeof body.model === "string" && body.model.length > 0 ? body.model : undefined;
 }
 
 function asJson(value: unknown): Json | undefined {
@@ -506,6 +511,7 @@ function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args): Snapshot[
                 session: candidate.session,
                 messagesCount: normalized.segments.length,
                 provider: normalized.provider,
+                wireModel: wireModel(body),
                 sourceDir: candidate.source.dir,
                 segments: normalized.segments,
                 usage: loadMeterUsage(responsePath, normalized.provider),
@@ -654,6 +660,7 @@ export function analyzeOpenCodeCacheBustSession(
         ];
     });
     const analyzedRequestTimestamps = boundedSnapshots
+        .filter((snapshot) => !isUsageMissing(snapshot))
         .map((snapshot) => Date.parse(snapshot.createdAt))
         .filter(inWindow);
     return {
@@ -661,6 +668,11 @@ export function analyzeOpenCodeCacheBustSession(
         highWaterMarkMs:
             analyzedRequestTimestamps.length > 0 ? Math.max(...analyzedRequestTimestamps) : null,
     };
+}
+
+function isUsageMissing(snapshot: Snapshot): boolean {
+    const usage = snapshot.usage;
+    return usage === undefined || (usage.cacheRead === 0 && usage.input === 0);
 }
 
 /** First wire-order segment index where prev/cur diverge (added/removed/changed). */
@@ -702,14 +714,43 @@ export function analyzeSnapshots(
 ): AnalysisRow[] {
     let previousShortRead = false;
     let previousBustDivergenceIndex: number | undefined;
+    let previousMetered: Snapshot | undefined;
     const rows: AnalysisRow[] = [];
     for (let index = 0; index < snaps.length; index += 1) {
         const current = snaps[index];
-        if (index === 0) {
-            rows.push({ current, divergenceIndex: -1, verdict: "BASE" });
+        if (isUsageMissing(current)) {
+            const previous = previousMetered;
+            const divergenceIndex = previous
+                ? firstDivergence(previous.segments, current.segments)
+                : -1;
+            const byteVerdict = previous
+                ? current.provider === "openai"
+                    ? divergenceIndex >= 0 && divergenceIndex < previous.segments.length
+                        ? "BUST"
+                        : "STABLE"
+                    : divergenceIndex !== -1 &&
+                        divergenceIndex <= lastBreakpointIndex(current.segments)
+                      ? "BUST"
+                      : "STABLE"
+                : undefined;
+            rows.push({
+                current,
+                previous,
+                divergenceIndex,
+                byteVerdict,
+                verdict: "UNMETERED",
+                meterVsBytes: "UNMETERED",
+                divergenceClass: "usage_missing",
+            });
             continue;
         }
-        const previous = snaps[index - 1];
+        if (!previousMetered) {
+            rows.push({ current, divergenceIndex: -1, verdict: "BASE" });
+            previousMetered = current;
+            continue;
+        }
+        const previous = previousMetered;
+        if (!previous.usage || !current.usage) continue;
         const divergenceIndex = firstDivergence(previous.segments, current.segments);
         // Anthropic exposes explicit breakpoints. OpenAI's cache is an implicit prefix,
         // so an in-place change/removal busts while ordinary appended input does not.
@@ -719,20 +760,7 @@ export function analyzeSnapshots(
                 : divergenceIndex !== -1 &&
                   divergenceIndex <= lastBreakpointIndex(current.segments);
         const byteVerdict: ByteVerdict = byteBust ? "BUST" : "STABLE";
-        if (!current.usage || !previous.usage) {
-            previousShortRead = false;
-            previousBustDivergenceIndex = undefined;
-            rows.push({
-                current,
-                previous,
-                divergenceIndex,
-                byteVerdict,
-                verdict: "UNMETERED",
-                meterVsBytes: "UNMETERED",
-            });
-            continue;
-        }
-        const prevTotal = previous.usage.total;
+        const prevTotal = previous.usage!.total;
         const epsilon = Math.max(64, previous.usage.input);
         const meterFloor = prevTotal - epsilon;
         // Anthropic separates direct input from cache writes, so it belongs in the
@@ -783,10 +811,15 @@ export function analyzeSnapshots(
                       currentProvider: current.provider,
                       firstDivergenceRole: divergentSegment?.role,
                       firstDivergenceSize: divergentSegment?.bytes,
-                      rewrittenTokens,
-                      cacheCreationTokens: current.usage.cacheCreation,
-                      promptTokens: prevTotal,
-                      inheritedFold: attributionDecision !== decision,
+                       rewrittenTokens,
+                       cacheCreationTokens: current.usage.cacheCreation,
+                       promptTokens: prevTotal,
+                       providerComparableRead: current.usage.cacheRead,
+                       directInput: current.usage.input,
+                       previousTotal: prevTotal,
+                       previousModel: previous.wireModel,
+                       currentModel: current.wireModel,
+                       inheritedFold: attributionDecision !== decision,
                       contentEvidence: [previous, current]
                           .flatMap((snapshot) =>
                               snapshot.segments.slice(
@@ -800,6 +833,7 @@ export function analyzeSnapshots(
                   })
                 : undefined;
         previousBustDivergenceIndex = verdict === "BUST" ? divergenceIndex : undefined;
+        previousMetered = current;
         rows.push({
             current,
             previous,
@@ -871,7 +905,13 @@ function meterCell(row: AnalysisRow): string {
         row.current.provider === "openai"
             ? `cached=${read.toLocaleString()}`
             : `read=${read.toLocaleString()} + input=${directInput.toLocaleString()} = ${row.comparableRead?.toLocaleString()}`;
-    return `${comparable}; floor=${row.meterFloor?.toLocaleString()} (prevTotal=${row.prevTotal?.toLocaleString()}, ε=${row.epsilon?.toLocaleString()})${rewritten}`;
+    const wireModel =
+        row.previous?.wireModel &&
+        row.current.wireModel &&
+        row.previous.wireModel !== row.current.wireModel
+            ? `; wireModel=${row.previous.wireModel} → ${row.current.wireModel}`
+            : "";
+    return `${comparable}; floor=${row.meterFloor?.toLocaleString()} (prevTotal=${row.prevTotal?.toLocaleString()}, ε=${row.epsilon?.toLocaleString()})${rewritten}${wireModel}`;
 }
 
 const HELP = `usage: bun scripts/analyze-cache-busts.ts --session <prefix> [options]
