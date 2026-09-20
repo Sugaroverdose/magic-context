@@ -4,6 +4,7 @@ import { createDreamTaskExecutor } from "../../features/magic-context/dreamer/ta
 import { runDueTasksForProject } from "../../features/magic-context/dreamer/task-scheduler";
 import { openDatabase } from "../../features/magic-context/storage";
 import type { HiddenCompletionExecutor } from "../../hooks/magic-context/compartment-runner-types";
+import { selectRunnableDreamTasks } from "./dream-manual";
 import type { V2Context } from "./types";
 
 /** The event carrier only wakes the shared scheduler; it never implements another
@@ -30,15 +31,21 @@ export function startDreamTrigger(
                 const db = openDatabase();
                 if (!db) continue;
                 try {
-                    await runDueTasksForProject({
-                        db,
-                        projectIdentity: args.projectIdentity(),
+                    // Scheduled and manual runs share one capability filter so a
+                    // host without a tool loop never records unsupported tasks as failed.
+                    const { runnable } = selectRunnableDreamTasks({
                         tasks: buildDreamTaskRuntimeConfigs(
                             args.config,
                             "opencode",
                             args.language,
                             args.mural?.model,
                         ),
+                        toolsSupported: args.executor.capabilities.tools === true,
+                    });
+                    await runDueTasksForProject({
+                        db,
+                        projectIdentity: args.projectIdentity(),
+                        tasks: runnable,
                         executor: createDreamTaskExecutor({
                             hiddenCompletionExecutor: args.executor,
                             parentSessionId: event.data.sessionID,

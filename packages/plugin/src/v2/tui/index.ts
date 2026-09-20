@@ -1,11 +1,14 @@
 import { jsx } from "@opentui/solid/jsx-runtime";
+import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
 import type { SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
+import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../../tui/compaction-off";
 import {
     closeRpc,
     getCompartmentCount,
     initRpcClient,
     loadSidebarSnapshot,
     loadStatusDetail,
+    requestDream,
     requestRecomp,
 } from "../../tui/data/context-db";
 import {
@@ -13,7 +16,7 @@ import {
     startNotificationSocket,
     stopNotificationSocket,
 } from "../../tui/data/notification-socket";
-import type { V2SidebarState, V2TuiContext } from "./types";
+import type { V2KeymapLayer, V2SidebarState, V2TuiContext } from "./types";
 
 const SIDEBAR_REFRESH_MS = 1_000;
 const inflight = new Set<string>();
@@ -25,8 +28,20 @@ function compactTokens(value: number): string {
     return String(value);
 }
 
-function sidebarText(snapshot: SidebarSnapshot | undefined): string {
+/** Exported for test access; mirrors the v1 sidebar's compaction-off rows. */
+export function sidebarText(snapshot: SidebarSnapshot | undefined): string {
     if (!snapshot) return "Magic Context · loading…";
+    if (snapshot.compaction_enabled === false) {
+        return [
+            "Magic Context",
+            nativeCompactionContextLabel(snapshot),
+            ...compactionOffSidebarRows(snapshot).map((row) => `${row.label} ${row.value}`),
+            ...(snapshot.readySmartNoteCount > 0
+                ? [`Smart Notes ${snapshot.readySmartNoteCount} ready`]
+                : []),
+            ...(snapshot.lastTransformError ? [`Warning: ${snapshot.lastTransformError}`] : []),
+        ].join("\n");
+    }
     const pressure =
         snapshot.contextLimit > 0
             ? `${snapshot.usagePercentage.toFixed(1)}% · ${compactTokens(snapshot.inputTokens)}/${compactTokens(snapshot.contextLimit)}`
@@ -41,12 +56,18 @@ function sidebarText(snapshot: SidebarSnapshot | undefined): string {
     ].join("\n");
 }
 
-function statusText(detail: StatusDetail): string {
+/** Exported for test access. */
+export function statusText(detail: StatusDetail): string {
     const context =
         detail.contextLimit > 0
             ? `${detail.usagePercentage.toFixed(1)}% (${compactTokens(detail.inputTokens)}/${compactTokens(detail.contextLimit)} tokens)`
             : `${compactTokens(detail.inputTokens)} tokens`;
     return [
+        ...(detail.compaction_enabled === false
+            ? [
+                  `Compaction: disabled (${COMPACTION_ENABLED_PATH}: false) — native compaction owns the context window.`,
+              ]
+            : []),
         `Context: ${context}`,
         `Historian: ${detail.historianRunning ? "running" : "idle"}`,
         `Compartments: ${detail.compartmentCount}`,
@@ -162,6 +183,22 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         return requested;
     };
 
+    const showDream = async (task?: string) => {
+        const target = currentSessionID(context);
+        if (!target) {
+            context.ui.toast.show({ message: "No active session", variant: "warning" });
+            return false;
+        }
+        const started = await requestDream(target, task);
+        context.ui.toast.show({
+            message: started
+                ? "Dream run started; the summary appears when it finishes"
+                : "Dream request failed",
+            variant: started ? "info" : "error",
+        });
+        return started;
+    };
+
     const unregisterSlot = context.ui.slot({
         append: "sidebar.content",
         render: ({ sessionID }) => {
@@ -170,38 +207,82 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         },
     });
 
-    try {
-        context.keymap.layer(() => ({
-            mode: "global",
-            commands: [
-                {
-                    id: "magic-context.status",
-                    title: "Magic Context: Status",
-                    group: "Magic Context",
-                    palette: true,
-                    slash: { name: "ctx-status", arguments: true },
-                    run: async (input) => {
-                        await showStatus(input?.trim().toLowerCase() === "diagnostics");
-                    },
+    // The keymap layer owns /ctx-status + /ctx-recomp + /ctx-dream. OpenCode 2
+    // runs plugin setup() outside the TUI component tree, where
+    // context.keymap.layer() throws "Keymap.Provider is missing" (the provider is
+    // a Solid context). Try the direct call first (hosts that do run setup
+    // in-tree), then fall back to the app slot: its render executes inside the
+    // component tree, the same place the host's own built-in plugins register
+    // their layers.
+    const buildKeymapLayer = (): V2KeymapLayer => ({
+        mode: "global",
+        commands: [
+            {
+                id: "magic-context.status",
+                title: "Magic Context: Status",
+                group: "Magic Context",
+                palette: true,
+                slash: { name: "ctx-status", arguments: true },
+                run: async (input) => {
+                    await showStatus(input?.trim().toLowerCase() === "diagnostics");
                 },
-                {
-                    id: "magic-context.recomp",
-                    title: "Magic Context: Recomp",
-                    group: "Magic Context",
-                    palette: true,
-                    slash: { name: "ctx-recomp" },
-                    run: async () => {
-                        await showRecomp();
-                    },
+            },
+            {
+                id: "magic-context.recomp",
+                title: "Magic Context: Recomp",
+                group: "Magic Context",
+                palette: true,
+                slash: { name: "ctx-recomp" },
+                run: async () => {
+                    await showRecomp();
                 },
-            ],
-        }));
-    } catch (error) {
-        if (!(error instanceof Error) || error.message !== "Keymap.Provider is missing")
-            throw error;
-        console.warn(
-            "[magic-context] OpenCode 2.0.5 keymap.layer is unavailable during plugin setup; /ctx-status and /ctx-recomp were not registered",
-        );
+            },
+            {
+                id: "magic-context.dream",
+                title: "Magic Context: Dream",
+                group: "Magic Context",
+                palette: true,
+                slash: { name: "ctx-dream", arguments: true },
+                run: async (input) => {
+                    await showDream(input?.trim() || undefined);
+                },
+            },
+        ],
+    });
+    let keymapLayerRegistered = false;
+    let keymapGapLogged = false;
+    const registerKeymapLayer = (): boolean => {
+        if (keymapLayerRegistered) return true;
+        try {
+            context.keymap.layer(buildKeymapLayer);
+            keymapLayerRegistered = true;
+            return true;
+        } catch (error) {
+            if (!(error instanceof Error) || error.message !== "Keymap.Provider is missing")
+                throw error;
+            return false;
+        }
+    };
+    let unregisterKeymapSlot: (() => void) | undefined;
+    if (!registerKeymapLayer()) {
+        unregisterKeymapSlot = context.ui.slot({
+            append: "app",
+            render: () => {
+                let registered = false;
+                try {
+                    registered = registerKeymapLayer();
+                } catch (error) {
+                    console.warn("[magic-context] keymap.layer registration failed", error);
+                }
+                if (!registered && !keymapGapLogged) {
+                    keymapGapLogged = true;
+                    console.warn(
+                        "[magic-context] OpenCode 2 keymap.layer is unavailable; /ctx-status, /ctx-recomp and /ctx-dream were not registered",
+                    );
+                }
+                return null;
+            },
+        });
     }
 
     const stopListening = context.data.listen(({ details }) => {
@@ -255,6 +336,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
 
     return () => {
         unregisterSlot();
+        unregisterKeymapSlot?.();
         stopListening();
         stopNotificationSocket();
         closeRpc();

@@ -11,8 +11,10 @@ import {
 import { resolveProjectIdentity } from "../../features/magic-context/project-identity";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage-db";
 import { acquireWrapupInProgress } from "../../features/magic-context/storage-meta-persisted";
+import type { HiddenCompletionExecutor } from "./compartment-runner-types";
 import type { LiveSessionState } from "./live-session-state";
 import {
+    buildRecompDeps,
     contextualizeUpgradeReason,
     extractRecompReason,
     isRecompComplete,
@@ -71,6 +73,23 @@ function makeCtx(
         ...overrides,
     } as ManagedRecompContext;
 }
+
+describe("managed recomp completion executor", () => {
+    it("forwards a host executor when no SDK client is available", () => {
+        useTempDataHome("recomp-orch-executor-");
+        const db = openDatabase();
+        const executor = {} as HiddenCompletionExecutor;
+        const ctx = makeCtx(db, "/tmp/recomp-orch-executor", {
+            client: undefined as never,
+            hiddenCompletionExecutor: executor,
+        });
+
+        const deps = buildRecompDeps(ctx, "ses-executor");
+
+        expect(deps.client).toBeUndefined();
+        expect(deps.hiddenCompletionExecutor).toBe(executor);
+    });
+});
 
 describe("runManagedUpgrade — wrapup guard", () => {
     it("skips before migration-only upgrade work while wrapup is active", async () => {

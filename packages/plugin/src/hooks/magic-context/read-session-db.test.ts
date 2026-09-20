@@ -598,6 +598,62 @@ function createOpenCodeDb(rows: MessageRow[]): void {
     }
 }
 
+function insertV2SessionMessages(
+    rows: Array<{
+        id: string;
+        sessionId: string;
+        type: "user" | "assistant" | "compaction";
+        seq: number;
+        model?: { providerID?: string; id?: string };
+        agent?: string;
+    }>,
+    options: { v2Marker?: boolean; v1Part?: boolean } = {},
+): void {
+    const dbPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const db = new Database(dbPath);
+    try {
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS session_v2 (id TEXT PRIMARY KEY);
+        `);
+        if (options.v2Marker === false) db.exec("DROP TABLE session_v2");
+        if (options.v1Part !== false) {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS part (
+                    id TEXT PRIMARY KEY,
+                    message_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    time_updated INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );
+            `);
+        }
+        const insert = db.prepare(
+            `INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        );
+        const now = Date.now();
+        for (const row of rows) {
+            const data: Record<string, unknown> = {};
+            if (row.model !== undefined) data.model = row.model;
+            if (row.agent !== undefined) data.agent = row.agent;
+            insert.run(row.id, row.sessionId, row.type, row.seq, now, now, JSON.stringify(data));
+        }
+    } finally {
+        closeQuietly(db);
+    }
+}
+
 describe("latestPersistedMessageForRecovery", () => {
     it("reports when the latest assistant child has completed", () => {
         useTempDataHome("read-session-db-recovery-completed-");
@@ -626,6 +682,105 @@ describe("latestPersistedMessageForRecovery", () => {
 });
 
 describe("findLastAssistantModelFromOpenCodeDb", () => {
+    it("prefers session_message on a migrated v2 store", () => {
+        useTempDataHome("read-session-db-v2-preference-");
+        createOpenCodeDb([
+            {
+                id: "msg_stale",
+                sessionId: "ses_A",
+                role: "assistant",
+                providerID: "anthropic",
+                modelID: "claude-sonnet-4.5",
+                timeCreated: 1000,
+            },
+        ]);
+        insertV2SessionMessages([
+            { id: "sms_user", sessionId: "ses_A", type: "user", seq: 1 },
+            {
+                id: "sms_asst",
+                sessionId: "ses_A",
+                type: "assistant",
+                seq: 2,
+                model: { providerID: "commandcode", id: "deepseek/deepseek-v4.1-flash" },
+                agent: "build",
+            },
+        ]);
+        expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            providerID: "commandcode",
+            modelID: "deepseek/deepseek-v4.1-flash",
+            agent: "build",
+        });
+    });
+
+    it("reads session_message on a native v2 store", () => {
+        useTempDataHome("read-session-db-native-v2-");
+        insertV2SessionMessages(
+            [
+                {
+                    id: "sms_asst",
+                    sessionId: "ses_A",
+                    type: "assistant",
+                    seq: 2,
+                    model: { providerID: "commandcode", id: "deepseek-v4" },
+                },
+            ],
+            { v1Part: false },
+        );
+        expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            providerID: "commandcode",
+            modelID: "deepseek-v4",
+        });
+    });
+
+    it("falls back to the v1 table when migrated v2 has no assistant row", () => {
+        useTempDataHome("read-session-db-v2-fallback-");
+        createOpenCodeDb([
+            {
+                id: "msg_legacy",
+                sessionId: "ses_A",
+                role: "assistant",
+                providerID: "anthropic",
+                modelID: "claude-opus-4-7",
+                timeCreated: 1000,
+            },
+        ]);
+        insertV2SessionMessages([{ id: "sms_user", sessionId: "ses_A", type: "user", seq: 1 }]);
+        expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            providerID: "anthropic",
+            modelID: "claude-opus-4-7",
+        });
+    });
+
+    it("does not consult session_message on a 1.18 store", () => {
+        useTempDataHome("read-session-db-v1-session-message-");
+        createOpenCodeDb([
+            {
+                id: "msg_live",
+                sessionId: "ses_A",
+                role: "assistant",
+                providerID: "anthropic",
+                modelID: "claude-opus-4-7",
+                timeCreated: 2000,
+            },
+        ]);
+        insertV2SessionMessages(
+            [
+                {
+                    id: "sms_stale",
+                    sessionId: "ses_A",
+                    type: "assistant",
+                    seq: 9,
+                    model: { providerID: "stale", id: "stale-model" },
+                },
+            ],
+            { v2Marker: false },
+        );
+        expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            providerID: "anthropic",
+            modelID: "claude-opus-4-7",
+        });
+    });
+
     it("returns null for a session with no assistant messages", () => {
         useTempDataHome("read-session-db-no-assistant-");
         createOpenCodeDb([

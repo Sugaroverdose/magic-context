@@ -1,6 +1,8 @@
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
+import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
+import { isFailClosedBlockingError } from "../../features/magic-context/fail-closed-block";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
 import { createScheduler } from "../../features/magic-context/scheduler";
@@ -16,6 +18,7 @@ import {
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import { assertExecutableToolInput } from "../../hooks/magic-context/dropped-input-guard";
+import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import {
     createChatMessageHook,
@@ -28,8 +31,10 @@ import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatt
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
+import { registerRpcHandlers } from "../../plugin/rpc-handlers";
 import { detectConflicts } from "../../shared/conflict-detector";
-import { getDataDir } from "../../shared/data-path";
+import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
+import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import {
@@ -45,6 +50,7 @@ import {
     type PromptSurfaceRuntime,
 } from "../../shared/prompt-surface-runtime";
 import { pushNotification } from "../../shared/rpc-notifications";
+import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
@@ -52,13 +58,22 @@ import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { removeHostSession } from "../host-service";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
+import { DeletedSessionTombstones } from "./deleted-session-tombstones";
+import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { startDreamTrigger } from "./dream-trigger";
 import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
+import { modelLimitCacheWarm, warmModelLimitCacheFromCatalog } from "./model-limit-cache";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
+import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { rawMessages } from "./store";
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
+import { resolveUsageReading } from "./usage-reading";
+
+export function isBlockingV2TransformError(error: unknown): boolean {
+    return error instanceof EmergencyFailClosedError || isFailClosedBlockingError(error);
+}
 
 export function createHostSeams(
     context: V2Context,
@@ -303,6 +318,8 @@ export async function registerContext(context: V2Context) {
     let transform: ReturnType<typeof createTransform> | undefined;
     let systemPrompt: ReturnType<typeof createSystemPromptHashHandler> | undefined;
     const systemPromptRefreshSessions = new Set<string>();
+    const tagger = createTagger();
+    const deletedSessions = new DeletedSessionTombstones();
     const recordUsage = async (
         draft: Pick<SessionContext, "sessionID" | "model">,
     ): Promise<boolean> => {
@@ -315,13 +332,10 @@ export async function registerContext(context: V2Context) {
                 gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
             );
             try {
-                const latest = reader
-                    .history(draft.sessionID)
-                    .filter((row) => row.type === "assistant")
-                    .at(-1);
-                const tokens = latest?.data.tokens;
-                const modelKey = `${draft.model.providerID}/${draft.model.id}`;
-                if (!queriedModels.has(modelKey)) {
+                const latest = reader.latestAssistant(draft.sessionID);
+                const latestCompaction = reader.latestCompaction(draft.sessionID);
+                const draftModelKey = `${draft.model.providerID}/${draft.model.id}`;
+                if (!queriedModels.has(draftModelKey)) {
                     const catalog = await Promise.resolve(context.model.list());
                     const providers = new Map<
                         string,
@@ -349,42 +363,65 @@ export async function registerContext(context: V2Context) {
                             }),
                         },
                     });
-                    queriedModels.add(modelKey);
+                    queriedModels.add(draftModelKey);
                 }
-                const rawLimit = rawLimits.get(modelKey);
-                // The shared catalog rejects small limits as implausible, but a GA
-                // provider may explicitly configure a valid small context window.
-                const limit =
-                    rawLimit && !isSaneLimit(rawLimit.context)
-                        ? resolveLimit(rawLimit, draft.model.providerID, draft.model.id)
-                        : resolveContextLimit(draft.model.providerID, draft.model.id, {
-                              db,
+                const usageDb = db;
+                const limitFor = (providerID: string, modelID: string) => {
+                    const modelKey = `${providerID}/${modelID}`;
+                    const rawLimit = rawLimits.get(modelKey);
+                    // The shared catalog rejects unusually small limits, but a
+                    // provider may explicitly configure a valid small context window.
+                    return rawLimit && !isSaneLimit(rawLimit.context)
+                        ? (resolveLimit(rawLimit, providerID, modelID) ?? 0)
+                        : resolveContextLimit(providerID, modelID, {
+                              db: usageDb,
                               sessionID: draft.sessionID,
                           });
-                if (tokens && limit && Number.isFinite(limit) && limit > 0) {
-                    const inputTokens = tokens.input + tokens.cache.read + tokens.cache.write;
-                    // Only the raw host window is an immediate admission boundary.
-                    // Reserved-output pressure still reaches the historian recovery path.
+                };
+                const reading = resolveUsageReading({
+                    rowModel: latest?.data.model,
+                    draftModel: { providerID: draft.model.providerID, id: draft.model.id },
+                    tokens: latest?.data.tokens,
+                    completed: latest?.data.time?.completed,
+                    limitFor,
+                });
+                if (reading) {
+                    // The provider's raw 95% wall always refuses. Below that wall,
+                    // use the outgoing model's output-reserved admission limit; a newer
+                    // host compaction may cross that tighter limit and still be sent once
+                    // so its reduced input-token usage can be measured.
+                    const rawContextLimit = rawLimits.get(draftModelKey)?.context;
+                    const providerHardPressure =
+                        typeof rawContextLimit === "number" &&
+                        Number.isFinite(rawContextLimit) &&
+                        rawContextLimit > 0 &&
+                        reading.inputTokens / rawContextLimit >= 0.95;
+                    const hostCompactionReducedUsage =
+                        latestCompaction !== undefined &&
+                        latest !== undefined &&
+                        latestCompaction.seq >= latest.seq;
                     unsafe =
-                        rawLimit !== undefined &&
-                        inputTokens <= rawLimit.context &&
-                        inputTokens / rawLimit.context >= 0.95;
-                    const completed = latest?.data.time?.completed;
-                    if (typeof completed === "number")
-                        updateSessionMeta(db, draft.sessionID, { lastResponseTime: completed });
-                    const percentage = (inputTokens / limit) * 100;
-                    updateSessionMeta(db, draft.sessionID, {
+                        providerHardPressure ||
+                        (!hostCompactionReducedUsage &&
+                            rawContextLimit !== undefined &&
+                            reading.inputTokens / reading.admissionLimit >= 0.95);
+                    if (reading.completed !== undefined)
+                        updateSessionMeta(usageDb, draft.sessionID, {
+                            lastResponseTime: reading.completed,
+                        });
+                    const percentage = (reading.inputTokens / reading.limit) * 100;
+                    updateSessionMeta(usageDb, draft.sessionID, {
                         lastContextPercentage: percentage,
-                        lastInputTokens: inputTokens,
-                        lastUsageContextLimit: limit,
-                        lastObservedModelKey: modelKey,
+                        lastInputTokens: reading.inputTokens,
+                        lastUsageContextLimit: reading.limit,
+                        lastObservedModelKey: reading.modelKey ?? draftModelKey,
                     });
                     sessionLog(
                         draft.sessionID,
-                        `v2 usage: inputTokens=${inputTokens} contextLimit=${limit} percentage=${percentage}`,
+                        `v2 usage: inputTokens=${reading.inputTokens} contextLimit=${reading.limit} percentage=${percentage}`,
                     );
                     usage.set(draft.sessionID, {
-                        usage: { inputTokens, percentage: (inputTokens / limit) * 100 },
+                        usage: { inputTokens: reading.inputTokens, percentage },
                         hasUsageTokens: true,
                         updatedAt: Date.now(),
                     });
@@ -409,6 +446,7 @@ export async function registerContext(context: V2Context) {
                 if (!event.data?.sessionID) continue;
                 const sessionID = event.data.sessionID;
                 if (event.type === "session.deleted") {
+                    deletedSessions.add(sessionID);
                     if (db) {
                         markSessionCleanupPending(db, sessionID);
                         clearSession(db, sessionID);
@@ -425,6 +463,7 @@ export async function registerContext(context: V2Context) {
                     lastHeuristicsTurnId.delete(sessionID);
                     systemPromptRefreshSessions.delete(sessionID);
                     systemPrompt?.clearSession(sessionID);
+                    tagger.cleanup(sessionID);
                     continue;
                 }
                 if (event.type !== "session.execution.succeeded") continue;
@@ -456,6 +495,9 @@ export async function registerContext(context: V2Context) {
                 systemHash: foldDigest(JSON.stringify(draft.system)),
                 toolSetHash: "",
                 modelKey: `${draft.model.providerID}/${draft.model.id}`,
+                // materializeM0 does not read cacheExpired. mustMaterialize owns
+                // expiry decisions on the transform path; this fold always renders
+                // fresh bytes and keys its markers from the system and model hashes.
                 cacheExpired: false,
                 lastResponseTime: state.lastResponseTime,
             },
@@ -497,11 +539,15 @@ export async function registerContext(context: V2Context) {
         });
     await context.session.hook("context", async (draft) => {
         if (hiddenChildHook.apply(draft)) return;
+        // A deletion that races an in-flight pass must not let that pass rebuild
+        // the state just cleared by the one deletion event.
+        if (deletedSessions.has(draft.sessionID)) return;
         liveModels.set(draft.sessionID, {
             providerID: draft.model.providerID,
             modelID: draft.model.id,
         });
         variants.set(draft.sessionID, draft.model.variant);
+        if (!modelLimitCacheWarm()) void warmModelLimitCacheFromCatalog(context);
         agents.set(draft.sessionID, draft.agent);
         applyV2PromptSurfaceTools(draft, promptSurfaceRuntime, config.prompt_surface);
         if (context.tool.transform) {
@@ -600,7 +646,7 @@ export async function registerContext(context: V2Context) {
                 );
             transform ??= createTransform({
                 db,
-                tagger: createTagger(),
+                tagger,
                 scheduler: createScheduler({
                     executeThresholdPercentage: config.execute_threshold_percentage,
                 }),
@@ -745,22 +791,157 @@ export async function registerContext(context: V2Context) {
             }
         } catch (error) {
             if (error instanceof V2ContextRefusal) throw error;
-            if (postFold) {
+            if (isBlockingV2TransformError(error)) {
+                // These errors mean the shared transform cannot prove a safe prompt.
+                // Native compaction owns recovery when Magic Context compaction is off.
+                if (!compactionOff) {
+                    await interruptBeforeProvider(context.session, draft.sessionID);
+                    throw new V2ContextRefusal("Magic Context refused to send an unsafe prompt.", {
+                        cause: error,
+                    });
+                }
+                console.warn(
+                    "[magic-context] compaction-off: fail-closed inert, passing through",
+                    error,
+                );
+            } else if (postFold) {
                 await interruptBeforeProvider(context.session, draft.sessionID);
                 throw new V2ContextRefusal(
                     "Magic Context could not restore the unarchived host history.",
                     { cause: error },
                 );
+            } else {
+                // Another plugin can poison the shared draft. Do not fail an otherwise viable turn.
+                console.warn("[magic-context] v2 context unavailable", error);
             }
-            // Another plugin can poison the shared draft. Do not fail an otherwise viable turn.
-            console.warn("[magic-context] v2 context unavailable", error);
         }
     });
+    // Warm eagerly for cold sidebar/status reads; a failed startup warm releases
+    // its latch and the context hook above retries after the host catalog settles.
+    void warmModelLimitCacheFromCatalog(context);
+    // OpenCode 2 never runs the v1 server() lane. Start the RPC surface here so
+    // the terminal TUI can read the v2 lane's draft-authoritative session state.
+    const rpcLiveSessionState = createV2RpcLiveSessionState({
+        liveModelBySession: liveModels,
+        variantBySession: variants,
+        agentBySession: agents,
+        channel1StateBySession: channel1,
+        historyRefreshSessions,
+        pendingMaterializationSessions,
+    });
+    const storageDir = getMagicContextStorageDir();
+    const rpcServer = new MagicContextRpcServer(storageDir, directory);
+    let rpcStopped = false;
+    registerRpcHandlers(rpcServer, {
+        directory,
+        config,
+        client: undefined,
+        liveSessionState: rpcLiveSessionState,
+        rustModeModuleClient: undefined,
+        hiddenCompletionExecutor,
+        storageDir,
+    });
+    // The v2 TUI reaches manual dreaming through RPC because this host has no
+    // command-template path. The run continues in the background and reports its
+    // result through the notification socket.
+    const manualDreamer =
+        config.dreamer && config.dreamer.disable !== true ? config.dreamer : undefined;
+    rpcServer.handle("dream", async (params) => {
+        const sessionId = String(params.sessionId ?? "");
+        if (!sessionId) return { ok: false, error: "no session" };
+        if (!manualDreamer || !hiddenCompletionExecutor) {
+            pushNotification(
+                "toast",
+                { message: "Dreaming is not configured for this project.", variant: "warning" },
+                sessionId,
+            );
+            return { ok: false, error: "dreamer unavailable" };
+        }
+        const requested = resolveManualDreamTask(params.task);
+        if (requested.error) {
+            pushNotification("toast", { message: requested.error, variant: "warning" }, sessionId);
+            return { ok: false, error: requested.error };
+        }
+        db ??= openDatabase();
+        if (!db || !isDatabasePersisted(db)) {
+            pushNotification(
+                "toast",
+                {
+                    message: "Dreaming is unavailable: context storage is not durable.",
+                    variant: "error",
+                },
+                sessionId,
+            );
+            return { ok: false, error: "storage unavailable" };
+        }
+        const runDb = db;
+        const runExecutor = hiddenCompletionExecutor;
+        void runManualDreamNow({
+            db: runDb,
+            dreamer: manualDreamer,
+            projectIdentity: resolveProjectIdentity(directory) ?? directory,
+            directory,
+            language: config.language,
+            mural: config.mural,
+            executor: runExecutor,
+            sessionId,
+            ...(requested.task !== undefined ? { task: requested.task } : {}),
+        })
+            .then(({ summary, unsupportedTasks }) => {
+                // When an explicitly requested task is unsupported, omit the
+                // otherwise misleading "No enabled dream tasks" empty summary.
+                const hasSummaryContent =
+                    summary.ran.length > 0 ||
+                    summary.failed.length > 0 ||
+                    summary.skippedNoWork.length > 0 ||
+                    summary.deferredBusy.length > 0 ||
+                    Object.keys(summary.backlogBefore ?? {}).length > 0 ||
+                    Object.keys(summary.backlogAfter ?? {}).length > 0;
+                const message = [
+                    hasSummaryContent || unsupportedTasks.length === 0
+                        ? summarizeManualDream(summary)
+                        : undefined,
+                    unsupportedTasks.length > 0
+                        ? `Unsupported on this host (no tool loop): ${unsupportedTasks.join(", ")}`
+                        : undefined,
+                ]
+                    .filter((line) => line !== undefined)
+                    .join("\n\n");
+                pushNotification(
+                    "action",
+                    {
+                        action: "show-result-dialog",
+                        title: "Magic Context dream run",
+                        message,
+                    },
+                    sessionId,
+                );
+            })
+            .catch((error) => {
+                pushNotification(
+                    "toast",
+                    { message: `Dream run failed: ${getErrorMessage(error)}`, variant: "error" },
+                    sessionId,
+                );
+            });
+        return { ok: true };
+    });
+    // Start the RPC server asynchronously after plugin construction returns so
+    // Bun.serve and its discovery-file write do not consume the host's deadline.
+    setTimeout(() => {
+        if (rpcStopped) return;
+        void rpcServer
+            .start()
+            .catch((error) => console.warn("[magic-context] v2 RPC server failed to start", error));
+    }, 0);
     return {
         async dispose() {
+            rpcStopped = true;
+            rpcServer.stop();
             tools?.dispose();
             usageController.abort();
             await usageDone;
+            deletedSessions.clear();
             await dreamTrigger?.dispose();
             for (const release of rawProviders.values()) release();
             rawProviders.clear();

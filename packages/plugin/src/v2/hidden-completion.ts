@@ -737,17 +737,25 @@ export async function createV2HiddenCompletionExecutor(
                         ? request.body.system
                         : run.identity.system;
                 const tokens = row.data.tokens;
+                const tokenNumber = (value: unknown): number | undefined =>
+                    typeof value === "number" && Number.isFinite(value) ? value : undefined;
+                const reportedInput = tokenNumber(tokens?.input);
+                const reportedOutput = tokenNumber(tokens?.output);
                 run.completion = {
                     text,
                     reasoning: null,
-                    usage: tokens
-                        ? {
-                              input: tokens.input,
-                              output: tokens.output,
-                              cacheRead: tokens.cache.read,
-                              cacheWrite: tokens.cache.write,
-                          }
-                        : meter(system, promptText(request), text ?? ""),
+                    // If either side is numeric, retain the provider's partial usage
+                    // and floor omitted components to zero. With no numeric usage,
+                    // use the local meter so budget accounting remains finite.
+                    usage:
+                        reportedInput !== undefined || reportedOutput !== undefined
+                            ? {
+                                  input: reportedInput ?? 0,
+                                  output: reportedOutput ?? 0,
+                                  cacheRead: tokenNumber(tokens?.cache?.read) ?? 0,
+                                  cacheWrite: tokenNumber(tokens?.cache?.write) ?? 0,
+                              }
+                            : meter(system, promptText(request), text ?? ""),
                     lengthCapped: ["length", "max_tokens"].includes(row.data.finish ?? ""),
                     providerId: row.data.model?.providerID ?? requested.providerID,
                     modelId: row.data.model?.id ?? requested.modelID,
