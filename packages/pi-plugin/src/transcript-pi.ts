@@ -83,6 +83,7 @@ import {
 } from "./native-replay-pi";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
+import { isPiSystemEntry, type PiSystemEntry } from "./system-entry-pi";
 
 // We re-declare the minimal subset of pi-ai message shapes we need.
 // Importing from @earendil-works/pi-ai directly would couple the plugin
@@ -135,7 +136,11 @@ type PiToolResultMessage = {
 	timestamp: number;
 };
 
-type PiAgentMessage = PiUserMessage | PiAssistantMessage | PiToolResultMessage;
+type PiAgentMessage =
+	| PiUserMessage
+	| PiAssistantMessage
+	| PiToolResultMessage
+	| PiSystemEntry;
 type MarkDirty = (messageIndex: number, toolCallId?: string) => void;
 
 /**
@@ -318,7 +323,7 @@ function buildTranscriptView(
 	let i = 0;
 	while (i < working.length) {
 		const msg = working[i];
-		if (msg === undefined) {
+		if (msg === undefined || isPiSystemEntry(msg)) {
 			i += 1;
 			continue;
 		}

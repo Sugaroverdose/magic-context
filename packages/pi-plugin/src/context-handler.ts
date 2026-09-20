@@ -141,7 +141,6 @@ import {
 } from "@magic-context/core/hooks/magic-context/channel2-cycle";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { evaluateChannel2 } from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
-import { formatTailHygienePrefixMismatch } from "@magic-context/core/hooks/magic-context/tail-hygiene-walk";
 import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import {
 	type DroppedTokenReduction,
@@ -182,6 +181,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/supersession-reclaim";
 import { stripSystemInjection } from "@magic-context/core/hooks/magic-context/system-injection-stripper";
 import { stripTagPrefix } from "@magic-context/core/hooks/magic-context/tag-content-primitives";
+import { formatTailHygienePrefixMismatch } from "@magic-context/core/hooks/magic-context/tail-hygiene-walk";
 import {
 	advanceToolReclaimWatermarkToCurrentMax,
 	buildSyntheticToolReclaimOps,
@@ -287,6 +287,11 @@ import {
 import { capturePiServedArray } from "./served-array-ledger";
 import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
 import { stripPiProcessedImages } from "./strip-processed-images-pi";
+import {
+	adoptPiCompactionSystemSnapshot,
+	isPiSystemEntry,
+	isPiSystemMessageEntry,
+} from "./system-entry-pi";
 import { clearPiSystemPromptSession } from "./system-prompt";
 import {
 	assertPiTailHygieneContentUnchanged,
@@ -1399,7 +1404,11 @@ function collectMessageEntryIds(
 	};
 
 	if (compactionIndex >= 0) {
-		// Index 0 = synthetic compaction summary — no SessionEntry id.
+		const hasSystemSnapshot = isPiSystemEntry(
+			(entries[compactionIndex] as { systemMessage?: unknown }).systemMessage,
+		);
+		if (hasSystemSnapshot) ids.push(undefined);
+		// The synthetic summary has no SessionEntry id.
 		ids.push(undefined);
 
 		// Pre-compaction: emit ids from firstKeptEntryId (inclusive) up to
@@ -1414,7 +1423,11 @@ function collectMessageEntryIds(
 				if (typeof entryId === "string" && entryId === firstKeptEntryId) {
 					foundFirstKept = true;
 				}
-				if (!foundFirstKept) continue;
+				if (
+					!foundFirstKept ||
+					(hasSystemSnapshot && isPiSystemMessageEntry(entry))
+				)
+					continue;
 				if (isEmitEligible(entry)) {
 					ids.push(entry.id);
 				}
@@ -1654,7 +1667,11 @@ function buildPiAlignedEntryIds(
 		return entries.filter(isPiContextEmitEligible).map((entry) => entry.id);
 	}
 
-	const ids: (string | undefined)[] = [undefined];
+	const compaction = entries[compactionIndex] as { systemMessage?: unknown };
+	const hasSystemSnapshot = isPiSystemEntry(compaction.systemMessage);
+	const ids: (string | undefined)[] = hasSystemSnapshot
+		? [undefined, undefined]
+		: [undefined];
 	if (firstKeptEntryId !== undefined) {
 		let foundFirstKept = false;
 		for (let index = 0; index < compactionIndex; index += 1) {
@@ -1662,7 +1679,12 @@ function buildPiAlignedEntryIds(
 			if ((entry as { id?: unknown } | undefined)?.id === firstKeptEntryId) {
 				foundFirstKept = true;
 			}
-			if (foundFirstKept && isPiContextEmitEligible(entry)) ids.push(entry.id);
+			if (
+				foundFirstKept &&
+				isPiContextEmitEligible(entry) &&
+				!(hasSystemSnapshot && isPiSystemMessageEntry(entry))
+			)
+				ids.push(entry.id);
 		}
 	}
 	for (let index = compactionIndex + 1; index < entries.length; index += 1) {
@@ -1672,7 +1694,7 @@ function buildPiAlignedEntryIds(
 	return ids;
 }
 
-// The first two prepended Pi messages already contain the compartment summaries.
+// The injected history users already contain the compartment summaries.
 // Calling appendCompaction makes Pi add the same summary during the next projection,
 // changing bytes sent to the provider one pass after cache invalidation. Remove it
 // only when the branch entry proves this plugin created the matching compaction.
@@ -1681,7 +1703,8 @@ function stripMcOwnedPiCompactionSummary(
 	entryIds: (string | undefined)[],
 	branchEntries: readonly unknown[],
 ): boolean {
-	const summaryMessage = messages[0] as
+	const summaryIndex = isPiSystemEntry(messages[0]) ? 1 : 0;
+	const summaryMessage = messages[summaryIndex] as
 		| { role?: unknown; summary?: unknown; tokensBefore?: unknown }
 		| undefined;
 	if (summaryMessage?.role !== "compactionSummary") return false;
@@ -1708,13 +1731,13 @@ function stripMcOwnedPiCompactionSummary(
 	if (
 		summaryMessage.summary !== compaction.summary ||
 		summaryMessage.tokensBefore !== compaction.tokensBefore ||
-		entryIds[0] !== undefined
+		entryIds[summaryIndex] !== undefined
 	) {
 		return false;
 	}
 
-	messages.splice(0, 1);
-	entryIds.splice(0, 1);
+	messages.splice(summaryIndex, 1);
+	entryIds.splice(summaryIndex, 1);
 	return true;
 }
 
@@ -6492,6 +6515,17 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					args.sessionId,
 					pending,
 				);
+				if (outcome.kind === "applied") {
+					if (
+						adoptPiCompactionSystemSnapshot(
+							args.messages,
+							args.readBranchEntries(),
+						) &&
+						injectionResult
+					) {
+						injectionResult.syntheticLeadingCount = 3;
+					}
+				}
 				if (outcome.kind === "waiting-for-entry") {
 					suppressDeferredHistoryDrain = true;
 					preserveDeferredMaterializationForMarkerDrain = true;

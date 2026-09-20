@@ -21,6 +21,8 @@ import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import type { Database } from "@magic-context/core/shared/sqlite";
 
+import { isPiSystemEntry } from "./system-entry-pi";
+
 interface PiLkgInputSnapshot {
 	id: string;
 	messageIndex: number;
@@ -28,6 +30,7 @@ interface PiLkgInputSnapshot {
 }
 
 export interface PiLkgPassSnapshot {
+	systemEntries?: readonly string[];
 	sessionId: string;
 	inputs: PiLkgInputSnapshot[];
 	preparationFailure: string | null;
@@ -372,8 +375,10 @@ export function createPiLkgCoordinator(
 				ok: true,
 				messages: [
 					...prefix.filter(
-						(_, index) =>
-							ownership[index] === null || !removed.has(ownership[index] ?? ""),
+						(message, index) =>
+							isPiSystemEntry(message) ||
+							ownership[index] === null ||
+							!removed.has(ownership[index] ?? ""),
 					),
 					...snapshot.pristineTail,
 				],
@@ -568,7 +573,32 @@ export function createPiLkgCoordinator(
 		}
 	};
 
-	return { beginPass, replay, captureAppliedPass };
+	return {
+		beginPass(args) {
+			return {
+				...beginPass(args),
+				systemEntries: args.messages
+					.filter(isPiSystemEntry)
+					.map((message) => JSON.stringify(message)),
+			};
+		},
+		replay(snapshot) {
+			const result = replay(snapshot);
+			if (!result.ok) return result;
+			const systems = result.messages
+				.filter(isPiSystemEntry)
+				.map((message) => JSON.stringify(message));
+			let cursor = 0;
+			for (const expected of snapshot.systemEntries ?? []) {
+				const index = systems.indexOf(expected, cursor);
+				if (index < 0)
+					return { ok: false, reason: "lkg_system_state_mismatch" };
+				cursor = index + 1;
+			}
+			return result;
+		},
+		captureAppliedPass,
+	};
 }
 
 /** Synthetic todo results follow their assistant owner when a raw head is trimmed. */
@@ -578,7 +608,7 @@ export function resolvePiLkgOutputEntryIds(
 	entryId: (message: object) => string | undefined,
 ): (string | null | undefined)[] {
 	const ids = messages.map((message, index) =>
-		index < syntheticLeadingCount
+		index < syntheticLeadingCount && !isPiSystemEntry(message)
 			? null
 			: isRecord(message)
 				? entryId(message)
