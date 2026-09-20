@@ -37,6 +37,7 @@ import {
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION,
     OPENCODE_PLUGIN_NAME,
 } from "./opencode-plugin-cache";
+import { readPluginEntries } from "./opencode-plugin-registration";
 import { type ConfigPaths, detectConfigPaths, getMagicContextHistorianDir } from "./paths";
 import { sanitizeConfigValue, sanitizeDiagnosticText, sanitizePathString } from "./redaction";
 
@@ -295,7 +296,8 @@ function readConfig(path: string): { value: Record<string, unknown> | null; erro
 }
 
 function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
-    const plugins = Array.isArray(config?.plugin) ? config.plugin : [];
+    // Both keys: OpenCode 2 loads `plugin` and `plugins` together.
+    const plugins = readPluginEntries(config).map(({ entry }) => entry);
     return plugins.some((entry) => {
         if (typeof entry !== "string") return false;
         if (entry === OPENCODE_PLUGIN_NAME) return true;

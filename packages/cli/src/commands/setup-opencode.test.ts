@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { parse as parseJsonc } from "comment-json";
 import {
     addPluginToOpenCodeConfig,
@@ -274,5 +274,46 @@ describe("setup-opencode JSONC byte preservation", () => {
 
         expect(readFileSync(configPath, "utf-8")).toBe(expected);
         expect(readFileSync(configPath, "utf-8")).not.toContain("removed DCP plugin");
+    });
+});
+
+// OpenCode 2 loads both the legacy `plugin` and the native `plugins` array, so
+// setup must recognise a registration under either and write new entries under
+// the running generation's own key; otherwise the plugin loads twice.
+describe("setup-opencode plugin key across host generations", () => {
+    it("writes a fresh v2 registration under `plugins`, never `plugin`", () => {
+        const path = join(tempDir(), "opencode.json");
+        writeFileSync(path, `{"model":"openai/x"}`);
+        addPluginToOpenCodeConfig(path, "json", false, true, "v2");
+        const config = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(config.plugin).toBeUndefined();
+        expect(config.plugins).toEqual(["@cortexkit/opencode-magic-context@latest"]);
+    });
+
+    it("leaves a checkout registered under `plugins` alone on a v2 host", () => {
+        const path = join(tempDir(), "opencode.json");
+        const checkout = resolve(import.meta.dir, "../../../plugin");
+        writeFileSync(path, JSON.stringify({ plugins: [checkout] }));
+        addPluginToOpenCodeConfig(path, "json", false, true, "v2");
+        const config = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(config.plugins).toEqual([checkout]);
+        expect(config.plugin).toBeUndefined();
+    });
+
+    it("creates a v2 config with the `plugins` key", () => {
+        const path = join(tempDir(), "opencode.json");
+        addPluginToOpenCodeConfig(path, "none", false, true, "v2");
+        const config = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(config.plugins).toEqual(["@cortexkit/opencode-magic-context@latest"]);
+        expect(config.plugin).toBeUndefined();
+    });
+
+    it("keeps the singular `plugin` key on a v1 host", () => {
+        const path = join(tempDir(), "opencode.json");
+        writeFileSync(path, `{"model":"openai/x"}`);
+        addPluginToOpenCodeConfig(path, "json", false, true, "v1");
+        const config = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(config.plugin).toEqual(["@cortexkit/opencode-magic-context@latest"]);
+        expect(config.plugins).toBeUndefined();
     });
 });

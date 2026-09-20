@@ -12,6 +12,10 @@ import {
     setJsoncValue,
 } from "@magic-context/core/shared/jsonc-edit";
 import { sanitizeParsedJson } from "@magic-context/core/shared/jsonc-parser";
+import {
+    type OpenCodeHostGeneration,
+    openCodeHostGenerationFromVersion,
+} from "@magic-context/core/shared/opencode-db-path";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import {
     isDevPathPluginEntry,
@@ -36,6 +40,11 @@ import {
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY,
     OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
 } from "../lib/opencode-plugin-cache";
+import {
+    OPENCODE_PLUGIN_CONFIG_KEYS,
+    pluginConfigKeyFor,
+    readPluginEntries,
+} from "../lib/opencode-plugin-registration";
 import { detectConfigPaths } from "../lib/paths";
 import { confirm, intro, log, note, outro, promptIO, spinner } from "../lib/prompts";
 
@@ -118,14 +127,21 @@ export function addPluginToOpenCodeConfig(
      * behavior for call sites that cannot supply the resolved mode.
      */
     compactionEnabled = true,
+    /**
+     * Which key the running host reads registrations from. OpenCode 2 loads the
+     * legacy `plugin` array and its native `plugins` array together, so a fresh
+     * entry must go under the host's own key or the plugin loads twice.
+     */
+    hostGeneration: OpenCodeHostGeneration = "v1",
 ): void {
+    const registrationKey = pluginConfigKeyFor(hostGeneration);
     // The detection result predates interactive prompts. Re-read at commit time so
     // a config created while the wizard was open is merged instead of overwritten.
     const existsAtCommit = existsSync(configPath);
     const existing = existsAtCommit ? readJsoncConfigForUpdate(configPath) : {};
     if (!existsAtCommit) {
         ensureDir(dirname(configPath));
-        const created: Record<string, unknown> = { plugin: [PLUGIN_ENTRY] };
+        const created: Record<string, unknown> = { [registrationKey]: [PLUGIN_ENTRY] };
         if (compactionEnabled) {
             created.compaction = { auto: false, prune: false };
         }
@@ -135,7 +151,9 @@ export function addPluginToOpenCodeConfig(
 
     let text = readFileSync(configPath, "utf-8");
     let changed = false;
-    const rawPlugins: unknown[] = Array.isArray(existing.plugin) ? existing.plugin : [];
+    // Both keys are live registrations on OpenCode 2; read them together so a
+    // checkout registered under `plugins` is never doubled by an npm entry.
+    const rawPlugins: unknown[] = readPluginEntries(existing).map(({ entry }) => entry);
     const retainedPlugins = removeDcp
         ? rawPlugins.filter((plugin) => !matchesPluginEntry(plugin, DCP_PLUGIN_NAME))
         : rawPlugins;
@@ -153,9 +171,10 @@ export function addPluginToOpenCodeConfig(
         );
     }
 
-    if (Array.isArray(existing.plugin)) {
-        if (removeDcp) {
-            const result = removeJsoncArrayEntries(text, ["plugin"], (plugin) =>
+    if (removeDcp) {
+        for (const key of OPENCODE_PLUGIN_CONFIG_KEYS) {
+            if (!Array.isArray(existing[key])) continue;
+            const result = removeJsoncArrayEntries(text, [key], (plugin) =>
                 matchesPluginEntry(plugin, DCP_PLUGIN_NAME),
             );
             if (result.removed) {
@@ -163,17 +182,14 @@ export function addPluginToOpenCodeConfig(
                 changed = true;
             }
         }
+    }
 
-        const hasNpmEntry = retainedPlugins.some((plugin) =>
-            matchesPluginEntry(plugin, PLUGIN_NAME),
-        );
-        const hasDevEntry = retainedPlugins.some((plugin) => isDevPathPluginEntry(plugin));
-        if (!hasNpmEntry && !hasDevEntry) {
-            text = appendJsoncArrayValues(text, ["plugin"], [PLUGIN_ENTRY]);
-            changed = true;
-        }
-    } else {
-        text = setJsoncValue(text, ["plugin"], [PLUGIN_ENTRY]);
+    const hasNpmEntry = retainedPlugins.some((plugin) => matchesPluginEntry(plugin, PLUGIN_NAME));
+    const hasDevEntry = retainedPlugins.some((plugin) => isDevPathPluginEntry(plugin));
+    if (!hasNpmEntry && !hasDevEntry) {
+        text = Array.isArray(existing[registrationKey])
+            ? appendJsoncArrayValues(text, [registrationKey], [PLUGIN_ENTRY])
+            : setJsoncValue(text, [registrationKey], [PLUGIN_ENTRY]);
         changed = true;
     }
 
@@ -352,6 +368,8 @@ export async function runSetup(dryRun = false): Promise<number> {
     s.start("Checking OpenCode installation");
 
     const detection = detectOpenCode();
+    // Desktop-only installs have no binary to version and keep the 1.x key.
+    let hostGeneration: OpenCodeHostGeneration = "v1";
     if (detection.kind === "none") {
         s.stop("OpenCode not found");
         const shouldContinue = await confirm(
@@ -376,6 +394,7 @@ export async function runSetup(dryRun = false): Promise<number> {
     } else {
         const version = getOpenCodeVersion(detection.binary);
         s.stop(`OpenCode ${version ?? ""} detected`);
+        hostGeneration = openCodeHostGenerationFromVersion(version);
     }
 
     // ─── Step 2: Get available models ───────────────────
@@ -539,6 +558,7 @@ export async function runSetup(dryRun = false): Promise<number> {
             paths.opencodeConfigFormat,
             removeDcp,
             compactionEnabled,
+            hostGeneration,
         );
         log.success(`Plugin added to ${paths.opencodeConfig}`);
         if (removeDcp) log.success("Removed opencode-dcp from plugin list");
@@ -570,8 +590,14 @@ export async function runSetup(dryRun = false): Promise<number> {
             claudeMax,
         });
         log.success(`Config written to ${paths.magicContextConfig}`);
-        addPluginToTuiConfig(paths.tuiConfig, paths.tuiConfigFormat);
-        log.success(`TUI sidebar plugin added to ${basename(paths.tuiConfig)}`);
+        // OpenCode 2 resolves the sidebar from the plugin entry itself; tui.json
+        // is a 1.x-only surface and registers nothing on a 2.x host.
+        if (hostGeneration === "v1") {
+            addPluginToTuiConfig(paths.tuiConfig, paths.tuiConfigFormat);
+            log.success(`TUI sidebar plugin added to ${basename(paths.tuiConfig)}`);
+        } else {
+            log.info("TUI sidebar loads from the plugin entry on OpenCode 2 (tui.json not used)");
+        }
 
         if (disableOmoHooks) {
             const actions = fixConflicts(
