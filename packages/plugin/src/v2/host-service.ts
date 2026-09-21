@@ -1,48 +1,119 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
  * Reaching the OpenCode 2 host's own HTTP API from inside a plugin.
  *
- * The plugin surface a v2 host hands us carries no client and no address, but the host running in
- * service mode registers itself in a file that is the whole discovery contract: a base URL and the
- * password for basic auth. Everything here is plain `fetch` and `node:fs` on purpose — the OpenCode
- * client package stays a development dependency and must not be imported at runtime.
+ * The plugin surface a v2 host hands us carries no client and no address, but a host running in
+ * service mode registers itself in a file that is the whole discovery contract: a base URL, the
+ * password for basic auth, and the process id of the host that wrote it. Everything here is plain
+ * `fetch` and `node:fs` on purpose — the OpenCode client package stays a development dependency and
+ * must not be imported at runtime.
  *
- * A plain `opencode serve` writes no registration, so discovery legitimately comes up empty; every
- * caller treats that as "not now" rather than an error.
+ * Registrations are channel-scoped, and a channel is also what picks the host's session database,
+ * so two registrations on one machine can belong to two completely separate stores. Discovery
+ * therefore never picks "whichever registration exists": it picks the registration written by THIS
+ * process, matched on process id, which is the one host whose store contains the sessions this
+ * plugin instance created. A plain `opencode serve` and a `--standalone` host write no registration
+ * at all, so discovery legitimately comes up empty; every caller treats that as "not now" rather
+ * than an error.
+ *
+ * Bytes this follows, identical in `@opencode/cli` 2.0.5 and 2.0.11:
+ *   - filename: `service.json` on the `latest`/`dev`/`beta`/`next` channels, otherwise
+ *     `service-<channel>.json` with everything outside `[A-Za-z0-9._-]` replaced by `-`;
+ *   - directory: `$XDG_STATE_HOME/opencode` (`~/.local/state/opencode` with no XDG override);
+ *   - contents: `{ id, version, url, pid, password }`, where `pid` is the serving process's own
+ *     `process.pid` and `id` is that service's identifier. The host re-reads this file and shuts
+ *     itself down when the id/pid/url/password it observes are no longer its own, so a live
+ *     registration always describes the process that currently owns the endpoint.
  */
 
-/** Matches the path the OpenCode client resolves a local service from. */
-export function serviceRegistrationPath(env: NodeJS.ProcessEnv = process.env): string {
+/** Channels whose registration keeps the unsuffixed default filename. */
+const DEFAULT_CHANNELS = ["latest", "dev", "beta", "next"];
+
+/** The channel this plugin's host is running on; matches the host's own default. */
+export function serviceChannel(env: NodeJS.ProcessEnv = process.env): string {
+    return env.OPENCODE_CHANNEL && env.OPENCODE_CHANNEL.length > 0
+        ? env.OPENCODE_CHANNEL
+        : "latest";
+}
+
+/** Registration filename for one channel, following OpenCode 2's own naming rule. */
+export function serviceRegistrationFilename(channel: string): string {
+    if (DEFAULT_CHANNELS.includes(channel)) return "service.json";
+    return `service-${channel.replace(/[^a-zA-Z0-9._-]/g, "-")}.json`;
+}
+
+/** Directory the host writes every channel's registration into. */
+export function serviceRegistrationDirectory(env: NodeJS.ProcessEnv = process.env): string {
     const state = env.XDG_STATE_HOME ?? join(homedir(), ".local", "state");
-    return join(state, "opencode", "service.json");
+    return join(state, "opencode");
+}
+
+/** Registration path for this environment's channel. */
+export function serviceRegistrationPath(env: NodeJS.ProcessEnv = process.env): string {
+    return join(
+        serviceRegistrationDirectory(env),
+        serviceRegistrationFilename(serviceChannel(env)),
+    );
 }
 
 export interface HostService {
+    /** Absolute path of the registration file this was read from. */
+    readonly path: string;
     /** Base URL with no trailing slash. */
     readonly url: string;
     readonly headers: Record<string, string>;
+    /** Process id of the host that wrote the registration. */
+    readonly pid: number;
+    /** Service identifier from the registration, when it carries one. */
+    readonly serviceID?: string;
 }
 
-/** Reads the registration a running service left behind, or undefined when there is none. */
-export function discoverHostService(env: NodeJS.ProcessEnv = process.env): HostService | undefined {
+/**
+ * The binding persisted alongside a hidden child so its cleanup can find the same host again after
+ * a restart. The registration path is the durable part: it names the channel, and the channel names
+ * the store the child's session lives in. The service id and pid describe the process that created
+ * the child and are kept for diagnosis, not as a gate — a restarted host on the same channel is
+ * still the owner of the same sessions.
+ */
+export interface HostServiceOwner {
+    readonly registration: string;
+    readonly serviceID?: string;
+    readonly pid: number;
+}
+
+/** A cleanup that cannot be attempted right now and must be retried later. */
+export class HostServiceUnavailable extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "HostServiceUnavailable";
+    }
+}
+
+function parseRegistration(path: string): HostService | undefined {
     let text: string;
     try {
-        text = readFileSync(serviceRegistrationPath(env), "utf8");
+        text = readFileSync(path, "utf8");
     } catch {
         return undefined;
     }
-    let info: { url?: unknown; password?: unknown };
+    let info: { url?: unknown; password?: unknown; pid?: unknown; id?: unknown };
     try {
-        info = JSON.parse(text) as { url?: unknown; password?: unknown };
+        info = JSON.parse(text) as typeof info;
     } catch {
         return undefined;
     }
     if (typeof info.url !== "string" || info.url.length === 0) return undefined;
+    // The host always writes its own pid. A registration without one is not a
+    // shape this adapter knows how to bind ownership to.
+    if (typeof info.pid !== "number" || !Number.isFinite(info.pid)) return undefined;
     return {
+        path,
         url: info.url.replace(/\/+$/, ""),
+        pid: info.pid,
+        ...(typeof info.id === "string" && info.id.length > 0 ? { serviceID: info.id } : {}),
         headers:
             typeof info.password === "string" && info.password.length > 0
                 ? {
@@ -52,25 +123,102 @@ export function discoverHostService(env: NodeJS.ProcessEnv = process.env): HostS
     };
 }
 
+/** Every readable registration in the state directory, whichever channel wrote it. */
+export function readServiceRegistrations(env: NodeJS.ProcessEnv = process.env): HostService[] {
+    const directory = serviceRegistrationDirectory(env);
+    let names: string[];
+    try {
+        names = readdirSync(directory);
+    } catch {
+        return [];
+    }
+    return names
+        .filter((name) => name === "service.json" || /^service-.+\.json$/.test(name))
+        .sort()
+        .flatMap((name) => parseRegistration(join(directory, name)) ?? []);
+}
+
 /**
- * Deletes a session through the host, which interrupts whatever it is doing, waits for it to go
- * idle, removes its children, and publishes the deletion so the rest of the host keeps up. This is
- * the same route the OpenCode client's session removal calls, so it inherits all of that.
+ * The registration written by the process this plugin is loaded in, or undefined when the host
+ * registered nothing (a plain `opencode serve`, or a `--standalone` host).
+ *
+ * Matching on process id rather than on the channel's expected filename means a host whose channel
+ * we guessed wrong, or one running on a channel we have never heard of, is still recognised — and,
+ * more importantly, an unrelated service belonging to a different store never is.
+ */
+export function discoverOwnHostService(
+    env: NodeJS.ProcessEnv = process.env,
+    pid: number = process.pid,
+): HostService | undefined {
+    return readServiceRegistrations(env).find((service) => service.pid === pid);
+}
+
+/** The owner binding to persist with a hidden child created by this process. */
+export function hostServiceOwner(
+    env: NodeJS.ProcessEnv = process.env,
+    pid: number = process.pid,
+): HostServiceOwner | undefined {
+    const service = discoverOwnHostService(env, pid);
+    if (!service) return undefined;
+    return {
+        registration: service.path,
+        ...(service.serviceID === undefined ? {} : { serviceID: service.serviceID }),
+        pid: service.pid,
+    };
+}
+
+/**
+ * Resolve the host to delete an owned session through, or explain why there is none.
+ *
+ * The only acceptable route is the registration this process itself wrote AND that the child
+ * recorded when it was created. Any other live service is a different endpoint — very possibly a
+ * different channel's store — where the session was never created, so its 404 would mean "I never
+ * had it", not "it is gone".
+ */
+export function resolveOwnerHostService(
+    owner: HostServiceOwner | undefined,
+    env: NodeJS.ProcessEnv = process.env,
+    pid: number = process.pid,
+): HostService {
+    if (!owner) {
+        throw new HostServiceUnavailable(
+            "This session was created by an OpenCode host that registered no service, so there is no owner-bound route to delete it through",
+        );
+    }
+    const own = discoverOwnHostService(env, pid);
+    if (!own) {
+        throw new HostServiceUnavailable(
+            "This OpenCode host registered no service, so the owning host cannot be reached to delete the session",
+        );
+    }
+    if (own.path !== owner.registration) {
+        throw new HostServiceUnavailable(
+            `This OpenCode host is registered at ${own.path}, not at the session's owner ${owner.registration}; refusing to delete through a service that never created it`,
+        );
+    }
+    return own;
+}
+
+/**
+ * Deletes a session through the host that created it, which interrupts whatever it is doing, waits
+ * for it to go idle, removes its children, and publishes the deletion so the rest of the host keeps
+ * up. This is the same route the OpenCode client's session removal calls, so it inherits all of
+ * that.
  */
 export async function removeHostSession(
     sessionID: string,
+    owner: HostServiceOwner | undefined,
     env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-    const service = discoverHostService(env);
-    if (!service) {
-        throw new Error("No running OpenCode service is registered to delete the session through");
-    }
+    const service = resolveOwnerHostService(owner, env);
     const response = await fetch(`${service.url}/api/session/${encodeURIComponent(sessionID)}`, {
         method: "DELETE",
         headers: service.headers,
         signal: AbortSignal.timeout(60_000),
     });
-    // A session that is already gone is the state the caller asked for.
+    // A session the owning host no longer has is the state the caller asked for. This is only
+    // meaningful because the request went to the owner: the same 404 from any other service would
+    // mean the session was never there.
     if (!response.ok && response.status !== 404) {
         throw new Error(`OpenCode session delete answered ${response.status}`);
     }

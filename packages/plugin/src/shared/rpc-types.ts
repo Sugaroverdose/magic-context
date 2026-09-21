@@ -11,6 +11,7 @@ import type {
 import type { SynapseLaneDescriptor } from "../features/magic-context/memory/embedding-synapse";
 import type { ConfigParseFailure } from "./config-diagnostics";
 import type { LoggerDiagnostics } from "./logger";
+import type { UserFacingFailureKey } from "./user-facing-codes";
 
 export interface TailHygieneStatus {
     /** Tokens in active, non-protected tail content that the agent can reclaim. */
@@ -99,6 +100,14 @@ export interface SidebarSnapshot {
      * shows this as "Tool Definitions".
      */
     toolDefinitionTokens: number;
+    /**
+     * Named capabilities the host this plugin runs in does not have, such as an
+     * experimental mode the host cannot carry. These persist for the life of
+     * the process rather than describing one failed operation, so the status
+     * surfaces keep showing them. Absent on hosts with nothing to report and on
+     * older RPC servers.
+     */
+    hostLimitations?: UserFacingFailureKey[];
     /** Persisted reclaimable (U) and eligible (T) token counts used by both nudge mechanisms. */
     tailHygiene?: TailHygieneStatus;
     /**

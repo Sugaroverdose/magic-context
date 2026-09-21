@@ -121,11 +121,24 @@ test("OpenCode 2 hidden historian keeps one cheap-model child across provider er
                 childID: string;
                 error?: string;
                 completion?: { text: string; usage: Record<string, number> };
+                pluginPid: number;
+                owner: { registration: string; serviceID?: string; pid: number } | null;
             };
         };
 
         const first = await command(1, { temperature: 0.25 });
         expect(first.ok).toBe(true);
+        // Ownership binding (issue 492 finding 5): the plugin runs inside the serving process, so
+        // the registration naming that process id is the one host whose store holds this child.
+        const fullRegistration = JSON.parse(
+            readFileSync(serviceRegistrationPath(host.env), "utf8"),
+        ) as { id?: string; pid: number };
+        expect(first.pluginPid).toBe(fullRegistration.pid);
+        expect(first.owner).toEqual({
+            registration: serviceRegistrationPath(host.env),
+            ...(fullRegistration.id === undefined ? {} : { serviceID: fullRegistration.id }),
+            pid: fullRegistration.pid,
+        });
         expect(first.completion).toMatchObject({
             text: "hidden completion",
             usage: { input: 101, output: 11 },
@@ -226,10 +239,36 @@ test("OpenCode 2 hidden historian keeps one cheap-model child across provider er
         const storePath = gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env);
         expect(storedSession(storePath, first.childID).exists).toBe(true);
         expect(storedSession(storePath, first.childID).messages).toBeGreaterThan(0);
+        // An unrelated service registered on another channel must never be probed: its store is a
+        // different database, so its 404 would mean "never had it" rather than "already gone"
+        // (issue 492 finding 5). This decoy records every request it receives.
+        const decoyRequests: string[] = [];
+        const decoy = Bun.serve({
+            port: 0,
+            fetch(request) {
+                decoyRequests.push(`${request.method} ${new URL(request.url).pathname}`);
+                return new Response(null, { status: 404 });
+            },
+        });
+        writeFileSync(
+            join(host.env.XDG_STATE_HOME!, "opencode", "service-local.json"),
+            JSON.stringify({
+                id: "unrelated-local-channel-service",
+                version: "2.0.5",
+                url: `http://127.0.0.1:${decoy.port}`,
+                // Another opencode instance, so another process id: this registration is never
+                // the one this plugin's process wrote.
+                pid: fullRegistration.pid + 100_000,
+                password: "decoy",
+            }),
+        );
+
         const regenerated = await command(5, { generation: "ga-proof-generation-2" });
         expect(regenerated.ok).toBe(true);
         expect(regenerated.childID).not.toBe(first.childID);
         await eventually(() => !storedSession(storePath, first.childID).exists);
+        decoy.stop(true);
+        expect(decoyRequests).toEqual([]);
         // session_message cascades off the session row, so nothing is left orphaned behind it.
         expect(storedSession(storePath, first.childID).messages).toBe(0);
         const rootsAfterRetirement = await client.session.list({

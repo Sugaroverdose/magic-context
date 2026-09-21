@@ -6,6 +6,7 @@ import type {
 } from "../hooks/magic-context/compartment-runner-types";
 import { HiddenCompletionRefusal } from "../hooks/magic-context/compartment-runner-types";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
+import { declareHostLimitation } from "../shared/host-limitations";
 import { log } from "../shared/logger";
 import type { PromptArgs } from "../shared/model-suggestion-retry";
 import { parseProviderModel, toModelEntry } from "../shared/resolve-fallbacks";
@@ -16,6 +17,7 @@ import {
     type HiddenChildAttempt,
     type HiddenChildHook,
 } from "./hooks/hidden-child";
+import { type HostServiceOwner, HostServiceUnavailable, hostServiceOwner } from "./host-service";
 import type { StoreRow } from "./store-reader";
 
 interface Model {
@@ -34,12 +36,22 @@ interface PersistedHiddenChild {
     model: Model;
     created_at: number;
     title_reasserted: boolean;
+    /**
+     * The host service registration that owned this child when it was created, or absent when the
+     * creating host had registered none (and for rows written before this was recorded). Deletion
+     * goes through this and nothing else, so an absent binding means the child's session can only
+     * be left behind and reported.
+     */
+    owner?: HostServiceOwner;
 }
 
 interface RetiredHiddenChild extends PersistedHiddenChild {
     retired_at: number;
     reason: string;
 }
+
+/** The parts of a retired child that deleting its session needs. */
+type RetirableChild = Pick<PersistedHiddenChild, "id" | "owner">;
 
 interface HiddenChildrenMeta {
     version: 1;
@@ -67,11 +79,11 @@ export interface HiddenChildHost {
     interrupt(input: { sessionID: string }): Promise<{ interrupted: boolean }>;
     update(input: { sessionID: string; title: string }): Promise<void>;
     /**
-     * Deletes a session and everything hanging off it. Optional because the host surface this
-     * adapter is handed does not always carry it; when it is missing, a retired child keeps its
-     * entry in the retired list and the next boot sweep tries again.
+     * Deletes a session and everything hanging off it, through the host that created it. Optional
+     * because the host surface this adapter is handed does not always carry it; when it is missing,
+     * a retired child keeps its entry in the retired list and the next boot sweep tries again.
      */
-    remove?(input: { sessionID: string }): Promise<void>;
+    remove?(input: { sessionID: string; owner?: HostServiceOwner }): Promise<void>;
 }
 
 export interface HiddenChildRows {
@@ -92,6 +104,11 @@ export interface V2HiddenCompletionOptions {
      * purpose rather than fired off in parallel.
      */
     removalSpacingMs?: number;
+    /**
+     * Which host service registration, if any, owns the children this process creates. Called once
+     * per created child so a host that starts serving later still binds correctly.
+     */
+    resolveOwner?: () => HostServiceOwner | undefined;
     log?: (message: string) => void;
 }
 
@@ -137,6 +154,17 @@ function isRole(value: unknown): value is HiddenChildRole {
     return value === "historian" || value === "dreamer";
 }
 
+function isOwner(value: unknown): value is HostServiceOwner {
+    if (!value || typeof value !== "object") return false;
+    const owner = value as Partial<HostServiceOwner>;
+    return (
+        typeof owner.registration === "string" &&
+        owner.registration.length > 0 &&
+        typeof owner.pid === "number" &&
+        (owner.serviceID === undefined || typeof owner.serviceID === "string")
+    );
+}
+
 function isPersistedChild(value: unknown): value is PersistedHiddenChild {
     if (!value || typeof value !== "object") return false;
     const child = value as Partial<PersistedHiddenChild>;
@@ -147,7 +175,8 @@ function isPersistedChild(value: unknown): value is PersistedHiddenChild {
         typeof child.title === "string" &&
         isModel(child.model) &&
         typeof child.created_at === "number" &&
-        typeof child.title_reasserted === "boolean"
+        typeof child.title_reasserted === "boolean" &&
+        (child.owner === undefined || isOwner(child.owner))
     );
 }
 
@@ -466,6 +495,7 @@ export async function createV2HiddenCompletionExecutor(
     }
 
     const spacing = options.removalSpacingMs ?? REMOVAL_SPACING_MS;
+    const resolveOwner = options.resolveOwner ?? hostServiceOwner;
     const note = options.log ?? log;
     const queued = new Set<string>();
     // One chain, so removals never overlap however many retirements land at once.
@@ -478,24 +508,38 @@ export async function createV2HiddenCompletionExecutor(
             (timer as unknown as { unref?: () => void }).unref?.();
         });
 
-    const removeChildSession = async (id: string): Promise<void> => {
+    const removeChildSession = async (child: RetirableChild): Promise<void> => {
         const remove = host.remove;
         if (!remove) return;
         try {
-            await remove({ sessionID: id });
+            await remove({
+                sessionID: child.id,
+                ...(child.owner === undefined ? {} : { owner: child.owner }),
+            });
         } catch (error) {
-            // The host was unreachable or refused. Keep the entry so a later sweep retries it;
-            // cleanup is never allowed to fail the hidden run that triggered it.
+            // The host was unreachable, refused, or is not the one that created this child. Keep
+            // the entry so a later sweep retries it; cleanup is never allowed to fail the hidden
+            // run that triggered it.
+            if (error instanceof HostServiceUnavailable) {
+                // Nothing in this process can delete it. Say so once, everywhere the user looks,
+                // rather than repeating an unactionable line in the log on every sweep.
+                if (declareHostLimitation("hidden_cleanup_unbound")) {
+                    note(
+                        `[magic-context] hidden child ${child.id} has no owner-bound deletion route and stays recorded for retry: ${errorText(error)}`,
+                    );
+                }
+                return;
+            }
             note(
-                `[magic-context] hidden child ${id} could not be deleted, left for a later sweep: ${errorText(error)}`,
+                `[magic-context] hidden child ${child.id} could not be deleted, left for a later sweep: ${errorText(error)}`,
             );
             return;
         }
         try {
-            store.prune(id);
+            store.prune(child.id);
         } catch (error) {
             note(
-                `[magic-context] hidden child ${id} was deleted but not forgotten: ${errorText(error)}`,
+                `[magic-context] hidden child ${child.id} was deleted but not forgotten: ${errorText(error)}`,
             );
         }
     };
@@ -504,26 +548,26 @@ export async function createV2HiddenCompletionExecutor(
      * Queues a retired child's session for deletion. Returns immediately: a caller in the middle of
      * a hidden run must not wait on host cleanup.
      */
-    const scheduleRemoval = (id: string): void => {
-        if (!host.remove || queued.has(id)) return;
-        queued.add(id);
+    const scheduleRemoval = (child: RetirableChild): void => {
+        if (!host.remove || queued.has(child.id)) return;
+        queued.add(child.id);
         removals = removals
             .then(() => pause(spacing))
-            .then(() => removeChildSession(id))
+            .then(() => removeChildSession(child))
             .catch(() => {})
             .finally(() => {
-                queued.delete(id);
+                queued.delete(child.id);
             });
     };
 
     const retireChild = (child: PersistedHiddenChild, reason: string): void => {
         store.retire(child, reason);
-        scheduleRemoval(child.id);
+        scheduleRemoval(child);
     };
 
     // Boot sweep. Anything left over from an earlier process — including the backlog built up
     // before retirement deleted anything — is drained here, spaced like every other removal.
-    for (const child of persisted.retired_children) scheduleRemoval(child.id);
+    for (const child of persisted.retired_children) scheduleRemoval(child);
 
     const acquireRole = async (role: HiddenChildRole): Promise<() => void> => {
         const previous = roleTails.get(role) ?? Promise.resolve();
@@ -631,6 +675,10 @@ export async function createV2HiddenCompletionExecutor(
                     });
                     if (!created.id)
                         throw new Error("OpenCode 2 did not return a child session id");
+                    // Bind the child to the host that is creating it, now, while that host is
+                    // demonstrably this process. Deleting it later goes through this binding and
+                    // nothing else.
+                    const owner = resolveOwner();
                     active = {
                         id: created.id,
                         role,
@@ -639,6 +687,7 @@ export async function createV2HiddenCompletionExecutor(
                         model: head,
                         created_at: Date.now(),
                         title_reasserted: false,
+                        ...(owner === undefined ? {} : { owner }),
                     };
                     store.put(active);
                     options.hook.registerChild(active.id);

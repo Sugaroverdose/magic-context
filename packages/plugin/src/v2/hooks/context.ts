@@ -17,6 +17,10 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
+import {
+    getCurrentToolSetHash,
+    recordToolDefinition,
+} from "../../features/magic-context/tool-definition-tokens";
 import { assertExecutableToolInput } from "../../hooks/magic-context/dropped-input-guard";
 import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
@@ -34,6 +38,7 @@ import { registerRpcHandlers } from "../../plugin/rpc-handlers";
 import { detectConflicts } from "../../shared/conflict-detector";
 import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
 import { getErrorMessage } from "../../shared/error-message";
+import { declareHostLimitation } from "../../shared/host-limitations";
 import { sessionLog } from "../../shared/logger";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import {
@@ -50,11 +55,12 @@ import {
 } from "../../shared/prompt-surface-runtime";
 import { pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
+import { renderUserFacingFailure } from "../../shared/user-facing-codes";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
 import { createV2HiddenCompletionExecutor } from "../hidden-completion";
-import { removeHostSession } from "../host-service";
+import { type HostServiceOwner, removeHostSession } from "../host-service";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
 import { DeletedSessionTombstones } from "./deleted-session-tombstones";
@@ -168,9 +174,57 @@ export function applyV2PromptSurfaceTools(
     }
 }
 
+/**
+ * Experimental Rust mode is a v1-only route: the Rust transform reaches the module over a subc
+ * transport that only the v1 server lane constructs, and nothing on this lane builds or owns one.
+ * Rather than accepting the setting and quietly running something else, downgrade it here, once,
+ * where every later reader of the config sees the mode that is actually running — including the
+ * RPC status and sidebar handlers, which otherwise ask a Rust module that does not exist for the
+ * session state and answer every status request with an error.
+ *
+ * The downgrade is announced twice on purpose: once in the log for whoever is reading it, and as a
+ * named limitation that /ctx-status and the sidebar keep showing for as long as the process runs.
+ */
+export function resolveV2TransformMode<T extends { transform_mode?: "ts" | "rust" }>(config: T): T {
+    if (config.transform_mode !== "rust") return config;
+    if (declareHostLimitation("rust_mode_unsupported")) {
+        console.warn(
+            `[magic-context] ${renderUserFacingFailure("rust_mode_unsupported", "plain")}`,
+        );
+    }
+    return { ...config, transform_mode: "ts" };
+}
+
+/**
+ * Measure the tool definitions this request is actually going to send.
+ *
+ * OpenCode 1 measures the same thing through its `tool.definition` hook; OpenCode 2 has no such
+ * hook, but the request draft carries the whole tool set, so the draft is the measurement seam.
+ * This runs after the per-model descriptions have been applied, so what is counted is what goes on
+ * the wire, and it is keyed by the same {provider, model, agent} triple the status and sidebar
+ * handlers look the measurement up by.
+ *
+ * Measuring changes no served byte: the resulting tool-set hash is an attribution marker that the
+ * m[0] materialization decision records but never folds on.
+ */
+export function recordV2ToolDefinitions(draft: SessionContext): void {
+    if (!draft.tools) return;
+    for (const [id, tool] of Object.entries(draft.tools)) {
+        if (!tool) continue;
+        recordToolDefinition(
+            draft.model.providerID,
+            draft.model.id,
+            draft.agent,
+            id,
+            typeof tool.description === "string" ? tool.description : "",
+            tool.input,
+        );
+    }
+}
+
 export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
-    const config = loadPluginConfigDetailed(directory).config;
+    const config = resolveV2TransformMode(loadPluginConfigDetailed(directory).config);
     if (!config.enabled) return;
     const compactionOff = !isCompactionEnabled(config);
     const conflicts = detectConflicts(directory, {
@@ -237,8 +291,11 @@ export async function registerContext(context: V2Context) {
                   {
                       ...context.session,
                       // The injected session surface stops short of deletion, so retiring a hidden
-                      // child reaches the host's delete route directly.
-                      remove: (input: { sessionID: string }) => removeHostSession(input.sessionID),
+                      // child reaches the host's delete route directly — through the registration
+                      // the child recorded when it was created, never through whichever service
+                      // happens to be registered now.
+                      remove: (input: { sessionID: string; owner?: HostServiceOwner }) =>
+                          removeHostSession(input.sessionID, input.owner),
                   },
                   {
                       db,
@@ -492,7 +549,11 @@ export async function registerContext(context: V2Context) {
             memoryInjectionBudgetTokens: config.memory.injection_budget_tokens,
             hardSignals: {
                 systemHash: foldDigest(JSON.stringify(draft.system)),
-                toolSetHash: "",
+                toolSetHash: getCurrentToolSetHash(
+                    draft.model.providerID,
+                    draft.model.id,
+                    draft.agent,
+                ),
                 modelKey: `${draft.model.providerID}/${draft.model.id}`,
                 // materializeM0 does not read cacheExpired. mustMaterialize owns
                 // expiry decisions on the transform path; this fold always renders
@@ -555,6 +616,9 @@ export async function registerContext(context: V2Context) {
         // descriptions become the baseline every later request (any session,
         // any model) starts from. Registration happens once, in tools.ts.
         applyV2PromptSurfaceTools(draft, promptSurfaceRuntime, config.prompt_surface);
+        // Measured after the descriptions are final, so the Tool Defs row and the tool-set hash
+        // describe the bytes this request sends rather than the host's unedited catalog.
+        recordV2ToolDefinitions(draft);
         let postFold = false;
         try {
             if ((await recordUsage(draft)) && !compactionOff) {
@@ -641,6 +705,15 @@ export async function registerContext(context: V2Context) {
                 protectedTokenTierOverrides: getProtectedTokensTierOverrides(config),
                 executeThresholdPercentage: config.execute_threshold_percentage,
                 liveModelBySession: liveModels,
+                getToolSetHash: (sessionId) => {
+                    const model = liveModels.get(sessionId);
+                    if (!model) return "";
+                    return getCurrentToolSetHash(
+                        model.providerID,
+                        model.modelID,
+                        agents.get(sessionId),
+                    );
+                },
                 channel1StateBySession: channel1,
                 historyRefreshSessions,
                 pendingMaterializationSessions,

@@ -5,6 +5,7 @@ import packageJson from "../../../package.json"
 import { badgeTextColor } from '../badge-contrast';
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
 import { formatThresholdPercent } from "../../shared/format-threshold"
+import { renderUserFacingFailure } from "../../shared/user-facing-codes"
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../compaction-off"
 import {
     computeEffectiveOrder,
@@ -772,6 +773,18 @@ const SidebarContent = (props: {
                     <text fg={props.theme.error}>⚠ {s()!.lastTransformError}</text>
                 </box>
             )}
+
+            {/* Named limitations of the host itself (for example an experimental
+                mode this OpenCode version cannot run). They stay for as long as
+                the process runs, so they are drawn like the transform error
+                rather than as a one-shot toast. */}
+            <For each={s()?.hostLimitations ?? []}>
+                {(limitation) => (
+                    <box marginTop={1} width="100%">
+                        <text fg={props.theme.warning}>⚠ {renderUserFacingFailure(limitation, "plain")}</text>
+                    </box>
+                )}
+            </For>
 
             {s()?.dreamerProgress && (
                 <box marginTop={1} width="100%">

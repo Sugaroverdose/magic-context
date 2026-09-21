@@ -3,6 +3,7 @@ import {
     HiddenCompletionRefusal,
     type HiddenRunIdentity,
 } from "../hooks/magic-context/compartment-runner-types";
+import { __resetHostLimitations, activeHostLimitations } from "../shared/host-limitations";
 import { Database } from "../shared/sqlite";
 import {
     createV2HiddenCompletionExecutor,
@@ -16,6 +17,7 @@ import {
     registerHiddenChildAgents,
 } from "./hooks/hidden-child";
 import type { SessionContext } from "./hooks/types";
+import { type HostServiceOwner, HostServiceUnavailable } from "./host-service";
 import type { StoreRow } from "./store-reader";
 
 const run: HiddenRunIdentity = {
@@ -133,7 +135,17 @@ function retiredChild(id: string, retiredAt: number) {
     };
 }
 
-async function setup(generation = "host-generation-1", capabilities: { remove?: boolean } = {}) {
+async function setup(
+    generation = "host-generation-1",
+    capabilities: {
+        remove?: boolean;
+        /**
+         * Which registration, if any, the fake host would report as its own. Undefined stands for
+         * a host that registered no service at all (`--standalone`, or a plain `serve`).
+         */
+        owner?: HostServiceOwner;
+    } = {},
+) {
     const db = new Database(":memory:");
     db.exec("CREATE TABLE schema_migrations_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     const rows = new Rows();
@@ -148,6 +160,7 @@ async function setup(generation = "host-generation-1", capabilities: { remove?: 
     const interrupts: string[] = [];
     const requests: SessionContext[] = [];
     const removed: string[] = [];
+    const removals: Array<{ sessionID: string; owner?: HostServiceOwner }> = [];
     let nextID = 0;
     let failPrompt = false;
     let promptError: Error | undefined;
@@ -227,7 +240,8 @@ async function setup(generation = "host-generation-1", capabilities: { remove?: 
         // none either; the tests that cover cleanup opt the capability in.
         ...(capabilities.remove
             ? {
-                  async remove(input: { sessionID: string }) {
+                  async remove(input: { sessionID: string; owner?: HostServiceOwner }) {
+                      removals.push(structuredClone(input));
                       if (removeError) throw removeError;
                       removed.push(input.sessionID);
                   },
@@ -242,6 +256,7 @@ async function setup(generation = "host-generation-1", capabilities: { remove?: 
             openReader: () => rows,
             generation: hostGeneration,
             removalSpacingMs: 0,
+            resolveOwner: () => capabilities.owner,
             log: () => {},
         });
     const executor = await create();
@@ -258,6 +273,7 @@ async function setup(generation = "host-generation-1", capabilities: { remove?: 
         interrupts,
         requests,
         removed,
+        removals,
         meta: () =>
             JSON.parse(
                 (
@@ -559,6 +575,88 @@ describe("OpenCode 2 hidden child completion", () => {
             await eventually(() => state.removed.includes("child-1"));
             await eventually(() => state.meta().retired_children.length === 0);
         } finally {
+            state.db.close();
+        }
+    });
+
+    test("deletes only through the registration that created the child", async () => {
+        const owner: HostServiceOwner = {
+            registration: "/state/opencode/service-local.json",
+            serviceID: "owning-service",
+            pid: 4242,
+        };
+        const state = await setup("host-generation-1", { remove: true, owner });
+        try {
+            const first = await state.executor.open(run);
+            await state.executor.attempt(first, request());
+            await close(state.executor, first, true);
+
+            state.setFailPrompt(true);
+            const second = await state.executor.open(run);
+            await expect(state.executor.attempt(second, request())).rejects.toThrow(
+                "provider unavailable",
+            );
+            await close(state.executor, second, false);
+
+            await eventually(() => state.removed.includes("child-1"));
+            expect(state.removals).toEqual([{ sessionID: "child-1", owner }]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("carries the creating host's binding across a restart of the executor", async () => {
+        const owner: HostServiceOwner = {
+            registration: "/state/opencode/service-local.json",
+            serviceID: "owning-service",
+            pid: 4242,
+        };
+        const state = await setup("host-generation-1", { remove: true, owner });
+        try {
+            const handle = await state.executor.open(run);
+            await state.executor.attempt(handle, request());
+            await close(state.executor, handle, true);
+
+            // A newer host build retires the previous generation's child. The binding it deletes
+            // through has to be the one the CREATING process recorded, which this restarted
+            // executor only knows from the persisted row.
+            const restarted = await state.create("host-generation-2");
+            const next = await restarted.open(run);
+            await restarted.attempt(next, request());
+            await close(restarted, next, true);
+
+            await eventually(() => state.removed.includes("child-1"));
+            expect(state.removals[0]).toEqual({ sessionID: "child-1", owner });
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("keeps an unbound child recorded and names the limitation instead of guessing a host", async () => {
+        __resetHostLimitations();
+        // A host that registered no service: nothing this process can reach owns the child.
+        const state = await setup("host-generation-1", { remove: true, owner: undefined });
+        try {
+            state.setRemoveError(
+                new HostServiceUnavailable(
+                    "This session was created by an OpenCode host that registered no service",
+                ),
+            );
+            state.setFailPrompt(true);
+            const handle = await state.executor.open(run);
+            await expect(state.executor.attempt(handle, request())).rejects.toThrow(
+                "provider unavailable",
+            );
+            await close(state.executor, handle, false);
+
+            await eventually(() => state.removals.length === 1);
+            expect(state.removals).toEqual([{ sessionID: "child-1" }]);
+            expect(state.removed).toEqual([]);
+            // Still recorded, so a later process inside a registered service retries it.
+            expect(state.meta().retired_children.map((child) => child.id)).toEqual(["child-1"]);
+            expect(activeHostLimitations()).toContain("hidden_cleanup_unbound");
+        } finally {
+            __resetHostLimitations();
             state.db.close();
         }
     });

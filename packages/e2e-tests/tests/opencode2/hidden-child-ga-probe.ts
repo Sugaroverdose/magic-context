@@ -7,7 +7,11 @@ import {
     HiddenChildHook,
     registerHiddenChildAgents,
 } from "../../../plugin/src/v2/hooks/hidden-child";
-import { removeHostSession } from "../../../plugin/src/v2/host-service";
+import {
+    type HostServiceOwner,
+    hostServiceOwner,
+    removeHostSession,
+} from "../../../plugin/src/v2/host-service";
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";
 
 interface Command {
@@ -38,9 +42,11 @@ export default {
         });
         let agentsReady: Promise<void> | undefined;
 
-        // Exactly what the shipped plugin does: find the running host through its own service
-        // registration and delete over its HTTP route. Nothing here is handed in by the harness.
-        const remove = (input: { sessionID: string }) => removeHostSession(input.sessionID);
+        // Exactly what the shipped plugin does: bind each child to the registration THIS process
+        // wrote, and delete over that host's HTTP route. Nothing here is handed in by the harness.
+        const remove = (input: { sessionID: string; owner?: HostServiceOwner }) =>
+            removeHostSession(input.sessionID, input.owner);
+
 
         const executors = new Map<
             string,
@@ -135,7 +141,13 @@ export default {
                 const result = await run(command);
                 writeFileSync(
                     join(context.location.directory, `hidden-child-result-${command.seq}.json`),
-                    JSON.stringify(result),
+                    // The owner binding is reported so the test can check the pid rule against
+                    // the real registration bytes the running host wrote.
+                    JSON.stringify({
+                        ...result,
+                        pluginPid: process.pid,
+                        owner: hostServiceOwner() ?? null,
+                    }),
                 );
             }
         })();

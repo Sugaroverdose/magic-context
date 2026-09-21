@@ -52,6 +52,10 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
     if (detail.memoryMirror?.stalled) warnings.push("memory_mirror_stalled");
     if (detail.memoryAuthorityMismatch) warnings.push("memory_authority_mismatch");
     if ((detail.dreamerFailures?.length ?? 0) > 0) warnings.push("dreamer_task_failing");
+    // Host limitations are not failures of this turn, but they belong in the
+    // same list: the user needs to see that something they configured or asked
+    // for is not running here.
+    warnings.push(...(detail.hostLimitations ?? []));
 
     return {
         inputTokens: detail.inputTokens,
