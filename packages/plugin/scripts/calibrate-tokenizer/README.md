@@ -56,3 +56,9 @@ Both accepted. Existing openai-codex/* result rows and OAuth routing remain sepa
 Reference: https://platform.kimi.ai/docs/api/estimate. Adapter sends SYSTEM as a system message, TOOLS as chat function schemas, and PROSE as a user message to `POST https://api.moonshot.ai/v1/tokenizers/estimate-token-count`; reads `data.total_tokens`, baseline-subtracted. Credentials: MOONSHOT_API_KEY or ~/.config/kimi.key. The docs list kimi-k2.6 but do not explicitly list a tools field in the estimate schema; the tools cross-check will stop the harness if a server silently ignores it.
 
 2026-09-21: both moonshot/kimi-k2.6 and moonshot/kimi-for-coding returned HTTP 429 on the minimal baseline. Method `tokenizers/estimate-token-count`; SYSTEM/TOOLS/PROSE and section ratios unavailable, cross-check not reached. No paid fallback was used and no Kimi table entries were added or changed. Retry with an endpoint-authorized key/quota before calibrating. The existing opencode-go/kimi-k2.6 0.87/0.86 remains the 5% cross-check reference, not a substituted measurement.
+
+## Z.ai GLM
+
+Reference: https://docs.z.ai/api-reference/tools/tokenizer. Uses ZAI_API_KEY or ~/.config/zai.key and `POST https://api.z.ai/api/paas/v4/tokenizer`, reading usage.prompt_tokens. SYSTEM is a system message, TOOLS chat function definitions, PROSE user text; each subtracts a minimal-user baseline. Although the documentation's model enum is older, glm-5, glm-5.1 and glm-4.7 are attempted explicitly rather than substituted with another generation.
+
+2026-09-21: all three models returned HTTP 429 on the minimal baseline. Method `paas/v4/tokenizer`; all probe and section ratios unavailable, cross-check not reached. No GLM entries changed or guessed. Configured references are opencode-go/glm-5.1 (1.0/1.06) for 5/5.1 and cerebras/zai-glm-4.7 (1.0/1.09) for 4.7; retry when this key has endpoint access/quota.

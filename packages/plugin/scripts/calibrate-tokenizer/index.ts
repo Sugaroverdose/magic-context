@@ -25,6 +25,7 @@ import { buildProseProbe } from "./prose";
 import { crossCheck } from "./cross-check";
 import { measureAnthropic } from "./providers/anthropic";
 import { type CountAdapter } from "./providers/counting";
+import { measureZai } from "./providers/zai";
 import { measureKimi } from "./providers/kimi";
 import { measureOpenAI } from "./providers/openai";
 import { measureOpenAICodex } from "./providers/openai-codex";
@@ -37,6 +38,7 @@ interface AuthFile {
 }
 
 const FREE_ADAPTERS: Record<string, { measure: CountAdapter; method: string; env: string; file: string }> = {
+    zai: { measure: measureZai, method: "paas/v4/tokenizer", env: "ZAI_API_KEY", file: "zai.key" },
     moonshot: { measure: measureKimi, method: "tokenizers/estimate-token-count", env: "MOONSHOT_API_KEY", file: "kimi.key" },
     openai: { measure: measureOpenAI, method: "responses/input_tokens", env: "OPENAI_API_KEY", file: "openai.key" },
 };

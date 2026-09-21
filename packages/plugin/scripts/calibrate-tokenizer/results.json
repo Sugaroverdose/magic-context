@@ -395,5 +395,92 @@
     },
     "error": "/v1/tokenizers/estimate-token-count HTTP 429 (request rejected)",
     "durationMs": 230
+  },
+  {
+    "method": "paas/v4/tokenizer",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 57125,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "zai/glm-5",
+    "provider": "zai",
+    "modelId": "glm-5",
+    "tokenizerKey": "zai/glm-4.5",
+    "systemTokens": {
+      "local_raw": 14355,
+      "local_sdk": 14373,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 20168,
+      "local_sdk": 14081,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "/api/paas/v4/tokenizer HTTP 429 (request rejected)",
+    "durationMs": 2467
+  },
+  {
+    "method": "paas/v4/tokenizer",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 57125,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "zai/glm-5.1",
+    "provider": "zai",
+    "modelId": "glm-5.1",
+    "tokenizerKey": "zai/glm-4.5",
+    "systemTokens": {
+      "local_raw": 14355,
+      "local_sdk": 14373,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 20168,
+      "local_sdk": 14081,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "/api/paas/v4/tokenizer HTTP 429 (request rejected)",
+    "durationMs": 236
+  },
+  {
+    "method": "paas/v4/tokenizer",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 57125,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "zai/glm-4.7",
+    "provider": "zai",
+    "modelId": "glm-4.7",
+    "tokenizerKey": "zai/glm-4.5",
+    "systemTokens": {
+      "local_raw": 14355,
+      "local_sdk": 14373,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 20168,
+      "local_sdk": 14081,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "/api/paas/v4/tokenizer HTTP 429 (request rejected)",
+    "durationMs": 258
   }
 ]
