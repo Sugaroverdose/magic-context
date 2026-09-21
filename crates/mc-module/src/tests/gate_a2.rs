@@ -212,13 +212,19 @@ async fn gate_a_killed_host_loses_the_run_to_the_next_one_and_its_late_report_is
         "the chunk is not re-assembled for the replacement"
     );
 
+    // The two hosts produce DIFFERENT documents, so the compartment that lands
+    // says which of them was published rather than only how many did.
+    let (start, end) = prompt_ordinal_range(&prompt).expect("a claim's prompt names its range");
+    let dead_hosts_answer = historian_output(start, end, "the dead host's answer");
+    let survivors_answer = historian_output(start, end, "the surviving host's answer");
+
     // The killed host's report, replayed by hand with the token it still holds.
     let late = call_dispatch_request(
         &handler,
         json!({
             "method": "historian.complete", "v": 1,
             "run_id": run_id, "token": token_a,
-            "output": { "text": historian_output_for_prompt(&prompt), "length_capped": false },
+            "output": { "text": dead_hosts_answer, "length_capped": false },
         }),
     )
     .await;
@@ -234,17 +240,25 @@ async fn gate_a_killed_host_loses_the_run_to_the_next_one_and_its_late_report_is
         json!({
             "method": "historian.complete", "v": 1,
             "run_id": run_id, "token": host_b.token,
-            "output": { "text": historian_output_for_prompt(&prompt), "length_capped": false },
+            "output": { "text": survivors_answer, "length_capped": false },
         }),
     )
     .await;
     assert_eq!(accepted["ok"], json!(true), "{accepted}");
     wait_for_idle(&store).await;
 
+    let compartments = store.load_compartments("ses").unwrap();
     assert_eq!(
-        store.load_compartments("ses").unwrap().len(),
+        compartments.len(),
         1,
         "two hosts ran the same prompt and exactly one document became a compartment"
+    );
+    assert!(
+        compartments[0]
+            .content
+            .contains("the surviving host's answer"),
+        "the compartment has to be the live claimant's document: {}",
+        compartments[0].content
     );
     assert!(
         gate_queue_rows(&dir.path().join("data")).is_empty(),
@@ -317,13 +331,7 @@ fn gate_a_report_that_crosses_a_module_restart_is_stored_and_then_published() {
         .build()
         .unwrap();
     second.block_on(a2_after_the_restart(
-        producer,
-        &data_home,
-        &project,
-        messages,
-        run_id,
-        token,
-        completion,
+        producer, &data_home, &project, messages, run_id, token, completion,
     ));
     drop(second);
     drop(dir);
@@ -568,7 +576,14 @@ async fn gate_a_host_bound_to_one_project_cannot_walk_another_projects_run() {
     let (handler, store, dir, project) = handler_with_store(producer, host_runner_config());
     let project_key = lane_project_key(&store, &project);
     let now = now_ms();
-    a2_queue_run(&store, "ses", "run-mine", &project_key, "my transcript", now);
+    a2_queue_run(
+        &store,
+        "ses",
+        "run-mine",
+        &project_key,
+        "my transcript",
+        now,
+    );
     a2_queue_run(
         &store,
         "their-session",
@@ -620,6 +635,26 @@ async fn gate_a_host_bound_to_one_project_cannot_walk_another_projects_run() {
              {request}"
         );
     }
+
+    // The lane's last write is scoped too, not only the ops in front of it. A
+    // report offered straight to the store under this host's project is refused
+    // even though the token is the right one for that run, so the scope does not
+    // depend on the authorize step in front of it having run first.
+    assert_eq!(
+        store
+            .record_historian_report(
+                &project_key,
+                "run-theirs",
+                &theirs.token,
+                &mc_store::HistorianRunReport::Output {
+                    text: historian_output(1, 3, "stolen"),
+                    length_capped: false,
+                },
+                now,
+            )
+            .unwrap(),
+        mc_store::HistorianRecordOutcome::Refused(mc_store::HistorianReportRefusal::UnknownRun),
+    );
 
     // The other project's run is untouched: same claimant, same token, no report.
     let rows = gate_queue_rows(&dir.path().join("data"));
@@ -759,7 +794,8 @@ async fn gate_the_a8_emergency_accounting_on_a_fixture_that_has_tool_arcs() {
         m0_text(&host_second).contains("autonomous summary"),
         "the fold lands on the pass after the claimant reported"
     );
-    let (host_second_dropped, host_second_messages, host_second_bytes) = served_census(&host_second);
+    let (host_second_dropped, host_second_messages, host_second_bytes) =
+        served_census(&host_second);
 
     eprintln!(
         "A8 emergency accounting on a tool-bearing fixture: \
