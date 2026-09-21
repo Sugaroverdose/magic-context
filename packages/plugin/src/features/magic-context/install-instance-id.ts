@@ -1,25 +1,7 @@
 import type { Database } from "bun:sqlite";
 
-/**
- * The identity one installation of this host presents when it claims work.
- *
- * Why it is persisted rather than derived:
- *
- *  - A file-derived id (the store's own uuid, the database path) is the SAME for
- *    two processes opening the same file, so two hosts serving one project would
- *    both present it and a claim CAS keyed on identity would admit both.
- *  - A process-random id is different for the same install after a restart, so a
- *    host could not recognise work it had claimed moments earlier.
- *
- * Minted once, on demand, and never rotated. It is not a secret and not a
- * credential: it identifies which installation took a piece of work, which is
- * only ever used for diagnosis. What actually authorises a report is the
- * attempt-scoped token the module mints at claim time, so an id that leaks
- * grants nothing.
- */
 const INSTALL_INSTANCE_ID_KEY = "install_instance_id";
 
-/** Shape of the single-column read used by both helpers. */
 interface MetaValueRow {
     value: string;
 }
@@ -33,22 +15,34 @@ function readRaw(db: Database): string | null {
 }
 
 /**
- * Read the install's instance id without minting one.
- *
- * Returns null on an install that has never claimed anything. Callers that need
- * an id should use {@link ensureInstallInstanceId} instead; this exists for
- * diagnostics that must not create state as a side effect of being looked at.
+ * Read the id without minting one, returning null on an install that has never
+ * claimed anything. Separate from {@link ensureInstallInstanceId} so diagnostics
+ * can look without creating state as a side effect of being looked at.
  */
 export function readInstallInstanceId(db: Database): string | null {
     return readRaw(db);
 }
 
 /**
- * Return this install's instance id, minting and persisting one on first use.
+ * The identity one installation of this host presents when it claims a historian
+ * run, minting and persisting it on first use.
+ *
+ * Why it is persisted rather than derived:
+ *
+ *  - A file-derived id (the store's own uuid, the database path) is the SAME for
+ *    two processes opening the same file, so two hosts serving one project would
+ *    both present it and a claim keyed on identity would admit both.
+ *  - A process-random id is different for the same install after a restart, so a
+ *    host could not recognise work it had claimed moments earlier.
+ *
+ * Minted once and never rotated. It is not a credential: it records which
+ * installation took a piece of work, for diagnosis. What authorises a report is
+ * the attempt-scoped token the module mints at claim time, so an id that leaks
+ * grants nothing.
  *
  * Safe against two processes reaching it at once: the insert ignores a row that
- * is already there and the value is re-read afterwards, so both callers end up
- * returning the id that actually landed rather than the one they generated.
+ * is already there and the value is re-read afterwards, so both callers return
+ * the id that actually landed rather than the one they generated.
  */
 export function ensureInstallInstanceId(db: Database): string {
     const existing = readRaw(db);

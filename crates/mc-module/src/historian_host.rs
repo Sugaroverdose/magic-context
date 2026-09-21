@@ -18,9 +18,9 @@ use crate::historian_producer::ProducerOutput;
 /// What a claimant reported for one run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostRunReport {
-    /// The completion produced text. `length_capped` carries the same meaning it
-    /// does on the in-module path: the model stopped at its output ceiling, so
-    /// the document may be cut mid-structure.
+    /// The completion produced text. `length_capped` means the model stopped at
+    /// its output ceiling, so the document may be cut mid-structure — the same
+    /// signal the in-module producer reads off its own run terminal.
     Output(ProducerOutput),
     /// The completion did not happen. The code is the claimant's own vocabulary
     /// (`chain_exhausted`, `no_models`, …) and lands in the failure taxonomy the
@@ -37,8 +37,8 @@ struct HostRunSlot {
 /// Why a report could not be handed to a waiter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostReportDeliveryError {
-    /// Nothing in this process is waiting for that run. Either it was never
-    /// queued here, or it already ended.
+    /// No firing in this process is waiting for the named run. Either it was
+    /// never queued here, or it already ended.
     NoWaiter,
     /// A report for this run has already been accepted. The module takes exactly
     /// one terminal report per claim; later duplicates are dropped rather than
@@ -55,7 +55,6 @@ impl HostReportDeliveryError {
     }
 }
 
-/// Runs this process queued and is still waiting on.
 #[derive(Debug, Default)]
 pub struct HostRunLedger {
     slots: Mutex<HashMap<String, HostRunSlot>>,

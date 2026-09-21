@@ -1,29 +1,24 @@
-//! Which thing runs the historian's LLM call.
+//! Which side runs the historian's model call.
 //!
 //! Everything else about a fold — trigger evaluation, chunk assembly, prompt
 //! bytes, validation, discard-last, the publish CAS, marker scheduling and the
-//! failure taxonomy — is the module's and does not move. The only part that is
-//! pluggable is the completion itself: prompt in, text out.
-//!
-//! Two runners exist:
+//! failure taxonomy — belongs to this module and is identical under both
+//! runners. The only pluggable part is the completion itself: prompt in, text
+//! out.
 //!
 //! - [`HistorianRunnerKind::Broca`] opens a route to the `broca` module and
-//!   drives the run there. This is the path the module has always taken, and it
-//!   stays the default: nothing about its requests, its retries or its
-//!   published output changes because this seam exists.
+//!   drives the run there. It is the default, and its requests, retries and
+//!   published output are the same as they were before a second runner existed.
 //! - [`HistorianRunnerKind::Host`] queues the assembled run for a claimant
-//!   outside the module and waits for it to report back. It exists so a user
-//!   with no Broca can still fold, which is the whole point of the seam.
+//!   outside the module and waits for it to report back. It exists so a project
+//!   with no Broca module registered can still fold.
 
 use std::fmt;
 
-/// The configured completion route for historian runs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HistorianRunnerKind {
-    /// Drive the completion through the `broca` module (the current behaviour).
     #[default]
     Broca,
-    /// Queue the completion for a claimant outside the module.
     Host,
 }
 
@@ -46,7 +41,7 @@ impl HistorianRunnerKind {
         }
     }
 
-    /// Every accepted spelling, for config warnings and documentation.
+    /// Named so a config warning can list what the user could have written.
     pub const ACCEPTED_VALUES: [&'static str; 2] = ["broca", "host"];
 }
 

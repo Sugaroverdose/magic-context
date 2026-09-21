@@ -1,11 +1,12 @@
-//! The claim lane for historian runs whose completion something outside this
-//! module runs.
+//! The claim lane: historian runs whose model call is made by a host process
+//! rather than by this module.
 //!
 //! A run enters the lane when the module has assembled a chunk and built the
 //! prompt but has no producer of its own to send it to. The run is queued, a
-//! claimant takes it under a lease, and the module accepts exactly one terminal
-//! report per claim. Everything else about the firing — chunking, validation,
-//! the publish CAS, the failure taxonomy — is unchanged and stays where it is.
+//! claimant (the host serving that session) takes it under a lease, and the
+//! module accepts exactly one terminal report per claim. Chunking, validation,
+//! the publish CAS and the failure taxonomy all stay module-side and are
+//! identical whichever side made the call.
 //!
 //! Two rules make this safe without trusting the claimant:
 //!
@@ -28,8 +29,8 @@ use crate::{HistorianDurableState, HistorianPhase, McStore, McStoreError, Module
 ///
 /// A fold legitimately runs for minutes, so the lease cannot be short. It also
 /// cannot be unbounded: a claimant that dies silently would park the run forever.
-/// The ceiling is the module's own producer await, which is the longest a run has
-/// ever been allowed to take.
+/// 600 s is the module's own per-run producer await, so a claimant is allowed
+/// exactly as long as the module would have waited for its own producer.
 pub const HISTORIAN_LEASE_CEILING_MS: i64 = 600_000;
 
 /// How often a live claimant is expected to extend its lease. Two missed beats
@@ -41,7 +42,8 @@ pub const HISTORIAN_HEARTBEAT_INTERVAL_MS: i64 = 30_000;
 const PHASE_PENDING: &str = "pending";
 const PHASE_CLAIMED: &str = "claimed";
 
-/// Resolve the lease a claim gets from the run's configured await budget.
+/// The lease a claim gets. A run whose await budget outlives the ceiling is
+/// leased for the ceiling, which is what leaves time to re-claim it.
 pub fn historian_lease_ms(await_budget_ms: i64) -> i64 {
     await_budget_ms.clamp(1, HISTORIAN_LEASE_CEILING_MS)
 }
@@ -98,7 +100,7 @@ pub enum HistorianClaimRefusal {
     UnknownRun,
     /// The run exists but is not waiting for a claimant.
     NotPending,
-    /// The run is already held by a claimant whose lease has not expired.
+    /// Another claimant holds it and its lease has not run out.
     AlreadyClaimed,
 }
 
@@ -124,8 +126,8 @@ pub enum HistorianReportRefusal {
     UnknownRun,
     /// The run exists but nobody holds it, so no token can be current.
     NotClaimed,
-    /// The token was real once. The claim it belonged to is over, so whatever
-    /// this report carries describes an attempt that no longer exists.
+    /// The token was real once, but the claim it belonged to is over: the sender
+    /// is describing an attempt that no longer exists.
     SupersededToken,
 }
 
@@ -165,16 +167,17 @@ pub enum HistorianHeartbeatOutcome {
 
 impl HistorianDurableState {
     /// Drop the claim but keep the run: `run_id`, chunk fingerprint, selected
-    /// identities and `firing_seq` all survive, so the next claimant continues this
-    /// run instead of paying to assemble a new chunk. Clearing the token is what
-    /// makes the departing claimant's late report refusable.
+    /// identities and `firing_seq` all survive, so the next claimant continues the
+    /// same run instead of paying to assemble a new chunk. Clearing the token is
+    /// what makes the departing claimant's late report refusable.
     pub fn park_for_reclaim(&mut self) {
         self.state = HistorianPhase::Reclaiming;
         self.coordinator_token = None;
         self.claim_deadline_ms = None;
     }
 
-    /// Hand the run to a claimant under a module-minted attempt and token.
+    /// Hand the run to a claimant. The attempt and token are minted by the module
+    /// so a claimant cannot present a newer claim than the one it was given.
     pub fn grant_claim(&mut self, attempt: u32, token: String, claim_deadline_ms: i64) {
         self.state = HistorianPhase::AwaitingProducer;
         self.producer_attempt = attempt;
@@ -537,9 +540,9 @@ impl McStore {
 
     /// Check that a terminal report belongs to the current claim.
     ///
-    /// This deliberately does not change the phase. The report still has to pass
+    /// The phase is deliberately left alone here. A report still has to pass
     /// validation and the publish CAS, both of which own their own transitions;
-    /// moving the phase here would make a rejected report look published.
+    /// advancing the phase on arrival would make a rejected report look published.
     pub fn authorize_historian_report(
         &self,
         run_id: &str,

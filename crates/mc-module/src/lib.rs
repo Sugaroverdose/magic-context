@@ -5543,10 +5543,11 @@ impl McHandler {
                 });
                 Some("reattaching")
             }
-            // A run parked for a claimant does not survive a restart in this slice:
-            // nothing re-publishes it to the queue yet, so leaving it parked would
-            // strand the session until the next trigger. Recovery releases it and a
-            // later trigger assembles a fresh chunk.
+            // A run parked for a claimant is released rather than kept across a
+            // restart. Nothing re-publishes a parked run to the claim queue on boot,
+            // so keeping it would hold the session's single-flight slot with no
+            // claimant able to arrive. Releasing it costs one re-assembled chunk on
+            // the next trigger and never loses durable output.
             HistorianPhase::Firing
             | HistorianPhase::Reclaiming
             | HistorianPhase::Validating

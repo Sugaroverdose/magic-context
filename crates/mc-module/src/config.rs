@@ -545,9 +545,9 @@ fn merge_tiers_with_warnings(
         if let Some(runner) = user.pointer("/historian/runner").and_then(Value::as_str) {
             match HistorianRunnerKind::parse(runner) {
                 Some(kind) => cfg.historian_runner = kind,
-                // Keeping the default on an unreadable value is the safe half of the
-                // choice: a typo leaves folds running exactly where they ran before
-                // instead of rerouting every completion to a lane the user did not ask for.
+                // An unreadable value keeps the default rather than refusing to fire.
+                // A typo then leaves folds running exactly where they ran before,
+                // instead of sending every completion somewhere the user never asked for.
                 None => warnings.push(format!(
                     "ignoring historian.runner {runner:?}; expected one of {}",
                     HistorianRunnerKind::ACCEPTED_VALUES.join(", ")
