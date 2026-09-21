@@ -1868,6 +1868,16 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "historian_last_failure_at", "INTEGER DEFAULT NULL");
     ensureColumn(db, "session_meta", "system_prompt_hash", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "cleared_reasoning_through_tag", "INTEGER DEFAULT 0");
+    // The tags_version_* triggers above are DURABLE schema: their bodies write this
+    // column on every tag write, and SQLite re-resolves a trigger body whenever it
+    // reparses the schema (any ALTER TABLE ... RENAME does). A database whose
+    // session_meta predates the column therefore carries a trigger that cannot be
+    // compiled, and the migration chain that would eventually add the column has to
+    // get past its own table rebuilds first — the embedding rebuild dropped
+    // memory_embeddings and then could not rename its replacement into place. Heal
+    // the column here, alongside every other column those trigger bodies name, so
+    // the schema is always compilable before any migration runs.
+    ensureColumn(db, "session_meta", "tags_version", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(db, "session_meta", "tool_reclaim_watermark", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "stripped_placeholder_ids", "TEXT DEFAULT ''");
     // Frozen replay watermark for the stale-ctx_reduce strip: message ids whose

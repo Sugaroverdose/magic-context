@@ -121,3 +121,7 @@ packages/*/.cortexkit/
 # Scratch trees written by the pure-replay differential harness (never source; keep the
 # watcher and the code index out of them).
 .pure-replay-differential-*/
+
+# Same shape: the issue 485 fixture generator checks the pre-fix package out here.
+# The script removes it on the way out, but an interrupted run leaves it behind.
+.issue-485-pure-*/
