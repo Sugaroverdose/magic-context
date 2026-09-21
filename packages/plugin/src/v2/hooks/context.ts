@@ -130,6 +130,26 @@ function toolResultText(result: { content?: unknown } | undefined): string {
         .join("\n");
 }
 
+/**
+ * Record why a turn is about to be refused before the model is called.
+ *
+ * When reading the host store or the context database fails, the turn is treated
+ * as unsafe and interrupted before the provider request. The host then stores the
+ * turn as interrupted and the user simply never receives a reply — there is no
+ * error on screen and no assistant message. Without this line the reason exists
+ * only in OpenCode's own server log, so the Magic Context log that users are
+ * asked for during a support request says nothing about why their turn died
+ * (issue #493, where a store the OpenCode 2 host had migrated from OpenCode 1
+ * was refused by the v2 store reader and every turn ended in silence).
+ */
+export function reportPreProviderRefusal(sessionID: string, error: unknown): void {
+    console.warn("[magic-context] v2 refuseIfUnsafe", error);
+    sessionLog(
+        sessionID,
+        `v2 refusing this turn before the model call: the context could not be read: ${getErrorMessage(error)}`,
+    );
+}
+
 /** Accept both a raw model array and the 2.0.5 `{ data }` list payload. */
 export function catalogModels(listed: unknown): Array<{
     id: string;
@@ -478,7 +498,7 @@ export async function registerContext(context: V2Context) {
                 reader.close();
             }
         } catch (error) {
-            console.warn("[magic-context] v2 refuseIfUnsafe", error);
+            reportPreProviderRefusal(draft.sessionID, error);
             unsafe = true;
         }
         return unsafe;
