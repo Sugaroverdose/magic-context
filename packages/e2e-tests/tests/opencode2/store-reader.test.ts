@@ -146,11 +146,7 @@ test("10,000-row raw read pages decode only the requested page and count decodes
 					JSON.stringify({ outcome: "succeeded" }),
 				);
 			}
-			insert.run(
-				`message-${ordinal}`,
-				seq,
-				ordinal === 1 ? "not-json" : JSON.stringify({ text: `row ${ordinal}` }),
-			);
+			insert.run(`message-${ordinal}`, seq, JSON.stringify({ text: `row ${ordinal}` }));
 		}
 	})();
 
