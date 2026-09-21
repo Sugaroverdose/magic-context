@@ -19592,6 +19592,10 @@ mod tests {
     use super::*;
     use cortexkit_store_types::{Isolation, StorageBackend};
 
+    // Adversarial gate over the claim-lane migration and the single-store marker
+    // migration as one merged chain.
+    mod gate_a1_b0;
+
     fn descriptor(dir: &std::path::Path) -> StorageDescriptor {
         StorageDescriptor {
             module_id: "magic-context-test".to_string(),
