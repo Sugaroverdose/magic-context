@@ -1297,6 +1297,21 @@
             ]
         },
         {
+            "path": "tests/rust-subagent-lkg-cycle.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "existing rust-* file; hermetic Rust harness leg",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/rust-tail-mutation-readopt.test.ts",
             "tier": "rust-only",
             "invocation": {
