@@ -22,7 +22,7 @@ describe("mode manifest validator", () => {
         // removed. Adding an OpenCode 2 lane file moves this number and the excluded
         // list below and nothing else, because those files carry tier "excluded" and
         // so never enter a TS or Rust invocation list.
-        expect(validation.files.length).toBe(83);
+        expect(validation.files.length).toBe(85);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -34,7 +34,7 @@ describe("mode manifest validator", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
         expect(ts).toHaveLength(26);
-        expect(rust).toHaveLength(45);
+        expect(rust).toHaveLength(47);
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(1);
         expect(filesForMode(validation, "ts", "opencode")).toHaveLength(25);
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(21);

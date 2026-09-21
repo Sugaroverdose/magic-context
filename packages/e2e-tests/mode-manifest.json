@@ -560,7 +560,7 @@
                 "ts": false,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: pins the captured GA host evidence (sha256) — unit-shaped, needs no host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: pins the captured GA host evidence (sha256) \u2014 unit-shaped, needs no host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1228,6 +1228,21 @@
                 "rust": true
             },
             "rationale": "park self-heal confirms external-module exit before driving the prolonged outage, then proves the recovered process resumes real transforms",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-persisted-synthetic-prompt.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "hermetic Rust harness leg; a plugin-injected synthetic user prompt must stay on the served wire after it stops being newest",
             "contract_refs": [
                 "RUST-E2E"
             ],

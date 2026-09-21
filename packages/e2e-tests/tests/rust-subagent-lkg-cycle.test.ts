@@ -17,9 +17,9 @@
  * makes the plugin treat it as a subagent) through 20+ provider passes carrying
  * tool calls, tool results, and signed thinking, and interleaves the shape that
  * triggered the incident: an OpenCode notice delivery, a user message whose parts
- * are flagged synthetic. Such a message is served only while it is the newest one,
- * so the following pass drops it — an ordinary tail change that must never be read
- * as a frozen-prefix mutation.
+ * are flagged synthetic. Such a message is persisted and is served on every later
+ * pass like any other turn; the pass that first carries it is an ordinary tail
+ * change that must never be read as a frozen-prefix mutation.
  *
  * Assertion style: the plugin's own session log (no replay entered, no divergence
  * attributed to a frame) plus sha256 identity of the retained prefix between
@@ -145,8 +145,8 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: subagent defer passes are byte
             for (let turn = 1; turn <= 11; turn += 1) {
                 await h.sendPrompt(child, `${PROBE} turn ${turn}: ${h.ballast(120)}`);
                 if (turn === 4 || turn === 8) {
-                    // OpenCode's own notice shape: a synthetic user part. Served while it
-                    // is the newest message, dropped by the next pass.
+                    // OpenCode's own notice shape: a synthetic user part. It persists as an
+                    // ordinary user row and stays on the wire from this pass onward.
                     await h.sendPrompt(
                         child,
                         `<system-reminder>\n[BACKGROUND TASK COMPLETED] ${PROBE} notice ${turn}\n</system-reminder>`,
@@ -201,11 +201,10 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: subagent defer passes are byte
             // earlier pass served below its live tail must reproduce, hash for hash, at the
             // same index in the next pass.
             //
-            // The live tail here is the last two messages. A notice delivery is legitimately
-            // dropped on the pass after it is served, which costs its own slot AND the one
-            // before it: with the notice's user message gone, the Anthropic serializer merges
-            // the assistant that preceded it into the assistant that follows. Nothing below
-            // those two may move — the incident rewrote ten to fifteen messages deep.
+            // The live tail here is the last two messages: a turn can add a user message and
+            // the assistant reply to it between two captures. Nothing below those two may
+            // move — the incident described at the top of this file rewrote ten to fifteen
+            // messages deep.
             const LIVE_TAIL_MESSAGES = 2;
             let comparedPairs = 0;
             for (let pass = 1; pass < served.length; pass += 1) {
