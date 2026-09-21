@@ -14,6 +14,7 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 
+use crate::historian_runner::HistorianRunnerKind;
 use crate::scheduler::{self, ExecuteThresholdConfig};
 
 /// Default execute threshold percentage (65.0). The Rust module reads config without the
@@ -83,6 +84,10 @@ pub struct McModuleConfig {
     pub model_chain: Vec<String>,
     /// Optional trusted user-configured sampling temperature for historian requests.
     pub historian_temperature: Option<f64>,
+    /// Which side runs the historian's completion. USER-tier only, for the same
+    /// reason the model is: it decides whose provider account and whose process
+    /// pays for the call, so a cloned repository must not be able to redirect it.
+    pub historian_runner: HistorianRunnerKind,
     /// Trusted user-configured language for hidden-agent prose. Project config is deliberately
     /// excluded because the language directive becomes provider-visible prompt text.
     pub language: Option<String>,
@@ -134,6 +139,7 @@ impl Default for McModuleConfig {
         Self {
             model_chain: Vec::new(),
             historian_temperature: None,
+            historian_runner: HistorianRunnerKind::default(),
             language: None,
             execute_threshold_percentage: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
             execute_threshold_user_config: None,
@@ -536,6 +542,18 @@ fn merge_tiers_with_warnings(
         if let Some(temperature) = number_at(user, "/historian/temperature") {
             cfg.historian_temperature = Some(temperature);
         }
+        if let Some(runner) = user.pointer("/historian/runner").and_then(Value::as_str) {
+            match HistorianRunnerKind::parse(runner) {
+                Some(kind) => cfg.historian_runner = kind,
+                // Keeping the default on an unreadable value is the safe half of the
+                // choice: a typo leaves folds running exactly where they ran before
+                // instead of rerouting every completion to a lane the user did not ask for.
+                None => warnings.push(format!(
+                    "ignoring historian.runner {runner:?}; expected one of {}",
+                    HistorianRunnerKind::ACCEPTED_VALUES.join(", ")
+                )),
+            }
+        }
         if let Some(language) = user
             .pointer("/language")
             .and_then(Value::as_str)
@@ -656,6 +674,7 @@ fn merge_tiers_with_warnings(
         warn_ignored_project_key(project, "/memory/budget_tokens", &mut warnings);
         warn_ignored_project_key(project, "/memory/user_profile_budget_tokens", &mut warnings);
         warn_ignored_project_key(project, "/historian/context_limit_tokens", &mut warnings);
+        warn_ignored_project_key(project, "/historian/runner", &mut warnings);
         if let Some(enabled) = project.pointer("/smart_drops").and_then(Value::as_bool) {
             cfg.smart_drops = enabled;
         }

@@ -13,6 +13,15 @@
 
 #![forbid(unsafe_code)]
 
+mod historian_claim;
+
+pub use historian_claim::{
+    historian_lease_ms, HistorianClaim, HistorianClaimOutcome, HistorianClaimRefusal,
+    HistorianHeartbeatOutcome, HistorianPendingRun, HistorianReportAuthorization,
+    HistorianReportOutcome, HistorianReportRefusal, NewHistorianPendingRun,
+    HISTORIAN_HEARTBEAT_INTERVAL_MS, HISTORIAN_LEASE_CEILING_MS,
+};
+
 use cortexkit_cache_core::{CoreState, DurabilityClass, FrozenUnit};
 use cortexkit_store::{open_sqlite, Migration, SqliteStore, StoreError};
 use cortexkit_store_types::StorageDescriptor;
@@ -2916,6 +2925,53 @@ const MIGRATIONS: &[Migration] = &[
         );
     ",
     },
+    Migration {
+        version: 57,
+        // The queue a historian run sits in while something outside this module runs
+        // its completion.
+        //
+        // The session's own durable state (inside `mc_cache_state.meta`) stays the
+        // authority on the firing: phase, chunk fingerprint, selected identities and
+        // the publish predicate all live there and are unchanged. This table exists
+        // for the two things that state cannot do. First, it is addressable by
+        // `run_id` without knowing which session owns it, which is all a claimant
+        // has. Second, it holds the request bytes (system prompt, user prompt, model
+        // chain) a claimant needs and the session row has no reason to carry.
+        //
+        // `phase` and `attempt` are the claim's own copy of the pair the session
+        // state carries, so a claim resolves in one row read and CASes in one row
+        // write. They are written in the same transaction as the session state,
+        // never independently.
+        //
+        // Rows are bounded by the number of concurrently folding sessions; terminal
+        // rows are deleted rather than accumulated.
+        statements: "
+        CREATE TABLE IF NOT EXISTS mc_historian_pending_run (
+            run_id               TEXT PRIMARY KEY,
+            session_id           TEXT NOT NULL,
+            project_path         TEXT NOT NULL,
+            firing_seq           INTEGER NOT NULL,
+            chunk_fingerprint    TEXT NOT NULL,
+            phase                TEXT NOT NULL,
+            attempt              INTEGER NOT NULL,
+            claimant_instance_id TEXT,
+            coordinator_token    TEXT,
+            claim_deadline_ms    INTEGER,
+            lease_ms             INTEGER NOT NULL,
+            deadline_ms          INTEGER NOT NULL,
+            system_prompt        TEXT NOT NULL,
+            user_prompt          TEXT NOT NULL,
+            model_chain          TEXT NOT NULL,
+            await_budget_ms      INTEGER NOT NULL,
+            created_at_ms        INTEGER NOT NULL,
+            updated_at_ms        INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS mc_historian_pending_run_session
+            ON mc_historian_pending_run(session_id);
+        CREATE INDEX IF NOT EXISTS mc_historian_pending_run_phase
+            ON mc_historian_pending_run(phase, claim_deadline_ms);
+    ",
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -3118,6 +3174,15 @@ pub enum HistorianPhase {
     Idle,
     Firing,
     AwaitingProducer,
+    /// The run still exists and still owns its chunk, but nobody is producing for
+    /// it: the claimant's lease expired without a terminal report. The coordinator
+    /// token is cleared so a late report from the dead claimant is refused, while
+    /// `run_id`, the chunk fingerprint and `firing_seq` are kept so the next
+    /// claimant continues the SAME run under a fresh attempt instead of paying for
+    /// a whole new chunk. Without this phase the run sat in `AwaitingProducer`
+    /// until the producer await gave up, because no transition admitted a second
+    /// producer.
+    Reclaiming,
     Validating,
     Publishing,
 }
@@ -3128,6 +3193,7 @@ impl HistorianPhase {
             HistorianPhase::Idle => "idle",
             HistorianPhase::Firing => "firing",
             HistorianPhase::AwaitingProducer => "awaiting_producer",
+            HistorianPhase::Reclaiming => "reclaiming",
             HistorianPhase::Validating => "validating",
             HistorianPhase::Publishing => "publishing",
         }
@@ -3212,6 +3278,24 @@ pub struct HistorianDurableState {
     pub producer_session_id: Option<String>,
     #[serde(default)]
     pub producer_run_id: Option<String>,
+    /// Which try at `producer_run_id` this is. The run identity is the PAIR: a run
+    /// whose claimant died and was re-claimed keeps its `run_id` and advances this,
+    /// so a late report from the dead claimant names a run that still exists but an
+    /// attempt that no longer does, and is refused. Attempts are minted here, never
+    /// by whoever runs the completion. Rows written before attempts existed default
+    /// to 0, which is the attempt the first claimant gets.
+    #[serde(default)]
+    pub producer_attempt: u32,
+    /// The attempt-unique secret handed to the current claimant. `historian.complete`
+    /// and `historian.heartbeat` present it instead of an identity, so a report is
+    /// accepted on proof of holding the current claim rather than on who sent it.
+    /// Absent in every phase that has no live claimant, including `Reclaiming`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_token: Option<String>,
+    /// When the current claim stops being current. A claimant that has not reported
+    /// or heartbeated by this wall-clock time can be replaced under a new attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_deadline_ms: Option<i64>,
     #[serde(default)]
     pub fired_at_ms: Option<i64>,
     /// Session-level revert epoch observed when the chunk was assembled. It is copied
@@ -3259,6 +3343,9 @@ impl Default for HistorianDurableState {
             selected_range_identities: Vec::new(),
             producer_session_id: None,
             producer_run_id: None,
+            producer_attempt: 0,
+            coordinator_token: None,
+            claim_deadline_ms: None,
             fired_at_ms: None,
             expected_revert_epoch: 0,
             compartment_set_generation: CompartmentSetGeneration::default(),
@@ -3611,6 +3698,10 @@ pub struct PromotedRef {
 pub struct HistorianPublishPredicate {
     pub firing_seq: u64,
     pub producer_run_id: String,
+    /// The attempt half of the run identity. A report produced under an earlier
+    /// attempt of the same `producer_run_id` fails this predicate, which is what
+    /// stops a superseded claimant from publishing over the claimant that replaced it.
+    pub producer_attempt: u32,
     pub chunk_fingerprint: String,
     pub selected_range_identities: Vec<HistorianSelectedMessageIdentity>,
     /// Cheap generation of the complete compartment set captured when this firing
@@ -3749,8 +3840,12 @@ impl std::fmt::Display for HistorianPublishError {
             }
             HistorianPublishError::StateMismatch { expected, found } => write!(
                 f,
-                "historian publish state mismatch: expected seq {} run {} fingerprint {}, found {:?}",
-                expected.firing_seq, expected.producer_run_id, expected.chunk_fingerprint, found
+                "historian publish state mismatch: expected seq {} run {} attempt {} fingerprint {}, found {:?}",
+                expected.firing_seq,
+                expected.producer_run_id,
+                expected.producer_attempt,
+                expected.chunk_fingerprint,
+                found
             ),
             HistorianPublishError::InvalidState { state } => {
                 write!(f, "historian publish invalid state: {state}")
@@ -13060,6 +13155,7 @@ impl McStore {
             let historian = &meta.historian;
             let predicate_matches = historian.firing_seq == predicate.firing_seq
                 && historian.producer_run_id.as_deref() == Some(predicate.producer_run_id.as_str())
+                && historian.producer_attempt == predicate.producer_attempt
                 && historian.chunk_fingerprint == predicate.chunk_fingerprint
                 && historian.selected_range_identities == predicate.selected_range_identities
                 && historian.compartment_set_generation == predicate.compartment_set_generation;
@@ -13139,6 +13235,7 @@ impl McStore {
             let historian = &meta.historian;
             let predicate_matches = historian.firing_seq == predicate.firing_seq
                 && historian.producer_run_id.as_deref() == Some(predicate.producer_run_id.as_str())
+                && historian.producer_attempt == predicate.producer_attempt
                 && historian.chunk_fingerprint == predicate.chunk_fingerprint
                 && historian.selected_range_identities == predicate.selected_range_identities
                 && historian.compartment_set_generation == predicate.compartment_set_generation;
@@ -13221,6 +13318,7 @@ impl McStore {
             let predicate_matches = meta.historian.firing_seq == predicate.firing_seq
                 && meta.historian.producer_run_id.as_deref()
                     == Some(predicate.producer_run_id.as_str())
+                && meta.historian.producer_attempt == predicate.producer_attempt
                 && meta.historian.chunk_fingerprint == predicate.chunk_fingerprint
                 && meta.historian.selected_range_identities == predicate.selected_range_identities
                 && meta.historian.compartment_set_generation
@@ -25565,6 +25663,9 @@ mod tests {
                 selected_range_identities,
                 producer_session_id: Some("producer-session".into()),
                 producer_run_id: Some("run-1".into()),
+                producer_attempt: 0,
+                coordinator_token: None,
+                claim_deadline_ms: None,
                 fired_at_ms: Some(123),
                 expected_revert_epoch: 0,
                 compartment_set_generation: CompartmentSetGeneration::default(),
@@ -25694,6 +25795,7 @@ mod tests {
         HistorianPublishPredicate {
             firing_seq: 7,
             producer_run_id: "run-1".into(),
+            producer_attempt: 0,
             chunk_fingerprint: "fp".into(),
             selected_range_identities: selected_range_identities(),
             compartment_set_generation: CompartmentSetGeneration::default(),

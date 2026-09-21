@@ -472,6 +472,9 @@ pub fn fire(
         selected_range_identities,
         producer_session_id: None,
         producer_run_id: None,
+        producer_attempt: 0,
+        coordinator_token: None,
+        claim_deadline_ms: None,
         fired_at_ms: Some(fired_at_ms),
         expected_revert_epoch,
         compartment_set_generation,
@@ -494,10 +497,65 @@ pub fn producer_started(
     next.state = HistorianPhase::AwaitingProducer;
     next.producer_session_id = Some(producer_session_id);
     next.producer_run_id = Some(producer_run_id);
+    // The in-module producer holds its run for as long as it runs and cannot be
+    // taken over, so it is always attempt 0 of that run and needs no token.
+    next.producer_attempt = 0;
+    next.coordinator_token = None;
+    next.claim_deadline_ms = None;
     // A producer run is established: any failure detail or retry cooldown from a
     // prior firing is resolved.
     next.failure_backoff_at_ms = None;
     next.last_failure = None;
+    Ok(next)
+}
+
+/// `Firing -> Reclaiming`: the run is assembled and queued, but no claimant has
+/// taken it yet. The run identity exists from here on, so a claim continues this
+/// run rather than starting another.
+pub fn pending_published(
+    current: &HistorianDurableState,
+    producer_run_id: String,
+) -> Result<HistorianDurableState, HistorianStateError> {
+    require_phase(current, HistorianPhase::Firing, "pending_published")?;
+    let mut next = current.clone();
+    next.producer_run_id = Some(producer_run_id);
+    next.producer_attempt = 0;
+    next.park_for_reclaim();
+    Ok(next)
+}
+
+/// `AwaitingProducer -> Reclaiming`: the claimant's lease ran out without a
+/// terminal report. The run, its chunk and its firing sequence are kept; only the
+/// claim is dropped, so the replacement pays for one completion rather than a
+/// whole new chunk. Dropping the token is what makes the departed claimant's late
+/// report refusable in every later phase.
+pub fn lease_expired(
+    current: &HistorianDurableState,
+) -> Result<HistorianDurableState, HistorianStateError> {
+    require_phase(current, HistorianPhase::AwaitingProducer, "lease_expired")?;
+    let mut next = current.clone();
+    next.park_for_reclaim();
+    Ok(next)
+}
+
+/// `Reclaiming -> AwaitingProducer`: a claimant took the run under an attempt and
+/// token this module minted. Attempts are monotonic per run, so the pair
+/// `(run_id, attempt)` names exactly one claim for the life of the run.
+pub fn reclaimed(
+    current: &HistorianDurableState,
+    attempt: u32,
+    token: String,
+    claim_deadline_ms: i64,
+) -> Result<HistorianDurableState, HistorianStateError> {
+    require_phase(current, HistorianPhase::Reclaiming, "reclaimed")?;
+    if attempt <= current.producer_attempt {
+        return Err(HistorianStateError::InvalidTransition {
+            from: current.state.clone(),
+            event: "reclaimed",
+        });
+    }
+    let mut next = current.clone();
+    next.grant_claim(attempt, token, claim_deadline_ms);
     Ok(next)
 }
 
@@ -588,6 +646,7 @@ pub fn publish_predicate(
     Ok(HistorianPublishPredicate {
         firing_seq: state.firing_seq,
         producer_run_id,
+        producer_attempt: state.producer_attempt,
         chunk_fingerprint: state.chunk_fingerprint.clone(),
         selected_range_identities: state.selected_range_identities.clone(),
         compartment_set_generation: state.compartment_set_generation,
@@ -859,7 +918,14 @@ pub fn handle_restart_load(
                 chunk_fingerprint: state.chunk_fingerprint,
             })
         }
-        HistorianPhase::Firing | HistorianPhase::Validating | HistorianPhase::Publishing => {
+        // A parked run is released rather than kept: nothing re-publishes it to the
+        // claim queue after a restart, so keeping it would hold the session's
+        // single-flight slot with no claimant able to arrive. Releasing it costs one
+        // re-assembled chunk on the next trigger and never loses durable output.
+        HistorianPhase::Firing
+        | HistorianPhase::Reclaiming
+        | HistorianPhase::Validating
+        | HistorianPhase::Publishing => {
             let firing_seq = state.firing_seq;
             let next = abandon(&state, failure_backoff_at_ms);
             persist_historian_state(store, session_id, next)?;
@@ -1953,6 +2019,197 @@ where
     )))
 }
 
+/// How often a claimant is expected to extend its lease, for the claim response.
+pub const HISTORIAN_HEARTBEAT_INTERVAL_MS: i64 = mc_store::HISTORIAN_HEARTBEAT_INTERVAL_MS;
+
+/// Run one firing with the completion done outside this module.
+///
+/// The shape mirrors the in-module path exactly up to the completion and exactly
+/// after it: the same admission checks, the same `fire`, the same validation and
+/// the same publish CAS. What differs is only the middle — instead of opening a
+/// route and driving a run, the assembled request is queued and this task waits
+/// for a claimant to report.
+///
+/// The model chain is passed through to the claimant rather than walked here.
+/// Fallback is the claimant's to do because only it knows which of those models
+/// it can actually reach; what comes back is one text or one failure, and the
+/// module's failure taxonomy treats that failure the same way it treats a
+/// producer error.
+pub async fn run_historian_firing_on_host(
+    ledger: &std::sync::Arc<crate::historian_host::HostRunLedger>,
+    request: HistorianFireRequest<'_>,
+    await_budget: Duration,
+) -> Result<HistorianDriveOutcome, HistorianDriveError> {
+    if request.model_chain.is_empty() {
+        return Err(HistorianDriveError::NoModels);
+    }
+    if let Some(reason) = producer_window_failure_reason(
+        request.producer_source_tokens,
+        request.historian_context_limit_tokens,
+        request.max_output_tokens,
+    ) {
+        let loaded = request.store.load(request.session_id)?;
+        let mut meta = loaded.meta.clone();
+        meta.historian.last_failure = Some(reason.clone());
+        meta.historian.failure_backoff_at_ms = Some(request.failure_backoff_at_ms);
+        request
+            .store
+            .commit(request.session_id, loaded.row_version, &loaded.core, &meta)?;
+        eprintln!(
+            "[mc-module][{}] historian oversize admission refused before queueing: {reason}",
+            request.session_id
+        );
+        return Err(HistorianDriveError::Producer(
+            HistorianProducerError::context_overflow(reason),
+        ));
+    }
+
+    verify_chunk_fingerprint(
+        request.chunk_fingerprint,
+        request.observed_chunk_fingerprint,
+    )?;
+    let loaded = request.store.load(request.session_id)?;
+    let mut recent_decision = request.recent_decision.clone();
+    if let Some(decision) = recent_decision.as_mut() {
+        // The claimant picks the model from the chain, so the decision record
+        // names the chain's head rather than claiming a model was used.
+        decision.producer_model = request.model_chain.first().cloned();
+    }
+    let fired = match fire(
+        &loaded.meta.historian,
+        request.from_ordinal,
+        request.to_ordinal,
+        request.chunk_fingerprint.to_string(),
+        request.selected_range_identities.clone(),
+        request.expected_revert_epoch,
+        request.compartment_set_generation,
+        request.now_ms,
+        recent_decision,
+    )? {
+        FireOutcome::Busy(state) => return Ok(HistorianDriveOutcome::Busy(state)),
+        FireOutcome::Fired(state) => state,
+    };
+    persist_historian_state(request.store, request.session_id, fired.clone())?;
+
+    // The run id is the module's, minted at fire, and never the claimant's. Reusing
+    // the producer-session naming keeps one vocabulary for "this firing's run"
+    // across both runners.
+    let run_id = historian_producer_session_id(
+        request.project_slug,
+        request.session_id,
+        fired.firing_seq,
+    );
+    let registration = ledger.register(&run_id);
+    let queued = request
+        .store
+        .publish_pending_historian_run(&mc_store::NewHistorianPendingRun {
+            run_id: run_id.clone(),
+            session_id: request.session_id.to_string(),
+            project_path: request.project_path.to_string(),
+            firing_seq: fired.firing_seq,
+            chunk_fingerprint: request.chunk_fingerprint.to_string(),
+            system_prompt: request.system.as_ref().to_string(),
+            user_prompt: request.prompt.to_string(),
+            model_chain: request.model_chain.to_vec(),
+            await_budget_ms: await_budget.as_millis().min(i64::MAX as u128) as i64,
+            now_ms: request.now_ms,
+        });
+    if let Err(error) = queued {
+        let detail = format!("historian run could not be queued for a claimant: {error}");
+        persist_historian_state(
+            request.store,
+            request.session_id,
+            abandon_with_detail(&fired, request.failure_backoff_at_ms, Some(detail.clone())),
+        )?;
+        return Err(HistorianDriveError::Producer(
+            HistorianProducerError::retryable_model_failure(detail),
+        ));
+    }
+
+    let report = registration.wait(await_budget).await;
+    let _ = request.store.finish_historian_pending_run(&run_id);
+
+    let completed_at_ms = (request.completion_now_ms)();
+    let failure_backoff_at_ms = completion_failure_backoff_at_ms(
+        request.now_ms,
+        request.failure_backoff_at_ms,
+        completed_at_ms,
+    );
+    let output = match report {
+        Some(crate::historian_host::HostRunReport::Output(output)) => output,
+        Some(crate::historian_host::HostRunReport::Failed { code, message }) => {
+            abandon_current_state_with_detail(
+                request.store,
+                request.session_id,
+                failure_backoff_at_ms,
+                Some(format!("host runner reported {code}: {message}")),
+            )?;
+            return Err(HistorianDriveError::Producer(HistorianProducerError::Subc(
+                ProducerErrorBody::untagged(code, message),
+            )));
+        }
+        None => {
+            abandon_current_state_with_detail(
+                request.store,
+                request.session_id,
+                failure_backoff_at_ms,
+                Some(format!(
+                    "host runner produced no report for {run_id} within {}ms",
+                    await_budget.as_millis()
+                )),
+            )?;
+            return Err(HistorianDriveError::Producer(
+                HistorianProducerError::TimedOut,
+            ));
+        }
+    };
+
+    // Reload rather than reusing `fired`: the claim advanced the phase, the
+    // attempt and the token, and the publish predicate CASes on the attempt.
+    let claimed = request.store.load(request.session_id)?.meta.historian;
+    if claimed.state != HistorianPhase::AwaitingProducer
+        || claimed.producer_run_id.as_deref() != Some(run_id.as_str())
+    {
+        return Err(HistorianDriveError::State(
+            HistorianStateError::InvalidTransition {
+                from: claimed.state.clone(),
+                event: "host_report",
+            },
+        ));
+    }
+
+    let row_version = publish_output_from_awaiting(PublishOutputRequest {
+        store: request.store,
+        session_id: request.session_id,
+        project_path: request.project_path,
+        awaiting: claimed.clone(),
+        output,
+        observed_chunk_fingerprint: request.observed_chunk_fingerprint,
+        validation_chunk: request.validation_chunk,
+        chunk_transcript: request.chunk_transcript,
+        raw_chunk_messages: request.raw_chunk_messages,
+        boundary_dates: request.boundary_dates,
+        prior_compartments: request.prior_compartments,
+        validate_options: request.validate_options,
+        created_at_ms: request.now_ms,
+        failure_started_at_ms: request.now_ms,
+        failure_backoff_at_ms: request.failure_backoff_at_ms,
+        completion_now_ms: request.completion_now_ms,
+        publication_fence: request.publication_fence,
+    })?;
+
+    Ok(HistorianDriveOutcome::Completed(HistorianRunSuccess {
+        row_version,
+        producer_session_id: run_id.clone(),
+        producer_run_id: run_id,
+        model: request
+            .model_chain
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "host".to_string()),
+    }))
+}
+
 pub async fn reattach_historian_producer<P>(
     producer: &mut P,
     request: HistorianReattachRequest<'_>,
@@ -2847,6 +3104,9 @@ mod tests {
             selected_range_identities: test_selected_range_identities(),
             producer_session_id: Some("producer-session".into()),
             producer_run_id: Some("run-3".into()),
+            producer_attempt: 0,
+            coordinator_token: None,
+            claim_deadline_ms: None,
             fired_at_ms: Some(10),
             expected_revert_epoch: 0,
             compartment_set_generation: CompartmentSetGeneration::default(),
@@ -4707,6 +4967,9 @@ mod tests {
             selected_range_identities: test_selected_range_identities(),
             producer_session_id: Some("ps".into()),
             producer_run_id: Some("run-1".into()),
+            producer_attempt: 0,
+            coordinator_token: None,
+            claim_deadline_ms: None,
             fired_at_ms: Some(1),
             expected_revert_epoch: 0,
             compartment_set_generation: CompartmentSetGeneration {
@@ -5415,6 +5678,7 @@ mod tests {
         let predicate = HistorianPublishPredicate {
             firing_seq: 3,
             producer_run_id: "run-3".into(),
+            producer_attempt: 0,
             chunk_fingerprint: "tail-fp".into(),
             selected_range_identities,
             compartment_set_generation,

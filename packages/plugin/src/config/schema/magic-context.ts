@@ -635,6 +635,12 @@ export const HistorianConfigSchema = AgentMetadataSchema.extend({
     opencode: OpenCodeHarnessBlockSchema.optional(),
     pi: PiHarnessBlockSchema.optional(),
     omp: OmpHarnessBlockSchema.optional(),
+    runner: z
+        .enum(["broca", "host"])
+        .optional()
+        .describe(
+            'Which side runs the historian completion in Rust transform mode: "broca" routes it to the Broca module (default), "host" queues it for this process to run on the configured historian model. User-level config only — it decides whose provider account pays for the call.',
+        ),
     two_pass: z
         .boolean()
         .default(false)

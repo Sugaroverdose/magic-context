@@ -23,7 +23,13 @@ const HARNESS_KEYS = PER_HARNESS_MODEL_KEYS;
 /** Every historian model-resolution field, including per-harness qualifiers.
  *  Variant and thinking_level merge onto the user's historian model at resolve
  *  time, so leaving them would let a cloned repo force extra spend. */
-const HISTORIAN_USER_ONLY_FIELDS = PER_HARNESS_MIGRATION_INVENTORY.historian.migrated_execution;
+const HISTORIAN_USER_ONLY_FIELDS = [
+    ...PER_HARNESS_MIGRATION_INVENTORY.historian.migrated_execution,
+    // `runner` chooses which process and which provider account runs the hidden
+    // historian completion. A cloned repo redirecting it would move that spend and
+    // that prompt text somewhere the user never agreed to.
+    "runner",
+] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
 
 /**
@@ -348,10 +354,11 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  *    can opt its own runtime into the experimental Rust pipeline. The resolver
  *    requires trusted user-level `subc` configuration before Rust can activate.
  *  - historian model-resolution fields (model, fallback_models, variant,
- *    thinking_level), including both per-harness blocks — historian model
- *    spend is user-level only. Qualifiers merge onto the user's historian
+ *    thinking_level) and `runner`, including both per-harness blocks — historian
+ *    model spend is user-level only. Qualifiers merge onto the user's historian
  *    model at resolve time, so a cloned repo cannot force extra thinking or
- *    variant cost.
+ *    variant cost, and cannot move the completion to a different process or
+ *    provider account.
  *  - `mural.model` at the top-level block, the legacy experimental spelling,
  *    and any nested `mural.model` under hidden agents — a cloned repo cannot
  *    choose where project memory is sent.

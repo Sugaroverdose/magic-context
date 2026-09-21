@@ -29,8 +29,10 @@ pub mod divergence;
 pub mod healing;
 pub mod historian;
 pub mod historian_chunk;
+pub mod historian_host;
 pub mod historian_producer;
 pub mod historian_prompt;
+pub mod historian_runner;
 pub mod historian_validate;
 pub mod injection;
 pub mod m0_compose;
@@ -103,7 +105,9 @@ use historian_chunk::{
     assemble_historian_firing, AssembleHistorianFiringOutcome, AssembledHistorianFiring,
     HistorianAssemblerConfig,
 };
+use historian_host::{HostReportDeliveryError, HostRunLedger, HostRunReport};
 use historian_producer::{HistorianProducer, HistorianProducerConfig, HistorianProducerError};
+use historian_runner::HistorianRunnerKind;
 use prompt_surface::{PromptSurfacePreset, PromptSurfaceSelection};
 use scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT;
 use selection::SelKind;
@@ -3560,6 +3564,9 @@ pub struct McHandler {
     session_resolver: Arc<dyn SessionResolver>,
     config: Mutex<ConfigCache>,
     historian_model_unresolvable: Arc<HistorianModelUnresolvableCache>,
+    /// Runs queued for a claimant that a firing task in this process is still
+    /// waiting on. Empty under the in-module runner.
+    host_runs: Arc<HostRunLedger>,
     #[cfg(test)]
     fixed_config: Option<McModuleConfig>,
     reattaching_sessions: Arc<Mutex<HashSet<String>>>,
@@ -4101,6 +4108,12 @@ struct HistorianFiringTask {
     project_root: PathBuf,
     project_slug: String,
     firing: AssembledHistorianFiring,
+    /// Which side runs the completion for this firing, resolved from config at
+    /// the moment the firing was prepared so a config edit mid-run cannot move a
+    /// firing already in flight to a different lane.
+    runner: HistorianRunnerKind,
+    /// Waiters for runs queued for a claimant. Unused by the in-module runner.
+    host_runs: Arc<HostRunLedger>,
     model_chain_generation: u64,
     model_unresolvable_cache: Arc<HistorianModelUnresolvableCache>,
     live_guard: SessionSetGuard,
@@ -4149,6 +4162,7 @@ impl McHandler {
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
             historian_model_unresolvable: Arc::new(HistorianModelUnresolvableCache::default()),
+            host_runs: Arc::new(HostRunLedger::new()),
             #[cfg(test)]
             fixed_config: None,
             reattaching_sessions: Arc::new(Mutex::new(HashSet::new())),
@@ -4446,6 +4460,7 @@ impl McHandler {
                 cache_ttl_by_model: std::collections::BTreeMap::new(),
                 model_chain: vec!["test/model".to_string()],
                 historian_temperature: None,
+                historian_runner: crate::historian_runner::HistorianRunnerKind::default(),
                 language: None,
                 execute_threshold_percentage: 65.0,
                 execute_threshold_user_config: None,
@@ -4497,6 +4512,7 @@ impl McHandler {
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
             historian_model_unresolvable: Arc::new(HistorianModelUnresolvableCache::default()),
+            host_runs: Arc::new(HostRunLedger::new()),
             fixed_config: Some(config),
             reattaching_sessions: Arc::new(Mutex::new(HashSet::new())),
             live_historian_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -5404,6 +5420,7 @@ impl McHandler {
             return Some(match phase {
                 HistorianPhase::AwaitingProducer => "reattaching",
                 HistorianPhase::Firing
+                | HistorianPhase::Reclaiming
                 | HistorianPhase::Validating
                 | HistorianPhase::Publishing => "recovering",
                 HistorianPhase::Idle => "recovered",
@@ -5526,7 +5543,14 @@ impl McHandler {
                 });
                 Some("reattaching")
             }
-            HistorianPhase::Firing | HistorianPhase::Validating | HistorianPhase::Publishing => {
+            // A run parked for a claimant does not survive a restart in this slice:
+            // nothing re-publishes it to the queue yet, so leaving it parked would
+            // strand the session until the next trigger. Recovery releases it and a
+            // later trigger assembles a fresh chunk.
+            HistorianPhase::Firing
+            | HistorianPhase::Reclaiming
+            | HistorianPhase::Validating
+            | HistorianPhase::Publishing => {
                 tokio::spawn(async move {
                     let _guard = guard;
                     if let Err(e) = historian::handle_restart_load(
@@ -6112,6 +6136,8 @@ impl McHandler {
                 project_root: binding.project_root.clone(),
                 project_slug,
                 firing,
+                runner: cfg.historian_runner,
+                host_runs: Arc::clone(&self.host_runs),
                 model_chain_generation,
                 model_unresolvable_cache: Arc::clone(&self.historian_model_unresolvable),
                 live_guard,
@@ -6256,6 +6282,8 @@ impl McHandler {
             project_root: binding.project_root.clone(),
             project_slug,
             firing,
+            runner: binding.config.historian_runner,
+            host_runs: Arc::clone(&self.host_runs),
             model_chain_generation,
             model_unresolvable_cache: Arc::clone(&self.historian_model_unresolvable),
             live_guard,
@@ -6350,9 +6378,11 @@ impl McHandler {
             language,
             historian_temperature,
             project_path,
-            project_root,
             project_slug,
+            project_root,
             firing,
+            runner,
+            host_runs,
             model_chain_generation,
             model_unresolvable_cache,
             live_guard,
@@ -6362,6 +6392,32 @@ impl McHandler {
         let _guard = live_guard;
         let failure_started_at_ms = firing.now_ms;
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
+        if runner == HistorianRunnerKind::Host {
+            // The host lane never opens a Broca route, so there is no connect step
+            // to fail: the run is queued and this task waits for a claimant.
+            let mut request = firing.as_fire_request(
+                &store,
+                &session_id,
+                &project_path,
+                &project_slug,
+                language.as_deref(),
+            );
+            request.temperature = historian_temperature;
+            request.publication_fence = publication_fence.as_deref();
+            let result = historian::run_historian_firing_on_host(
+                &host_runs,
+                request,
+                historian::completion_wait_budget(),
+            )
+            .await;
+            if let Ok(loaded) = store.load(&session_id) {
+                DISPATCH_HEALTH.record_historian_outcome(
+                    historian_status_summary(&loaded.meta.historian),
+                    loaded.meta.historian.recent_decisions.len(),
+                );
+            }
+            return result;
+        }
         let result = match factory.connect(&project_root).await {
             Ok(mut producer) => {
                 let mut request = firing.as_fire_request(
@@ -7205,6 +7261,176 @@ impl McHandler {
                 code: "store_write_failed".to_string(),
                 message: error.to_string(),
             },
+        }
+    }
+
+    /// `historian.pending {session_id?}` — runs waiting for a claimant.
+    ///
+    /// Omitting `session_id` lists every session this store serves, because a
+    /// claimant discovers runs by polling, not by already knowing which session
+    /// produced them.
+    fn handle_historian_pending_value(&self, request: &Value) -> HandlerOutcome {
+        let session_id = match optional_run_string(request, "session_id") {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let store = match self.store.get() {
+            Some(store) => store,
+            None => return self.store_refusal(),
+        };
+        match store.list_pending_historian_runs(session_id.as_deref(), now_ms()) {
+            Ok(runs) => respond(json!({
+                "ok": true,
+                "runs": runs
+                    .into_iter()
+                    .map(|run| json!({
+                        "run_id": run.run_id,
+                        "session_id": run.session_id,
+                        "chunk_fingerprint": run.chunk_fingerprint,
+                        "prompt_bytes_len": run.prompt_bytes_len,
+                        "deadline_ms": run.deadline_ms,
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
+            Err(error) => HandlerOutcome::Error {
+                code: "store_load_failed".to_string(),
+                message: error.to_string(),
+            },
+        }
+    }
+
+    /// `historian.claim {run_id, claimant_instance_id}` — take a queued run.
+    ///
+    /// A lost race answers `{ok: false, refusal}` rather than an error frame: two
+    /// claimants reaching for the same run is ordinary operation, and the caller's
+    /// response is to move to the next run, not to treat the request as failed.
+    /// Malformed requests still fail loudly.
+    fn handle_historian_claim_value(&self, request: &Value) -> HandlerOutcome {
+        let run_id = match required_run_string(request, "run_id", "historian.claim") {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let claimant = match required_run_string(
+            request,
+            "claimant_instance_id",
+            "historian.claim",
+        ) {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let store = match self.store.get() {
+            Some(store) => store,
+            None => return self.store_refusal(),
+        };
+        match store.claim_historian_run(&run_id, &claimant, now_ms()) {
+            Ok(mc_store::HistorianClaimOutcome::Claimed(claim)) => respond(json!({
+                "ok": true,
+                "run_id": claim.run_id,
+                "session_id": claim.session_id,
+                "attempt": claim.attempt,
+                "token": claim.token,
+                "prompt": {
+                    "system": claim.system_prompt,
+                    "user": claim.user_prompt,
+                },
+                "model_chain": claim.model_chain,
+                "await_budget_ms": claim.await_budget_ms,
+                "claim_deadline_ms": claim.claim_deadline_ms,
+                "heartbeat_interval_ms": mc_store::HISTORIAN_HEARTBEAT_INTERVAL_MS,
+            })),
+            Ok(mc_store::HistorianClaimOutcome::Refused(refusal)) => {
+                respond(json!({ "ok": false, "refusal": refusal.as_wire_str() }))
+            }
+            Err(error) => HandlerOutcome::Error {
+                code: "store_write_failed".to_string(),
+                message: error.to_string(),
+            },
+        }
+    }
+
+    /// `historian.heartbeat {run_id, token}` — extend the current claim's lease.
+    fn handle_historian_heartbeat_value(&self, request: &Value) -> HandlerOutcome {
+        let run_id = match required_run_string(request, "run_id", "historian.heartbeat") {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let token = match required_run_string(request, "token", "historian.heartbeat") {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let store = match self.store.get() {
+            Some(store) => store,
+            None => return self.store_refusal(),
+        };
+        match store.heartbeat_historian_run(&run_id, &token, now_ms()) {
+            Ok(mc_store::HistorianHeartbeatOutcome::Extended { claim_deadline_ms }) => {
+                respond(json!({
+                    "ok": true,
+                    "claim_deadline_ms": claim_deadline_ms,
+                    "heartbeat_interval_ms": mc_store::HISTORIAN_HEARTBEAT_INTERVAL_MS,
+                }))
+            }
+            Ok(mc_store::HistorianHeartbeatOutcome::Refused(refusal)) => {
+                respond(json!({ "ok": false, "refusal": refusal.as_wire_str() }))
+            }
+            Err(error) => HandlerOutcome::Error {
+                code: "store_write_failed".to_string(),
+                message: error.to_string(),
+            },
+        }
+    }
+
+    /// `historian.complete {run_id, token, output | error}` — the terminal report.
+    ///
+    /// The token is checked FIRST, before the report body is even read: a claimant
+    /// that was replaced still holds a real token, and parsing its output before
+    /// establishing that the claim is current would spend validation on a document
+    /// that can never be published.
+    ///
+    /// Accepting a report does not publish it. It hands the text to the firing task
+    /// that queued the run, which validates and publishes through exactly the same
+    /// code the in-module producer path uses — same parser, same length-cap
+    /// refusal, same publish CAS.
+    fn handle_historian_complete_value(&self, request: &Value) -> HandlerOutcome {
+        let run_id = match required_run_string(request, "run_id", "historian.complete") {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let token = match required_run_string(request, "token", "historian.complete") {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let store = match self.store.get() {
+            Some(store) => store,
+            None => return self.store_refusal(),
+        };
+        match store.authorize_historian_report(&run_id, &token) {
+            Ok(mc_store::HistorianReportOutcome::Authorized(_)) => {}
+            Ok(mc_store::HistorianReportOutcome::Refused(refusal)) => {
+                return respond(json!({ "ok": false, "refusal": refusal.as_wire_str() }));
+            }
+            Err(error) => {
+                return HandlerOutcome::Error {
+                    code: "store_load_failed".to_string(),
+                    message: error.to_string(),
+                };
+            }
+        }
+
+        let report = match parse_historian_report(request) {
+            Ok(report) => report,
+            Err(outcome) => return outcome,
+        };
+        match self.host_runs.deliver(&run_id, report) {
+            Ok(()) => respond(json!({ "ok": true, "accepted": true })),
+            Err(HostReportDeliveryError::AlreadyReported) => respond(json!({
+                "ok": false,
+                "refusal": HostReportDeliveryError::AlreadyReported.as_wire_str(),
+            })),
+            Err(HostReportDeliveryError::NoWaiter) => respond(json!({
+                "ok": false,
+                "refusal": HostReportDeliveryError::NoWaiter.as_wire_str(),
+            })),
         }
     }
 
@@ -13600,6 +13826,10 @@ impl McHandler {
                     self.handle_note_delivery_value(channel, &request, false)
                         .await
                 }
+                "historian.pending" => self.handle_historian_pending_value(&request),
+                "historian.claim" => self.handle_historian_claim_value(&request),
+                "historian.heartbeat" => self.handle_historian_heartbeat_value(&request),
+                "historian.complete" => self.handle_historian_complete_value(&request),
                 "todo_state.set" => self.handle_todo_state_set_value(channel, &request),
                 "session.flush" => self.handle_session_flush_value(channel, &request),
                 "session.recomp" => self.handle_session_recomp_value(channel, &request),
@@ -13670,6 +13900,97 @@ fn unrecognized_request_error(request: &Value) -> HandlerOutcome {
         message: format!(
             "no `method` or `kind` field matched a known request; got top-level keys: [{got_keys}]"
         ),
+    }
+}
+
+/// Maximum bytes a claimant's reported completion may carry.
+///
+/// The same ceiling the rest of the facade surface uses. Output past it cannot
+/// be a historian document the validator would accept anyway, and refusing at
+/// the wire keeps an oversized body from reaching the parser at all.
+const MAX_HISTORIAN_REPORT_BYTES: usize = MAX_FACADE_FRAME_BYTES;
+
+/// Read a required non-empty string field from a historian claim-lane request.
+fn required_run_string(
+    request: &Value,
+    field: &str,
+    operation: &str,
+) -> Result<String, HandlerOutcome> {
+    match request.get(field).and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() && value.len() <= 512 => Ok(value.to_string()),
+        Some(_) => Err(invalid_params_error(format!(
+            "{operation} {field} must contain 1..=512 non-blank bytes"
+        ))),
+        None => Err(invalid_params_error(format!(
+            "{operation} requires {field}"
+        ))),
+    }
+}
+
+/// Read an optional non-empty string field, refusing a present-but-blank value
+/// rather than silently widening the query to every session.
+fn optional_run_string(request: &Value, field: &str) -> Result<Option<String>, HandlerOutcome> {
+    match request.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() && value.len() <= 512 => {
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err(invalid_params_error(format!(
+            "{field} must be omitted or contain 1..=512 non-blank bytes"
+        ))),
+    }
+}
+
+/// Decode the terminal report body of `historian.complete`.
+///
+/// Exactly one of `output` and `error` must be present: a report carrying both
+/// does not say what happened, and a report carrying neither says nothing at all.
+fn parse_historian_report(request: &Value) -> Result<HostRunReport, HandlerOutcome> {
+    let output = request.get("output").filter(|value| !value.is_null());
+    let error = request.get("error").filter(|value| !value.is_null());
+    match (output, error) {
+        (Some(output), None) => {
+            let Some(text) = output.get("text").and_then(Value::as_str) else {
+                return Err(invalid_params_error(
+                    "historian.complete output requires a text string",
+                ));
+            };
+            if text.len() > MAX_HISTORIAN_REPORT_BYTES {
+                return Err(invalid_params_error(format!(
+                    "historian.complete output text exceeds the {MAX_HISTORIAN_REPORT_BYTES}-byte limit"
+                )));
+            }
+            Ok(HostRunReport::Output(
+                crate::historian_producer::ProducerOutput {
+                    text: text.to_string(),
+                    // Absent means the claimant did not observe a length-class
+                    // finish reason. It is never inferred from the text: a
+                    // document that merely looks complete can still be cut.
+                    length_capped: output
+                        .get("length_capped")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                },
+            ))
+        }
+        (None, Some(error)) => Ok(HostRunReport::Failed {
+            code: error
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("host_runner_error")
+                .to_string(),
+            message: error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("host runner reported a failure with no message")
+                .to_string(),
+        }),
+        (Some(_), Some(_)) => Err(invalid_params_error(
+            "historian.complete carries both output and error; exactly one says what happened",
+        )),
+        (None, None) => Err(invalid_params_error(
+            "historian.complete requires either output or error",
+        )),
     }
 }
 
@@ -19831,6 +20152,7 @@ mod tests {
             cache_ttl_by_model: std::collections::BTreeMap::new(),
             model_chain: vec!["test/model".to_string()],
             historian_temperature: None,
+            historian_runner: crate::historian_runner::HistorianRunnerKind::default(),
             language: None,
             execute_threshold_percentage: 65.0,
             execute_threshold_user_config: None,
@@ -25933,6 +26255,9 @@ mod tests {
                 selected_range_identities: selected_range_identities.clone(),
                 producer_session_id: Some("producer".to_string()),
                 producer_run_id: Some("run".to_string()),
+                producer_attempt: 0,
+                coordinator_token: None,
+                claim_deadline_ms: None,
                 fired_at_ms: Some(1),
                 expected_revert_epoch: 0,
                 compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
@@ -25955,6 +26280,7 @@ mod tests {
                 predicate: &mc_store::HistorianPublishPredicate {
                     firing_seq: 7,
                     producer_run_id: "run".to_string(),
+                    producer_attempt: 0,
                     chunk_fingerprint: "fp".to_string(),
                     selected_range_identities,
                     compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
@@ -34062,6 +34388,9 @@ mod tests {
             selected_range_identities,
             producer_session_id: Some("producer-session".to_string()),
             producer_run_id: Some("run-reattach".to_string()),
+            producer_attempt: 0,
+            coordinator_token: None,
+            claim_deadline_ms: None,
             fired_at_ms: Some(1),
             expected_revert_epoch: 0,
             compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
@@ -34095,6 +34424,9 @@ mod tests {
             selected_range_identities,
             producer_session_id: Some("producer-session".to_string()),
             producer_run_id: Some("run-stale".to_string()),
+            producer_attempt: 0,
+            coordinator_token: None,
+            claim_deadline_ms: None,
             fired_at_ms: Some(1),
             expected_revert_epoch: 0,
             compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
@@ -34467,6 +34799,7 @@ mod tests {
                 predicate: &mc_store::HistorianPublishPredicate {
                     firing_seq: 1,
                     producer_run_id: "run-stale".to_string(),
+                    producer_attempt: 0,
                     chunk_fingerprint: "seeded-fingerprint".to_string(),
                     selected_range_identities: seeded_historian_identities(),
                     compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
@@ -36982,6 +37315,7 @@ mod tests {
         let predicate = mc_store::HistorianPublishPredicate {
             firing_seq: 1,
             producer_run_id: "ctx-expand-run".to_string(),
+            producer_attempt: 0,
             chunk_fingerprint: "ctx-expand-fixture".to_string(),
             selected_range_identities,
             compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
