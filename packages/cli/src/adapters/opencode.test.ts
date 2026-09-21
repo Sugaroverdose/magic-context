@@ -46,6 +46,29 @@ describe("OpenCodeAdapter registration keys across host generations", () => {
         expect(adapter.hasPluginEntry()).toBe(true);
     });
 
+    test("an object-form v2 entry ({ package, options }) counts as present and is not duplicated", async () => {
+        // OpenCode 2 replaces the 1.x `[package, options]` tuple with an object
+        // (core 2.0.11 decodes the legacy tuple into the same object). A matcher
+        // that only knows the tuple reads this as unregistered and appends a
+        // second entry, loading the plugin twice.
+        const entry = { package: "@cortexkit/opencode-magic-context@latest", options: { x: 1 } };
+        write({ plugins: [entry] });
+        const adapter = new OpenCodeAdapter({ hostGeneration: "v2" });
+        expect(adapter.hasPluginEntry()).toBe(true);
+        const result = await adapter.ensurePluginEntry();
+        expect(result.action).toBe("already_present");
+        expect(read()).toEqual({ plugins: [entry] });
+    });
+
+    test("an object-form v2 entry pointing at a local checkout is recognised as the dev path", async () => {
+        const checkout = resolve(import.meta.dir, "../../../plugin");
+        write({ plugins: [{ package: checkout }] });
+        const adapter = new OpenCodeAdapter({ hostGeneration: "v2" });
+        const result = await adapter.ensurePluginEntry();
+        expect(result.action).toBe("already_present");
+        expect(read()).toEqual({ plugins: [{ package: checkout }] });
+    });
+
     test("a fresh registration on a v2 host is written under `plugins`, never `plugin`", async () => {
         write({ model: "openai/x" });
         const adapter = new OpenCodeAdapter({ hostGeneration: "v2" });

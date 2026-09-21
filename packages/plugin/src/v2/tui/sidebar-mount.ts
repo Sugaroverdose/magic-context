@@ -44,6 +44,12 @@ export interface V1SidebarMount {
  * back to a colour chosen for the host's theme mode: an earlier fallback of
  * white text painted the section headers white-on-white on light themes when
  * the mapping read key names the theme package never had.
+ *
+ * The accent is read at hue step 200, the step the host draws its own accent
+ * UI in. The ramp is ordered by distance from the page, not by lightness, so
+ * step 200 stays a readable accent in both modes (captured GA host: #9d7cd8 on
+ * #0a0a0a dark, #d68c27 on #ffffff light) where step 500 resolved to a dark
+ * purple on the dark page and a pale orange on the light one.
  */
 export function flattenTheme(
     theme: V2ResolvedTheme | undefined,
@@ -54,7 +60,7 @@ export function flattenTheme(
     return {
         text: theme?.text?.base ?? (light ? "#1a1a1a" : "#ffffff"),
         textMuted: theme?.text?.muted ?? (light ? "#6b6b6b" : "#9a9a9a"),
-        accent: theme?.hue?.accent?.[500] ?? "#5f87ff",
+        accent: theme?.hue?.accent?.[200] ?? "#5f87ff",
         background: theme?.background?.base ?? (light ? "#ffffff" : "#000000"),
         borderActive: theme?.border?.base ?? "#9a9a9a",
         error: feedback?.error?.base ?? "#d13b3b",

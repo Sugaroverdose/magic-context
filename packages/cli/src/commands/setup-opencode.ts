@@ -21,6 +21,7 @@ import {
     isDevPathPluginEntry,
     isLocalPathPluginEntry,
     matchesPluginEntry,
+    pluginEntryPackage,
 } from "../adapters/opencode";
 import { writeFileAtomic } from "../lib/atomic-write";
 import {
@@ -259,9 +260,7 @@ export function findDcpPluginIndexes(plugins: unknown[]): number[] {
 }
 
 function pluginEntryName(entry: unknown): string {
-    if (typeof entry === "string") return entry;
-    if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
-    return String(entry);
+    return pluginEntryPackage(entry) ?? String(entry);
 }
 
 async function resolveDcpConflictBeforeSetup(

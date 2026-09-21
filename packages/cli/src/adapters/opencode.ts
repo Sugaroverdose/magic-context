@@ -291,13 +291,26 @@ export class OpenCodeAdapter implements HarnessAdapter {
     }
 }
 
+/**
+ * The package reference inside a plugin entry, whichever shape the host
+ * accepts. OpenCode 1.x `plugin` entries are a string or a `[package, options]`
+ * tuple; OpenCode 2 `plugins` entries are a string or a `{ package, options }`
+ * object (core 2.0.11 decodes the legacy tuple into that object and
+ * concatenates both lists). A matcher that only knows the tuple reads a native
+ * v2 object entry as "not registered" and appends a duplicate.
+ */
+export function pluginEntryPackage(entry: unknown): string | null {
+    if (typeof entry === "string") return entry;
+    if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
+    if (entry !== null && typeof entry === "object" && !Array.isArray(entry)) {
+        const pkg = (entry as { package?: unknown }).package;
+        if (typeof pkg === "string") return pkg;
+    }
+    return null;
+}
+
 export function isLocalPathPluginEntry(entry: unknown): boolean {
-    const candidate =
-        typeof entry === "string"
-            ? entry
-            : Array.isArray(entry) && typeof entry[0] === "string"
-              ? entry[0]
-              : null;
+    const candidate = pluginEntryPackage(entry);
     if (!candidate) return false;
     return (
         candidate.startsWith("file://") ||
@@ -313,12 +326,7 @@ export function isLocalPathPluginEntry(entry: unknown): boolean {
  * such as `magic-context-theme` must not suppress the real plugin registration.
  */
 export function isDevPathPluginEntry(entry: unknown): boolean {
-    const candidate =
-        typeof entry === "string"
-            ? entry
-            : Array.isArray(entry) && typeof entry[0] === "string"
-              ? entry[0]
-              : null;
+    const candidate = pluginEntryPackage(entry);
     if (!candidate || !isLocalPathPluginEntry(entry)) return false;
 
     let localPath: string;
@@ -348,7 +356,8 @@ export function isDevPathPluginEntry(entry: unknown): boolean {
 /**
  * Match a plugin array entry against a package name. Plugin entries can be:
  *   - a string: "@cortexkit/opencode-magic-context@latest" or "@cortexkit/opencode-magic-context"
- *   - a tuple: ["@cortexkit/opencode-magic-context@latest", { ... options }]
+ *   - a tuple (OpenCode 1.x): ["@cortexkit/opencode-magic-context@latest", { ... options }]
+ *   - an object (OpenCode 2): { package: "@cortexkit/opencode-magic-context@latest", options: { ... } }
  *   - a file URL: "file:///path/to/local/dev/checkout"
  *
  * For matching purposes we strip everything after `@` (after the first `@org/pkg`
@@ -360,9 +369,7 @@ export function isDevPathPluginEntry(entry: unknown): boolean {
  * Exported for reuse across setup and doctor flows.
  */
 export function matchesPluginEntry(entry: unknown, pkgName: string): boolean {
-    let candidate: string | null = null;
-    if (typeof entry === "string") candidate = entry;
-    else if (Array.isArray(entry) && typeof entry[0] === "string") candidate = entry[0];
+    const candidate = pluginEntryPackage(entry);
     if (!candidate) return false;
     if (candidate.startsWith("file://")) return false;
     // Strip version tag: "@cortexkit/foo@latest" → "@cortexkit/foo"
