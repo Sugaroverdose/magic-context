@@ -34,9 +34,7 @@ describe("install instance id", () => {
 
     test("the id is minted once and stays the same across every later call", () => {
         const first = ensureInstallInstanceId(db);
-        expect(first).toMatch(
-            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-        );
+        expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
         expect(ensureInstallInstanceId(db)).toBe(first);
         expect(readInstallInstanceId(db)).toBe(first);
     });

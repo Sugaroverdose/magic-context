@@ -962,6 +962,14 @@
           "additionalProperties": false,
           "description": "Strict OMP model-resolution block. It accepts no OpenCode vocabulary."
         },
+        "runner": {
+          "description": "Which side runs the historian completion in Rust transform mode: \"broca\" routes it to the Broca module (default), \"host\" queues it for this process to run on the configured historian model. User-level config only — it decides whose provider account pays for the call.",
+          "type": "string",
+          "enum": [
+            "broca",
+            "host"
+          ]
+        },
         "two_pass": {
           "default": false,
           "description": "Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false)",
