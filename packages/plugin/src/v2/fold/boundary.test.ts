@@ -10,16 +10,9 @@ import {
     getOrCreateSessionMeta,
     openDatabase,
 } from "../../features/magic-context/storage";
-import {
-    getPersistedCompactionMarkerState,
-    setPersistedCompactionMarkerState,
-} from "../../features/magic-context/storage-meta-persisted";
+import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
-import {
-    createV2RustCompactionMarkerStrategy,
-    resolveBoundaryUserMessage,
-    trimToRecordedBoundary,
-} from "./boundary";
+import { createV2RustCompactionMarkerStrategy, resolveBoundaryUserMessage } from "./boundary";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -141,74 +134,23 @@ describe("createV2RustCompactionMarkerStrategy", () => {
         expect(outcome.kind).toBe("retryable-failure");
         expect(getPersistedCompactionMarkerState(db, "ses-3")?.boundaryMessageId).toBe("u2");
     });
-});
 
-describe("trimToRecordedBoundary", () => {
-    function record(db: ContextDatabase, sessionId: string, boundaryMessageId: string): void {
-        getOrCreateSessionMeta(db, sessionId);
-        setPersistedCompactionMarkerState(db, sessionId, {
-            boundaryMessageId,
-            summaryMessageId: "",
-            compactionPartId: "",
-            summaryPartId: "",
-            boundaryOrdinal: 3,
-            targetEndMessageId: boundaryMessageId,
-        });
-    }
-
-    it("drops exactly the messages before the recorded boundary", () => {
+    it("records the message an OpenCode 1 compaction row would have cut at", () => {
         const db = useTempDataHome();
-        record(db, "ses-trim", "u2");
-        const messages = history.map((message) => ({ id: message.id }));
-        expect(trimToRecordedBoundary(db, "ses-trim", messages)).toBe(2);
-        expect(messages.map((message) => message.id)).toEqual(["u2", "a2", "a3", "u3", "a4"]);
-    });
-
-    it("does nothing when no boundary has been recorded", () => {
-        const db = useTempDataHome();
-        getOrCreateSessionMeta(db, "ses-none");
-        const messages = history.map((message) => ({ id: message.id }));
-        expect(trimToRecordedBoundary(db, "ses-none", messages)).toBe(0);
-        expect(messages).toHaveLength(history.length);
-    });
-
-    it("does nothing when the boundary is already the first message", () => {
-        const db = useTempDataHome();
-        record(db, "ses-head", "u1");
-        const messages = history.map((message) => ({ id: message.id }));
-        expect(trimToRecordedBoundary(db, "ses-head", messages)).toBe(0);
-        expect(messages).toHaveLength(history.length);
-    });
-
-    it("leaves an array that does not contain the boundary untouched", () => {
-        const db = useTempDataHome();
-        record(db, "ses-absent", "u2");
-        const messages = [{ id: "u3" }, { id: "a4" }];
-        expect(trimToRecordedBoundary(db, "ses-absent", messages)).toBe(0);
-        expect(messages.map((message) => message.id)).toEqual(["u3", "a4"]);
-    });
-
-    it("produces the same array an OpenCode 1 compaction row would have produced", () => {
-        const db = useTempDataHome();
-        // OpenCode 1: the host writes a compaction row at the boundary user message and
-        // serves from there, and the wire encoder then drops its injected summary row.
-        // The array that reaches the module is therefore the boundary message onward.
-        const boundary = resolveBoundaryUserMessage(history, "a3");
-        expect(boundary).not.toBeNull();
-        const hostTrimmed = history
-            .slice(history.findIndex((message) => message.id === boundary!.id))
-            .map((message) => ({ id: message.id }));
-
-        // OpenCode 2: no row exists, so the same boundary is recorded and applied here.
         getOrCreateSessionMeta(db, "ses-parity");
-        createV2RustCompactionMarkerStrategy(() => history).applyDeferred(db, "ses-parity", {
+        // OpenCode 1: the host writes a compaction row at the boundary user message
+        // and serves the conversation from there. OpenCode 2 has no such row, so the
+        // same rule has to name the same message for the two hosts to agree on where
+        // a folded session starts.
+        const hostBoundary = resolveBoundaryUserMessage(history, "a3");
+        expect(hostBoundary?.id).toBe("u2");
+        strategy.applyDeferred(db, "ses-parity", {
             ordinal: 5,
             endMessageId: "a3",
             publishedAt: Date.now(),
         });
-        const adapterTrimmed = history.map((message) => ({ id: message.id }));
-        trimToRecordedBoundary(db, "ses-parity", adapterTrimmed);
-
-        expect(adapterTrimmed).toEqual(hostTrimmed);
+        expect(getPersistedCompactionMarkerState(db, "ses-parity")?.boundaryMessageId).toBe(
+            hostBoundary!.id,
+        );
     });
 });

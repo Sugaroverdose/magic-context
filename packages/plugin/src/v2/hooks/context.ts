@@ -58,7 +58,7 @@ import {
 import { pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
-import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
+import { createV2RustCompactionMarkerStrategy } from "../fold/boundary";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
@@ -591,26 +591,65 @@ export async function registerContext(context: V2Context) {
                 const moduleBaseline = rustModeModuleClient
                     ? servedModuleM0Text(draft.sessionID)
                     : undefined;
-                if (rustModeModuleClient && moduleBaseline === null) {
-                    // No module output has been accepted for this session yet, so there is
-                    // no baseline to answer with. Leaving `result` unset is how this host's
-                    // hook is declined: it hands the summary back to the host's own
-                    // compaction rather than inventing one Magic Context would then have to
-                    // keep serving.
+                // Declining is `result` left unset: the host then owns the summary for
+                // this fire instead of being handed one Magic Context would have to keep
+                // serving. Every fire is logged with its verdict, because the host's
+                // firing rate and ours are separate facts and only the pair explains a
+                // session's checkpoint cadence.
+                const decline = (reason: string): void => {
                     sessionLog(
                         draft.sessionID,
-                        "v2 compaction declined: rust mode has served no module output to summarize yet",
+                        `v2 compaction hook: fired answered=false reason=${reason}`,
                     );
+                };
+                if (rustModeModuleClient && moduleBaseline === null) {
+                    // No module output has been accepted for this session yet, so there is
+                    // no baseline to answer with.
+                    decline("no_served_module_output");
                     return;
+                }
+                // The module owns the fold schedule in Rust mode and publishes each fold
+                // as a boundary. The host fires this hook off its OWN usage measurement,
+                // which counts the history it has stored rather than the reduced array
+                // Magic Context actually sends, so once a long session crosses the host's
+                // trigger it can fire on every single turn. Answering every fire would
+                // write a host checkpoint per turn and make each of those turns a HARD
+                // fold, which is the opposite of what folding is for. The hook is a
+                // trigger, not a command: answer it when the module's boundary has moved
+                // past the one the last answer checkpointed, and decline otherwise.
+                const moduleBoundaryOrdinal =
+                    rustModeModuleClient && db
+                        ? (getPersistedCompactionMarkerState(db, draft.sessionID)
+                              ?.boundaryOrdinal ?? null)
+                        : null;
+                if (rustModeModuleClient) {
+                    if (moduleBoundaryOrdinal === null) {
+                        // The module has served bytes but has not folded yet, so there is
+                        // no Magic Context checkpoint for the host to record.
+                        decline("no_module_boundary");
+                        return;
+                    }
+                    const answered = (await folds.read(draft.sessionID))?.moduleBoundaryOrdinal;
+                    if (answered !== undefined && answered >= moduleBoundaryOrdinal) {
+                        decline(`boundary_not_advanced at=${moduleBoundaryOrdinal}`);
+                        return;
+                    }
                 }
                 const fold = await folds.supply({
                     sessionID: draft.sessionID,
                     watermark,
                     runningCut: running?.seq,
+                    ...(moduleBoundaryOrdinal !== null
+                        ? { moduleBoundaryOrdinal }
+                        : {}),
                     // Kept lazy for the TypeScript lane: materializing writes cache state and
                     // must only happen when the fold identity is actually new.
                     materialize: () => moduleBaseline ?? materialize(draft),
                 });
+                sessionLog(
+                    draft.sessionID,
+                    `v2 compaction hook: fired answered=true boundary=${moduleBoundaryOrdinal ?? "none"}`,
+                );
                 draft.result = { summary: fold.submitted };
             } catch (cause) {
                 await interruptBeforeProvider(context.session, draft.sessionID);
@@ -769,8 +808,9 @@ export async function registerContext(context: V2Context) {
                 historianMaxOutputTokens: config.historian?.maxTokens,
                 historianTwoPass: config.historian?.two_pass,
                 // TypeScript mode folds on the host's own compaction rows, so its marker
-                // carrier stays inert. Rust mode has no such row to fold on: the module's
-                // materialized boundary is recorded instead and trimmed against below.
+                // carrier stays inert. Rust mode has no such row to write: the module's
+                // materialized boundary is recorded in the marker columns instead, and
+                // the compaction hook above answers the host from it.
                 compactionMarkerStrategy: rustModeModuleClient
                     ? createV2RustCompactionMarkerStrategy((sessionID) => read(sessionID))
                     : v2CompactionMarkerStrategy,
@@ -860,17 +900,6 @@ export async function registerContext(context: V2Context) {
                 }
             } finally {
                 reader.close();
-            }
-            // The trim OpenCode 1 gets from its compaction row. Without it a folded
-            // session would hand the module its whole history every turn, which is the
-            // cost the fold exists to remove.
-            if (rustModeModuleClient) {
-                const dropped = trimToRecordedBoundary(db, draft.sessionID, draft.messages);
-                if (dropped > 0)
-                    sessionLog(
-                        draft.sessionID,
-                        `v2 boundary trim: dropped ${dropped} messages before the module boundary`,
-                    );
             }
             const mapped = adaptPayload(draft, admitted);
             await transform({}, mapped);

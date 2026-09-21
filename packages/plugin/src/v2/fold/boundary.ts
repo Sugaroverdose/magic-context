@@ -39,11 +39,9 @@ export function resolveBoundaryUserMessage(
  * Marker lifecycle for Rust mode on OpenCode 2.
  *
  * On OpenCode 1 the module's materialized boundary becomes a real compaction row
- * in the host's store, and the host is then what trims the array it hands the
- * plugin on the next turn. OpenCode 2 exposes no way to write such a row, so the
+ * in the host's store. OpenCode 2 exposes no way to write such a row, so the
  * boundary is recorded here instead, in the same `session_meta` columns the
- * OpenCode 1 marker state already uses, and the trim is applied by the adapter
- * before the array crosses into the module.
+ * OpenCode 1 marker state already uses.
  *
  * Only the carrier differs. The advance-only rule and the compare-and-swap on the
  * pending blob are the shared caller's, unchanged: this records a boundary that
@@ -81,6 +79,17 @@ export function createV2RustCompactionMarkerStrategy(
                     ),
                 };
             }
+            // THIS RECORD HAS READERS — it is not bookkeeping for its own sake.
+            // Three places read it back, and deleting the write breaks all three:
+            //   1. the post-fold restore in src/v2/hooks/context.ts, which uses
+            //      `boundaryMessageId` to bound how much pre-cut history it puts
+            //      back behind the host's compaction cut;
+            //   2. `markerAt` / `persistedBoundaryOrdinal` in
+            //      hooks/magic-context/rust-mode-transform.ts, which report the
+            //      boundary on the coverage line and gate note-nudge publication;
+            //   3. the compaction-hook answer in src/v2/hooks/context.ts, which
+            //      only checkpoints the host when `boundaryOrdinal` has moved
+            //      past the last boundary it answered with.
             const state: PersistedCompactionMarkerState = {
                 boundaryMessageId: boundary.id,
                 // OpenCode 2 writes no summary message and no parts for it. The
@@ -100,32 +109,4 @@ export function createV2RustCompactionMarkerStrategy(
             return { kind: "applied", markerOrdinal: pending.ordinal };
         },
     };
-}
-
-/**
- * Drop everything before the recorded boundary from the array about to be sent.
- *
- * This is the trim OpenCode 1 gets for free from its compaction row. Without it
- * a session that has already folded would hand the module its whole history on
- * every later turn, which is exactly the cost the fold was supposed to remove —
- * most visibly on a cold start, where the module has no state yet and would seed
- * from thousands of messages instead of the tail.
- *
- * Returns the number of messages removed. A boundary that is not in the array is
- * left alone: it either has not been reached yet or belongs to history the host
- * has already dropped, and guessing in either direction would change what the
- * model sees.
- */
-export function trimToRecordedBoundary(
-    db: ContextDatabase,
-    sessionId: string,
-    messages: Array<{ id?: string }>,
-): number {
-    const marker = getPersistedCompactionMarkerState(db, sessionId);
-    const boundaryId = marker?.boundaryMessageId;
-    if (!boundaryId) return 0;
-    const start = messages.findIndex((message) => message.id === boundaryId);
-    if (start <= 0) return 0;
-    messages.splice(0, start);
-    return start;
 }
