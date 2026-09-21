@@ -12992,9 +12992,9 @@ fn assistant_has_completed_content(message: &CkIngressMessage) -> bool {
     })
 }
 
-/// OpenCode marks notice-triggered user prompts synthetic, the same flag used by stale
-/// injected history. Only the newest user owns the live request; historical synthetic rows
-/// remain excluded by the ordinary tail filters.
+/// OpenCode marks notice-triggered user prompts synthetic. The newest one owns the live
+/// request, so it is served even when it sits outside the tail the compaction boundary
+/// covers. Older ones are ordinary history and are served by the ordinary tail filters.
 pub(crate) fn is_newest_synthetic_user_prompt(
     request: &TransformRequest,
     message: &CkIngressMessage,
@@ -13005,6 +13005,31 @@ pub(crate) fn is_newest_synthetic_user_prompt(
             .messages
             .last()
             .is_some_and(|newest| newest.mid == message.mid)
+}
+
+/// True when this ingress row is one Magic Context composed itself, so removing it from the
+/// served array removes nothing the conversation owns.
+///
+/// `meta.synthetic` on its own cannot answer that. The flag is set when every part of the
+/// harness row is marked `synthetic`, and on a persisted OpenCode row that marking means
+/// "the model sees this text, the user interface does not draw it as a human turn": OpenCode
+/// serializes such a row to the model on every pass, and it is never paired with `ignored`.
+/// Plugins use it for injected prompts and notices, and Magic Context's own Channel 2 nudge
+/// arrives the same way. Those rows are written to the session database with their own id and
+/// own the assistant replies that follow them, so dropping one rewrites the cached tail and
+/// leaves two assistants adjacent for the AI SDK to merge.
+///
+/// What Magic Context actually composes is the m0/m1 head -- the two leading user rows that
+/// carry the rendered context and memory blocks -- served without an id of its own and minted
+/// under the reserved `mc_` prefix, plus the assistant and tool halves of the synthetic todo
+/// pair. That is the same structural discriminator the TypeScript lane applies in
+/// `isSyntheticHeadMessage` (id-less, user role, every part synthetic): a row carrying a
+/// persisted harness id is a real turn and stays.
+pub(crate) fn is_module_composed_row(message: &CkIngressMessage) -> bool {
+    if !message.ck.meta.synthetic {
+        return false;
+    }
+    message.ck.role != "user" || message.mid.starts_with(RESERVED_ID_PREFIX)
 }
 
 pub(crate) fn user_terminated_tail_decision(
@@ -13605,9 +13630,7 @@ fn build_output_with_tags_inner(
     let output_mids = req
         .messages
         .iter()
-        .filter(|message| {
-            !message.ck.meta.synthetic || is_newest_synthetic_user_prompt(req, message)
-        })
+        .filter(|message| !is_module_composed_row(message))
         .filter(|message| {
             is_newest_synthetic_user_prompt(req, message)
                 || is_tail(message.ordinal, output_coverage)
@@ -13664,9 +13687,11 @@ fn build_output_with_tags_inner(
         .map(|anchor| synthetic_todo_render_anchor_mid(projection, anchor));
     let mut inserted_synthetic_todo = false;
     let tail_loop_started_at = Instant::now();
-    for msg in req.messages.iter().filter(|message| {
-        !message.ck.meta.synthetic || is_newest_synthetic_user_prompt(req, message)
-    }) {
+    for msg in req
+        .messages
+        .iter()
+        .filter(|message| !is_module_composed_row(message))
+    {
         let keep_live_synthetic_prompt = is_newest_synthetic_user_prompt(req, msg);
         let keep_leading_system = serializer_profile
             != Some(SerializerProfile::ClaudeCodeAnthropic)
@@ -22159,10 +22184,126 @@ pub(crate) mod tests {
             Some("msg_02d6ec606001jEBwnJuw1OX68F")
         );
         assert_eq!(response.messages().last().unwrap().role, "user");
+        // The older notice is a persisted row with its own id, so it is ordinary history and
+        // stays on the wire. Only the position changes: it is no longer the live prompt.
         assert!(response
             .messages()
             .iter()
-            .all(|message| message.meta.harness_id.as_deref() != Some("notice-historical")));
+            .any(|message| message.meta.harness_id.as_deref() == Some("notice-historical")));
+    }
+
+    /// A persisted user row whose parts are marked `synthetic` is a real turn, not a Magic
+    /// Context injection. OpenCode sets that flag to mean "the model sees this text, the TUI
+    /// does not draw it as a human message": the row is written to the session database with
+    /// its own id, it is serialized to the model on every pass, and it owns the assistant
+    /// replies that follow it. Only Magic Context's own head rows -- composed in-process,
+    /// served without an id, every part synthetic -- may be dropped from the served array.
+    ///
+    /// Dropping a persisted row once it stopped being the newest message rewrote roughly a
+    /// thousand tokens of the cached tail on every plugin-injected prompt, and left the
+    /// assistant that answered it adjacent to the assistant before it, which the AI SDK then
+    /// merged into a single message.
+    #[test]
+    fn persisted_synthetic_user_rows_stay_served_after_they_stop_being_newest() {
+        fn served_bytes(response: &TransformResponse, harness_id: &str) -> Vec<u8> {
+            let message = response
+                .messages()
+                .iter()
+                .find(|message| message.meta.harness_id.as_deref() == Some(harness_id))
+                .unwrap_or_else(|| panic!("{harness_id} must stay on the served wire"));
+            serde_json::to_vec(message).unwrap()
+        }
+
+        fn harness_order(response: &TransformResponse) -> Vec<&str> {
+            response
+                .messages()
+                .iter()
+                .filter_map(|message| message.meta.harness_id.as_deref())
+                .filter(|id| id.starts_with("msg_"))
+                .collect()
+        }
+
+        fn request(messages: Vec<CkIngressMessage>) -> TransformRequest {
+            let mut request = profile_req(
+                SerializerProfile::OpencodeAiSdk,
+                "persisted-synthetic-user",
+                "cfg",
+                messages,
+            );
+            request.provider_id = Some("anthropic".to_string());
+            request
+        }
+
+        // The specimen row: a background-completion notice injected by a plugin through
+        // OpenCode's prompt path, persisted with id msg_0c431a772001Vuc0tNE4sppnvq.
+        let mut notice = wire_item(
+            "user",
+            "msg_notice",
+            3,
+            &["<system-reminder>\n[BACKGROUND BASH COMPLETED] task bash-1 finished\n</system-reminder>"],
+        );
+        notice.ck.meta.synthetic = true;
+        // Magic Context's own Channel 2 nudge reaches the session through the same OpenCode
+        // prompt path with the same part shape, so it persists as the same kind of row.
+        let mut channel2 = wire_item(
+            "user",
+            "msg_channel2",
+            5,
+            &["[SYSTEM DIRECTIVE: context ceiling reached, wrap up the current step]"],
+        );
+        channel2.ck.meta.synthetic = true;
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let opening = vec![
+            wire_item("user", "msg_prompt", 1, &["drive the task"]),
+            wire_item("assistant", "msg_assistant_one", 2, &["on it"]),
+        ];
+
+        let mut first_messages = opening.clone();
+        first_messages.push(notice.clone());
+        let first = run(&s, &request(first_messages), &spine());
+        let notice_bytes = served_bytes(&first, "msg_notice");
+
+        let mut second_messages = opening.clone();
+        second_messages.push(notice.clone());
+        second_messages.push(reasoning_tool_shell_message(
+            "msg_assistant_two",
+            4,
+            "call-notice-answer",
+            true,
+        ));
+        second_messages.push(channel2.clone());
+        let second = run(&s, &request(second_messages.clone()), &spine());
+        assert_eq!(
+            served_bytes(&second, "msg_notice"),
+            notice_bytes,
+            "the notice must be served byte-identically once it is no longer newest"
+        );
+        let channel2_bytes = served_bytes(&second, "msg_channel2");
+
+        let mut third_messages = second_messages;
+        third_messages.push(reasoning_tool_shell_message(
+            "msg_assistant_three",
+            6,
+            "call-channel2-answer",
+            true,
+        ));
+        let third = run(&s, &request(third_messages), &spine());
+        assert_eq!(served_bytes(&third, "msg_notice"), notice_bytes);
+        assert_eq!(served_bytes(&third, "msg_channel2"), channel2_bytes);
+        // Every persisted row keeps its place, so no two assistant rows become adjacent.
+        assert_eq!(
+            harness_order(&third),
+            vec![
+                "msg_prompt",
+                "msg_assistant_one",
+                "msg_notice",
+                "msg_assistant_two",
+                "msg_channel2",
+                "msg_assistant_three",
+            ]
+        );
     }
 
     #[test]

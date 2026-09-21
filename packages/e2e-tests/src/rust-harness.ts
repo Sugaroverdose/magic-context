@@ -663,8 +663,9 @@ export class RustTestHarness {
             messageID?: string;
             /**
              * Send the prompt the way OpenCode's own notice deliveries do: a text part
-             * flagged `synthetic`. Such a message is injected context rather than a real
-             * user turn, and the transform serves it only while it is the newest message.
+             * flagged `synthetic`. The flag keeps the message out of the terminal's
+             * human-turn rendering; OpenCode still persists it as an ordinary user row
+             * and still serializes it to the model on every later pass.
              */
             synthetic?: boolean;
         } = {},
