@@ -5,7 +5,7 @@ import {
     resolveModelCalibration,
 } from "./tokenizer-calibration";
 
-const NEUTRAL: ModelCalibration = { systemRatio: 1.0, toolsRatio: 1.0 };
+const NEUTRAL: ModelCalibration = { systemRatio: 1.0, toolsRatio: 1.0, proseRatio: 1.0 };
 
 describe("resolveModelCalibration", () => {
     it("returns neutral ratios for unknown models", () => {
@@ -40,8 +40,8 @@ describe("resolveModelCalibration", () => {
         }
     });
 
-    it("matches GPT-5.x family across all variants", () => {
-        const cases = ["gpt-5", "gpt-5.4", "gpt-5.4-codex", "gpt-5.5", "gpt-5.3-codex"];
+    it("uses legacy GPT-5.x ratios for variants without API-key measurements", () => {
+        const cases = ["gpt-5", "gpt-5.4", "gpt-5.4-codex", "gpt-5.3-codex"];
         for (const model of cases) {
             const calib = resolveModelCalibration("openai", model);
             expect(calib.systemRatio).toBe(1.0);
@@ -143,14 +143,14 @@ describe("calibrateBuckets", () => {
             profileLocal: 0,
             conversationLocal: 30_000,
             toolCallsLocal: 0,
-            calibration: { systemRatio: 2.0, toolsRatio: 1.0 },
+            calibration: { systemRatio: 2.0, toolsRatio: 1.0, proseRatio: 1.0 },
         });
         expect(out.systemTokens).toBe(20_000);
         expect(out.conversationTokens).toBe(30_000);
         expect(out.systemTokens + out.conversationTokens).toBe(50_000);
     });
 
-    it("keeps verbatim buckets at local count and absorbs residual into conversation/tool calls", () => {
+    it("keeps unmeasured prose at local count and absorbs residual into conversation/tool calls", () => {
         // System=1000, tools=500 (calibrated, neutral so no scaling).
         // Verbatim: compartments=1000, facts=500, memories=0 → all stay at local count.
         // Stable + verbatim = 3000. Residual target = 10000 - 3000 = 7000.
@@ -171,8 +171,7 @@ describe("calibrateBuckets", () => {
         // Calibrated stays at local raw count (neutral).
         expect(out.systemTokens).toBe(1_000);
         expect(out.toolDefinitionTokens).toBe(500);
-        // Verbatim must equal local input exactly. THIS is the property the
-        // user asked for: compartments, facts, memories should not drift.
+        // Unmeasured prose keeps the local input exactly (neutral calibration).
         expect(out.compartmentTokens).toBe(1_000);
         expect(out.factTokens).toBe(500);
         expect(out.memoryTokens).toBe(0);
@@ -235,7 +234,7 @@ describe("calibrateBuckets", () => {
             profileLocal: 0,
             conversationLocal: 100,
             toolCallsLocal: 0,
-            calibration: { systemRatio: 5.0, toolsRatio: 5.0 },
+            calibration: { systemRatio: 5.0, toolsRatio: 5.0, proseRatio: 1.0 },
         });
         const sum =
             out.systemTokens +
@@ -266,7 +265,7 @@ describe("calibrateBuckets", () => {
             profileLocal: 0,
             conversationLocal: 1,
             toolCallsLocal: 0,
-            calibration: { systemRatio: 1.51, toolsRatio: 1.57 },
+            calibration: { systemRatio: 1.51, toolsRatio: 1.57, proseRatio: 1.0 },
         });
         const sum =
             out.systemTokens +
@@ -310,7 +309,7 @@ describe("calibrateBuckets", () => {
             profileLocal: 0,
             conversationLocal: 0,
             toolCallsLocal: 0,
-            calibration: { systemRatio: 5.0, toolsRatio: 5.0 },
+            calibration: { systemRatio: 5.0, toolsRatio: 5.0, proseRatio: 1.0 },
         });
         const sum =
             out.systemTokens +
@@ -355,7 +354,7 @@ describe("calibrateBuckets", () => {
             profileLocal: 0,
             conversationLocal: 40_000,
             toolCallsLocal: 68_000,
-            calibration: { systemRatio: 1.51, toolsRatio: 1.57 },
+            calibration: { systemRatio: 1.51, toolsRatio: 1.57, proseRatio: 1.0 },
         });
         // Calibrated buckets.
         expect(out.systemTokens).toBe(Math.round(16_500 * 1.51));
@@ -392,7 +391,7 @@ describe("calibrateBuckets", () => {
             memoriesLocal: 10_000,
             conversationLocal: 40_000,
             toolCallsLocal: 20_000,
-            calibration: { systemRatio: 1, toolsRatio: 1 },
+            calibration: { systemRatio: 1, toolsRatio: 1, proseRatio: 1.0 },
         };
         const without = calibrateBuckets({ ...base, docsLocal: 0, profileLocal: 0 });
         const withDocs = calibrateBuckets({ ...base, docsLocal: 20_000, profileLocal: 2_000 });
@@ -416,4 +415,89 @@ describe("calibrateBuckets", () => {
             withDocs.toolCallTokens;
         expect(sum).toBe(200_000);
     });
+});
+
+describe("measured Claude 5 prose calibration", () => {
+    it("resolves measured aliases and leaves unmeasured Fable 5.2 neutral", () => {
+        for (const provider of ["anthropic", "openrouter/anthropic", "github-copilot"]) {
+            for (const model of ["claude-fable-5-1", "claude-opus-5"]) {
+                expect(resolveModelCalibration(provider, model)).toMatchObject({
+                    systemRatio: 1.511497,
+                    toolsRatio: 1.551639,
+                    proseRatio: 1.571778,
+                });
+            }
+        }
+        expect(resolveModelCalibration("anthropic", "claude-fable-5-2")).toEqual(NEUTRAL);
+        expect(resolveModelCalibration("anthropic", "claude-opus-4-8").proseRatio).toBe(1);
+    });
+
+    it("calibrates the real-session m0 shape without inflating residuals", () => {
+        const input = {
+            inputTokens: 530_000,
+            systemLocal: 9_000,
+            toolDefsLocal: 19_000,
+            compartmentsLocal: 98_000,
+            factsLocal: 0,
+            docsLocal: 36_000,
+            memoriesLocal: 15_000,
+            profileLocal: 4_000,
+            conversationLocal: 40_000,
+            toolCallsLocal: 70_000,
+            calibration: resolveModelCalibration("anthropic", "claude-fable-5-1"),
+        };
+        const out = calibrateBuckets(input);
+        expect(out).toEqual({
+            systemTokens: 13603,
+            toolDefinitionTokens: 29481,
+            compartmentTokens: 154034,
+            factTokens: 0,
+            docsTokens: 56584,
+            memoryTokens: 23577,
+            profileTokens: 6287,
+            conversationTokens: 89612,
+            toolCallTokens: 156822,
+        });
+        // References are count_tokens from one real session; local inputs are its
+        // rounded sidebar readouts, so 5% avoids false precision. Synthetic memory
+        // measured 1.79 versus 1.56 in that session: prose drift is content-dependent.
+        for (const [actual, reference] of [
+            [out.compartmentTokens, 146815],
+            [out.docsTokens, 55220],
+            [out.memoryTokens, 23462],
+            [out.profileTokens, 6075],
+        ])
+            expect(Math.abs(actual - reference) / reference).toBeLessThan(0.05);
+        expect(Object.values(out).reduce((a, b) => a + b, 0)).toBe(530_000);
+        const before = calibrateBuckets({ ...input, calibration: NEUTRAL });
+        expect(out.toolCallTokens).toBeLessThan(before.toolCallTokens - 60_000);
+    });
+
+    it("scales facts and preserves the sum through prose clamp rounding", () => {
+        const out = calibrateBuckets({
+            inputTokens: 7,
+            systemLocal: 1,
+            toolDefsLocal: 1,
+            compartmentsLocal: 1,
+            factsLocal: 1,
+            docsLocal: 1,
+            memoriesLocal: 1,
+            profileLocal: 1,
+            conversationLocal: 0,
+            toolCallsLocal: 0,
+            calibration: { systemRatio: 1, toolsRatio: 1, proseRatio: 1.5 },
+        });
+        expect(Object.values(out).reduce((a, b) => a + b, 0)).toBe(7);
+        expect(Object.values(out).every((value) => value >= 0)).toBe(true);
+    });
+});
+
+it("uses measured Responses ratios for OpenAI API models", () => {
+    for (const model of ["gpt-5.5", "gpt-6-astra"]) {
+        expect(resolveModelCalibration("openai", model)).toMatchObject({
+            systemRatio: 1.000278,
+            toolsRatio: 0.850953,
+            proseRatio: 1.000017,
+        });
+    }
 });
