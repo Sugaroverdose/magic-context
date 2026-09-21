@@ -39,6 +39,7 @@ import {
     getMigrationOnOpenRefusal,
     getPersistedSchemaVersion,
     getSchemaFenceRejection,
+    initializeDatabase,
     inspectRpcServerDiscovery,
     isDatabasePersisted,
     LATEST_SUPPORTED_VERSION,
@@ -1195,6 +1196,58 @@ describe("storage-db", () => {
                     "historian_last_failure_at",
                 ]),
             );
+        });
+
+        it("#when an existing session_meta predates tags_version #then the schema bootstrap heals it before any migration runs", () => {
+            const dataHome = useTempDataHome("storage-db-legacy-tags-version-");
+            const dbPath = resolveDbPath(dataHome);
+            mkdirSync(join(dataHome, "cortexkit", "magic-context"), {
+                recursive: true,
+            });
+            const legacyDb = new Database(dbPath);
+            legacyDb.run(`
+        CREATE TABLE session_meta (
+          session_id TEXT PRIMARY KEY,
+          last_response_time INTEGER,
+          cache_ttl TEXT,
+          counter INTEGER DEFAULT 0,
+          last_nudge_tokens INTEGER DEFAULT 0,
+          last_nudge_band TEXT DEFAULT '',
+          last_transform_error TEXT DEFAULT '',
+          is_subagent INTEGER DEFAULT 0,
+          last_context_percentage REAL DEFAULT 0,
+          last_input_tokens INTEGER DEFAULT 0,
+          observed_safe_input_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_alert_sent INTEGER NOT NULL DEFAULT 0,
+          times_execute_threshold_reached INTEGER DEFAULT 0,
+          cleared_reasoning_through_tag INTEGER DEFAULT 0,
+          harness TEXT NOT NULL DEFAULT 'opencode'
+        );
+      `);
+            closeQuietly(legacyDb);
+
+            // Only the schema bootstrap, no migration runner: the tag triggers are
+            // created here and the migration that adds tags_version runs much later,
+            // so this is the window where a legacy database carries a trigger whose
+            // body names a column that does not exist. SQLite resolves a trigger body
+            // when the trigger fires AND whenever it reparses the whole schema, which
+            // every ALTER TABLE ... RENAME does — so an uncompilable trigger here also
+            // broke the embedding-table rebuild in the middle of the migration chain,
+            // leaving memory_embeddings dropped and unrecoverable.
+            const db = new Database(dbPath);
+            try {
+                initializeDatabase(db);
+                db.prepare(
+                    "INSERT INTO tags (session_id, message_id, type, tag_number) VALUES (?, ?, ?, ?)",
+                ).run("legacy-tags-version", "msg-1", "message", 1);
+                expect(
+                    db
+                        .prepare("SELECT tags_version FROM session_meta WHERE session_id = ?")
+                        .get("legacy-tags-version"),
+                ).toEqual({ tags_version: 1 });
+            } finally {
+                closeQuietly(db);
+            }
         });
 
         it("#when an existing memory_embeddings table lacks model_id #then openDatabase adds the missing column", () => {
