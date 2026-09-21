@@ -21,6 +21,8 @@
 export interface ModelCalibration {
     systemRatio: number;
     toolsRatio: number;
+    /** Table prefix the ratios were inherited from when the model itself is unmeasured. */
+    derivedFrom?: string;
     proseRatio: number;
 }
 
@@ -190,7 +192,41 @@ const CALIBRATION_TABLE: CalibrationEntry[] = [
     // OpenCode-Go — same upstream open-weight providers.
     { prefix: "opencode-go/glm-5.1", systemRatio: 1.0, toolsRatio: 1.06 },
     { prefix: "opencode-go/glm-5", systemRatio: 1.0, toolsRatio: 1.06 },
-    { prefix: "opencode-go/kimi-k2.6", systemRatio: 0.87, toolsRatio: 0.86 },
+    // Moonshot's free estimate endpoint (2026-09-21) reproduced the usage-derived
+    // 0.87/0.86 within 0.5%, so the OpenCode-Go alias carries the measured prose
+    // ratio for the same upstream model.
+    { prefix: "opencode-go/kimi-k2.6", systemRatio: 0.87, toolsRatio: 0.86, proseRatio: 0.925501 },
+    // Moonshot direct — tokenizers/estimate-token-count, 2026-09-21.
+    {
+        prefix: "moonshot/kimi-k2.6",
+        systemRatio: 0.872126,
+        toolsRatio: 0.863853,
+        proseRatio: 0.925501,
+    },
+    {
+        prefix: "moonshot/kimi-for-coding",
+        systemRatio: 0.872126,
+        toolsRatio: 0.863853,
+        proseRatio: 0.925501,
+    },
+    // Z.ai direct — paas/v4/tokenizer, 2026-09-21. Only GLM 4.x is measurable:
+    // the endpoint returns prompt_tokens=0 for every glm-5* id, so those stay
+    // on their usage-derived rows above.
+    { prefix: "zai/glm-4.7", systemRatio: 0.999721, toolsRatio: 1.056823, proseRatio: 1.000875 },
+    // Meta Muse Spark — responses/input_tokens preflight, 2026-09-21. All five
+    // Spark ids measured identically; the Zen-routed alias is the same model.
+    {
+        prefix: "meta/muse-spark",
+        systemRatio: 0.865949,
+        toolsRatio: 1.024605,
+        proseRatio: 0.923366,
+    },
+    {
+        prefix: "opencode/muse-spark",
+        systemRatio: 0.865949,
+        toolsRatio: 1.024605,
+        proseRatio: 0.923366,
+    },
 ];
 
 const NEUTRAL: ModelCalibration = { systemRatio: 1.0, toolsRatio: 1.0, proseRatio: 1.0 };
@@ -214,7 +250,89 @@ export function resolveModelCalibration(
             best = entry;
         }
     }
-    return best ? { ...best, proseRatio: best.proseRatio ?? 1.0 } : NEUTRAL;
+    if (best) return { ...best, proseRatio: best.proseRatio ?? 1.0 };
+    return resolveFamilyFallback(providerId.toLowerCase(), modelId.toLowerCase()) ?? NEUTRAL;
+}
+
+/**
+ * A model id split into the parts that decide tokenizer kinship: the family
+ * name before the first numeric token, the numeric version, and the variant
+ * words after it. `claude-fable-5-2` is family `claude-fable`, version [5, 2],
+ * no variant; `gpt-6-astra` is family `gpt`, version [6], variant `astra`;
+ * `gemini-3.8-flash` is family `gemini`, version [3, 8], variant `flash`.
+ * Ids with no numeric token (`kimi-k2.6`) have no version and never fall back.
+ */
+interface ModelLineage {
+    family: string;
+    version: number[];
+    variant: string;
+}
+
+function parseModelLineage(modelId: string): ModelLineage | null {
+    const tokens = modelId.split("-");
+    const versionAt = tokens.findIndex((token) => /^\d+(\.\d+)*$/.test(token));
+    if (versionAt <= 0) return null;
+    const version: number[] = [];
+    let end = versionAt;
+    while (end < tokens.length && /^\d+(\.\d+)*$/.test(tokens[end] ?? "")) {
+        for (const part of (tokens[end] ?? "").split(".")) version.push(Number(part));
+        end += 1;
+    }
+    return {
+        family: tokens.slice(0, versionAt).join("-"),
+        version,
+        variant: tokens.slice(end).join("-"),
+    };
+}
+
+function compareVersions(a: number[], b: number[]): number {
+    const length = Math.max(a.length, b.length);
+    for (let i = 0; i < length; i++) {
+        const delta = (a[i] ?? 0) - (b[i] ?? 0);
+        if (delta !== 0) return delta;
+    }
+    return 0;
+}
+
+/**
+ * A model the table has never measured inherits the ratios of its nearest
+ * measured relative: same provider, same family, same variant, preferring the
+ * newest version below the requested one, else the oldest above it. A new
+ * release (Fable 5.2 the week it ships) is far more likely to keep its
+ * predecessor's tokenizer than to match NEUTRAL, which is not a tokenizer at
+ * all but the absence of one; the learned session scalar corrects any drift
+ * once it exists. The chosen source is reported in `derivedFrom` so logs can
+ * tell a measurement from an inheritance.
+ */
+function resolveFamilyFallback(providerId: string, modelId: string): ModelCalibration | null {
+    const wanted = parseModelLineage(modelId);
+    if (!wanted) return null;
+    let below: { entry: CalibrationEntry; version: number[] } | null = null;
+    let above: { entry: CalibrationEntry; version: number[] } | null = null;
+    for (const entry of CALIBRATION_TABLE) {
+        const prefix = entry.prefix.toLowerCase();
+        if (!prefix.startsWith(`${providerId}/`)) continue;
+        const lineage = parseModelLineage(prefix.slice(providerId.length + 1));
+        if (!lineage || lineage.family !== wanted.family || lineage.variant !== wanted.variant)
+            continue;
+        const order = compareVersions(lineage.version, wanted.version);
+        if (order === 0) continue;
+        if (order < 0) {
+            if (!below || compareVersions(lineage.version, below.version) > 0) {
+                below = { entry, version: lineage.version };
+            }
+        } else if (!above || compareVersions(lineage.version, above.version) < 0) {
+            above = { entry, version: lineage.version };
+        }
+    }
+    const source = below ?? above;
+    if (!source) return null;
+    return {
+        systemRatio: source.entry.systemRatio,
+        toolsRatio: source.entry.toolsRatio,
+        proseRatio: source.entry.proseRatio ?? 1.0,
+        derivedFrom: source.entry.prefix,
+    };
 }
 
 /**

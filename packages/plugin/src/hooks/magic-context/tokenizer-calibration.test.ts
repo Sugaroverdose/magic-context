@@ -25,6 +25,66 @@ describe("resolveModelCalibration", () => {
         expect(calib.toolsRatio).toBeCloseTo(1.57, 2);
     });
 
+    it("carries the 2026-09-21 count-endpoint measurements for Moonshot, Z.ai GLM 4.7 and Meta Muse", () => {
+        // Values are results.json rows (tokenizers/estimate-token-count,
+        // paas/v4/tokenizer, responses/input_tokens). The Zen-routed Muse alias
+        // and the OpenCode-Go Kimi alias mirror the same upstream model.
+        const kimi = resolveModelCalibration("moonshot", "kimi-k2.6");
+        expect(kimi.systemRatio).toBeCloseTo(0.872126, 5);
+        expect(kimi.toolsRatio).toBeCloseTo(0.863853, 5);
+        expect(kimi.proseRatio).toBeCloseTo(0.925501, 5);
+        expect(resolveModelCalibration("opencode-go", "kimi-k2.6").proseRatio).toBeCloseTo(
+            0.925501,
+            5,
+        );
+        const glm = resolveModelCalibration("zai", "glm-4.7");
+        expect(glm.systemRatio).toBeCloseTo(0.999721, 5);
+        expect(glm.toolsRatio).toBeCloseTo(1.056823, 5);
+        // glm-5* ids are deliberately absent from the table (the tokenizer endpoint
+        // reports 0 for them); they inherit GLM 4.7 through the family fallback.
+        expect(resolveModelCalibration("zai", "glm-5.1").derivedFrom).toBe("zai/glm-4.7");
+        const muse = resolveModelCalibration("meta", "muse-spark-1.3-contributor");
+        expect(muse.systemRatio).toBeCloseTo(0.865949, 5);
+        expect(muse.toolsRatio).toBeCloseTo(1.024605, 5);
+        expect(muse.proseRatio).toBeCloseTo(0.923366, 5);
+        const zen = resolveModelCalibration("opencode", "muse-spark-1.3-contributor-free");
+        expect([zen.systemRatio, zen.toolsRatio, zen.proseRatio]).toEqual([
+            muse.systemRatio,
+            muse.toolsRatio,
+            muse.proseRatio,
+        ]);
+    });
+
+    it("lets an unmeasured release inherit its nearest measured relative", () => {
+        // The week a new version ships nobody has measured it yet; its predecessor's
+        // tokenizer is the best available truth, and NEUTRAL is no tokenizer at all.
+        const fable52 = resolveModelCalibration("anthropic", "claude-fable-5-2");
+        const fable51 = resolveModelCalibration("anthropic", "claude-fable-5-1");
+        expect(fable52.derivedFrom).toBe("anthropic/claude-fable-5-1");
+        expect(fable52.proseRatio).toBe(fable51.proseRatio);
+        expect(fable51.derivedFrom).toBeUndefined();
+        // Newest version below wins over anything above.
+        expect(resolveModelCalibration("anthropic", "claude-opus-4-9").derivedFrom).toBe(
+            "anthropic/claude-opus-4-8",
+        );
+        // Variant words must match: an astra release follows astra, not plain gpt.
+        expect(resolveModelCalibration("openai", "gpt-6.1-astra").derivedFrom).toBe(
+            "openai/gpt-6-astra",
+        );
+        expect(resolveModelCalibration("openai", "gpt-7").derivedFrom).toBe("openai/gpt-5.5");
+        expect(resolveModelCalibration("google", "gemini-3.9-flash").derivedFrom).toBe(
+            "google/gemini-3.8-flash",
+        );
+        // Only above exists: the oldest above is used.
+        expect(resolveModelCalibration("anthropic", "claude-opus-4-4").derivedFrom).toBe(
+            "anthropic/claude-opus-4-5",
+        );
+        // Provider-scoped, family-scoped, version-bearing only.
+        expect(resolveModelCalibration("anthropic", "claude-muse-9")).toEqual(NEUTRAL);
+        expect(resolveModelCalibration("moonshot", "kimi-k3")).toEqual(NEUTRAL);
+        expect(resolveModelCalibration("brand-new", "claude-fable-5-2")).toEqual(NEUTRAL);
+    });
+
     it("matches Claude 4.5/4.6 family within range", () => {
         const cases = [
             ["anthropic", "claude-opus-4-5"],
@@ -418,7 +478,7 @@ describe("calibrateBuckets", () => {
 });
 
 describe("measured Claude 5 prose calibration", () => {
-    it("resolves measured aliases and leaves unmeasured Fable 5.2 neutral", () => {
+    it("resolves measured aliases and lets unmeasured Fable 5.2 inherit 5.1", () => {
         for (const provider of ["anthropic", "openrouter/anthropic", "github-copilot"]) {
             for (const model of ["claude-fable-5-1", "claude-opus-5"]) {
                 expect(resolveModelCalibration(provider, model)).toMatchObject({
@@ -428,7 +488,10 @@ describe("measured Claude 5 prose calibration", () => {
                 });
             }
         }
-        expect(resolveModelCalibration("anthropic", "claude-fable-5-2")).toEqual(NEUTRAL);
+        // Unmeasured Fable 5.2 is not neutral: it inherits 5.1 until measured.
+        expect(resolveModelCalibration("anthropic", "claude-fable-5-2").derivedFrom).toBe(
+            "anthropic/claude-fable-5-1",
+        );
         expect(resolveModelCalibration("anthropic", "claude-opus-4-8").proseRatio).toBe(1);
     });
 
