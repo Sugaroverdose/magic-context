@@ -78,6 +78,7 @@ use mc_store::{
     StateImportError, StateImportPreflight, StateImportValidationError, StoredChunkTranscript,
     StoredCompartment, StoredMemoryMutation, StoredNote, TodoStateSetOutcome, UserHintSeedRow,
     VerificationUpdate, WrapupCommandRecord, LATEST_MIGRATION_VERSION,
+    SINGLE_STORE_MARKER_REFUSAL_REASON,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -318,11 +319,29 @@ struct StoreOpenAttempt {
     origin: DescriptorOrigin,
 }
 
+/// The reason code a failed open carries when nothing more specific applies: the open failed for
+/// one of the many ordinary reasons a database open can fail, and the sentence beside it is the
+/// only description there is. Named arms exist only where a reader has to act differently.
+const STORE_OPEN_FAILURE_REASON_GENERIC: &str = "open_error";
+
+/// The stable reason code for an open that failed for a reason worth naming, or the generic code
+/// when there is none. Keeping this in one place means the health lane, the refusal message and
+/// the log line cannot drift into naming the same failure three different ways.
+fn store_open_failure_reason_code(error: &McStoreError) -> &'static str {
+    match error {
+        McStoreError::SingleStoreMarkerUnsupported { .. } => SINGLE_STORE_MARKER_REFUSAL_REASON,
+        _ => STORE_OPEN_FAILURE_REASON_GENERIC,
+    }
+}
+
 /// Why a store open ended for good. Recorded BEFORE the phase returns to idle so a request that
 /// observes an idle phase always finds the reason, instead of falling through to the
 /// "nothing was ever attempted" arm and blaming a missing ack that did arrive.
 #[derive(Clone, Debug)]
 struct StoreOpenFailure {
+    /// The stable token a reader matches on.
+    reason_code: String,
+    /// The human sentence, which may name paths, elapsed times and driver text.
     reason: String,
     origin: &'static str,
     descriptor: String,
@@ -351,6 +370,7 @@ enum StoreRefusal {
     /// The open ended and is not retried, so every later request refuses the same way until the
     /// module restarts.
     Failed {
+        reason_code: String,
         reason: String,
         origin: &'static str,
         descriptor: String,
@@ -393,11 +413,12 @@ impl StoreRefusal {
                 "storage single-writer lease is held by another live process: elapsed_ms={elapsed_ms} wait_window_ms={wait_window_ms} descriptor={descriptor} ({disposition})"
             ),
             Self::Failed {
+                reason_code,
                 reason,
                 origin,
                 descriptor,
             } => format!(
-                "storage open failed and is not retried before restart: reason={reason} descriptor_origin={origin} descriptor={descriptor} ({disposition})"
+                "storage open failed and is not retried before restart: reason_code={reason_code} reason={reason} descriptor_origin={origin} descriptor={descriptor} ({disposition})"
             ),
         }
     }
@@ -489,9 +510,10 @@ impl StoreOpenCoordinator {
 
     /// Record why the open ended, then release the phase. The order matters: a request that sees
     /// the idle phase must already be able to read the reason.
-    fn fail_and_idle(&self, reason: String, now_ms: u64) {
+    fn fail_and_idle(&self, reason_code: &str, reason: String, now_ms: u64) {
         let attempt = self.attempt_snapshot();
         *self.failure.lock().expect("store open failure mutex") = Some(StoreOpenFailure {
+            reason_code: reason_code.to_string(),
             reason,
             origin: attempt
                 .as_ref()
@@ -532,6 +554,7 @@ impl StoreOpenCoordinator {
             },
             _ => match self.failure_snapshot() {
                 Some(failure) => StoreRefusal::Failed {
+                    reason_code: failure.reason_code,
                     reason: failure.reason,
                     origin: failure.origin,
                     descriptor: failure.descriptor,
@@ -542,6 +565,7 @@ impl StoreOpenCoordinator {
                 // the open records one), and reported as a failed open rather than as a missing
                 // ack so a bookkeeping gap can never masquerade as "the daemon never acked".
                 None => StoreRefusal::Failed {
+                    reason_code: STORE_OPEN_FAILURE_REASON_GENERIC.to_string(),
                     reason: "store open ended without recording a reason".to_string(),
                     origin: self
                         .attempt_snapshot()
@@ -584,12 +608,13 @@ impl StoreOpenCoordinator {
         Some(HealthReport {
             status: HealthStatus::Failing,
             detail: Some(format!(
-                "storage open failed and is not retried: {} (descriptor {} from {}); requests refuse with store_open_failed until the module restarts",
-                failure.reason, failure.descriptor, failure.origin
+                "storage open failed and is not retried: {} ({}) (descriptor {} from {}); requests refuse with store_open_failed until the module restarts",
+                failure.reason_code, failure.reason, failure.descriptor, failure.origin
             )),
             metrics: Some(json!({
                 "lane": TRANSFORM_HEALTH_LANE,
                 "storage_state": "open_failed",
+                "storage_open_failure_reason_code": failure.reason_code,
                 "storage_open_failure_reason": failure.reason,
                 "storage_descriptor": failure.descriptor,
                 "storage_descriptor_origin": failure.origin,
@@ -4252,6 +4277,7 @@ impl McHandler {
             Ok(opened) => {
                 if coordinator.cancelled.load(Ordering::Acquire) {
                     coordinator.fail_and_idle(
+                        STORE_OPEN_FAILURE_REASON_GENERIC,
                         "store open cancelled during shutdown".to_string(),
                         now_ms().max(0) as u64,
                     );
@@ -4264,7 +4290,11 @@ impl McHandler {
             Err(error) if store_open_error_is_live_lease(&error) => error,
             Err(error) => {
                 eprintln!("mc-module: store open failed: {error}");
-                coordinator.fail_and_idle(error.to_string(), now_ms().max(0) as u64);
+                coordinator.fail_and_idle(
+                    store_open_failure_reason_code(&error),
+                    error.to_string(),
+                    now_ms().max(0) as u64,
+                );
                 return;
             }
         };
@@ -4293,6 +4323,7 @@ impl McHandler {
                     elapsed.as_secs_f64()
                 );
                 coordinator.fail_and_idle(
+                    STORE_OPEN_FAILURE_REASON_GENERIC,
                     format!(
                         "storage lease wait expired after {:.2}s: {last_lease_error}",
                         elapsed.as_secs_f64()
@@ -4343,7 +4374,11 @@ impl McHandler {
                         "mc-module: storage lease wait ended after {:.2}s; store open failed: {error}",
                         started.elapsed().as_secs_f64()
                     );
-                    coordinator.fail_and_idle(error.to_string(), now_ms().max(0) as u64);
+                    coordinator.fail_and_idle(
+                        store_open_failure_reason_code(&error),
+                        error.to_string(),
+                        now_ms().max(0) as u64,
+                    );
                     return;
                 }
             }
@@ -4358,6 +4393,7 @@ impl McHandler {
             elapsed.as_secs_f64()
         );
         coordinator.fail_and_idle(
+            STORE_OPEN_FAILURE_REASON_GENERIC,
             format!(
                 "storage lease wait cancelled during shutdown after {:.2}s",
                 elapsed.as_secs_f64()
@@ -18556,6 +18592,109 @@ mod tests {
                 .as_str()
                 .is_some_and(|reason| reason.contains("lease")),
             "{metrics}"
+        );
+    }
+
+    /// A store that has been migrated into single-store mode must stop this binary at the door,
+    /// and every surface that answers "why is there no store" must name that specific reason.
+    ///
+    /// The named token is what makes the refusal actionable: "storage open failed" sends an
+    /// operator looking for a broken file, while `single_store_marker` says the store is intact
+    /// and this binary is the wrong one. The health lane, the shared refusal seam behind
+    /// `session.status` and the transform lane are all asserted, because an operator may be
+    /// looking at any one of the three and a reason that reaches only one is a reason they will
+    /// not see.
+    #[tokio::test]
+    async fn a_single_store_marker_refusal_is_named_on_health_and_on_every_refusal_seam() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let migrated = McStore::open(&descriptor).unwrap();
+        migrated
+            .set_single_store_marker_for_test(1_758_000_000_000, "a1b2c3d4")
+            .unwrap();
+        drop(migrated);
+
+        let handler = McHandler::new();
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while handler.store_open.failure_snapshot().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("an open that cannot succeed must record its reason");
+
+        let report = <McHandler as ModuleHandler>::health(&handler).await;
+        assert_eq!(report.status, HealthStatus::Failing);
+        let metrics = report
+            .metrics
+            .expect("a failed open must carry health metrics");
+        assert_eq!(metrics["storage_state"], "open_failed");
+        assert_eq!(
+            metrics["storage_open_failure_reason_code"],
+            SINGLE_STORE_MARKER_REFUSAL_REASON
+        );
+        let detail = report
+            .detail
+            .expect("a failed open must carry a health detail");
+        assert!(
+            detail.contains(SINGLE_STORE_MARKER_REFUSAL_REASON),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("run that build or newer"),
+            "health must carry the remediation, not only the diagnosis: {detail}"
+        );
+
+        // `session.status` and the other management lanes answer "there is no store" by calling
+        // exactly this method, so asserting it here covers all of them.
+        let (code, message) = error_frame(handler.store_refusal());
+        assert_eq!(code, "store_open_failed");
+        assert!(
+            message.contains(&format!("reason_code={SINGLE_STORE_MARKER_REFUSAL_REASON}")),
+            "{message}"
+        );
+        assert!(message.contains("ck-mc a1b2c3d4"), "{message}");
+        assert!(
+            message.contains("terminal"),
+            "a store this binary cannot read is not something a retry fixes: {message}"
+        );
+
+        let (transform_code, transform_message) =
+            error_frame(call_transform_outcome(&handler, request(big_messages())).await);
+        assert_eq!(transform_code, "store_open_failed");
+        assert!(
+            transform_message
+                .contains(&format!("reason_code={SINGLE_STORE_MARKER_REFUSAL_REASON}")),
+            "{transform_message}"
+        );
+    }
+
+    /// An open that failed for an ordinary reason must NOT borrow the single-store name, or the
+    /// named reason stops distinguishing anything.
+    #[tokio::test]
+    async fn an_ordinary_failed_open_carries_the_generic_reason_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let _predecessor = McStore::open(&descriptor).unwrap();
+        let handler = McHandler::new();
+        handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(60)));
+
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
+        wait_for_store_open_phase(&handler, STORE_OPEN_WAITING).await;
+        wait_for_store_open_phase(&handler, STORE_OPEN_IDLE).await;
+
+        let report = <McHandler as ModuleHandler>::health(&handler).await;
+        let metrics = report
+            .metrics
+            .expect("a failed open must carry health metrics");
+        assert_eq!(
+            metrics["storage_open_failure_reason_code"],
+            STORE_OPEN_FAILURE_REASON_GENERIC
         );
     }
 
