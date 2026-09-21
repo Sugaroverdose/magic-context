@@ -61,6 +61,120 @@ pub fn local_budget(provider_tokens: f64, ratio: f64) -> f64 {
     (provider_tokens / ratio).floor()
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SeedEntry {
+    prefix: String,
+    system_ratio: f64,
+    tools_ratio: f64,
+    #[serde(default = "neutral_ratio")]
+    prose_ratio: f64,
+}
+fn neutral_ratio() -> f64 {
+    1.0
+}
+
+fn seeds() -> &'static [SeedEntry] {
+    static SEEDS: std::sync::OnceLock<Vec<SeedEntry>> = std::sync::OnceLock::new();
+    SEEDS.get_or_init(|| {
+        serde_json::from_str(include_str!(
+            "../../../packages/plugin/src/hooks/magic-context/tokenizer-calibration-seeds.json"
+        ))
+        .expect("compiled static calibration table")
+    })
+}
+
+fn lineage(model: &str) -> Option<(String, Vec<u64>, String)> {
+    let tokens: Vec<_> = model.split('-').collect();
+    let numeric = |token: &str| {
+        !token.is_empty()
+            && token
+                .split('.')
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let at = tokens.iter().position(|token| numeric(token))?;
+    if at == 0 {
+        return None;
+    }
+    let mut end = at;
+    let mut version = Vec::new();
+    while end < tokens.len() && numeric(tokens[end]) {
+        for part in tokens[end].split('.') {
+            version.push(part.parse().ok()?);
+        }
+        end += 1;
+    }
+    Some((tokens[..at].join("-"), version, tokens[end..].join("-")))
+}
+fn version_order(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
+    for i in 0..a.len().max(b.len()) {
+        let order = a.get(i).unwrap_or(&0).cmp(b.get(i).unwrap_or(&0));
+        if order != std::cmp::Ordering::Equal {
+            return order;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+impl DecisionCalibration {
+    /// Match the longest measured prefix, then the nearest version in the same
+    /// provider/family/variant, preferring an older version. Shares the TS table.
+    pub fn for_model(model_key: Option<&str>) -> Self {
+        let key = model_key.unwrap_or("").to_lowercase();
+        let table = seeds();
+        let direct = table
+            .iter()
+            .filter(|entry| key.starts_with(&entry.prefix))
+            .max_by_key(|entry| entry.prefix.len());
+        let inherited = || {
+            let (provider, model) = key.split_once('/')?;
+            let (family, version, variant) = lineage(model)?;
+            let mut below: Option<(&SeedEntry, Vec<u64>)> = None;
+            let mut above: Option<(&SeedEntry, Vec<u64>)> = None;
+            for entry in table {
+                let Some(model) = entry.prefix.strip_prefix(&format!("{provider}/")) else {
+                    continue;
+                };
+                let Some((f, v, kind)) = lineage(model) else {
+                    continue;
+                };
+                if f != family || kind != variant {
+                    continue;
+                }
+                match version_order(&v, &version) {
+                    std::cmp::Ordering::Less
+                        if below
+                            .as_ref()
+                            .is_none_or(|(_, old)| version_order(&v, old).is_gt()) =>
+                    {
+                        below = Some((entry, v))
+                    }
+                    std::cmp::Ordering::Greater
+                        if above
+                            .as_ref()
+                            .is_none_or(|(_, old)| version_order(&v, old).is_lt()) =>
+                    {
+                        above = Some((entry, v))
+                    }
+                    _ => {}
+                }
+            }
+            below.or(above).map(|(entry, _)| entry)
+        };
+        let selected = direct.or_else(inherited);
+        Self {
+            system_ratio: selected.map_or(1.0, |s| s.system_ratio),
+            tools_ratio: selected.map_or(1.0, |s| s.tools_ratio),
+            prose_ratio: selected.map_or(1.0, |s| s.prose_ratio),
+            seeded: selected.is_some(),
+            unknown_fit_ratio: table
+                .iter()
+                .flat_map(|s| [s.system_ratio, s.tools_ratio, s.prose_ratio])
+                .fold(2.0, f64::max),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

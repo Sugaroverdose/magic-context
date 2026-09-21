@@ -63,3 +63,21 @@ export function localBudget(providerTokens: number, ratio: number): number {
         return 0;
     return Math.floor(providerTokens / ratio);
 }
+
+/** Split provider/model at the first slash, retaining any further slashes in the model name. */
+export function calibrationForModelKey(modelKey: string | null | undefined): DecisionCalibration {
+    const slash = modelKey?.indexOf("/") ?? -1;
+    return slash > 0
+        ? resolveDecisionCalibration(modelKey!.slice(0, slash), modelKey!.slice(slash + 1))
+        : resolveDecisionCalibration(undefined, undefined);
+}
+
+/** Convert at history materialization, not in cache markers: calibration must not trigger a fold. */
+export function historyLocalBudget(
+    providerTokens: number,
+    modelKey: string | null | undefined,
+): number {
+    const ratio = calibrationForModelKey(modelKey).proseRatio;
+    // Neutral preserves legacy fractional budgets, which may come from decay pressure.
+    return ratio === 1 ? providerTokens : localBudget(providerTokens, ratio);
+}

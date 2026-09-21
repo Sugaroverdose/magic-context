@@ -4800,7 +4800,10 @@ fn apply_once(
                         project_path: ctx.project_path,
                         project_directory: ctx.project_directory,
                         now_ms: ctx.now_ms,
-                        history_budget_tokens: ctx.history_budget_tokens,
+                        history_budget_tokens: crate::decay_render::history_local_budget(
+                            ctx.history_budget_tokens,
+                            req.model_key.as_deref(),
+                        ),
                         covered_system_messages: &covered_system_messages,
                         memory_enabled: ctx.memory_enabled,
                         host_backed_memory_ids: serializer_profile
@@ -4905,7 +4908,11 @@ fn apply_once(
                                     project_path: ctx.project_path,
                                     project_directory: ctx.project_directory,
                                     now_ms: ctx.now_ms,
-                                    history_budget_tokens: ctx.history_budget_tokens,
+                                    history_budget_tokens:
+                                        crate::decay_render::history_local_budget(
+                                            ctx.history_budget_tokens,
+                                            req.model_key.as_deref(),
+                                        ),
                                     covered_system_messages: &recut_covered_system_messages,
                                     memory_enabled: ctx.memory_enabled,
                                     host_backed_memory_ids: serializer_profile
@@ -5156,7 +5163,10 @@ fn apply_once(
                             project_path: ctx.project_path,
                             project_directory: ctx.project_directory,
                             now_ms: ctx.now_ms,
-                            history_budget_tokens: ctx.history_budget_tokens,
+                            history_budget_tokens: crate::decay_render::history_local_budget(
+                                ctx.history_budget_tokens,
+                                req.model_key.as_deref(),
+                            ),
                             covered_system_messages: &covered_system_messages,
                             memory_enabled: ctx.memory_enabled,
                             host_backed_memory_ids: serializer_profile
