@@ -7126,3 +7126,37 @@ it("refuses LKG plus suffix when tool-definition completeness is lost", async ()
     );
     expect(output.messages).toEqual(input);
 });
+
+it("unknown calibrated raw fallback refuses a locally fitting request and admits a safe request", async () => {
+    for (const [limit, allowed] of [
+        [10000, false],
+        [50000, true],
+    ] as const) {
+        const sessionId = `calibrated-raw-wall-${limit}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        recordDetectedContextLimit(db, sessionId, limit, "test-provider/test-model");
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                throw new Error("synthetic daemon failure");
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const meta = makeMeta(db, sessionId);
+        meta.systemPromptTokens = 6000;
+        const input = makeMessages(sessionId);
+        const output = { messages: [...input] as unknown[] };
+        if (allowed) {
+            await transform.run(sessionId, input, output, meta);
+            expect(output.messages).toEqual(input);
+        } else {
+            await expect(transform.run(sessionId, input, output, meta)).rejects.toMatchObject({
+                code: "RAW_FALLBACK_CONTEXT_LIMIT",
+                contextLimitTokens: 10000,
+            });
+            expect(output.messages).toEqual(input);
+        }
+    }
+});

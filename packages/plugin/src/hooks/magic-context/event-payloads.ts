@@ -35,6 +35,7 @@ export interface MessageUpdatedAssistantInfo {
     /** OpenCode assistant message id. Undefined only when the event payload
      *  doesn't include one (older SDK versions or malformed events). */
     messageID?: string;
+    parentID?: string;
     completedAt?: number;
     providerID?: string;
     modelID?: string;
@@ -126,6 +127,7 @@ export function getMessageUpdatedAssistantInfo(
         finish: typeof info.finish === "string" ? info.finish : undefined,
         sessionID: info.sessionID,
         messageID: typeof info.id === "string" ? info.id : undefined,
+        ...(typeof info.parentID === "string" ? { parentID: info.parentID } : {}),
         completedAt: typeof time?.completed === "number" ? time.completed : undefined,
         providerID: typeof info.providerID === "string" ? info.providerID : undefined,
         modelID: typeof info.modelID === "string" ? info.modelID : undefined,

@@ -62,7 +62,7 @@ export function estimateMessageTokens(message: MessageLike): MessageTokenEstimat
             signature?: string;
             data?: string;
             ignored?: boolean;
-            state?: { input?: unknown; output?: unknown };
+            state?: { input?: unknown; output?: unknown; error?: unknown };
             args?: unknown;
             input?: unknown;
             content?: unknown;
@@ -99,6 +99,7 @@ export function estimateMessageTokens(message: MessageLike): MessageTokenEstimat
             case "tool":
                 toolCall += serializedTokens(p.state?.input);
                 toolCall += serializedTokens(p.state?.output);
+                toolCall += serializedTokens(p.state?.error);
                 break;
             case "tool-invocation":
                 toolCall += serializedTokens(p.args);
@@ -132,6 +133,7 @@ export interface FinalWireTokenEstimate {
     rawTokens?: number;
     rawComponents?: { system: number; tools: number; prose: number };
     completeness?: "complete" | "partial";
+    componentsComplete?: boolean;
 }
 
 /**
@@ -182,6 +184,8 @@ export function estimateFinalWireInputTokens(
         rawTokens: rawComponents.system + rawComponents.tools + rawComponents.prose,
         rawComponents,
         completeness: complete ? "complete" : "partial",
+        componentsComplete:
+            measuredToolDefinitions !== undefined && input.messages.every(hasCountableParts),
         messageTokens,
         systemTokens,
         toolDefinitionTokens,
@@ -201,8 +205,14 @@ function hasCountableParts(message: MessageLike): boolean {
                 return typeof p.thinking === "string";
             case "redacted_thinking":
                 return typeof p.data === "string";
-            case "tool":
-                return p.state !== null && typeof p.state === "object";
+            case "tool": {
+                if (p.state === null || typeof p.state !== "object") return false;
+                const state = p.state as Record<string, unknown>;
+                return (
+                    state.input !== undefined &&
+                    (state.output !== undefined || state.error !== undefined)
+                );
+            }
             case "tool-invocation":
                 return p.args !== undefined;
             case "tool_use":

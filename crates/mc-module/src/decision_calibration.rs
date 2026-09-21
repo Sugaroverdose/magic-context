@@ -116,6 +116,18 @@ fn version_order(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
+/// Identify a table seed versus same-family inheritance; session usage samples never affect this lookup.
+pub fn seed_source(model_key: Option<&str>) -> &'static str {
+    let key = model_key.unwrap_or("").to_lowercase();
+    if DecisionCalibration::for_model(model_key).seeded
+        && !seeds().iter().any(|s| key.starts_with(&s.prefix))
+    {
+        "family-fallback"
+    } else {
+        "seed"
+    }
+}
+
 impl DecisionCalibration {
     /// Match the longest measured prefix, then the nearest version in the same
     /// provider/family/variant, preferring an older version. Shares the TS table.

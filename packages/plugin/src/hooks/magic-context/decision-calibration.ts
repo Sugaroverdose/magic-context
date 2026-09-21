@@ -10,6 +10,7 @@ import {
 export interface DecisionCalibration extends Readonly<ModelCalibration> {
     readonly modelKey: string;
     readonly revision: string;
+    readonly matchedPrefix?: string;
     readonly seeded: boolean;
     readonly source: "seed" | "family-fallback";
 }
@@ -23,6 +24,8 @@ export function resolveDecisionCalibration(
         ...ratios,
         modelKey: `${providerId ?? "unknown"}/${modelId ?? "unknown"}`.toLowerCase(),
         revision: CALIBRATION_TABLE_REVISION,
+        matchedPrefix:
+            ratios.derivedFrom ?? (ratios as ModelCalibration & { prefix?: string }).prefix,
         seeded: hasModelCalibration(providerId, modelId),
         source: ratios.derivedFrom ? "family-fallback" : "seed",
     });

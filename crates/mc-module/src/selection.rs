@@ -156,6 +156,8 @@ pub enum SelKind {
 /// the selection logic needs on top of the raw incoming item.
 #[derive(Debug, Clone)]
 pub struct SelItem {
+    /// Current representation's local-token count for emergency budgeting; it does not change age-based eligibility.
+    pub served_token_count: Option<usize>,
     pub id: String,
     pub ordinal: u64,
     /// Provider-facing role of the owning message.
@@ -1036,7 +1038,7 @@ fn active_floor_tokens(
                 } else {
                     seed.prose_ratio
                 };
-                item.token_count.unwrap_or(0) as f64 * ratio
+                item.served_token_count.or(item.token_count).unwrap_or(0) as f64 * ratio
             })
             .sum();
     }
@@ -1093,6 +1095,14 @@ fn select_emergency(
     // sub-threshold fractional remainder at the boundary.
     let reclaim_tokens = (ctx.current_total_input_tokens - target).round();
     if reclaim_tokens <= EMERGENCY_REARM_MIN_TOKENS {
+        *assessment = Some(mc_store::EmergencyDropAssessment {
+            fixed_floor_tokens: fixed_floor,
+            target_tokens: target,
+            required_reclaim_tokens: reclaim_tokens.max(0.0),
+            selected_reclaim_tokens: 0.0,
+            candidate_tokens: 0.0,
+            target_unreachable: reclaim_tokens > 0.0,
+        });
         return HashSet::new();
     }
 
@@ -1333,7 +1343,9 @@ pub(crate) fn select_reductions_with_outcome(
                                     SelKind::ToolCall { .. } | SelKind::ToolResult { .. }
                                 )
                         })
-                        .map(|item| item.token_count.unwrap_or(0) as f64)
+                        .map(|item| {
+                            item.served_token_count.or(item.token_count).unwrap_or(0) as f64
+                        })
                         .sum::<f64>();
                     let skeleton = (!ctx.emergency_window_yields
                         && recent.contains(arc.arc_id.as_str()))
@@ -1627,6 +1639,7 @@ mod tests {
     ) -> SelItem {
         let id = call_block_id(mid);
         SelItem {
+            served_token_count: None,
             id: id.clone(),
             ordinal,
             message_role: SelMessageRole::Assistant,
@@ -1643,6 +1656,7 @@ mod tests {
 
     fn tool_result(mid: &str, ordinal: u64, name: &str, bytes: usize) -> SelItem {
         SelItem {
+            served_token_count: None,
             id: result_block_id(mid),
             ordinal,
             message_role: SelMessageRole::NonAssistant,
@@ -1658,6 +1672,7 @@ mod tests {
 
     fn reasoning(mid: &str, ordinal: u64, bytes: usize) -> SelItem {
         SelItem {
+            served_token_count: None,
             id: reasoning_block_id(mid),
             ordinal,
             message_role: SelMessageRole::Assistant,
@@ -1671,6 +1686,7 @@ mod tests {
 
     fn reasoning_with_id(id: &str, arc_id: &str, ordinal: u64, bytes: usize) -> SelItem {
         SelItem {
+            served_token_count: None,
             id: id.to_string(),
             ordinal,
             message_role: SelMessageRole::Assistant,
@@ -1684,6 +1700,7 @@ mod tests {
 
     fn text_with_id(id: &str, ordinal: u64, bytes: usize) -> SelItem {
         SelItem {
+            served_token_count: None,
             id: id.to_string(),
             ordinal,
             message_role: SelMessageRole::NonAssistant,
@@ -1704,6 +1721,7 @@ mod tests {
         bytes: usize,
     ) -> SelItem {
         SelItem {
+            served_token_count: None,
             id: id.to_string(),
             ordinal,
             message_role: SelMessageRole::Assistant,
@@ -1726,6 +1744,7 @@ mod tests {
         bytes: usize,
     ) -> SelItem {
         SelItem {
+            served_token_count: None,
             id: id.to_string(),
             ordinal,
             message_role: SelMessageRole::NonAssistant,
@@ -1878,6 +1897,7 @@ mod tests {
     #[test]
     fn natural_bust_drains_a_single_command_remainder() {
         let items = vec![SelItem {
+            served_token_count: None,
             id: "drop".to_string(),
             ordinal: 1,
             message_role: SelMessageRole::NonAssistant,
@@ -2075,6 +2095,7 @@ mod tests {
                         SelMessageRole::NonAssistant
                     };
                     SelItem {
+                        served_token_count: None,
                         id: i.id.clone(),
                         ordinal: i.ordinal,
                         message_role,
@@ -2475,6 +2496,7 @@ mod tests {
         }
         items.push(text_with_id("heavy-text#0", 7, 30_000));
         items.push(SelItem {
+            served_token_count: None,
             id: "heavy-reasoning#0".to_string(),
             ordinal: 8,
             message_role: SelMessageRole::Assistant,
@@ -2485,6 +2507,7 @@ mod tests {
             arc_id: None,
         });
         items.push(SelItem {
+            served_token_count: None,
             id: "irreducible-system#0".to_string(),
             ordinal: 9,
             message_role: SelMessageRole::System,
@@ -2522,6 +2545,7 @@ mod tests {
                 4_000,
             ));
             items.push(SelItem {
+                served_token_count: None,
                 id: format!("{mid}#3"),
                 ordinal,
                 message_role: SelMessageRole::Assistant,
@@ -3518,6 +3542,7 @@ mod tests {
     #[test]
     fn held_agent_drop_never_trickles_when_the_window_slides() {
         let items = vec![SelItem {
+            served_token_count: None,
             id: "held#0".to_string(),
             ordinal: 1,
             message_role: SelMessageRole::NonAssistant,
@@ -3544,6 +3569,7 @@ mod tests {
     fn different_commands_wait_for_a_single_ride_opportunity() {
         let items = vec![
             SelItem {
+                served_token_count: None,
                 id: "held#0".to_string(),
                 ordinal: 1,
                 message_role: SelMessageRole::NonAssistant,
@@ -3554,6 +3580,7 @@ mod tests {
                 arc_id: None,
             },
             SelItem {
+                served_token_count: None,
                 id: "new#0".to_string(),
                 ordinal: 2,
                 message_role: SelMessageRole::NonAssistant,
@@ -3590,6 +3617,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(index, kind)| SelItem {
+                served_token_count: None,
                 id: format!("carrier#{index}"),
                 ordinal: 1,
                 message_role: SelMessageRole::NonAssistant,
@@ -3816,6 +3844,7 @@ mod tests {
         let items = vec![
             reasoning_with_id("left#0", "left#2", 1, 50),
             SelItem {
+                served_token_count: None,
                 id: "left#1".to_string(),
                 ordinal: 1,
                 message_role: SelMessageRole::Assistant,
@@ -3829,6 +3858,7 @@ mod tests {
             tool_call_with_ids("left#3", "left#3", 1, "mcp_read", args, 50),
             tool_result_with_ids("older-result#0", "left#2", 2, "mcp_read", 300),
             SelItem {
+                served_token_count: None,
                 id: "right#0".to_string(),
                 ordinal: 3,
                 message_role: SelMessageRole::Assistant,

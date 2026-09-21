@@ -4363,9 +4363,28 @@ describe("createTransform historian failure handling", () => {
         const db = openDatabase();
         incrementHistorianFailure(db, "ses-recovery", "503 overloaded");
 
+        await refreshModelLimitsFromApi({
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            {
+                                id: "test",
+                                models: {
+                                    "recovery-producer": {
+                                        limit: { context: 200_000, output: 32000 },
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                }),
+            },
+        });
         const createSession = mock(async () => ({ data: { id: "ses-recovery-child" } }));
         const prompt = mock(async () => ({}));
         const transform = createTransform({
+            historianModel: "test/recovery-producer",
             tagger: createTagger(),
             scheduler: { shouldExecute: mock(() => "defer" as const) },
             contextUsageMap: new Map([

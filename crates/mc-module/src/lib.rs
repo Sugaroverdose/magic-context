@@ -19856,7 +19856,7 @@ mod tests {
             caveman: crate::config::CavemanConfig::default(),
             auto_promote: true,
             user_memory_collection_enabled: false,
-            historian_context_limit_tokens: 128_000,
+            historian_context_limit_tokens: 200_000,
             historian_context_limit_known: true,
             memory_budget_tokens: 4_000.0,
             user_profile_budget_tokens: 4_000.0,
@@ -32189,7 +32189,7 @@ mod tests {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
-        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
+        cache_wrapup_messages(&handler, wrapup_messages(80, 1600));
 
         let body = tool_body(
             handler
@@ -32245,7 +32245,7 @@ mod tests {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
-        cache_wrapup_messages(&handler, wrapup_messages(320, 800));
+        cache_wrapup_messages(&handler, wrapup_messages(320, 1600));
 
         let body = tool_body(
             handler
@@ -32279,7 +32279,7 @@ mod tests {
         *producer.fact_each_run.lock().unwrap() = Some("rust wrapup fact".to_string());
         let (handler, store, _dir, project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
-        cache_wrapup_messages(&handler, wrapup_messages(320, 800));
+        cache_wrapup_messages(&handler, wrapup_messages(320, 1600));
 
         let body = tool_body(
             handler
@@ -32434,7 +32434,7 @@ mod tests {
             route_project_root,
             "memories",
         );
-        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
+        cache_wrapup_messages(&handler, wrapup_messages(80, 1600));
 
         let response = tool_body(
             handler

@@ -14,6 +14,7 @@ import {
     createPromptSurfaceRuntime,
     promptSurfaceHashMaterial,
 } from "../../shared/prompt-surface-runtime";
+import { calibrationCandidates } from "./calibration-candidate";
 import { resolveCtxReduceAvailability } from "./ctx-reduce-availability";
 
 import { estimateTokens } from "./read-session-formatting";
@@ -435,6 +436,21 @@ export function createSystemPromptHashHandler(deps: {
 
         // ── Step 3: Persist only after all routing identities are frozen ──
         const systemContent = output.system.join("\n");
+        if (modelKey && calibrationCandidates.needsSystem("opencode", sessionId, modelKey)) {
+            try {
+                calibrationCandidates.observeSystem(
+                    "opencode",
+                    sessionId,
+                    modelKey,
+                    estimateTokens(systemContent),
+                );
+            } catch {
+                sessionLog(
+                    sessionId,
+                    "calibration: completeness=partial reason=unavailable-system-count",
+                );
+            }
+        }
 
         // The first stable ctx_reduce verdict and resolved model jointly own the
         // baseline. A provisional tool verdict or unknown model can render a

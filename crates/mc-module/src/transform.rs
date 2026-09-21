@@ -6187,6 +6187,19 @@ fn apply_once(
             req.session_id, mid, row_version,
         );
     }
+    if is_bust_pass {
+        let key = req.model_key.as_deref();
+        let seed = crate::decision_calibration::DecisionCalibration::for_model(key);
+        let raw_returned_json_local: usize = ck_messages
+            .iter()
+            .map(|message| {
+                mc_tokenizer::estimate_tokens(
+                    std::str::from_utf8(&message.canonical_bytes).unwrap_or(""),
+                )
+            })
+            .sum();
+        eprintln!("calibration: model={} seed={}/{}/{} sample=unavailable ema=unavailable n=0 source={} completeness=partial raw_returned_json_local={} reason=system-tools-correlation-unobserved tool_io_policy=tool-schema-seed", key.unwrap_or("unknown/unknown"), seed.system_ratio, seed.tools_ratio, seed.prose_ratio, crate::decision_calibration::seed_source(key), raw_returned_json_local);
+    }
     timings.store_memories = m1_revision_read_timings.memories_ms;
     timings.store_notes = m1_revision_read_timings.notes_ms;
     timings.finalize = elapsed_ms(finalize_started_at);
@@ -7864,6 +7877,12 @@ fn sel_item_from_flat(block: &FlatBlock, tag_tokens_by_block: &HashMap<&str, usi
         ck_wire::CkKind::Opaque(_) => SelKind::Opaque,
     };
     SelItem {
+        served_token_count: Some(
+            tag_tokens_by_block
+                .get(block.id.as_str())
+                .copied()
+                .unwrap_or_else(|| mc_tokenizer::estimate_tokens(&block.bytes)),
+        ),
         id: block.id.clone(),
         ordinal: block.ordinal,
         message_role: match block.role.as_str() {
@@ -7874,12 +7893,7 @@ fn sel_item_from_flat(block: &FlatBlock, tag_tokens_by_block: &HashMap<&str, usi
         kind,
         provider_executed: block.provider_executed,
         byte_size: block.bytes.len(),
-        token_count: Some(
-            tag_tokens_by_block
-                .get(block.id.as_str())
-                .copied()
-                .unwrap_or_else(|| mc_tokenizer::estimate_tokens(&block.bytes)),
-        ),
+        token_count: tag_tokens_by_block.get(block.id.as_str()).copied(),
         arc_id: block.arc_id.clone(),
     }
 }

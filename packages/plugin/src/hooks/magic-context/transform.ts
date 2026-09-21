@@ -66,6 +66,7 @@ import { getSdkContextLimit } from "../../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
+import { capturePricedCalibration } from "./calibration-observation";
 import { replayCavemanCompression } from "./caveman-cleanup";
 import { commitCompactionModeRecord, reconcileCompactionMode } from "./compaction-off-transition";
 import { getActiveCompartmentRun, startCompartmentAgent } from "./compartment-runner";
@@ -2455,17 +2456,33 @@ export function createTransform(deps: TransformDeps) {
         // here; overflow propagates to native compaction instead of blocking.
         const finalWireTail = describeFinalWireTail(messages);
         let finalWireEstimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
+        if (postTransformResult.bustedThisPass) {
+            try {
+                finalWireEstimate = estimateFinalWireInputTokens({
+                    messages,
+                    systemPromptTokens: sessionMeta.systemPromptTokens,
+                    providerID: modelForBudget?.providerID,
+                    modelID: modelForBudget?.modelID,
+                    agentName: notificationParams.agent,
+                });
+            } catch {
+                sessionLog(
+                    sessionId,
+                    "calibration: completeness=partial reason=unavailable-returned-array-count",
+                );
+            }
+        }
         if (!compactionOff) {
-            // Fresh-tokenize only in the emergency band. This estimate is telemetry,
-            // never an abort gate: provider-accurate accounting is deferred to the
-            // module-side implementation.
+            // Recovery estimates provider input even while reusing cached messages.
+            // Cache-busting passes also retain raw counts for telemetry; samples never drive decisions.
             const emergencyUsagePercentage = usagePercentageSynthetic
                 ? Math.max(95, contextUsage.percentage)
                 : windowGeometry?.usableHard && contextUsage.inputTokens > 0
                   ? (contextUsage.inputTokens / windowGeometry.usableHard) * 100
                   : contextUsage.percentage;
             finalWireEstimate =
-                emergencyUsagePercentage >= 95
+                finalWireEstimate ??
+                (emergencyUsagePercentage >= 95
                     ? estimateFinalWireInputTokens({
                           messages,
                           systemPromptTokens: sessionMeta.systemPromptTokens,
@@ -2473,7 +2490,7 @@ export function createTransform(deps: TransformDeps) {
                           modelID: modelForBudget?.modelID,
                           agentName: notificationParams.agent,
                       })
-                    : undefined;
+                    : undefined);
             if (finalWireEstimate) {
                 sessionLog(
                     sessionId,
@@ -2608,6 +2625,15 @@ export function createTransform(deps: TransformDeps) {
         }
 
         if (postTransformResult.bustedThisPass) {
+            if (finalWireEstimate)
+                capturePricedCalibration(
+                    sessionId,
+                    modelForBudget
+                        ? `${modelForBudget.providerID}/${modelForBudget.modelID}`
+                        : "unknown/unknown",
+                    messages,
+                    finalWireEstimate,
+                );
             recordPendingTransformDecision(sessionId, {
                 tsMs: Date.now(),
                 decision: schedulerDecision,
