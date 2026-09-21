@@ -32,12 +32,35 @@ export interface MaterializationPassSignals {
     m0MutationDriftDetected: boolean;
 }
 
-/** Automatic reductions ride independently priced work, never pressure alone. */
-export function hasReclaimRide(signals: {
+/**
+ * The four signals that can independently authorize an automatic reduction to
+ * run: a hard fold, a forced reduction, an explicit flush, and freshly published
+ * history. Each is a cache bust the session is already paying for, so a
+ * reduction riding one adds no further prefix rewrite of its own.
+ */
+export interface ReclaimRideSignals {
     hardFold: boolean;
     force: boolean;
     explicitFlush: boolean;
     publishedHistory: boolean;
-}): boolean {
+}
+
+/** Automatic reductions ride independently priced work, never pressure alone. */
+export function hasReclaimRide(signals: ReclaimRideSignals): boolean {
     return signals.hardFold || signals.force || signals.explicitFlush || signals.publishedHistory;
+}
+
+const RECLAIM_RIDE_NAMES = ["hardFold", "force", "explicitFlush", "publishedHistory"] as const;
+
+/**
+ * Names the ride signals that actually granted permission to mutate, for the
+ * logs that announce that permission. The permission is `hasReclaimRide`, so a
+ * log naming anything else sends whoever reads it to the wrong cause: a drain
+ * granted by freshly published history used to be reported as
+ * "reason=scheduler_execute", which is a different signal entirely and was not
+ * even true on the passes that printed it.
+ */
+export function reclaimRideLabel(signals: ReclaimRideSignals): string {
+    const active = RECLAIM_RIDE_NAMES.filter((name) => signals[name]);
+    return `ride=${active.length > 0 ? active.join("+") : "none"}`;
 }

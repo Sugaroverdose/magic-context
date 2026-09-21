@@ -59,7 +59,7 @@ import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
 import { runAutoSearchHint } from "./auto-search-runner";
-import { hasReclaimRide } from "./cache-busting-signals";
+import { hasReclaimRide, reclaimRideLabel } from "./cache-busting-signals";
 import {
     rearmChannel2AfterCoverageAdvancingHardFold,
     rearmChannel2AfterMeasuredCollapse,
@@ -1507,8 +1507,8 @@ export async function runPostTransformPhase(
                 : foldExecutedThisPass && args.schedulerDecision !== "execute"
                   ? `m0_hard_fold (drain folded into executed m[0] bust, scheduler=${args.schedulerDecision})`
                   : subagentRerun
-                    ? `scheduler_execute_subagent_rerun (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`
-                    : `scheduler_execute (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
+                    ? `${reclaimRideLabel(rideSignals)} subagent_rerun (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`
+                    : `${reclaimRideLabel(rideSignals)} (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
         sessionLog(
             args.sessionId,
             `heuristics WILL RUN — reason=${reason}, context=${args.contextUsage.percentage.toFixed(1)}%, turn=${args.currentTurnId}`,
@@ -1574,7 +1574,7 @@ export async function runPostTransformPhase(
                   ? "deferred_materialization"
                   : foldExecutedThisPass && args.schedulerDecision !== "execute"
                     ? `m0_hard_fold (drain folded into executed m[0] bust, scheduler=${args.schedulerDecision})`
-                    : `scheduler_execute (scheduler=${args.schedulerDecision})`;
+                    : `${reclaimRideLabel(rideSignals)} (scheduler=${args.schedulerDecision})`;
             sessionLog(
                 args.sessionId,
                 `pending ops WILL APPLY — reason=${applyReason}, pendingOps=${formatPendingOpsDepth()}, context=${args.contextUsage.percentage.toFixed(1)}%`,

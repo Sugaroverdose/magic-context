@@ -7111,3 +7111,68 @@ describe("postprocess defer instrumentation and scaling", () => {
         }
     });
 });
+
+describe("pending-ops and heuristics permission labels", () => {
+    // The permission these two logs announce is the reclaim ride, not the
+    // scheduler decision. Both fall-throughs used to print "scheduler_execute"
+    // even on passes where the scheduler had deferred, so an operator reading
+    // the log could not tell a published-history drain from a force-band drain.
+    async function permissionLines(
+        sessionId: string,
+        overrides: Partial<Parameters<typeof runPostTransformPhase>[0]>,
+    ): Promise<string[]> {
+        const logs: string[] = [];
+        const log = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [], {
+                    resolvedProviderID: "anthropic",
+                    ...overrides,
+                }),
+            );
+        } finally {
+            log.mockRestore();
+        }
+        return logs.filter(
+            (line) => line.includes("WILL APPLY — reason=") || line.includes("WILL RUN — reason="),
+        );
+    }
+
+    it("names the ride that granted the pass, and names a different one on a different ride", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+
+        const publishedHistory = await permissionLines("ses-ride-published-history", {
+            contextUsage: { percentage: 20, inputTokens: 1_000 },
+            historyRebuiltThisPass: true,
+            pendingCompartmentInjection: {
+                block: "",
+                compartmentEndMessage: 2,
+                compartmentEndMessageId: "ride-end",
+                compartmentCount: 1,
+                skippedVisibleMessages: 0,
+                factCount: 0,
+                memoryCount: 0,
+                rebuiltFromDb: true,
+            },
+        });
+        // At this emergency-level context usage the force band is the only ride
+        // that is true, so the pass must be labelled differently from the one above.
+        const forceBand = await permissionLines("ses-ride-force-band", {
+            fullFeatureMode: false,
+            contextUsage: { percentage: 96, inputTokens: 1_000 },
+        });
+
+        expect(publishedHistory).toEqual([
+            "heuristics WILL RUN — reason=ride=publishedHistory (pendingOps=0, scheduler=defer), context=20.0%, turn=null",
+            "pending ops WILL APPLY — reason=ride=publishedHistory (scheduler=defer), pendingOps=0, context=20.0%",
+        ]);
+        expect(forceBand).toEqual([
+            "heuristics WILL RUN — reason=ride=force (pendingOps=0, scheduler=defer), context=96.0%, turn=null",
+            "pending ops WILL APPLY — reason=ride=force (scheduler=defer), pendingOps=0, context=96.0%",
+        ]);
+        expect(publishedHistory).not.toEqual(forceBand);
+    });
+});

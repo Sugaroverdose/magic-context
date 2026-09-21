@@ -811,3 +811,116 @@ describe("analyze-cache-bust provider meter verdicts", () => {
         expect(row.meterVsBytes).toBe("UNMETERED");
     });
 });
+
+describe("analyze-cache-bust rotating billing header", () => {
+    // Redacted from three consecutive captured Anthropic requests. The content is
+    // replaced; the shape that produced the defect is kept: a three-block system
+    // whose first block is the auth plugin's per-request billing header, a head
+    // message carrying cache_control breakpoints, two messages appended per
+    // request, and the tail cache_control marker moving onto the newest message
+    // each time.
+    const fixtureRoot = join(
+        import.meta.dir,
+        "test-fixtures",
+        "cache-bust-bodies",
+        "anthropic-billing-header",
+    );
+    const fixtureJson = (file: string): Record<string, unknown> =>
+        JSON.parse(readFileSync(join(fixtureRoot, file), "utf8")) as Record<string, unknown>;
+
+    function billingHeaderSession(): { dir: string; session: string } {
+        const dir = mkdtempSync(join(tmpdir(), "cache-bust-billing-header-"));
+        tempDirs.push(dir);
+        const session = "ses_billingHeaderRotation";
+        for (const [index, timestamp] of [
+            [1, "2026-09-21T12:26:17.760Z"],
+            [2, "2026-09-21T12:26:31.108Z"],
+            [3, "2026-09-21T12:32:32.610Z"],
+        ] as const) {
+            writeDump(
+                dir,
+                `${timestamp.replaceAll(":", "-").replace(".", "-")}-00000${index}-${session}`,
+                timestamp,
+                session,
+                fixtureJson(`00${index}-request.json`),
+                fixtureJson(`00${index}-response.json`),
+            );
+        }
+        return { dir, session };
+    }
+
+    test("the fixture really does rotate the header, so the normalization is load-bearing", () => {
+        const headerText = (file: string): string =>
+            ((fixtureJson(file).system as Array<{ text: string }>)[0] as { text: string }).text;
+
+        expect(headerText("002-request.json")).not.toBe(headerText("003-request.json"));
+        expect(headerText("002-request.json")).toContain("x-anthropic-billing-header:");
+        // Both `cch` and `cc_prev_req` move; `cc_prompt_id` moves across an idle gap.
+        for (const field of ["cch=", "cc_prev_req=req_", "cc_prompt_id="]) {
+            expect(headerText("002-request.json").split(field)[1]).not.toBe(
+                headerText("003-request.json").split(field)[1],
+            );
+        }
+    });
+
+    test("an appended-tail request over a rotated header is STABLE, not a byte bust", () => {
+        const { dir, session } = billingHeaderSession();
+
+        const row = __test.analyzeSnapshots(snapshotsFor(dir, session))[1];
+
+        expect(row.verdict).toBe("STABLE");
+        expect(row.byteVerdict).toBe("STABLE");
+        expect(row.meterVsBytes).toBe("AGREE");
+        // The first divergence is the appended tail, not the rotating system row.
+        expect(row.divergenceIndex).toBe(252);
+        expect(row.current.segments[row.divergenceIndex].role).toBe("assistant");
+    });
+
+    test("a short read over an unchanged reusable prefix is provider-side latency", () => {
+        const { dir, session } = billingHeaderSession();
+
+        const row = __test.analyzeSnapshots(snapshotsFor(dir, session))[2];
+
+        expect(row.verdict).toBe("LATENCY");
+        expect(row.byteVerdict).toBe("STABLE");
+        expect(row.meterVsBytes).toBe("LATENCY");
+        expect(row.divergenceClass).toBe("provider_short_read_identical_bytes");
+        // The tail cache_control marker moved from message 252 to message 254;
+        // the reusable prefix is still the one the previous request wrote.
+        expect(row.divergenceIndex).toBe(254);
+        expect(row.current.usage?.cacheRead).toBe(285_161);
+    });
+
+    test("prints no bytes-BUST cell for the whole rotated-header run", () => {
+        const { dir, session } = billingHeaderSession();
+
+        const run = Bun.spawnSync([
+            process.execPath,
+            join(import.meta.dir, "analyze-cache-busts.ts"),
+            "--session",
+            session,
+            "--dir",
+            dir,
+            "--all-rows",
+        ]);
+
+        expect(run.exitCode).toBe(0);
+        const output = run.stdout.toString();
+        expect(output).not.toContain("(bytes BUST)");
+        expect(output).not.toContain("message[0] role=system");
+        expect(output).toContain("divergence-class: provider_short_read_identical_bytes");
+        expect(output).toContain("No metered busts across 3 request(s).");
+        expect(output).toContain("1 latency-only short read(s)");
+    });
+
+    test("normalizes the rotated header into one shared system-message identity", () => {
+        const [previous, current] = ["002-request.json", "003-request.json"].map(
+            (file) => normalizeRequestBody(fixtureJson(file), "anthropic").messages[0],
+        );
+
+        expect(previous.canonical).toContain("x-anthropic-billing-header: <rotating>");
+        expect(previous.canonical).not.toContain("cc_prev_req=req_0");
+        expect(current.hash).toBe(previous.hash);
+        expect(describeBodyPair([previous], [current])).toBeUndefined();
+    });
+});

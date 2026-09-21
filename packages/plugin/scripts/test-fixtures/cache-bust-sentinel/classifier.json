@@ -74,6 +74,15 @@
         "input": {}
     },
     {
+        "class": "accounted_execute_published_history",
+        "decision": {
+            "decision": "execute",
+            "canonicalDecision": "execute",
+            "appliedRide": "publishedHistory"
+        },
+        "input": {}
+    },
+    {
         "class": "accounted_soft_m1_execute",
         "decision": { "decision": "execute", "canonicalDecision": "execute" },
         "input": {}
@@ -92,6 +101,11 @@
             "previousModel": "claude-opus-5",
             "currentModel": "claude-opus-4-8"
         }
+    },
+    {
+        "class": "provider_short_read_identical_bytes",
+        "decision": { "decision": "defer", "canonicalDecision": "defer" },
+        "input": { "providerShortReadWithIdenticalPrefix": true }
     },
     {
         "class": "unaccounted_defer_pass",

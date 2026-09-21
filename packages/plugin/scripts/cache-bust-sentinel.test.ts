@@ -216,6 +216,61 @@ describe("cache-bust attribution contract", () => {
         ).toBe("unaccounted_defer_pass");
     });
 
+    test("joins the execute pass that served the request, not the next turn's nearer defer", () => {
+        // 2026-09-21 12:26:17Z: the request was shaped by the 12:26:08Z execute
+        // pass — nine seconds of module and host latency between the pass and the
+        // send — while the next turn's defer pass ran four seconds after it.
+        // Ranking candidates by absolute distance picked that defer, and the
+        // request was reported as an unaccounted defer bust.
+        const requestMs = Date.parse("2026-09-21T12:26:17.760Z");
+        const servingExecute = decision({
+            timestampMs: Date.parse("2026-09-21T12:26:08.421Z"),
+            decision: "execute",
+            canonicalDecision: "execute",
+            appliedRide: "publishedHistory",
+            source: "transform scheduler log",
+        });
+        const nextTurnDefer = decision({
+            timestampMs: Date.parse("2026-09-21T12:26:22.102Z"),
+            decision: "defer",
+            canonicalDecision: "defer",
+            source: "transform scheduler log",
+        });
+        const bust = {
+            divergenceIndex: 1,
+            previousMessageCount: 594,
+            providerComparableRead: 285_161,
+            directInput: 2,
+            previousTotal: 654_353,
+        };
+
+        const joined = nearestCacheBustDecision([nextTurnDefer, servingExecute], requestMs);
+
+        expect(joined).toBe(servingExecute);
+        const cls = classifyCacheBust({ ...bust, decision: joined });
+        expect(cls).toBe("accounted_execute_published_history");
+        expect(isUnaccountedCacheBustClass(cls)).toBe(false);
+        // The defer really is the class this request used to get, so the two
+        // candidates are not interchangeable.
+        expect(classifyCacheBust({ ...bust, decision: nextTurnDefer })).toBe(
+            "unaccounted_defer_pass",
+        );
+    });
+
+    test("still joins a following pass when no pass ran before the request", () => {
+        const requestMs = Date.parse("2026-09-21T12:26:17.760Z");
+        const following = decision({
+            timestampMs: requestMs + 4_000,
+            decision: "defer",
+            canonicalDecision: "defer",
+        });
+
+        expect(nearestCacheBustDecision([following], requestMs)).toBe(following);
+        expect(
+            nearestCacheBustDecision([decision({ timestampMs: requestMs + 5_001 })], requestMs),
+        ).toBeUndefined();
+    });
+
     test("accounts all ten long-turn post-restart rows by request time", () => {
         const rows = JSON.parse(
             readFileSync(
