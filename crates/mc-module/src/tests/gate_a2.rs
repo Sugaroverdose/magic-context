@@ -520,15 +520,23 @@ async fn gate_a_parked_row_goes_back_on_offer_on_the_next_boot_with_the_same_run
 }
 
 /// The sweep the fixes added has a caller now: restart recovery runs it, so a row
-/// parked with no report past its own deadline is deleted rather than left in the
-/// queue for the lifetime of the store.
+/// a previous restart parked is deleted once the run it describes is past its own
+/// deadline.
+///
+/// The row under test is one NOTHING else can reach. A restart that parks a row
+/// releases its session in the same breath, which clears the run id the adoption
+/// path looks the row up through; the session then fires again and takes a new
+/// run. The old row is left addressed by nobody, and the sweep is the only thing
+/// that walks the queue rather than one session's link into it.
 #[tokio::test(flavor = "current_thread")]
-async fn gate_restart_recovery_sweeps_a_parked_row_that_outlived_its_deadline() {
+async fn gate_restart_recovery_sweeps_a_parked_row_nothing_else_can_reach() {
     let producer = Arc::new(ProducerState::default());
     let (handler, store, dir, project) = handler_with_store(producer, host_runner_config());
     let data_home = dir.path().join("data");
     let project_key = lane_project_key(&store, &project);
-    // Queued far enough in the past that its own deadline has already gone by.
+
+    // Queued far enough in the past that its own deadline has already gone by, and
+    // parked by the restart that released its session.
     let stale = now_ms() - A2_AWAIT_BUDGET_MS - 60_000;
     a2_queue_run(
         &store,
@@ -541,7 +549,27 @@ async fn gate_restart_recovery_sweeps_a_parked_row_that_outlived_its_deadline() 
     assert!(store
         .park_historian_pending_run("run-abandoned", stale)
         .unwrap());
-    assert_eq!(gate_queue_rows(&data_home).len(), 1);
+
+    // The session fired again and is on a different run now, so nothing links back
+    // to the parked row any more.
+    a2_queue_run(
+        &store,
+        "ses",
+        "run-current",
+        &project_key,
+        "a later transcript",
+        now_ms(),
+    );
+    assert_eq!(
+        store
+            .load_parked_historian_run("ses")
+            .unwrap()
+            .map(|parked| parked.run_id)
+            .as_deref(),
+        Some("run-current"),
+        "the abandoned row is unreachable through the session's own link"
+    );
+    assert_eq!(gate_queue_rows(&data_home).len(), 2);
 
     // A pass for that session enters restart recovery, which is where the sweep
     // runs. The session is not idle, so the recovery path is reached.
@@ -550,7 +578,12 @@ async fn gate_restart_recovery_sweeps_a_parked_row_that_outlived_its_deadline() 
 
     let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
     loop {
-        if gate_queue_rows(&data_home).is_empty() {
+        let rows = gate_queue_rows(&data_home);
+        if rows.len() == 1 {
+            assert_eq!(
+                rows[0].run_id, "run-current",
+                "the sweep must take the abandoned row and leave the live one"
+            );
             break;
         }
         assert!(
