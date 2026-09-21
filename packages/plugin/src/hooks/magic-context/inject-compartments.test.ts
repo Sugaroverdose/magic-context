@@ -1481,6 +1481,77 @@ describe("m[0]/m[1] materialization", () => {
         expect(refreshed.m1Text).toContain("## 1-1 · 2026-01-04 · New");
     });
 
+    it("a compartment marked unresolved by a store-projection rebase is not rendered into m[0] or m[1]", () => {
+        // Its `## start-end` range no longer names the messages it covers and
+        // ctx_expand refuses that range, so rendering it invites the agent to
+        // expand a range the tool declines (seen on a real way-back boot).
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        appendCompartments(db, SESSION_ID, [
+            {
+                sequence: 1,
+                startMessage: 1,
+                endMessage: 4,
+                startMessageId: "m1",
+                endMessageId: "m4",
+                title: "Resolved",
+                content: "Resolved summary",
+                p1: "Resolved summary",
+            },
+            {
+                sequence: 2,
+                startMessage: 5,
+                endMessage: 9,
+                startMessageId: "m5",
+                endMessageId: "m9",
+                title: "Unresolved",
+                content: "Unresolved summary",
+                p1: "Unresolved summary",
+            },
+        ]);
+        db.prepare(
+            "UPDATE compartments SET rebase_status = 'unresolved' WHERE session_id = ? AND sequence = 2",
+        ).run(SESSION_ID);
+        const baseline = materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        expect(baseline.m0Text).toContain("Resolved summary");
+        expect(baseline.m0Text).not.toContain("Unresolved summary");
+        expect(baseline.m0Text).not.toContain("## 5-9");
+
+        // The same rule on the delta: an unresolved row newer than the baseline
+        // stays out of m[1] too.
+        const state = readStateFromMeta();
+        appendCompartments(db, SESSION_ID, [
+            {
+                sequence: 3,
+                startMessage: 10,
+                endMessage: 12,
+                startMessageId: "m10",
+                endMessageId: "m12",
+                title: "Later unresolved",
+                content: "Later unresolved summary",
+                p1: "Later unresolved summary",
+            },
+        ]);
+        db.prepare(
+            "UPDATE compartments SET rebase_status = 'unresolved' WHERE session_id = ? AND sequence = 3",
+        ).run(SESSION_ID);
+        const refreshed = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+        expect(refreshed.m1Text).not.toContain("Later unresolved summary");
+    });
+
     it("mustMaterialize does NOT materialize m[0] on a retrospective memory write", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();

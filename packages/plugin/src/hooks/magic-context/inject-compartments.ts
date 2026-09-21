@@ -1875,13 +1875,25 @@ function readM0Compartments(db: Database, sessionId: string): M0Compartment[] {
         db,
         `SELECT id, session_id, sequence, start_message, end_message, start_message_id,
                 end_message_id, title, content, p1, p2, p3, p4, episode_type,
-                created_at, importance, legacy
+                created_at, importance, legacy, rebase_status
            FROM compartments
           WHERE session_id = ?
           ORDER BY sequence ASC`,
     ).all(sessionId) as Array<Record<string, unknown>>;
 
-    return rows.map(rowToM0Compartment);
+    return rows.map(rowToM0Compartment).filter(isRenderableCompartment);
+}
+
+/**
+ * A compartment whose anchor message ids stopped resolving after a store
+ * projection change (`rebase_status = 'unresolved'`) keeps its content readable
+ * by id but must not render into <session-history>: its `## start-end` range no
+ * longer names the messages it covers, and ctx_expand refuses that range, so
+ * rendering it would invite the agent to expand a range the tool declines
+ * (observed on the real way-back boot before this filter existed).
+ */
+function isRenderableCompartment(compartment: M0Compartment): boolean {
+    return compartment.rebaseStatus !== "unresolved";
 }
 
 function nullableString(value: unknown): string | null {
@@ -1951,12 +1963,12 @@ function readNewCompartments(
         db,
         `SELECT id, session_id, sequence, start_message, end_message, start_message_id,
                 end_message_id, title, content, p1, p2, p3, p4, episode_type,
-                created_at, importance, legacy
+                created_at, importance, legacy, rebase_status
            FROM compartments
           WHERE session_id = ? AND sequence > ?
           ORDER BY sequence ASC`,
     ).all(sessionId, afterSequence) as Array<Record<string, unknown>>;
-    return rows.map(rowToM0Compartment);
+    return rows.map(rowToM0Compartment).filter(isRenderableCompartment);
 }
 
 /**
