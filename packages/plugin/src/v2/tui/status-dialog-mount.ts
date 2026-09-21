@@ -55,7 +55,7 @@ export async function mountV1StatusDialog(
                             get theme() {
                                 return {
                                     get current() {
-                                        return flattenTheme(context.theme);
+                                        return flattenTheme(context.theme, context.themeMode);
                                     },
                                 };
                             },

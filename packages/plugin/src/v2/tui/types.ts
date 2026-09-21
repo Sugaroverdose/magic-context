@@ -27,15 +27,24 @@ export interface V2ThemeColor {
  * level is optional because the plugin must still paint on a host whose theme
  * resolves a different token set than the pinned 2.0.5 one.
  */
+/**
+ * The part of `@opencode/theme/tui`'s `ResolvedThemeTokens` the sidebar and the
+ * status dialog read, with the key names from the published 2.0.11 declaration
+ * (`dist/tui/types.d.ts`): `text.base` / `text.muted`, `text.feedback.<kind>.base`
+ * for `error` / `warning` / `success` / `info`, `hue.<name>[step]` with steps
+ * 100..900 and the `accent` alias, `background.base`, `border.base`. Every level
+ * is optional because the plugin must still paint on a host whose theme resolves
+ * a different token set.
+ */
 export interface V2ResolvedTheme {
     readonly hue?: Readonly<Record<string, Readonly<Record<string, V2ThemeColor>>>>;
     readonly text?: {
-        readonly default?: V2ThemeColor;
-        readonly subdued?: V2ThemeColor;
-        readonly feedback?: Readonly<Record<string, { readonly default?: V2ThemeColor }>>;
+        readonly base?: V2ThemeColor;
+        readonly muted?: V2ThemeColor;
+        readonly feedback?: Readonly<Record<string, { readonly base?: V2ThemeColor }>>;
     };
-    readonly background?: { readonly default?: V2ThemeColor };
-    readonly border?: { readonly default?: V2ThemeColor };
+    readonly background?: { readonly base?: V2ThemeColor };
+    readonly border?: { readonly base?: V2ThemeColor };
 }
 
 export interface V2TuiContext {
@@ -43,6 +52,8 @@ export interface V2TuiContext {
     readonly renderer: { requestRender(): void };
     /** `Context.theme` on GA 2.0.5/2.0.11; absent on hosts that publish no theme. */
     readonly theme?: V2ResolvedTheme;
+    /** `Context.themeMode` on GA 2.0.5/2.0.11; picks readable fallbacks when a token is missing. */
+    readonly themeMode?: "dark" | "light";
     readonly data: {
         readonly listen: (handler: (event: { details: unknown }) => void) => () => void;
         readonly location: { default(): V2TuiLocation };

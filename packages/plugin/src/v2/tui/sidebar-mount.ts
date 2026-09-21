@@ -38,23 +38,28 @@ export interface V1SidebarMount {
 /**
  * Colour tokens moved between host generations: OpenCode 1 handed the sidebar a
  * flat table (`theme.accent`, `theme.textMuted`, …) while OpenCode 2 resolves a
- * token tree (`@opencode/theme/tui` `ResolvedTheme`: `text.default`,
- * `text.subdued`, `text.feedback.error.default`, `hue.accent[500]`, …). This
- * maps the eight tokens the sidebar reads. A host that resolves none of them
- * still gets a readable sidebar from the hex fallbacks rather than an
- * exception from a missing colour.
+ * token tree (`@opencode/theme/tui` `ResolvedThemeTokens`: `text.base`,
+ * `text.muted`, `text.feedback.error.base`, `hue.accent[500]`, …). This maps
+ * the eight tokens the sidebar reads. A token the host does not resolve falls
+ * back to a colour chosen for the host's theme mode: an earlier fallback of
+ * white text painted the section headers white-on-white on light themes when
+ * the mapping read key names the theme package never had.
  */
-export function flattenTheme(theme: V2ResolvedTheme | undefined): V1Theme {
+export function flattenTheme(
+    theme: V2ResolvedTheme | undefined,
+    mode: "dark" | "light" = "dark",
+): V1Theme {
+    const light = mode === "light";
     const feedback = theme?.text?.feedback;
     return {
-        text: theme?.text?.default ?? "#ffffff",
-        textMuted: theme?.text?.subdued ?? "#9a9a9a",
+        text: theme?.text?.base ?? (light ? "#1a1a1a" : "#ffffff"),
+        textMuted: theme?.text?.muted ?? (light ? "#6b6b6b" : "#9a9a9a"),
         accent: theme?.hue?.accent?.[500] ?? "#5f87ff",
-        background: theme?.background?.default ?? "#000000",
-        borderActive: theme?.border?.default ?? "#9a9a9a",
-        error: feedback?.error?.default ?? "#ff5f5f",
-        warning: feedback?.warning?.default ?? "#ffaf5f",
-        success: feedback?.success?.default ?? "#5fd75f",
+        background: theme?.background?.base ?? (light ? "#ffffff" : "#000000"),
+        borderActive: theme?.border?.base ?? "#9a9a9a",
+        error: feedback?.error?.base ?? "#d13b3b",
+        warning: feedback?.warning?.base ?? "#c77d1a",
+        success: feedback?.success?.base ?? "#2e9a4e",
     };
 }
 
@@ -130,7 +135,7 @@ export async function mountV1Sidebar(
                     get theme() {
                         return {
                             get current() {
-                                return flattenTheme(context.theme);
+                                return flattenTheme(context.theme, context.themeMode);
                             },
                         };
                     },
