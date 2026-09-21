@@ -17,9 +17,10 @@ mod historian_claim;
 
 pub use historian_claim::{
     historian_lease_ms, HistorianClaim, HistorianClaimOutcome, HistorianClaimRefusal,
-    HistorianHeartbeatOutcome, HistorianPendingRun, HistorianReportAuthorization,
-    HistorianReportOutcome, HistorianReportRefusal, NewHistorianPendingRun,
-    HISTORIAN_HEARTBEAT_INTERVAL_MS, HISTORIAN_LEASE_CEILING_MS,
+    HistorianHeartbeatOutcome, HistorianParkedRun, HistorianPendingRun, HistorianRecordOutcome,
+    HistorianReportAuthorization, HistorianReportOutcome, HistorianReportRefusal,
+    HistorianRunReport, NewHistorianPendingRun, HISTORIAN_HEARTBEAT_INTERVAL_MS,
+    HISTORIAN_LEASE_CEILING_MS,
 };
 
 use cortexkit_cache_core::{CoreState, DurabilityClass, FrozenUnit};
@@ -2970,6 +2971,34 @@ const MIGRATIONS: &[Migration] = &[
             ON mc_historian_pending_run(session_id);
         CREATE INDEX IF NOT EXISTS mc_historian_pending_run_phase
             ON mc_historian_pending_run(phase, claim_deadline_ms);
+    ",
+    },
+    Migration {
+        version: 60,
+        // Where a claimant's terminal report is kept when the task that queued the
+        // run is no longer in this process.
+        //
+        // A fold legitimately takes minutes, so the module can be restarted while a
+        // host is still running the completion. Before these columns the report had
+        // nowhere to land: the queue row carried the request but not the answer, so
+        // a report that arrived after a bounce was refused and the provider call it
+        // paid for was thrown away. Recording it here lets the next transform pass
+        // for that session publish it through exactly the same code an in-process
+        // report goes through.
+        //
+        // A row only ever holds one report: the phase moves to `reported` when the
+        // first one is written, which stops the run being offered or claimed again,
+        // so a second report cannot overwrite the first.
+        //
+        // 58 is B0's and 59 is B1's (pass-trace publish durations); this is the
+        // next free version.
+        statements: "
+        ALTER TABLE mc_historian_pending_run ADD COLUMN report_kind TEXT;
+        ALTER TABLE mc_historian_pending_run ADD COLUMN report_text TEXT;
+        ALTER TABLE mc_historian_pending_run ADD COLUMN report_length_capped INTEGER;
+        ALTER TABLE mc_historian_pending_run ADD COLUMN report_error_code TEXT;
+        ALTER TABLE mc_historian_pending_run ADD COLUMN report_error_message TEXT;
+        ALTER TABLE mc_historian_pending_run ADD COLUMN reported_at_ms INTEGER;
     ",
     },
 ];
@@ -22923,11 +22952,40 @@ mod tests {
         );
     }
 
+    /// The versions the bundled chain actually carries.
+    ///
+    /// Read off `MIGRATIONS` rather than synthesized as `1..=LATEST`: the chain is
+    /// extended on several branches at once, each reserving a number, so it holds a
+    /// gap until they all land. What must be true is that a store records exactly
+    /// the versions this binary ships and nothing else — which is what this reads.
+    pub(crate) fn bundled_migration_versions() -> Vec<i64> {
+        let mut versions: Vec<i64> = MIGRATIONS
+            .iter()
+            .map(|migration| i64::from(migration.version))
+            .collect();
+        versions.sort_unstable();
+        versions
+    }
+
+    #[test]
+    fn the_bundled_migration_chain_never_reuses_or_rewinds_a_version() {
+        let versions = bundled_migration_versions();
+        assert!(
+            versions.windows(2).all(|pair| pair[0] < pair[1]),
+            "two migrations may not share a version, and the chain may not go backwards: {versions:?}"
+        );
+        assert_eq!(
+            versions.last().copied(),
+            Some(i64::from(LATEST_MIGRATION_VERSION)),
+            "the reported ceiling must be the newest bundled migration"
+        );
+    }
+
     #[test]
     fn fresh_and_migrated_stores_have_latest_schema() {
         let fresh_dir = tempfile::tempdir().unwrap();
         let fresh = McStore::open(&descriptor(fresh_dir.path())).unwrap();
-        let expected_versions = (1_i64..=LATEST_MIGRATION_VERSION as i64).collect::<Vec<_>>();
+        let expected_versions = bundled_migration_versions();
         let fresh_versions = fresh
             .inner
             .with_conn(|conn| {
@@ -27383,10 +27441,7 @@ mod shadow_tests {
                 Ok(versions)
             })
             .unwrap();
-        assert_eq!(
-            versions,
-            (1_i64..=LATEST_MIGRATION_VERSION as i64).collect::<Vec<_>>()
-        );
+        assert_eq!(versions, crate::tests::bundled_migration_versions());
         assert_eq!(
             store
                 .get_note_by_id("git:identity", "session", 1)

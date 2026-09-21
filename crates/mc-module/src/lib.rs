@@ -5435,6 +5435,123 @@ impl McHandler {
             session_id: session_id.clone(),
         };
 
+        // Only the host lane parks a run in the durable claim queue, so this lookup
+        // is skipped on the phases that lane never reaches. A run found here
+        // outlived this process: its claimant is either still working or has already
+        // left its answer on the row, and releasing the run would throw that away.
+        let parked_host_run = match phase {
+            HistorianPhase::AwaitingProducer | HistorianPhase::Reclaiming => store
+                .load_parked_historian_run(&parsed.session_id)
+                .ok()
+                .flatten(),
+            _ => None,
+        };
+        if let Some(parked) = parked_host_run {
+            // Still out with a claimant and still inside its deadline: there is
+            // nothing to do but leave the run where it is. The session keeps its
+            // single-flight slot, which is exactly what it would be doing if this
+            // process had never restarted.
+            if parked.report.is_none() && parked.deadline_ms > now {
+                drop(guard);
+                return Some("reattaching");
+            }
+            let publication_fence = Arc::new(ReattachSnapshotPublicationFence {
+                snapshots: Arc::clone(&self.transform_snapshots),
+                session_id: session_id.clone(),
+                generation: snapshot_generation,
+                #[cfg(test)]
+                after_store_publish: Arc::clone(&self.publication_fence_write_hook),
+            });
+            let live: Vec<_> = projection
+                .blocks
+                .iter()
+                .filter(|b| !b.synthetic)
+                .cloned()
+                .collect();
+            let Some(range) = loaded.meta.historian.chunk_range.clone() else {
+                drop(guard);
+                return Some("recovering");
+            };
+            let chunk = historian_chunk::build_historian_chunk(
+                parsed.messages.as_slice(),
+                &live,
+                range.from_ordinal,
+                derive_historian_chunk_tokens(config.historian_context_limit_tokens),
+                range.to_ordinal.saturating_add(1),
+            );
+            let prior_compartments = match store.load_compartments(&session_id) {
+                Ok(cs) => cs
+                    .iter()
+                    .map(historian_chunk::stored_range)
+                    .collect::<Vec<_>>(),
+                Err(_) => Vec::new(),
+            };
+            let raw_chunk_messages = serde_json::to_string(
+                &parsed
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        !message.ck.meta.synthetic
+                            && message.ordinal >= chunk.chunk.start_index
+                            && message.ordinal <= chunk.chunk.end_index
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+            let boundary_dates = historian_chunk::native_boundary_dates(&parsed.messages);
+            let fingerprint_items: Vec<_> =
+                chunk.snapshot.iter().map(|item| item.as_item()).collect();
+            let observed = historian::compute_chunk_fingerprint(&fingerprint_items);
+            tokio::spawn(async move {
+                let _guard = guard;
+                let outcome =
+                    historian::adopt_historian_run_on_host(historian::HistorianReattachRequest {
+                        store: &store,
+                        session_id: &session_id,
+                        project_path: &project_path,
+                        observed_chunk_fingerprint: &observed,
+                        validation_chunk: &chunk.chunk,
+                        chunk_transcript: &chunk.text,
+                        raw_chunk_messages: &raw_chunk_messages,
+                        boundary_dates: &boundary_dates,
+                        prior_compartments: &prior_compartments,
+                        validate_options: historian_validate::ValidateOptions {
+                            sequence_offset: prior_compartments.len() as u64 + 1,
+                            in_emergency: false,
+                            memory_enabled: config.memory_enabled,
+                            auto_promote: config.auto_promote,
+                            user_memory_collection_enabled: config.user_memory_collection_enabled,
+                            force_keep_last_compartment: false,
+                        },
+                        publication_floor_ordinal: range.to_ordinal,
+                        now_ms: now,
+                        failure_backoff_at_ms: now + HISTORIAN_FAILURE_BACKOFF_MS,
+                        completion_now_ms: now_ms,
+                        publication_fence: Some(publication_fence.as_ref()),
+                    });
+                match outcome {
+                    Ok(historian::HostRunAdoption::Published(success)) => eprintln!(
+                        "mc-module: historian run {} published from a report a claimant left across a restart",
+                        success.producer_run_id
+                    ),
+                    Ok(historian::HostRunAdoption::Failed { run_id, code }) => eprintln!(
+                        "mc-module: historian run {run_id} released for {session_id}: claimant reported {code}"
+                    ),
+                    Ok(historian::HostRunAdoption::Released { run_id }) => eprintln!(
+                        "mc-module: historian run {run_id} released for {session_id}: no report before its deadline"
+                    ),
+                    Ok(
+                        historian::HostRunAdoption::NotParked
+                        | historian::HostRunAdoption::StillOut { .. },
+                    ) => {}
+                    Err(e) => eprintln!(
+                        "mc-module: historian host-run adoption failed for {session_id}: {e}"
+                    ),
+                }
+            });
+            return Some("reattaching");
+        }
+
         match phase {
             HistorianPhase::AwaitingProducer => {
                 let publication_fence = Arc::new(ReattachSnapshotPublicationFence {
@@ -5543,11 +5660,11 @@ impl McHandler {
                 });
                 Some("reattaching")
             }
-            // A run parked for a claimant is released rather than kept across a
-            // restart. Nothing re-publishes a parked run to the claim queue on boot,
-            // so keeping it would hold the session's single-flight slot with no
-            // claimant able to arrive. Releasing it costs one re-assembled chunk on
-            // the next trigger and never loses durable output.
+            // Reached only when the queue row is gone: a run parked for a claimant
+            // that still has its row was handled above. Without a row nothing can
+            // ever claim or report the run, so keeping it would hold the session's
+            // single-flight slot forever. Releasing it costs one re-assembled chunk
+            // on the next trigger and never loses durable output.
             HistorianPhase::Firing
             | HistorianPhase::Reclaiming
             | HistorianPhase::Validating
@@ -7389,6 +7506,16 @@ impl McHandler {
     /// that queued the run, which validates and publishes through exactly the same
     /// code the in-module producer path uses — same parser, same length-cap
     /// refusal, same publish CAS.
+    ///
+    /// When no task in this process is waiting — which is what a module restart
+    /// inside the completion window looks like from here — the report is stored on
+    /// the run's queue row instead of being refused, and the next transform pass
+    /// for that session publishes it through that same code. A fold takes minutes,
+    /// so the module being restarted inside one is ordinary rather than
+    /// exceptional, and throwing away a provider call the host already paid for is
+    /// the worse of the two answers. `publish` in the response says which of the
+    /// two happened, so a claimant can log "handed over" separately from "stored
+    /// for the next pass".
     fn handle_historian_complete_value(&self, request: &Value) -> HandlerOutcome {
         let run_id = match required_run_string(request, "run_id", "historian.complete") {
             Ok(value) => value,
@@ -7419,16 +7546,34 @@ impl McHandler {
             Ok(report) => report,
             Err(outcome) => return outcome,
         };
+        let durable = durable_report(&report);
         match self.host_runs.deliver(&run_id, report) {
-            Ok(()) => respond(json!({ "ok": true, "accepted": true })),
+            Ok(()) => respond(json!({ "ok": true, "accepted": true, "publish": "immediate" })),
             Err(HostReportDeliveryError::AlreadyReported) => respond(json!({
                 "ok": false,
                 "refusal": HostReportDeliveryError::AlreadyReported.as_wire_str(),
             })),
-            Err(HostReportDeliveryError::NoWaiter) => respond(json!({
-                "ok": false,
-                "refusal": HostReportDeliveryError::NoWaiter.as_wire_str(),
-            })),
+            // The token is re-checked inside `record_historian_report`: between the
+            // authorization above and this write the lease can lapse and the run can
+            // be handed to somebody else, and the replaced claim's report must not
+            // be the one that lands.
+            Err(HostReportDeliveryError::NoWaiter) => {
+                match store.record_historian_report(&run_id, &token, &durable, now_ms()) {
+                    Ok(mc_store::HistorianRecordOutcome::Recorded) => {
+                        eprintln!(
+                            "mc-module: historian report for {run_id} stored for the next pass (no firing task in this process is waiting on it)"
+                        );
+                        respond(json!({ "ok": true, "accepted": true, "publish": "deferred" }))
+                    }
+                    Ok(mc_store::HistorianRecordOutcome::Refused(refusal)) => {
+                        respond(json!({ "ok": false, "refusal": refusal.as_wire_str() }))
+                    }
+                    Err(error) => HandlerOutcome::Error {
+                        code: "store_write_failed".to_string(),
+                        message: error.to_string(),
+                    },
+                }
+            }
         }
     }
 
@@ -9923,6 +10068,27 @@ impl McHandler {
                 .unwrap_or(Duration::ZERO)
         };
         let mut trigger_timings = HistorianTriggerTimings::default();
+        // Serve-then-fold. The emergency pass joins the fold inline only when this
+        // module runs the completion itself. Under the host runner the completion is
+        // made in another process, where it legitimately takes minutes; holding an
+        // emergency pass open for it would block the request the user is waiting on
+        // behind a background fold, and would make the hidden child's own context
+        // hook dispatch while its parent transform is still blocked. The emergency
+        // reduction this pass already computed is served instead, and the fold lands
+        // on a later pass. What that costs is real and is accounted rather than
+        // hidden: the tiered drops the emergency output makes are permanent, and the
+        // fold's arrival pays for a second prefix rewrite.
+        //
+        // Resolved from the same place the firing itself resolves its runner
+        // (`prepare_historian_fire`), not from the route's bind-time copy: a pass
+        // that decided to wait inline while the firing went to the host would wait
+        // for a completion that was never going to arrive in this process. Only an
+        // emergency pass asks, so the ordinary pass pays nothing for it.
+        let serve_then_fold = result.scheduler_pass == scheduler::PassDecision::Emergency95
+            && self
+                .effective_config(&binding.project_root)
+                .historian_runner
+                == HistorianRunnerKind::Host;
         let diagnostics = if parsed.is_subagent {
             historian_no_fire_diagnostics(NoFireDiagnosticsInput {
                 no_fire: "subagent_session".into(),
@@ -9934,7 +10100,8 @@ impl McHandler {
                 progress: None,
                 last_failure: None,
             })
-        } else if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
+        } else if result.scheduler_pass == scheduler::PassDecision::Emergency95 && !serve_then_fold
+        {
             match self.prepare_historian_fire(
                 Arc::clone(&store),
                 &parsed,
@@ -13943,6 +14110,22 @@ fn optional_run_string(request: &Value, field: &str) -> Result<Option<String>, H
 ///
 /// Exactly one of `output` and `error` must be present: a report carrying both
 /// does not say what happened, and a report carrying neither says nothing at all.
+/// The storable shape of a report, for the queue row that keeps it until a pass
+/// can publish it. Kept as a separate value because the in-process ledger consumes
+/// the report it is handed.
+fn durable_report(report: &HostRunReport) -> mc_store::HistorianRunReport {
+    match report {
+        HostRunReport::Output(output) => mc_store::HistorianRunReport::Output {
+            text: output.text.clone(),
+            length_capped: output.length_capped,
+        },
+        HostRunReport::Failed { code, message } => mc_store::HistorianRunReport::Failed {
+            code: code.clone(),
+            message: message.clone(),
+        },
+    }
+}
+
 fn parse_historian_report(request: &Value) -> Result<HostRunReport, HandlerOutcome> {
     let output = request.get("output").filter(|value| !value.is_null());
     let error = request.get("error").filter(|value| !value.is_null());
@@ -34067,6 +34250,130 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
+    /// What one served response cost: how many tail items the pass dropped to fit,
+    /// how many messages it served, and how many bytes that was.
+    ///
+    /// A dropped tool output serializes as `{"dropped": …}`, which is what makes
+    /// the drop count readable straight off the wire.
+    fn served_census(response: &Value) -> (usize, usize, usize) {
+        let served = serde_json::to_string(&response["ck_messages"]).unwrap();
+        let dropped = served.matches("\"dropped\"").count();
+        let messages = response["ck_messages"].as_array().map_or(0, Vec::len);
+        (dropped, messages, served.len())
+    }
+
+    /// Serve-then-fold (design §2.1 / §7A A8).
+    ///
+    /// Under the default runner an emergency pass joins the fold inline and serves
+    /// the folded prefix. Under the host runner the completion happens in another
+    /// process, where it legitimately takes minutes, so the pass serves the
+    /// emergency reduction it already computed and the fold lands later.
+    ///
+    /// The test prints the accounting A8 requires — dropped-tag count and the size
+    /// of the rewrite each runner serves — so the difference is a measured number
+    /// in the report rather than a claim.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_host_runner_serves_the_emergency_reduction_instead_of_joining_the_fold() {
+        let messages = big_messages();
+
+        let broca_producer = Arc::new(ProducerState::default());
+        let (broca_handler, _broca_store, _broca_dir, _broca_project) =
+            handler_with_store(Arc::clone(&broca_producer), default_test_config());
+        let broca =
+            call_transform_with_usage(&broca_handler, messages.clone(), 48_000, 50_000).await;
+        assert!(
+            m0_text(&broca).contains("autonomous summary"),
+            "the Broca lane still joins the fold inline on an emergency pass"
+        );
+        assert_eq!(broca_producer.starts.load(Ordering::SeqCst), 1);
+        let (broca_dropped, broca_messages, broca_bytes) = served_census(&broca);
+
+        let mut host_config = default_test_config();
+        host_config.historian_runner = HistorianRunnerKind::Host;
+        let host_producer = Arc::new(ProducerState::default());
+        let (host_handler, host_store, _host_dir, _host_project) =
+            handler_with_store(Arc::clone(&host_producer), host_config);
+        let host = call_transform_with_usage(&host_handler, messages.clone(), 48_000, 50_000).await;
+        assert_eq!(
+            host["historian"]["fired"], true,
+            "the emergency pass still fires; only the join is gone"
+        );
+        assert!(
+            !m0_text(&host).contains("autonomous summary"),
+            "the host lane serves the emergency reduction, not a fold it waited for"
+        );
+        assert_eq!(
+            host_producer.connects.load(Ordering::SeqCst),
+            0,
+            "the host lane never opens a Broca route"
+        );
+        let (host_dropped, host_messages, host_emergency_bytes) = served_census(&host);
+
+        // The run is queued for a claimant rather than run here.
+        let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
+        let queued = loop {
+            let pending = host_store
+                .list_pending_historian_runs(None, now_ms())
+                .unwrap();
+            if let Some(run) = pending.into_iter().next() {
+                break run;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the emergency pass must queue its run for a claimant"
+            );
+            tokio::time::sleep(TEST_WAIT_POLL).await;
+        };
+
+        // A claimant answers, and the fold arrives on the NEXT pass. That pass is
+        // the second priced rewrite A8 asks to be accounted.
+        let claim = call_dispatch_request(
+            &host_handler,
+            json!({
+                "method": "historian.claim",
+                "v": 1,
+                "run_id": queued.run_id,
+                "claimant_instance_id": "install-uuid-one",
+            }),
+        )
+        .await;
+        assert_eq!(claim["ok"], json!(true), "{claim}");
+        // The same completion the scripted Broca producer would have returned for
+        // this prompt, so the two arms differ only in which side ran the model.
+        let completion = historian_output_for_prompt(
+            claim["prompt"]["user"]
+                .as_str()
+                .expect("a claim hands back its user prompt"),
+        );
+        let report = call_dispatch_request(
+            &host_handler,
+            json!({
+                "method": "historian.complete",
+                "v": 1,
+                "run_id": queued.run_id,
+                "token": claim["token"],
+                "output": { "text": completion, "length_capped": false },
+            }),
+        )
+        .await;
+        assert_eq!(report["ok"], json!(true), "{report}");
+        wait_for_idle(&host_store).await;
+
+        let host_second = call_transform_with_usage(&host_handler, messages, 48_000, 50_000).await;
+        assert!(
+            m0_text(&host_second).contains("autonomous summary"),
+            "the fold lands on the pass after the claimant reported"
+        );
+        let (_, host_second_messages, host_second_bytes) = served_census(&host_second);
+
+        eprintln!(
+            "A8 emergency accounting on one fixture: \
+             broca dropped_tags={broca_dropped} served_messages={broca_messages} served_bytes={broca_bytes} second_rewrite_bytes=0 | \
+             host dropped_tags={host_dropped} served_messages={host_messages} emergency_served_bytes={host_emergency_bytes} \
+             second_rewrite_messages={host_second_messages} second_rewrite_bytes={host_second_bytes}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn handler_emergency_busy_waits_for_the_active_run_and_then_refolds() {
         let producer = Arc::new(ProducerState::default());
@@ -38180,48 +38487,95 @@ mod tests {
         for name in [
             "heartbeat-from-a-claimant-that-was-replaced",
             "a-report-under-a-superseded-token-is-refused-before-its-output-is-read",
-            "a-report-for-a-run-no-firing-is-waiting-on",
         ] {
             drive_claim_wire_case(&handler, claim_wire_case(&golden, name), Some(&token)).await;
         }
 
-        // With a firing waiting, the same report is accepted and handed over.
-        let registration = handler.host_runs.register(CLAIM_RUN_ID);
+        // With a firing waiting, the report is handed over in this process.
+        {
+            let registration = handler.host_runs.register(CLAIM_RUN_ID);
+            drive_claim_wire_case(
+                &handler,
+                claim_wire_case(
+                    &golden,
+                    "a-report-accepted-by-the-firing-that-queued-the-run",
+                ),
+                Some(&token),
+            )
+            .await;
+            assert_eq!(
+                registration.wait(Duration::from_millis(50)).await,
+                Some(HostRunReport::Output(
+                    crate::historian_producer::ProducerOutput {
+                        text: "<compartments/>".to_string(),
+                        length_capped: false,
+                    }
+                ))
+            );
+        }
+
+        {
+            let failure_registration = handler.host_runs.register(CLAIM_RUN_ID);
+            drive_claim_wire_case(
+                &handler,
+                claim_wire_case(
+                    &golden,
+                    "a-failure-report-accepted-by-the-firing-that-queued-the-run",
+                ),
+                Some(&token),
+            )
+            .await;
+            assert_eq!(
+                failure_registration.wait(Duration::from_millis(50)).await,
+                Some(HostRunReport::Failed {
+                    code: "chain_exhausted".to_string(),
+                    message: "every configured model refused".to_string(),
+                })
+            );
+        }
+
+        // Both registrations are gone, which is what a module restarted inside the
+        // completion window looks like from the claim lane: the run is still queued
+        // and its token is still current, but nothing in this process is waiting for
+        // the answer. The report is stored on the queue row rather than refused.
+        assert_eq!(handler.host_runs.waiting_count(), 0);
         drive_claim_wire_case(
             &handler,
             claim_wire_case(
                 &golden,
-                "a-report-accepted-by-the-firing-that-queued-the-run",
+                "a-report-with-no-firing-waiting-is-stored-for-the-next-pass",
             ),
             Some(&token),
         )
         .await;
+        let parked = store
+            .load_parked_historian_run("ses")
+            .unwrap()
+            .expect("the queue row survives to carry the report");
+        assert_eq!(parked.run_id, CLAIM_RUN_ID);
         assert_eq!(
-            registration.wait(Duration::from_millis(50)).await,
-            Some(HostRunReport::Output(
-                crate::historian_producer::ProducerOutput {
-                    text: "<compartments/>".to_string(),
-                    length_capped: false,
-                }
-            ))
+            parked.report,
+            Some(mc_store::HistorianRunReport::Output {
+                text: "<compartments/>".to_string(),
+                length_capped: false,
+            })
         );
 
-        let failure_registration = handler.host_runs.register(CLAIM_RUN_ID);
-        drive_claim_wire_case(
+        // A second report for a stored one is refused rather than overwriting it.
+        let duplicate = call_dispatch_request(
             &handler,
-            claim_wire_case(
-                &golden,
-                "a-failure-report-accepted-by-the-firing-that-queued-the-run",
-            ),
-            Some(&token),
+            json!({
+                "method": "historian.complete",
+                "v": 1,
+                "run_id": CLAIM_RUN_ID,
+                "token": token,
+                "output": { "text": "<compartments/>", "length_capped": false },
+            }),
         )
         .await;
         assert_eq!(
-            failure_registration.wait(Duration::from_millis(50)).await,
-            Some(HostRunReport::Failed {
-                code: "chain_exhausted".to_string(),
-                message: "every configured model refused".to_string(),
-            })
+            duplicate,
+            json!({ "ok": false, "refusal": "already_reported" })
         );
     }
 

@@ -738,6 +738,8 @@ export async function registerContext(context: V2Context) {
                 // its own default, so no fallback belongs here.
                 historianMaxOutputTokens: config.historian?.maxTokens,
                 historianTwoPass: config.historian?.two_pass,
+                historianRunner: config.historian?.runner,
+                historianHostRunnerEnabled: config.historian?.host_runner?.enabled,
                 compactionMarkerStrategy: v2CompactionMarkerStrategy,
                 memoryConfig: {
                     enabled: config.memory.enabled,

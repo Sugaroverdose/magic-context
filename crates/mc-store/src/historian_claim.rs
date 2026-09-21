@@ -41,6 +41,10 @@ pub const HISTORIAN_HEARTBEAT_INTERVAL_MS: i64 = 30_000;
 /// Queue phase written to `mc_historian_pending_run.phase`.
 const PHASE_PENDING: &str = "pending";
 const PHASE_CLAIMED: &str = "claimed";
+/// A terminal report is stored on the row and is waiting to be published. The run
+/// stops being offered and stops being claimable here, so the stored report cannot
+/// be superseded by a later claim.
+const PHASE_REPORTED: &str = "reported";
 
 /// The lease a claim gets. A run whose await budget outlives the ceiling is
 /// leased for the ceiling, which is what leaves time to re-claim it.
@@ -129,6 +133,9 @@ pub enum HistorianReportRefusal {
     /// The token was real once, but the claim it belonged to is over: the sender
     /// is describing an attempt that no longer exists.
     SupersededToken,
+    /// A terminal report for this run is already stored and waiting to be
+    /// published. The module takes exactly one per run.
+    AlreadyReported,
 }
 
 impl HistorianReportRefusal {
@@ -137,8 +144,37 @@ impl HistorianReportRefusal {
             HistorianReportRefusal::UnknownRun => "unknown_run",
             HistorianReportRefusal::NotClaimed => "not_claimed",
             HistorianReportRefusal::SupersededToken => "superseded_token",
+            HistorianReportRefusal::AlreadyReported => "already_reported",
         }
     }
+}
+
+/// What a claimant reported, in the shape the queue row stores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistorianRunReport {
+    /// The completion produced text. `length_capped` means the model stopped at
+    /// its output ceiling, so the document may be cut mid-structure.
+    Output { text: String, length_capped: bool },
+    /// The completion did not happen, in the claimant's own vocabulary.
+    Failed { code: String, message: String },
+}
+
+/// A run this session parked for a claimant, as the recovery path sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorianParkedRun {
+    pub run_id: String,
+    pub attempt: u32,
+    /// When the run stops being worth publishing at all.
+    pub deadline_ms: i64,
+    /// The terminal report a claimant already handed back, if one arrived while
+    /// no task in this process was waiting for it.
+    pub report: Option<HistorianRunReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistorianRecordOutcome {
+    Recorded,
+    Refused(HistorianReportRefusal),
 }
 
 /// The run identity a verified report is allowed to act on. The caller validates
@@ -591,6 +627,160 @@ impl McStore {
         Ok(outcome)
     }
 
+    /// Store a claimant's terminal report on the queue row so a task that is not
+    /// in this process can publish it later.
+    ///
+    /// This is the durable half of `historian.complete`. It exists because a fold
+    /// legitimately runs for minutes and the module can be restarted inside that
+    /// window: the firing task that queued the run is then gone, and without a
+    /// place to put the answer the provider call the host already paid for would
+    /// be discarded. The report is picked up by the next transform pass for the
+    /// session, which validates and publishes it through exactly the same code an
+    /// in-process report goes through.
+    ///
+    /// The token is re-checked inside this transaction rather than trusted from an
+    /// earlier read: between authorizing a report and storing it the lease can
+    /// lapse and the run can be handed to somebody else, and a report from the
+    /// claim that was replaced must not land.
+    pub fn record_historian_report(
+        &self,
+        run_id: &str,
+        token: &str,
+        report: &HistorianRunReport,
+        now_ms: i64,
+    ) -> Result<HistorianRecordOutcome, McStoreError> {
+        let outcome = self.inner.with_conn_fenced(|tx| {
+            let row = tx
+                .query_row(
+                    "SELECT coordinator_token, report_kind, deadline_ms
+                       FROM mc_historian_pending_run WHERE run_id = ?1",
+                    params![run_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((stored_token, existing_report, deadline_ms)) = row else {
+                return Ok(HistorianRecordOutcome::Refused(
+                    HistorianReportRefusal::UnknownRun,
+                ));
+            };
+            if existing_report.is_some() {
+                return Ok(HistorianRecordOutcome::Refused(
+                    HistorianReportRefusal::AlreadyReported,
+                ));
+            }
+            let Some(stored_token) = stored_token else {
+                return Ok(HistorianRecordOutcome::Refused(
+                    HistorianReportRefusal::NotClaimed,
+                ));
+            };
+            if stored_token != token {
+                return Ok(HistorianRecordOutcome::Refused(
+                    HistorianReportRefusal::SupersededToken,
+                ));
+            }
+            // A run whose own deadline has passed is not worth storing an answer
+            // for: the module stopped waiting for it, and the next pass would only
+            // release it. Saying so lets the claimant log a reason rather than
+            // believing the fold is on its way.
+            if deadline_ms <= now_ms {
+                return Ok(HistorianRecordOutcome::Refused(
+                    HistorianReportRefusal::UnknownRun,
+                ));
+            }
+            let (kind, text, length_capped, code, message) = match report {
+                HistorianRunReport::Output {
+                    text,
+                    length_capped,
+                } => (
+                    "output",
+                    Some(text.as_str()),
+                    Some(i64::from(*length_capped)),
+                    None,
+                    None,
+                ),
+                HistorianRunReport::Failed { code, message } => (
+                    "error",
+                    None,
+                    None,
+                    Some(code.as_str()),
+                    Some(message.as_str()),
+                ),
+            };
+            tx.execute(
+                "UPDATE mc_historian_pending_run
+                    SET phase = ?2, report_kind = ?3, report_text = ?4,
+                        report_length_capped = ?5, report_error_code = ?6,
+                        report_error_message = ?7, reported_at_ms = ?8, updated_at_ms = ?8
+                  WHERE run_id = ?1",
+                params![
+                    run_id,
+                    PHASE_REPORTED,
+                    kind,
+                    text,
+                    length_capped,
+                    code,
+                    message,
+                    now_ms,
+                ],
+            )?;
+            Ok(HistorianRecordOutcome::Recorded)
+        })?;
+        Ok(outcome)
+    }
+
+    /// The run a session is currently parked on, if it has one.
+    ///
+    /// Answers the question the restart path asks: this session is not idle and no
+    /// task in this process owns it — is there a queued run behind that, and did
+    /// its claimant already answer?
+    pub fn load_parked_historian_run(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<HistorianParkedRun>, McStoreError> {
+        let parked = self.inner.with_conn_fenced(|tx| {
+            let Some((_row_version, meta)) = load_meta(tx, session_id)? else {
+                return Ok(None);
+            };
+            let Some(run_id) = meta.historian.producer_run_id.clone() else {
+                return Ok(None);
+            };
+            tx.query_row(
+                "SELECT attempt, deadline_ms, report_kind, report_text,
+                        report_length_capped, report_error_code, report_error_message
+                   FROM mc_historian_pending_run WHERE run_id = ?1 AND session_id = ?2",
+                params![run_id, session_id],
+                |row| {
+                    let kind: Option<String> = row.get(2)?;
+                    let report = match kind.as_deref() {
+                        Some("output") => Some(HistorianRunReport::Output {
+                            text: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                            length_capped: row.get::<_, Option<i64>>(4)?.unwrap_or(0) != 0,
+                        }),
+                        Some("error") => Some(HistorianRunReport::Failed {
+                            code: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                            message: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                        }),
+                        _ => None,
+                    };
+                    Ok(HistorianParkedRun {
+                        run_id: run_id.clone(),
+                        attempt: row.get::<_, i64>(0)?.max(0) as u32,
+                        deadline_ms: row.get(1)?,
+                        report,
+                    })
+                },
+            )
+            .optional()
+        })?;
+        Ok(parked)
+    }
+
     /// Drop a queue row on any terminal outcome. Terminal runs are removed rather
     /// than marked so the queue stays the size of the work actually outstanding.
     pub fn finish_historian_pending_run(&self, run_id: &str) -> Result<bool, McStoreError> {
@@ -760,6 +950,187 @@ mod tests {
         assert_eq!(
             pending[0].prompt_bytes_len,
             "sys".len() as u64 + "user".len() as u64
+        );
+    }
+
+    /// Claim `run_id` and hand back the token the module minted for it.
+    fn claim_token(store: &McStore, run_id: &str, claimant: &str, now_ms: i64) -> String {
+        match store.claim_historian_run(run_id, claimant, now_ms).unwrap() {
+            HistorianClaimOutcome::Claimed(claim) => claim.token,
+            other => panic!("expected a claim, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_report_with_nowhere_to_go_is_kept_on_the_run_for_the_next_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-1", "ses", 1_000);
+        let token = claim_token(&store, "run-1", "install-one", 1_000);
+
+        assert_eq!(
+            store
+                .record_historian_report(
+                    "run-1",
+                    &token,
+                    &HistorianRunReport::Output {
+                        text: "<compartments/>".to_string(),
+                        length_capped: false,
+                    },
+                    2_000,
+                )
+                .unwrap(),
+            HistorianRecordOutcome::Recorded
+        );
+
+        let parked = store
+            .load_parked_historian_run("ses")
+            .unwrap()
+            .expect("the parked run survives to carry its report");
+        assert_eq!(parked.run_id, "run-1");
+        assert_eq!(parked.attempt, 1);
+        assert_eq!(
+            parked.report,
+            Some(HistorianRunReport::Output {
+                text: "<compartments/>".to_string(),
+                length_capped: false,
+            })
+        );
+        // The session is left exactly where the claim put it, because publishing is
+        // still ahead: validation and the publish CAS own those transitions.
+        assert_eq!(
+            store.historian_state("ses").unwrap().state,
+            HistorianPhase::AwaitingProducer
+        );
+    }
+
+    #[test]
+    fn a_stored_report_takes_the_run_out_of_the_queue_for_everyone_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-1", "ses", 1_000);
+        let token = claim_token(&store, "run-1", "install-one", 1_000);
+        store
+            .record_historian_report(
+                "run-1",
+                &token,
+                &HistorianRunReport::Failed {
+                    code: "chain_exhausted".to_string(),
+                    message: "every configured model refused".to_string(),
+                },
+                2_000,
+            )
+            .unwrap();
+
+        // Long past the lease, which would otherwise make the run stealable.
+        let after_lease = 1_000 + HISTORIAN_LEASE_CEILING_MS + 1;
+        assert!(store
+            .list_pending_historian_runs(None, after_lease)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .claim_historian_run("run-1", "install-two", after_lease)
+                .unwrap(),
+            HistorianClaimOutcome::Refused(HistorianClaimRefusal::NotPending)
+        );
+        assert!(store
+            .expire_historian_claims(after_lease)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .load_parked_historian_run("ses")
+                .unwrap()
+                .and_then(|parked| parked.report),
+            Some(HistorianRunReport::Failed {
+                code: "chain_exhausted".to_string(),
+                message: "every configured model refused".to_string(),
+            }),
+            "the stored report cannot be superseded by a later claim"
+        );
+    }
+
+    #[test]
+    fn only_the_current_claim_may_leave_a_report_and_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-1", "ses", 1_000);
+        let first = claim_token(&store, "run-1", "install-one", 1_000);
+        let report = HistorianRunReport::Output {
+            text: "<compartments/>".to_string(),
+            length_capped: false,
+        };
+
+        // The lease lapses and a second claimant takes the run.
+        let after_lease = 1_000 + HISTORIAN_LEASE_CEILING_MS + 1;
+        let second = claim_token(&store, "run-1", "install-two", after_lease);
+        assert_ne!(first, second);
+        assert_eq!(
+            store
+                .record_historian_report("run-1", &first, &report, after_lease + 1)
+                .unwrap(),
+            HistorianRecordOutcome::Refused(HistorianReportRefusal::SupersededToken),
+            "the replaced claimant's late report must not land"
+        );
+
+        assert_eq!(
+            store
+                .record_historian_report("run-1", &second, &report, after_lease + 1)
+                .unwrap(),
+            HistorianRecordOutcome::Recorded
+        );
+        assert_eq!(
+            store
+                .record_historian_report("run-1", &second, &report, after_lease + 2)
+                .unwrap(),
+            HistorianRecordOutcome::Refused(HistorianReportRefusal::AlreadyReported)
+        );
+    }
+
+    #[test]
+    fn a_report_for_a_run_whose_deadline_passed_is_not_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-1", "ses", 1_000);
+        let token = claim_token(&store, "run-1", "install-one", 1_000);
+        let after_deadline = 1_000 + AWAIT_BUDGET_MS + 1;
+
+        assert_eq!(
+            store
+                .record_historian_report(
+                    "run-1",
+                    &token,
+                    &HistorianRunReport::Output {
+                        text: "<compartments/>".to_string(),
+                        length_capped: false,
+                    },
+                    after_deadline,
+                )
+                .unwrap(),
+            HistorianRecordOutcome::Refused(HistorianReportRefusal::UnknownRun),
+            "the module stopped waiting for this run, so there is nothing to publish into"
+        );
+        assert_eq!(
+            store
+                .load_parked_historian_run("ses")
+                .unwrap()
+                .and_then(|parked| parked.report),
+            None
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_queued_run_is_not_parked_on_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        assert_eq!(store.load_parked_historian_run("ses").unwrap(), None);
+        queue_run(&store, "run-1", "ses", 1_000);
+        store.finish_historian_pending_run("run-1").unwrap();
+        assert_eq!(
+            store.load_parked_historian_run("ses").unwrap(),
+            None,
+            "a session whose queue row is gone has nothing to adopt"
         );
     }
 

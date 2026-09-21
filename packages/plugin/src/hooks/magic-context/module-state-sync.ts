@@ -1957,7 +1957,11 @@ export interface ModuleStateSyncClient {
             | "ctx_memory"
             | "note.evaluate"
             | "transform.ack"
-            | "transform.nack";
+            | "transform.nack"
+            | "historian.pending"
+            | "historian.claim"
+            | "historian.heartbeat"
+            | "historian.complete";
         body: unknown;
         signal?: AbortSignal;
         generationSensitive?: boolean;

@@ -1,4 +1,6 @@
-import type { Database } from "bun:sqlite";
+// The shared chokepoint type, not `bun:sqlite`: the same plugin artifact runs on
+// Bun and on Node/Electron, and this row is read on both.
+import type { Database } from "../../shared/sqlite";
 
 const INSTALL_INSTANCE_ID_KEY = "install_instance_id";
 

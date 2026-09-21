@@ -918,10 +918,12 @@ pub fn handle_restart_load(
                 chunk_fingerprint: state.chunk_fingerprint,
             })
         }
-        // A parked run is released rather than kept: nothing re-publishes it to the
-        // claim queue after a restart, so keeping it would hold the session's
-        // single-flight slot with no claimant able to arrive. Releasing it costs one
-        // re-assembled chunk on the next trigger and never loses durable output.
+        // A parked run whose queue row still exists is picked up by
+        // `adopt_historian_run_on_host` before this function is reached, so what is
+        // released here is a park with no row behind it: nothing can claim it and
+        // nothing can report on it, and keeping it would hold the session's
+        // single-flight slot forever. Releasing it costs one re-assembled chunk on
+        // the next trigger and never loses durable output.
         HistorianPhase::Firing
         | HistorianPhase::Reclaiming
         | HistorianPhase::Validating
@@ -2207,6 +2209,139 @@ pub async fn run_historian_firing_on_host(
             .cloned()
             .unwrap_or_else(|| "host".to_string()),
     }))
+}
+
+/// What the restart path found when it met a run parked for a claimant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostRunAdoption {
+    /// This session has no queued run behind its phase, so it is not a host-lane
+    /// firing and the ordinary restart recovery applies.
+    NotParked,
+    /// A report the claimant left behind was validated and published, through the
+    /// same code an in-process report goes through.
+    Published(Box<HistorianRunSuccess>),
+    /// The claimant reported that the completion did not happen. The firing is
+    /// abandoned with that code, exactly as an in-process failure report abandons it.
+    Failed { run_id: String, code: String },
+    /// The run is still out with a claimant and has not outlived its deadline, so
+    /// the session keeps its single-flight slot and a later pass looks again.
+    StillOut { run_id: String, deadline_ms: i64 },
+    /// The run outlived its deadline with no report. It is released and the next
+    /// trigger may refire from a freshly assembled chunk.
+    Released { run_id: String },
+}
+
+/// Pick up a run that was queued for a claimant before this process started.
+///
+/// This is what makes host-side work survive a module restart. The claim queue is
+/// durable, so a run parked for a claimant is still there after a bounce and the
+/// claimant that holds it keeps heartbeating against the same row; what does NOT
+/// survive is the in-process firing task that would have received the report.
+/// Rather than release the run — which throws away a provider call that may
+/// already have been paid for — the parked run is kept and the next transform
+/// pass for its session looks here.
+///
+/// Publishing goes through `publish_output_from_awaiting`, the same function the
+/// in-process host report and the Broca lane both call, so a report that arrives
+/// across a restart is validated and CASed exactly like one that does not.
+///
+/// The session's slot is not held indefinitely: a parked run whose own deadline
+/// has passed is released here, which is the same bound the module applies to its
+/// own producer await.
+pub fn adopt_historian_run_on_host(
+    request: HistorianReattachRequest<'_>,
+) -> Result<HostRunAdoption, HistorianDriveError> {
+    let Some(parked) = request
+        .store
+        .load_parked_historian_run(request.session_id)?
+    else {
+        return Ok(HostRunAdoption::NotParked);
+    };
+    let run_id = parked.run_id.clone();
+    let release = |detail: String| -> Result<(), HistorianDriveError> {
+        abandon_current_state_with_detail(
+            request.store,
+            request.session_id,
+            request.failure_backoff_at_ms,
+            Some(detail),
+        )?;
+        let _ = request.store.finish_historian_pending_run(&run_id);
+        Ok(())
+    };
+
+    let report = match parked.report {
+        None if parked.deadline_ms <= request.now_ms => {
+            release(format!(
+                "host runner produced no report for {run_id} before its deadline"
+            ))?;
+            return Ok(HostRunAdoption::Released { run_id });
+        }
+        None => {
+            return Ok(HostRunAdoption::StillOut {
+                run_id,
+                deadline_ms: parked.deadline_ms,
+            })
+        }
+        Some(report) => report,
+    };
+
+    let output = match report {
+        mc_store::HistorianRunReport::Failed { code, message } => {
+            release(format!("host runner reported {code}: {message}"))?;
+            return Ok(HostRunAdoption::Failed { run_id, code });
+        }
+        mc_store::HistorianRunReport::Output {
+            text,
+            length_capped,
+        } => ProducerOutput {
+            text,
+            length_capped,
+        },
+    };
+
+    // The stored report is only publishable under the claim it was made for. The
+    // queue row stops being claimable the moment a report lands on it, so this is
+    // a guard against a state that moved on some other way (a refire, a publish
+    // that already happened) rather than against a racing claimant.
+    let awaiting = request.store.load(request.session_id)?.meta.historian;
+    if awaiting.state != HistorianPhase::AwaitingProducer
+        || awaiting.producer_run_id.as_deref() != Some(run_id.as_str())
+        || awaiting.producer_attempt != parked.attempt
+    {
+        let _ = request.store.finish_historian_pending_run(&run_id);
+        return Ok(HostRunAdoption::Released { run_id });
+    }
+
+    let publish_result = publish_output_from_awaiting(PublishOutputRequest {
+        store: request.store,
+        session_id: request.session_id,
+        project_path: request.project_path,
+        awaiting,
+        output,
+        observed_chunk_fingerprint: request.observed_chunk_fingerprint,
+        validation_chunk: request.validation_chunk,
+        chunk_transcript: request.chunk_transcript,
+        raw_chunk_messages: request.raw_chunk_messages,
+        boundary_dates: request.boundary_dates,
+        prior_compartments: request.prior_compartments,
+        validate_options: request.validate_options,
+        created_at_ms: request.now_ms,
+        failure_started_at_ms: request.now_ms,
+        failure_backoff_at_ms: request.failure_backoff_at_ms,
+        completion_now_ms: request.completion_now_ms,
+        publication_fence: request.publication_fence,
+    });
+    // The queue row goes whether the publish landed or was refused: the report it
+    // carried has been spent either way, and leaving it would offer the same
+    // rejected document to the next pass forever.
+    let _ = request.store.finish_historian_pending_run(&run_id);
+    let row_version = publish_result?;
+    Ok(HostRunAdoption::Published(Box::new(HistorianRunSuccess {
+        row_version,
+        producer_session_id: run_id.clone(),
+        producer_run_id: run_id,
+        model: "host".to_string(),
+    })))
 }
 
 pub async fn reattach_historian_producer<P>(
@@ -6057,6 +6192,214 @@ mod tests {
             .list_pending_historian_runs(None, 123)
             .unwrap()
             .is_empty());
+    }
+
+    /// Put the store in the state a module restart leaves behind: a run queued and
+    /// claimed, with no firing task in this process waiting for its report.
+    ///
+    /// Built from the same `fire` → queue → claim steps the live path takes, and
+    /// deliberately without a firing task: a task that ENDS cleans its own run out
+    /// of the queue, which is the opposite of the case under test.
+    fn claim_a_run_with_no_firing_task(host_store: &McStore) -> (String, String) {
+        seed_test_selected_range_identities(host_store);
+        let compartment_set_generation = host_store
+            .load_historian_assembly_snapshot("ses")
+            .unwrap()
+            .compartment_set_generation;
+        let loaded = host_store.load("ses").unwrap();
+        let FireOutcome::Fired(fired) = fire(
+            &loaded.meta.historian,
+            2,
+            4,
+            "fp".into(),
+            test_selected_range_identities(),
+            0,
+            compartment_set_generation,
+            123,
+            None,
+        )
+        .expect("an idle session fires") else {
+            panic!("an idle session must fire");
+        };
+        persist_historian_state(host_store, "ses", fired.clone()).unwrap();
+        let run_id = historian_producer_session_id("proj", "ses", fired.firing_seq);
+        host_store
+            .publish_pending_historian_run(&mc_store::NewHistorianPendingRun {
+                run_id: run_id.clone(),
+                session_id: "ses".to_string(),
+                project_path: "git:proj".to_string(),
+                firing_seq: fired.firing_seq,
+                chunk_fingerprint: "fp".to_string(),
+                system_prompt: "role guidance".to_string(),
+                user_prompt: "prompt".to_string(),
+                model_chain: vec!["prov/model-a".to_string()],
+                await_budget_ms: 600_000,
+                now_ms: 123,
+            })
+            .unwrap();
+        let mc_store::HistorianClaimOutcome::Claimed(claim) = host_store
+            .claim_historian_run(&run_id, "install-uuid-one", 123)
+            .expect("claiming must not fail")
+        else {
+            panic!("the only claimant must win");
+        };
+        (claim.run_id, claim.token)
+    }
+
+    /// The restart decision, end to end: a report that arrives with no firing task
+    /// waiting for it is stored, and the next pass publishes it through the SAME
+    /// `publish_output_from_awaiting` an in-process report goes through.
+    #[test]
+    fn a_report_left_across_a_restart_is_published_by_the_next_pass() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let host_store = store(host_dir.path());
+        seed_prior_compartment(&host_store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let output = historian_xml("survived the bounce");
+
+        let (run_id, token) = claim_a_run_with_no_firing_task(&host_store);
+        // The firing task is gone but the run is not: this is what the queue row is
+        // for. Re-queue it the way the module does after a restart — nothing to do,
+        // because the row and the session's phase both survived.
+        assert_eq!(
+            host_store.historian_state("ses").unwrap().state,
+            HistorianPhase::AwaitingProducer
+        );
+
+        assert_eq!(
+            host_store
+                .record_historian_report(
+                    &run_id,
+                    &token,
+                    &mc_store::HistorianRunReport::Output {
+                        text: output.clone(),
+                        length_capped: false,
+                    },
+                    123,
+                )
+                .unwrap(),
+            mc_store::HistorianRecordOutcome::Recorded
+        );
+
+        let adoption = adopt_historian_run_on_host(reattach_request(&host_store, &chunk, &prior))
+            .expect("the stored report publishes");
+        assert!(
+            matches!(adoption, HostRunAdoption::Published(_)),
+            "{adoption:?}"
+        );
+        assert_eq!(
+            host_store.load_compartments("ses").unwrap().len(),
+            2,
+            "prior plus the fold the host paid for before the restart"
+        );
+        assert_eq!(
+            host_store.historian_state("ses").unwrap().state,
+            HistorianPhase::Idle
+        );
+        assert!(
+            host_store
+                .list_pending_historian_runs(None, 123)
+                .unwrap()
+                .is_empty(),
+            "a published run leaves the queue"
+        );
+    }
+
+    #[test]
+    fn a_claimants_failure_left_across_a_restart_releases_the_run() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let host_store = store(host_dir.path());
+        seed_prior_compartment(&host_store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+
+        let (run_id, token) = claim_a_run_with_no_firing_task(&host_store);
+        host_store
+            .record_historian_report(
+                &run_id,
+                &token,
+                &mc_store::HistorianRunReport::Failed {
+                    code: "chain_exhausted".to_string(),
+                    message: "every configured model refused".to_string(),
+                },
+                123,
+            )
+            .unwrap();
+
+        let adoption = adopt_historian_run_on_host(reattach_request(&host_store, &chunk, &prior))
+            .expect("a stored failure is a terminal outcome, not an error");
+        assert!(
+            matches!(&adoption, HostRunAdoption::Failed { code, .. } if code == "chain_exhausted"),
+            "{adoption:?}"
+        );
+        let state = host_store.historian_state("ses").unwrap();
+        assert_eq!(state.state, HistorianPhase::Idle);
+        assert!(state
+            .last_failure
+            .as_deref()
+            .is_some_and(|detail| detail.contains("chain_exhausted")));
+        assert_eq!(host_store.load_compartments("ses").unwrap().len(), 1);
+    }
+
+    /// The other half of the boot decision: a run kept across a restart is kept
+    /// only while it can still be answered.
+    #[test]
+    fn a_run_still_out_with_a_claimant_is_kept_until_its_deadline_and_then_released() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let host_store = store(host_dir.path());
+        seed_prior_compartment(&host_store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+
+        let (run_id, _token) = claim_a_run_with_no_firing_task(&host_store);
+        let deadline_ms = host_store
+            .load_parked_historian_run("ses")
+            .unwrap()
+            .expect("the run is parked")
+            .deadline_ms;
+
+        let kept = adopt_historian_run_on_host(reattach_request(&host_store, &chunk, &prior))
+            .expect("a run still out is not an error");
+        assert_eq!(
+            kept,
+            HostRunAdoption::StillOut {
+                run_id: run_id.clone(),
+                deadline_ms,
+            }
+        );
+        assert_eq!(
+            host_store.historian_state("ses").unwrap().state,
+            HistorianPhase::AwaitingProducer,
+            "the session keeps the slot its claimant is still working on"
+        );
+
+        let mut past_deadline = reattach_request(&host_store, &chunk, &prior);
+        past_deadline.now_ms = deadline_ms + 1;
+        let released =
+            adopt_historian_run_on_host(past_deadline).expect("an expired run is released");
+        assert_eq!(released, HostRunAdoption::Released { run_id });
+        assert_eq!(
+            host_store.historian_state("ses").unwrap().state,
+            HistorianPhase::Idle
+        );
+        assert!(host_store
+            .list_pending_historian_runs(None, 123)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_session_with_no_queued_run_is_left_to_the_ordinary_restart_recovery() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let host_store = store(host_dir.path());
+        seed_prior_compartment(&host_store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        assert_eq!(
+            adopt_historian_run_on_host(reattach_request(&host_store, &chunk, &prior)).unwrap(),
+            HostRunAdoption::NotParked
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
