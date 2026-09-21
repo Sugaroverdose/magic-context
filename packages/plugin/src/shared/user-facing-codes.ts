@@ -7,6 +7,11 @@ export const USER_FACING_FAILURES = {
         sentence: "History compression could not finish this turn.",
         action: "It will retry automatically.",
     },
+    hidden_cleanup_unbound: {
+        code: "MC-H02",
+        sentence: "Some finished background sessions could not be removed from this host.",
+        action: "They are removed automatically the next time Magic Context runs inside a registered OpenCode service.",
+    },
     recomp_unavailable: {
         code: "MC-R01",
         sentence: "History compression could not be rebuilt.",
@@ -181,6 +186,11 @@ export const USER_FACING_FAILURES = {
         code: "MC-M02",
         sentence: "Memory authority is inconsistent between the host and module.",
         action: "Run `ck doctor drain-authority` before changing Rust mode.",
+    },
+    rust_mode_unsupported: {
+        code: "MC-S06",
+        sentence: "Experimental Rust transform mode is not available on this OpenCode host.",
+        action: 'Magic Context is running its TypeScript mode instead; set `transform_mode` to "ts" to stop requesting Rust.',
     },
     dreamer_task_failing: {
         code: "MC-S05",
