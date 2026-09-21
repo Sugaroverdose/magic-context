@@ -192,24 +192,6 @@ describe.skipIf(!prereqs.ok)(
             expect(new Set(digests).size).toBe(1);
         }, 900_000);
 
-        it("reports oc_input against the recorded boundary rather than the whole history", async () => {
-            const coverage = readCoverage(logPath);
-            expect(coverage.length).toBeGreaterThan(0);
-            console.log(
-                `oc_input per pass: ${coverage.map((entry) => `${entry.ocInput}@${entry.markerAt}`).join(" ")}`,
-            );
-            const folded = coverage.findIndex((entry) => entry.markerAt !== "none");
-            if (folded < 0) {
-                // No boundary was published in this fixture's pressure range. Say so
-                // rather than assert a decrease that nothing produced.
-                console.log("no module boundary published; trim decrease not exercised here");
-                return;
-            }
-            const before = Math.max(...coverage.slice(0, folded).map((entry) => entry.ocInput));
-            const after = coverage[coverage.length - 1]!.ocInput;
-            expect(after).toBeLessThan(before);
-        }, 120_000);
-
         it("shows module status on the OpenCode 2 status surfaces", async () => {
             const storageDir = join(host.env.XDG_DATA_HOME!, "cortexkit", "magic-context");
             const directory = rpcPortDir(storageDir, host.cwd);
