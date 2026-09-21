@@ -51,8 +51,13 @@ test("pre-adoption sweep variant follows the array this session was last served"
         info: { id, role: "assistant" },
         parts: [{ type: "text", text: id }],
     });
-    // A row whose parts were all removed never reaches the provider.
+    // Rows with nothing left to send never reach the provider: one whose parts
+    // were spliced away, and one reduced to an empty text shell.
     const emptied = (id: string): MessageLike => ({ info: { id, role: "assistant" }, parts: [] });
+    const shell = (id: string): MessageLike => ({
+        info: { id, role: "assistant" },
+        parts: [{ type: "text", text: "" }],
+    });
     // The two sweeps disagree about one unrelated row: "unrelated".
     const candidates = {
         legacy: [row("first"), row("owner-survivor")],
@@ -82,7 +87,13 @@ test("pre-adoption sweep variant follows the array this session was last served"
     // matches nor blocks the variant that reproduces the rest.
     expect(
         classifyToolSweepCandidates(
-            [row("first"), emptied("dropped-owner"), row("unrelated"), row("owner-survivor")],
+            [
+                row("first"),
+                emptied("dropped-owner"),
+                shell("emptied-owner"),
+                row("unrelated"),
+                row("owner-survivor"),
+            ],
             candidates,
         ).condition,
     ).toBe("matched_scoped");

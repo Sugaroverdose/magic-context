@@ -3,8 +3,10 @@ import {
     getMergedReasoningStrippedIds,
 } from "../../features/magic-context/storage-meta-persisted";
 import { sessionLog } from "../../shared/logger";
+import { isRecord } from "../../shared/record-type-guard";
 import type { Database } from "../../shared/sqlite";
 import { getSlot } from "./lkg-slot";
+import { stripTagPrefix } from "./tag-content-primitives";
 import type { MessageLike } from "./tag-messages";
 import type { ToolSweepCandidates, ToolSweepVariantResolver } from "./tool-drop-target";
 
@@ -60,19 +62,27 @@ export interface ToolSweepVariantDecision {
 /**
  * Identify a served row for comparison against a previously served array.
  *
- * Rows whose parts are all gone are skipped: OpenCode removes them before the
- * request is built, so they are not part of what the model saw, and a build
- * that emptied such a row without removing it would otherwise look like a
- * different history.
+ * Rows with nothing left to send are skipped: a row whose parts were all
+ * removed, or that was reduced to an empty text shell, is dropped before the
+ * request is built, so it is not part of what the model saw. A build that
+ * emptied such a row without removing it would otherwise look like a different
+ * history. Reasoning-only rows DO reach the provider and are compared — they
+ * are exactly what the two sweeps disagree about.
  */
 function servedRowKeys(messages: readonly MessageLike[]): string[] {
     const keys: string[] = [];
     for (const message of messages) {
-        if (!Array.isArray(message?.parts) || message.parts.length === 0) continue;
+        if (!Array.isArray(message?.parts) || !message.parts.some(partReachesProvider)) continue;
         const id = message.info?.id;
         keys.push(typeof id === "string" && id.length > 0 ? id : JSON.stringify(message.info));
     }
     return keys;
+}
+
+function partReachesProvider(part: unknown): boolean {
+    if (!isRecord(part)) return true;
+    if (part.type !== "text") return true;
+    return typeof part.text === "string" && stripTagPrefix(part.text).trim().length > 0;
 }
 
 function firstDivergence(left: readonly string[], right: readonly string[]): number {
