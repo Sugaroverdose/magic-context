@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -101,5 +101,22 @@ describe("catalogModels", () => {
     it("does not iterate a thenable or empty object", () => {
         expect(catalogModels({})).toEqual([]);
         expect(catalogModels(Promise.resolve([mock]))).toEqual([]);
+    });
+});
+
+// The v2 context hook edits the request draft only. A `context.tool.transform`
+// call from inside the hook would register a persistent host-state transform on
+// every pass (eight after seven passes in the issue 492 reproduction) and let a
+// light-preset session's shortened descriptions become the baseline for every
+// later request on the host. This pins the call out of the hook body; the only
+// permitted registration is the one-time setup in tools.ts.
+describe("v2 context hook never registers a persistent tool transform", () => {
+    it("has no context.tool.transform call after the context hook opens", () => {
+        const source = readFileSync(join(import.meta.dir, "context.ts"), "utf8");
+        const hookStart = source.indexOf('context.session.hook("context"');
+        expect(hookStart).toBeGreaterThan(0);
+        const hookBody = source.slice(hookStart);
+        expect(hookBody).not.toContain("context.tool.transform(");
+        expect(hookBody).toContain("applyV2PromptSurfaceTools(draft");
     });
 });

@@ -548,21 +548,13 @@ export async function registerContext(context: V2Context) {
         variants.set(draft.sessionID, draft.model.variant);
         if (!modelLimitCacheWarm()) void warmModelLimitCacheFromCatalog(context);
         agents.set(draft.sessionID, draft.agent);
+        // Per-model descriptions are applied to this request's draft only.
+        // `context.tool.transform` must never be called from here: the host keeps
+        // every registration for the life of the process, so one call per pass
+        // grows host state without bound and a light-preset session's shortened
+        // descriptions become the baseline every later request (any session,
+        // any model) starts from. Registration happens once, in tools.ts.
         applyV2PromptSurfaceTools(draft, promptSurfaceRuntime, config.prompt_surface);
-        if (context.tool.transform) {
-            const modelKey = `${draft.model.providerID}/${draft.model.id}`;
-            const registration = promptSurfaceRuntime.resolveRegistration(
-                config.prompt_surface,
-                modelKey,
-            );
-            await context.tool.transform((editor) => {
-                for (const id of ACTIVE_TOOL_IDS) {
-                    editor.update(id, (tool) => {
-                        tool.description = registration.descriptionFor(id, tool.description);
-                    });
-                }
-            });
-        }
         let postFold = false;
         try {
             if ((await recordUsage(draft)) && !compactionOff) {
