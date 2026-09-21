@@ -140,6 +140,6 @@ export function formatOpenCodeV2ReconversionRecipe(databasePath: string): string
         `Database: ${databasePath}`,
         "In sqlite3, run: DELETE FROM kv WHERE key = 'migration.v1-v2';",
         "Large-store conversion can take several minutes. `opencode service start` may kill the server as unresponsive while it runs; start `opencode serve --port N` by hand instead.",
-        'Wait until `SELECT value FROM kv WHERE key = \'migration.v1-v2\';` reads `{"phase":"completed"}` before stopping that manual server (see note #3157).',
+        'Wait until `SELECT value FROM kv WHERE key = \'migration.v1-v2\';` reads `{"phase":"completed"}` before stopping that manual server',
     ];
 }
