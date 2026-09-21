@@ -1020,6 +1020,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_completion_route_defaults_to_broca_and_only_the_user_may_move_it() {
+        assert_eq!(
+            merge_tiers(None, None).historian_runner,
+            HistorianRunnerKind::Broca,
+            "an unconfigured install keeps folding exactly where it always has"
+        );
+
+        let user = serde_json::json!({ "historian": { "runner": "host" } });
+        assert_eq!(
+            merge_tiers(Some(&user), None).historian_runner,
+            HistorianRunnerKind::Host
+        );
+
+        // A cloned repository must not be able to move the historian completion
+        // to a different process or provider account.
+        let project = serde_json::json!({ "historian": { "runner": "host" } });
+        assert_eq!(
+            merge_tiers(None, Some(&project)).historian_runner,
+            HistorianRunnerKind::Broca
+        );
+        assert_eq!(
+            merge_tiers(Some(&user), Some(&serde_json::json!({
+                "historian": { "runner": "broca" }
+            })))
+            .historian_runner,
+            HistorianRunnerKind::Host,
+            "the project tier cannot move the runner in either direction"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_runner_value_leaves_completions_where_they_were() {
+        for value in [serde_json::json!("hosted"), serde_json::json!("")] {
+            let user = serde_json::json!({ "historian": { "runner": value } });
+            assert_eq!(
+                merge_tiers(Some(&user), None).historian_runner,
+                HistorianRunnerKind::Broca,
+                "value {value}"
+            );
+        }
+        // A non-string is not a runner name at all and is ignored the same way.
+        let user = serde_json::json!({ "historian": { "runner": 7 } });
+        assert_eq!(
+            merge_tiers(Some(&user), None).historian_runner,
+            HistorianRunnerKind::Broca
+        );
+    }
+
+    #[test]
     fn tier_policy_ignores_project_models_and_rejects_project_lowering() {
         let user = serde_json::json!({
             "historian": { "model": "cheap", "fallback_models": ["fallback"] },

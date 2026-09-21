@@ -37952,6 +37952,431 @@ mod tests {
         );
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
     }
+
+    // ---- historian claim lane: the wire A2 codes against -------------------
+
+    const CLAIM_RUN_ID: &str = "mc-historian:project:a1a1a1a1a1a1a1a1:1";
+    const CLAIM_SYSTEM_PROMPT: &str = "historian-system-prompt";
+    const CLAIM_USER_PROMPT: &str = "historian-user-prompt";
+    /// The budget the host runner queues a run under: the module's own completion
+    /// wait. It is deliberately longer than the lease ceiling, so a claimant's lease
+    /// can lapse while the run itself is still worth finishing.
+    const CLAIM_AWAIT_BUDGET_MS: i64 = 660_000;
+
+    #[derive(Debug, serde::Deserialize)]
+    struct ClaimWireGolden {
+        schema: u32,
+        cases: Vec<ClaimWireCase>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct ClaimWireCase {
+        name: String,
+        request: Value,
+        volatile: Vec<String>,
+        response: Value,
+    }
+
+    fn claim_wire_golden() -> ClaimWireGolden {
+        let golden: ClaimWireGolden =
+            serde_json::from_str(include_str!("../testdata/historian-claim-wire-golden.json"))
+                .expect("parse historian claim wire golden");
+        assert_eq!(golden.schema, 1);
+        golden
+    }
+
+    fn claim_wire_case<'a>(golden: &'a ClaimWireGolden, name: &str) -> &'a ClaimWireCase {
+        golden
+            .cases
+            .iter()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("the claim wire golden has no case named {name}"))
+    }
+
+    /// Replace one dotted path (`runs.0.deadline_ms`) with the volatile marker.
+    fn mask_volatile_path(value: &mut Value, path: &str) {
+        let mut cursor = value;
+        let mut segments = path.split('.').peekable();
+        while let Some(segment) = segments.next() {
+            let last = segments.peek().is_none();
+            let next = match cursor {
+                Value::Array(items) => {
+                    let index: usize = segment
+                        .parse()
+                        .unwrap_or_else(|_| panic!("{segment} is not an array index in {path}"));
+                    items.get_mut(index)
+                }
+                Value::Object(map) => map.get_mut(segment),
+                _ => None,
+            };
+            let Some(next) = next else {
+                panic!("the response has no value at {path}");
+            };
+            if last {
+                *next = Value::String("<volatile>".to_string());
+                return;
+            }
+            cursor = next;
+        }
+    }
+
+    fn mask_volatile(mut value: Value, paths: &[String]) -> Value {
+        for path in paths {
+            mask_volatile_path(&mut value, path);
+        }
+        value
+    }
+
+    /// Drive one golden case and return the raw (unmasked) response so the test
+    /// can check the volatile values it just masked out of the comparison.
+    async fn drive_claim_wire_case(
+        handler: &McHandler,
+        case: &ClaimWireCase,
+        token: Option<&str>,
+    ) -> Value {
+        let mut request = case.request.clone();
+        if let Some(token) = token {
+            if request.get("token").and_then(Value::as_str) == Some("<current-token>") {
+                request["token"] = json!(token);
+            }
+        }
+        let observed = call_dispatch_request(handler, request).await;
+        assert_eq!(
+            mask_volatile(observed.clone(), &case.volatile),
+            case.response,
+            "wire drift in {}",
+            case.name
+        );
+        observed
+    }
+
+    /// Put `ses` in the phase a firing reaches just before its completion runs,
+    /// then queue that run for a claimant.
+    fn queue_a_run_for_a_claimant(store: &McStore, project_path: &str, now_ms: i64) {
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.historian = HistorianDurableState {
+            state: HistorianPhase::Firing,
+            firing_seq: 1,
+            chunk_range: Some(HistorianChunkRange {
+                from_ordinal: 1,
+                to_ordinal: 3,
+            }),
+            chunk_fingerprint: "fp-a1".to_string(),
+            selected_range_identities: Vec::new(),
+            producer_session_id: None,
+            producer_run_id: None,
+            producer_attempt: 0,
+            coordinator_token: None,
+            claim_deadline_ms: None,
+            fired_at_ms: Some(now_ms),
+            expected_revert_epoch: 0,
+            compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
+            failure_backoff_at_ms: None,
+            last_failure: None,
+            last_no_fire: None,
+            recent_decisions: Vec::new(),
+            consecutive_publish_failures: 0,
+        };
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        store
+            .publish_pending_historian_run(&mc_store::NewHistorianPendingRun {
+                run_id: CLAIM_RUN_ID.to_string(),
+                session_id: "ses".to_string(),
+                project_path: project_path.to_string(),
+                firing_seq: 1,
+                chunk_fingerprint: "fp-a1".to_string(),
+                system_prompt: CLAIM_SYSTEM_PROMPT.to_string(),
+                user_prompt: CLAIM_USER_PROMPT.to_string(),
+                model_chain: vec!["test/first".to_string(), "test/second".to_string()],
+                await_budget_ms: CLAIM_AWAIT_BUDGET_MS,
+                now_ms,
+            })
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_historian_claim_lane_answers_the_wire_a2_codes_against() {
+        let golden = claim_wire_golden();
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let project_path = project.to_string_lossy().to_string();
+        let queued_at_ms = now_ms();
+        queue_a_run_for_a_claimant(&store, &project_path, queued_at_ms);
+
+        let pending = drive_claim_wire_case(
+            &handler,
+            claim_wire_case(&golden, "pending-lists-the-queued-run"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            pending["runs"][0]["deadline_ms"],
+            json!(queued_at_ms + CLAIM_AWAIT_BUDGET_MS),
+            "the run deadline is the queue time plus the await budget"
+        );
+        assert_eq!(
+            pending["runs"][0]["prompt_bytes_len"],
+            json!(CLAIM_SYSTEM_PROMPT.len() + CLAIM_USER_PROMPT.len()),
+            "prompt_bytes_len counts exactly the two strings claim hands back"
+        );
+        drive_claim_wire_case(
+            &handler,
+            claim_wire_case(&golden, "pending-without-a-session-lists-every-queued-run"),
+            None,
+        )
+        .await;
+
+        let claimed = drive_claim_wire_case(
+            &handler,
+            claim_wire_case(
+                &golden,
+                "claim-hands-back-the-request-under-a-minted-attempt-and-token",
+            ),
+            None,
+        )
+        .await;
+        let token = claimed["token"].as_str().expect("a claim mints a token").to_string();
+        assert_eq!(token.len(), 32, "the token is a 16-byte hex digest");
+        assert!(
+            claimed["claim_deadline_ms"]
+                .as_i64()
+                .is_some_and(|deadline| deadline > queued_at_ms
+                    && deadline <= queued_at_ms + CLAIM_AWAIT_BUDGET_MS),
+            "the lease ends within the run's own deadline: {claimed}"
+        );
+
+        // A claimed run is no longer offered to anyone else.
+        let pending_after_claim = call_dispatch_request(
+            &handler,
+            json!({ "method": "historian.pending", "v": 1, "session_id": "ses" }),
+        )
+        .await;
+        assert_eq!(pending_after_claim, json!({ "ok": true, "runs": [] }));
+
+        for name in [
+            "a-second-claimant-loses-the-race-while-the-lease-holds",
+            "claiming-a-run-that-was-never-queued",
+        ] {
+            drive_claim_wire_case(&handler, claim_wire_case(&golden, name), None).await;
+        }
+
+        let beat = drive_claim_wire_case(
+            &handler,
+            claim_wire_case(&golden, "heartbeat-extends-the-current-claim"),
+            Some(&token),
+        )
+        .await;
+        assert!(
+            beat["claim_deadline_ms"].as_i64().is_some_and(|deadline| {
+                deadline >= claimed["claim_deadline_ms"].as_i64().unwrap()
+            }),
+            "a heartbeat never shortens the lease: {beat}"
+        );
+
+        for name in [
+            "heartbeat-from-a-claimant-that-was-replaced",
+            "a-report-under-a-superseded-token-is-refused-before-its-output-is-read",
+            "a-report-for-a-run-no-firing-is-waiting-on",
+        ] {
+            drive_claim_wire_case(&handler, claim_wire_case(&golden, name), Some(&token)).await;
+        }
+
+        // With a firing waiting, the same report is accepted and handed over.
+        let registration = handler.host_runs.register(CLAIM_RUN_ID);
+        drive_claim_wire_case(
+            &handler,
+            claim_wire_case(&golden, "a-report-accepted-by-the-firing-that-queued-the-run"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(
+            registration.wait(Duration::from_millis(50)).await,
+            Some(HostRunReport::Output(
+                crate::historian_producer::ProducerOutput {
+                    text: "<compartments/>".to_string(),
+                    length_capped: false,
+                }
+            ))
+        );
+
+        let failure_registration = handler.host_runs.register(CLAIM_RUN_ID);
+        drive_claim_wire_case(
+            &handler,
+            claim_wire_case(
+                &golden,
+                "a-failure-report-accepted-by-the-firing-that-queued-the-run",
+            ),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(
+            failure_registration.wait(Duration::from_millis(50)).await,
+            Some(HostRunReport::Failed {
+                code: "chain_exhausted".to_string(),
+                message: "every configured model refused".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn claim_lane_requests_that_name_nothing_fail_loudly() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        for (request, expected_fragment) in [
+            (
+                json!({ "method": "historian.claim", "v": 1, "claimant_instance_id": "i" }),
+                "historian.claim requires run_id",
+            ),
+            (
+                json!({ "method": "historian.claim", "v": 1, "run_id": "r" }),
+                "historian.claim requires claimant_instance_id",
+            ),
+            (
+                json!({ "method": "historian.claim", "v": 1, "run_id": "  ", "claimant_instance_id": "i" }),
+                "run_id must contain",
+            ),
+            (
+                json!({ "method": "historian.heartbeat", "v": 1, "run_id": "r" }),
+                "historian.heartbeat requires token",
+            ),
+            (
+                json!({ "method": "historian.complete", "v": 1, "token": "t" }),
+                "historian.complete requires run_id",
+            ),
+            (
+                json!({ "method": "historian.pending", "v": 1, "session_id": "" }),
+                "session_id must be omitted",
+            ),
+        ] {
+            let outcome = handler.dispatch_value(7, request.clone()).await;
+            let (code, message) = error_frame(outcome);
+            assert_eq!(code, "invalid_params", "{request}");
+            assert!(
+                message.contains(expected_fragment),
+                "expected {expected_fragment:?} in {message:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_report_body_that_does_not_say_what_happened_is_refused() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let project_path = project.to_string_lossy().to_string();
+        queue_a_run_for_a_claimant(&store, &project_path, now_ms());
+        let claimed = call_dispatch_request(
+            &handler,
+            json!({
+                "method": "historian.claim",
+                "v": 1,
+                "run_id": CLAIM_RUN_ID,
+                "claimant_instance_id": "install-uuid-one",
+            }),
+        )
+        .await;
+        let token = claimed["token"].as_str().unwrap().to_string();
+        for (body, expected_fragment) in [
+            (
+                json!({
+                    "output": { "text": "<compartments/>" },
+                    "error": { "code": "chain_exhausted", "message": "both" },
+                }),
+                "both output and error",
+            ),
+            (json!({}), "requires either output or error"),
+            (
+                json!({ "output": { "length_capped": true } }),
+                "output requires a text string",
+            ),
+        ] {
+            let mut request = json!({
+                "method": "historian.complete",
+                "v": 1,
+                "run_id": CLAIM_RUN_ID,
+                "token": token,
+            });
+            for (key, value) in body.as_object().unwrap() {
+                request[key] = value.clone();
+            }
+            let (code, message) = error_frame(handler.dispatch_value(7, request.clone()).await);
+            assert_eq!(code, "invalid_params", "{request}");
+            assert!(
+                message.contains(expected_fragment),
+                "expected {expected_fragment:?} in {message:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_expired_lease_hands_the_same_run_to_the_next_claimant() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let project_path = project.to_string_lossy().to_string();
+        // Queue far enough in the past that the lease has already lapsed but the
+        // run's own deadline has not. Those are different clocks on purpose: the
+        // await budget outlives the lease ceiling, which is what makes a re-claim
+        // worth offering at all.
+        let queued_at_ms = now_ms() - mc_store::HISTORIAN_LEASE_CEILING_MS - 1;
+        assert!(
+            CLAIM_AWAIT_BUDGET_MS > mc_store::HISTORIAN_LEASE_CEILING_MS,
+            "a lease that outlives its run leaves nothing to re-claim"
+        );
+        queue_a_run_for_a_claimant(&store, &project_path, queued_at_ms);
+
+        let first = store
+            .claim_historian_run(CLAIM_RUN_ID, "install-uuid-one", queued_at_ms)
+            .unwrap();
+        let mc_store::HistorianClaimOutcome::Claimed(first) = first else {
+            panic!("the first claimant must win: {first:?}");
+        };
+        assert_eq!(first.attempt, 1);
+
+        let second = call_dispatch_request(
+            &handler,
+            json!({
+                "method": "historian.claim",
+                "v": 1,
+                "run_id": CLAIM_RUN_ID,
+                "claimant_instance_id": "install-uuid-two",
+            }),
+        )
+        .await;
+        assert_eq!(second["ok"], json!(true), "{second}");
+        assert_eq!(
+            second["attempt"],
+            json!(2),
+            "the replacement continues the same run under the next attempt"
+        );
+        assert_ne!(second["token"].as_str().unwrap(), first.token);
+
+        let state = store.historian_state("ses").unwrap();
+        assert_eq!(state.producer_run_id.as_deref(), Some(CLAIM_RUN_ID));
+        assert_eq!(state.chunk_fingerprint, "fp-a1");
+        assert_eq!(state.firing_seq, 1);
+        assert_eq!(state.producer_attempt, 2);
+
+        // The replaced claimant's token no longer names a live claim, so nothing it
+        // reports can reach validation.
+        let late = call_dispatch_request(
+            &handler,
+            json!({
+                "method": "historian.complete",
+                "v": 1,
+                "run_id": CLAIM_RUN_ID,
+                "token": first.token,
+                "output": { "text": "<compartments/>" },
+            }),
+        )
+        .await;
+        assert_eq!(
+            late,
+            json!({ "ok": false, "refusal": "superseded_token" }),
+            "a superseded report is refused before its output is read"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -651,6 +651,227 @@ impl McStore {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CoreState, ModuleMeta};
+    use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+
+    const AWAIT_BUDGET_MS: i64 = 660_000;
+
+    fn open_store(dir: &std::path::Path) -> McStore {
+        McStore::open(&StorageDescriptor {
+            module_id: "magic-context-test".to_string(),
+            storage_namespace: "mc_cache".to_string(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: dir.join("store.db").to_string_lossy().to_string(),
+            },
+        })
+        .unwrap()
+    }
+
+    /// Seed a session in the phase a firing reaches just before its completion
+    /// runs, then queue that run for a claimant.
+    fn queue_run(store: &McStore, run_id: &str, session_id: &str, now_ms: i64) {
+        let loaded = store.load(session_id).unwrap();
+        let mut meta = ModuleMeta::default();
+        meta.historian.state = HistorianPhase::Firing;
+        meta.historian.firing_seq = 1;
+        meta.historian.chunk_fingerprint = "fp".to_string();
+        store
+            .commit(session_id, loaded.row_version, &CoreState::default(), &meta)
+            .unwrap();
+        store
+            .publish_pending_historian_run(&NewHistorianPendingRun {
+                run_id: run_id.to_string(),
+                session_id: session_id.to_string(),
+                project_path: "git:proj".to_string(),
+                firing_seq: 1,
+                chunk_fingerprint: "fp".to_string(),
+                system_prompt: "sys".to_string(),
+                user_prompt: "user".to_string(),
+                model_chain: vec!["test/model".to_string()],
+                await_budget_ms: AWAIT_BUDGET_MS,
+                now_ms,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn queueing_a_run_parks_the_session_and_offers_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-1", "ses", 1_000);
+
+        let state = store.historian_state("ses").unwrap();
+        assert_eq!(state.state, HistorianPhase::Reclaiming);
+        assert_eq!(state.producer_run_id.as_deref(), Some("run-1"));
+        assert_eq!(state.coordinator_token, None);
+
+        let pending = store.list_pending_historian_runs(None, 2_000).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].run_id, "run-1");
+        assert_eq!(pending[0].session_id, "ses");
+        assert_eq!(pending[0].deadline_ms, 1_000 + AWAIT_BUDGET_MS);
+        assert_eq!(pending[0].prompt_bytes_len, "sys".len() as u64 + "user".len() as u64);
+    }
+
+    #[test]
+    fn a_run_whose_own_deadline_passed_is_never_offered_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-1", "ses", 1_000);
+        let after_deadline = 1_000 + AWAIT_BUDGET_MS + 1;
+
+        assert!(store
+            .list_pending_historian_runs(None, after_deadline)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .claim_historian_run("run-1", "install-one", after_deadline)
+                .unwrap(),
+            HistorianClaimOutcome::Refused(HistorianClaimRefusal::NotPending)
+        );
+    }
+
+    #[test]
+    fn the_sweep_parks_a_claim_whose_lease_ran_out_and_leaves_a_live_one_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-dead", "ses-dead", 1_000);
+        queue_run(&store, "run-live", "ses-live", 1_000);
+        store
+            .claim_historian_run("run-dead", "install-one", 1_000)
+            .unwrap();
+        store
+            .claim_historian_run("run-live", "install-two", 1_000)
+            .unwrap();
+
+        // One millisecond before either lease ends, nothing is swept.
+        let lease_end = 1_000 + HISTORIAN_LEASE_CEILING_MS;
+        assert!(store.expire_historian_claims(lease_end - 1).unwrap().is_empty());
+
+        // The live claimant extends its lease; the dead one does not.
+        let live_token = match store
+            .claim_historian_run("run-live", "install-three", lease_end - 1)
+            .unwrap()
+        {
+            HistorianClaimOutcome::Refused(HistorianClaimRefusal::AlreadyClaimed) => store
+                .historian_state("ses-live")
+                .unwrap()
+                .coordinator_token
+                .expect("the live claim keeps its token"),
+            other => panic!("a live lease must not be stealable: {other:?}"),
+        };
+        store
+            .heartbeat_historian_run("run-live", &live_token, lease_end - 1)
+            .unwrap();
+
+        assert_eq!(
+            store.expire_historian_claims(lease_end).unwrap(),
+            vec!["run-dead".to_string()]
+        );
+        assert_eq!(
+            store.historian_state("ses-dead").unwrap().state,
+            HistorianPhase::Reclaiming
+        );
+        assert_eq!(
+            store.historian_state("ses-live").unwrap().state,
+            HistorianPhase::AwaitingProducer,
+            "a claimant that keeps reporting is never stolen from"
+        );
+    }
+
+    #[test]
+    fn a_heartbeat_never_pushes_a_lease_past_the_run_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-1", "ses", 1_000);
+        let HistorianClaimOutcome::Claimed(claim) = store
+            .claim_historian_run("run-1", "install-one", 1_000)
+            .unwrap()
+        else {
+            panic!("the first claimant must win");
+        };
+        let run_deadline_ms = 1_000 + AWAIT_BUDGET_MS;
+        let late = run_deadline_ms - 1;
+        assert_eq!(
+            store
+                .heartbeat_historian_run("run-1", &claim.token, late)
+                .unwrap(),
+            HistorianHeartbeatOutcome::Extended {
+                claim_deadline_ms: run_deadline_ms
+            }
+        );
+    }
+
+    #[test]
+    fn finishing_a_run_removes_it_from_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-1", "ses", 1_000);
+        assert!(store.finish_historian_pending_run("run-1").unwrap());
+        assert!(!store.finish_historian_pending_run("run-1").unwrap());
+        assert!(store
+            .list_pending_historian_runs(None, 2_000)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .claim_historian_run("run-1", "install-one", 2_000)
+                .unwrap(),
+            HistorianClaimOutcome::Refused(HistorianClaimRefusal::UnknownRun)
+        );
+    }
+
+    #[test]
+    fn a_run_can_only_be_queued_from_a_firing_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let loaded = store.load("ses").unwrap();
+        store
+            .commit(
+                "ses",
+                loaded.row_version,
+                &CoreState::default(),
+                &ModuleMeta::default(),
+            )
+            .unwrap();
+        let error = store
+            .publish_pending_historian_run(&NewHistorianPendingRun {
+                run_id: "run-1".to_string(),
+                session_id: "ses".to_string(),
+                project_path: "git:proj".to_string(),
+                firing_seq: 1,
+                chunk_fingerprint: "fp".to_string(),
+                system_prompt: "sys".to_string(),
+                user_prompt: "user".to_string(),
+                model_chain: vec!["test/model".to_string()],
+                await_budget_ms: AWAIT_BUDGET_MS,
+                now_ms: 1_000,
+            })
+            .expect_err("an idle session has no run to queue");
+        assert!(error.to_string().contains("is not firing"), "{error}");
+        assert!(store
+            .list_pending_historian_runs(None, 2_000)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn the_lease_is_the_await_budget_capped_at_the_ceiling() {
+        assert_eq!(historian_lease_ms(60_000), 60_000);
+        assert_eq!(
+            historian_lease_ms(AWAIT_BUDGET_MS),
+            HISTORIAN_LEASE_CEILING_MS,
+            "the await budget outliving the ceiling is what leaves a run to re-claim"
+        );
+        assert_eq!(historian_lease_ms(0), 1, "a zero lease would be instantly stale");
+    }
+}
+
 fn read_claim(
     tx: &rusqlite::Transaction<'_>,
     run_id: &str,

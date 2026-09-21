@@ -5790,4 +5790,156 @@ mod tests {
             awaiting.producer_run_id
         );
     }
+
+    /// A fired run with one claimant in flight, for the re-claim transitions.
+    fn awaiting_a_claimant() -> HistorianDurableState {
+        let FireOutcome::Fired(fired) = fire(
+            &HistorianDurableState::default(),
+            1,
+            4,
+            "fp-reclaim".into(),
+            test_selected_range_identities(),
+            0,
+            CompartmentSetGeneration::default(),
+            1_000,
+            None,
+        )
+        .unwrap() else {
+            panic!("a fresh idle state must fire");
+        };
+        let queued = pending_published(&fired, "run-1".into()).unwrap();
+        assert_eq!(queued.state, HistorianPhase::Reclaiming);
+        reclaimed(&queued, 1, "token-one".into(), 61_000).unwrap()
+    }
+
+    #[test]
+    fn lease_expiry_then_reclaim_admits_a_second_producer() {
+        let first = awaiting_a_claimant();
+        assert_eq!(first.state, HistorianPhase::AwaitingProducer);
+        assert_eq!(first.producer_attempt, 1);
+        assert_eq!(first.coordinator_token.as_deref(), Some("token-one"));
+
+        let parked = lease_expired(&first).unwrap();
+        assert_eq!(parked.state, HistorianPhase::Reclaiming);
+        assert_eq!(
+            parked.coordinator_token, None,
+            "the departed claimant's token must stop being current"
+        );
+        assert_eq!(parked.claim_deadline_ms, None);
+        // What makes the re-claim cheap: the run, its chunk and its sequence survive.
+        assert_eq!(parked.producer_run_id.as_deref(), Some("run-1"));
+        assert_eq!(parked.chunk_fingerprint, "fp-reclaim");
+        assert_eq!(parked.firing_seq, first.firing_seq);
+        assert_eq!(
+            parked.selected_range_identities,
+            first.selected_range_identities
+        );
+
+        let second = reclaimed(&parked, 2, "token-two".into(), 121_000).unwrap();
+        assert_eq!(second.state, HistorianPhase::AwaitingProducer);
+        assert_eq!(second.producer_attempt, 2);
+        assert_eq!(second.coordinator_token.as_deref(), Some("token-two"));
+        assert_eq!(second.producer_run_id.as_deref(), Some("run-1"));
+    }
+
+    #[test]
+    fn the_publish_predicate_names_the_attempt_not_just_the_run() {
+        let first = awaiting_a_claimant();
+        let second = reclaimed(&lease_expired(&first).unwrap(), 2, "token-two".into(), 2).unwrap();
+
+        let first_predicate = publish_predicate(&first).unwrap();
+        let second_predicate = publish_predicate(&second).unwrap();
+        assert_eq!(
+            first_predicate.producer_run_id,
+            second_predicate.producer_run_id
+        );
+        assert_eq!(first_predicate.producer_attempt, 1);
+        assert_eq!(second_predicate.producer_attempt, 2);
+        assert_ne!(
+            first_predicate, second_predicate,
+            "a superseded claimant must not satisfy the predicate the current one does"
+        );
+    }
+
+    #[test]
+    fn attempts_only_move_forward() {
+        let first = awaiting_a_claimant();
+        let parked = lease_expired(&first).unwrap();
+        for replayed in [0, 1] {
+            let error = reclaimed(&parked, replayed, "token-replay".into(), 2)
+                .expect_err("an attempt at or below the current one is not a new claim");
+            assert!(
+                matches!(
+                    error,
+                    HistorianStateError::InvalidTransition {
+                        event: "reclaimed",
+                        ..
+                    }
+                ),
+                "attempt {replayed}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reclaim_transitions_refuse_every_phase_they_do_not_belong_to() {
+        let first = awaiting_a_claimant();
+        // Re-claiming is only meaningful for a run with no claimant.
+        assert!(matches!(
+            reclaimed(&first, 2, "t".into(), 2),
+            Err(HistorianStateError::InvalidTransition {
+                from: HistorianPhase::AwaitingProducer,
+                event: "reclaimed"
+            })
+        ));
+        // A run already parked has no lease left to expire.
+        let parked = lease_expired(&first).unwrap();
+        assert!(matches!(
+            lease_expired(&parked),
+            Err(HistorianStateError::InvalidTransition {
+                from: HistorianPhase::Reclaiming,
+                event: "lease_expired"
+            })
+        ));
+        // The in-module producer lane keeps its own guard: it is not reachable
+        // from a parked run, and a second producer still cannot barge into an
+        // in-flight one.
+        assert!(matches!(
+            producer_started(&parked, "ps".into(), "run-2".into()),
+            Err(HistorianStateError::InvalidTransition {
+                from: HistorianPhase::Reclaiming,
+                event: "producer_started"
+            })
+        ));
+        assert!(matches!(
+            producer_started(&first, "ps".into(), "run-2".into()),
+            Err(HistorianStateError::InvalidTransition {
+                from: HistorianPhase::AwaitingProducer,
+                event: "producer_started"
+            })
+        ));
+    }
+
+    #[test]
+    fn the_in_module_producer_lane_carries_no_claim() {
+        let FireOutcome::Fired(fired) = fire(
+            &HistorianDurableState::default(),
+            1,
+            4,
+            "fp".into(),
+            test_selected_range_identities(),
+            0,
+            CompartmentSetGeneration::default(),
+            1_000,
+            None,
+        )
+        .unwrap() else {
+            panic!("a fresh idle state must fire");
+        };
+        let awaiting = producer_started(&fired, "ps".into(), "run-1".into()).unwrap();
+        assert_eq!(awaiting.producer_attempt, 0);
+        assert_eq!(awaiting.coordinator_token, None);
+        assert_eq!(awaiting.claim_deadline_ms, None);
+        assert_eq!(publish_predicate(&awaiting).unwrap().producer_attempt, 0);
+    }
 }
