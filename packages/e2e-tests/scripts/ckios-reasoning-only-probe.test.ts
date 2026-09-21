@@ -45,6 +45,9 @@ test("dropped marker boundary must not advance before the served prefix is trimm
         const [a, b] = bodies.map((body: { messages: unknown[] }) => body.messages);
         expect(JSON.stringify(a.slice(0, 4))).not.toContain("[dropped §3§]");
         const sha = (messages: unknown[]) => createHash("sha256").update(JSON.stringify(messages, (key, value) => key === "cache_control" ? undefined : value)).digest("hex");
+        const normalized = (value: unknown) => JSON.stringify(value, (key, item) => key === "cache_control" ? undefined : item);
+        const firstDivergence = Array.from({ length: a.length }, (_, i) => i).find(i => normalized(a[i]) !== normalized(b[i])) ?? -1;
+        console.log(`MARKER_GATE dropped-boundary A=${sha(a)} B_prefix=${sha(b.slice(0, a.length))} first_divergence=${firstDivergence}`);
         expect(sha(b.slice(0, a.length))).toBe(sha(a));
     } finally { rmSync(output, { recursive: true, force: true }); }
 }, 240_000);

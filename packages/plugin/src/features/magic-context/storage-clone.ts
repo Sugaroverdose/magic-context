@@ -1,3 +1,4 @@
+import { isReservedLedgerControlEntry } from "../../hooks/magic-context/tool-sweep-policy";
 import { getHarness } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
@@ -106,6 +107,14 @@ type RawSessionMetaRow = {
     todo_synthetic_state_json: string | null;
 };
 
+/**
+ * Copy the reasoning replay ledger into the clone. Most entries name a source
+ * message and are filtered/remapped with the rest of the session, but the
+ * ledger also carries session-wide control flags that are not ids at all. Those
+ * have nothing to map, and dropping them would silently reset the fork's
+ * served-bytes policy back to a pre-adoption default on its first pass, so they
+ * are copied through verbatim.
+ */
 function clonePiContentDecisions(
     raw: string | null,
     filter: CloneSessionStateFilter,
@@ -116,6 +125,10 @@ function clonePiContentDecisions(
     const copied: string[] = [];
     for (const entry of entries) {
         if (typeof entry !== "string") continue;
+        if (isReservedLedgerControlEntry(entry)) {
+            copied.push(entry);
+            continue;
+        }
         const decision = decodePiContentDecision(entry);
         if (!decision) continue;
         const [kind, id] = decision;

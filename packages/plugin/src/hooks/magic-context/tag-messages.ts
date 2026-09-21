@@ -34,6 +34,7 @@ import {
     type ToolCallIndex,
     type ToolDropResult,
     ToolMutationBatch,
+    type ToolSweepVariantResolver,
 } from "./tool-drop-target";
 import { logTransformTiming } from "./transform-stage-logger";
 
@@ -401,8 +402,19 @@ export interface TagMessagesOptions {
      * per session, so message shape stays stable.
      */
     skipPrefixInjection?: boolean;
-    /** Prune only tool-drop owners; callers enable this after persisting cache-safe session adoption. */
-    scopedToolSweep?: boolean;
+    /**
+     * Prune only tool-drop owners; callers enable this after persisting
+     * cache-safe session adoption. A resolver defers the choice to finalize
+     * time, where both candidate arrays are known (see
+     * `createPreAdoptionToolSweepResolver`).
+     */
+    scopedToolSweep?: boolean | ToolSweepVariantResolver;
+    /**
+     * The array that reaches the provider, when it is not `messages`. Passes
+     * that trim a compaction prefix tag the pre-trim copy, and the sweep has to
+     * remove its emptied rows from the served array as well.
+     */
+    servedMessages?: MessageLike[];
     /** @internal diagnostic hook used by cache-stability/perf tests. */
     onToolOwnerFallbackLookup?: (lookup: ToolOwnerFallbackLookup) => void;
 }
@@ -460,7 +472,7 @@ export function tagMessages(
     // FIFO logic and double-pop the queue. Parts are object references
     // (the same `unknown` instance walked twice in the loop).
     const ownerByPartKey = new Map<unknown, { ownerMsgId: string; callId: string }>();
-    const batch = new ToolMutationBatch(messages, options.scopedToolSweep);
+    const batch = new ToolMutationBatch(messages, options.scopedToolSweep, options.servedMessages);
     // Inert whitespace rows are replayed by (message, whitespace rank), not by
     // session-wide number membership: after a part-id remap the ordinal fallback
     // offers whichever inert row sits at the current ordinal, and two inert parts

@@ -2330,6 +2330,22 @@ export async function runPostTransformPhase(
                     `compaction-marker drain: pending ordinal ${pending.ordinal} is newer than consumed boundary ${args.pendingCompartmentInjection?.compartmentEndMessage ?? "<none>"}; preserving deferred history refresh signal`,
                 );
             } else if (!trimWasProven) {
+                // Refusing here keeps the marker and the served prefix one
+                // decision: the boundary only advances on a pass that actually
+                // trimmed through it.
+                //
+                // A session that was mid-drain when it upgraded from a build
+                // without this rule pays for that build's last drain exactly
+                // once. That build committed the boundary while still serving
+                // the rows below it; afterwards the host builds the request
+                // from the committed boundary, so those rows never reach this
+                // transform again. The first pass after the upgrade therefore
+                // serves a shorter prefix than the last pass before it. We do
+                // not re-add them: re-serving history the host no longer hands
+                // us is the failure mode this whole path exists to prevent.
+                // The loss is bounded — only rows below the committed boundary
+                // disappear, everything above it survives (shifted), and the
+                // next pass is byte-identical to that one.
                 suppressV12HistoryDrain = true;
                 sessionLog(
                     args.sessionId,

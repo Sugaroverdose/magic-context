@@ -35,23 +35,28 @@ for (const lane of ["plain", "mc", "marker", "marker-drops", "marker-dropped-bou
     const { baseURL } = await mock.start();
     mock.setDefault({ text: "finished", usage: { input_tokens: 1000, output_tokens: 1 } });
     mock.addMatcher(body => JSON.stringify(body.messages).includes("Generate a title for this conversation:") ? { text: "Fixture", usage: { input_tokens: 10, output_tokens: 1 } } : null);
+    const refuseTrim = process.env.MC_PROBE_REFUSE_TRIM === "1";
     const probes = ["before", "after"].map(stage => {
         const path = `${output}/${lane}-${stage}-plugin.ts`;
-        writeFileSync(path, `import { appendFileSync } from 'node:fs';\nexport default async () => ({ 'experimental.chat.messages.transform': async (_input, output) => { appendFileSync(${JSON.stringify(`${output}/${lane}-${stage}.jsonl`)}, JSON.stringify(output.messages) + '\\n'); } });\n`);
+        const refusalInjection = refuseTrim && stage === "before" ? `if (!injected && output.messages.some(m => m.parts.some(p => p.type === 'text' && p.text.includes(${JSON.stringify(notice)})))) { injected = true; output.messages.splice(2, 0, { info: { role: 'user' }, parts: [{ type: 'text', text: 'unprovable trim fixture' }] }); }` : "";
+        writeFileSync(path, `import { appendFileSync } from 'node:fs';\nlet injected = false;\nexport default async () => ({ 'experimental.chat.messages.transform': async (_input, output) => { ${refusalInjection} appendFileSync(${JSON.stringify(`${output}/${lane}-${stage}.jsonl`)}, JSON.stringify(output.messages) + '\\n'); } });\n`);
         return `file://${path}`;
     });
-    const host = await spawnOpencode({
+    const upgradePlugin = process.env.MC_PROBE_UPGRADE_FROM;
+    const fixedPlugin = `file://${resolve(import.meta.dir, '../../plugin/src/index.ts')}`;
+    const spawnOptions: Parameters<typeof spawnOpencode>[0] = {
         mockProviderURL: baseURL,
         mockProviderID: "anthropic",
         mockModelID: "claude-opus-5",
         expectedMagicContextState: enabled ? "enabled" : "configured-disabled",
         prepareContextDatabase: enabled,
         extraEnv: { MAGIC_CONTEXT_LOG_PATH: `${output}/${lane}.log` },
-        openCodeConfigExtra: { plugin: enabled ? [probes[0], `file://${resolve(import.meta.dir, '../../plugin/src/index.ts')}`, probes[1]] : probes },
+        openCodeConfigExtra: { plugin: enabled ? [probes[0], upgradePlugin ? `file://${resolve(upgradePlugin)}` : fixedPlugin, probes[1]] : probes },
         magicContextConfig: { execute_threshold_percentage: markerDrops ? 65 : 90, protected_tokens: 0, compressor: { enabled: false }, memory: { auto_search: { enabled: false } } },
-    });
+    };
+    let host = await spawnOpencode(spawnOptions);
     try {
-        const client = createOpencodeClient({ baseUrl: host.url });
+        let client = createOpencodeClient({ baseUrl: host.url });
         const session = await client.session.create({ query: { directory: host.env.workdir }, throwOnError: true });
         const id = session.data!.id;
         const prompt = async (text: string, synthetic = false) => client.session.prompt({
@@ -101,14 +106,55 @@ for (const lane of ["plain", "mc", "marker", "marker-drops", "marker-dropped-bou
                     queuePendingOp(storageDb, id, tag.tag_number, "drop", Date.now());
                     db.query("UPDATE tags SET status = 'dropped', drop_mode = 'full' WHERE session_id = ? AND tag_number = ?").run(id, tag.tag_number);
                 }
+                if (lane === "marker-dropped-boundary") writeFileSync(`${output}/${lane}-boundary-fixture.json`, JSON.stringify({ boundary: history[endOrdinal - 1], tags: db.query("SELECT status, drop_mode, tool_owner_message_id FROM tags WHERE session_id = ? AND type = 'tool' AND tool_owner_message_id = ?").all(id, history[endOrdinal - 1].info.id) }, null, 2));
             } finally { db.close(); }
         }
+        const captureMarkerState = (label: string) => {
+            const db = openTestDb(resolve(host.env.dataDir, "cortexkit/magic-context/context.db"));
+            try {
+                const state = db.query("SELECT pending_compaction_marker_state, compaction_marker_state FROM session_meta WHERE session_id = ?").get(id);
+                writeFileSync(`${output}/${lane}-${label}-state.json`, JSON.stringify(state, null, 2));
+            } finally { db.close(); }
+        };
+        if (refuseTrim) captureMarkerState("before-refusal");
         const first = mock.requests().length;
         mock.script([
             { content: [{ type: "thinking", thinking: "NEWEST_THINKING", signature: "new-signature" }, { type: "tool_use", id: "tool-second", name: "bash", input: { command: "printf next", description: "fixture next" } }], stop_reason: "tool_use", usage: { input_tokens: 1000, output_tokens: 1 } },
             { text: "done", usage: { input_tokens: 1000, output_tokens: 1 } },
         ]);
+        if (upgradePlugin || refuseTrim) mock.script([{ text: "upgrade boundary", usage: { input_tokens: refuseTrim ? 140000 : 1000, output_tokens: 1 } }]);
         await prompt(notice, true);
+        if (refuseTrim) {
+            captureMarkerState("after-refusal");
+            await prompt("retry with provable source order", true);
+            captureMarkerState("after-retry");
+            await prompt("verify marker does not advance twice", true);
+            captureMarkerState("after-defer");
+            await Bun.sleep(750);
+        }
+        if (upgradePlugin) {
+            const env = host.env;
+            // Let the 500ms logger flush scheduler and marker-drain records before shutdown.
+            await Bun.sleep(750);
+            writeFileSync(`${output}/${lane}-pre-upgrade.log`, readFileSync(`${output}/${lane}.log`));
+            // Freeze the raw hook arrays served before the restart so the gate can
+            // tell the pre-upgrade pass apart from the passes that follow it.
+            writeFileSync(`${output}/${lane}-pre-upgrade-after.jsonl`, readFileSync(`${output}/${lane}-after.jsonl`));
+            const db = openTestDb(resolve(env.dataDir, "cortexkit/magic-context/context.db"));
+            try {
+                writeFileSync(`${output}/${lane}-pre-upgrade-ledger.json`, JSON.stringify(db.query("SELECT merged_reasoning_stripped_ids FROM session_meta WHERE session_id = ?").get(id)));
+                // What the pre-fix build durably recorded as its last served array.
+                writeFileSync(`${output}/${lane}-pre-upgrade-lkg.json`, JSON.stringify(db.query("SELECT session_id, length(json_prefix) AS prefix_bytes, captured_at FROM lkg_slots WHERE session_id = ?").all(id)));
+            } finally { db.close(); }
+            await host.kill();
+            host = await spawnOpencode({ ...spawnOptions, existingEnv: env, openCodeConfigExtra: { plugin: [probes[0], fixedPlugin, probes[1]] } });
+            client = createOpencodeClient({ baseUrl: host.url });
+            await prompt("post-restart defer", true);
+            writeFileSync(`${output}/${lane}-post-restart-after.jsonl`, readFileSync(`${output}/${lane}-after.jsonl`));
+            // A second defer pass: whatever the first pass after the upgrade
+            // serves, the session must keep serving it.
+            await prompt("post-restart defer again", true);
+        }
         const bodies = mock.requests().slice(first).map(request => request.body);
         if (marker) {
             const db = openTestDb(resolve(host.env.dataDir, "cortexkit/magic-context/context.db"));

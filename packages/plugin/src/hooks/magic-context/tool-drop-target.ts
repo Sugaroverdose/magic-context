@@ -260,14 +260,36 @@ function isDropContent(content: string): boolean {
     return content.startsWith(DROP_PREFIX);
 }
 
+/**
+ * The two arrays a pre-adoption pass could serve, offered to a variant
+ * resolver before either one is applied. `legacy` is what the original
+ * session-wide sweep would serve (every row left without a meaningful part is
+ * removed, including rows this pass never touched); `scoped` is what the
+ * narrow sweep would serve (only the tool-drop owners this pass emptied).
+ */
+export interface ToolSweepCandidates {
+    legacy: MessageLike[];
+    scoped: MessageLike[];
+}
+
+/** Choose the sweep variant for this pass; `true` selects the scoped sweep. */
+export type ToolSweepVariantResolver = (candidates: ToolSweepCandidates) => boolean;
+
 export class ToolMutationBatch {
     private partsToRemove = new Set<unknown>();
     private affectedMessages = new Set<MessageLike>();
     private messages: MessageLike[];
+    private resolvedScopedSweep: boolean | undefined;
 
+    /**
+     * `servedMessages` is the array that actually goes to the provider when it
+     * is not the array being tagged (see `pruneServedRows`). Leave it undefined
+     * whenever tagging and serving share one array.
+     */
     constructor(
         messages: MessageLike[],
-        private readonly scopedSweep = false,
+        private readonly scopedSweep: boolean | ToolSweepVariantResolver = false,
+        private readonly servedMessages?: MessageLike[],
     ) {
         this.messages = messages;
     }
@@ -284,20 +306,57 @@ export class ToolMutationBatch {
             message.parts = message.parts.filter((p) => !this.partsToRemove.has(p));
         }
 
+        const scopedSweep = this.resolveScopedSweep();
+        const removed = new Set<MessageLike>();
         for (let i = this.messages.length - 1; i >= 0; i -= 1) {
             // Tool removal must not delete unrelated reasoning-only turns. Existing
             // sessions switch from the old global scan only on a cache-busting pass,
             // because restoring previously removed messages also changes cached bytes.
             if (
-                (!this.scopedSweep || this.affectedMessages.has(this.messages[i])) &&
+                (!scopedSweep || this.affectedMessages.has(this.messages[i])) &&
                 !this.messages[i].parts.some(hasMeaningfulPart)
             ) {
+                removed.add(this.messages[i]);
                 this.messages.splice(i, 1);
             }
         }
+        this.pruneServedRows(removed);
 
         this.partsToRemove.clear();
         this.affectedMessages.clear();
+    }
+
+    /** Ask the resolver once per batch so every finalize in a pass sweeps alike. */
+    private resolveScopedSweep(): boolean {
+        if (typeof this.scopedSweep !== "function") return this.scopedSweep;
+        if (this.resolvedScopedSweep === undefined) {
+            this.resolvedScopedSweep = this.scopedSweep({
+                legacy: this.messages.filter((message) => message.parts.some(hasMeaningfulPart)),
+                scoped: this.messages.filter(
+                    (message) =>
+                        !this.affectedMessages.has(message) ||
+                        message.parts.some(hasMeaningfulPart),
+                ),
+            });
+        }
+        return this.resolvedScopedSweep;
+    }
+
+    /**
+     * The array being tagged is not always the array that reaches the provider:
+     * on a pass that trims a compaction prefix, tagging runs over the pre-trim
+     * copy so persisted drops still find rows the trim removed. Splicing only
+     * that copy left the served array holding a message whose parts had all
+     * been removed, and the next pass — which sweeps the served array directly
+     * — removed it, so two passes over the same history served different
+     * arrays. Remove the same rows from both.
+     */
+    private pruneServedRows(removed: ReadonlySet<MessageLike>): void {
+        const served = this.servedMessages;
+        if (!served || served === this.messages || removed.size === 0) return;
+        for (let i = served.length - 1; i >= 0; i -= 1) {
+            if (removed.has(served[i])) served.splice(i, 1);
+        }
     }
 }
 

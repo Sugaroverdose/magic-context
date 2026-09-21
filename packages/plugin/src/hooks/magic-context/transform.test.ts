@@ -65,7 +65,7 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import type { MarkerUpdateOutcome } from "./compaction-marker-manager";
 import { injectM0M1 } from "./inject-compartments";
-import { getSlot, resetLkgSlotsForTest } from "./lkg-slot";
+import { captureSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { __ignoredNotificationTest } from "./send-session-notification";
 import { clearMessageTokensCache, createTransform } from "./transform";
 
@@ -164,18 +164,27 @@ function toolOutput(message: TestMessage, index: number): string {
 }
 
 describe("createTransform", () => {
-    it("adopts scoped tool sweeping only on a priced pass and preserves reasoning-only replay", async () => {
+    it.each([
+        "soft-execute",
+        "explicit-flush",
+        "force-band",
+        "published-history",
+    ])("adopts scoped tool sweeping only on a priced pass and preserves reasoning-only replay (%s)", async (kind) => {
         useTempDataHome("context-transform-scoped-sweep-");
         const sessionId = "ses-scoped-sweep";
         const db = openDatabase();
+        const historyRefreshSessions = new Set<string>();
+        const deferredHistoryRefreshSessions = new Set<string>();
+        const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>();
         let decision: "execute" | "defer" = "defer";
         const makeTransform = () =>
             createTransform({
                 tagger: createTagger(),
                 scheduler: { shouldExecute: () => decision },
-                contextUsageMap: new Map(),
+                contextUsageMap,
                 db,
-                historyRefreshSessions: new Set(),
+                historyRefreshSessions,
+                deferredHistoryRefreshSessions,
                 pendingMaterializationSessions: new Set(),
                 lastHeuristicsTurnId: new Map(),
                 clearReasoningAge: 1000,
@@ -246,7 +255,20 @@ describe("createTransform", () => {
         expect(legacy.some((message) => message.info.id === "sweep-thinking")).toBe(false);
         const sha = (value: unknown) =>
             createHash("sha256").update(JSON.stringify(value)).digest("hex");
-        expect(sha(await run())).toBe(sha(legacy));
+        const capture = (label: string, messages: TestMessage[], previous: TestMessage[]) => {
+            const index =
+                Array.from(
+                    { length: Math.max(messages.length, previous.length) },
+                    (_, i) => i,
+                ).find((i) => JSON.stringify(messages[i]) !== JSON.stringify(previous[i])) ?? -1;
+            console.log(`SCOPED_GATE ${label} sha256=${sha(messages)} first_divergence=${index}`);
+        };
+        capture("legacy-1", legacy, legacy);
+        for (let pass = 2; pass <= 3; pass++) {
+            const replay = await run();
+            capture(`legacy-${pass}`, replay, legacy);
+            expect(sha(replay)).toBe(sha(legacy));
+        }
         const marker = () =>
             String(
                 (
@@ -258,8 +280,52 @@ describe("createTransform", () => {
                 ).ids,
             ).includes("@tool-sweep-scoped");
         expect(marker()).toBe(false);
-        decision = "execute";
+        if (kind === "soft-execute") decision = "execute";
+        if (kind === "explicit-flush") historyRefreshSessions.add(sessionId);
+        if (kind === "force-band")
+            contextUsageMap.set(sessionId, {
+                usage: { percentage: 99, inputTokens: 190000 },
+                updatedAt: Date.now(),
+            });
+        if (kind === "published-history") {
+            // A published compartment plus a pending deferred-history signal:
+            // the next pass rebuilds the injected history head (m[0]) from that
+            // compartment. That rebuild changes bytes the session already paid
+            // to cache, which is what makes the pass cache-busting even though
+            // the scheduler is still deferring.
+            replaceAllCompartments(db, sessionId, [
+                {
+                    sequence: 0,
+                    startMessage: 1,
+                    endMessage: 2,
+                    startMessageId: "sweep-user",
+                    endMessageId: "sweep-tool",
+                    title: "Published history",
+                    content: "Historian published the opening of this session.",
+                },
+            ]);
+            deferredHistoryRefreshSessions.add(sessionId);
+            contextUsageMap.set(sessionId, {
+                usage: { percentage: 95, inputTokens: 190000 },
+                updatedAt: Date.now(),
+            });
+        }
         const priced = await run();
+        capture(kind, priced, legacy);
+        if (kind === "published-history") {
+            // The publication is the fold this pass pays for: the covered
+            // opening is gone and the rendered compartment leads the array.
+            expect(JSON.stringify(priced[0])).toContain("<session-history>");
+            expect(priced.some((message) => message.info.id === "sweep-user")).toBe(false);
+            expect(priced.some((message) => message.info.id === "sweep-tool")).toBe(false);
+            // The dropped owner is spliced from the array that is SERVED, not
+            // only from the copy the tagger walked, so the following defer
+            // passes (which sweep the served array directly) replay it.
+            expect(priced.filter((message) => message.parts.length === 0)).toEqual([]);
+            console.log(
+                `SCOPED_GATE hard fold rematerialized m0; served rows=${priced.length}; empty shells=0`,
+            );
+        }
         expect(
             priced
                 .find((message) => message.info.id === "sweep-thinking")
@@ -267,7 +333,15 @@ describe("createTransform", () => {
         ).toBe(true);
         expect(marker()).toBe(true);
         decision = "defer";
+        historyRefreshSessions.clear();
+        deferredHistoryRefreshSessions.clear();
+        contextUsageMap.clear();
         transform = makeTransform();
+        for (let pass = 1; pass <= 3; pass++) {
+            const replay = await run();
+            capture(`adopted-defer-${pass}`, replay, priced);
+            expect(sha(replay)).toBe(sha(priced));
+        }
         source.push({
             info: { id: "sweep-newest", role: "assistant" },
             parts: [
@@ -278,6 +352,145 @@ describe("createTransform", () => {
         const replay = await run();
         expect(sha(replay.slice(0, priced.length))).toBe(sha(priced));
         expect(replay.some((message) => message.info.id === "sweep-tool")).toBe(false);
+    });
+    it("pre-adoption defer serves the sweep variant each session was last served", async () => {
+        useTempDataHome("context-transform-sweep-lkg-");
+        const db = openDatabase();
+        const makeTransform = (sessionId: string) =>
+            createTransform({
+                tagger: createTagger(),
+                scheduler: { shouldExecute: () => "defer" as const },
+                contextUsageMap: new Map(),
+                db,
+                historyRefreshSessions: new Set(),
+                pendingMaterializationSessions: new Set(),
+                lastHeuristicsTurnId: new Map(),
+                clearReasoningAge: 1000,
+                protectedTokens: 0,
+                historianRunnable: false,
+                liveModelBySession: new Map([
+                    [sessionId, { providerID: "anthropic", modelID: "claude-opus-5" }],
+                ]),
+            });
+        const sourceFor = (sessionId: string): TestMessage[] => [
+            {
+                info: { id: "lkg-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "start" }],
+            },
+            {
+                info: { id: "lkg-tool", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "bash",
+                        callID: "lkg-call",
+                        state: { status: "completed", output: "spent result" },
+                    },
+                ],
+            },
+            ...Array.from(
+                { length: 24 },
+                (_, index): TestMessage => ({
+                    info: { id: `lkg-filler-${index}`, role: index % 2 ? "assistant" : "user" },
+                    parts: [{ type: "text", text: `unchanged ${index}` }],
+                }),
+            ),
+            {
+                info: {
+                    id: "lkg-thinking",
+                    role: "assistant",
+                    finish: "stop",
+                    time: { created: 1, completed: 2 },
+                },
+                parts: [
+                    { type: "step-start", text: "" },
+                    { type: "reasoning", text: "signed reasoning only" },
+                    { type: "step-finish", text: "" },
+                ],
+            },
+            {
+                info: { id: "lkg-notice", role: "user" },
+                parts: [
+                    {
+                        type: "text",
+                        text: "<system-reminder>[BACKGROUND BASH COMPLETED]</system-reminder>",
+                    },
+                ],
+            },
+        ];
+        const sha = (value: unknown) =>
+            createHash("sha256").update(JSON.stringify(value)).digest("hex");
+        const marker = (sessionId: string) =>
+            String(
+                (
+                    db
+                        .prepare(
+                            "SELECT merged_reasoning_stripped_ids AS ids FROM session_meta WHERE session_id = ?",
+                        )
+                        .get(sessionId) as { ids: string }
+                ).ids,
+            ).includes("@tool-sweep-scoped");
+        // Both arms replay the same history on a pass that may not change bytes.
+        // They differ only in what the durable snapshot says was served last.
+        const runArm = async (sessionId: string, lastServedKeepsReasoning: boolean) => {
+            const source = sourceFor(sessionId);
+            const transform = makeTransform(sessionId);
+            const run = async () => {
+                const output = { messages: structuredClone(source) };
+                await transform({}, output);
+                return output.messages;
+            };
+            await run();
+            const tool = getTagsBySession(db, sessionId).find((tag) => tag.type === "tool");
+            expect(tool).toBeDefined();
+            updateTagStatus(db, sessionId, tool!.tagNumber, "dropped");
+            updateTagDropMode(db, sessionId, tool!.tagNumber, "full");
+            const legacy = await run();
+            expect(legacy.some((message) => message.info.id === "lkg-thinking")).toBe(false);
+            expect(marker(sessionId)).toBe(false);
+            const lastServed = lastServedKeepsReasoning
+                ? legacy.flatMap((message) =>
+                      message.info.id === "lkg-notice"
+                          ? [
+                                {
+                                    info: { id: "lkg-thinking", role: "assistant" },
+                                    parts: [{ type: "reasoning", text: "signed reasoning only" }],
+                                },
+                                message,
+                            ]
+                          : [message],
+                  )
+                : legacy;
+            expect(
+                captureSlot(sessionId, {
+                    jsonPrefix: JSON.stringify(lastServed),
+                    inputIdSeq: ["lkg-user"],
+                    inputContentDigests: ["seeded-last-served"],
+                    lastInputMessageId: "lkg-user",
+                    modelKey: "anthropic/claude-opus-5",
+                    providerKey: "anthropic",
+                    capturedAt: Date.now(),
+                }),
+            ).toBe(true);
+            return { legacy, replay: await run() };
+        };
+
+        const old = await runArm("ses-sweep-lkg-old", false);
+        const scoped = await runArm("ses-sweep-lkg-scoped", true);
+        console.log(`SCOPED_GATE lkg replay old=${sha(old.replay)} scoped=${sha(scoped.replay)}`);
+        // Served-under-legacy session keeps being served the legacy array.
+        expect(sha(old.replay)).toBe(sha(old.legacy));
+        expect(old.replay.some((message) => message.info.id === "lkg-thinking")).toBe(false);
+        expect(marker("ses-sweep-lkg-old")).toBe(false);
+        // Served-under-scoped session gets its reasoning-only turn back — that
+        // is a replay of its own bytes — and records the adoption.
+        expect(
+            scoped.replay
+                .find((message) => message.info.id === "lkg-thinking")
+                ?.parts.some((part) => part.type === "reasoning"),
+        ).toBe(true);
+        expect(marker("ses-sweep-lkg-scoped")).toBe(true);
+        expect(sha(old.replay)).not.toBe(sha(scoped.replay));
     });
     async function runMarkerBoundaryFixture(options: {
         name: string;
