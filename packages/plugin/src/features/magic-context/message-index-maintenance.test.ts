@@ -4,11 +4,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { recordMessageFtsRowid } from "./message-fts-rowid-map";
 import {
     MESSAGE_HISTORY_ORPHAN_SAFETY_AGE_MS,
+    MESSAGE_HISTORY_ORPHAN_UNAVAILABLE_REPROBE_MS,
     sweepOrphanedOpenCodeMessageIndexes,
 } from "./message-index";
 import { runMigrations } from "./migrations";
@@ -265,4 +267,59 @@ describe("message history orphan maintenance", () => {
             closeQuietly(db);
         }
     });
+});
+
+/**
+ * The sweep reads OpenCode's session table, which Pi and OMP do not have. That
+ * used to be asserted with a throw, and because the sweep runs early in the
+ * shared maintenance tick, the throw ended the tick before any scheduled task
+ * could be dispatched — on those two hosts the background maintenance stopped
+ * entirely (issue 496). An absent source parks exactly like an unreadable one.
+ */
+describe("message history orphan sweep on a host without an OpenCode store", () => {
+    afterEach(() => {
+        _resetHarnessForTesting();
+    });
+
+    for (const harness of ["pi", "omp"] as const) {
+        test(`parks and re-probes instead of throwing on ${harness}`, () => {
+            setHarness(harness);
+            const db = createStoreDb();
+            const now = 2_000_000_000_000;
+            seedIndexedSession(db, "host-row-kept", now - MESSAGE_HISTORY_ORPHAN_SAFETY_AGE_MS - 1);
+            let openAttempts = 0;
+            const openSource = () => {
+                openAttempts += 1;
+                return null;
+            };
+
+            try {
+                const first = sweepOrphanedOpenCodeMessageIndexes(db, openSource, { now });
+                expect(first).toEqual({
+                    status: "unavailable",
+                    scanned: 0,
+                    deleted: 0,
+                    cursor: "",
+                });
+                // The store this sweep reads is never opened on these hosts.
+                expect(openAttempts).toBe(0);
+
+                // Parked future-dated, so the ordinary cooldown arithmetic
+                // re-probes after a day rather than on the next tick.
+                const parked = sweepOrphanedOpenCodeMessageIndexes(db, openSource, {
+                    now: now + 15 * 60 * 1000,
+                });
+                expect(parked.status).toBe("cooldown");
+                const reprobed = sweepOrphanedOpenCodeMessageIndexes(db, openSource, {
+                    now: now + MESSAGE_HISTORY_ORPHAN_UNAVAILABLE_REPROBE_MS + 1,
+                });
+                expect(reprobed.status).toBe("unavailable");
+
+                // Parking must not touch this host's own indexed rows.
+                expect(countRows(db, "message_history_fts", "host-row-kept")).toBe(1);
+            } finally {
+                closeQuietly(db);
+            }
+        });
+    }
 });

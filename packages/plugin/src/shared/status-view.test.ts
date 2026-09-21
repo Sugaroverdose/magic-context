@@ -224,4 +224,39 @@ describe("status view model", () => {
             "Dreamer",
         ]);
     });
+
+    /**
+     * "Nothing has run lately" and "the background maintenance never got to its
+     * work" used to look identical here — both were simply an old Dreamer
+     * timestamp. The blocked state gets its own row so they cannot be confused
+     * (issue 496).
+     */
+    describe("blocked background maintenance", () => {
+        const failure = {
+            at: NOW - 2 * 3_600_000,
+            stage: "message-history maintenance",
+            message: "orphan sweep cannot read this host store",
+        };
+
+        test("has no row while the maintenance passes are completing", () => {
+            expect(rowLabels("History Compression")).not.toContain("Dreamer blocked");
+            expect(rowLabels("Knowledge", { compactionEnabled: false })).not.toContain(
+                "Dreamer blocked",
+            );
+        });
+
+        test("names the stage that stopped and carries its code", () => {
+            const row = view({ dreamerTickFailure: failure })
+                .sections.find((section) => section.title === "History Compression")
+                ?.rows.find((entry) => entry.label === "Dreamer blocked");
+            expect(row?.value).toBe("message-history maintenance failed 2h ago (MC-D09)");
+            expect(row?.tone).toBe("error");
+        });
+
+        test("is drawn with compaction off too, where the Dreamer row also lives", () => {
+            expect(
+                rowLabels("Knowledge", { compactionEnabled: false, dreamerTickFailure: failure }),
+            ).toContain("Dreamer blocked");
+        });
+    });
 });

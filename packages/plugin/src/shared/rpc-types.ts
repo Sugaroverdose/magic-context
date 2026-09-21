@@ -9,6 +9,7 @@ import type {
     DreamTaskName,
     DreamTaskProgress,
 } from "../features/magic-context/dreamer/task-registry";
+import type { DreamerTickFailure } from "../features/magic-context/dreamer/tick-failure";
 import type { SynapseLaneDescriptor } from "../features/magic-context/memory/embedding-synapse";
 import type { ConfigParseFailure } from "./config-diagnostics";
 import type { LoggerDiagnostics } from "./logger";
@@ -181,6 +182,11 @@ export interface StatusDetail extends SidebarSnapshot {
      * a backlog that never falls. Absent on a host that runs every task.
      */
     dreamerUnsupportedTasks?: DreamTaskName[];
+    /**
+     * The stage that stopped the last background maintenance pass, when one did.
+     * Absent while the maintenance timer is completing its passes.
+     */
+    dreamerTickFailure?: DreamerTickFailure | null;
     /** True when Rust authority has rerouted host tool and historian paths to the module. */
     hostBackendsModuleSide?: boolean;
     /** Host cursor compared with the module changefeed frontier. */

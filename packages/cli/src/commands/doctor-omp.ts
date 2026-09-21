@@ -3,6 +3,10 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
+import {
+    formatDreamerTickFailure,
+    getDreamerTickFailure,
+} from "@magic-context/core/features/magic-context/dreamer/tick-failure";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getMagicContextStorageResolution } from "@magic-context/core/shared/data-path";
 import { loadPiConfig } from "@magic-context/pi-core/config";
@@ -293,6 +297,9 @@ async function runHealthChecks(options: {
                     "fail",
                     `SQLite integrity_check: ${String(integrity?.integrity_check)}\n${formatDatabaseRepairGuidance(dbPath)}`,
                 );
+            const tickFailure = db ? getDreamerTickFailure(db) : null;
+            if (tickFailure) add(results, "warn", formatDreamerTickFailure(tickFailure));
+            else if (db) add(results, "pass", "Background maintenance completed its last pass");
         } catch (error) {
             add(
                 results,

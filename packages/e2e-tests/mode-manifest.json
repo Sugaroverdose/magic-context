@@ -155,6 +155,35 @@
             ]
         },
         {
+            "path": "tests/dreamer-timer-tick.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "the maintenance timer's per-project dispatch is only at risk on the hosts whose sessions live outside the OpenCode store, where the global stage ahead of the loop cannot run (issue 496)",
+            "contract_refs": [
+                "PI-HARNESS"
+            ],
+            "hosts": [
+                "pi",
+                "omp"
+            ],
+            "behavior": true,
+            "divergences": [
+                {
+                    "host": "opencode",
+                    "reason": "the global message-history stage reads this host's own store, so it completes and the per-project loop was never skipped here",
+                    "contract_ref": "PI-HARNESS"
+                },
+                {
+                    "host": "opencode2",
+                    "reason": "the global message-history stage reads this host's own store, so it completes and the per-project loop was never skipped here",
+                    "contract_ref": "PI-HARNESS"
+                }
+            ]
+        },
+        {
             "path": "tests/dropped-input-guard.test.ts",
             "tier": "both-modes",
             "invocation": {

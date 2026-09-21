@@ -13,6 +13,7 @@
  * the token-breakdown palette: those colours identify a context category across
  * the status view AND the sidebar, so they are fixed hex values shared by both.
  */
+import type { DreamerTickFailure } from "../features/magic-context/dreamer/tick-failure";
 import { formatCacheTtlDisplay } from "./cache-ttl-display";
 import { type ConfigParseFailure, formatConfigParseStatusLine } from "./config-diagnostics";
 import { formatThresholdPercent } from "./format-threshold";
@@ -133,6 +134,12 @@ export interface StatusViewSource {
      * backlog that silently never falls.
      */
     readonly dreamerUnsupportedTasks?: readonly string[];
+    /**
+     * Set when the last background maintenance pass stopped before finishing.
+     * Shown so "the dreamer has nothing to do" and "the dreamer never got to
+     * its work" are not the same blank space in this view.
+     */
+    readonly dreamerTickFailure?: DreamerTickFailure | null;
     readonly memoryCount: number;
     readonly sessionNoteCount?: number;
     readonly readySmartNoteCount?: number;
@@ -347,6 +354,7 @@ function historyRows(source: StatusViewSource, now: number): StatusRow[] {
         });
     }
     rows.push(...dreamerUnsupportedRows(source));
+    rows.push(...dreamerTickFailureRows(source, now));
     return rows;
 }
 
@@ -359,6 +367,21 @@ function dreamerUnsupportedRows(source: StatusViewSource): StatusRow[] {
             label: "Dreamer unavailable",
             value: `${unsupported.join(", ")} (${userFacingFailureCode("dream_task_needs_tool_loop")})`,
             tone: "warning",
+        },
+    ];
+}
+
+/** One row naming the stage that stopped the last maintenance pass, if one did. */
+function dreamerTickFailureRows(source: StatusViewSource, now: number): StatusRow[] {
+    const failure = source.dreamerTickFailure;
+    if (!failure) return [];
+    return [
+        {
+            label: "Dreamer blocked",
+            value: `${failure.stage} failed ${formatRelativeTime(failure.at, now)} (${userFacingFailureCode(
+                "dreamer_tick_blocked",
+            )})`,
+            tone: "error",
         },
     ];
 }
@@ -395,6 +418,7 @@ function knowledgeSections(source: StatusViewSource, now: number): StatusSection
         });
     }
     rows.push(...dreamerUnsupportedRows(source));
+    rows.push(...dreamerTickFailureRows(source, now));
     return [{ title: "Knowledge", labelWidth: 23, rows }];
 }
 

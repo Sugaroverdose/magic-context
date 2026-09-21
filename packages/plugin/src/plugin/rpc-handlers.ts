@@ -24,6 +24,10 @@ import {
     type DreamTaskFailureState,
     toolLoopDreamTasks,
 } from "../features/magic-context/dreamer/task-registry";
+import {
+    type DreamerTickFailure,
+    getDreamerTickFailure,
+} from "../features/magic-context/dreamer/tick-failure";
 import { getLocalEmbeddingNativeMemoryStats } from "../features/magic-context/memory/embedding-local";
 import {
     emptyMemoryImportanceHistogram,
@@ -698,6 +702,15 @@ export function buildSidebarSnapshotRpcResponse(
     }
 }
 
+/** The recorded maintenance-tick failure; storage trouble here reports none. */
+function safeTickFailure(db: Database): DreamerTickFailure | null {
+    try {
+        return getDreamerTickFailure(db);
+    } catch {
+        return null;
+    }
+}
+
 export function buildStatusDetail(
     db: Database,
     sessionId: string,
@@ -727,6 +740,10 @@ export function buildStatusDetail(
     const detail: StatusDetail = {
         ...base,
         memoryImportanceHistogram: emptyMemoryImportanceHistogram(),
+        // Not project-scoped: the maintenance timer is one per process, and a
+        // pass that ends early costs every project its work, so this is read
+        // from the shared store rather than from a project's schedule rows.
+        dreamerTickFailure: safeTickFailure(db),
         hostBackendsModuleSide: rustMode,
         memoryMirror: rustMode ? getMemoryMirrorStatus(db, moduleFeedHead) : undefined,
         memoryAuthorityMismatch:

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { recordDreamerTickFailure } from "@magic-context/core/features/magic-context/dreamer/tick-failure";
+import { openDatabase } from "@magic-context/core/features/magic-context/storage";
 import { inspectMagicContextLogs } from "../lib/log-lines";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import { runDoctor } from "./doctor-omp";
@@ -104,6 +106,119 @@ describe("OMP doctor", () => {
         expect(code).toBe(0);
         expect(prompts.messages.join("\n")).toContain("OMP 17.1.7 detected");
         expect(prompts.messages.join("\n")).toContain("FAIL 0");
+    });
+
+    /**
+     * A maintenance pass that stops before its work leaves no failed task and
+     * no changed schedule row, so the doctor is where a user can find out that
+     * the background maintenance is not running at all (issue 496).
+     */
+    it("reports a background maintenance pass that stopped before its work", async () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-tick-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        const configDir = join(root, ".config", "cortexkit");
+        const storageDir = join(root, ".local", "share", "cortexkit", "magic-context");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        mkdirSync(storageDir, { recursive: true });
+        writeFileSync(
+            join(pluginDir, "package.json"),
+            JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
+        );
+        writeFileSync(join(configDir, "magic-context.jsonc"), "{}\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const seeded = openDatabase({ dbPath: join(storageDir, "context.db") });
+        if (!seeded) throw new Error("could not create the test context database");
+        recordDreamerTickFailure(seeded, {
+            at: Date.parse("2026-09-21T09:15:00.000Z"),
+            stage: "message-history maintenance",
+            message: "OpenCode orphan sweep cannot read a omp host store",
+        });
+        seeded.close();
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                listOmpPlugins: () => [
+                    {
+                        name: "@cortexkit/pi-magic-context",
+                        version: "0.42.6",
+                        enabled: true,
+                        path: pluginDir,
+                    },
+                ],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? false : "off") as never,
+                runOmpCommand: () => ({ ok: true, stdout: agentDir, stderr: "" }),
+            },
+        });
+
+        expect(code).toBe(0);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("MC-D09");
+        expect(output).toContain("Background maintenance stopped in message-history maintenance");
+        expect(output).not.toContain("Background maintenance completed its last pass");
+    });
+
+    it("reports a background maintenance pass that completed", async () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-tick-ok-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        const configDir = join(root, ".config", "cortexkit");
+        const storageDir = join(root, ".local", "share", "cortexkit", "magic-context");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        mkdirSync(storageDir, { recursive: true });
+        writeFileSync(
+            join(pluginDir, "package.json"),
+            JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
+        );
+        writeFileSync(join(configDir, "magic-context.jsonc"), "{}\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const seeded = openDatabase({ dbPath: join(storageDir, "context.db") });
+        if (!seeded) throw new Error("could not create the test context database");
+        seeded.close();
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                listOmpPlugins: () => [
+                    {
+                        name: "@cortexkit/pi-magic-context",
+                        version: "0.42.6",
+                        enabled: true,
+                        path: pluginDir,
+                    },
+                ],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? false : "off") as never,
+                runOmpCommand: () => ({ ok: true, stdout: agentDir, stderr: "" }),
+            },
+        });
+
+        expect(code).toBe(0);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("Background maintenance completed its last pass");
+        expect(output).not.toContain("MC-D09");
     });
 
     it("reads the OMP legacy log when no Pi log exists", async () => {

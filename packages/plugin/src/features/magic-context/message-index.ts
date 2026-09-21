@@ -5,7 +5,7 @@ import {
     hasMeaningfulUserText,
 } from "../../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
-import { getHarness } from "../../shared/harness";
+import { getHarness, type HarnessId } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { removeSystemReminders } from "../../shared/system-directive";
@@ -32,7 +32,7 @@ interface MessageHistoryOrphanSweepRow {
 }
 
 export interface MessageHistoryOrphanSweepResult {
-    status: "swept" | "cooldown" | "source_unavailable";
+    status: "swept" | "cooldown" | "source_unavailable" | "unavailable";
     scanned: number;
     deleted: number;
     cursor: string;
@@ -740,15 +740,21 @@ export function ensureMessagesIndexed(
     indexMessagesAfterOrdinal(db, sessionId, messages, lastIndexedOrdinal, messages.length);
 }
 
-function openCodeSweepHarness(): "opencode" | "opencode2" {
-    const harness = getHarness();
-    if (harness === "opencode" || harness === "opencode2") return harness;
-    throw new Error(`OpenCode orphan sweep cannot read a ${harness} host store`);
+/**
+ * True when the running host keeps its sessions in the OpenCode store this
+ * sweep reads. Pi and OMP keep theirs elsewhere, so there is nothing here for
+ * the sweep to compare against — that is an absent source, not an error, and
+ * the caller parks the sweep instead of failing the maintenance pass.
+ */
+function harnessSupportsOpenCodeOrphanSweep(
+    harness: HarnessId,
+): harness is "opencode" | "opencode2" {
+    return harness === "opencode" || harness === "opencode2";
 }
 
 function getMessageHistoryOrphanSweepState(
     db: Database,
-    harness: "opencode" | "opencode2",
+    harness: HarnessId,
 ): MessageHistoryOrphanSweepRow {
     return (
         (db
@@ -763,7 +769,7 @@ function persistMessageHistoryOrphanSweepState(
     db: Database,
     cursor: string,
     lastSweptAt: number | null,
-    harness: "opencode" | "opencode2",
+    harness: HarnessId,
 ): void {
     db.prepare(
         `INSERT INTO message_history_orphan_sweep (harness, cursor_session_id, last_swept_at)
@@ -810,11 +816,27 @@ export function sweepOrphanedOpenCodeMessageIndexes(
         cooldownMs,
         options.unavailableReprobeMs ?? MESSAGE_HISTORY_ORPHAN_UNAVAILABLE_REPROBE_MS,
     );
-    const harness = openCodeSweepHarness();
+    const harness = getHarness();
     const state = getMessageHistoryOrphanSweepState(db, harness);
     const cursor = typeof state.cursor_session_id === "string" ? state.cursor_session_id : "";
     if (typeof state.last_swept_at === "number" && state.last_swept_at + cooldownMs > now) {
         return { status: "cooldown", scanned: 0, deleted: 0, cursor };
+    }
+
+    if (!harnessSupportsOpenCodeOrphanSweep(harness)) {
+        // Same class of problem as the unreadable store below: the source this
+        // sweep needs is not here. Park it future-dated so the normal cooldown
+        // arithmetic re-probes after one day, and report it to the caller
+        // instead of throwing — a throw here aborted the whole maintenance tick
+        // on Pi and OMP, which stopped every scheduled task from running
+        // (issue 496).
+        persistMessageHistoryOrphanSweepState(
+            db,
+            cursor,
+            now + unavailableReprobeMs - cooldownMs,
+            harness,
+        );
+        return { status: "unavailable", scanned: 0, deleted: 0, cursor };
     }
 
     let openCodeDb: Database | null = null;

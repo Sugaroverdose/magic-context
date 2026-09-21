@@ -12,6 +12,10 @@ import { loadRawConfigFile } from "@magic-context/core/config/raw-loader";
 import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
 import { substituteConfigVariables } from "@magic-context/core/config/variable";
 import {
+    formatDreamerTickFailure,
+    getDreamerTickFailure,
+} from "@magic-context/core/features/magic-context/dreamer/tick-failure";
+import {
     type EmbeddingProbeOutcome,
     probeEmbeddingEndpoint,
 } from "@magic-context/core/features/magic-context/memory/embedding-probe";
@@ -724,6 +728,9 @@ async function runHealthChecks(options: {
                 for (const stall of listShadowBackfillStalls(db)) {
                     add(results, "warn", formatShadowBackfillStall(stall));
                 }
+                const tickFailure = getDreamerTickFailure(db);
+                if (tickFailure) add(results, "warn", formatDreamerTickFailure(tickFailure));
+                else add(results, "pass", "Background maintenance completed its last pass");
             }
         } catch (error) {
             if (error instanceof UnsupportedSchemaVersionError) {
