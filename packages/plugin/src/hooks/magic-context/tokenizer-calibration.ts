@@ -231,10 +231,30 @@ const CALIBRATION_TABLE: CalibrationEntry[] = [
 
 const NEUTRAL: ModelCalibration = { systemRatio: 1.0, toolsRatio: 1.0, proseRatio: 1.0 };
 
+/** Version of the static measurements and family-inheritance rules, independent of session usage samples. */
+export const CALIBRATION_TABLE_REVISION = "2026-09-21-family-v1";
+
+export const UNKNOWN_FIT_RATIO = Math.max(
+    2,
+    ...CALIBRATION_TABLE.flatMap((entry) => [
+        entry.systemRatio,
+        entry.toolsRatio,
+        entry.proseRatio ?? 1,
+    ]),
+);
+
+/** Whether the resolver found a measured or family-inherited seed, including neutral measurements. */
+export function hasModelCalibration(
+    providerId: string | undefined,
+    modelId: string | undefined,
+): boolean {
+    return resolveModelCalibration(providerId, modelId) !== NEUTRAL;
+}
+
 /**
  * Look up calibration ratios for a given `providerID/modelID` key. Performs
- * longest-prefix match (case-insensitive). Returns neutral ratios (1.0/1.0)
- * for unknown models so the calibration is a no-op rather than incorrect.
+ * longest-prefix match (case-insensitive), then same-family inheritance.
+ * Unknown models retain neutral decision ratios; fit callers must instead use UNKNOWN_FIT_RATIO.
  */
 export function resolveModelCalibration(
     providerId: string | undefined,
