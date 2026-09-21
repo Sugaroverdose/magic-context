@@ -5743,6 +5743,9 @@ impl McHandler {
                 &boundary_messages,
                 &TriggerContext {
                     boundary: BoundaryContext {
+                        calibration: Some(decision_calibration::DecisionCalibration::for_model(
+                            parsed.model_key.as_deref(),
+                        )),
                         context_limit,
                         // Historian preparation reloads module config independently, but a host-
                         // resolved request threshold is still authoritative for this pass.
@@ -12176,7 +12179,12 @@ impl McHandler {
                 protection_window::pre_snapshot_floor(store.tag_cache_namespace(), session_id)
             })
             .unwrap_or_else(|| protection_window::derive_default_floor(200_000));
-        let window = protection_window::ProtectionWindow::from_persisted_rows(&tags, floor);
+        let window = protection_window::ProtectionWindow::from_persisted_rows_calibrated(
+            &tags,
+            floor,
+            decision_calibration::DecisionCalibration::for_model(Some(&loaded.meta.last_model_key))
+                .tools_ratio,
+        );
         let (deferred, immediate): (Vec<_>, Vec<_>) =
             queueable.iter().copied().partition(|number| {
                 window
@@ -18011,6 +18019,7 @@ mod tests {
 
                 let context = TriggerContext {
                     boundary: BoundaryContext {
+                        calibration: None,
                         context_limit: 200_000.0,
                         execute_threshold_percentage: 65.0,
                         usage_percentage: 70.0,
@@ -18084,6 +18093,7 @@ mod tests {
         let warm_projection = crate::ck_wire::project_messages(&warm_request.messages).unwrap();
         let context = TriggerContext {
             boundary: BoundaryContext {
+                calibration: None,
                 context_limit: 200_000.0,
                 execute_threshold_percentage: 65.0,
                 usage_percentage: 50.0,
@@ -18276,6 +18286,7 @@ mod tests {
             blocks: vec![block("user-6#0", "keep this prompt")],
         });
         let boundary = BoundaryContext {
+            calibration: None,
             context_limit: 1_000.0,
             execute_threshold_percentage: 65.0,
             usage_percentage: 70.0,

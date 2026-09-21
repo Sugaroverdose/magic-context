@@ -4298,9 +4298,11 @@ fn apply_once(
     let protected_tokens_floor = floor_resolution.effective;
     // Pending same-pass mints are not persisted rows yet. Every consumer view below is projected
     // from this one walk over the hydrated mc_tags baseline, independent of the served array.
-    let protection_window = ProtectionWindow::from_persisted_rows(
+    let protection_window = ProtectionWindow::from_persisted_rows_calibrated(
         &tag_rows[..hydrated_tag_count],
         protected_tokens_floor,
+        crate::decision_calibration::DecisionCalibration::for_model(req.model_key.as_deref())
+            .tools_ratio,
     );
     let tag_window_protected_block_ids = protection_window.row_identities.block_ids.clone();
     let exempt_message_protected_block_ids = [mutation_exempt_mid, lineage_anchor_mid]

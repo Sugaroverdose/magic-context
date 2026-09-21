@@ -47,6 +47,8 @@ export function completedToolArcCrossesBoundary(
 
 export interface TrueRawTokenIndexBuildOptions extends TrueRawEstimateOptions {
     cacheNamespace: string;
+    /** Stored totals must already use these same ratios; tokenizer caches remain raw. */
+    calibration?: { proseRatio: number; toolsRatio: number; systemRatio: number };
     /**
      * Durable per-message token source. When provided and it returns a non-null
      * value for a message, that value is used as the message's total instead of
@@ -618,10 +620,18 @@ export function buildTrueRawTokenIndex(
         // estimateTokens of each part), so the prefix sums and cut point are
         // identical to the live path while skipping per-message tokenization.
         const stored = options.storedTotalForMessage?.(message);
-        const total =
-            stored !== undefined && stored !== null
-                ? stored
-                : tokenForMessage(message, options).total;
+        let total: number;
+        if (stored !== undefined && stored !== null) {
+            total = stored;
+        } else {
+            const raw = tokenForMessage(message, options);
+            const seed = options.calibration;
+            total = seed
+                ? (raw.toolInput + raw.toolOutput) * seed.toolsRatio +
+                  (raw.text + raw.reasoning + raw.other) * seed.proseRatio +
+                  raw.image
+                : raw.total;
+        }
         tokensByOrdinal.set(message.ordinal, total);
         idsByOrdinal.set(message.ordinal, message.id);
         // Park the token in the dense span while retaining its absolute ordinal key.

@@ -1,4 +1,5 @@
 import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
+import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
 import {
     loadProtectedTailMeta,
     markProtectedTailPolicyV3Seeded,
@@ -68,6 +69,7 @@ export interface ResolvedBoundaryContext {
      * from the tag store; omitted (→ all-live) when the caller has no tag store.
      */
     storedTokenTotals?: Map<string, number>;
+    calibration?: ReturnType<typeof sessionDecisionCalibration>;
 }
 
 export interface ProtectedTailBoundarySnapshot {
@@ -519,6 +521,7 @@ export function resolveProtectedTailBoundary(
     const index = buildTrueRawTokenIndex(ctx.sessionId, messages, {
         providerShapeVersion: ctx.providerShapeVersion,
         cacheNamespace: ctx.cacheNamespace,
+        calibration: ctx.calibration,
         absoluteMessageCount,
         storedTotalForMessage: storedTotals
             ? (m) => {
@@ -865,12 +868,14 @@ export function resolveBoundaryContext(args: {
     // the boundary indexes raw messages without re-tokenizing 60k+ messages on
     // a cold pass (the 16s→ms win). Best-effort: a store failure just falls back
     // to all-live tokenization.
+    const calibration = sessionDecisionCalibration(args.db, args.sessionId);
     let storedTokenTotals: Map<string, number> | undefined;
     try {
         storedTokenTotals = getAllStatusTagTokenTotalsFlat(
             args.db,
             args.sessionId,
             args.taggerFloor ?? 0,
+            calibration,
         ).totals;
     } catch (error) {
         sessionLog(
@@ -896,6 +901,7 @@ export function resolveBoundaryContext(args: {
         providerShapeVersion: args.providerShapeVersion ?? "opencode-v1",
         cacheNamespace: args.cacheNamespace ?? `opencode:${args.sessionId}`,
         storedTokenTotals,
+        calibration,
     };
 }
 
@@ -918,6 +924,7 @@ export function resolveWrapupProtectedTailBoundary(
     const index = buildTrueRawTokenIndex(ctx.sessionId, messages, {
         providerShapeVersion: ctx.providerShapeVersion,
         cacheNamespace: ctx.cacheNamespace,
+        calibration: ctx.calibration,
         absoluteMessageCount,
         storedTotalForMessage: ctx.storedTokenTotals
             ? (m) => {

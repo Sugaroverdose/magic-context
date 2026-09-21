@@ -137,6 +137,8 @@ pub struct BoundaryMsg {
 /// Inputs for resolving the protected-tail boundary.
 #[derive(Debug, Clone)]
 pub struct BoundaryContext {
+    /// Static class ratios for this decision; original block/cache counts stay raw.
+    pub calibration: Option<crate::decision_calibration::DecisionCalibration>,
     /// Main model context limit in tokens.
     pub context_limit: f64,
     /// Execute threshold percentage used to derive usable context.
@@ -163,6 +165,7 @@ pub struct BoundaryContext {
 impl Default for BoundaryContext {
     fn default() -> Self {
         Self {
+            calibration: None,
             context_limit: 128_000.0,
             execute_threshold_percentage: 65.0,
             usage_percentage: 0.0,
@@ -416,7 +419,7 @@ pub fn resolve_protected_tail_boundary(
     messages: &[BoundaryMsg],
     ctx: &BoundaryContext,
 ) -> BoundaryResolution {
-    let index = TokenIndex::new(messages);
+    let index = TokenIndex::calibrated(messages, ctx.calibration);
     resolve_protected_tail_boundary_with_index(messages, ctx, &index)
 }
 
@@ -738,7 +741,7 @@ pub fn check_compartment_trigger(
     if ctx.compartment_in_progress {
         return no_fire(HistorianNoFireCause::HistorianAlreadyInProgress);
     }
-    let index = TokenIndex::new(messages);
+    let index = TokenIndex::calibrated(messages, ctx.boundary.calibration);
     let mut token_estimator = estimate_tokens;
     check_compartment_trigger_with_index(messages, ctx, &index, &mut token_estimator)
 }
@@ -751,7 +754,7 @@ pub(crate) fn check_compartment_trigger_with_token_estimator(
     if ctx.compartment_in_progress {
         return no_fire(HistorianNoFireCause::HistorianAlreadyInProgress);
     }
-    let index = TokenIndex::new(messages);
+    let index = TokenIndex::calibrated(messages, ctx.boundary.calibration);
     check_compartment_trigger_with_index(messages, ctx, &index, token_estimator)
 }
 
@@ -1036,26 +1039,38 @@ struct TokenIndex {
 
 impl TokenIndex {
     fn new(messages: &[BoundaryMsg]) -> Self {
-        Self::from_block_tokens(messages, |block| block.original_token_count)
+        Self::from_block_tokens(messages, |block| block.original_token_count as f64)
+    }
+
+    fn calibrated(
+        messages: &[BoundaryMsg],
+        seed: Option<crate::decision_calibration::DecisionCalibration>,
+    ) -> Self {
+        let Some(seed) = seed else {
+            return Self::new(messages);
+        };
+        Self::from_block_tokens(messages, |block| {
+            let ratio = match block.kind {
+                SelKind::ToolCall { .. } | SelKind::ToolResult { .. } => seed.tools_ratio,
+                SelKind::Media => 1.0,
+                _ => seed.prose_ratio,
+            };
+            block.original_token_count as f64 * ratio
+        })
     }
 
     #[cfg(test)]
     fn new_retokenized(messages: &[BoundaryMsg]) -> Self {
-        Self::from_block_tokens(messages, |block| estimate_tokens(&block.original))
+        Self::from_block_tokens(messages, |block| estimate_tokens(&block.original) as f64)
     }
 
     fn from_block_tokens(
         messages: &[BoundaryMsg],
-        mut block_tokens: impl FnMut(&BoundaryBlock) -> usize,
+        mut block_tokens: impl FnMut(&BoundaryBlock) -> f64,
     ) -> Self {
         let mut totals_by_ordinal = BTreeMap::new();
         for message in messages {
-            let total = message
-                .blocks
-                .iter()
-                .map(&mut block_tokens)
-                .map(|tokens| tokens as f64)
-                .sum::<f64>();
+            let total = message.blocks.iter().map(&mut block_tokens).sum::<f64>();
             *totals_by_ordinal
                 .entry(message.message_ordinal)
                 .or_insert(0.0) += total;
@@ -2252,6 +2267,7 @@ mod tests {
 
     fn boundary_ctx(json: &BoundaryCtxJson) -> BoundaryContext {
         BoundaryContext {
+            calibration: None,
             context_limit: json.context_limit,
             execute_threshold_percentage: json.execute_threshold_percentage,
             usage_percentage: json.usage_percentage,
@@ -2763,6 +2779,7 @@ mod tests {
                 let mut messages = Vec::new();
                 let mut ctx = TriggerContext {
                     boundary: BoundaryContext {
+                        calibration: None,
                         context_limit: limit,
                         execute_threshold_percentage: threshold,
                         usage_percentage: 75.0,
@@ -2948,6 +2965,7 @@ mod tests {
                 for threshold in [65.0, 75.0] {
                     let ctx = TriggerContext {
                         boundary: BoundaryContext {
+                            calibration: None,
                             context_limit: limit,
                             execute_threshold_percentage: threshold,
                             usage_percentage: percentage,
@@ -3030,6 +3048,7 @@ mod tests {
         for fold_only in [false, true] {
             let mut ctx = TriggerContext {
                 boundary: BoundaryContext {
+                    calibration: None,
                     context_limit: 167_000.0,
                     execute_threshold_percentage: 65.0,
                     usage_percentage: 75.0,
@@ -3070,6 +3089,7 @@ mod tests {
 
     fn ctx_for_tests() -> BoundaryContext {
         BoundaryContext {
+            calibration: None,
             context_limit: 20_000.0,
             execute_threshold_percentage: 50.0,
             usage_percentage: 81.0,
