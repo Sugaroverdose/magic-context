@@ -795,11 +795,12 @@ export async function registerContext(context: V2Context) {
                             .get(draft.sessionID) as { id: string | null } | null
                     )?.id;
                     // Restore only rows after the cached message prefix and before the host
-                    // checkpoint; older rows are already present in the cached messages. For
-                    // a recovered fold without a cached boundary id, start at its persisted
-                    // source position rather than reloading the entire retained session.
+                    // checkpoint; older rows are already present in the cached messages. The
+                    // first fold has no cached prefix, so it starts immediately before the
+                    // first retained seq instead of using an unbounded seq-zero scan.
                     const boundary =
-                        reader.sequenceForId(draft.sessionID, boundaryID) ?? identity.watermark;
+                        reader.sequenceForId(draft.sessionID, boundaryID) ??
+                        (reader.earliestSequence(draft.sessionID) ?? 0) - 1;
                     const present = new Set(draft.messages.map((message) => message.id));
                     const restored = reader
                         .range(draft.sessionID, boundary, cut.seq)

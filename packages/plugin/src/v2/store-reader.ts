@@ -343,6 +343,13 @@ export class V2StoreReader {
         );
     }
 
+    earliestSequence(sessionID: string): number | undefined {
+        const row = this.db
+            .prepare("SELECT MIN(seq) AS seq FROM session_message WHERE session_id = ?")
+            .get(sessionID) as { seq: number | null } | undefined;
+        return typeof row?.seq === "number" ? row.seq : undefined;
+    }
+
     latestSequence(sessionID: string): number {
         const row = this.db
             .prepare("SELECT MAX(seq) AS seq FROM session_message WHERE session_id = ?")
@@ -372,9 +379,9 @@ export class V2StoreReader {
     }
 
     /**
-     * Read every retained row for conversion rebases and explicit diagnostics.
-     * Context passes use messagePage/count/range instead; this must not be their
-     * ordinary source because conversion rebases alone need every part payload.
+     * Read every retained row only for conversions between store generations and
+     * explicit diagnostics, because those operations need every part payload.
+     * Context passes use messagePage, messageCount, and range instead.
      */
     history(sessionID: string): StoreRow[] {
         return trackDecodeOperation("history", () => this.all(sessionID, -1));

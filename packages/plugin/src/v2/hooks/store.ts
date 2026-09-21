@@ -75,9 +75,9 @@ export type V2RawMessageReader = ((sessionID: string) => RawMessage[]) & {
 };
 
 /**
- * The callable full read exists only for a store-generation conversion rebase,
- * which needs every message part to repair part-index tags. Normal context and
- * indexing passes use the attached SQL-bounded page and count methods.
+ * Use the callable full read only when converting data between store generations,
+ * because that repair must inspect every message part to preserve part-index tags.
+ * Normal context and indexing passes use the SQL-bounded page and count methods.
  */
 export function createV2RawMessageReader(openReader: () => V2StoreReader): V2RawMessageReader {
     const read = (sessionID: string) => {
