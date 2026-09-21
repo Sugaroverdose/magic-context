@@ -945,7 +945,9 @@ pub struct HistorianRunSuccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HistorianDriveOutcome {
     Completed(HistorianRunSuccess),
-    Busy(HistorianDurableState),
+    /// Boxed because the durable firing state is several times the size of a
+    /// success and this outcome is returned on every pass that declines.
+    Busy(Box<HistorianDurableState>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1735,7 +1737,7 @@ where
             request.now_ms,
             recent_decision,
         )? {
-            FireOutcome::Busy(state) => return Ok(HistorianDriveOutcome::Busy(state)),
+            FireOutcome::Busy(state) => return Ok(HistorianDriveOutcome::Busy(Box::new(state))),
             FireOutcome::Fired(state) => state,
         };
         if !model_unresolvable_failures.is_empty() {
@@ -2086,7 +2088,7 @@ pub async fn run_historian_firing_on_host(
         request.now_ms,
         recent_decision,
     )? {
-        FireOutcome::Busy(state) => return Ok(HistorianDriveOutcome::Busy(state)),
+        FireOutcome::Busy(state) => return Ok(HistorianDriveOutcome::Busy(Box::new(state))),
         FireOutcome::Fired(state) => state,
     };
     persist_historian_state(request.store, request.session_id, fired.clone())?;
@@ -2094,11 +2096,8 @@ pub async fn run_historian_firing_on_host(
     // The run id is the module's, minted at fire, and never the claimant's. Reusing
     // the producer-session naming keeps one vocabulary for "this firing's run"
     // across both runners.
-    let run_id = historian_producer_session_id(
-        request.project_slug,
-        request.session_id,
-        fired.firing_seq,
-    );
+    let run_id =
+        historian_producer_session_id(request.project_slug, request.session_id, fired.firing_seq);
     let registration = ledger.register(&run_id);
     let queued = request
         .store

@@ -1041,9 +1041,12 @@ mod tests {
             HistorianRunnerKind::Broca
         );
         assert_eq!(
-            merge_tiers(Some(&user), Some(&serde_json::json!({
-                "historian": { "runner": "broca" }
-            })))
+            merge_tiers(
+                Some(&user),
+                Some(&serde_json::json!({
+                    "historian": { "runner": "broca" }
+                }))
+            )
             .historian_runner,
             HistorianRunnerKind::Host,
             "the project tier cannot move the runner in either direction"

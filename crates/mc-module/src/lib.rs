@@ -7310,11 +7310,8 @@ impl McHandler {
             Ok(value) => value,
             Err(outcome) => return outcome,
         };
-        let claimant = match required_run_string(
-            request,
-            "claimant_instance_id",
-            "historian.claim",
-        ) {
+        let claimant = match required_run_string(request, "claimant_instance_id", "historian.claim")
+        {
             Ok(value) => value,
             Err(outcome) => return outcome,
         };
@@ -38138,7 +38135,10 @@ mod tests {
             None,
         )
         .await;
-        let token = claimed["token"].as_str().expect("a claim mints a token").to_string();
+        let token = claimed["token"]
+            .as_str()
+            .expect("a claim mints a token")
+            .to_string();
         assert_eq!(token.len(), 32, "the token is a 16-byte hex digest");
         assert!(
             claimed["claim_deadline_ms"]
@@ -38188,7 +38188,10 @@ mod tests {
         let registration = handler.host_runs.register(CLAIM_RUN_ID);
         drive_claim_wire_case(
             &handler,
-            claim_wire_case(&golden, "a-report-accepted-by-the-firing-that-queued-the-run"),
+            claim_wire_case(
+                &golden,
+                "a-report-accepted-by-the-firing-that-queued-the-run",
+            ),
             Some(&token),
         )
         .await;
@@ -38320,10 +38323,12 @@ mod tests {
         // await budget outlives the lease ceiling, which is what makes a re-claim
         // worth offering at all.
         let queued_at_ms = now_ms() - mc_store::HISTORIAN_LEASE_CEILING_MS - 1;
-        assert!(
-            CLAIM_AWAIT_BUDGET_MS > mc_store::HISTORIAN_LEASE_CEILING_MS,
-            "a lease that outlives its run leaves nothing to re-claim"
-        );
+        const {
+            assert!(
+                CLAIM_AWAIT_BUDGET_MS > mc_store::HISTORIAN_LEASE_CEILING_MS,
+                "a lease that outlives its run leaves nothing to re-claim"
+            )
+        };
         queue_a_run_for_a_claimant(&store, &project_path, queued_at_ms);
 
         let first = store

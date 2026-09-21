@@ -157,7 +157,9 @@ pub enum HistorianReportOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HistorianHeartbeatOutcome {
     /// The lease now runs until this wall-clock time.
-    Extended { claim_deadline_ms: i64 },
+    Extended {
+        claim_deadline_ms: i64,
+    },
     Refused(HistorianReportRefusal),
 }
 
@@ -354,9 +356,7 @@ impl McStore {
         })?;
         Ok(rows
             .into_iter()
-            .filter(|(_, phase, claim_deadline_ms)| {
-                is_claimable(phase, *claim_deadline_ms, now_ms)
-            })
+            .filter(|(_, phase, claim_deadline_ms)| is_claimable(phase, *claim_deadline_ms, now_ms))
             .map(|(run, _, _)| run)
             .collect())
     }
@@ -417,13 +417,11 @@ impl McStore {
                 ));
             }
             if !is_claimable(&phase, claim_deadline_ms, now_ms) {
-                return Ok(HistorianClaimOutcome::Refused(
-                    if phase == PHASE_CLAIMED {
-                        HistorianClaimRefusal::AlreadyClaimed
-                    } else {
-                        HistorianClaimRefusal::NotPending
-                    },
-                ));
+                return Ok(HistorianClaimOutcome::Refused(if phase == PHASE_CLAIMED {
+                    HistorianClaimRefusal::AlreadyClaimed
+                } else {
+                    HistorianClaimRefusal::NotPending
+                }));
             }
 
             let Some((row_version, mut meta)) = load_meta(tx, &session_id)? else {
@@ -503,13 +501,13 @@ impl McStore {
         now_ms: i64,
     ) -> Result<HistorianHeartbeatOutcome, McStoreError> {
         let outcome = self.inner.with_conn_fenced(|tx| {
-            let Some((session_id, stored_token, lease_ms, deadline_ms)) = read_claim(tx, run_id)?
-            else {
+            let Some(claim) = read_claim(tx, run_id)? else {
                 return Ok(HistorianHeartbeatOutcome::Refused(
                     HistorianReportRefusal::UnknownRun,
                 ));
             };
-            let Some(stored_token) = stored_token else {
+            let session_id = claim.session_id;
+            let Some(stored_token) = claim.coordinator_token else {
                 return Ok(HistorianHeartbeatOutcome::Refused(
                     HistorianReportRefusal::NotClaimed,
                 ));
@@ -519,7 +517,7 @@ impl McStore {
                     HistorianReportRefusal::SupersededToken,
                 ));
             }
-            let claim_deadline_ms = now_ms.saturating_add(lease_ms).min(deadline_ms);
+            let claim_deadline_ms = now_ms.saturating_add(claim.lease_ms).min(claim.deadline_ms);
             tx.execute(
                 "UPDATE mc_historian_pending_run
                     SET claim_deadline_ms = ?2, updated_at_ms = ?3
@@ -548,13 +546,13 @@ impl McStore {
         token: &str,
     ) -> Result<HistorianReportOutcome, McStoreError> {
         let outcome = self.inner.with_conn_fenced(|tx| {
-            let Some((session_id, stored_token, _lease_ms, _deadline_ms)) = read_claim(tx, run_id)?
-            else {
+            let Some(claim) = read_claim(tx, run_id)? else {
                 return Ok(HistorianReportOutcome::Refused(
                     HistorianReportRefusal::UnknownRun,
                 ));
             };
-            let Some(stored_token) = stored_token else {
+            let session_id = claim.session_id;
+            let Some(stored_token) = claim.coordinator_token else {
                 return Ok(HistorianReportOutcome::Refused(
                     HistorianReportRefusal::NotClaimed,
                 ));
@@ -594,10 +592,10 @@ impl McStore {
     /// than marked so the queue stays the size of the work actually outstanding.
     pub fn finish_historian_pending_run(&self, run_id: &str) -> Result<bool, McStoreError> {
         let removed = self.inner.with_conn_fenced(|tx| {
-            Ok(tx.execute(
+            tx.execute(
                 "DELETE FROM mc_historian_pending_run WHERE run_id = ?1",
                 params![run_id],
-            )?)
+            )
         })?;
         Ok(removed > 0)
     }
@@ -648,6 +646,48 @@ impl McStore {
     /// The durable historian state for one session, for tests and diagnostics.
     pub fn historian_state(&self, session_id: &str) -> Result<HistorianDurableState, McStoreError> {
         Ok(self.load(session_id)?.meta.historian)
+    }
+}
+
+/// The claim-bearing columns of one queue row.
+struct StoredClaim {
+    session_id: String,
+    /// Absent while no claimant holds the run.
+    coordinator_token: Option<String>,
+    lease_ms: i64,
+    /// When the run itself expires, which caps every lease granted on it.
+    deadline_ms: i64,
+}
+
+fn read_claim(
+    tx: &rusqlite::Transaction<'_>,
+    run_id: &str,
+) -> rusqlite::Result<Option<StoredClaim>> {
+    tx.query_row(
+        "SELECT session_id, coordinator_token, lease_ms, deadline_ms
+           FROM mc_historian_pending_run WHERE run_id = ?1",
+        params![run_id],
+        |row| {
+            Ok(StoredClaim {
+                session_id: row.get(0)?,
+                coordinator_token: row.get(1)?,
+                lease_ms: row.get(2)?,
+                deadline_ms: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// A run is claimable when nobody holds it, or when whoever held it stopped
+/// extending the lease. The expired-lease case is checked here rather than only
+/// in the sweep so a claimant that arrives before the sweep runs is not told the
+/// run is busy when it is in fact abandoned.
+fn is_claimable(phase: &str, claim_deadline_ms: Option<i64>, now_ms: i64) -> bool {
+    match phase {
+        PHASE_PENDING => true,
+        PHASE_CLAIMED => claim_deadline_ms.is_some_and(|deadline| deadline <= now_ms),
+        _ => false,
     }
 }
 
@@ -714,7 +754,10 @@ mod tests {
         assert_eq!(pending[0].run_id, "run-1");
         assert_eq!(pending[0].session_id, "ses");
         assert_eq!(pending[0].deadline_ms, 1_000 + AWAIT_BUDGET_MS);
-        assert_eq!(pending[0].prompt_bytes_len, "sys".len() as u64 + "user".len() as u64);
+        assert_eq!(
+            pending[0].prompt_bytes_len,
+            "sys".len() as u64 + "user".len() as u64
+        );
     }
 
     #[test]
@@ -751,7 +794,10 @@ mod tests {
 
         // One millisecond before either lease ends, nothing is swept.
         let lease_end = 1_000 + HISTORIAN_LEASE_CEILING_MS;
-        assert!(store.expire_historian_claims(lease_end - 1).unwrap().is_empty());
+        assert!(store
+            .expire_historian_claims(lease_end - 1)
+            .unwrap()
+            .is_empty());
 
         // The live claimant extends its lease; the dead one does not.
         let live_token = match store
@@ -868,38 +914,10 @@ mod tests {
             HISTORIAN_LEASE_CEILING_MS,
             "the await budget outliving the ceiling is what leaves a run to re-claim"
         );
-        assert_eq!(historian_lease_ms(0), 1, "a zero lease would be instantly stale");
-    }
-}
-
-fn read_claim(
-    tx: &rusqlite::Transaction<'_>,
-    run_id: &str,
-) -> rusqlite::Result<Option<(String, Option<String>, i64, i64)>> {
-    tx.query_row(
-        "SELECT session_id, coordinator_token, lease_ms, deadline_ms
-           FROM mc_historian_pending_run WHERE run_id = ?1",
-        params![run_id],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        },
-    )
-    .optional()
-}
-
-/// A run is claimable when nobody holds it, or when whoever held it stopped
-/// extending the lease. The expired-lease case is checked here rather than only
-/// in the sweep so a claimant that arrives before the sweep runs is not told the
-/// run is busy when it is in fact abandoned.
-fn is_claimable(phase: &str, claim_deadline_ms: Option<i64>, now_ms: i64) -> bool {
-    match phase {
-        PHASE_PENDING => true,
-        PHASE_CLAIMED => claim_deadline_ms.is_some_and(|deadline| deadline <= now_ms),
-        _ => false,
+        assert_eq!(
+            historian_lease_ms(0),
+            1,
+            "a zero lease would be instantly stale"
+        );
     }
 }
