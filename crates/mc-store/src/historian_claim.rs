@@ -734,6 +734,59 @@ impl McStore {
         Ok(outcome)
     }
 
+    /// Put a run that outlived this process back on offer.
+    ///
+    /// Called by the restart path for a run whose claimant is still out. The row
+    /// survived, so nothing is minted here — the same `run_id`, the same chunk
+    /// fingerprint and the same firing sequence go back on offer, which is what
+    /// makes a re-claim cost one completion instead of a re-assembled chunk.
+    ///
+    /// It is a no-op for a row that is already on offer or already claimed, and it
+    /// refuses to revive a row that carries a report or has outlived its deadline:
+    /// both of those are answers, and re-offering them would buy a second
+    /// completion for a question that is already settled.
+    pub fn republish_parked_historian_run(
+        &self,
+        run_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, McStoreError> {
+        let republished = self.inner.with_conn_fenced(|tx| {
+            let row = tx
+                .query_row(
+                    "SELECT phase, report_kind, deadline_ms, claim_deadline_ms
+                       FROM mc_historian_pending_run WHERE run_id = ?1",
+                    params![run_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((phase, report, deadline_ms, claim_deadline_ms)) = row else {
+                return Ok(false);
+            };
+            if report.is_some() || deadline_ms <= now_ms {
+                return Ok(false);
+            }
+            if is_claimable(&phase, claim_deadline_ms, now_ms) || phase == PHASE_CLAIMED {
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE mc_historian_pending_run
+                    SET phase = ?2, claimant_instance_id = NULL, coordinator_token = NULL,
+                        claim_deadline_ms = NULL, updated_at_ms = ?3
+                  WHERE run_id = ?1",
+                params![run_id, PHASE_PENDING, now_ms],
+            )?;
+            Ok(true)
+        })?;
+        Ok(republished)
+    }
+
     /// The run a session is currently parked on, if it has one.
     ///
     /// Answers the question the restart path asks: this session is not idle and no
@@ -1117,6 +1170,102 @@ mod tests {
                 .unwrap()
                 .and_then(|parked| parked.report),
             None
+        );
+    }
+
+    /// Force a queue row into a phase that is not on offer.
+    ///
+    /// `parked` is the spelling the restart path uses for a run it released, and
+    /// putting it back on offer is what boot-time re-publication has to do. Written
+    /// directly here so the re-publication is proved against that exact value
+    /// rather than only against phases that happen to be claimable already.
+    fn force_phase(store: &McStore, run_id: &str, phase: &str) {
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "UPDATE mc_historian_pending_run SET phase = ?2 WHERE run_id = ?1",
+                    params![run_id, phase],
+                )
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_run_taken_out_of_the_queue_by_a_restart_goes_back_on_offer_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-1", "ses", 1_000);
+        force_phase(&store, "run-1", "parked");
+        assert!(
+            store
+                .list_pending_historian_runs(None, 2_000)
+                .unwrap()
+                .is_empty(),
+            "a parked row is not on offer"
+        );
+
+        assert!(store
+            .republish_parked_historian_run("run-1", 2_000)
+            .unwrap());
+        let offered = store.list_pending_historian_runs(None, 2_000).unwrap();
+        assert_eq!(offered.len(), 1);
+        assert_eq!(offered[0].run_id, "run-1");
+        assert_eq!(
+            offered[0].chunk_fingerprint, "fp",
+            "the same run keeps the chunk it already owns"
+        );
+        assert_eq!(offered[0].deadline_ms, 1_000 + AWAIT_BUDGET_MS);
+
+        // Idempotent: a row that is already on offer is left exactly as it is.
+        assert!(!store
+            .republish_parked_historian_run("run-1", 2_000)
+            .unwrap());
+    }
+
+    #[test]
+    fn a_settled_run_is_never_put_back_on_offer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+
+        // Answered: re-offering would buy a second completion for a settled question.
+        queue_run(&store, "run-answered", "ses-answered", 1_000);
+        let token = claim_token(&store, "run-answered", "install-one", 1_000);
+        store
+            .record_historian_report(
+                "run-answered",
+                &token,
+                &HistorianRunReport::Output {
+                    text: "<compartments/>".to_string(),
+                    length_capped: false,
+                },
+                2_000,
+            )
+            .unwrap();
+        assert!(!store
+            .republish_parked_historian_run("run-answered", 2_000)
+            .unwrap());
+
+        // Past its own deadline: the module has stopped waiting for it.
+        queue_run(&store, "run-expired", "ses-expired", 1_000);
+        force_phase(&store, "run-expired", "parked");
+        assert!(!store
+            .republish_parked_historian_run("run-expired", 1_000 + AWAIT_BUDGET_MS + 1)
+            .unwrap());
+
+        // A claim nobody has given up on is not disturbed.
+        queue_run(&store, "run-live", "ses-live", 1_000);
+        let live_token = claim_token(&store, "run-live", "install-one", 1_000);
+        assert!(!store
+            .republish_parked_historian_run("run-live", 2_000)
+            .unwrap());
+        assert_eq!(
+            store
+                .historian_state("ses-live")
+                .unwrap()
+                .coordinator_token
+                .as_deref(),
+            Some(live_token.as_str())
         );
     }
 

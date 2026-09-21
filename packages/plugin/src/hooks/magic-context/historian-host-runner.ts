@@ -32,6 +32,9 @@ import type { HiddenCompletionExecutor } from "./compartment-runner-types";
  *    replaced, is normal operation for a poller. The answer is always to move on
  *    to the next run, never to retry the same attempt: the module mints the
  *    attempt and the token, so a claimant cannot re-present a claim it has lost.
+ *    A refused HEARTBEAT is the one that ends a run in flight: whatever the code,
+ *    it means the claim this host is working under is over, so the completion is
+ *    abandoned and nothing is reported.
  *
  * 2. **A slow run must not block an unrelated one.** A completion legitimately
  *    takes minutes. Claims are therefore started and then left to run on their
@@ -40,6 +43,13 @@ import type { HiddenCompletionExecutor } from "./compartment-runner-types";
  * 3. **One claim per session at a time.** The module allows one firing per
  *    session anyway; taking a second here would spend a provider call on a run
  *    whose report could never be admitted.
+ *
+ * The loop is per project, and its requests ride a route bound to that project.
+ * The module scopes the lane to the caller's binding, so an unbound caller is
+ * refused and a bound one only ever sees its own project's runs. That matters
+ * here for more than tidiness: a claim hands back the folded transcript, so a
+ * loop that could poll across projects could read another project's
+ * conversation.
  */
 
 /** The four module ops this lane uses. */
@@ -233,6 +243,7 @@ export class HistorianHostRunner {
     private idleCancel: (() => void) | null = null;
     private idlePollsLeft = 0;
     private disabledLogged = false;
+    private pendingRefusalLogged: string | null = null;
     private stopped = false;
 
     constructor(private readonly deps: HistorianHostRunnerDeps) {}
@@ -307,11 +318,25 @@ export class HistorianHostRunner {
             return;
         }
         this.disabledLogged = false;
+        // `v` is read by the module: a request without it, or with a version this
+        // module does not serve, is a bad request rather than something quietly
+        // given v1 semantics.
         const response = await this.deps.call({
             method: "historian.pending",
             sessionId: routeSessionId,
             body: { v: 1 },
         });
+        const refusal = refusalOf(response);
+        if (refusal !== null) {
+            // The lane is scoped to the caller's project binding. A refusal here is
+            // a wiring fault, not a race, so say it once rather than every pass.
+            if (this.pendingRefusalLogged !== refusal) {
+                this.pendingRefusalLogged = refusal;
+                this.log(`the module refused this host's poll: ${refusal}`);
+            }
+            return;
+        }
+        this.pendingRefusalLogged = null;
         const runs = readPendingRuns(response);
         for (const run of runs) {
             if (this.stopped || !this.deps.enabled()) return;
@@ -396,16 +421,16 @@ export class HistorianHostRunner {
         }, budgetMs);
         try {
             const completion = await this.runCompletion(claim, budgetMs, abort.signal);
-            if (heartbeat.superseded) return;
+            if (heartbeat.claimOver) return;
             await this.report(claim, {
                 output: { text: completion.text, length_capped: completion.lengthCapped },
             });
         } catch (error) {
-            // A superseded token ends this claim outright: the run belongs to somebody
-            // else now, and a report under a dead token would be refused before it was
-            // read anyway.
-            if (heartbeat.superseded) {
-                this.log(`run ${claim.runId} dropped: this claim was superseded`);
+            // The module already said this claim is over — replaced, or on a run it
+            // has stopped waiting for. Either way the report would be refused before
+            // it was read, so the only thing left to do is stop.
+            if (heartbeat.claimOver) {
+                this.log(`run ${claim.runId} dropped: the module ended this claim`);
                 return;
             }
             // Shutting down is not a fold failure. Reporting one would abandon the
@@ -428,14 +453,24 @@ export class HistorianHostRunner {
         }
     }
 
+    /**
+     * Say the claim is still alive, and notice when it is not.
+     *
+     * A refusal here is terminal for this run whatever its code says. The module
+     * has three reasons to refuse: the token was replaced (`superseded_token`),
+     * nobody holds the run (`not_claimed`), or the run itself outlived its
+     * deadline (`run_expired` / `not_pending`). All three mean the same thing to a
+     * claimant — the completion in flight can no longer be delivered, so stop
+     * paying for it and do not send a report.
+     */
     private startHeartbeat(
         claim: HistorianHostClaim,
         abort: AbortController,
-    ): { stop: () => void; readonly superseded: boolean } {
+    ): { stop: () => void; readonly claimOver: boolean } {
         const intervalMs = Math.max(1_000, claim.heartbeatIntervalMs);
         let cancel: (() => void) | null = null;
         let stopped = false;
-        const state = { superseded: false };
+        const state = { claimOver: false };
         const beat = async (): Promise<void> => {
             if (stopped) return;
             let response: unknown;
@@ -454,7 +489,7 @@ export class HistorianHostRunner {
             }
             const refusal = refusalOf(response);
             if (refusal !== null) {
-                state.superseded = true;
+                state.claimOver = true;
                 stopped = true;
                 this.log(`heartbeat for ${claim.runId} refused: ${refusal}; abandoning this claim`);
                 abort.abort(new Error(`historian host claim ${claim.runId} was ${refusal}`));
@@ -468,8 +503,8 @@ export class HistorianHostRunner {
                 stopped = true;
                 cancel?.();
             },
-            get superseded() {
-                return state.superseded;
+            get claimOver() {
+                return state.claimOver;
             },
         };
     }

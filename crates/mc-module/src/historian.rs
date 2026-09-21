@@ -2225,7 +2225,13 @@ pub enum HostRunAdoption {
     Failed { run_id: String, code: String },
     /// The run is still out with a claimant and has not outlived its deadline, so
     /// the session keeps its single-flight slot and a later pass looks again.
-    StillOut { run_id: String, deadline_ms: i64 },
+    /// `republished` is true when this pass put a run back on offer that a restart
+    /// had taken out of the queue.
+    StillOut {
+        run_id: String,
+        deadline_ms: i64,
+        republished: bool,
+    },
     /// The run outlived its deadline with no report. It is released and the next
     /// trigger may refire from a freshly assembled chunk.
     Released { run_id: String },
@@ -2277,10 +2283,25 @@ pub fn adopt_historian_run_on_host(
             return Ok(HostRunAdoption::Released { run_id });
         }
         None => {
+            // Put the run back on offer rather than assume it is still there. A
+            // restart can take a row out of the queue while leaving the run itself
+            // alive, and re-offering the SAME row is what keeps the chunk this run
+            // already owns — minting a second run for the same range would pay to
+            // assemble it again and leave two runs racing for one publish slot.
+            let republished = request
+                .store
+                .republish_parked_historian_run(&run_id, request.now_ms)
+                .unwrap_or(false);
+            if republished {
+                eprintln!(
+                    "mc-module: historian run {run_id} put back on offer for a claimant after a restart"
+                );
+            }
             return Ok(HostRunAdoption::StillOut {
                 run_id,
                 deadline_ms: parked.deadline_ms,
-            })
+                republished,
+            });
         }
         Some(report) => report,
     };
@@ -6366,6 +6387,8 @@ mod tests {
             HostRunAdoption::StillOut {
                 run_id: run_id.clone(),
                 deadline_ms,
+                // Already on offer under a live claim: nothing to put back.
+                republished: false,
             }
         );
         assert_eq!(

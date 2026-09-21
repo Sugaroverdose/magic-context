@@ -40,6 +40,8 @@ class FakeClaimLane {
     reports: Array<{ runId: string; body: Record<string, unknown> }> = [];
     now = 1_000;
     leaseMs = 600_000;
+    /** Set to a refusal code to answer every `historian.pending` with it. */
+    refusePending: string | null = null;
 
     queue(args: {
         runId: string;
@@ -80,6 +82,7 @@ class FakeClaimLane {
         const run = this.runs.get(runId);
         switch (args.method) {
             case "historian.pending": {
+                if (this.refusePending) return { ok: false, refusal: this.refusePending };
                 const runs = [...this.runs.entries()]
                     .filter(
                         ([, entry]) =>
@@ -125,6 +128,11 @@ class FakeClaimLane {
                 if (run.token === null) return { ok: false, refusal: "not_claimed" };
                 if (run.token !== args.body.token) {
                     return { ok: false, refusal: "superseded_token" };
+                }
+                // Past the run's own deadline the module has stopped waiting, so the
+                // heartbeat refuses rather than handing back a lease already in the past.
+                if (run.deadlineMs <= this.now) {
+                    return { ok: false, refusal: "run_expired" };
                 }
                 run.claimDeadlineMs = Math.min(this.now + this.leaseMs, run.deadlineMs);
                 return {
@@ -379,6 +387,82 @@ describe("historian host runner", () => {
         expect(logs.some((line) => line.includes("superseded_token"))).toBe(true);
         expect(lane.reports).toHaveLength(0);
         expect(runner.inFlightSessions()).toEqual([]);
+    });
+
+    it("stops the completion when the module says the run itself expired", async () => {
+        const lane = new FakeClaimLane();
+        lane.queue({ runId: "run-a", sessionId: "ses-a" });
+        const { executor, script } = scriptedExecutor();
+        const beats: Array<() => void> = [];
+        const { runner, logs } = runnerOver(lane, {
+            executors: new Map([["ses-a", executor]]),
+            schedule: (callback) => {
+                beats.push(callback);
+                return () => {};
+            },
+        });
+
+        await runner.pump("ses-a");
+        await script.started;
+
+        // The run outlived its own deadline while this host was still working. The
+        // module has stopped waiting, so continuing would be spend against nobody.
+        lane.now = lane.now + 660_001;
+        beats.at(0)?.();
+        await settle();
+        script.fail(new Error("aborted by the loop"));
+        await settle();
+
+        expect(logs.some((line) => line.includes("run_expired"))).toBe(true);
+        expect(lane.reports).toHaveLength(0);
+        expect(runner.inFlightSessions()).toEqual([]);
+    });
+
+    it("says once when the module refuses this host's poll outright", async () => {
+        const lane = new FakeClaimLane();
+        lane.queue({ runId: "run-a", sessionId: "ses-a" });
+        lane.refusePending = "route_unbound";
+        const { executor } = scriptedExecutor();
+        const { runner, logs } = runnerOver(lane, {
+            executors: new Map([["ses-a", executor]]),
+        });
+
+        await runner.pump("ses-a");
+        await runner.pump("ses-a");
+        await settle();
+
+        expect(lane.calls.filter((call) => call.method === "historian.claim")).toHaveLength(0);
+        expect(logs.filter((line) => line.includes("route_unbound"))).toHaveLength(1);
+    });
+
+    it("sends the wire version on every op so the module can refuse an unknown one", async () => {
+        const lane = new FakeClaimLane();
+        lane.queue({ runId: "run-a", sessionId: "ses-a" });
+        const { executor, script } = scriptedExecutor();
+        const beats: Array<() => void> = [];
+        const { runner } = runnerOver(lane, {
+            executors: new Map([["ses-a", executor]]),
+            schedule: (callback) => {
+                beats.push(callback);
+                return () => {};
+            },
+        });
+
+        await runner.pump("ses-a");
+        await script.started;
+        beats.at(0)?.();
+        await settle();
+        script.settle({});
+        await settle();
+
+        const methods = new Set(lane.calls.map((call) => call.method));
+        expect([...methods].sort()).toEqual([
+            "historian.claim",
+            "historian.complete",
+            "historian.heartbeat",
+            "historian.pending",
+        ]);
+        expect(lane.calls.every((call) => call.body.v === 1)).toBe(true);
     });
 
     it("reports a typed failure when every model in the chain refuses", async () => {
