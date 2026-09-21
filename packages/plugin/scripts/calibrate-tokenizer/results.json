@@ -337,5 +337,63 @@
     },
     "error": null,
     "durationMs": 3150
+  },
+  {
+    "method": "tokenizers/estimate-token-count",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "moonshot/kimi-k2.6",
+    "provider": "moonshot",
+    "modelId": "kimi-k2.6",
+    "tokenizerKey": "moonshotai/kimi-k2-0905",
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": 18020,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": 15896,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "/v1/tokenizers/estimate-token-count HTTP 429 (request rejected)",
+    "durationMs": 330
+  },
+  {
+    "method": "tokenizers/estimate-token-count",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "moonshot/kimi-for-coding",
+    "provider": "moonshot",
+    "modelId": "kimi-for-coding",
+    "tokenizerKey": "moonshotai/kimi-k2-0905",
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": 18020,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": 15896,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "/v1/tokenizers/estimate-token-count HTTP 429 (request rejected)",
+    "durationMs": 230
   }
 ]

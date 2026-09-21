@@ -22,9 +22,10 @@ import * as o200kEncoding from "ai-tokenizer/encoding/o200k_base";
 import * as p50kEncoding from "ai-tokenizer/encoding/p50k_base";
 
 import { buildProseProbe } from "./prose";
-import { resolveModelCalibration } from "../../src/hooks/magic-context/tokenizer-calibration";
+import { crossCheck } from "./cross-check";
 import { measureAnthropic } from "./providers/anthropic";
 import { type CountAdapter } from "./providers/counting";
+import { measureKimi } from "./providers/kimi";
 import { measureOpenAI } from "./providers/openai";
 import { measureOpenAICodex } from "./providers/openai-codex";
 import { measureOpenAICompatible } from "./providers/openai-compatible";
@@ -36,6 +37,7 @@ interface AuthFile {
 }
 
 const FREE_ADAPTERS: Record<string, { measure: CountAdapter; method: string; env: string; file: string }> = {
+    moonshot: { measure: measureKimi, method: "tokenizers/estimate-token-count", env: "MOONSHOT_API_KEY", file: "kimi.key" },
     openai: { measure: measureOpenAI, method: "responses/input_tokens", env: "OPENAI_API_KEY", file: "openai.key" },
 };
 
@@ -293,6 +295,12 @@ function parseArgs(): { only: string | null; providers: string[] | null } {
     return { only, providers };
 }
 
+function writeResults(path: string, results: MeasurementResult[]): void {
+    const previous = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as MeasurementResult[] : [];
+    const measuredLabels = new Set(results.map((row) => row.label));
+    writeFileSync(path, JSON.stringify([...previous.filter((row) => !measuredLabels.has(row.label)), ...results], null, 2), "utf8");
+}
+
 async function main(): Promise<void> {
     const { only, providers } = parseArgs();
     const here = new URL(".", import.meta.url).pathname;
@@ -347,22 +355,18 @@ async function main(): Promise<void> {
         }
         results.push(r);
         console.log(`method=${r.method}, proseRatio=${r.proseRatio ?? "skipped"}`, r.proseSections);
-        if (!r.error && r.method === "count_tokens" && ["claude-opus-4-7", "claude-sonnet-4-6"].includes(test.modelId)) {
-            const shipped = resolveModelCalibration(test.provider, test.modelId);
-            const systemDelta = (r.systemTokens.api ?? 0) / r.systemTokens.local_raw / shipped.systemRatio - 1;
-            const toolsDelta = (r.toolsTokens.api ?? 0) / r.toolsTokens.local_raw / shipped.toolsRatio - 1;
-            console.log(`Cross-check delta: system=${systemDelta * 100}%, tools=${toolsDelta * 100}%`);
-            if (Math.abs(systemDelta) > 0.05 || Math.abs(toolsDelta) > 0.05) {
-                writeFileSync(join(here, "results.json"), JSON.stringify(results, null, 2));
+        const check = !r.error && r.method !== "usage" ? crossCheck(test.provider, test.modelId, (r.systemTokens.api ?? 0) / r.systemTokens.local_raw, (r.toolsTokens.api ?? 0) / r.toolsTokens.local_raw) : null;
+        if (check) {
+            console.log(`Cross-check delta: system=${check.systemDelta * 100}%, tools=${check.toolsDelta * 100}%`);
+            if (check.failed) {
+                writeResults(join(here, "results.json"), results);
                 throw new Error("Cross-check exceeds 5%; stopped without changing calibration table");
             }
         }
     }
 
     const outPath = join(here, "results.json");
-    const previous = existsSync(outPath) ? JSON.parse(readFileSync(outPath, "utf8")) as MeasurementResult[] : [];
-    const measuredLabels = new Set(results.map((row) => row.label));
-    writeFileSync(outPath, JSON.stringify([...previous.filter((row) => !measuredLabels.has(row.label)), ...results], null, 2), "utf-8");
+    writeResults(outPath, results);
     console.log(`\nWrote ${outPath}`);
 
     // Summary
