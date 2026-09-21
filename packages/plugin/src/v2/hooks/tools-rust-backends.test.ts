@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parsePluginConfig } from "../../config";
 import {
-    closeDatabase,
     type ContextDatabase,
+    closeDatabase,
     openDatabase,
 } from "../../features/magic-context/storage";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";

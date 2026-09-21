@@ -14,10 +14,12 @@ describe("misplaced agent model warning", () => {
     it("is what a top-level historian.model actually resolves to", () => {
         // The premise, asserted rather than assumed: if this ever starts
         // resolving, the warning below becomes wrong and should be deleted.
-        expect(resolveHistorianModel({ historian: { model: "openai/gpt-5" } }, "opencode")).toEqual({
-            primary: undefined,
-            fallbacks: [],
-        });
+        expect(resolveHistorianModel({ historian: { model: "openai/gpt-5" } }, "opencode")).toEqual(
+            {
+                primary: undefined,
+                fallbacks: [],
+            },
+        );
     });
 
     it("warns when the model sits outside every harness block", () => {
