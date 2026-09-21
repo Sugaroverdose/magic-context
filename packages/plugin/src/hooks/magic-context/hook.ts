@@ -12,14 +12,6 @@ import {
 } from "../../config/schema/magic-context";
 import type { ResolvedTransformMode } from "../../config/transform-mode";
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
-import {
-    applyMirroredNoteCompileFields,
-    applyTargetedMemoryMirrorRow,
-    drainMirrorPages,
-    ensureContextStoreUuid,
-    getModuleNoteEvaluationBridge,
-    registerModuleNoteEvaluationBridge,
-} from "../../features/magic-context/context-authority";
 import { openOpenCodeDb } from "../../features/magic-context/dreamer/open-opencode-db";
 import { OpenCodeRetrospectiveRawProvider } from "../../features/magic-context/dreamer/retrospective-raw-provider";
 import {
@@ -35,15 +27,11 @@ import {
     clearHookInitFailure,
     recordHookInitFailure,
 } from "../../features/magic-context/fail-closed-block";
-import { reembedMirrorInvalidatedMemories } from "../../features/magic-context/memory/mirror-reembed";
 import {
     resolveProjectIdentityForSession,
     takeDubiousOwnershipProjectIdentityWarning,
 } from "../../features/magic-context/memory/project-identity";
-import {
-    embedUnembeddedMemoriesForProject,
-    getEmbeddingCoverageStatus,
-} from "../../features/magic-context/project-embedding-registry";
+import { getEmbeddingCoverageStatus } from "../../features/magic-context/project-embedding-registry";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
     getDatabasePersistenceError,
@@ -62,11 +50,6 @@ import { getCurrentToolSetHash } from "../../features/magic-context/tool-definit
 import type { ContextUsage } from "../../features/magic-context/types";
 import { bootQuietRemainingMs, scheduleAfterBootQuiet } from "../../plugin/boot-quiet";
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "../../plugin/embedding-bootstrap";
-import {
-    moduleMemoryOperation,
-    translateHostMemoryIds,
-    translateModuleMemoryMutationReply,
-} from "../../plugin/memory-id-translation";
 import { buildStatusDetail } from "../../plugin/rpc-handlers";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../plugin/types";
@@ -107,6 +90,7 @@ import { clearInjectionCache } from "./inject-compartments";
 import { createDbLkgPersistence } from "./lkg-persist";
 import { dropSlot, registerLkgPersistence } from "./lkg-slot";
 import { createSubcModuleClient } from "./module-client";
+import { createModuleToolBackends } from "./module-tool-backends";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { ManagedRecompContext } from "./recomp-orchestrator";
 import { runManagedRecomp } from "./recomp-orchestrator";
@@ -247,38 +231,6 @@ function notifyMagicContextDisabled(client: PluginContext["client"], reason: str
         .catch((error) => {
             log("[magic-context] failed to show disabled toast:", error);
         });
-}
-
-function moduleNoteRowId(response: unknown, depth = 0): number | null {
-    if (depth > 4 || response === null || response === undefined) return null;
-    if (typeof response === "string") {
-        const match = response.match(/\b(?:smart\s+)?note\s+#(\d+)/i);
-        return match ? Number(match[1]) : null;
-    }
-    if (Array.isArray(response)) {
-        for (const item of response) {
-            const id = moduleNoteRowId(item, depth + 1);
-            if (id !== null) return id;
-        }
-        return null;
-    }
-    if (typeof response !== "object") return null;
-    const record = response as Record<string, unknown>;
-    return (
-        moduleNoteRowId(record.result, depth + 1) ??
-        moduleNoteRowId(record.content, depth + 1) ??
-        moduleNoteRowId(record.text, depth + 1)
-    );
-}
-
-function moduleNoteResponseIsError(response: unknown, depth = 0): boolean {
-    if (depth > 4 || response === null || typeof response !== "object") return false;
-    if (Array.isArray(response)) {
-        return response.some((item) => moduleNoteResponseIsError(item, depth + 1));
-    }
-    const record = response as Record<string, unknown>;
-    if (record.isError === true || record.ok === false || record.error !== undefined) return true;
-    return moduleNoteResponseIsError(record.result, depth + 1);
 }
 
 export function createMagicContextHook(deps: MagicContextDeps) {
@@ -701,299 +653,18 @@ export function createMagicContextHook(deps: MagicContextDeps) {
               client: deps.client,
           })
         : undefined;
-    const syncModuleDomain = async (
-        domain: "memories" | "notes",
-        pageBudget?: number,
-    ): Promise<void> => {
-        if (!rustModeModuleClient?.mirrorPull) return;
-        await drainMirrorPages({
-            db,
-            module: rustModeModuleClient,
-            domain,
-            limit: 1000,
-            pageBudget,
-        });
-    };
-    const syncModuleNotes = (): Promise<void> => syncModuleDomain("notes");
-    const syncModuleMemoryIdentity = async (
-        moduleProject: string,
-        moduleRowId: number,
-        projectRoot: string,
-    ): Promise<void> => {
-        if (!rustModeModuleClient?.mirrorMemory) return;
-        const { row } = await rustModeModuleClient.mirrorMemory({
-            module_row_id: moduleRowId,
-            projectRoot,
-        });
-        if (!row) return;
-        const identity = applyTargetedMemoryMirrorRow({ db, row });
-        if (!identity || !rustModeModuleClient.memoryIdentityAck) return;
-        await rustModeModuleClient.memoryIdentityAck({
-            project: moduleProject,
-            projectRoot,
-            rows: [
-                {
-                    module_row_id: moduleRowId,
-                    context_row_id: identity.contextRowId,
-                },
-            ],
-        });
-    };
-    const rustToolBackends: RustToolBackends | undefined =
-        deps.config.transform_mode === "rust" && rustModeModuleClient
-            ? {
-                  authorityState: async ({ projectPath, projectRoot, sessionId, domain }) => {
-                      if (!rustModeModuleClient.authorityStatus) return null;
-                      const result = await rustModeModuleClient.authorityStatus({
-                          context_store_uuid: ensureContextStoreUuid(db),
-                          project: projectPath,
-                          projectRoot,
-                          sessionId,
-                          domain,
-                      });
-                      return result.authority?.state ?? null;
-                  },
-                  reduce: ({ sessionId, projectRoot, drop, commandId }) =>
-                      rustModeModuleClient.call({
-                          sessionId,
-                          projectRoot,
-                          method: "agent_drops.append",
-                          body: {
-                              method: "agent_drops.append",
-                              v: 1,
-                              session_id: sessionId,
-                              drop,
-                              command_id: commandId,
-                          },
-                      }),
-                  note: async ({
-                      commandId,
-                      sessionId,
-                      projectRoot,
-                      memoryProject,
-                      action,
-                      content,
-                      surfaceCondition,
-                      compiledProvider,
-                      compiledConfig,
-                      compiledAt,
-                      compileStatus,
-                      filter,
-                      limit,
-                      offset,
-                      noteIds,
-                  }) => {
-                      const response = await rustModeModuleClient.call({
-                          sessionId,
-                          projectRoot,
-                          method: "ctx_note",
-                          body: {
-                              name: "ctx_note",
-                              arguments: {
-                                  ...(commandId ? { command_id: commandId } : {}),
-                                  action,
-                                  content,
-                                  memory_project: memoryProject,
-                                  surface_condition: surfaceCondition,
-                                  compiled_provider: compiledProvider,
-                                  compiled_config: compiledConfig,
-                                  compiled_at: compiledAt,
-                                  compile_status: compileStatus,
-                                  filter,
-                                  limit,
-                                  offset,
-                                  note_ids: noteIds,
-                              },
-                          },
-                      });
-                      // The module is authoritative, but context.db remains the local
-                      // read model for note nudges and dashboard/RPC consumers.
-                      await syncModuleNotes();
-                      if (compileStatus && !moduleNoteResponseIsError(response)) {
-                          const moduleRowId =
-                              action === "write"
-                                  ? moduleNoteRowId(response)
-                                  : (noteIds?.[0] ?? null);
-                          if (
-                              moduleRowId === null ||
-                              !applyMirroredNoteCompileFields({
-                                  db,
-                                  moduleProject: memoryProject,
-                                  moduleRowId,
-                                  fields: {
-                                      compiledProvider: compiledProvider ?? null,
-                                      compiledConfig: compiledConfig ?? null,
-                                      compiledAt: compiledAt ?? null,
-                                      compileStatus,
-                                  },
-                              })
-                          ) {
-                              throw new Error(
-                                  "Rust note was written but its host compilation metadata could not be mirrored",
-                              );
-                          }
-                      }
-                      return response;
-                  },
-                  memory: async ({
-                      commandId,
-                      sessionId,
-                      projectRoot,
-                      memoryProject,
-                      action,
-                      content,
-                      category,
-                      ids,
-                      reason,
-                      limit,
-                  }) => {
-                      const hostIds = ids ?? [];
-                      const translatedIds = translateHostMemoryIds(db, hostIds);
-                      if ("error" in translatedIds) return translatedIds.error;
-                      const moduleIds = translatedIds.moduleIds;
-                      const response = await rustModeModuleClient.call({
-                          sessionId,
-                          projectRoot,
-                          method: "ctx_memory",
-                          body: {
-                              name: "ctx_memory",
-                              arguments: {
-                                  ...(commandId ? { command_id: commandId } : {}),
-                                  action,
-                                  content,
-                                  category,
-                                  ids: moduleIds,
-                                  host_ids: hostIds,
-                                  memory_id_lane: "host",
-                                  reason,
-                                  limit,
-                                  memory_project: memoryProject,
-                              },
-                          },
-                      });
-                      // Pull the rows this call touched before anything reads the host
-                      // copy. A fresh canonical row can sit behind a large cursor backlog,
-                      // so the agent reply needs a bounded path to its host id; an edited
-                      // row needs its new content on the host before the embedding pass
-                      // below, or that pass embeds content the mirror is about to replace
-                      // and the replacement silently drops the vector. The ordinary memory
-                      // drain remains on the transform-pass cadence.
-                      const operation = moduleMemoryOperation(response);
-                      const touchedModuleRowIds = new Set<number>();
-                      if (action === "update" || action === "archive" || action === "merge") {
-                          for (const moduleId of moduleIds) touchedModuleRowIds.add(moduleId);
-                      }
-                      if (operation?.action === "write" && operation.module_id !== undefined) {
-                          touchedModuleRowIds.add(operation.module_id);
-                      }
-                      if (operation?.action === "merge") {
-                          if (operation.canonical_module_id !== undefined) {
-                              touchedModuleRowIds.add(operation.canonical_module_id);
-                          }
-                          for (const supersededId of operation.superseded_module_ids ?? []) {
-                              touchedModuleRowIds.add(supersededId);
-                          }
-                      }
-                      for (const moduleRowId of touchedModuleRowIds) {
-                          // One unpullable row (a merge source the module already
-                          // retired, say) must not skip the rows after it.
-                          try {
-                              await syncModuleMemoryIdentity(
-                                  memoryProject,
-                                  moduleRowId,
-                                  projectRoot,
-                              );
-                          } catch (error) {
-                              log("[magic-context] targeted memory mirror sync failed:", error);
-                          }
-                      }
-                      if (
-                          !moduleNoteResponseIsError(response) &&
-                          (action === "write" ||
-                              action === "update" ||
-                              action === "archive" ||
-                              action === "merge")
-                      ) {
-                          // TypeScript memory writes queue embedding work immediately.
-                          // The Rust path must do the same after publishing its memory.
-                          void (async () => {
-                              await ensureProjectRegisteredFromOpenCodeDirectory(projectRoot, db);
-                              // An edit that changed content left the host row without an
-                              // embedding when it mirrored back; re-embed before looking for
-                              // anything else still missing one.
-                              await reembedMirrorInvalidatedMemories(db);
-                              const embedded = await embedUnembeddedMemoriesForProject(
-                                  db,
-                                  memoryProject,
-                              );
-                              if (embedded > 0) {
-                                  log(
-                                      `[magic-context] proactively embedded ${embedded} mirrored ${embedded === 1 ? "memory" : "memories"} for project ${memoryProject}`,
-                                  );
-                              }
-                          })().catch((error) => {
-                              log("[magic-context] mirrored memory embedding failed:", error);
-                          });
-                      }
-                      return (
-                          translateModuleMemoryMutationReply({
-                              db,
-                              moduleProject: memoryProject,
-                              response,
-                              requestedHostIds: hostIds,
-                              requestedCategory: category,
-                          }) ?? response
-                      );
-                  },
-                  noteEvaluationAvailable: (evaluationProjectPath: string) =>
-                      getModuleNoteEvaluationBridge(evaluationProjectPath) !== undefined,
-                  memorySync: (sessionId: string) => {
-                      rustMemorySyncRequestedSessions.add(sessionId);
-                  },
-              }
-            : undefined;
-    // Bridges are per resolved project, and sessions can resolve projects other
-    // than the plugin's launch directory (a /cd switch, multi-project hosts).
-    // Registration is therefore an idempotent ensure invoked for every project
-    // that reaches rust-mode preparation, not a one-shot at construction.
+    // The facades that let the host's own tools write through the module are
+    // built in one place both host lanes call, so a facade cannot be present on
+    // one host and silently missing on the other.
+    const moduleToolBackends = createModuleToolBackends({
+        db,
+        moduleClient: rustModeModuleClient,
+        directory: deps.directory,
+        memorySyncRequestedSessions: rustMemorySyncRequestedSessions,
+    });
+    const rustToolBackends: RustToolBackends | undefined = moduleToolBackends?.backends;
     const ensureModuleNoteEvaluationBridge = (bridgeProjectPath: string): void => {
-        if (!rustModeModuleClient?.mirrorPull) return;
-        if (getModuleNoteEvaluationBridge(bridgeProjectPath)) return;
-        registerModuleNoteEvaluationBridge(bridgeProjectPath, {
-            sync: syncModuleNotes,
-            async evaluate({ contextNoteId, sessionId, verdict }): Promise<void> {
-                const identity = db
-                    .prepare(
-                        `SELECT identity.module_row_id, revision.status_version
-                           FROM mirror_identity identity
-                           JOIN mirror_note_revisions revision
-                             ON revision.module_project = identity.module_project
-                            AND revision.module_row_id = identity.module_row_id
-                          WHERE identity.domain = 'notes' AND identity.module_project = ?
-                            AND identity.context_row_id = ?`,
-                    )
-                    .get(bridgeProjectPath, contextNoteId) as
-                    | { module_row_id: number; status_version: number }
-                    | undefined;
-                if (!identity) {
-                    throw new Error(`module identity is missing for smart note ${contextNoteId}`);
-                }
-                await rustModeModuleClient.call({
-                    sessionId,
-                    projectRoot: deps.directory,
-                    method: "note.evaluate",
-                    body: {
-                        method: "note.evaluate",
-                        v: 1,
-                        session_id: sessionId,
-                        note_id: identity.module_row_id,
-                        source_revision: identity.status_version,
-                        verdict,
-                    },
-                });
-                await syncModuleNotes();
-            },
-        });
+        moduleToolBackends?.ensureNoteEvaluationBridge(bridgeProjectPath);
     };
     ensureModuleNoteEvaluationBridge(projectPath);
     const notifyRustModeParked = (sessionId: string, message: string): void => {

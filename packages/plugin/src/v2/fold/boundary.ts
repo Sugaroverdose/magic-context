@@ -81,15 +81,14 @@ export function createV2RustCompactionMarkerStrategy(
             }
             // THIS RECORD HAS READERS — it is not bookkeeping for its own sake.
             // Three places read it back, and deleting the write breaks all three:
-            //   1. the post-fold restore in src/v2/hooks/context.ts, which uses
+            //   1. `trimToRecordedBoundary` below, which is what bounds the array
+            //      handed to the module on a host that wrote no compaction row;
+            //   2. the post-fold restore in src/v2/hooks/context.ts, which uses
             //      `boundaryMessageId` to bound how much pre-cut history it puts
             //      back behind the host's compaction cut;
-            //   2. `markerAt` / `persistedBoundaryOrdinal` in
+            //   3. `markerAt` / `persistedBoundaryOrdinal` in
             //      hooks/magic-context/rust-mode-transform.ts, which report the
-            //      boundary on the coverage line and gate note-nudge publication;
-            //   3. the compaction-hook answer in src/v2/hooks/context.ts, which
-            //      only checkpoints the host when `boundaryOrdinal` has moved
-            //      past the last boundary it answered with.
+            //      boundary on the coverage line and gate note-nudge publication.
             const state: PersistedCompactionMarkerState = {
                 boundaryMessageId: boundary.id,
                 // OpenCode 2 writes no summary message and no parts for it. The
@@ -109,4 +108,40 @@ export function createV2RustCompactionMarkerStrategy(
             return { kind: "applied", markerOrdinal: pending.ordinal };
         },
     };
+}
+
+/**
+ * Drop everything before the recorded boundary from the array about to be sent.
+ *
+ * This is the trim OpenCode 1 gets for free from its compaction row. OpenCode 2
+ * writes such a row only when it decides to compact, and a healthy Rust-mode
+ * session folds before the host's own trigger is ever reached — so on the normal
+ * path there is no host cut and this is the ONLY thing that keeps a folded
+ * session from handing the module its whole history again on every later turn.
+ * Measured with it removed: the array handed to the module grew from 15 to 53
+ * messages over twenty post-fold turns while the boundary stood still.
+ *
+ * It is silent when the host HAS cut, because the boundary message is then
+ * already gone from the array. An earlier pass mutated it under a fixture whose
+ * mock reported a constant usage — which kept the host compacting on every turn,
+ * and therefore always cutting — and concluded from the silence that it never
+ * fires at all.
+ *
+ * Returns the number of messages removed. A boundary that is not in the array is
+ * left alone: it either has not been reached yet or belongs to history the host
+ * has already dropped, and guessing in either direction would change what the
+ * model sees.
+ */
+export function trimToRecordedBoundary(
+    db: ContextDatabase,
+    sessionId: string,
+    messages: Array<{ id?: string }>,
+): number {
+    const marker = getPersistedCompactionMarkerState(db, sessionId);
+    const boundaryId = marker?.boundaryMessageId;
+    if (!boundaryId) return 0;
+    const start = messages.findIndex((message) => message.id === boundaryId);
+    if (start <= 0) return 0;
+    messages.splice(0, start);
+    return start;
 }

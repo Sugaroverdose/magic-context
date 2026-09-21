@@ -1,16 +1,21 @@
 /// <reference types="bun-types" />
 
 /**
- * Who decides when a Rust-mode session on OpenCode 2 folds.
+ * What a fold buys a Rust-mode session on OpenCode 2, measured on the real host.
  *
- * Two clocks run in this lane and they are not the same clock. The host fires
- * its `compaction` hook off the usage IT measures — the history it has stored
- * for the session — while Magic Context folds off what the module measures, the
- * true-raw mass of the conversation it is actually serving. Once a long session
- * crosses the host's trigger, the host keeps asking on every turn; the module
- * folds far less often than that. This file pins the rule that resolves the two:
- * the hook is a trigger Magic Context answers, not a command it obeys, so a
- * checkpoint is written when the module's boundary moves and not otherwise.
+ * Two facts meet here. The host decides to compact from the usage reported for
+ * the request Magic Context actually served, so a fold that shrinks the served
+ * array is what takes the host back below its own trigger. And this host's
+ * `compaction` hook must be ANSWERED: leaving `result` unset is not a polite
+ * decline, it makes the host summarize with its own model and, when that answer
+ * is not in the template it requires, record `compaction.failed` and end the
+ * turn. So the checkpoint the host stores has to be Magic Context's own
+ * baseline, on every request, or the session either stalls or starts carrying a
+ * summary of history the module never served.
+ *
+ * The mock therefore reports usage proportional to the bytes it received, the
+ * way a provider does. A fixed usage number would keep the host above its
+ * trigger for ever and make the cadence below unmeasurable.
  *
  * Its own file on purpose: each scenario boots a hermetic daemon, a module and a
  * GA host, and two such stacks in one Bun process do not both come up. The rust
@@ -61,24 +66,35 @@ function readCoverage(logPath: string): Array<{ ocInput: number; markerAt: strin
 }
 
 /**
- * `v2 compaction hook: fired answered=… …` — one line per host request.
+ * `v2 compaction hook: fired answered=… source=…` — one line per host request.
  *
- * This is the instrument the whole file turns on: the host's firing rate and
- * Magic Context's answering rate are separate facts, and only reading both
- * explains a session's checkpoint cadence.
+ * The host's request rate and what Magic Context answered with are separate
+ * facts, and only reading both explains a session's checkpoint cadence.
  */
-function readHookFires(logPath: string): Array<{ answered: boolean; reason: string }> {
+function readHookFires(logPath: string): Array<{ answered: boolean; source: string }> {
     return logLines(logPath, "v2 compaction hook: ").map((body) => ({
         answered: field(body, "answered") === "true",
-        reason: field(body, "reason"),
+        source: field(body, "source"),
     }));
 }
 
-/** Completed host checkpoints, read from the store the host actually wrote. */
+/**
+ * The plugin buffers its diagnostic log and the host finishes a turn after the
+ * prompt call returns, so a read taken straight after a loop of prompts can miss
+ * most of it. Wait for the passes those turns produce before reading anything.
+ */
+async function waitForCoverage(logPath: string, atLeast: number): Promise<void> {
+    const deadline = Date.now() + 120_000;
+    while (readCoverage(logPath).length < atLeast && Date.now() < deadline) {
+        await Bun.sleep(250);
+    }
+}
+
+/** Host checkpoints, read from the store the host actually wrote. */
 function compactionRows(
     dbPath: string,
     sessionId: string,
-): Array<{ seq: number; status: string; summary: string }> {
+): Array<{ seq: number; status: string; summary: string; error: string }> {
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
         return (
@@ -89,13 +105,35 @@ function compactionRows(
                 )
                 .all(sessionId) as Array<{ seq: number; data: string }>
         ).map((row) => {
-            const data = JSON.parse(row.data) as { status?: string; summary?: string };
+            const data = JSON.parse(row.data) as {
+                status?: string;
+                summary?: string;
+                error?: { message?: string };
+            };
             return {
                 seq: row.seq,
                 status: String(data.status ?? ""),
-                summary: String(data.summary ?? "").slice(0, 120),
+                summary: String(data.summary ?? "").slice(0, 80),
+                error: String(data.error?.message ?? ""),
             };
         });
+    } finally {
+        db.close();
+    }
+}
+
+/** Turns whose outcome the host recorded as failed — a stalled session's fingerprint. */
+function failedTurns(dbPath: string, sessionId: string): number {
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+        const row = db
+            .prepare(
+                `SELECT COUNT(*) AS count FROM session_message
+                  WHERE session_id = ? AND type = 'idle'
+                    AND json_extract(data, '$.outcome') = 'failed'`,
+            )
+            .get(sessionId) as { count: number };
+        return row.count;
     } finally {
         db.close();
     }
@@ -125,13 +163,18 @@ function ballast(tokens: number): string {
 }
 
 /**
- * Both answers report the same high usage, so the HOST stays above its own
- * trigger for the whole run. They differ in the only thing Magic Context
- * measures: how much real conversational content the turn adds. That is the
- * divergence this file is about, and holding the host's number fixed is what
- * keeps the two clocks separable.
+ * Report usage for the bytes this request actually carried.
+ *
+ * The OpenCode 2 lane's mock speaks the OpenAI Responses API, which carries the
+ * conversation in `input`. Four characters per token is the same rough ratio the
+ * ballast above is built on; the exact number does not matter, only that it
+ * tracks what was sent, because that is what makes the host's own compaction
+ * trigger respond to a fold instead of ignoring it.
  */
-const HOST_PRESSURE_USAGE = { input_tokens: 20_000, output_tokens: 20 };
+function usageForBody(body: Record<string, unknown>): number {
+    const wire = body.input ?? body.messages ?? [];
+    return Math.round(JSON.stringify(wire).length / 4);
+}
 
 describe.skipIf(!prereqs.ok)(
     `rust mode on OpenCode 2: fold cadence${prereqs.ok ? "" : ` (skipped: ${prereqs.skipReason})`}`,
@@ -140,6 +183,15 @@ describe.skipIf(!prereqs.ok)(
         let subc: HermeticSubcStack;
         let logPath: string;
         let openCodeDbPath: string;
+        /**
+         * When set, the mock reports this usage whatever it was sent.
+         *
+         * That is how the second scenario holds the host above its own compaction
+         * trigger: a provider's report normally falls when the served array does,
+         * and a host that never falls back under its trigger is exactly the case
+         * where the `compaction` hook has to answer on every request.
+         */
+        let forcedUsage: number | null = null;
 
         beforeAll(async () => {
             const fixture = isolation();
@@ -165,11 +217,18 @@ describe.skipIf(!prereqs.ok)(
                     subc: { connection_file: subc.connectionFile },
                     memory: { enabled: false },
                     dreamer: { disable: true },
+                    // The historian model has to sit in the harness sub-block: the
+                    // shared resolver reads `historian.<harness>`, and the v2 lane
+                    // resolves with "opencode".
                     historian: { opencode: { model: "openai/mock-model" } },
                     execute_threshold_percentage: 40,
                     history_budget_percentage: 0.15,
                 },
             });
+            host.mock.addMatcher((body) => ({
+                text: "ok",
+                usage: { input_tokens: forcedUsage ?? usageForBody(body), output_tokens: 20 },
+            }));
         }, 900_000);
 
         afterAll(async () => {
@@ -177,7 +236,7 @@ describe.skipIf(!prereqs.ok)(
             await subc?.stop();
         });
 
-        it("checkpoints the host when the module folds, not when the host asks", async () => {
+        it("folds once and stops paying for the history it folded", async () => {
             const client = OpenCode.make({
                 baseUrl: host.url,
                 headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
@@ -196,14 +255,17 @@ describe.skipIf(!prereqs.ok)(
             const boundaryPublished = () =>
                 readCoverage(logPath).some((entry) => entry.markerAt !== "none");
 
-            // ── 1. drive until the module folds once ─────────────────────────────
+            // ── 1. drive real content until the module folds ─────────────────────
             // Each round is one ordinary turn carrying real prose; the loop just keeps
             // asking until the durable state the rest of this test depends on exists.
+            const pressure = { text: "pressure", usage: { input_tokens: 20_000, output_tokens: 20 } };
             await driveHistorian({
                 prompt,
                 mock: host.mock,
-                pressure: { text: "pressure", usage: HOST_PRESSURE_USAGE },
-                quiet: { text: "ok", usage: HOST_PRESSURE_USAGE },
+                // The matcher registered in beforeAll answers first, so these two are
+                // only the fallback; the usage on the wire stays proportional either way.
+                pressure,
+                quiet: pressure,
                 label: "a module boundary",
                 satisfied: boundaryPublished,
                 rounds: 24,
@@ -213,99 +275,139 @@ describe.skipIf(!prereqs.ok)(
             });
             expect(boundaryPublished()).toBe(true);
 
-            const afterFirstFold = compactionRows(openCodeDbPath, session.id);
-            const firstFoldCoverage = readCoverage(logPath).length;
-            const firstFoldFires = readHookFires(logPath).length;
-            console.log(
-                `after the first fold: compaction rows=${JSON.stringify(afterFirstFold)}`,
-            );
-            // The module folded and the host recorded exactly one checkpoint for it.
-            // Without this the "no further rows" assertion below would be vacuous:
-            // a run that never checkpointed at all would satisfy it.
-            expect(afterFirstFold.filter((row) => row.status === "completed")).toHaveLength(1);
+            const afterFold = compactionRows(openCodeDbPath, session.id);
+            const foldFires = readHookFires(logPath).length;
+            const foldCoverage = readCoverage(logPath).length;
+            console.log(`after the fold: compaction rows=${JSON.stringify(afterFold)}`);
+            // Whatever the host wrote is a completed checkpoint carrying Magic
+            // Context's baseline. A request this hook failed to answer shows up here
+            // as `status: failed` with "Compaction summary did not match the required
+            // template", which is what this assertion exists to catch.
+            expect(afterFold.filter((row) => row.status !== "completed")).toEqual([]);
+            for (const row of afterFold) expect(row.summary).toContain("<session-history>");
+            expect(failedTurns(openCodeDbPath, session.id)).toBe(0);
 
-            // ── 2. twenty turns the module has no reason to fold on ──────────────
-            // Same reported usage, so the host stays above its own trigger and keeps
-            // asking; almost no new content, so the module's own measure stays under
-            // the execute threshold and its boundary does not move.
-            host.mock.setDefault({ text: "ok", usage: HOST_PRESSURE_USAGE });
-            for (let turn = 1; turn <= 20; turn += 1) {
-                await prompt(`quiet turn ${turn}`);
-            }
-
-            const quietFires = readHookFires(logPath).slice(firstFoldFires);
-            const quietCoverage = readCoverage(logPath).slice(firstFoldCoverage);
-            const afterQuiet = compactionRows(openCodeDbPath, session.id);
-            console.log(
-                `quiet phase: host fired ${quietFires.length} times, answered ${quietFires.filter((fire) => fire.answered).length}`,
-            );
-            console.log(
-                `quiet phase decline reasons: ${[...new Set(quietFires.filter((fire) => !fire.answered).map((fire) => fire.reason))].join(", ") || "<none>"}`,
-            );
-            console.log(
-                `quiet phase oc_input: ${quietCoverage.map((entry) => `${entry.ocInput}@${entry.markerAt}`).join(" ")}`,
-            );
-
-            // The host really did keep asking. If this fails the cadence claim is
-            // wrong and the rest of the phase proves nothing, so it is asserted
-            // rather than assumed.
-            expect(quietFires.length).toBeGreaterThan(5);
-            // …and Magic Context declined every one of them, because its own
-            // boundary did not move.
-            expect(quietFires.filter((fire) => fire.answered)).toHaveLength(0);
-            // The consequence in the store: no new checkpoint. This also catches the
-            // case where declining merely hands the cut to the host, which would
-            // write a row of its own.
-            expect(afterQuiet).toEqual(afterFirstFold);
-            // And the consequence for the module: the array it is handed stops
-            // tracking the conversation, which is what a fold is for.
-            expect(quietCoverage.length).toBeGreaterThan(10);
-            const ocInputs = quietCoverage.map((entry) => entry.ocInput);
-            expect(Math.max(...ocInputs) - Math.min(...ocInputs)).toBeLessThanOrEqual(2);
-
-            // ── 3. real content again: the module folds, the host is told ────────
-            const boundariesSoFar = new Set(
-                readCoverage(logPath)
-                    .map((entry) => entry.markerAt)
-                    .filter((marker) => marker !== "none"),
-            );
-            const advanced = () =>
-                readCoverage(logPath).some(
-                    (entry) => entry.markerAt !== "none" && !boundariesSoFar.has(entry.markerAt),
+            // ── 2. keep the conversation going and watch the window, not the tail ──
+            // Content turns, because the boundary only moves when the historian has
+            // something to publish. What the trim claims is not that the array never
+            // changes size, but that it is a WINDOW behind the boundary rather than
+            // the whole conversation: a session that keeps talking keeps paying for
+            // the tail, never again for the head.
+            const boundariesSeen = () =>
+                new Set(
+                    readCoverage(logPath)
+                        .map((entry) => entry.markerAt)
+                        .filter((marker) => marker !== "none"),
                 );
             await driveHistorian({
                 prompt,
                 mock: host.mock,
-                pressure: { text: "pressure", usage: HOST_PRESSURE_USAGE },
-                quiet: { text: "ok", usage: HOST_PRESSURE_USAGE },
-                label: "a second module boundary",
-                satisfied: advanced,
-                rounds: 16,
+                pressure,
+                quiet: pressure,
+                label: "three module boundaries and eight more passes",
+                satisfied: () =>
+                    boundariesSeen().size >= 3 &&
+                    readCoverage(logPath).length >= foldCoverage + 8,
+                rounds: 20,
                 settleMs: 6_000,
                 text: (round) =>
-                    `second chunk turn ${round + 1}: durable signal. ${ballast(3_000)}`,
+                    `later turn ${round + 1}: durable signal for later chunk ${round + 1}. ${ballast(3_000)}`,
             });
-            expect(advanced()).toBe(true);
+            await waitForCoverage(logPath, foldCoverage + 1);
 
-            const afterSecondFold = compactionRows(openCodeDbPath, session.id);
-            const allFires = readHookFires(logPath);
+            const laterFires = readHookFires(logPath).slice(foldFires);
+            const coverage = readCoverage(logPath);
+            const afterLater = compactionRows(openCodeDbPath, session.id);
             console.log(
-                `after the second fold: compaction rows=${JSON.stringify(afterSecondFold)}`,
+                `later phase: ${coverage.length - foldCoverage} module passes, ${laterFires.length} host compaction requests`,
             );
             console.log(
-                `whole run: host fired ${allFires.length} times, Magic Context answered ${allFires.filter((fire) => fire.answered).length}`,
+                `oc_input per pass: ${coverage.map((entry) => `${entry.ocInput}@${entry.markerAt.slice(-6)}`).join(" ")}`,
             );
-            const completed = afterSecondFold.filter((row) => row.status === "completed");
-            expect(completed.length).toBeGreaterThan(afterFirstFold.length);
-            // One checkpoint per module fold, not one per host request.
-            expect(completed.length).toBe(allFires.filter((fire) => fire.answered).length);
-            expect(allFires.length).toBeGreaterThan(completed.length);
-            // Every checkpoint carries the module's own baseline, not a host-composed
-            // summary of a history the module never served.
-            for (const row of completed) expect(row.summary).toContain("<session-history>");
+            console.log(`compaction rows=${JSON.stringify(afterLater)}`);
+
+            // The boundary advanced more than once, so what follows measures a moving
+            // window rather than one stale id.
+            expect(boundariesSeen().size).toBeGreaterThanOrEqual(3);
+            // Each turn adds a user row and an assistant row, so an untrimmed array
+            // would carry about two more on every pass. That is the number the trim
+            // has to beat.
+            const untrimmed = 2 * coverage.length - 1;
+            const finalOcInput = coverage[coverage.length - 1]!.ocInput;
+            console.log(`final oc_input ${finalOcInput} vs untrimmed equivalent ${untrimmed}`);
+            expect(finalOcInput).toBeLessThan(untrimmed * 0.8);
+            // The adapter's own trim is what produced it: this line is written only
+            // when messages are actually dropped, so a smaller number reached some
+            // other way cannot satisfy it.
+            const dropped = logLines(logPath, "v2 boundary trim: dropped ").map((line) =>
+                Number(line.split(" ")[0]),
+            );
+            console.log(`adapter trim drops: ${dropped.join(" ")}`);
+            // The boundary is recorded during the pass that publishes it and read at
+            // the START of a pass, so every pass after the first one that had a
+            // boundary is a pass the trim ran on.
+            const passesWithBoundary = coverage.filter((entry) => entry.markerAt !== "none").length;
+            expect(dropped.length).toBeGreaterThanOrEqual(passesWithBoundary - 1);
+            // …and it drops more as the boundary advances, which is the difference
+            // between a live boundary and one recorded once and never moved.
+            expect(Math.max(...dropped)).toBeGreaterThan(dropped[0]!);
+            // Whatever the host wrote is still a completed checkpoint, and no turn
+            // died on an unanswered request.
+            expect(afterLater.filter((row) => row.status !== "completed")).toEqual([]);
+            expect(failedTurns(openCodeDbPath, session.id)).toBe(0);
             // The module was serving throughout; a run that fell back to the
             // TypeScript transform would satisfy the counts above for free.
             expect(readPasses(logPath).some((pass) => pass.servedFrom === "transform")).toBe(true);
+        }, 1_800_000);
+
+        it("answers every host checkpoint request, so a session above the host's trigger keeps running", async () => {
+            // A provider whose report never falls, plus turns big enough that the
+            // next request would not fit under what it reported: the host compacts
+            // before every one of them. This is the case that decides whether an
+            // unanswered request is survivable, and on GA 2.0.5 it is not — the host
+            // summarizes with its own model, rejects the answer as "Compaction
+            // summary did not match the required template", and ends the turn with
+            // idle outcome=failed.
+            forcedUsage = 20_000;
+            const client = OpenCode.make({
+                baseUrl: host.url,
+                headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
+            });
+            const session = await client.session.create({
+                location: { directory: host.cwd },
+                model: { providerID: "openai", id: "mock-model" },
+            });
+            const before = readHookFires(logPath).length;
+            const beforeCoverage = readCoverage(logPath).length;
+            for (let turn = 1; turn <= 8; turn += 1) {
+                await client.session.prompt({
+                    sessionID: session.id,
+                    text: `pressured turn ${turn}. ${ballast(3_000)}`,
+                });
+                await client.session.wait(
+                    { sessionID: session.id },
+                    { signal: AbortSignal.timeout(180_000) },
+                );
+            }
+            await waitForCoverage(logPath, beforeCoverage + 8);
+
+            const fires = readHookFires(logPath).slice(before);
+            const rows = compactionRows(openCodeDbPath, session.id);
+            console.log(
+                `host asked ${fires.length} times; sources: ${fires.map((fire) => fire.source).join(" ")}`,
+            );
+            console.log(`checkpoint rows=${JSON.stringify(rows)}`);
+            // The host really did ask. Without this the assertions below would hold
+            // for a session the hook never ran on.
+            expect(fires.length).toBeGreaterThan(2);
+            expect(fires.filter((fire) => !fire.answered)).toEqual([]);
+            // Answered from the module's own baseline, not a host-composed summary of
+            // history the module never served.
+            expect(fires.filter((fire) => fire.source === "module").length).toBeGreaterThan(1);
+            expect(rows.filter((row) => row.status !== "completed")).toEqual([]);
+            // Every turn completed: the session kept running under a host that never
+            // stopped asking.
+            expect(failedTurns(openCodeDbPath, session.id)).toBe(0);
         }, 1_800_000);
     },
 );

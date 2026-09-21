@@ -31,6 +31,7 @@ import {
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
+import { createModuleToolBackends } from "../../hooks/magic-context/module-tool-backends";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
 import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
@@ -58,7 +59,7 @@ import {
 import { pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
-import { createV2RustCompactionMarkerStrategy } from "../fold/boundary";
+import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
@@ -240,8 +241,27 @@ export async function registerContext(context: V2Context) {
         // The primary context hook retains the existing fail-closed storage path.
         // Hidden work remains unavailable for this plugin instance when durable storage cannot open.
     }
+    // Rust mode reaches the `ck-mc` module over the same subc client the OpenCode 1
+    // lane builds. Building it is inert until a pass actually calls the module, so
+    // it is safe to hold one here for the whole process. It is resolved before the
+    // tools are registered because the tool facades are part of the same wiring:
+    // registering `ctx_note`/`ctx_memory` without them would let an agent's write
+    // land in the host read model alone, where the module never sees it.
+    const rustModeModuleClient = resolveV2RustModeModuleClient(config, directory);
+    const rustMemorySyncRequestedSessions = new Set<string>();
+    const moduleToolBackends =
+        db && isDatabasePersisted(db)
+            ? createModuleToolBackends({
+                  db,
+                  moduleClient: rustModeModuleClient,
+                  directory,
+                  memorySyncRequestedSessions: rustMemorySyncRequestedSessions,
+              })
+            : undefined;
     const tools =
-        db && isDatabasePersisted(db) ? await registerTools(context, db, config) : undefined;
+        db && isDatabasePersisted(db)
+            ? await registerTools(context, db, config, moduleToolBackends?.backends)
+            : undefined;
     await context.session.hook("http.response", async (draft) => {
         if (!db || draft.kind !== "primary" || draft.response.ok) return;
         const detection = detectOverflow(await draft.response.clone().text());
@@ -366,10 +386,6 @@ export async function registerContext(context: V2Context) {
             reader.close();
         }
     };
-    // Rust mode reaches the `ck-mc` module over the same subc client the OpenCode 1
-    // lane builds. Building it is inert until a pass actually calls the module, so
-    // it is safe to hold one here for the whole process.
-    const rustModeModuleClient = resolveV2RustModeModuleClient(config, directory);
     const rustRefusalRecovery = rustModeModuleClient
         ? createV2RustRefusalRecovery({
               context,
@@ -591,64 +607,36 @@ export async function registerContext(context: V2Context) {
                 const moduleBaseline = rustModeModuleClient
                     ? servedModuleM0Text(draft.sessionID)
                     : undefined;
-                // Declining is `result` left unset: the host then owns the summary for
-                // this fire instead of being handed one Magic Context would have to keep
-                // serving. Every fire is logged with its verdict, because the host's
-                // firing rate and ours are separate facts and only the pair explains a
-                // session's checkpoint cadence.
-                const decline = (reason: string): void => {
-                    sessionLog(
-                        draft.sessionID,
-                        `v2 compaction hook: fired answered=false reason=${reason}`,
-                    );
-                };
-                if (rustModeModuleClient && moduleBaseline === null) {
-                    // No module output has been accepted for this session yet, so there is
-                    // no baseline to answer with.
-                    decline("no_served_module_output");
-                    return;
-                }
-                // The module owns the fold schedule in Rust mode and publishes each fold
-                // as a boundary. The host fires this hook off its OWN usage measurement,
-                // which counts the history it has stored rather than the reduced array
-                // Magic Context actually sends, so once a long session crosses the host's
-                // trigger it can fire on every single turn. Answering every fire would
-                // write a host checkpoint per turn and make each of those turns a HARD
-                // fold, which is the opposite of what folding is for. The hook is a
-                // trigger, not a command: answer it when the module's boundary has moved
-                // past the one the last answer checkpointed, and decline otherwise.
-                const moduleBoundaryOrdinal =
-                    rustModeModuleClient && db
-                        ? (getPersistedCompactionMarkerState(db, draft.sessionID)
-                              ?.boundaryOrdinal ?? null)
-                        : null;
-                if (rustModeModuleClient) {
-                    if (moduleBoundaryOrdinal === null) {
-                        // The module has served bytes but has not folded yet, so there is
-                        // no Magic Context checkpoint for the host to record.
-                        decline("no_module_boundary");
-                        return;
-                    }
-                    const answered = (await folds.read(draft.sessionID))?.moduleBoundaryOrdinal;
-                    if (answered !== undefined && answered >= moduleBoundaryOrdinal) {
-                        decline(`boundary_not_advanced at=${moduleBoundaryOrdinal}`);
-                        return;
-                    }
-                }
+                // This hook ALWAYS answers, and leaving `result` unset is not an option.
+                // On GA 2.0.5 an unanswered request is not a polite decline: the host
+                // summarizes with its own model and, when that answer is not in the
+                // template it requires, records a `compaction.failed` row and ends the
+                // turn with idle outcome=failed. Measured on the real host, a session
+                // whose hook declined produced a failed compaction and no provider
+                // request at all on every turn after the first. When the module has
+                // served nothing yet there is no module baseline to answer with, so the
+                // TypeScript one is supplied instead: still Magic Context's own account
+                // of the session, rather than a host-composed summary of history the
+                // module never served, or a dead turn.
+                const source = !rustModeModuleClient
+                    ? "typescript"
+                    : moduleBaseline === null
+                      ? "typescript_fallback"
+                      : "module";
                 const fold = await folds.supply({
                     sessionID: draft.sessionID,
                     watermark,
                     runningCut: running?.seq,
-                    ...(moduleBoundaryOrdinal !== null
-                        ? { moduleBoundaryOrdinal }
-                        : {}),
                     // Kept lazy for the TypeScript lane: materializing writes cache state and
                     // must only happen when the fold identity is actually new.
                     materialize: () => moduleBaseline ?? materialize(draft),
                 });
+                // One line per request with the baseline it was answered from. The
+                // host's rate and ours are separate facts, and only reading both
+                // explains a session's checkpoint cadence.
                 sessionLog(
                     draft.sessionID,
-                    `v2 compaction hook: fired answered=true boundary=${moduleBoundaryOrdinal ?? "none"}`,
+                    `v2 compaction hook: fired answered=true source=${source}`,
                 );
                 draft.result = { summary: fold.submitted };
             } catch (cause) {
@@ -817,6 +805,24 @@ export async function registerContext(context: V2Context) {
                 transformMode: config.transform_mode,
                 rustModeModuleClient,
                 rustModeProjectRoot: directory,
+                rustMemorySyncRequestedSessions,
+                // OpenCode 1 puts this on the host's toast surface through its SDK
+                // client. This host exposes no such client to a plugin, so it goes
+                // out on the notification socket the TUI already reads — the same
+                // carrier a finished dream reports on. Without it a parked module
+                // is invisible: the session keeps answering from the last good
+                // output and nothing says why it stopped moving.
+                onRustModeParked: (sessionId, message) =>
+                    pushNotification(
+                        "toast",
+                        { message: `Rust Magic Context paused: ${message}`, variant: "warning" },
+                        sessionId,
+                    ),
+                // A session can resolve a project other than the launch directory,
+                // so the note-evaluation bridge is ensured per prepared project
+                // rather than once at setup.
+                onRustModeProjectPrepared: (projectPath) =>
+                    moduleToolBackends?.ensureNoteEvaluationBridge(projectPath),
                 promptSurface: config.prompt_surface,
                 promptSurfaceRuntime,
                 onRustEngineReconnectRefusal: (refusal) => rustRefusalRecovery?.arm(refusal),
@@ -900,6 +906,19 @@ export async function registerContext(context: V2Context) {
                 }
             } finally {
                 reader.close();
+            }
+            // On a turn the host did not compact, the array still starts at the top
+            // of the conversation, and the module would be handed the whole history
+            // again — the cost the fold exists to remove. On a turn it did compact,
+            // the boundary message is already gone from the array and this is a
+            // no-op. Both happen in an ordinary session.
+            if (rustModeModuleClient && db) {
+                const dropped = trimToRecordedBoundary(db, draft.sessionID, draft.messages);
+                if (dropped > 0)
+                    sessionLog(
+                        draft.sessionID,
+                        `v2 boundary trim: dropped ${dropped} messages before the module boundary`,
+                    );
             }
             const mapped = adaptPayload(draft, admitted);
             await transform({}, mapped);

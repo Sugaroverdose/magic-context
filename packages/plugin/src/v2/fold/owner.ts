@@ -7,16 +7,6 @@ export interface FoldIdentity {
     cutSeq?: number;
     submitted: string;
     submittedSha: string;
-    /**
-     * Rust mode only: the module boundary this checkpoint was answered for.
-     *
-     * The host asks for a checkpoint on its own schedule; Magic Context supplies
-     * one on the module's. Recording which boundary the last answer covered is
-     * what lets the next request tell "the module folded again" apart from "the
-     * host is still above its own trigger", and it survives a restart because
-     * the host checkpoint it describes does too.
-     */
-    moduleBoundaryOrdinal?: number;
     rendered?: V2Message;
     renderedSha?: string;
     renderedSummary?: string;
@@ -52,7 +42,6 @@ export class FoldOwner {
         sessionID: string;
         watermark: number;
         runningCut?: number;
-        moduleBoundaryOrdinal?: number;
         materialize: () => string;
     }): Promise<FoldIdentity> {
         return this.serial(args.sessionID, async () => {
@@ -62,32 +51,13 @@ export class FoldOwner {
                 (args.runningCut !== undefined
                     ? previous.cutSeq === args.runningCut
                     : previous.cutSeq === undefined && previous.watermark === args.watermark);
-            if (same) {
-                if (
-                    args.moduleBoundaryOrdinal !== undefined &&
-                    previous.moduleBoundaryOrdinal !== args.moduleBoundaryOrdinal
-                ) {
-                    // The same host checkpoint, now covering a newer module boundary:
-                    // record the boundary so the next request is measured against what
-                    // this answer actually covered.
-                    const updated: FoldIdentity = {
-                        ...previous,
-                        moduleBoundaryOrdinal: args.moduleBoundaryOrdinal,
-                    };
-                    await this.storage.set(this.key(args.sessionID), updated);
-                    return updated;
-                }
-                return previous;
-            }
+            if (same) return previous;
             const submitted = args.materialize();
             const next: FoldIdentity = {
                 watermark: args.watermark,
                 cutSeq: args.runningCut,
                 submitted,
                 submittedSha: foldDigest(submitted),
-                ...(args.moduleBoundaryOrdinal !== undefined
-                    ? { moduleBoundaryOrdinal: args.moduleBoundaryOrdinal }
-                    : {}),
             };
             await this.storage.set(this.key(args.sessionID), next);
             return next;
