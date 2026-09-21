@@ -6,6 +6,7 @@
  *   setup           Interactive setup wizard for OpenCode, Pi, or OMP.
  *   doctor          Health-check + auto-fix for installed harnesses.
  *     --force         Force-clear plugin cache.
+ *     --fix           Repair safe, Magic Context-owned store rows.
  *     --issue         Bundle a sanitized issue report and submit/open.
  *     --clear         Interactive picker to clear plugin caches.
  *   doctor migrate  Migrate OpenCode session content to Pi/OMP JSONL.
@@ -60,6 +61,7 @@ function printUsage(): void {
     console.log("    setup            Interactive setup wizard");
     console.log("    doctor           Check and fix configuration issues");
     console.log("    doctor --force   Force-clear plugin cache");
+    console.log("    doctor --fix     Repair safe, Magic Context-owned store rows");
     console.log("    doctor --issue   Collect diagnostics and open a GitHub issue");
     console.log("    doctor --issue --report <path>  Write diagnostics without prompting");
     console.log("    doctor --clear   Interactive cache cleanup picker");
@@ -158,6 +160,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
             const report = valueAfter(rest, "--report");
             return runDoctor({
                 force: rest.includes("--force"),
+                fix: rest.includes("--fix"),
                 issue: rest.includes("--issue") || report !== null,
                 ...(report !== null ? { report } : {}),
                 clear: rest.includes("--clear"),

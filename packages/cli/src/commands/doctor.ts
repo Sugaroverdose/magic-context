@@ -2,7 +2,7 @@
  * Unified `doctor` command.
  *
  * Dispatches to the per-harness doctor based on `--harness` or auto-detection.
- * Supports `--force`, `--issue`, and `--clear` flags identically across both.
+ * Supports shared diagnostic flags and dispatches harness-specific repairs.
  *
  * `--clear` is special: it presents an interactive picker that lets the user
  * choose which caches to clear across all installed harnesses. It does NOT
@@ -31,6 +31,7 @@ import { doctor as runPiDoctor } from "./doctor-pi";
 
 export interface RunDoctorOptions extends V22BackfillCommandArgs {
     force?: boolean;
+    fix?: boolean;
     issue?: boolean;
     report?: string;
     clear?: boolean;
@@ -132,6 +133,7 @@ async function dispatchDoctor(adapter: HarnessAdapter, options: RunDoctorOptions
         case "opencode": {
             return runOpenCodeDoctor({
                 force: options.force,
+                fix: options.fix,
                 issue: options.issue,
             });
         }
