@@ -184,6 +184,62 @@ function readCompartments(fixture: ConversionFixture, sessionId: string) {
     );
 }
 
+function placeSyntheticSplitBetweenCompartments(
+    fixture: ConversionFixture,
+    sessionId: string,
+    splitMessageId: string,
+): void {
+    const projection = v1Projection(fixture, sessionId);
+    const split = projection.find((message) => message.id === splitMessageId);
+    const next = projection.find((message) => message.ordinal === (split?.ordinal ?? 0) + 1);
+    if (!split || !next) throw new Error("the synthetic split source has no following v1 message");
+
+    const db = new Database(fixture.contextDbPath);
+    try {
+        const rows = db
+            .prepare(
+                `SELECT id, sequence, start_message, end_message
+                   FROM compartments WHERE session_id = ? ORDER BY sequence`,
+            )
+            .all(sessionId) as Array<{
+            id: number;
+            sequence: number;
+            start_message: number;
+            end_message: number;
+        }>;
+        const existingIndex = rows.findIndex((row) => row.end_message === split.ordinal);
+        if (existingIndex >= 0 && rows[existingIndex + 1]?.start_message === split.ordinal + 1) return;
+        const source = rows.find(
+            (row) => row.start_message <= split.ordinal && row.end_message > split.ordinal,
+        );
+        if (!source) throw new Error("no published compartment can be split at the synthetic turn");
+
+        db.transaction(() => {
+            db.prepare(
+                "UPDATE compartments SET sequence = sequence + 1000 WHERE session_id = ? AND sequence > ?",
+            ).run(sessionId, source.sequence);
+            db.prepare(
+                "UPDATE compartments SET sequence = sequence - 999 WHERE session_id = ? AND sequence > ?",
+            ).run(sessionId, source.sequence + 1000);
+            db.prepare(
+                `INSERT INTO compartments
+                    (session_id, sequence, start_message, end_message, start_message_id,
+                     end_message_id, title, content, p1, p2, p3, p4, importance,
+                     episode_type, legacy, created_at, harness, rebase_status)
+                 SELECT session_id, ?, ?, end_message, ?, end_message_id, title, content,
+                        p1, p2, p3, p4, importance, episode_type, legacy, created_at,
+                        harness, rebase_status
+                   FROM compartments WHERE id = ?`,
+            ).run(source.sequence + 1, split.ordinal + 1, next.id, source.id);
+            db.prepare(
+                "UPDATE compartments SET end_message = ?, end_message_id = ? WHERE id = ?",
+            ).run(split.ordinal, split.id, source.id);
+        })();
+    } finally {
+        db.close();
+    }
+}
+
 function readFtsRows(fixture: ConversionFixture, sessionId: string) {
     return contextRows<{ ordinal: number; messageId: string }>(
         fixture,

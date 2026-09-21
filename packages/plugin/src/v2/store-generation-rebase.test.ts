@@ -18,6 +18,11 @@ import {
     readCoordinateRebaseNotice,
     rebaseSessionCoordinates,
 } from "../features/magic-context/store-generation-rebase";
+import { v2NonNarrativeStoredGapRanges } from "../hooks/magic-context/compartment-runner-incremental";
+import { validateStoredCompartments } from "../hooks/magic-context/compartment-runner-validation";
+import {
+    withRawMessageProvider,
+} from "../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../hooks/magic-context/read-session-raw";
 import { Database } from "../shared/sqlite";
 import { rawMessages } from "./hooks/store";
@@ -255,6 +260,125 @@ function sessionDigest(sessionId: string): string {
     ]);
     return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
 }
+
+test("a synthetic split between adjacent compartments is absorbed into the earlier range", () => {
+    ensureSession("ses_a");
+    insertCompartment("ses_a", {
+        sequence: 1,
+        start: 1,
+        end: 3,
+        startMessageId: "msg_a_001_u1",
+        endMessageId: "msg_a_003_u2",
+    });
+    insertCompartment("ses_a", {
+        sequence: 2,
+        start: 4,
+        end: 6,
+        startMessageId: "msg_a_004_a2",
+        endMessageId: "msg_a_006_a3",
+    });
+    db.prepare("UPDATE session_meta SET coordinate_generation = 'v1' WHERE session_id = ?").run(
+        "ses_a",
+    );
+
+    const outcome = runRebase("ses_a", "v2", v2Projection(syntheticSplit));
+    const compartments = getCompartments(db, "ses_a");
+
+    expect(outcome.healedGaps).toBe(1);
+    expect(outcome.narrativeGaps).toBe(0);
+    expect(compartments.map((row) => [row.startMessage, row.endMessage])).toEqual([
+        [1, 4],
+        [5, 7],
+    ]);
+    expect(validateStoredCompartments(compartments)).toBeNull();
+    expect(readCoordinateRebaseNotice(db, "ses_a")).toMatchObject({
+        generation: "v2",
+        healedGaps: 1,
+        narrativeGaps: 0,
+    });
+});
+
+test("v2 notice compatibility tolerates an older synthetic-only stored gap", () => {
+    ensureSession("ses_a");
+    insertCompartment("ses_a", {
+        sequence: 1,
+        start: 1,
+        end: 3,
+        startMessageId: "msg_a_001_u1",
+        endMessageId: "msg_a_003_u2",
+    });
+    insertCompartment("ses_a", {
+        sequence: 2,
+        start: 5,
+        end: 7,
+        startMessageId: "msg_a_004_a2",
+        endMessageId: "msg_a_006_a3",
+    });
+    db.prepare(
+        "UPDATE session_meta SET coordinate_rebase_notice = ? WHERE session_id = ?",
+    ).run(
+        JSON.stringify({ generation: "v2", previousGeneration: "v1", at: 1 }),
+        "ses_a",
+    );
+    const messages = v2Projection(syntheticSplit);
+
+    const error = withRawMessageProvider(
+        "ses_a",
+        { readMessages: () => messages, getMessageCount: () => messages.length },
+        () => {
+            const compartments = getCompartments(db, "ses_a");
+            const safeRanges = v2NonNarrativeStoredGapRanges(db, "ses_a", compartments);
+            expect(safeRanges).toEqual([{ start: 4, end: 4 }]);
+            return validateStoredCompartments(compartments, safeRanges);
+        },
+    );
+
+    expect(error).toBeNull();
+});
+
+test("a narrative row between rebased compartments remains a reported gap", () => {
+    ensureSession("ses_a");
+    insertCompartment("ses_a", {
+        sequence: 1,
+        start: 1,
+        end: 3,
+        startMessageId: "msg_a_001_u1",
+        endMessageId: "msg_a_003_u2",
+    });
+    insertCompartment("ses_a", {
+        sequence: 2,
+        start: 4,
+        end: 6,
+        startMessageId: "msg_a_004_a2",
+        endMessageId: "msg_a_006_a3",
+    });
+    db.prepare("UPDATE session_meta SET coordinate_generation = 'v1' WHERE session_id = ?").run(
+        "ses_a",
+    );
+    const narrativeSplit = syntheticSplit.map((row) =>
+        row.type === "synthetic"
+            ? ({ ...row, type: "user", data: { text: "narrative bridge" } } as StoreRow)
+            : row,
+    );
+
+    const outcome = runRebase("ses_a", "v2", v2Projection(narrativeSplit));
+    const compartments = getCompartments(db, "ses_a");
+
+    expect(outcome.healedGaps).toBe(0);
+    expect(outcome.narrativeGaps).toBe(1);
+    expect(compartments.map((row) => [row.startMessage, row.endMessage])).toEqual([
+        [1, 3],
+        [5, 7],
+    ]);
+    expect(validateStoredCompartments(compartments)).toBe(
+        "gap before message 5 (expected 4)",
+    );
+    expect(readCoordinateRebaseNotice(db, "ses_a")).toMatchObject({
+        generation: "v2",
+        healedGaps: 0,
+        narrativeGaps: 1,
+    });
+});
 
 test("a saved compartment end still selects its endpoint after a synthetic split", () => {
     // Saved against the 1.x projection: end=4, endpoint msg_a_004_a2 at ordinal 4.

@@ -239,6 +239,7 @@ export function buildHistorianRepairPrompt(
 
 export function validateStoredCompartments(
     compartments: Array<{ startMessage: number; endMessage: number }>,
+    nonNarrativeGapRanges: ReadonlyArray<{ start: number; end: number }> = [],
 ): string | null {
     if (compartments.length === 0) {
         return null;
@@ -250,7 +251,13 @@ export function validateStoredCompartments(
             if (compartment.startMessage < expectedStart) {
                 return `overlap before message ${expectedStart} (saw ${compartment.startMessage}-${compartment.endMessage})`;
             }
-            return `gap before message ${compartment.startMessage} (expected ${expectedStart})`;
+            const gapEnd = compartment.startMessage - 1;
+            const safeGap = nonNarrativeGapRanges.some(
+                (range) => range.start <= expectedStart && range.end >= gapEnd,
+            );
+            if (!safeGap) {
+                return `gap before message ${compartment.startMessage} (expected ${expectedStart})`;
+            }
         }
         if (compartment.endMessage < compartment.startMessage) {
             return `invalid range ${compartment.startMessage}-${compartment.endMessage}`;

@@ -158,6 +158,32 @@ test("10,000-row raw read pages decode only the requested page and count decodes
 		expect(page[0]).toMatchObject({ id: "message-9901", ordinal: 9_901 });
 		expect(page.at(-1)).toMatchObject({ id: "message-9950", ordinal: 9_950 });
 		expect(read.getCount("ses-long")).toBe(10_000);
+		expect(read.getStoredCount("ses-long")).toBe(10_010);
+		expect(read.findById("ses-long", "message-9950")).toMatchObject({
+			id: "message-9950",
+			ordinal: 9_950,
+		});
+		expect(read.ordinalOf("ses-long", "message-9950")).toBe(9_950);
+		expect(read.ordinalOf("ses-long", "idle-10000")).toBeNull();
+		expect([...read.ordinalMapForRange("ses-long", 9_990, 9_992)]).toEqual([
+			["message-9990", 9_990],
+			["message-9991", 9_991],
+			["message-9992", 9_992],
+		]);
+		expect(read.readOrdinalPage("ses-long", null, 2)).toEqual([
+			{
+				id: "message-1",
+				timeCreated: 2,
+				contributesOrdinal: true,
+				hasValidInfo: true,
+			},
+			{
+				id: "message-2",
+				timeCreated: 4,
+				contributesOrdinal: true,
+				hasValidInfo: true,
+			},
+		]);
 		const counters = getV2StoreReaderDebugCounters();
 		expect(counters.decodedRows).toBeLessThanOrEqual(100);
 		expect(counters.operations.messagePage).toEqual({
@@ -170,6 +196,19 @@ test("10,000-row raw read pages decode only the requested page and count decodes
 			decodedRows: 0,
 			maxDecodedRows: 0,
 		});
+		expect(counters.operations.messageById).toEqual({
+			calls: 1,
+			decodedRows: 1,
+			maxDecodedRows: 1,
+		});
+		for (const operation of [
+			"storedMessageCount",
+			"messageOrdinalById",
+			"messageIdOrdinals",
+			"messageOrdinalPage",
+		]) {
+			expect(counters.operations[operation]?.decodedRows).toBe(0);
+		}
 		expect(counters.operations.history).toBeUndefined();
 	} finally {
 		writer.close();
