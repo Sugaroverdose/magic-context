@@ -136,6 +136,29 @@ describe("findBoundaryUserMessage", () => {
 });
 
 describe("injectCompactionMarker", () => {
+    it("writes a completed summary timestamp for OpenCode 2 conversion", () => {
+        const dataHome = useTempDataHome("marker-inject-completed-");
+        const db = createOpenCodeDb(dataHome);
+        insertMessage(db, "msg_001_user", "user", 100);
+        insertMessage(db, "msg_002_target", "assistant", 200);
+        closeQuietly(db);
+
+        const result = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 2,
+            endMessageId: "msg_002_target",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+        });
+
+        const inspection = new Database(join(dataHome, "opencode", "opencode.db"));
+        const time = inspection
+            .prepare("SELECT json_extract(data, '$.time') AS time FROM message WHERE id = ?")
+            .get(result?.summaryMessageId) as { time: string };
+        expect(JSON.parse(time.time)).toEqual({ created: 101, completed: 101 });
+        closeQuietly(inspection);
+    });
+
     it("keeps deterministic marker ids in OpenCode's lexicographic row order", () => {
         const dataHome = useTempDataHome("marker-inject-id-order-");
         const db = createOpenCodeDb(dataHome);

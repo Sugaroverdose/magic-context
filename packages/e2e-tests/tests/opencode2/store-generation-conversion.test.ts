@@ -120,6 +120,13 @@ interface Evidence {
     unresolvedHeading: string;
     resolvedHeading: string;
     servedHeadBack: string;
+    markerBoundaryId: string;
+    markerCreated: number;
+    markerCompleted: number;
+    convertedMarkerCount: number;
+    firstConvertedInput: string;
+    preBoundarySentinel: string;
+    postBoundarySentinel: string;
 }
 
 interface FlipEvidence {
@@ -595,6 +602,66 @@ beforeAll(async () => {
     // would make the search below pick the wrong compartment as the 2.x-only one.
     const v1Before = v1Projection(fixture, sessionId);
     const v1EndOrdinal = v1Compartments[v1Compartments.length - 1]!.endMessage;
+    const markerEvidence = (() => {
+        const db = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
+        try {
+            const marker = db
+                .prepare(
+                    `SELECT json_extract(data, '$.parentID') AS boundaryId,
+                            json_extract(data, '$.time.created') AS created,
+                            json_extract(data, '$.time.completed') AS completed
+                       FROM message
+                      WHERE session_id = ?
+                        AND json_extract(data, '$.summary') = 1
+                        AND json_extract(data, '$.providerID') = 'magic-context'
+                      ORDER BY time_created DESC, id DESC
+                      LIMIT 1`,
+                )
+                .get(sessionId) as
+                | { boundaryId: string; created: number; completed: number }
+                | undefined;
+            if (!marker) throw new Error("the 1.x historian left no Magic Context marker");
+
+            const userTextRows = db
+                .prepare(
+                    `SELECT p.message_id AS id, json_extract(p.data, '$.text') AS text
+                       FROM part p
+                       JOIN message m ON m.id = p.message_id AND m.session_id = p.session_id
+                      WHERE p.session_id = ?
+                        AND json_extract(m.data, '$.role') = 'user'
+                        AND json_extract(p.data, '$.type') = 'text'
+                      ORDER BY m.time_created, m.id, p.time_created, p.id`,
+                )
+                .all(sessionId) as Array<{ id: string; text: string }>;
+            const projection = new Map(v1Before.map((message) => [message.id, message.ordinal]));
+            const boundaryOrdinal = projection.get(marker.boundaryId);
+            if (boundaryOrdinal === undefined) {
+                throw new Error(`marker boundary ${marker.boundaryId} is absent from the v1 projection`);
+            }
+            const authored = userTextRows
+                .map((row) => ({ ...row, ordinal: projection.get(row.id) }))
+                .filter(
+                    (row): row is { id: string; text: string; ordinal: number } =>
+                        typeof row.ordinal === "number" && typeof row.text === "string",
+                );
+            const before = authored.find((row) => row.ordinal < boundaryOrdinal);
+            const after = authored.findLast((row) => row.ordinal > boundaryOrdinal);
+            if (!before || !after) {
+                throw new Error(
+                    `marker boundary ${marker.boundaryId} did not leave both a compacted prefix and a retained tail`,
+                );
+            }
+            return {
+                boundaryId: marker.boundaryId,
+                created: marker.created,
+                completed: marker.completed,
+                preBoundarySentinel: before.text.slice(0, 96),
+                postBoundarySentinel: after.text.slice(0, 96),
+            };
+        } finally {
+            db.close();
+        }
+    })();
     v1Stopped = true;
     await v1.stop();
 
@@ -616,6 +683,19 @@ beforeAll(async () => {
         headers: { authorization: `Basic ${btoa(`opencode:${v2.password}`)}` },
     });
     await waitForPluginActive(v2Client, fixture.cwd);
+    const convertedMarkerCount = (() => {
+        const db = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
+        try {
+            const row = db
+                .prepare(
+                    "SELECT COUNT(*) AS count FROM session_message WHERE id = ? AND type = 'compaction'",
+                )
+                .get(markerEvidence.boundaryId) as { count: number };
+            return row.count;
+        } finally {
+            db.close();
+        }
+    })();
     const promptV2: PromptDriver = async (text) => {
         await v2Client.session.prompt({ sessionID: sessionId, text });
         await v2Client.session.wait(
@@ -626,6 +706,12 @@ beforeAll(async () => {
 
     const forwardFirstRequest = mock.requests().length;
     await promptV2("first prompt on the converted store");
+    const firstConvertedRequest = mock
+        .requests()
+        .slice(forwardFirstRequest)
+        .find((request) => JSON.stringify(request.body.input ?? "").includes("first prompt on the converted store"));
+    if (!firstConvertedRequest) throw new Error("the first converted prompt reached no v2 provider input");
+    const firstConvertedInput = JSON.stringify(firstConvertedRequest.body.input);
     const forwardRebaseLines = rebaseLinesFor(fixture, "v2", sessionId);
     const forwardCompartments = readCompartments(fixture, sessionId);
     const forwardProjection = v2Projection(fixture, sessionId);
@@ -809,6 +895,13 @@ beforeAll(async () => {
             ? `## ${resolvedForHeading.startMessage}-${resolvedForHeading.endMessage} `
             : "",
         servedHeadBack,
+        markerBoundaryId: markerEvidence.boundaryId,
+        markerCreated: markerEvidence.created,
+        markerCompleted: markerEvidence.completed,
+        convertedMarkerCount,
+        firstConvertedInput,
+        preBoundarySentinel: markerEvidence.preBoundarySentinel,
+        postBoundarySentinel: markerEvidence.postBoundarySentinel,
     };
     // Printed, not just asserted: the delivery record for this change quotes the
     // rebase lines, the served-byte pins and the doctor counts, and they can only
@@ -832,6 +925,15 @@ beforeAll(async () => {
 
 afterAll(async () => {
     for (const stop of cleanup.reverse()) await stop().catch(() => undefined);
+});
+
+test("OpenCode 2 converts the completed MC marker and serves only its retained tail", () => {
+    expect(evidence.markerCompleted).toBe(evidence.markerCreated);
+    expect(evidence.convertedMarkerCount).toBe(1);
+    expect(evidence.markerBoundaryId).not.toBe("");
+    expect(evidence.firstConvertedInput).toContain("first prompt on the converted store");
+    expect(evidence.firstConvertedInput).toContain(evidence.postBoundarySentinel);
+    expect(evidence.firstConvertedInput).not.toContain(evidence.preBoundarySentinel);
 });
 
 test("the conversion really split a 1.x turn inside the published compartment", () => {

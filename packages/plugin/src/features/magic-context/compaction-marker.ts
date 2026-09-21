@@ -474,7 +474,7 @@ export function injectCompactionMarker(
         tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
         modelID: "magic-context",
         providerID: "magic-context",
-        time: { created: boundaryTime + 1 },
+        time: { created: boundaryTime + 1, completed: boundaryTime + 1 },
     });
 
     try {
