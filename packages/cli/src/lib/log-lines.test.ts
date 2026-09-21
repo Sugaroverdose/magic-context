@@ -8,6 +8,8 @@ import {
     getMagicContextLogPaths,
     inspectLogFile,
     inspectMagicContextLogs,
+    type LogLevel,
+    logSpecAdmits,
     parseLogLine,
     readLogLines,
 } from "./log-lines";
@@ -30,27 +32,37 @@ afterEach(() => {
 });
 
 describe("parseLogLine", () => {
-    it("parses the authoritative fleet grammar fixture", () => {
-        const fixtureCase = golden.cases.find((entry) => entry.event.module === "magic-context");
-        if (!fixtureCase) throw new Error("golden fixture has no magic-context case");
+    it("reads every render case of the authority fleet r2 fixture", () => {
+        for (const fixture of golden.cases) {
+            const bound: Record<string, string> = Object.fromEntries(fixture.event.bound);
+            // The reader hands consumers the bare id: `session=` carries the
+            // issuer so the id can be matched against a session store, and the
+            // pickers that filter on it show the id alone.
+            const session = bound.session
+                ? bound.session.slice(bound.session.indexOf(":") + 1)
+                : null;
 
-        expect(parseLogLine(fixtureCase.line)).toEqual({
-            ts: "2026-09-05T10:41:03.130Z",
-            level: "WARN",
-            session: "ses_00fc88222ffe",
-            tags: ["perf"],
-            message: "transform stage folded",
-            kv: { ms: "412", retry: "2" },
-            grammar: "fleet",
-        });
+            expect(parseLogLine(fixture.line), fixture.name).toEqual({
+                ts: new Date(fixture.event.at_ms).toISOString(),
+                level: fixture.event.level.toUpperCase(),
+                logger: fixture.event.logger,
+                session,
+                tags: fixture.event.logger.split(".").slice(1),
+                bound,
+                message: fixture.event.message,
+                kv: Object.fromEntries(fixture.event.fields),
+                grammar: "fleet-r2",
+            });
+        }
     });
 
-    it("preserves message escaping and quoted field suffixes from every golden case", () => {
-        for (const fixture of golden.cases) {
-            const line = fixture.line.replace(` ${fixture.event.module} `, " magic-context ");
-            const parsed = parseLogLine(line);
-            expect(parsed?.message, fixture.name).toBe(fixture.event.message);
-            expect(parsed?.kv, fixture.name).toEqual(Object.fromEntries(fixture.event.fields));
+    it("admits or filters every CK_LOG case of the authority fixture", () => {
+        for (const fixture of golden.level_filter.cases) {
+            const level = fixture.level.toUpperCase() as LogLevel;
+            expect(
+                logSpecAdmits(fixture.spec, level, fixture.logger),
+                `${fixture.spec || "<empty>"} @ ${fixture.level} ${fixture.logger}`,
+            ).toBe(fixture.emit);
         }
     });
 
@@ -72,18 +84,53 @@ describe("parseLogLine", () => {
         }
     });
 
-    it("parses the legacy bracketed grammar and maps synthetic global to no session", () => {
-        expect(
-            parseLogLine(
-                "[2026-09-05T10:41:03.130Z] [magic-context][ses_00fc88222ffe] transform stage folded cache.read=7 cache.write=2",
-            ),
-        ).toEqual({
+    // One event, written by the three producers a developer box can still have
+    // on disk. Each line is the shape of exactly one grammar, and the reader
+    // must not read any of them as another.
+    const sameEvent = {
+        r2: "2026-09-05T10:41:03.130Z WARN  magic-context.perf: [harness=opencode session=opencode:ses_00fc88222ffe] transform stage folded ms=412 retry=2",
+        r1: "2026-09-05T10:41:03.130Z WARN  magic-context session=opencode:ses_00fc88222ffe tag=perf transform stage folded ms=412 retry=2",
+        legacy: "[2026-09-05T10:41:03.130Z] [magic-context][ses_00fc88222ffe] transform stage folded ms=412 retry=2",
+    };
+
+    it("reads the r2 shape as r2 and nothing else", () => {
+        expect(parseLogLine(sameEvent.r2)).toEqual({
+            ts: "2026-09-05T10:41:03.130Z",
+            level: "WARN",
+            logger: "magic-context.perf",
+            session: "ses_00fc88222ffe",
+            tags: ["perf"],
+            bound: { harness: "opencode", session: "opencode:ses_00fc88222ffe" },
+            message: "transform stage folded",
+            kv: { ms: "412", retry: "2" },
+            grammar: "fleet-r2",
+        });
+    });
+
+    it("reads the r1 shape as r1 and nothing else", () => {
+        expect(parseLogLine(sameEvent.r1)).toEqual({
+            ts: "2026-09-05T10:41:03.130Z",
+            level: "WARN",
+            logger: "magic-context",
+            session: "ses_00fc88222ffe",
+            tags: ["perf"],
+            bound: { session: "opencode:ses_00fc88222ffe" },
+            message: "transform stage folded",
+            kv: { ms: "412", retry: "2" },
+            grammar: "fleet-r1",
+        });
+    });
+
+    it("reads the legacy bracketed shape as legacy and maps synthetic global to no session", () => {
+        expect(parseLogLine(sameEvent.legacy)).toEqual({
             ts: "2026-09-05T10:41:03.130Z",
             level: null,
+            logger: "magic-context",
             session: "ses_00fc88222ffe",
             tags: [],
+            bound: {},
             message: "transform stage folded",
-            kv: { "cache.read": "7", "cache.write": "2" },
+            kv: { ms: "412", retry: "2" },
             grammar: "legacy",
         });
         expect(
@@ -94,6 +141,23 @@ describe("parseLogLine", () => {
             parseLogLine("[2026-09-05T10:41:03.130Z] [magic-context][] maintenance completed")
                 ?.session,
         ).toBeNull();
+    });
+
+    it("maps one event written in all three grammars onto one record shape", () => {
+        const records = [sameEvent.r2, sameEvent.r1, sameEvent.legacy].map(parseLogLine);
+        expect(records.map((record) => record?.grammar)).toEqual([
+            "fleet-r2",
+            "fleet-r1",
+            "legacy",
+        ]);
+        for (const record of records) {
+            expect(record?.session).toBe("ses_00fc88222ffe");
+            expect(record?.message).toBe("transform stage folded");
+            expect(record?.kv).toEqual({ ms: "412", retry: "2" });
+        }
+        // What r1 wrote as `tag=perf` is r2's logger component; the legacy
+        // grammar had no way to express it at all.
+        expect(records.map((record) => record?.tags)).toEqual([["perf"], ["perf"], []]);
     });
 
     for (const fixture of opaqueMessages) {
@@ -185,7 +249,7 @@ describe("log path discovery", () => {
         });
         expect(files.find((file) => file.exists)).toMatchObject({
             path: fleetPath,
-            grammar: "fleet",
+            grammar: "fleet-r1",
             lineCount: 1,
         });
     });
@@ -194,21 +258,52 @@ describe("log path discovery", () => {
         const root = mkdtempSync(join(tmpdir(), "mc-log-read-"));
         roots.push(root);
         const legacy = join(root, "legacy.log");
-        const fleet = join(root, "fleet.log");
+        const fleetR1 = join(root, "fleet-r1.log");
+        const fleetR2 = join(root, "fleet-r2.log");
         writeFileSync(
             legacy,
             "[2026-09-05T10:41:04.000Z] [magic-context][global] legacy message\n",
         );
-        writeFileSync(fleet, "2026-09-05T10:41:03.000Z INFO  magic-context fleet message\n");
+        writeFileSync(fleetR1, "2026-09-05T10:41:03.000Z INFO  magic-context fleet message\n");
+        writeFileSync(
+            fleetR2,
+            "2026-09-05T10:41:02.000Z INFO  magic-context.transform: r2 message ms=3\n",
+        );
 
         const legacyInfo = inspectLogFile(legacy);
-        const fleetInfo = inspectLogFile(fleet);
+        const fleetR1Info = inspectLogFile(fleetR1);
+        const fleetR2Info = inspectLogFile(fleetR2);
         expect(legacyInfo).toMatchObject({ exists: true, lineCount: 1, grammar: "legacy" });
-        expect(fleetInfo).toMatchObject({ exists: true, lineCount: 1, grammar: "fleet" });
-        expect(readLogLines([legacyInfo, fleetInfo])).toEqual([
+        expect(fleetR1Info).toMatchObject({ exists: true, lineCount: 1, grammar: "fleet-r1" });
+        expect(fleetR2Info).toMatchObject({ exists: true, lineCount: 1, grammar: "fleet-r2" });
+        expect(readLogLines([legacyInfo, fleetR1Info, fleetR2Info])).toEqual([
+            "2026-09-05T10:41:02.000Z INFO  magic-context.transform: r2 message ms=3",
             "2026-09-05T10:41:03.000Z INFO  magic-context fleet message",
             "[2026-09-05T10:41:04.000Z] [magic-context][global] legacy message",
         ]);
+    });
+
+    it("resolves no dated segment, which is why the writer-side fixture sections are inert", () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-log-segments-"));
+        roots.push(root);
+
+        // `segment_name` and `retention_prune` pin the WRITER: which file a
+        // module opens for today's UTC day and which old segments it unlinks by
+        // filename. magic-context still writes one `magic-context.log` rotated
+        // to `.1` (packages/plugin/src/shared/logger.ts) and the doctor reads no
+        // daemon log, so no reader here resolves or prunes a dated segment.
+        // Read the two sections anyway: when the writer does move, this is the
+        // assertion that fails and asks for a dated-segment resolver.
+        expect(golden.segment_name.cases.length).toBeGreaterThan(0);
+        expect(golden.retention_prune.cases.length).toBeGreaterThan(0);
+        const dated = /\.\d{4}-\d{2}-\d{2}\.log$/;
+        for (const path of getMagicContextLogPaths("opencode", {
+            tempDir: root,
+            storageDir: join(root, "storage"),
+            override: null,
+        })) {
+            expect(path, path).not.toMatch(dated);
+        }
     });
 });
 
