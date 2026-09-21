@@ -7,6 +7,7 @@ export type CacheBustDivergenceClass =
     | "accounted_hard_pressure_refold"
     | "accounted_hard_marker_drain"
     | "accounted_hard_fold"
+    | "accounted_execute_published_history"
     | "accounted_soft_m1_execute"
     | "accounted_ctx_reduce"
     | "accounted_ctx_flush"
@@ -15,6 +16,7 @@ export type CacheBustDivergenceClass =
     | "accounted_provider_system_prompt_change"
     | "usage_missing"
     | "provider_full_miss"
+    | "provider_short_read_identical_bytes"
     | "unaccounted_defer_pass"
     | "unaccounted_double_bust"
     | "unaccounted_tail_rewrite"
@@ -44,6 +46,12 @@ export interface CacheBustDecisionAttribution {
     decision: string;
     canonicalDecision?: string;
     deferReason?: string | null;
+    /**
+     * The reclaim ride the pass logged when it applied queued work, for example
+     * "publishedHistory". Names why the pass was allowed to mutate, which the
+     * scheduler decision alone does not say.
+     */
+    appliedRide?: string;
     materialized: boolean;
     materializeReason: string | null;
     emergency: boolean;
@@ -76,6 +84,8 @@ export interface CacheBustAttributionInput {
     previousTotal?: number;
     previousModel?: string;
     currentModel?: string;
+    /** The meter read short while the reusable byte prefix was unchanged. */
+    providerShortReadWithIdenticalPrefix?: boolean;
     decision?: CacheBustDecisionAttribution;
 }
 
@@ -147,6 +157,11 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
         rule: "matched pass records applied drops",
     },
     {
+        divergenceClass: "accounted_execute_published_history",
+        accounted: true,
+        rule: "matched execute pass drained queued work on a publishedHistory reclaim ride",
+    },
+    {
         divergenceClass: "accounted_soft_m1_execute",
         accounted: true,
         rule: "matched canonical execute pass refreshes m1",
@@ -160,6 +175,11 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
         divergenceClass: "provider_full_miss",
         accounted: true,
         rule: "provider cache read is exactly 0 with prevTotal ≥ 10,000; ordinary short reads stay unaccounted; show wire model prev → cur when it changes",
+    },
+    {
+        divergenceClass: "provider_short_read_identical_bytes",
+        accounted: true,
+        rule: "provider read fell short while the reusable byte prefix was unchanged; provider-side latency or eviction, not a prompt rewrite",
     },
     {
         divergenceClass: "unaccounted_defer_pass",
@@ -208,20 +228,36 @@ export function nearestCacheBustDecision(
         const delta = timeDelta(decision);
         return delta >= -30_000 && delta <= 5_000;
     };
-    const byDistance = (
+    // A transform pass runs before the request it shapes is put on the wire, so
+    // the pass that SERVED a request is the latest one at or before it. Ranking
+    // purely by absolute distance let a later pass — the one preparing the NEXT
+    // request — win whenever it happened to be closer in time: a request sent 9 s
+    // after its execute pass, with the next turn's defer pass 4 s after it, was
+    // attributed to that defer and reported as an unaccounted defer bust.
+    const byServeOrder = (
         left: CacheBustDecisionAttribution,
         right: CacheBustDecisionAttribution,
-    ): number => Math.abs(timeDelta(left)) - Math.abs(timeDelta(right));
+    ): number => {
+        const leftDelta = timeDelta(left);
+        const rightDelta = timeDelta(right);
+        const leftServed = leftDelta <= 0;
+        const rightServed = rightDelta <= 0;
+        if (leftServed !== rightServed) return leftServed ? -1 : 1;
+        return Math.abs(leftDelta) - Math.abs(rightDelta);
+    };
     const exact = messageId
         ? decisions
               .filter((decision) => decision.messageId === messageId && withinJoinWindow(decision))
-              .sort(byDistance)[0]
+              .sort(byServeOrder)[0]
         : undefined;
     if (exact) return exact;
-    return decisions.filter(withinJoinWindow).sort(byDistance)[0];
+    return decisions.filter(withinJoinWindow).sort(byServeOrder)[0];
 }
 
 export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDivergenceClass {
+    // No transform pass can explain a short provider read when the reusable bytes
+    // are unchanged, so this case is settled before joining any pass row.
+    if (input.providerShortReadWithIdenticalPrefix) return "provider_short_read_identical_bytes";
     const isSystemRow = input.divergenceIndex === 0 && input.firstDivergenceRole === "system";
     const rewrittenRatio =
         input.rewrittenTokens !== undefined && input.promptTokens && input.promptTokens > 0
@@ -274,6 +310,19 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
         if (usageMissing) return "usage_missing";
         if (providerFullMiss) return "provider_full_miss";
         return "unaccounted_defer_pass";
+    }
+    // A pass that logged its reclaim ride states outright why it was allowed to
+    // mutate, so it outranks the compaction-marker seam below, which only infers
+    // a cause from nearby content. A fold the pass explicitly recorded, and the
+    // provider-side zero-read facts, still win over it.
+    if (
+        !decision.materialized &&
+        !usageMissing &&
+        !providerFullMiss &&
+        canonicalDecision === "execute" &&
+        (decision.appliedRide ?? "").includes("publishedHistory")
+    ) {
+        return "accounted_execute_published_history";
     }
     if (
         materializeReason === "marker_drain" ||

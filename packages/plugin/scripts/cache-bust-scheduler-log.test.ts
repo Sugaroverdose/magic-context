@@ -56,3 +56,128 @@ test("analyzer and sentinel discriminate unaccounted_defer_pass from no_mc_pass_
     expect(events.some(line => line.includes('"divergence_class":"unaccounted_defer_pass"'))).toBe(true);
     expect(events.some(line => line.includes('"divergence_class":"no_mc_pass_row"'))).toBe(false);
 });
+
+// 2026-09-21 12:26Z. The execute pass at 12:26:08.421Z drained 160 queued drops
+// on a published-history ride and the request it shaped went out 9 s later, at
+// 12:26:17.760Z. The next turn's defer pass ran 4 s after that request.
+const drainSession = "ses_publishedHistoryDrain";
+const drainPassAt = "2026-09-21T12:26:08.421Z";
+const drainRequestMs = Date.parse("2026-09-21T12:26:17.760Z");
+const drainPreviousMs = Date.parse("2026-09-21T12:25:43.000Z");
+const drainLog = (applyReason: string): string =>
+    `[${drainPassAt}] [magic-context][${drainSession}] transform scheduler: percentage=75.0% inputTokens=654353 cacheTtl=never lastResponseTime=1789993567716 decision=execute
+[2026-09-21T12:26:08.580Z] [magic-context][${drainSession}] pending ops WILL APPLY — reason=${applyReason}, pendingOps=160, context=75.0%
+[2026-09-21T12:26:22.102Z] [magic-context][${drainSession}] transform scheduler: percentage=48.6% inputTokens=423813 cacheTtl=never lastResponseTime=1789993581708 decision=defer
+`;
+
+function drainFixture(applyReason: string): { dir: string; logPath: string } {
+    const dir = mkdtempSync(join(tmpdir(), "published-history-drain-"));
+    dirs.push(dir);
+    const logPath = join(dir, "mc.log");
+    writeFileSync(logPath, drainLog(applyReason));
+    const requests = [
+        {
+            timestampMs: drainPreviousMs,
+            head: "history before the drain",
+            usage: { input_tokens: 2, cache_read_input_tokens: 653_706, cache_creation_input_tokens: 645 },
+        },
+        {
+            timestampMs: drainRequestMs,
+            head: "history after the drain",
+            usage: { input_tokens: 2, cache_read_input_tokens: 285_161, cache_creation_input_tokens: 138_650 },
+        },
+    ];
+    for (const [index, request] of requests.entries()) {
+        const stem = `${new Date(request.timestampMs).toISOString().replaceAll(":", "-").replace(".", "-")}-00000${index}-${drainSession}`;
+        writeFileSync(
+            join(dir, `${stem}.meta.json`),
+            JSON.stringify({ session: drainSession, createdAt: new Date(request.timestampMs).toISOString() }),
+        );
+        writeFileSync(
+            join(dir, `${stem}.body.json`),
+            JSON.stringify({
+                // The per-request billing header rotates on both requests.
+                system: [{ type: "text", text: `x-anthropic-billing-header: cch=${index}abcd; cc_prev_req=req_00${index};` }],
+                messages: [
+                    { role: "user", content: [{ type: "text", text: request.head, cache_control: { type: "ephemeral" } }] },
+                    { role: "assistant", content: [{ type: "text", text: "shared tail" }] },
+                ],
+            }),
+        );
+        writeFileSync(join(dir, `${stem}.response.json`), JSON.stringify({ status: 200, usage: request.usage }));
+    }
+    return { dir, logPath };
+}
+
+test("attributes a request to the execute pass that served it nine seconds earlier", () => {
+    const { dir, logPath } = drainFixture("ride=publishedHistory (scheduler=execute)");
+
+    const pass = schedulerLogDecisions(drainLog("ride=publishedHistory (scheduler=execute)"), drainSession)[0];
+    expect(pass.decision).toBe("execute");
+    expect(pass.appliedRide).toBe("publishedHistory");
+
+    const analysis = analyzeOpenCodeCacheBustSession({
+        sessionId: drainSession,
+        anthropicDir: dir,
+        openaiDir: join(dir, "missing"),
+        mcLogPath: logPath,
+    });
+    expect(analysis.requests.at(-1)?.verdict).toBe("BUST");
+    expect(analysis.requests.at(-1)?.divergenceClass).toBe("accounted_execute_published_history");
+});
+
+test("a pass log without a ride label is still the serving execute pass, never a defer bust", () => {
+    // The ride label in the "pending ops WILL APPLY" line is new; a log written
+    // before it existed proves only that the serving pass was an execute pass.
+    const { dir, logPath } = drainFixture("scheduler_execute (scheduler=execute)");
+
+    const analysis = analyzeOpenCodeCacheBustSession({
+        sessionId: drainSession,
+        anthropicDir: dir,
+        openaiDir: join(dir, "missing"),
+        mcLogPath: logPath,
+    });
+
+    expect(analysis.requests.at(-1)?.divergenceClass).toBe("accounted_soft_m1_execute");
+});
+
+test("the served execute pass raises no sentinel wake for its window", async () => {
+    const { dir, logPath } = drainFixture("ride=publishedHistory (scheduler=execute)");
+    const events: string[] = [];
+
+    await runSentinelOnce(
+        {
+            once: true,
+            send: false,
+            intervalMs: 60_000,
+            lookbackMs: 120_000,
+            stateFile: join(dir, "state.json"),
+            databasePath: join(dir, "absent.db"),
+            rustStorePath: join(dir, "absent-rust.db"),
+            connectionFile: join(dir, "absent.json"),
+            wakeModuleId: "prefrontal-core",
+            wakeAgentId: "agent_b613e5cf2ee55b8c",
+            wakeFromAgent: "mc-cache-bust-sentinel",
+            anthropicDir: dir,
+            openaiDir: join(dir, "missing"),
+            mcLogPath: logPath,
+        },
+        {
+            now: () => drainRequestMs + 1_000,
+            listActiveSessions: () => [
+                {
+                    sessionId: drainSession,
+                    harness: "opencode",
+                    projectPath: "fixture",
+                    directory: dir,
+                    activityMs: drainRequestMs,
+                },
+            ],
+            loadDecisions: () => [],
+            stdout: (line) => events.push(line),
+        },
+    );
+
+    // The window is accounted, so the sentinel emits no wake event at all.
+    expect(events).toEqual([]);
+});

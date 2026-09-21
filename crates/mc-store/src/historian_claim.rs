@@ -45,6 +45,12 @@ const PHASE_CLAIMED: &str = "claimed";
 /// stops being offered and stops being claimable here, so the stored report cannot
 /// be superseded by a later claim.
 const PHASE_REPORTED: &str = "reported";
+/// A run nobody module-side is waiting for any more, because the process that
+/// queued it restarted. The row is kept rather than deleted: it still carries the
+/// chunk fingerprint and the prompt bytes, which is everything a boot-time
+/// re-publication needs. It is never offered to a claimant while parked, and the
+/// sweep deletes it once the run's own deadline passes.
+const PHASE_PARKED: &str = "parked";
 
 /// The lease a claim gets. A run whose await budget outlives the ceiling is
 /// leased for the ceiling, which is what leaves time to re-claim it.
@@ -136,6 +142,10 @@ pub enum HistorianReportRefusal {
     /// A terminal report for this run is already stored and waiting to be
     /// published. The module takes exactly one per run.
     AlreadyReported,
+    /// The claim is still the current one, but the run itself is past its own
+    /// deadline: the module has stopped waiting, so no report can be delivered any
+    /// more. It tells a claimant to stop rather than to retry.
+    RunExpired,
 }
 
 impl HistorianReportRefusal {
@@ -145,6 +155,7 @@ impl HistorianReportRefusal {
             HistorianReportRefusal::NotClaimed => "not_claimed",
             HistorianReportRefusal::SupersededToken => "superseded_token",
             HistorianReportRefusal::AlreadyReported => "already_reported",
+            HistorianReportRefusal::RunExpired => "run_expired",
         }
     }
 }
@@ -190,6 +201,16 @@ pub struct HistorianReportAuthorization {
 pub enum HistorianReportOutcome {
     Authorized(HistorianReportAuthorization),
     Refused(HistorianReportRefusal),
+}
+
+/// What one sweep did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistorianSweepOutcome {
+    /// Runs whose claimant stopped reporting. Their sessions are parked for
+    /// reclaim and the rows are offerable again.
+    pub reclaimed: Vec<String>,
+    /// Parked rows past the run's own deadline, deleted rather than kept.
+    pub dropped: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,11 +312,20 @@ fn store_meta(
     let meta_json = serde_json::to_string(meta).map_err(|error| {
         rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error.to_string())))
     })?;
-    tx.execute(
+    let affected = tx.execute(
         "UPDATE mc_cache_state SET row_version = ?2, meta = ?3
          WHERE session_id = ?1 AND row_version = ?4",
         params![session_id, next as i64, meta_json, current_row_version],
     )?;
+    // This function's signature promises the write landed, and every caller acts on
+    // that: it returns the new row version and moves on. Every caller today reads
+    // and writes inside one transaction, so the row version cannot move underneath
+    // it and this cannot fire. It is checked anyway, because the first caller added
+    // outside a transaction would otherwise get a silent no-op that reads exactly
+    // like a successful write.
+    if affected != 1 {
+        return Err(rusqlite::Error::StatementChangedRows(affected));
+    }
     Ok(next)
 }
 
@@ -357,27 +387,40 @@ impl McStore {
         })
     }
 
-    /// Runs waiting for a claimant, newest-queued last.
+    /// Runs waiting for a claimant in one project, newest-queued last.
+    ///
+    /// `project_path` is the caller's own project, not a filter it chooses: one
+    /// store serves every project on the machine, and the prompts a claim hands
+    /// back are the folded conversation transcript. A caller only ever sees runs
+    /// queued by the project its channel is bound to.
     ///
     /// A run whose own deadline has passed is not offered: taking it would spend a
-    /// provider call on output the module has already stopped waiting for.
+    /// provider call on output the module has already stopped waiting for. Nor is a
+    /// parked one, whose module-side waiter is gone.
+    ///
+    /// This is a pure read and runs on the plain read path. Polling is the claim
+    /// lane's steady state — every claimant asks on an interval — and routing that
+    /// through a fenced write transaction would take the store's exclusive write
+    /// lock, competing with transform commits, for a query that writes nothing.
     pub fn list_pending_historian_runs(
         &self,
+        project_path: &str,
         session_id: Option<&str>,
         now_ms: i64,
     ) -> Result<Vec<HistorianPendingRun>, McStoreError> {
-        let rows = self.inner.with_conn_fenced(|tx| {
-            let mut statement = tx.prepare(
+        let rows = self.inner.with_conn(|conn| {
+            let mut statement = conn.prepare(
                 "SELECT run_id, session_id, chunk_fingerprint,
                         LENGTH(CAST(system_prompt AS BLOB)) + LENGTH(CAST(user_prompt AS BLOB)),
                         deadline_ms, phase, claim_deadline_ms
                    FROM mc_historian_pending_run
-                  WHERE (?1 IS NULL OR session_id = ?1)
-                    AND deadline_ms > ?2
+                  WHERE project_path = ?1
+                    AND (?2 IS NULL OR session_id = ?2)
+                    AND deadline_ms > ?3
                   ORDER BY created_at_ms ASC, run_id ASC",
             )?;
             let mapped = statement
-                .query_map(params![session_id, now_ms], |row| {
+                .query_map(params![project_path, session_id, now_ms], |row| {
                     Ok((
                         HistorianPendingRun {
                             run_id: row.get(0)?,
@@ -404,8 +447,14 @@ impl McStore {
     ///
     /// The queue row and the session's phase move together so a claimant that is
     /// told it won always finds the session ready to accept its report.
+    ///
+    /// `project_path` is the caller's own project. A run belonging to another
+    /// project is answered exactly as a run that does not exist: the prompts handed
+    /// back are a conversation transcript, so a caller must not even learn that
+    /// another project on this machine has a run outstanding.
     pub fn claim_historian_run(
         &self,
+        project_path: &str,
         run_id: &str,
         claimant_instance_id: &str,
         now_ms: i64,
@@ -415,8 +464,9 @@ impl McStore {
                 .query_row(
                     "SELECT session_id, phase, attempt, claim_deadline_ms, lease_ms,
                             deadline_ms, system_prompt, user_prompt, model_chain, await_budget_ms
-                       FROM mc_historian_pending_run WHERE run_id = ?1",
-                    params![run_id],
+                       FROM mc_historian_pending_run
+                      WHERE run_id = ?1 AND project_path = ?2",
+                    params![run_id, project_path],
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,
@@ -532,15 +582,23 @@ impl McStore {
         Ok(outcome)
     }
 
-    /// Extend the current claim's lease. Only the holder of the current token can.
+    /// Extend the current claim's lease. Only the holder of the current token can,
+    /// and only while the run itself is still worth finishing.
+    ///
+    /// Past the run's own deadline the lease cannot be extended at all — the cap is
+    /// the deadline — so answering "extended" there would hand back a lease already
+    /// in the past. `pending` has stopped offering the run and `claim` refuses it by
+    /// then, which would leave the heartbeat as the one op still telling a claimant
+    /// to keep paying a provider for a completion nothing can accept.
     pub fn heartbeat_historian_run(
         &self,
+        project_path: &str,
         run_id: &str,
         token: &str,
         now_ms: i64,
     ) -> Result<HistorianHeartbeatOutcome, McStoreError> {
         let outcome = self.inner.with_conn_fenced(|tx| {
-            let Some(claim) = read_claim(tx, run_id)? else {
+            let Some(claim) = read_claim(tx, project_path, run_id)? else {
                 return Ok(HistorianHeartbeatOutcome::Refused(
                     HistorianReportRefusal::UnknownRun,
                 ));
@@ -554,6 +612,11 @@ impl McStore {
             if stored_token != token {
                 return Ok(HistorianHeartbeatOutcome::Refused(
                     HistorianReportRefusal::SupersededToken,
+                ));
+            }
+            if now_ms >= claim.deadline_ms {
+                return Ok(HistorianHeartbeatOutcome::Refused(
+                    HistorianReportRefusal::RunExpired,
                 ));
             }
             let claim_deadline_ms = now_ms.saturating_add(claim.lease_ms).min(claim.deadline_ms);
@@ -581,11 +644,12 @@ impl McStore {
     /// advancing the phase on arrival would make a rejected report look published.
     pub fn authorize_historian_report(
         &self,
+        project_path: &str,
         run_id: &str,
         token: &str,
     ) -> Result<HistorianReportOutcome, McStoreError> {
         let outcome = self.inner.with_conn_fenced(|tx| {
-            let Some(claim) = read_claim(tx, run_id)? else {
+            let Some(claim) = read_claim(tx, project_path, run_id)? else {
                 return Ok(HistorianReportOutcome::Refused(
                     HistorianReportRefusal::UnknownRun,
                 ));
@@ -642,8 +706,15 @@ impl McStore {
     /// earlier read: between authorizing a report and storing it the lease can
     /// lapse and the run can be handed to somebody else, and a report from the
     /// claim that was replaced must not land.
+    ///
+    /// `project_path` is the caller's own project, for the same reason the four ops
+    /// around it take one: this is a write reached from the claim lane, and a
+    /// caller must not be able to leave a document on a run belonging to another
+    /// project on this machine. A run in another project answers `unknown_run`,
+    /// the same answer as a run that does not exist.
     pub fn record_historian_report(
         &self,
+        project_path: &str,
         run_id: &str,
         token: &str,
         report: &HistorianRunReport,
@@ -653,8 +724,9 @@ impl McStore {
             let row = tx
                 .query_row(
                     "SELECT coordinator_token, report_kind, deadline_ms
-                       FROM mc_historian_pending_run WHERE run_id = ?1",
-                    params![run_id],
+                       FROM mc_historian_pending_run
+                      WHERE run_id = ?1 AND project_path = ?2",
+                    params![run_id, project_path],
                     |row| {
                         Ok((
                             row.get::<_, Option<String>>(0)?,
@@ -686,11 +758,12 @@ impl McStore {
             }
             // A run whose own deadline has passed is not worth storing an answer
             // for: the module stopped waiting for it, and the next pass would only
-            // release it. Saying so lets the claimant log a reason rather than
-            // believing the fold is on its way.
+            // release it. The refusal is the same one a heartbeat past the deadline
+            // gets, because it means the same thing and asks for the same response:
+            // the run is over, stop rather than take the next one.
             if deadline_ms <= now_ms {
                 return Ok(HistorianRecordOutcome::Refused(
-                    HistorianReportRefusal::UnknownRun,
+                    HistorianReportRefusal::RunExpired,
                 ));
             }
             let (kind, text, length_capped, code, message) = match report {
@@ -846,13 +919,42 @@ impl McStore {
         Ok(removed > 0)
     }
 
-    /// Return every run whose claimant stopped reporting to the queue, and park
-    /// its session so the next claimant continues the same run.
+    /// Stop offering a run without losing it, because the process that was waiting
+    /// for its report is gone.
     ///
-    /// The run keeps its `run_id`, its chunk and its firing sequence: only the
-    /// claim is dropped. That is what makes a re-claim cheap — the replacement
+    /// Called on restart recovery, where the session is being released: the run has
+    /// no module-side waiter any more, so a claimant that took it would produce a
+    /// completion nothing could accept. The row keeps its chunk fingerprint and its
+    /// prompt bytes so a boot-time re-publication can adopt it instead of paying to
+    /// assemble the chunk again; the sweep deletes it if nothing does.
+    pub fn park_historian_pending_run(
+        &self,
+        run_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, McStoreError> {
+        let parked = self.inner.with_conn_fenced(|tx| {
+            tx.execute(
+                "UPDATE mc_historian_pending_run
+                    SET phase = ?2, claimant_instance_id = NULL, coordinator_token = NULL,
+                        claim_deadline_ms = NULL, updated_at_ms = ?3
+                  WHERE run_id = ?1",
+                params![run_id, PHASE_PARKED, now_ms],
+            )
+        })?;
+        Ok(parked > 0)
+    }
+
+    /// Return every run whose claimant stopped reporting to the queue, and park
+    /// its session so the next claimant continues the same run. Parked rows whose
+    /// run is past its own deadline are deleted in the same pass.
+    ///
+    /// A reclaimed run keeps its `run_id`, its chunk and its firing sequence: only
+    /// the claim is dropped. That is what makes a re-claim cheap — the replacement
     /// claimant pays for one completion, not for re-assembling the chunk.
-    pub fn expire_historian_claims(&self, now_ms: i64) -> Result<Vec<String>, McStoreError> {
+    pub fn expire_historian_claims(
+        &self,
+        now_ms: i64,
+    ) -> Result<HistorianSweepOutcome, McStoreError> {
         let expired = self.inner.with_conn_fenced(|tx| {
             let mut statement = tx.prepare(
                 "SELECT run_id, session_id FROM mc_historian_pending_run
@@ -884,7 +986,27 @@ impl McStore {
                 }
                 reclaimed.push(run_id);
             }
-            Ok(reclaimed)
+
+            // A parked run past its own deadline is the end of the line: nobody is
+            // waiting for it module-side and re-publishing it would queue work whose
+            // deadline has already passed. Dropping it here is what keeps the queue
+            // the size of the work actually outstanding across restarts.
+            let mut statement = tx.prepare(
+                "SELECT run_id FROM mc_historian_pending_run
+                  WHERE phase = ?1 AND deadline_ms <= ?2",
+            )?;
+            let dropped = statement
+                .query_map(params![PHASE_PARKED, now_ms], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            for run_id in &dropped {
+                tx.execute(
+                    "DELETE FROM mc_historian_pending_run WHERE run_id = ?1",
+                    params![run_id],
+                )?;
+            }
+
+            Ok(HistorianSweepOutcome { reclaimed, dropped })
         })?;
         Ok(expired)
     }
@@ -905,14 +1027,17 @@ struct StoredClaim {
     deadline_ms: i64,
 }
 
+/// Read one queue row, scoped to the caller's project: a run belonging to another
+/// project reads as absent rather than as refused, so nothing about it leaks.
 fn read_claim(
     tx: &rusqlite::Transaction<'_>,
+    project_path: &str,
     run_id: &str,
 ) -> rusqlite::Result<Option<StoredClaim>> {
     tx.query_row(
         "SELECT session_id, coordinator_token, lease_ms, deadline_ms
-           FROM mc_historian_pending_run WHERE run_id = ?1",
-        params![run_id],
+           FROM mc_historian_pending_run WHERE run_id = ?1 AND project_path = ?2",
+        params![run_id, project_path],
         |row| {
             Ok(StoredClaim {
                 session_id: row.get(0)?,
@@ -928,7 +1053,8 @@ fn read_claim(
 /// A run is claimable when nobody holds it, or when whoever held it stopped
 /// extending the lease. The expired-lease case is checked here rather than only
 /// in the sweep so a claimant that arrives before the sweep runs is not told the
-/// run is busy when it is in fact abandoned.
+/// run is busy when it is in fact abandoned. A parked run is not claimable in any
+/// case: its module-side waiter is gone, so a completion for it has nowhere to go.
 fn is_claimable(phase: &str, claim_deadline_ms: Option<i64>, now_ms: i64) -> bool {
     match phase {
         PHASE_PENDING => true,
@@ -944,6 +1070,9 @@ mod tests {
     use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 
     const AWAIT_BUDGET_MS: i64 = 660_000;
+    /// The project every run in these tests is queued under, and the one a caller
+    /// has to present to see it.
+    const PROJECT: &str = "git:proj";
 
     fn open_store(dir: &std::path::Path) -> McStore {
         McStore::open(&StorageDescriptor {
@@ -955,6 +1084,39 @@ mod tests {
             },
         })
         .unwrap()
+    }
+
+    /// Seed a session in the phase a firing reaches just before its completion
+    /// runs, then queue that run for a claimant under a named project.
+    fn queue_run_for_project(
+        store: &McStore,
+        run_id: &str,
+        session_id: &str,
+        project_path: &str,
+        now_ms: i64,
+    ) {
+        let loaded = store.load(session_id).unwrap();
+        let mut meta = ModuleMeta::default();
+        meta.historian.state = HistorianPhase::Firing;
+        meta.historian.firing_seq = 1;
+        meta.historian.chunk_fingerprint = "fp".to_string();
+        store
+            .commit(session_id, loaded.row_version, &CoreState::default(), &meta)
+            .unwrap();
+        store
+            .publish_pending_historian_run(&NewHistorianPendingRun {
+                run_id: run_id.to_string(),
+                session_id: session_id.to_string(),
+                project_path: project_path.to_string(),
+                firing_seq: 1,
+                chunk_fingerprint: "fp".to_string(),
+                system_prompt: "sys".to_string(),
+                user_prompt: "user".to_string(),
+                model_chain: vec!["test/model".to_string()],
+                await_budget_ms: AWAIT_BUDGET_MS,
+                now_ms,
+            })
+            .unwrap();
     }
 
     /// Seed a session in the phase a firing reaches just before its completion
@@ -972,7 +1134,7 @@ mod tests {
             .publish_pending_historian_run(&NewHistorianPendingRun {
                 run_id: run_id.to_string(),
                 session_id: session_id.to_string(),
-                project_path: "git:proj".to_string(),
+                project_path: PROJECT.to_string(),
                 firing_seq: 1,
                 chunk_fingerprint: "fp".to_string(),
                 system_prompt: "sys".to_string(),
@@ -995,7 +1157,9 @@ mod tests {
         assert_eq!(state.producer_run_id.as_deref(), Some("run-1"));
         assert_eq!(state.coordinator_token, None);
 
-        let pending = store.list_pending_historian_runs(None, 2_000).unwrap();
+        let pending = store
+            .list_pending_historian_runs(PROJECT, None, 2_000)
+            .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].run_id, "run-1");
         assert_eq!(pending[0].session_id, "ses");
@@ -1008,7 +1172,10 @@ mod tests {
 
     /// Claim `run_id` and hand back the token the module minted for it.
     fn claim_token(store: &McStore, run_id: &str, claimant: &str, now_ms: i64) -> String {
-        match store.claim_historian_run(run_id, claimant, now_ms).unwrap() {
+        match store
+            .claim_historian_run(PROJECT, run_id, claimant, now_ms)
+            .unwrap()
+        {
             HistorianClaimOutcome::Claimed(claim) => claim.token,
             other => panic!("expected a claim, got {other:?}"),
         }
@@ -1024,6 +1191,7 @@ mod tests {
         assert_eq!(
             store
                 .record_historian_report(
+                    PROJECT,
                     "run-1",
                     &token,
                     &HistorianRunReport::Output {
@@ -1065,6 +1233,7 @@ mod tests {
         let token = claim_token(&store, "run-1", "install-one", 1_000);
         store
             .record_historian_report(
+                PROJECT,
                 "run-1",
                 &token,
                 &HistorianRunReport::Failed {
@@ -1078,19 +1247,20 @@ mod tests {
         // Long past the lease, which would otherwise make the run stealable.
         let after_lease = 1_000 + HISTORIAN_LEASE_CEILING_MS + 1;
         assert!(store
-            .list_pending_historian_runs(None, after_lease)
+            .list_pending_historian_runs(PROJECT, None, after_lease)
             .unwrap()
             .is_empty());
         assert_eq!(
             store
-                .claim_historian_run("run-1", "install-two", after_lease)
+                .claim_historian_run(PROJECT, "run-1", "install-two", after_lease)
                 .unwrap(),
             HistorianClaimOutcome::Refused(HistorianClaimRefusal::NotPending)
         );
-        assert!(store
-            .expire_historian_claims(after_lease)
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            store.expire_historian_claims(after_lease).unwrap(),
+            HistorianSweepOutcome::default(),
+            "a reported run is out of the sweep's reach too: neither reclaimed nor dropped"
+        );
         assert_eq!(
             store
                 .load_parked_historian_run("ses")
@@ -1121,7 +1291,7 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(
             store
-                .record_historian_report("run-1", &first, &report, after_lease + 1)
+                .record_historian_report(PROJECT, "run-1", &first, &report, after_lease + 1)
                 .unwrap(),
             HistorianRecordOutcome::Refused(HistorianReportRefusal::SupersededToken),
             "the replaced claimant's late report must not land"
@@ -1129,13 +1299,13 @@ mod tests {
 
         assert_eq!(
             store
-                .record_historian_report("run-1", &second, &report, after_lease + 1)
+                .record_historian_report(PROJECT, "run-1", &second, &report, after_lease + 1)
                 .unwrap(),
             HistorianRecordOutcome::Recorded
         );
         assert_eq!(
             store
-                .record_historian_report("run-1", &second, &report, after_lease + 2)
+                .record_historian_report(PROJECT, "run-1", &second, &report, after_lease + 2)
                 .unwrap(),
             HistorianRecordOutcome::Refused(HistorianReportRefusal::AlreadyReported)
         );
@@ -1152,6 +1322,7 @@ mod tests {
         assert_eq!(
             store
                 .record_historian_report(
+                    PROJECT,
                     "run-1",
                     &token,
                     &HistorianRunReport::Output {
@@ -1161,8 +1332,9 @@ mod tests {
                     after_deadline,
                 )
                 .unwrap(),
-            HistorianRecordOutcome::Refused(HistorianReportRefusal::UnknownRun),
-            "the module stopped waiting for this run, so there is nothing to publish into"
+            HistorianRecordOutcome::Refused(HistorianReportRefusal::RunExpired),
+            "the module stopped waiting for this run, so there is nothing to publish into, and \
+             the refusal has to say the run expired rather than that it never existed"
         );
         assert_eq!(
             store
@@ -1173,33 +1345,18 @@ mod tests {
         );
     }
 
-    /// Force a queue row into a phase that is not on offer.
-    ///
-    /// `parked` is the spelling the restart path uses for a run it released, and
-    /// putting it back on offer is what boot-time re-publication has to do. Written
-    /// directly here so the re-publication is proved against that exact value
-    /// rather than only against phases that happen to be claimable already.
-    fn force_phase(store: &McStore, run_id: &str, phase: &str) {
-        store
-            .inner
-            .with_conn_fenced(|tx| {
-                tx.execute(
-                    "UPDATE mc_historian_pending_run SET phase = ?2 WHERE run_id = ?1",
-                    params![run_id, phase],
-                )
-            })
-            .unwrap();
-    }
-
     #[test]
     fn a_run_taken_out_of_the_queue_by_a_restart_goes_back_on_offer_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path());
         queue_run(&store, "run-1", "ses", 1_000);
-        force_phase(&store, "run-1", "parked");
+        // Parked through the call the restart path itself makes, so this is driven by
+        // the writer rather than by a hand-written phase value that could drift from
+        // it.
+        assert!(store.park_historian_pending_run("run-1", 1_500).unwrap());
         assert!(
             store
-                .list_pending_historian_runs(None, 2_000)
+                .list_pending_historian_runs(PROJECT, None, 2_000)
                 .unwrap()
                 .is_empty(),
             "a parked row is not on offer"
@@ -1208,7 +1365,9 @@ mod tests {
         assert!(store
             .republish_parked_historian_run("run-1", 2_000)
             .unwrap());
-        let offered = store.list_pending_historian_runs(None, 2_000).unwrap();
+        let offered = store
+            .list_pending_historian_runs(PROJECT, None, 2_000)
+            .unwrap();
         assert_eq!(offered.len(), 1);
         assert_eq!(offered[0].run_id, "run-1");
         assert_eq!(
@@ -1233,6 +1392,7 @@ mod tests {
         let token = claim_token(&store, "run-answered", "install-one", 1_000);
         store
             .record_historian_report(
+                PROJECT,
                 "run-answered",
                 &token,
                 &HistorianRunReport::Output {
@@ -1248,7 +1408,9 @@ mod tests {
 
         // Past its own deadline: the module has stopped waiting for it.
         queue_run(&store, "run-expired", "ses-expired", 1_000);
-        force_phase(&store, "run-expired", "parked");
+        assert!(store
+            .park_historian_pending_run("run-expired", 1_500)
+            .unwrap());
         assert!(!store
             .republish_parked_historian_run("run-expired", 1_000 + AWAIT_BUDGET_MS + 1)
             .unwrap());
@@ -1291,12 +1453,12 @@ mod tests {
         let after_deadline = 1_000 + AWAIT_BUDGET_MS + 1;
 
         assert!(store
-            .list_pending_historian_runs(None, after_deadline)
+            .list_pending_historian_runs(PROJECT, None, after_deadline)
             .unwrap()
             .is_empty());
         assert_eq!(
             store
-                .claim_historian_run("run-1", "install-one", after_deadline)
+                .claim_historian_run(PROJECT, "run-1", "install-one", after_deadline)
                 .unwrap(),
             HistorianClaimOutcome::Refused(HistorianClaimRefusal::NotPending)
         );
@@ -1309,22 +1471,22 @@ mod tests {
         queue_run(&store, "run-dead", "ses-dead", 1_000);
         queue_run(&store, "run-live", "ses-live", 1_000);
         store
-            .claim_historian_run("run-dead", "install-one", 1_000)
+            .claim_historian_run(PROJECT, "run-dead", "install-one", 1_000)
             .unwrap();
         store
-            .claim_historian_run("run-live", "install-two", 1_000)
+            .claim_historian_run(PROJECT, "run-live", "install-two", 1_000)
             .unwrap();
 
         // One millisecond before either lease ends, nothing is swept.
         let lease_end = 1_000 + HISTORIAN_LEASE_CEILING_MS;
-        assert!(store
-            .expire_historian_claims(lease_end - 1)
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            store.expire_historian_claims(lease_end - 1).unwrap(),
+            HistorianSweepOutcome::default()
+        );
 
         // The live claimant extends its lease; the dead one does not.
         let live_token = match store
-            .claim_historian_run("run-live", "install-three", lease_end - 1)
+            .claim_historian_run(PROJECT, "run-live", "install-three", lease_end - 1)
             .unwrap()
         {
             HistorianClaimOutcome::Refused(HistorianClaimRefusal::AlreadyClaimed) => store
@@ -1335,11 +1497,11 @@ mod tests {
             other => panic!("a live lease must not be stealable: {other:?}"),
         };
         store
-            .heartbeat_historian_run("run-live", &live_token, lease_end - 1)
+            .heartbeat_historian_run(PROJECT, "run-live", &live_token, lease_end - 1)
             .unwrap();
 
         assert_eq!(
-            store.expire_historian_claims(lease_end).unwrap(),
+            store.expire_historian_claims(lease_end).unwrap().reclaimed,
             vec!["run-dead".to_string()]
         );
         assert_eq!(
@@ -1359,7 +1521,7 @@ mod tests {
         let store = open_store(dir.path());
         queue_run(&store, "run-1", "ses", 1_000);
         let HistorianClaimOutcome::Claimed(claim) = store
-            .claim_historian_run("run-1", "install-one", 1_000)
+            .claim_historian_run(PROJECT, "run-1", "install-one", 1_000)
             .unwrap()
         else {
             panic!("the first claimant must win");
@@ -1368,7 +1530,7 @@ mod tests {
         let late = run_deadline_ms - 1;
         assert_eq!(
             store
-                .heartbeat_historian_run("run-1", &claim.token, late)
+                .heartbeat_historian_run(PROJECT, "run-1", &claim.token, late)
                 .unwrap(),
             HistorianHeartbeatOutcome::Extended {
                 claim_deadline_ms: run_deadline_ms
@@ -1384,12 +1546,12 @@ mod tests {
         assert!(store.finish_historian_pending_run("run-1").unwrap());
         assert!(!store.finish_historian_pending_run("run-1").unwrap());
         assert!(store
-            .list_pending_historian_runs(None, 2_000)
+            .list_pending_historian_runs(PROJECT, None, 2_000)
             .unwrap()
             .is_empty());
         assert_eq!(
             store
-                .claim_historian_run("run-1", "install-one", 2_000)
+                .claim_historian_run(PROJECT, "run-1", "install-one", 2_000)
                 .unwrap(),
             HistorianClaimOutcome::Refused(HistorianClaimRefusal::UnknownRun)
         );
@@ -1412,7 +1574,7 @@ mod tests {
             .publish_pending_historian_run(&NewHistorianPendingRun {
                 run_id: "run-1".to_string(),
                 session_id: "ses".to_string(),
-                project_path: "git:proj".to_string(),
+                project_path: PROJECT.to_string(),
                 firing_seq: 1,
                 chunk_fingerprint: "fp".to_string(),
                 system_prompt: "sys".to_string(),
@@ -1424,9 +1586,274 @@ mod tests {
             .expect_err("an idle session has no run to queue");
         assert!(error.to_string().contains("is not firing"), "{error}");
         assert!(store
-            .list_pending_historian_runs(None, 2_000)
+            .list_pending_historian_runs(PROJECT, None, 2_000)
             .unwrap()
             .is_empty());
+    }
+
+    /// A run is only ever visible to the project that queued it, on every op in
+    /// the lane. One module store serves every project on the machine and a claim
+    /// hands back the folded transcript, so a caller in another project is answered
+    /// as if the run did not exist rather than as if it were refused.
+    #[test]
+    fn a_run_is_only_reachable_from_the_project_that_queued_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run_for_project(&store, "run-theirs", "ses-theirs", "git:other", 1_000);
+        queue_run_for_project(&store, "run-ours", "ses-ours", PROJECT, 1_000);
+
+        let ours = store
+            .list_pending_historian_runs(PROJECT, None, 2_000)
+            .unwrap();
+        assert_eq!(
+            ours.iter()
+                .map(|run| run.run_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["run-ours"],
+            "a poll must only see its own project's runs"
+        );
+
+        assert_eq!(
+            store
+                .claim_historian_run(PROJECT, "run-theirs", "install-one", 2_000)
+                .unwrap(),
+            HistorianClaimOutcome::Refused(HistorianClaimRefusal::UnknownRun),
+            "claiming another project's run must not hand over its prompts"
+        );
+
+        // The control: the same call inside the owning project succeeds, so the
+        // refusals above are about the project and not about the fixture.
+        let HistorianClaimOutcome::Claimed(theirs) = store
+            .claim_historian_run("git:other", "run-theirs", "install-one", 2_000)
+            .unwrap()
+        else {
+            panic!("the owning project must be able to claim its own run");
+        };
+
+        assert_eq!(
+            store
+                .heartbeat_historian_run(PROJECT, "run-theirs", &theirs.token, 3_000)
+                .unwrap(),
+            HistorianHeartbeatOutcome::Refused(HistorianReportRefusal::UnknownRun),
+            "a token from another project cannot extend a lease here"
+        );
+        assert_eq!(
+            store
+                .authorize_historian_report(PROJECT, "run-theirs", &theirs.token)
+                .unwrap(),
+            HistorianReportOutcome::Refused(HistorianReportRefusal::UnknownRun),
+            "nor report against it"
+        );
+        assert!(matches!(
+            store
+                .authorize_historian_report("git:other", "run-theirs", &theirs.token)
+                .unwrap(),
+            HistorianReportOutcome::Authorized(_)
+        ));
+    }
+
+    /// Past the run's own deadline the heartbeat refuses instead of handing back a
+    /// lease that is already in the past. By then `pending` has stopped offering
+    /// the run and `claim` refuses it, so an `ok` here would be the one answer
+    /// still telling a claimant to keep paying for a completion nothing accepts.
+    #[test]
+    fn a_heartbeat_past_the_runs_own_deadline_is_refused_rather_than_extended() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-1", "ses", 1_000);
+        let HistorianClaimOutcome::Claimed(claim) = store
+            .claim_historian_run(PROJECT, "run-1", "install-one", 1_000)
+            .unwrap()
+        else {
+            panic!("the first claimant must win");
+        };
+        let run_deadline_ms = 1_000 + AWAIT_BUDGET_MS;
+
+        // One millisecond before the deadline the same beat is still accepted, so
+        // the refusal below is about the deadline and not about the token.
+        assert_eq!(
+            store
+                .heartbeat_historian_run(PROJECT, "run-1", &claim.token, run_deadline_ms - 1)
+                .unwrap(),
+            HistorianHeartbeatOutcome::Extended {
+                claim_deadline_ms: run_deadline_ms
+            }
+        );
+        for now_ms in [run_deadline_ms, run_deadline_ms + 1] {
+            assert_eq!(
+                store
+                    .heartbeat_historian_run(PROJECT, "run-1", &claim.token, now_ms)
+                    .unwrap(),
+                HistorianHeartbeatOutcome::Refused(HistorianReportRefusal::RunExpired),
+                "at {now_ms} the run is past its deadline and the claimant must stop"
+            );
+        }
+    }
+
+    /// A claimant whose lease has already lapsed keeps the run if its heartbeat
+    /// reaches the store before a replacement's claim does.
+    ///
+    /// This is the documented convention, pinned here because it is the one
+    /// ordering a claimant can be surprised by: the lapsed holder is not evicted on
+    /// a clock, it is evicted by someone else arriving first. A beat inside the
+    /// two-missed-beats window is a live claimant proving liveness, and taking the
+    /// run from it would throw away a completion that is still being produced.
+    #[test]
+    fn a_heartbeat_revives_a_lapsed_lease_and_the_replacement_is_then_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-1", "ses", 1_000);
+        let HistorianClaimOutcome::Claimed(held) = store
+            .claim_historian_run(PROJECT, "run-1", "install-one", 1_000)
+            .unwrap()
+        else {
+            panic!("the first claimant must win");
+        };
+
+        // Past the lease, inside the run's own deadline: the two are different
+        // clocks, and this window is the whole reason a re-claim exists.
+        let lapsed_ms = 1_000 + HISTORIAN_LEASE_CEILING_MS + 1;
+        assert_eq!(
+            store
+                .list_pending_historian_runs(PROJECT, None, lapsed_ms)
+                .unwrap()
+                .len(),
+            1,
+            "with the lease lapsed and no beat, the run is offerable again"
+        );
+
+        // The holder beats first.
+        assert!(matches!(
+            store
+                .heartbeat_historian_run(PROJECT, "run-1", &held.token, lapsed_ms)
+                .unwrap(),
+            HistorianHeartbeatOutcome::Extended { .. }
+        ));
+        assert_eq!(
+            store
+                .claim_historian_run(PROJECT, "run-1", "install-two", lapsed_ms + 1)
+                .unwrap(),
+            HistorianClaimOutcome::Refused(HistorianClaimRefusal::AlreadyClaimed),
+            "the revived claim is a live one, so the replacement loses the race"
+        );
+        let state = store.historian_state("ses").unwrap();
+        assert_eq!(state.producer_attempt, 1, "no new attempt was minted");
+        assert_eq!(
+            state.coordinator_token.as_deref(),
+            Some(held.token.as_str())
+        );
+    }
+
+    /// A run whose module-side waiter is gone is parked: kept with its chunk
+    /// fingerprint and prompts for a boot-time re-publication, never offered to a
+    /// claimant, and deleted by the sweep once the run's own deadline passes.
+    #[test]
+    fn a_parked_run_is_never_offered_and_the_sweep_drops_it_at_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        queue_run(&store, "run-parked", "ses", 1_000);
+        assert_eq!(
+            store
+                .list_pending_historian_runs(PROJECT, None, 2_000)
+                .unwrap()
+                .len(),
+            1,
+            "the run is offerable before it is parked"
+        );
+
+        assert!(store
+            .park_historian_pending_run("run-parked", 2_000)
+            .unwrap());
+        assert!(store
+            .list_pending_historian_runs(PROJECT, None, 2_000)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .claim_historian_run(PROJECT, "run-parked", "install-one", 2_000)
+                .unwrap(),
+            HistorianClaimOutcome::Refused(HistorianClaimRefusal::NotPending)
+        );
+
+        // What the row is kept FOR: the fingerprint and the prompt bytes a
+        // re-publication would otherwise have to re-assemble.
+        let (phase, fingerprint, prompt) = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT phase, chunk_fingerprint, user_prompt
+                       FROM mc_historian_pending_run WHERE run_id = 'run-parked'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            (phase.as_str(), fingerprint.as_str(), prompt.as_str()),
+            ("parked", "fp", "user")
+        );
+
+        let run_deadline_ms = 1_000 + AWAIT_BUDGET_MS;
+        assert_eq!(
+            store.expire_historian_claims(run_deadline_ms - 1).unwrap(),
+            HistorianSweepOutcome::default(),
+            "a parked run inside its own deadline is still adoptable"
+        );
+        assert_eq!(
+            store.expire_historian_claims(run_deadline_ms).unwrap(),
+            HistorianSweepOutcome {
+                reclaimed: Vec::new(),
+                dropped: vec!["run-parked".to_string()],
+            }
+        );
+        let remaining: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM mc_historian_pending_run", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(remaining, 0, "the row does not outlive its own deadline");
+    }
+
+    /// `store_meta` promises the write landed. A row version that moved underneath
+    /// it means it did not, and the caller has to hear about it rather than get a
+    /// new row version for a row that was never updated.
+    #[test]
+    fn store_meta_refuses_a_write_that_touched_no_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let loaded = store.load("ses").unwrap();
+        store
+            .commit(
+                "ses",
+                loaded.row_version,
+                &CoreState::default(),
+                &ModuleMeta::default(),
+            )
+            .unwrap();
+
+        let outcome = store.inner.with_conn_fenced(|tx| {
+            let (row_version, meta) = load_meta(tx, "ses")?.expect("the session row exists");
+            // The control: at the version the row actually holds, the write lands.
+            let next = store_meta(tx, "ses", row_version, &meta)?;
+            assert_eq!(next as i64, row_version + 1);
+            Ok(store_meta(tx, "ses", row_version, &meta)
+                .unwrap_err()
+                .to_string())
+        });
+        let error = outcome.unwrap();
+        assert!(
+            error.contains("0 rows") || error.to_lowercase().contains("changed"),
+            "the error has to say the update matched nothing: {error}"
+        );
     }
 
     #[test]

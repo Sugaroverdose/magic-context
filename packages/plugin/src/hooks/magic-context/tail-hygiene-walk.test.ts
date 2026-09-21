@@ -811,12 +811,60 @@ describe("tail hygiene image content memoization", () => {
 });
 
 describe("tail hygiene walk performance", () => {
+    it("tokenizes each rendered character exactly once, whatever the rendered size", () => {
+        // This is the load-invariant half of the linear-cost claim, and it is the one
+        // that always runs. "One pass over the rendered text" is a statement about
+        // WORK, not about elapsed time: the walk must hand every rendered character to
+        // the tokenizer exactly once and must not re-scan the text as it grows. Both
+        // of those are exact counts, so a busy machine cannot change the answer — a
+        // wall-clock ratio can be moved by a single scheduler stall, which is how the
+        // ratio form of this test kept reading red on shared runners (10.66ms against
+        // a 10.31ms bound derived from a 1.29ms small sample).
+        //
+        // A regression that re-read the text per tag, per part, or per pass would show
+        // up here as more calls or more characters, at any load.
+        const tags = [tag(1, "perf:p0", "message")];
+        const workAt = (tokens: number, marker: string) => {
+            // The walk memoizes token counts by content, so each size needs content no
+            // earlier measurement can have cached.
+            const text = `${marker} ${"token ".repeat(tokens)}`;
+            const messages = [textMessage("perf", text)];
+            let calls = 0;
+            let charactersTokenized = 0;
+            const tokenizer = spyOn(formattingModule, "estimateTokens").mockImplementation(
+                (content: string) => {
+                    calls += 1;
+                    charactersTokenized += content.length;
+                    return content.length;
+                },
+            );
+            try {
+                measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
+            } finally {
+                tokenizer.mockRestore();
+            }
+            return { calls, charactersTokenized, rendered: text.length };
+        };
+        const small = workAt(50_000, "tail-hygiene-walk-cost-50k");
+        const large = workAt(250_000, "tail-hygiene-walk-cost-250k");
+
+        expect(small.calls).toBe(1);
+        expect(large.calls).toBe(1);
+        expect(small.charactersTokenized).toBe(small.rendered);
+        expect(large.charactersTokenized).toBe(large.rendered);
+        // Five times the text, five times the work, to the character.
+        expect(large.charactersTokenized * small.rendered).toBe(
+            small.charactersTokenized * large.rendered,
+        );
+    });
+
     it("scales linearly with rendered size (250k tokens cost at most ~5x 50k)", () => {
-        // The walk is one pass over the rendered text, so its cost must grow with the
-        // text and nothing else. A flat wall-clock cap read red under parallel test
-        // load (155ms once on a release gate at load 30 versus 1–3ms quiet), so the
-        // primary assertion is the size ratio measured in the same process; the
-        // absolute cap stays as a belt only when the environment asks for it.
+        // The wall-clock form of the same claim. Even measured as same-process medians
+        // the ratio starves on a loaded shared runner: the 50k sample is small enough
+        // (1–3ms) that one scheduler stall in the 250k sample moves the ratio past any
+        // honest bound. So the bound is asserted only where wall-clock budgets mean
+        // something and recorded otherwise; the count-based test above carries the
+        // invariant everywhere else.
         const tags = [tag(1, "perf:p0", "message")];
         const timeAt = (tokens: number): number => {
             const messages = [textMessage("perf", "token ".repeat(tokens))];
@@ -832,8 +880,10 @@ describe("tail hygiene walk performance", () => {
         const small = timeAt(50_000);
         const large = timeAt(250_000);
         console.log(`tail-hygiene-walk p50: 50k=${small.toFixed(3)}ms 250k=${large.toFixed(3)}ms`);
-        expect(large).toBeLessThan(Math.max(small, 0.2) * 8);
-        if (process.env.MC_PERF_GATE) expect(large).toBeLessThan(30);
+        if (process.env.MC_PERF_GATE) {
+            expect(large).toBeLessThan(Math.max(small, 0.2) * 8);
+            expect(large).toBeLessThan(30);
+        }
     });
 });
 

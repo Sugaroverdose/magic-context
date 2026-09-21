@@ -495,6 +495,7 @@ export function loadSessionDecisions(
                 "unknown",
             canonicalDecision: stringField(row, "canonical_decision"),
             deferReason: stringField(row, "defer_reason") ?? null,
+            appliedRide: stringField(row, "applied_ride", "reclaim_ride"),
             materialized:
                 booleanField(row, "materialized", "m0_materialized", "fold_applied") ||
                 materializeReason !== null,
@@ -581,6 +582,7 @@ export function loadSessionDecisions(
             prior.messageId ??= record.messageId;
             prior.canonicalDecision ??= record.canonicalDecision;
             prior.deferReason ??= record.deferReason;
+            prior.appliedRide ??= record.appliedRide;
             prior.materialized ||= record.materialized;
             prior.materializeReason ??= record.materializeReason;
             prior.emergency ||= record.emergency;

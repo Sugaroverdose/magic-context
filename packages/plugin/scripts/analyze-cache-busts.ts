@@ -708,6 +708,29 @@ function lastBreakpointIndex(segs: Segment[]): number {
     return last;
 }
 
+/**
+ * Does the divergence land inside the prefix the previous request left cached?
+ *
+ * Anthropic writes the cache at the breakpoints of the request that was sent, so
+ * the reusable prefix ends at the PREVIOUS request's last breakpoint. Measuring
+ * against the CURRENT request's last breakpoint instead made every appended
+ * message look like a bust: this client moves its tail cache_control marker onto
+ * the newest message, so the marker always sat at or after the append and the
+ * append always looked like it fell inside a cached prefix that did not yet
+ * exist. OpenAI has no breakpoints — its prefix cache is implicit, so only an
+ * in-place change or removal inside the previous prompt busts it.
+ */
+function bustsReusablePrefix(
+    previous: Snapshot,
+    current: Snapshot,
+    divergenceIndex: number,
+): boolean {
+    if (divergenceIndex < 0) return false;
+    return current.provider === "openai"
+        ? divergenceIndex < previous.segments.length
+        : divergenceIndex <= lastBreakpointIndex(previous.segments);
+}
+
 export function analyzeSnapshots(
     snaps: readonly Snapshot[],
     decisions: readonly CacheBustDecisionAttribution[] = [],
@@ -724,14 +747,9 @@ export function analyzeSnapshots(
                 ? firstDivergence(previous.segments, current.segments)
                 : -1;
             const byteVerdict = previous
-                ? current.provider === "openai"
-                    ? divergenceIndex >= 0 && divergenceIndex < previous.segments.length
-                        ? "BUST"
-                        : "STABLE"
-                    : divergenceIndex !== -1 &&
-                        divergenceIndex <= lastBreakpointIndex(current.segments)
-                      ? "BUST"
-                      : "STABLE"
+                ? bustsReusablePrefix(previous, current, divergenceIndex)
+                    ? "BUST"
+                    : "STABLE"
                 : undefined;
             rows.push({
                 current,
@@ -752,14 +770,9 @@ export function analyzeSnapshots(
         const previous = previousMetered;
         if (!previous.usage || !current.usage) continue;
         const divergenceIndex = firstDivergence(previous.segments, current.segments);
-        // Anthropic exposes explicit breakpoints. OpenAI's cache is an implicit prefix,
-        // so an in-place change/removal busts while ordinary appended input does not.
-        const byteBust =
-            current.provider === "openai"
-                ? divergenceIndex >= 0 && divergenceIndex < previous.segments.length
-                : divergenceIndex !== -1 &&
-                  divergenceIndex <= lastBreakpointIndex(current.segments);
-        const byteVerdict: ByteVerdict = byteBust ? "BUST" : "STABLE";
+        const byteVerdict: ByteVerdict = bustsReusablePrefix(previous, current, divergenceIndex)
+            ? "BUST"
+            : "STABLE";
         const prevTotal = previous.usage!.total;
         const epsilon = Math.max(64, previous.usage.input);
         const meterFloor = prevTotal - epsilon;
@@ -801,9 +814,12 @@ export function analyzeSnapshots(
             divergenceIndex < 0
                 ? undefined
                 : (current.segments[divergenceIndex] ?? previous.segments[divergenceIndex]);
+        // A LATENCY row is also classified: a short read over an unchanged reusable
+        // prefix is a provider-side fact and deserves a name, not a blank cell.
         const divergenceClass =
-            verdict === "BUST"
+            verdict === "BUST" || verdict === "LATENCY"
                 ? classifyCacheBust({
+                      providerShortReadWithIdenticalPrefix: verdict === "LATENCY",
                       divergenceIndex,
                       previousMessageCount: previous.segments.length,
                       previousBustDivergenceIndex,
