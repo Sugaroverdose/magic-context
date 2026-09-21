@@ -738,5 +738,155 @@
     },
     "error": "/v1beta/models/gemini-2.5-pro:countTokens HTTP 404 (model or endpoint unavailable)",
     "durationMs": 130
+  },
+  {
+    "method": "input_tokens",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "meta/muse-spark-1.3",
+    "provider": "meta",
+    "modelId": "muse-spark-1.3",
+    "tokenizerKey": null,
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "/v1/responses/input_tokens HTTP 402 (request rejected)",
+    "durationMs": 991,
+    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing."
+  },
+  {
+    "method": "input_tokens",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "meta/muse-spark-1.3-contributor",
+    "provider": "meta",
+    "modelId": "muse-spark-1.3-contributor",
+    "tokenizerKey": null,
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "/v1/responses/input_tokens HTTP 402 (request rejected)",
+    "durationMs": 1136,
+    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing."
+  },
+  {
+    "method": "input_tokens",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "meta/muse-spark-1.2",
+    "provider": "meta",
+    "modelId": "muse-spark-1.2",
+    "tokenizerKey": null,
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "/v1/responses/input_tokens HTTP 402 (request rejected)",
+    "durationMs": 1876,
+    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing."
+  },
+  {
+    "method": "input_tokens",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "meta/muse-spark-1.2-contributor",
+    "provider": "meta",
+    "modelId": "muse-spark-1.2-contributor",
+    "tokenizerKey": null,
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "/v1/responses/input_tokens HTTP 402 (request rejected)",
+    "durationMs": 989,
+    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing."
+  },
+  {
+    "method": "input_tokens",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "meta/muse-spark-1.1",
+    "provider": "meta",
+    "modelId": "muse-spark-1.1",
+    "tokenizerKey": null,
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "/v1/responses/input_tokens HTTP 402 (request rejected)",
+    "durationMs": 333,
+    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing."
   }
 ]

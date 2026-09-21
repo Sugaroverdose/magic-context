@@ -86,3 +86,9 @@ References: https://ai.google.dev/gemini-api/docs/generate-content/tokens and ht
 | google/gemini-2.5-pro | countTokens | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
 
 2026-09-21: 2.5-pro returned HTTP 404 on the baseline; no entry added. The existing table had no google/antigravity pairing convention, so no antigravity aliases were inferred. No prior Gemini table values exist to cross-check.
+
+## Meta Muse
+
+Reference: https://dev.meta.ai/docs/token-counting. Base URL https://api.meta.ai, Bearer auth from META_API_KEY or ~/.config/meta.key. Uses Responses-shaped `POST /v1/responses/input_tokens`, method `input_tokens`; Anthropic-compatible count_tokens is also documented but was not used. SYSTEM= instructions, TOOLS=Responses function definitions, PROSE=user input, all baseline-subtracted. Preflight counts include rendered prompt scaffolding; generation usage is cumulative across hosted-tool iterations with injected-token accounting adjustments, so it is not final-context occupancy or directly comparable billing. This caveat is also stored on every Meta result row.
+
+2026-09-21 GET /v1/models returned: sam-3.1, muse-spark-1.3-contributor, muse-voice-transcribe-1.0, muse-spark-1.3, muse-image-1.0, muse-spark-1.2-contributor, muse-spark-1.2, muse-spark-1.1. All five Spark models were selected; no separate code model was listed. Each returned HTTP 402 on the minimal counting baseline. All SYSTEM/TOOLS/PROSE and section ratios are unavailable; no Meta or Zen alias table entries were invented. An account authorized for the free counting endpoint is required to finish these measurements; no payment or completion was attempted.

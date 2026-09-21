@@ -25,6 +25,7 @@ import { buildProseProbe } from "./prose";
 import { crossCheck } from "./cross-check";
 import { measureAnthropic } from "./providers/anthropic";
 import { type CountAdapter } from "./providers/counting";
+import { measureMeta, META_COUNT_CAVEAT } from "./providers/meta";
 import { measureGemini } from "./providers/gemini";
 import { measureXai } from "./providers/xai";
 import { measureZai } from "./providers/zai";
@@ -40,6 +41,7 @@ interface AuthFile {
 }
 
 const FREE_ADAPTERS: Record<string, { measure: CountAdapter; method: string; env: string; file: string }> = {
+    meta: { measure: measureMeta, method: "input_tokens", env: "META_API_KEY", file: "meta.key" },
     google: { measure: measureGemini, method: "countTokens", env: "GEMINI_API_KEY", file: "gemini.key" },
     xai: { measure: measureXai, method: "tokenize-text", env: "XAI_API_KEY", file: "xai.key" },
     zai: { measure: measureZai, method: "paas/v4/tokenizer", env: "ZAI_API_KEY", file: "zai.key" },
@@ -201,7 +203,7 @@ async function measureOne(
     let systemApi: number | null = null;
     let toolsApi: number | null = null;
     let error: string | null = null;
-    let caveat: string | undefined;
+    let caveat: string | undefined = test.provider === "meta" ? META_COUNT_CAVEAT : undefined;
     const adapter = FREE_ADAPTERS[authProvider(test)];
     let method = adapter?.method ?? (test.provider === "anthropic" && auth.anthropic?.type === "api" ? "count_tokens" : "usage");
     // biome-ignore lint/suspicious/noExplicitAny: encoding type varies
