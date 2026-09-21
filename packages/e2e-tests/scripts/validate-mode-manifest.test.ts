@@ -22,7 +22,7 @@ describe("mode manifest validator", () => {
         // removed. Adding an OpenCode 2 lane file moves this number and the excluded
         // list below and nothing else, because those files carry tier "excluded" and
         // so never enter a TS or Rust invocation list.
-        expect(validation.files.length).toBe(83);
+        expect(validation.files.length).toBe(86);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -33,15 +33,15 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(26);
-        expect(rust).toHaveLength(45);
+        expect(ts).toHaveLength(27);
+        expect(rust).toHaveLength(46);
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(1);
         expect(filesForMode(validation, "ts", "opencode")).toHaveLength(25);
-        expect(filesForMode(validation, "ts", "pi")).toHaveLength(21);
+        expect(filesForMode(validation, "ts", "pi")).toHaveLength(22);
         expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(20);
         // OMP hashes each request into its system header, breaking within-session byte identity
         // in cache-stability and long-running-session; their manifest entries declare the omission.
-        expect(filesForMode(validation, "ts", "omp")).toHaveLength(18);
+        expect(filesForMode(validation, "ts", "omp")).toHaveLength(19);
         const excluded = validation.manifest.entries
             .filter((entry) => entry.tier === "excluded")
             .map((entry) => entry.path);
@@ -68,6 +68,7 @@ describe("mode manifest validator", () => {
             "tests/opencode2/rust-mode-limitation.test.ts",
             "tests/opencode2/sidebar-component.test.ts",
             "tests/opencode2/status-dialog.test.ts",
+            "tests/opencode2/store-generation-conversion.test.ts",
             "tests/opencode2/store-reader.test.ts",
             "tests/opencode2/tool-definition-telemetry.test.ts",
             "tests/window-overlay-reload.test.ts",
