@@ -137,14 +137,23 @@ for (const lane of ["plain", "mc", "marker", "marker-drops", "marker-dropped-bou
             // Let the 500ms logger flush scheduler and marker-drain records before shutdown.
             await Bun.sleep(750);
             writeFileSync(`${output}/${lane}-pre-upgrade.log`, readFileSync(`${output}/${lane}.log`));
+            // Freeze the raw hook arrays served before the restart so the gate can
+            // tell the pre-upgrade pass apart from the passes that follow it.
+            writeFileSync(`${output}/${lane}-pre-upgrade-after.jsonl`, readFileSync(`${output}/${lane}-after.jsonl`));
             const db = openTestDb(resolve(env.dataDir, "cortexkit/magic-context/context.db"));
             try {
                 writeFileSync(`${output}/${lane}-pre-upgrade-ledger.json`, JSON.stringify(db.query("SELECT merged_reasoning_stripped_ids FROM session_meta WHERE session_id = ?").get(id)));
+                // What the pre-fix build durably recorded as its last served array.
+                writeFileSync(`${output}/${lane}-pre-upgrade-lkg.json`, JSON.stringify(db.query("SELECT session_id, length(json_prefix) AS prefix_bytes, captured_at FROM lkg_slots WHERE session_id = ?").all(id)));
             } finally { db.close(); }
             await host.kill();
             host = await spawnOpencode({ ...spawnOptions, existingEnv: env, openCodeConfigExtra: { plugin: [probes[0], fixedPlugin, probes[1]] } });
             client = createOpencodeClient({ baseUrl: host.url });
             await prompt("post-restart defer", true);
+            writeFileSync(`${output}/${lane}-post-restart-after.jsonl`, readFileSync(`${output}/${lane}-after.jsonl`));
+            // A second defer pass: whatever the first pass after the upgrade
+            // serves, the session must keep serving it.
+            await prompt("post-restart defer again", true);
         }
         const bodies = mock.requests().slice(first).map(request => request.body);
         if (marker) {

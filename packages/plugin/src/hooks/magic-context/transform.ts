@@ -128,7 +128,7 @@ import {
     stripClearedReasoning,
 } from "./strip-content";
 import { injectTemporalMarkers } from "./temporal-awareness";
-import { useScopedToolSweep } from "./tool-sweep-policy";
+import { createPreAdoptionToolSweepResolver, useScopedToolSweep } from "./tool-sweep-policy";
 import { runCompartmentPhase } from "./transform-compartment-phase";
 import {
     contextUsagePassSnapshot,
@@ -1950,14 +1950,18 @@ export function createTransform(deps: TransformDeps) {
                     messagesBeforeInitialPrepare && hiddenMessagesAtCompactionSeam.length > 0
                         ? messagesBeforeInitialPrepare
                         : messages;
-                const scopedToolSweep = useScopedToolSweep(
-                    db,
-                    sessionId,
-                    isCacheBusting || canConsumeDeferredEarly,
-                );
+                const canAdoptScopedToolSweep = isCacheBusting || canConsumeDeferredEarly;
+                // A pass that may not change bytes and has not adopted yet
+                // cannot pick a sweep from a default: which array this session
+                // was last served decides it. The resolver runs at finalize,
+                // where both candidate arrays exist.
+                const scopedToolSweep = useScopedToolSweep(db, sessionId, canAdoptScopedToolSweep)
+                    ? true
+                    : createPreAdoptionToolSweepResolver(db, sessionId);
                 const result = tagMessages(sessionId, messagesForTagging, deps.tagger, db, {
                     skipPrefixInjection,
                     scopedToolSweep,
+                    servedMessages: messages,
                 });
                 targets = result.targets;
                 reasoningByMessage = result.reasoningByMessage;
