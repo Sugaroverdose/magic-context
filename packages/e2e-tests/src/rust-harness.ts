@@ -84,7 +84,7 @@ export interface SdkClient {
             path: { id: string };
             body: {
                 model: { providerID: string; modelID: string };
-                parts: Array<{ type: "text"; text: string }>;
+                parts: Array<{ type: "text"; text: string; synthetic?: boolean }>;
                 agent?: string;
             };
         }) => Promise<{ data?: unknown; error?: unknown }>;
@@ -399,6 +399,43 @@ export class RustTestHarness {
     }
 
     /**
+     * Create a child session the way OpenCode's `task` tool does: POST /session with a
+     * `parentID`. The plugin reads that field from the `session.created` event and marks
+     * the row a subagent, which is the only way to drive subagent behaviour end to end.
+     */
+    async createChildSession(parentId: string, title?: string): Promise<string> {
+        const maxAttempts = 5;
+        for (let i = 1; i <= maxAttempts; i++) {
+            const res = await this.clientInstance.session.create({
+                query: { directory: this.env.workdir },
+                body: { parentID: parentId, ...(title ? { title } : {}) },
+            });
+            if (res.data) return res.data.id;
+            if (i < maxAttempts) {
+                await Bun.sleep(200 * i);
+                continue;
+            }
+            throw new Error(
+                `child session.create failed after ${maxAttempts} attempts. stderr:\n${this.opencodeInstance.stderr()}`,
+            );
+        }
+        throw new Error("child session.create failed");
+    }
+
+    /** Read the plugin's persisted subagent flag, or null before the row exists. */
+    isSubagent(sessionId: string): boolean | null {
+        try {
+            const row = this.contextDb()
+                .prepare("SELECT is_subagent FROM session_meta WHERE session_id = ?")
+                .get(sessionId) as { is_subagent?: unknown } | null;
+            if (!row) return null;
+            return row.is_subagent === 1 || row.is_subagent === true;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
      * Generate ~`tokens` tokens of varied prose ballast. Copied from the TS
      * harness: the protected-tail boundary measures true-raw content, so pressure
      * turns must carry real mass, and varied prose tokenizes at a stable rate.
@@ -624,6 +661,12 @@ export class RustTestHarness {
             providerID?: string;
             modelID?: string;
             messageID?: string;
+            /**
+             * Send the prompt the way OpenCode's own notice deliveries do: a text part
+             * flagged `synthetic`. Such a message is injected context rather than a real
+             * user turn, and the transform serves it only while it is the newest message.
+             */
+            synthetic?: boolean;
         } = {},
     ): Promise<unknown> {
         const timeoutMs = options.timeoutMs ?? 180_000;
@@ -634,7 +677,7 @@ export class RustTestHarness {
                     providerID: options.providerID ?? this.providerID,
                     modelID: options.modelID ?? this.modelID,
                 },
-                parts: [{ type: "text", text }],
+                parts: [{ type: "text", text, ...(options.synthetic ? { synthetic: true } : {}) }],
                 ...(options.agent ? { agent: options.agent } : {}),
                 ...(options.messageID ? { messageID: options.messageID } : {}),
             },

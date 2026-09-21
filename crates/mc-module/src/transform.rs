@@ -89,8 +89,8 @@ const MAX_CAS_RETRIES: u32 = 8;
 const BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT: u8 = 3;
 
 /// Reserved synthetic-block ids (never carried by a real conversation item).
-#[cfg(test)]
 const M0_ID: &str = "mc_m0";
+const M1_ID: &str = "mc_m1";
 /// The reserved id prefix: a non-synthetic item bearing it is a contract violation.
 const RESERVED_ID_PREFIX: &str = "mc_";
 const SYNTH_REGION_KIND: &str = "synthesized-region";
@@ -2355,7 +2355,17 @@ pub(crate) fn assert_prefix_projection_equivalent(
     Ok(())
 }
 
-fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFingerprint> {
+/// Fingerprint the served output, one entry per block.
+///
+/// `frame_block_stems` names the composed frames the builder actually emitted, in emission
+/// order. Anything else that is synthetic is named from its own shape (a todo pair) or from
+/// its position among the synthetic messages. Assigning a frame id by counting synthetic
+/// messages instead would hand `mc_m0` to the first harness-authored synthetic message of a
+/// frameless output, and the host reads that id as "the frozen prefix moved".
+fn served_output_fingerprints(
+    messages: &[ServedMessage],
+    frame_block_stems: &[&'static str],
+) -> Vec<ServedBlockFingerprint> {
     let mut synthetic_index = 0usize;
     let mut fingerprints = Vec::new();
     for (message_index, message) in messages.iter().enumerate() {
@@ -2367,8 +2377,10 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
                 Some(ck_wire::CkKind::ToolResult { id, .. }) => {
                     format!("mc_todo:{id}:result")
                 }
-                _ if synthetic_index < 2 => format!("mc_m{synthetic_index}"),
-                _ => format!("mc_synthetic:{synthetic_index}"),
+                _ => frame_block_stems.get(message_index).map_or_else(
+                    || format!("mc_synthetic:{synthetic_index}"),
+                    |stem| (*stem).to_string(),
+                ),
             };
             synthetic_index = synthetic_index.saturating_add(1);
             id
@@ -3657,7 +3669,8 @@ fn apply_once(
                 passthrough_overlay.as_ref(),
                 mutation_exempt_mid,
             );
-            let served_fingerprints = served_output_fingerprints(&passthrough_messages);
+            // The raw pass-through renders live messages only — no composed frame leads it.
+            let served_fingerprints = served_output_fingerprints(&passthrough_messages, &[]);
             let first_divergence = divergence::first_divergence(
                 &loaded.meta.served_output_fingerprint,
                 &served_fingerprints,
@@ -3775,7 +3788,8 @@ fn apply_once(
             passthrough_overlay.as_ref(),
             mutation_exempt_mid,
         );
-        let served_fingerprints = served_output_fingerprints(&passthrough_messages);
+        // The raw pass-through renders live messages only — no composed frame leads it.
+        let served_fingerprints = served_output_fingerprints(&passthrough_messages, &[]);
         let first_divergence = divergence::first_divergence(
             &loaded.meta.served_output_fingerprint,
             &served_fingerprints,
@@ -4609,13 +4623,17 @@ fn apply_once(
         PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
     );
     let is_bust_pass = !req.is_subagent && is_provider_prefix_mutation_pass;
+    // The gate question every hold below asks: does this pass have to reproduce a provider
+    // prefix that was already served, byte for byte?
+    //
     // Deferring a late tag protects a provider prefix that has already been served and
     // must be replayed byte for byte. A subagent has no such prefix: it is never charged
     // for a cache bust and recomposes its served array on every pass, so a tag first
     // minted there is safe to render at once and would otherwise stay hidden forever —
     // no later pass on that session can ever release it. `is_bust_pass` is the wrong
     // question here precisely because it already answers "is this session paying for a
-    // bust", which a subagent never is.
+    // bust", which a subagent never is: a hold keyed on it is held on every subagent pass
+    // forever, and "withheld forever" is not the deferral the hold was written to express.
     let prefix_replay_must_be_preserved = !req.is_subagent && !is_provider_prefix_mutation_pass;
     if !prefix_replay_must_be_preserved {
         meta.pending_tag_block_ids.clear();
@@ -4665,7 +4683,7 @@ fn apply_once(
         )? {
             if !hint.hint_text.is_empty()
                 && user_hint_target_was_served(&loaded.meta, &hint.block_id)
-                && !is_bust_pass
+                && prefix_replay_must_be_preserved
             {
                 // A decision for a previously served block is immutable, but its first append
                 // must ride a later independent bust rather than rewriting the cached prefix.
@@ -4679,7 +4697,7 @@ fn apply_once(
             });
             pending_overlays.user_hint = Some(hint);
         }
-        if is_bust_pass {
+        if !prefix_replay_must_be_preserved {
             meta.pending_user_hint_block_ids.clear();
         }
     }
@@ -4714,7 +4732,7 @@ fn apply_once(
         Vec::new()
     };
     timings.caveman = elapsed_ms(caveman_started_at);
-    if loaded.meta.soft_refresh_pending && is_bust_pass {
+    if loaded.meta.soft_refresh_pending && !prefix_replay_must_be_preserved {
         meta.soft_refresh_pending = false;
     }
     if is_bust_pass {
@@ -5739,8 +5757,12 @@ fn apply_once(
         is_bust_pass,
     )?;
     if !is_bust_pass {
-        let candidates =
-            legacy_system_strip_candidates(&core, &loaded.meta, &built_output.messages);
+        let candidates = legacy_system_strip_candidates(
+            &core,
+            &loaded.meta,
+            &built_output.messages,
+            &built_output.frame_block_stems,
+        );
         if !candidates.is_empty() {
             let mut unstripped_core = core.clone();
             for unit in &mut unstripped_core.frozen_units {
@@ -5763,10 +5785,11 @@ fn apply_once(
                 None,
                 false,
             )?;
-            let original_hashes = served_output_fingerprints(&unstripped.messages)
-                .into_iter()
-                .map(|block| (block.block_id, block.content_hash))
-                .collect::<HashMap<_, _>>();
+            let original_hashes =
+                served_output_fingerprints(&unstripped.messages, &unstripped.frame_block_stems)
+                    .into_iter()
+                    .map(|block| (block.block_id, block.content_hash))
+                    .collect::<HashMap<_, _>>();
             let previous = loaded
                 .meta
                 .served_output_fingerprint
@@ -5938,6 +5961,7 @@ fn apply_once(
     }
     let BuiltOutput {
         messages: ck_messages,
+        frame_block_stems,
         cache_entries: output_cache_entries,
         cache_stats: output_cache_stats,
         timings: build_timings,
@@ -5973,14 +5997,20 @@ fn apply_once(
     // Compare only the served block hashes before committing the new sequence. The first pass
     // records its baseline, and append-only tail growth is intentionally not a divergence.
     let divergence_started_at = Instant::now();
-    let served_fingerprints = served_output_fingerprints(&ck_messages);
+    let served_fingerprints = served_output_fingerprints(&ck_messages, &frame_block_stems);
     let first_divergence =
         divergence::first_divergence(&loaded.meta.served_output_fingerprint, &served_fingerprints);
     timings.divergence = elapsed_ms(divergence_started_at);
     let first_divergence_json = first_divergence
         .as_ref()
         .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
-    let deferred_frozen_prefix_divergence = matches!(plan, PassPlan::Defer)
+    // Pinning the baseline is itself a hold, and it is the one hold that can never expire on
+    // its own: the pinned fingerprint is only released by a pass that reprices the prefix.
+    // Gate it on the same question every other hold asks, so a session that has no served
+    // prefix to preserve keeps its baseline moving instead of re-reporting one stale mismatch
+    // on every later pass.
+    let deferred_frozen_prefix_divergence = prefix_replay_must_be_preserved
+        && matches!(plan, PassPlan::Defer)
         && first_divergence.as_ref().is_some_and(|divergence| {
             matches!(
                 divergence.block_id_old.as_deref(),
@@ -11327,6 +11357,7 @@ fn legacy_system_strip_candidates(
     core: &CoreState,
     meta: &ModuleMeta,
     rendered: &[ServedMessage],
+    frame_block_stems: &[&'static str],
 ) -> HashSet<String> {
     if !core
         .frozen_units
@@ -11335,7 +11366,7 @@ fn legacy_system_strip_candidates(
     {
         return HashSet::new();
     }
-    let current = served_output_fingerprints(rendered)
+    let current = served_output_fingerprints(rendered, frame_block_stems)
         .into_iter()
         .map(|block| (block.block_id, block.content_hash))
         .collect::<HashMap<_, _>>();
@@ -12523,6 +12554,12 @@ fn output_trailing_blank_decision(
 
 struct BuiltOutput {
     messages: Vec<ServedMessage>,
+    /// Block-id stems of the composed frames this output leads with, in emission order
+    /// (`mc_m0`, then `mc_m1`). Empty when the output carries no composed frame at all,
+    /// which is every subagent pass. Naming the frames from what was actually emitted —
+    /// rather than from "the first synthetic message in the array" — keeps a harness-authored
+    /// synthetic prompt from inheriting a frame's block id in a frameless output.
+    frame_block_stems: Vec<&'static str>,
     cache_entries: HashMap<String, SerializedOutputCacheEntry>,
     cache_stats: SerializedOutputCacheStats,
     timings: BuildOutputTimings,
@@ -13485,6 +13522,9 @@ fn build_output_with_tags_inner(
         build_timings.frozen_unit_index = elapsed_ms(frozen_unit_index_started_at);
     }
     let mut prev_assistant = false;
+    // Record each composed frame as it is emitted. A subagent never reaches this block, so
+    // its output leads with ordinary history and the list stays empty.
+    let mut frame_block_stems: Vec<&'static str> = Vec::new();
 
     if !req.is_subagent {
         if let Some(unit) = frozen_units.by_key("m0") {
@@ -13511,6 +13551,7 @@ fn build_output_with_tags_inner(
                 reused,
             );
             out.push(served);
+            frame_block_stems.push(M0_ID);
         }
         if let Some(unit) = frozen_units.by_key("m1") {
             let key = "synthetic:m1".to_string();
@@ -13532,6 +13573,7 @@ fn build_output_with_tags_inner(
                 reused,
             );
             out.push(served);
+            frame_block_stems.push(M1_ID);
         }
     }
 
@@ -13973,6 +14015,7 @@ fn build_output_with_tags_inner(
     build_timings.total = elapsed_ms(build_output_started_at);
     Ok(BuiltOutput {
         messages: out,
+        frame_block_stems,
         cache_entries,
         cache_stats,
         timings: build_timings,
@@ -16458,14 +16501,44 @@ pub(crate) mod tests {
             "synthetic".to_string(),
         ));
 
-        let block_ids = served_output_fingerprints(&[single, multiple, synthetic])
+        let block_ids = served_output_fingerprints(&[single, multiple, synthetic], &[])
             .into_iter()
             .map(|fingerprint| fingerprint.block_id)
             .collect::<Vec<_>>();
         assert_eq!(
             block_ids,
-            ["single#0", "multiple#0", "multiple#1", "mc_m0#0"]
+            ["single#0", "multiple#0", "multiple#1", "mc_synthetic:0#0"]
         );
+    }
+
+    #[test]
+    fn served_fingerprint_frame_ids_come_from_the_emitted_frames() {
+        let m0 = ServedMessage::from_message(CkWireMessage::synthetic_user_text("m0".to_string()));
+        let m1 = ServedMessage::from_message(CkWireMessage::synthetic_user_text("m1".to_string()));
+        let trailing_prompt =
+            ServedMessage::from_message(CkWireMessage::synthetic_user_text("notice".to_string()));
+        let turn = ServedMessage::from_message(text_message("turn", "one"));
+
+        let with_frames = served_output_fingerprints(
+            &[m0, m1, turn.clone(), trailing_prompt.clone()],
+            &[M0_ID, M1_ID],
+        )
+        .into_iter()
+        .map(|fingerprint| fingerprint.block_id)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            with_frames,
+            ["mc_m0#0", "mc_m1#0", "turn#0", "mc_synthetic:2#0"]
+        );
+
+        // A frameless output (every subagent pass) must not hand a frame id to the
+        // harness-authored prompt that happens to lead its synthetic messages: the host
+        // treats `mc_m0#0` as proof the frozen prefix changed and freezes its replay.
+        let frameless = served_output_fingerprints(&[turn, trailing_prompt], &[])
+            .into_iter()
+            .map(|fingerprint| fingerprint.block_id)
+            .collect::<Vec<_>>();
+        assert_eq!(frameless, ["turn#0", "mc_synthetic:0#0"]);
     }
 
     #[test]
@@ -16715,10 +16788,171 @@ pub(crate) mod tests {
             .iter()
             .map(|m| ServedMessage::from_message(std::ops::Deref::deref(m).clone()))
             .collect();
-        let forced_fps = served_output_fingerprints(&forced_messages);
+        // Name the leading synthetic messages the way the builder did: frames are emitted
+        // first and in order, so taking as many frame ids as there are leading synthetic
+        // messages reproduces the builder's own naming.
+        let frames = [M0_ID, M1_ID]
+            .into_iter()
+            .take(
+                forced_messages
+                    .iter()
+                    .take_while(|message| message.meta.synthetic)
+                    .count(),
+            )
+            .collect::<Vec<_>>();
+        let forced_fps = served_output_fingerprints(&forced_messages, &frames);
         assert_eq!(
             forced_fps, loaded.meta.served_output_fingerprint,
             "stored divergence fingerprints must match forced re-hash of served output"
+        );
+    }
+
+    /// A subagent output carries no composed frame, so nothing in it may be named `mc_m0`
+    /// or `mc_m1`, and no pass may pin the served baseline: the host reads those ids as
+    /// "the frozen prefix changed" and replays its last-known-good array instead of the
+    /// module's output, while the module keeps re-reporting the same stale mismatch
+    /// because no later pass on a subagent can ever release the pin.
+    #[test]
+    fn subagent_tail_notice_neither_takes_a_frame_id_nor_pins_the_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let session = "subagent-frozen-prefix-cycle";
+
+        let subagent_req = |messages: Vec<CkIngressMessage>| {
+            let mut request = req(session, "cfg0", messages);
+            request.is_subagent = true;
+            request
+        };
+        // OpenCode marks its notice-triggered prompts synthetic. The module serves such a
+        // prompt only while it is the newest message, so the following pass drops it.
+        let notice = |ordinal: u64| {
+            let mut message = item(
+                &format!("notice{ordinal}"),
+                ordinal,
+                "<system-reminder>background task finished</system-reminder>",
+            );
+            message.ck.meta.synthetic = true;
+            message
+        };
+
+        let mut history = vec![item("a", 0, "alpha"), item("b", 1, "beta")];
+        assert!(run(&store, &subagent_req(history.clone()), &spine())
+            .first_divergence
+            .is_none());
+
+        history.push(notice(2));
+        let served_notice = run(&store, &subagent_req(history.clone()), &spine());
+        assert!(
+            served_notice
+                .messages()
+                .iter()
+                .any(|message| message.meta.synthetic),
+            "the newest synthetic prompt must reach the served array"
+        );
+        let baseline = store.load(session).unwrap().meta.served_output_fingerprint;
+        assert!(
+            baseline
+                .iter()
+                .all(|block| block.block_id != "mc_m0#0" && block.block_id != "mc_m1#0"),
+            "a frameless output must not carry a composed-frame block id: {:?}",
+            baseline
+                .iter()
+                .map(|block| block.block_id.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        // The notice stops being newest here, so the module drops it. That is an ordinary
+        // tail change; it must attribute once and then leave the baseline current.
+        history.push(item("c", 3, "gamma"));
+        run(&store, &subagent_req(history.clone()), &spine());
+
+        for turn in 4..24u64 {
+            history.push(item(&format!("m{turn}"), turn, "more work"));
+            let grown = run(&store, &subagent_req(history.clone()), &spine());
+            assert!(
+                grown.first_divergence.is_none(),
+                "appending a turn must not re-report a divergence (turn {turn}): {:?}",
+                grown.first_divergence
+            );
+            let replay = run(&store, &subagent_req(history.clone()), &spine());
+            assert!(replay.first_divergence.is_none());
+            assert_eq!(
+                serde_json::to_value(replay.messages()).unwrap(),
+                serde_json::to_value(grown.messages()).unwrap(),
+                "consecutive defers on identical input must serve identical bytes"
+            );
+        }
+    }
+
+    /// Pinning the served baseline is a hold that only a repricing pass releases. A subagent
+    /// never gets one, so the pin must not engage there at all: one stale mismatch would
+    /// otherwise be re-reported on every later pass for the life of the session. A session
+    /// that does replay a served prefix keeps the pin.
+    #[test]
+    fn only_a_session_replaying_a_served_prefix_pins_its_baseline() {
+        let stale_frame_block = || ServedBlockFingerprint {
+            block_id: "mc_m0#0".to_string(),
+            content_hash: "stale-frame".to_string(),
+            serialized_len: 8,
+        };
+
+        let run_with_stale_frame_baseline = |session: &str, is_subagent: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let build = |messages: Vec<CkIngressMessage>| {
+                let mut request = req(session, "cfg0", messages);
+                request.is_subagent = is_subagent;
+                request
+            };
+            let history = vec![item("a", 0, "alpha"), item("b", 1, "beta")];
+            run(&store, &build(history.clone()), &spine());
+
+            // Stand in for a baseline recorded when the output still led with a frame.
+            let mut seeded = store.load(session).unwrap();
+            seeded.meta.served_output_fingerprint = vec![stale_frame_block()];
+            store
+                .commit_transform(
+                    session,
+                    TransformCommit {
+                        expected: seeded.row_version,
+                        core: &seeded.core,
+                        meta: &seeded.meta,
+                        consumed_drop_ids: &[],
+                        first_applied_command_ids: &[],
+                        memory_revision: None,
+                        compartment_max_seq: None,
+                        project_root: None,
+                        first_divergence: None,
+                        scheduler_observation: None,
+                        scheduler_request_observed_at_ms: None,
+                        scheduler_full_array_fingerprint: None,
+                        scheduler_eligible_supersession_count: None,
+                        scheduler_withheld_by_tag_window: None,
+                        scheduler_withheld_by_exempt_message: None,
+                        scheduler_applied_supersession_count: None,
+                        scheduler_applied_reductions: false,
+                        overlays: TransformOverlayBatch::default(),
+                    },
+                )
+                .unwrap();
+
+            let diverged = run(&store, &build(history), &spine());
+            assert!(
+                diverged.first_divergence.is_some(),
+                "the seeded baseline must attribute a mismatch"
+            );
+            store.load(session).unwrap().meta.served_output_fingerprint
+        };
+
+        assert_ne!(
+            run_with_stale_frame_baseline("stale-frame-subagent", true),
+            vec![stale_frame_block()],
+            "a subagent must adopt its new baseline; pinning it strands the session"
+        );
+        assert_eq!(
+            run_with_stale_frame_baseline("stale-frame-primary", false),
+            vec![stale_frame_block()],
+            "a session replaying a served prefix keeps the pinned baseline"
         );
     }
 
