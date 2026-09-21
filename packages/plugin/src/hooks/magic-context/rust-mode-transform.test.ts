@@ -6114,16 +6114,32 @@ describe("Rust stalled transform probe", () => {
         input[0]!.info.model = { providerID: "test-provider", modelID: "test-model" };
         const transformBodies: Record<string, unknown>[] = [];
         let healthProbes = 0;
+        // The original transform must still be in flight when the stall probe
+        // fires, so the mock holds its reply until the probe has been observed
+        // instead of sleeping a fixed interval: a fixed sleep raced the probe
+        // timer on a loaded runner and the probe was never reached (CI, 2026-09-21).
+        let releaseTransform: () => void = () => {};
+        const probeObserved = new Promise<void>((resolve) => {
+            releaseTransform = resolve;
+        });
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, body, signal }) => {
                 if (method === "session.status") {
                     healthProbes += 1;
+                    releaseTransform();
                     return { ok: true };
                 }
                 if (method !== "transform") return { ok: true };
                 const request = body as Record<string, unknown>;
                 transformBodies.push(request);
-                await Bun.sleep(30);
+                await Promise.race([
+                    probeObserved,
+                    Bun.sleep(5_000).then(() => {
+                        throw new Error(
+                            "stall probe never fired while the transform was in flight",
+                        );
+                    }),
+                ]);
                 if (signal?.aborted) throw signal.reason ?? new Error("aborted");
                 return {
                     decision: "SOFT+",
