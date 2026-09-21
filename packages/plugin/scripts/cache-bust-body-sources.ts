@@ -50,11 +50,26 @@ function sha(value: string): string {
     return createHash("sha256").update(value).digest("hex").slice(0, 10);
 }
 
+/**
+ * Values the caller rotates on every request even when the prompt is byte-stable.
+ * The Anthropic auth plugin prepends a billing-header block to `system` whose
+ * `cch`, `cc_prev_req`, and `cc_prompt_id` change per request; the provider meter
+ * reports a full cache read straight across those rotations, so a comparison that
+ * counts them reports a divergence on every single request and buries the real
+ * ones. The whole header line is replaced rather than each field, so a field
+ * added to it later cannot quietly reintroduce the noise.
+ */
+export function stripRotatingRequestFields(text: string): string {
+    return text
+        .replace(/^[ \t]*x-anthropic-billing-header:.*$/gim, "x-anthropic-billing-header: <rotating>")
+        .replace(/cch=[^;]*;/g, "cch=<NONCE>;");
+}
+
 function stripCacheControl(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(stripCacheControl);
     const object = asJson(value);
     if (!object) {
-        return typeof value === "string" ? value.replace(/cch=[^;]*;/g, "cch=<NONCE>;") : value;
+        return typeof value === "string" ? stripRotatingRequestFields(value) : value;
     }
     const normalized: Json = {};
     for (const [key, child] of Object.entries(object)) {
@@ -89,7 +104,10 @@ function partType(value: unknown, fallback: string): string {
 }
 
 function normalizePart(value: unknown, fallbackType: string): NormalizedPart {
-    const text = textForPart(value);
+    // Normalize before measuring: the part length and text prefix both feed the
+    // message identity the analyzer diffs on, so an un-normalized length or
+    // prefix would diverge on a rotation the hash already forgives.
+    const text = stripRotatingRequestFields(textForPart(value));
     const oneLine = text.replace(/\s+/g, " ").trim();
     return {
         type: partType(value, fallbackType),

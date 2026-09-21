@@ -2,17 +2,38 @@ import { readFileSync } from "node:fs";
 import { getMagicContextLogPath } from "../src/shared/data-path";
 import type { CacheBustDecisionAttribution } from "./cache-bust-attribution";
 
+const SCHEDULER_LINE =
+    /^\[([^\]]+)\] \[magic-context\]\[([^\]]+)\] transform scheduler: .*\binputTokens=(\d+)\b.*\bdecision=(execute|defer)\b/;
+const APPLY_LINE =
+    /^\[([^\]]+)\] \[magic-context\]\[([^\]]+)\] pending ops WILL APPLY — reason=(.*?), pendingOps=/;
+/** The pass logs its apply decision within the same pass, a beat after the scheduler line. */
+const APPLY_JOIN_MS = 5_000;
+
 /** Scheduler lines cover TS defers that have no durable transform_decisions row. */
 export function schedulerLogDecisions(text: string, sessionId: string): CacheBustDecisionAttribution[] {
     const decisions: CacheBustDecisionAttribution[] = [];
     for (const line of text.split("\n")) {
-        const match = /^\[([^\]]+)\] \[magic-context\]\[([^\]]+)\] transform scheduler: .*\binputTokens=(\d+)\b.*\bdecision=(execute|defer)\b/.exec(line);
-        if (!match || match[2] !== sessionId) continue;
-        const timestampMs = Date.parse(match[1]);
-        if (!Number.isFinite(timestampMs)) continue;
-        decisions.push({ timestampMs, decision: match[4], materialized: false, materializeReason: null,
-            emergency: false, droppedTokens: 0, droppedCount: 0, inputTokens: Number(match[3]), flush: false,
-            source: "transform scheduler log" });
+        const match = SCHEDULER_LINE.exec(line);
+        if (match) {
+            if (match[2] !== sessionId) continue;
+            const timestampMs = Date.parse(match[1]);
+            if (!Number.isFinite(timestampMs)) continue;
+            decisions.push({ timestampMs, decision: match[4], materialized: false, materializeReason: null,
+                emergency: false, droppedTokens: 0, droppedCount: 0, inputTokens: Number(match[3]), flush: false,
+                source: "transform scheduler log" });
+            continue;
+        }
+        // "pending ops WILL APPLY" names the reclaim ride that authorized the
+        // mutation. Attach it to the pass that just logged its scheduler line, so
+        // a drain that rode freshly published history can be told apart from an
+        // ordinary execute refresh.
+        const apply = APPLY_LINE.exec(line);
+        if (!apply || apply[2] !== sessionId) continue;
+        const appliedAtMs = Date.parse(apply[1]);
+        const pass = decisions.at(-1);
+        if (!pass || !Number.isFinite(appliedAtMs)) continue;
+        if (appliedAtMs < pass.timestampMs || appliedAtMs - pass.timestampMs > APPLY_JOIN_MS) continue;
+        pass.appliedRide = /\bride=([A-Za-z+]+)/.exec(apply[3])?.[1] ?? apply[3];
     }
     return decisions.sort((a, b) => a.timestampMs - b.timestampMs);
 }
