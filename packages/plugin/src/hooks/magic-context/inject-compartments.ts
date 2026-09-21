@@ -393,13 +393,12 @@ export function prepareCompartmentInjection(
     }
 
     // A compartment whose endpoints could not be re-derived after the host
-    // changed store projections is left out of the rendered history: its
-    // start/end attributes are the positions it had in a message list this host
-    // no longer serves, so publishing them would invite ctx_expand ranges that
-    // select unrelated messages. The row itself is kept and still reachable by id.
-    const compartments = getCompartments(db, sessionId).filter(
-        (compartment) => compartment.rebaseStatus !== "unresolved",
-    );
+    // changed store projections still renders: its summary IS the history and
+    // does not depend on the raw rows (most old compartments outlive their raw
+    // rows anyway once the host prunes them). Only its start/end coordinates
+    // are stale, and range recovery refuses those by rebase_status, so the
+    // agent gets the compartment text and a clear refusal instead of a gap.
+    const compartments = getCompartments(db, sessionId);
     // v2 faithful facts: session_facts is retired as a render source. Facts are
     // promoted to project memory and render via <project-memory>. We no longer
     // read or render session_facts here (matching the runner's removed write
@@ -1881,19 +1880,7 @@ function readM0Compartments(db: Database, sessionId: string): M0Compartment[] {
           ORDER BY sequence ASC`,
     ).all(sessionId) as Array<Record<string, unknown>>;
 
-    return rows.map(rowToM0Compartment).filter(isRenderableCompartment);
-}
-
-/**
- * A compartment whose anchor message ids stopped resolving after a store
- * projection change (`rebase_status = 'unresolved'`) keeps its content readable
- * by id but must not render into <session-history>: its `## start-end` range no
- * longer names the messages it covers, and ctx_expand refuses that range, so
- * rendering it would invite the agent to expand a range the tool declines
- * (observed on the real way-back boot before this filter existed).
- */
-function isRenderableCompartment(compartment: M0Compartment): boolean {
-    return compartment.rebaseStatus !== "unresolved";
+    return rows.map(rowToM0Compartment);
 }
 
 function nullableString(value: unknown): string | null {
@@ -1968,7 +1955,7 @@ function readNewCompartments(
           WHERE session_id = ? AND sequence > ?
           ORDER BY sequence ASC`,
     ).all(sessionId, afterSequence) as Array<Record<string, unknown>>;
-    return rows.map(rowToM0Compartment).filter(isRenderableCompartment);
+    return rows.map(rowToM0Compartment);
 }
 
 /**

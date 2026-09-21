@@ -326,34 +326,6 @@ function countRows(db: Database, sql: string, ...params: unknown[]): number {
     return typeof row?.count === "number" ? row.count : 0;
 }
 
-/**
- * Whether this session has any saved state whose meaning depends on message
- * positions. A session Magic Context is seeing for the first time has none, so
- * recording the current projection is all it needs.
- */
-function hasCoordinateBearingRows(db: Database, sessionId: string): boolean {
-    const probes: Array<[string, unknown[]]> = [
-        ["SELECT COUNT(*) AS count FROM compartments WHERE session_id = ?", [sessionId]],
-        ["SELECT COUNT(*) AS count FROM recomp_compartments WHERE session_id = ?", [sessionId]],
-        ["SELECT COUNT(*) AS count FROM message_history_index WHERE session_id = ?", [sessionId]],
-        ["SELECT COUNT(*) AS count FROM message_history_source WHERE session_id = ?", [sessionId]],
-        ["SELECT COUNT(*) AS count FROM compression_depth WHERE session_id = ?", [sessionId]],
-        [
-            "SELECT COUNT(*) AS count FROM compartment_chunk_embeddings WHERE session_id = ?",
-            [sessionId],
-        ],
-        [
-            "SELECT COUNT(*) AS count FROM notes WHERE session_id = ? AND anchor_ordinal IS NOT NULL",
-            [sessionId],
-        ],
-        ["SELECT COUNT(*) AS count FROM tags WHERE session_id = ?", [sessionId]],
-    ];
-    for (const [sql, params] of probes) {
-        if (countRows(db, sql, ...params) > 0) return true;
-    }
-    return false;
-}
-
 function stampGeneration(
     db: Database,
     sessionId: string,
@@ -477,7 +449,16 @@ export function rebaseSessionCoordinates(
         return emptyOutcome("unchanged", generation, previousGeneration);
     }
 
-    if (previousGeneration === null && !hasCoordinateBearingRows(db, sessionId)) {
+    // A session seen for the first time by a generation-aware build has no
+    // previous projection to rebase FROM: every coordinate it holds was written
+    // against the projection this host serves, so nothing can have moved. That
+    // includes compartments whose raw rows the host has since pruned — their
+    // anchors resolve nowhere, but they are exactly as consistent as they were
+    // yesterday. Re-deriving them here would mark most of a long session's
+    // history unresolved on an ordinary upgrade boot, with no store conversion
+    // anywhere. Record the projection and leave every row alone; only a real
+    // change of projection (v1 to v2 or back) re-derives.
+    if (previousGeneration === null) {
         stampGeneration(db, sessionId, generation, null);
         return emptyOutcome("stamped", generation, previousGeneration);
     }

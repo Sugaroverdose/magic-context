@@ -930,12 +930,15 @@ test("the 2.x-only tail is unresolved and everything else resolves by id", () =>
 /**
  * Range recovery for a compartment the way back could not re-anchor is refused,
  * the compartment that DID re-anchor reaches the wire at its re-derived
- * ordinals, and the unresolved one is absent from the rendered
- * `<session-history>`: its heading would name a range ctx_expand refuses, so the
- * m[0]/m[1] readers filter `rebase_status = 'unresolved'` rows (the first run of
- * this lane caught them being served).
+ * ordinals, and the unresolved one STILL renders into `<session-history>`: its
+ * summary is the history and does not depend on the raw rows (a host prunes
+ * those routinely, so on a real store most old compartments have no resolvable
+ * anchor at all). Only its coordinates are stale, which the ctx_expand refusal
+ * covers. An earlier version of this lane asserted the opposite and the
+ * corresponding reader filter would have dropped most of a long session's
+ * history at the flip.
  */
-test("the unresolved range is refused by ctx_expand and the re-anchored one is served", () => {
+test("the unresolved range is refused by ctx_expand and both compartments are served", () => {
     expect(evidence.expandRefusal).toMatch(
         /entirely within the live tail|No messages found in range/,
     );
@@ -946,7 +949,7 @@ test("the unresolved range is refused by ctx_expand and the re-anchored one is s
     expect(evidence.unresolvedHeading).not.toBe(evidence.resolvedHeading);
     expect(evidence.servedHeadBack).toContain(evidence.resolvedHeading);
     expect(evidence.unresolvedHeading).not.toBe("");
-    expect(evidence.servedHeadBack).not.toContain(evidence.unresolvedHeading);
+    expect(evidence.servedHeadBack).toContain(evidence.unresolvedHeading);
 });
 
 test("the way back also serves one HARD fold and four byte-identical defers", () => {

@@ -712,6 +712,57 @@ test("a session first seen on the running projection is stamped and nothing else
     expect(sessionDigest("ses_fresh")).toBe(before);
 });
 
+test("a session first seen with compartments whose raw rows the host has pruned is stamped, not rebased", () => {
+    // The ordinary upgrade shape: a long-lived 1.x session whose oldest raw rows
+    // are gone (the host prunes them; the compartments outlive them by design)
+    // meets the first generation-aware build. There is no previous projection to
+    // rebase from, so nothing has moved; treating the pruned anchors as
+    // unresolvable here marked most of a real store's history unresolved on a
+    // plain restart, with no store conversion anywhere.
+    ensureSession("ses_pruned");
+    insertCompartment("ses_pruned", {
+        sequence: 1,
+        start: 1,
+        end: 3,
+        startMessageId: "msg_gone_1",
+        endMessageId: "msg_gone_3",
+    });
+    insertCompartment("ses_pruned", {
+        sequence: 2,
+        start: 4,
+        end: 5,
+        startMessageId: "msg_b_005_u2",
+        endMessageId: "msg_b_006_a2",
+    });
+    const before = sessionDigest("ses_pruned");
+
+    let reads = 0;
+    const outcome = rebaseSessionCoordinates({
+        db,
+        sessionId: "ses_pruned",
+        generation: "v1",
+        readMessages: () => {
+            reads += 1;
+            // Only the newer messages survive on the host; the compartment-1
+            // anchors resolve nowhere.
+            return v1Projection("ses_pruned").filter((message) => message.ordinal >= 4);
+        },
+    });
+
+    expect(outcome.status).toBe("stamped");
+    expect(reads).toBe(0);
+    expect(outcome.compartmentsUnresolved).toBe(0);
+    expect(outcome.compartmentsRebased).toBe(0);
+    expect(compartmentOf("ses_pruned", 1).rebaseStatus).toBe("ok");
+    expect(compartmentOf("ses_pruned", 2).rebaseStatus).toBe("ok");
+    expect(readCoordinateGeneration(db, "ses_pruned")).toBe("v1");
+    // The stamp is the only difference.
+    db.prepare("UPDATE session_meta SET coordinate_generation = NULL WHERE session_id = ?").run(
+        "ses_pruned",
+    );
+    expect(sessionDigest("ses_pruned")).toBe(before);
+});
+
 test("a session whose coordinates already match the projection pays only the stamp", () => {
     ensureSession("ses_a");
     insertCompartment("ses_a", {

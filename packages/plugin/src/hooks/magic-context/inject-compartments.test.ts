@@ -1481,10 +1481,13 @@ describe("m[0]/m[1] materialization", () => {
         expect(refreshed.m1Text).toContain("## 1-1 · 2026-01-04 · New");
     });
 
-    it("a compartment marked unresolved by a store-projection rebase is not rendered into m[0] or m[1]", () => {
-        // Its `## start-end` range no longer names the messages it covers and
-        // ctx_expand refuses that range, so rendering it invites the agent to
-        // expand a range the tool declines (seen on a real way-back boot).
+    it("a compartment marked unresolved by a store-projection rebase still renders into m[0] and m[1]", () => {
+        // The compartment summary is the history; it does not depend on the raw
+        // rows it was folded from (a host prunes those routinely). Only the
+        // coordinates are stale, and range recovery refuses them by status. The
+        // first version of this filter dropped unresolved rows from the render,
+        // which on a real store meant most of a long session's history vanishing
+        // on the flip.
         db = makeDb();
         const projectDirectory = makeProjectDir();
         appendCompartments(db, SESSION_ID, [
@@ -1520,11 +1523,10 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
         });
         expect(baseline.m0Text).toContain("Resolved summary");
-        expect(baseline.m0Text).not.toContain("Unresolved summary");
-        expect(baseline.m0Text).not.toContain("## 5-9");
+        expect(baseline.m0Text).toContain("Unresolved summary");
 
         // The same rule on the delta: an unresolved row newer than the baseline
-        // stays out of m[1] too.
+        // renders into m[1] too.
         const state = readStateFromMeta();
         appendCompartments(db, SESSION_ID, [
             {
@@ -1549,7 +1551,7 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
             isCacheBustingPass: true,
         });
-        expect(refreshed.m1Text).not.toContain("Later unresolved summary");
+        expect(refreshed.m1Text).toContain("Later unresolved summary");
     });
 
     it("mustMaterialize does NOT materialize m[0] on a retrospective memory write", () => {
