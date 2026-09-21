@@ -2916,7 +2916,33 @@ const MIGRATIONS: &[Migration] = &[
         );
     ",
     },
+    // Versions 57 and 58 are deliberately absent here: they belong to the host-runner
+    // and single-store-marker slices, which are being written at the same time on their
+    // own branches. See RESERVED_UNMERGED_MIGRATION_VERSIONS.
+    Migration {
+        version: 59,
+        // How long a fold publish holds its write transaction.
+        //
+        // Sizing the module's context.db write chunks needs a measured publish duration,
+        // and nothing recorded one: the pass trace covered receive, complete and reject
+        // but never the publish itself. These three columns are that measurement, kept on
+        // the row the publish already touches rather than in a new table.
+        //
+        // Microseconds, because a small publish on a warm page cache finishes well inside
+        // one millisecond and a millisecond column would round most of them to zero.
+        statements: "
+        ALTER TABLE mc_pass_trace ADD COLUMN last_publish_duration_us INTEGER NULL;
+        ALTER TABLE mc_pass_trace ADD COLUMN max_publish_duration_us INTEGER NULL;
+        ALTER TABLE mc_pass_trace ADD COLUMN publish_sample_count INTEGER NOT NULL DEFAULT 0;
+    ",
+    },
 ];
+
+/// Migration numbers this binary does not ship because a sibling slice owns them.
+///
+/// The shipped list is otherwise contiguous, and a hole that is NOT listed here is a
+/// numbering mistake. Each entry disappears when the slice that owns it merges.
+pub const RESERVED_UNMERGED_MIGRATION_VERSIONS: &[u32] = &[57, 58];
 
 /// The highest `mc_cache` schema migration this binary ships.
 ///
@@ -3524,6 +3550,18 @@ fn mutate_pass_request_history(
         params![session_id, meta],
     )?;
     Ok(())
+}
+
+/// Durable publish-transaction timing for one session, in microseconds.
+///
+/// Separate from `PassTrace` on purpose: the pass trace's serialized shape is read by
+/// existing status consumers, and publish timing answers a different question (how long
+/// the module holds a write transaction) that only the single-store chunk budget needs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishTiming {
+    pub last_publish_duration_us: Option<i64>,
+    pub max_publish_duration_us: Option<i64>,
+    pub publish_sample_count: u64,
 }
 
 /// Durable receive/complete/reject breadcrumbs for one session's transform passes.
@@ -8444,6 +8482,65 @@ impl McStore {
             Ok(snapshot)
         })?;
         Ok(snapshot)
+    }
+
+    /// Record how long one fold publish held its write transaction.
+    ///
+    /// Kept out of the publish transaction itself: the number describes that transaction,
+    /// and measuring it from inside would fold the measurement's own write into what it
+    /// measures. Callers pass the elapsed time of the committed transaction.
+    pub fn record_publish_duration(
+        &self,
+        session_id: &str,
+        duration_us: i64,
+    ) -> Result<(), McStoreError> {
+        let duration_us = duration_us.max(0);
+        self.inner.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO mc_pass_trace (
+                     session_id,
+                     last_received_at_ms,
+                     last_completed_at_ms,
+                     last_publish_duration_us,
+                     max_publish_duration_us,
+                     publish_sample_count
+                 ) VALUES (?1, 0, 0, ?2, ?2, 1)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                     last_publish_duration_us = excluded.last_publish_duration_us,
+                     max_publish_duration_us = MAX(
+                         COALESCE(mc_pass_trace.max_publish_duration_us, 0),
+                         excluded.max_publish_duration_us
+                     ),
+                     publish_sample_count = mc_pass_trace.publish_sample_count + 1",
+                params![session_id, duration_us],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Read the durable publish-transaction timing for one session, if any publish has
+    /// been measured.
+    pub fn load_publish_timing(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<PublishTiming>, McStoreError> {
+        Ok(self.inner.with_conn(|conn| {
+            conn.query_row(
+                "SELECT last_publish_duration_us, max_publish_duration_us, publish_sample_count
+                   FROM mc_pass_trace
+                  WHERE session_id = ?1",
+                params![session_id],
+                |row| {
+                    Ok(PublishTiming {
+                        last_publish_duration_us: row.get(0)?,
+                        max_publish_duration_us: row.get(1)?,
+                        publish_sample_count: row.get::<_, i64>(2)?.max(0) as u64,
+                    })
+                },
+            )
+            .optional()
+        })?)
     }
 
     /// Record that the module accepted a transform request for this session. The count and
@@ -22825,11 +22922,67 @@ mod tests {
         );
     }
 
+    /// Every version from 1 to the newest shipped one, minus the numbers a sibling slice
+    /// currently owns. Keeping the contiguity check means a hole nobody reserved still
+    /// fails; listing the reservations means an in-flight slice does not.
+    pub(crate) fn expected_applied_migration_versions() -> Vec<i64> {
+        (1_i64..=LATEST_MIGRATION_VERSION as i64)
+            .filter(|version| !RESERVED_UNMERGED_MIGRATION_VERSIONS.contains(&(*version as u32)))
+            .collect()
+    }
+
+    #[test]
+    fn publish_duration_keeps_the_last_and_the_largest_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        assert_eq!(store.load_publish_timing("session").unwrap(), None);
+
+        store.record_publish_duration("session", 4_200).unwrap();
+        store.record_publish_duration("session", 19_500).unwrap();
+        // A later, faster publish must not erase the worst one the budget is sized against.
+        store.record_publish_duration("session", 900).unwrap();
+
+        assert_eq!(
+            store.load_publish_timing("session").unwrap(),
+            Some(PublishTiming {
+                last_publish_duration_us: Some(900),
+                max_publish_duration_us: Some(19_500),
+                publish_sample_count: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn publish_duration_does_not_disturb_the_pass_trace_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .trace_pass_received("session", "attempt", 1_700)
+            .unwrap();
+        store.record_publish_duration("session", 5_000).unwrap();
+
+        let trace = store.load_pass_trace("session").unwrap().unwrap();
+        assert_eq!(trace.last_received_at_ms, 1_700);
+        assert_eq!(trace.receive_count, 1);
+    }
+
+    #[test]
+    fn reserved_migration_numbers_are_not_shipped() {
+        for reserved in RESERVED_UNMERGED_MIGRATION_VERSIONS {
+            assert!(
+                !MIGRATIONS
+                    .iter()
+                    .any(|migration| migration.version == *reserved),
+                "migration {reserved} is reserved for another slice but is shipped here"
+            );
+        }
+    }
+
     #[test]
     fn fresh_and_migrated_stores_have_latest_schema() {
         let fresh_dir = tempfile::tempdir().unwrap();
         let fresh = McStore::open(&descriptor(fresh_dir.path())).unwrap();
-        let expected_versions = (1_i64..=LATEST_MIGRATION_VERSION as i64).collect::<Vec<_>>();
+        let expected_versions = expected_applied_migration_versions();
         let fresh_versions = fresh
             .inner
             .with_conn(|conn| {
@@ -27283,7 +27436,7 @@ mod shadow_tests {
             .unwrap();
         assert_eq!(
             versions,
-            (1_i64..=LATEST_MIGRATION_VERSION as i64).collect::<Vec<_>>()
+            crate::tests::expected_applied_migration_versions()
         );
         assert_eq!(
             store

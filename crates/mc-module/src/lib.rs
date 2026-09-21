@@ -32,6 +32,7 @@ pub mod historian_chunk;
 pub mod historian_producer;
 pub mod historian_prompt;
 pub mod historian_validate;
+pub mod host_store;
 pub mod injection;
 pub mod m0_compose;
 pub mod m1_compose;
@@ -4468,6 +4469,7 @@ impl McHandler {
                 prompt_surface_guidance_override: None,
                 smart_drops: false,
                 cache_ttl: "5m".to_string(),
+                single_store: crate::host_store::SingleStoreMode::Off,
             },
         )
     }
@@ -5127,10 +5129,23 @@ impl McHandler {
         if let Some(config) = &self.fixed_config {
             return config.clone();
         }
-        self.config
+        let config = self
+            .config
             .lock()
             .expect("config mutex")
-            .effective_for_project(project_root)
+            .effective_for_project(project_root);
+        // The publish path runs deep inside the historian, far from any config handle, so
+        // the resolved single-store mode is published here where config is already being
+        // read. `on` is refused rather than silently downgraded: the writers in this build
+        // are shadow/verify only, and a project that asked for real writes must be told.
+        match crate::host_store::admit_mode(config.single_store) {
+            Ok(mode) => crate::host_store::set_mode(mode),
+            Err(error) => {
+                crate::host_store::set_mode(crate::host_store::SingleStoreMode::Off);
+                crate::host_store::record_mode_refusal(&error);
+            }
+        }
+        config
     }
 
     fn observe_memory_mirror_frontier(&self, store: &McStore) -> Result<i64, McStoreError> {
@@ -7505,6 +7520,8 @@ impl McHandler {
             "pass_trace": pass_trace,
             "runtime_store_error": self.runtime_store_error_value(&session_id),
             "memory_mirror": self.memory_mirror_status_value(now_ms().max(0) as u64),
+            "single_store": crate::host_store::status_value(),
+            "publish_timing": store.load_publish_timing(&session_id).ok().flatten(),
             "authority": {
                 "memories": memory_authority,
                 "notes": notes_authority,
@@ -19853,6 +19870,7 @@ mod tests {
             prompt_surface_guidance_override: None,
             smart_drops: false,
             cache_ttl: "5m".to_string(),
+            single_store: crate::host_store::SingleStoreMode::Off,
         }
     }
 
