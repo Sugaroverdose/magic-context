@@ -151,6 +151,47 @@ describe("cache-bust attribution contract", () => {
         }
     });
 
+    test("a zero provider read with no MC pass row is still a provider full miss, not no_mc_pass_row", () => {
+        // A billing-header rotation on a subagent session (no decision row) rewrote
+        // 322k tokens at read=0; the sentinel woke the operator with
+        // no_mc_pass_row because the pass-row join ran before the usage classes.
+        const cls = classifyCacheBust({
+            divergenceIndex: 0,
+            firstDivergenceRole: "system",
+            previousMessageCount: 248,
+            providerComparableRead: 0,
+            directInput: 2,
+            previousTotal: 321_872,
+            promptTokens: 322_315,
+            rewrittenTokens: 322_315,
+            decision: undefined,
+        });
+        expect(cls).toBe("provider_full_miss");
+        expect(isUnaccountedCacheBustClass(cls)).toBe(false);
+        // Absent usage on a row-less request stays usage_missing, and a short
+        // (non-zero) read with no row is still the unaccounted no_mc_pass_row.
+        expect(
+            classifyCacheBust({
+                divergenceIndex: 3,
+                previousMessageCount: 10,
+                providerComparableRead: 0,
+                directInput: 0,
+                previousTotal: 50_000,
+                decision: undefined,
+            }),
+        ).toBe("usage_missing");
+        expect(
+            classifyCacheBust({
+                divergenceIndex: 3,
+                previousMessageCount: 10,
+                providerComparableRead: 20_000,
+                directInput: 500,
+                previousTotal: 50_000,
+                decision: undefined,
+            }),
+        ).toBe("no_mc_pass_row");
+    });
+
     test("classifies a zero provider read as a full miss but keeps a short read unaccounted", () => {
         const fullMiss = classifyCacheBust({
             divergenceIndex: 4,

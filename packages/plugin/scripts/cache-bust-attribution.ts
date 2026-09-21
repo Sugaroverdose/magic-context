@@ -233,8 +233,25 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
             : 0;
     if (isSystemRow && rewrittenRatio < 0.05 && creationRatio < 0.05) return "system_row_shift";
 
+    // Provider-side signals are read before the pass-row join: a request whose
+    // provider read is exactly zero is a cold miss on their side (a wire model
+    // swap, an expired prefix, a billing-header rotation) whatever MC did or did
+    // not record for it. Classifying it "no_mc_pass_row" made the sentinel wake
+    // the operator for a rotation of the auth plugin's billing header on a
+    // subagent session with no decision row (2026-09-21).
+    const previousTotal = input.previousTotal ?? input.promptTokens;
+    const usageMissing = input.providerComparableRead === 0 && input.directInput === 0;
+    const providerFullMiss =
+        input.providerComparableRead === 0 &&
+        previousTotal !== undefined &&
+        previousTotal >= 10_000;
+
     const decision = input.decision;
-    if (!decision) return "no_mc_pass_row";
+    if (!decision) {
+        if (usageMissing) return "usage_missing";
+        if (providerFullMiss) return "provider_full_miss";
+        return "no_mc_pass_row";
+    }
 
     const canonicalDecision = (decision.canonicalDecision ?? decision.decision).toLowerCase();
     const materializeReason = decision.materializeReason?.toLowerCase() ?? null;
@@ -245,12 +262,6 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
         input.firstDivergenceSize !== undefined &&
         input.firstDivergenceSize <= 256 &&
         input.divergenceIndex < Math.max(0, input.previousMessageCount - 2);
-    const previousTotal = input.previousTotal ?? input.promptTokens;
-    const usageMissing = input.providerComparableRead === 0 && input.directInput === 0;
-    const providerFullMiss =
-        input.providerComparableRead === 0 &&
-        previousTotal !== undefined &&
-        previousTotal >= 10_000;
     if (decision.flush || materializeReason === "explicit_flush") return "accounted_ctx_flush";
     if (decision.emergency && decision.droppedCount > 0) return "accounted_force_band";
     if (isTinyFirstRenderDefer && (usageMissing || providerFullMiss)) {
