@@ -24,6 +24,8 @@ import * as p50kEncoding from "ai-tokenizer/encoding/p50k_base";
 import { buildProseProbe } from "./prose";
 import { resolveModelCalibration } from "../../src/hooks/magic-context/tokenizer-calibration";
 import { measureAnthropic } from "./providers/anthropic";
+import { type CountAdapter } from "./providers/counting";
+import { measureOpenAI } from "./providers/openai";
 import { measureOpenAICodex } from "./providers/openai-codex";
 import { measureOpenAICompatible } from "./providers/openai-compatible";
 
@@ -31,6 +33,14 @@ interface AuthFile {
     [provider: string]:
         | { type: "oauth"; access: string; refresh?: string; expires?: number }
         | { type: "api"; key: string };
+}
+
+const FREE_ADAPTERS: Record<string, { measure: CountAdapter; method: string; env: string; file: string }> = {
+    openai: { measure: measureOpenAI, method: "responses/input_tokens", env: "OPENAI_API_KEY", file: "openai.key" },
+};
+
+function authProvider(test: ModelTest): string {
+    return test.label.startsWith("openai-codex/") ? "openai-codex" : test.provider;
 }
 
 interface ModelTest {
@@ -45,7 +55,7 @@ interface ModelTestSet {
 }
 
 interface MeasurementResult {
-    method: "count_tokens" | "usage";
+    method: string;
     proseRatio: number | null;
     proseTokens: { local_raw: number; api: number | null };
     proseSections: Record<string, { local_raw: number; api: number; ratio: number }>;
@@ -182,15 +192,16 @@ async function measureOne(
     let systemApi: number | null = null;
     let toolsApi: number | null = null;
     let error: string | null = null;
-    let method: "count_tokens" | "usage" = test.provider === "anthropic" && auth.anthropic?.type === "api" ? "count_tokens" : "usage";
+    const adapter = FREE_ADAPTERS[authProvider(test)];
+    let method = adapter?.method ?? (test.provider === "anthropic" && auth.anthropic?.type === "api" ? "count_tokens" : "usage");
     // biome-ignore lint/suspicious/noExplicitAny: encoding type varies
     const tokenizer = new Tokenizer(pickEncoding(test.tokenizerKey) as any);
     const proseLocal = tokenizer.count(Object.values(prose).join("\n\n"));
     let proseApi: number | null = null;
     const proseSections: MeasurementResult["proseSections"] = {};
     try {
-        const authEntry = auth[test.provider];
-        if (!authEntry) throw new Error(`No auth for provider ${test.provider}`);
+        const authEntry = auth[authProvider(test)];
+        if (!authEntry) throw new Error(`SKIP: no API key for ${test.provider}`);
 
         // Route OpenAI OAuth (ChatGPT Plus subscription) through the Codex backend
         // since `api.openai.com` requires a paid API key, while OAuth tokens work via
@@ -201,8 +212,11 @@ async function measureOne(
             authEntry.type === "oauth" &&
             !!authEntry.access;
         let measurements: { systemApi: number | null; toolsApi: number | null };
-        if (test.provider === "anthropic") {
-            const measured = await measureAnthropic(test, authEntry, systemText, toolsArray, prose);
+        if (adapter || test.provider === "anthropic") {
+            if (adapter && authEntry.type !== "api") throw new Error("SKIP: counting requires an API key, not OAuth");
+            const measured = adapter && authEntry.type === "api"
+                ? await adapter.measure(test.modelId, authEntry.key, systemText, toolsArray, prose)
+                : await measureAnthropic(test, authEntry, systemText, toolsArray, prose);
             measurements = measured;
             method = measured.method;
             proseApi = measured.proseApi;
@@ -297,12 +311,21 @@ async function main(): Promise<void> {
     let tests = testSet.tests;
     if (only) tests = tests.filter((t) => only.split(",").includes(t.label) || only.split(",").includes(t.modelId));
     if (providers) tests = tests.filter((t) => providers.includes(t.provider));
-    if (tests.some((test) => !auth[test.provider])) {
+    for (const test of tests) {
+        const provider = authProvider(test);
+        const adapter = FREE_ADAPTERS[provider];
+        if (!adapter) continue;
+        const path = join(homedir(), ".config", adapter.file);
+        const apiKey = process.env[adapter.env]?.trim() || (existsSync(path) ? readFileSync(path, "utf8").trim() : "");
+        if (apiKey) auth[provider] = { type: "api", key: apiKey };
+    }
+    const fallbackTests = tests.filter((test) => !FREE_ADAPTERS[authProvider(test)] && !auth[authProvider(test)]);
+    if (fallbackTests.length > 0) {
         console.log("Missing API key: usage fallback requires OAuth credentials; jwt auth is not yet supported on count_tokens. PROSE is never sent through usage.");
         const authPath = join(homedir(), ".local/share/opencode/auth.json");
         if (existsSync(authPath)) {
             const fallback = JSON.parse(readFileSync(authPath, "utf8")) as AuthFile;
-            for (const test of tests) if (!auth[test.provider] && fallback[test.provider]) auth[test.provider] = fallback[test.provider];
+            for (const test of fallbackTests) if (fallback[test.provider]) auth[authProvider(test)] = fallback[test.provider];
         }
     }
 
@@ -316,7 +339,7 @@ async function main(): Promise<void> {
         process.stdout.write(`  ${test.label.padEnd(45, " ")} ... `);
         const r = await measureOne(test, auth, systemText, toolsArray, prose);
         if (r.error) {
-            process.stdout.write(`ERROR (${r.durationMs}ms) ${r.error.slice(0, 80)}\n`);
+            process.stdout.write(`SKIP (${r.durationMs}ms) ${r.error}\n`);
         } else {
             process.stdout.write(
                 `system=${r.systemTokens.api ?? "—"} (raw ${r.systemTokens.local_raw}, ratio ${r.systemTokens.ratio_raw ?? "—"}x), tools=${r.toolsTokens.api ?? "—"} (raw ${r.toolsTokens.local_raw}, ratio ${r.toolsTokens.ratio_raw ?? "—"}x), ${r.durationMs}ms\n`,

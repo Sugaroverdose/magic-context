@@ -40,8 +40,8 @@ describe("resolveModelCalibration", () => {
         }
     });
 
-    it("matches GPT-5.x family across all variants", () => {
-        const cases = ["gpt-5", "gpt-5.4", "gpt-5.4-codex", "gpt-5.5", "gpt-5.3-codex"];
+    it("uses legacy GPT-5.x ratios for variants without API-key measurements", () => {
+        const cases = ["gpt-5", "gpt-5.4", "gpt-5.4-codex", "gpt-5.3-codex"];
         for (const model of cases) {
             const calib = resolveModelCalibration("openai", model);
             expect(calib.systemRatio).toBe(1.0);
@@ -490,4 +490,14 @@ describe("measured Claude 5 prose calibration", () => {
         expect(Object.values(out).reduce((a, b) => a + b, 0)).toBe(7);
         expect(Object.values(out).every((value) => value >= 0)).toBe(true);
     });
+});
+
+it("uses measured Responses ratios for OpenAI API models", () => {
+    for (const model of ["gpt-5.5", "gpt-6-astra"]) {
+        expect(resolveModelCalibration("openai", model)).toMatchObject({
+            systemRatio: 1.000278,
+            toolsRatio: 0.850953,
+            proseRatio: 1.000017,
+        });
+    }
 });

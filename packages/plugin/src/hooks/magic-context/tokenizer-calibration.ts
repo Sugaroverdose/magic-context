@@ -124,6 +124,15 @@ const CALIBRATION_TABLE: CalibrationEntry[] = [
     { prefix: "github-copilot/claude-sonnet-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
     { prefix: "github-copilot/claude-opus-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
     { prefix: "github-copilot/claude-haiku-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
+    // Measured via the API-key Responses counting endpoint, not ChatGPT OAuth.
+    // Historical Codex completion-usage measurements remain in results.json.
+    { prefix: "openai/gpt-5.5", systemRatio: 1.000278, toolsRatio: 0.850953, proseRatio: 1.000017 },
+    {
+        prefix: "openai/gpt-6-astra",
+        systemRatio: 1.000278,
+        toolsRatio: 0.850953,
+        proseRatio: 1.000017,
+    },
     // OpenAI gpt-5.x — ai-tokenizer's o200k_base matches exactly, tools overcounted ~16%.
     { prefix: "openai/gpt-5", systemRatio: 1.0, toolsRatio: 0.84 },
     // xAI Grok — ai-tokenizer overcounts (uses p50k_base which doesn't match Grok exactly).

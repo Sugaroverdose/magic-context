@@ -247,5 +247,95 @@
     },
     "error": null,
     "durationMs": 1451
+  },
+  {
+    "method": "responses/input_tokens",
+    "proseRatio": 1.0000174754906244,
+    "proseTokens": {
+      "local_raw": 57223,
+      "api": 57224
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 31411,
+        "api": 31412,
+        "ratio": 1.0000318359810259
+      },
+      "history": {
+        "local_raw": 23464,
+        "api": 23465,
+        "ratio": 1.0000426184793727
+      },
+      "memory": {
+        "local_raw": 2348,
+        "api": 2349,
+        "ratio": 1.0004258943781943
+      }
+    },
+    "label": "openai/gpt-5.5",
+    "provider": "openai",
+    "modelId": "gpt-5.5",
+    "tokenizerKey": "openai/gpt-5",
+    "systemTokens": {
+      "local_raw": 14400,
+      "local_sdk": 14416,
+      "api": 14404,
+      "ratio_raw": 1,
+      "ratio_sdk": 0.999
+    },
+    "toolsTokens": {
+      "local_raw": 20403,
+      "local_sdk": 13205,
+      "api": 17362,
+      "ratio_raw": 0.851,
+      "ratio_sdk": 1.315
+    },
+    "error": null,
+    "durationMs": 4646
+  },
+  {
+    "method": "responses/input_tokens",
+    "proseRatio": 1.0000174754906244,
+    "proseTokens": {
+      "local_raw": 57223,
+      "api": 57224
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 31411,
+        "api": 31412,
+        "ratio": 1.0000318359810259
+      },
+      "history": {
+        "local_raw": 23464,
+        "api": 23465,
+        "ratio": 1.0000426184793727
+      },
+      "memory": {
+        "local_raw": 2348,
+        "api": 2349,
+        "ratio": 1.0004258943781943
+      }
+    },
+    "label": "openai/gpt-6-astra",
+    "provider": "openai",
+    "modelId": "gpt-6-astra",
+    "tokenizerKey": "openai/gpt-5",
+    "systemTokens": {
+      "local_raw": 14400,
+      "local_sdk": 14416,
+      "api": 14404,
+      "ratio_raw": 1,
+      "ratio_sdk": 0.999
+    },
+    "toolsTokens": {
+      "local_raw": 20403,
+      "local_sdk": 13205,
+      "api": 17362,
+      "ratio_raw": 0.851,
+      "ratio_sdk": 1.315
+    },
+    "error": null,
+    "durationMs": 3150
   }
 ]

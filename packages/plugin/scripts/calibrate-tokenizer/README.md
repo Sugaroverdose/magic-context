@@ -39,3 +39,14 @@ Synthetic memory drifts more than documentation/history, so these are content-de
 | Total | 530,000 | 530,000 |
 
 Residual tool calls still exceed the raw local 70K: calibration removes misattributed m0 drift but cannot identify the remaining unmeasured conversation/tool drift. No budget, hygiene, historian, or transform decision changes. Plugin replay identity tests passed, including the full suite's pre-optimization served-wire digest, byte-identical hot passes, and four pure defer passes preserving served bytes.
+
+## OpenAI API-key measurements
+
+Reference: https://developers.openai.com/api/docs/guides/token-counting?lang=python (read 2026-09-21). The current guidance documents a server-side `POST /v1/responses/input_tokens`, including gpt-6-astra; this is not a tiktoken approximation. Uses OPENAI_API_KEY or ~/.config/openai.key. SYSTEM goes in `instructions`; TOOLS maps the same fixture to Responses function definitions; PROSE is user input. All subtract a minimal-user baseline. The four extra system tokens and one extra prose token are envelope/separator differences retained in the reported ratios.
+
+| Model | Method | SYSTEM | TOOLS | PROSE | Docs | History | Memory |
+|---|---|---:|---:|---:|---:|---:|---:|
+| openai/gpt-5.5 | responses/input_tokens | 1.000278 | 0.850953 | 1.000017 | 1.000032 | 1.000043 | 1.000426 |
+| openai/gpt-6-astra | responses/input_tokens | 1.000278 | 0.850953 | 1.000017 | 1.000032 | 1.000043 | 1.000426 |
+
+Both accepted. Existing openai-codex/* result rows and OAuth routing remain separate and unchanged. The GPT-5 fallback test excludes 5.5 now because its more-specific measured entry deliberately supersedes the family default. No unmeasured provider aliases added.
