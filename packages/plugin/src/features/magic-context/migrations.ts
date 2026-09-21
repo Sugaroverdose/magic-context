@@ -3058,6 +3058,42 @@ export const MIGRATIONS: Migration[] = [
             });
         },
     },
+    {
+        version: 88,
+        description: "record the store projection each session's coordinates were derived against",
+        up(db: Database): void {
+            // Issue 492 finding 1. Every conversational coordinate Magic Context
+            // saves (compartment endpoints, note anchors, search-index ordinals,
+            // the protected-tail floor) is a POSITION in the message list the
+            // running OpenCode host serves. OpenCode 2 converts a 1.x store into a
+            // second projection of the same conversation while keeping the 1.x
+            // tables, so the same session can be served under either projection
+            // depending on which host opens it — and the two number the messages
+            // differently. These columns give the rebase something durable to
+            // compare against and somewhere to record what it could not re-derive.
+            //
+            // coordinate_generation is NULLABLE with no default on purpose: an
+            // existing session has never recorded one, and "not recorded" must stay
+            // distinguishable from "recorded as v1".
+            if (tableExists(db, "session_meta")) {
+                ensureColumn(db, "session_meta", "coordinate_generation", "TEXT");
+                ensureColumn(db, "session_meta", "coordinate_rebase_notice", "TEXT");
+            }
+            // Existing rows are 'ok': they were written against the projection that
+            // was live at the time, and the first rebase pass decides them properly.
+            if (tableExists(db, "compartments")) {
+                ensureColumn(db, "compartments", "rebase_status", "TEXT NOT NULL DEFAULT 'ok'");
+            }
+            if (tableExists(db, "recomp_compartments")) {
+                ensureColumn(
+                    db,
+                    "recomp_compartments",
+                    "rebase_status",
+                    "TEXT NOT NULL DEFAULT 'ok'",
+                );
+            }
+        },
+    },
 ];
 
 /**

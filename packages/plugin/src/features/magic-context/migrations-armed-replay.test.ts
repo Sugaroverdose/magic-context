@@ -391,6 +391,53 @@ function assertV87RelabelArm(db: DatabaseType): void {
     ).toEqual({ harness: "opencode" });
 }
 
+const V88_SESSION_ID = "ses-v88-coordinates";
+
+/**
+ * Give v88 a session that already stores conversational coordinates, so the
+ * columns it adds land on populated rows rather than an empty table.
+ */
+function populateCoordinateSessionAtV87(db: DatabaseType): void {
+    db.prepare(
+        "INSERT INTO session_meta (session_id, harness, counter, prior_boundary_ordinal) VALUES (?, 'opencode', 1, 4)",
+    ).run(V88_SESSION_ID);
+    db.prepare(
+        `INSERT INTO compartments
+            (session_id, sequence, start_message, end_message, start_message_id, end_message_id,
+             title, content, importance, legacy, created_at, harness)
+         VALUES (?, 1, 1, 4, 'msg-start', 'msg-end', 'title', 'body', 50, 0, 1000, 'opencode')`,
+    ).run(V88_SESSION_ID);
+    db.prepare(
+        `INSERT INTO recomp_compartments
+            (session_id, sequence, start_message, end_message, start_message_id, end_message_id,
+             title, content, importance, pass_number, created_at, harness)
+         VALUES (?, 1, 1, 4, 'msg-start', 'msg-end', 'title', 'body', 50, 1, 1000, 'opencode')`,
+    ).run(V88_SESSION_ID);
+}
+
+function assertV88CoordinateArm(db: DatabaseType): void {
+    // Existing compartments are usable immediately (NOT NULL DEFAULT backfills
+    // them), while the session's projection stays unrecorded so only the runtime
+    // rebase decides it.
+    expect(
+        db
+            .prepare("SELECT rebase_status FROM compartments WHERE session_id = ?")
+            .get(V88_SESSION_ID),
+    ).toEqual({ rebase_status: "ok" });
+    expect(
+        db
+            .prepare("SELECT rebase_status FROM recomp_compartments WHERE session_id = ?")
+            .get(V88_SESSION_ID),
+    ).toEqual({ rebase_status: "ok" });
+    expect(
+        db
+            .prepare(
+                "SELECT coordinate_generation AS generation FROM session_meta WHERE session_id = ?",
+            )
+            .get(V88_SESSION_ID),
+    ).toEqual({ generation: null });
+}
+
 function populateModuleOwnedRows(db: DatabaseType, version: number, state: ReplayState): void {
     if (!state.contextStoreUuid) throw new Error("armed replay has no context store identity");
 
@@ -588,6 +635,12 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
         case 87:
             if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
             assertV87RelabelArm(db);
+            populateCoordinateSessionAtV87(db);
+            populateModuleOwnedRows(db, version, state);
+            return;
+        case 88:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            assertV88CoordinateArm(db);
             populateModuleOwnedRows(db, version, state);
             return;
         default:

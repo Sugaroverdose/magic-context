@@ -47,6 +47,8 @@ import {
     resolveEpochFloorForPass,
 } from "../../features/magic-context/storage-meta-persisted";
 import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-project-state";
+import type { CoordinateGeneration } from "../../features/magic-context/store-generation-rebase";
+import { rebaseSessionCoordinates } from "../../features/magic-context/store-generation-rebase";
 import type { Tagger } from "../../features/magic-context/tagger";
 import {
     clearOpenCodePendingTransformDecision,
@@ -734,6 +736,12 @@ export interface TransformDeps {
         compactionOff: boolean;
     }) => void;
     rustMemorySyncRequestedSessions?: Set<string>;
+    /**
+     * Which projection of the OpenCode store this host serves. Supplied by the
+     * OpenCode 1 and OpenCode 2 hooks; omitted by every other harness, which
+     * keeps them (Pi in particular) out of the coordinate rebase entirely.
+     */
+    storeGeneration?: CoordinateGeneration;
 }
 
 export function resolveTransformHostSeams(
@@ -805,6 +813,31 @@ export function createTransform(deps: TransformDeps) {
         logTransformTiming(sessionId, "findSessionId", startTime, `messages=${messages.length}`);
 
         const db = deps.db;
+
+        // Runs before anything reads a saved coordinate. Every ordinal this
+        // session stored is a position in the message list some host served; if
+        // the host in front of us serves a different projection of the same
+        // conversation, those positions must be re-derived from the surviving
+        // message ids first. Failing here must not take the chat down: the
+        // generation stamp is only written on success, so the next pass retries.
+        if (deps.storeGeneration !== undefined) {
+            try {
+                rebaseSessionCoordinates({
+                    db,
+                    sessionId,
+                    generation: deps.storeGeneration,
+                    readMessages: host.hostRawMessages,
+                });
+            } catch (error) {
+                passOutcome.record("store-generation-rebase-failure");
+                sessionLog(
+                    sessionId,
+                    "store projection rebase failed (retrying next pass):",
+                    error,
+                );
+            }
+        }
+
         if (deps.client !== undefined) {
             scheduleReconciliation(db, sessionId, host.hostRawMessages);
         }

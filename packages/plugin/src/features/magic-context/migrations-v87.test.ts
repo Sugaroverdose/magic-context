@@ -166,7 +166,7 @@ describe("migration v87: harness labels follow host-store evidence", () => {
             initializeDatabase(db);
             runMigrations(db);
 
-            expect(LATEST_SUPPORTED_VERSION).toBe(87);
+            expect(LATEST_SUPPORTED_VERSION).toBe(88);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
             expect(
                 db

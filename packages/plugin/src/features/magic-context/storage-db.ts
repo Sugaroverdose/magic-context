@@ -104,7 +104,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastMigrationOnOpenRefusal = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 87;
+export const LATEST_SUPPORTED_VERSION = 88;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -2099,6 +2099,17 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "upgrade_reminder_count", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(db, "session_meta", "cached_m0_mural_data_url", "TEXT");
     ensureColumn(db, "session_meta", "cached_m0_mural_hash", "TEXT");
+    // v88 (issue 492). The OpenCode host store exists in two projections and a
+    // user can move between them in both directions, which renumbers the
+    // positional ordinals every saved coordinate is expressed in. These columns
+    // record which projection a session's coordinates were last derived against
+    // and which compartments could not be re-derived from a surviving message id.
+    // coordinate_generation is deliberately NULLABLE with no default: NULL means
+    // "never recorded", which is not the same as either projection.
+    ensureColumn(db, "session_meta", "coordinate_generation", "TEXT");
+    ensureColumn(db, "session_meta", "coordinate_rebase_notice", "TEXT");
+    ensureColumn(db, "compartments", "rebase_status", "TEXT NOT NULL DEFAULT 'ok'");
+    ensureColumn(db, "recomp_compartments", "rebase_status", "TEXT NOT NULL DEFAULT 'ok'");
 
     db.exec(`
       CREATE TABLE IF NOT EXISTS project_state (
