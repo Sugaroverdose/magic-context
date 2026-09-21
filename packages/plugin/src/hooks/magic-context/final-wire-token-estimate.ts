@@ -1,8 +1,8 @@
 import { getMeasuredToolDefinitionTokens } from "../../features/magic-context/tool-definition-tokens";
+import { providerMass, resolveDecisionCalibration } from "./decision-calibration";
 import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
-import { resolveModelCalibration } from "./tokenizer-calibration";
 
 export interface MessageTokenEstimate {
     conversation: number;
@@ -128,13 +128,16 @@ export interface FinalWireTokenEstimate {
     messageTokens: MessageTokenEstimate;
     systemTokens: number;
     toolDefinitionTokens: number | undefined;
+    /** Unscaled transform-array/system/tool measurement; provider framing is unmeasured. */
+    rawTokens?: number;
+    rawComponents?: { system: number; tools: number; prose: number };
+    completeness?: "complete" | "partial";
 }
 
 /**
- * Telemetry-only estimate of the outgoing prompt after transform mutations.
- * System and tool definitions use the sidebar's calibrated measurements, while
- * messages are re-read from the final array. This is diagnostic data, not an
- * abort gate; provider-accurate gating is deferred to module-side Rust accounting.
+ * Estimate the returned transform array plus observed system and tool definitions.
+ * This is not exact provider tokenization: provider framing remains unmeasured.
+ * Fit callers must require trusted, not merely compare a numeric partial estimate.
  */
 export function estimateFinalWireInputTokens(
     input: FinalWireTokenEstimateInput,
@@ -152,7 +155,20 @@ export function estimateFinalWireInputTokens(
         input.providerID && input.modelID
             ? getMeasuredToolDefinitionTokens(input.providerID, input.modelID, input.agentName)
             : undefined;
-    const calibration = resolveModelCalibration(input.providerID, input.modelID);
+    const calibration = resolveDecisionCalibration(input.providerID, input.modelID);
+    const rawComponents = {
+        system: input.systemPromptTokens,
+        tools: (measuredToolDefinitions ?? 0) + messageTokens.toolCall,
+        prose: messageTokens.conversation,
+    };
+    const tokens = providerMass(rawComponents, calibration, true);
+    const complete =
+        Number.isFinite(tokens) &&
+        tokens > 0 &&
+        Number.isFinite(input.systemPromptTokens) &&
+        input.systemPromptTokens > 0 &&
+        measuredToolDefinitions !== undefined &&
+        input.messages.every(hasCountableParts);
     const systemTokens = Math.round(
         Math.max(0, input.systemPromptTokens) * calibration.systemRatio,
     );
@@ -161,14 +177,53 @@ export function estimateFinalWireInputTokens(
             ? undefined
             : Math.round(measuredToolDefinitions * calibration.toolsRatio);
     return {
-        tokens:
-            systemTokens +
-            (toolDefinitionTokens ?? 0) +
-            messageTokens.conversation +
-            messageTokens.toolCall,
-        trusted: systemTokens > 0 && toolDefinitionTokens !== undefined,
+        tokens,
+        trusted: complete,
+        rawTokens: rawComponents.system + rawComponents.tools + rawComponents.prose,
+        rawComponents,
+        completeness: complete ? "complete" : "partial",
         messageTokens,
         systemTokens,
         toolDefinitionTokens,
     };
+}
+
+function hasCountableParts(message: MessageLike): boolean {
+    return message.parts.every((part) => {
+        if (!part || typeof part !== "object") return false;
+        const p = part as unknown as Record<string, unknown>;
+        if (p.ignored === true) return true;
+        switch (p.type) {
+            case "text":
+            case "reasoning":
+                return typeof p.text === "string";
+            case "thinking":
+                return typeof p.thinking === "string";
+            case "redacted_thinking":
+                return typeof p.data === "string";
+            case "tool":
+                return p.state !== null && typeof p.state === "object";
+            case "tool-invocation":
+                return p.args !== undefined;
+            case "tool_use":
+                return p.input !== undefined;
+            case "tool_result":
+                return (
+                    typeof p.content === "string" ||
+                    (Array.isArray(p.content) &&
+                        p.content.every(
+                            (c: unknown) =>
+                                typeof c === "string" ||
+                                (c !== null &&
+                                    typeof c === "object" &&
+                                    (c as { type?: unknown }).type === "text"),
+                        ))
+                );
+            case "step-start":
+            case "step-finish":
+                return true;
+            default:
+                return false;
+        }
+    });
 }

@@ -93,11 +93,13 @@ import {
 	validateHistorianOutput,
 	validateStoredCompartments,
 } from "@magic-context/core/hooks/magic-context/compartment-runner-validation";
+import { resolveKnownHistorianContextLimit } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import { persistFilteredNoise } from "@magic-context/core/hooks/magic-context/persist-filtered-noise";
 import {
 	fitAtomicHistorianSourceToProducerWindow,
+	producerPromptFailureReason,
 	producerWindowFailureReason,
 } from "@magic-context/core/hooks/magic-context/producer-window-guard";
 import {
@@ -118,6 +120,7 @@ import {
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { buildReferenceBlocks } from "@magic-context/core/hooks/magic-context/reference-retrieval";
 import { describeError } from "@magic-context/core/shared/error-message";
+import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type {
 	ModelInput,
@@ -225,7 +228,8 @@ async function sleepWithAbort(
 	});
 }
 
-async function runHistorianSubagentWithTransientRetries(args: {
+async function runHistorianSubagentWithTransientRetriesGuarded(args: {
+	resolveContextLimit?: (model: string) => number | undefined;
 	runner: SubagentRunner;
 	options: SubagentRunOptions;
 	sessionId: string;
@@ -243,6 +247,19 @@ async function runHistorianSubagentWithTransientRetries(args: {
 		const attemptStart = Date.now();
 		let result: SubagentRunResult;
 		try {
+			const key = piModelRefToCanonical(args.options.model ?? "");
+			const window =
+				args.resolveContextLimit?.(key) ??
+				resolveKnownHistorianContextLimit(key);
+			const failure = producerPromptFailureReason({
+				sourceLocal: estimateTokens(args.options.userMessage),
+				systemLocal: estimateTokens(args.options.systemPrompt),
+				toolsLocal: 0,
+				modelKey: key,
+				contextLimitTokens: window,
+				maxOutputTokens: args.options.maxOutputTokens ?? 32000,
+			});
+			if (failure) throw new Error(failure);
 			result = await args.runner.run({
 				...args.options,
 				// The historian runner owns fallback iteration because every candidate's
@@ -377,6 +394,7 @@ export interface PiHistorianDeps {
 	historianChunkTokens: number;
 	/** Known context limit for the same resolved historian model. Unknown means no producer guard. */
 	historianContextLimit?: number;
+	producerContextLimits?: ReadonlyMap<string, number>;
 	/** Boundary resolved by the Pi trigger/recovery decision with the real model context. */
 	boundarySnapshot?: ProtectedTailBoundarySnapshot;
 	/**
@@ -476,6 +494,16 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		forceDrainQuota,
 		forceKeepLastCompartment,
 	} = deps;
+	const runHistorianSubagentWithTransientRetries = (
+		args: Parameters<typeof runHistorianSubagentWithTransientRetriesGuarded>[0],
+	) =>
+		runHistorianSubagentWithTransientRetriesGuarded({
+			...args,
+			resolveContextLimit: (model) =>
+				model === piModelRefToCanonical(historianModel ?? "")
+					? (historianContextLimit ?? deps.producerContextLimits?.get(model))
+					: deps.producerContextLimits?.get(model),
+		});
 
 	let issueNotified = false;
 	const notify = async (message: string): Promise<void> => {

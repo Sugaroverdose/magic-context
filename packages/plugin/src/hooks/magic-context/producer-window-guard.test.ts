@@ -48,3 +48,18 @@ test("unknown producer windows do not refuse", () => {
         }),
     ).toBeNull();
 });
+
+test("complete producer prompt uses producer calibration and refuses previously raw-fitting input", async () => {
+    const { producerPromptFailureReason } = await import("./producer-window-guard");
+    const input = {
+        sourceLocal: 6000,
+        systemLocal: 1000,
+        toolsLocal: 0,
+        modelKey: "anthropic/claude-fable-5-1",
+        contextLimitTokens: 11000,
+        maxOutputTokens: 1000,
+    };
+    expect(producerPromptFailureReason(input)).not.toBeNull();
+    expect(producerPromptFailureReason({ ...input, contextLimitTokens: 20000 })).toBeNull();
+    expect(producerPromptFailureReason({ ...input, contextLimitTokens: undefined })).not.toBeNull();
+});

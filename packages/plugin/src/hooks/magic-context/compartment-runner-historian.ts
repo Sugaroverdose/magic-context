@@ -23,6 +23,7 @@ import {
 } from "../../shared/data-path";
 import { describeError, getErrorMessage } from "../../shared/error-message";
 import type { ModelInput, ResolvedModelEntry } from "../../shared/model-resolution";
+import { getSdkContextLimit } from "../../shared/models-dev-cache";
 import { isRecord } from "../../shared/record-type-guard";
 import { modelBodyField, toModelEntry } from "../../shared/resolve-fallbacks";
 import type { Database } from "../../shared/sqlite";
@@ -47,6 +48,8 @@ import {
     type HistorianValidationChunk,
     validateHistorianOutput,
 } from "./compartment-runner-validation";
+import { producerPromptFailureReason } from "./producer-window-guard";
+import { estimateTokens } from "./read-session-formatting";
 
 // Intentionally kept: historian validation failure dumps are preserved for
 // debugging. They land in the project-local historian dir
@@ -553,8 +556,35 @@ async function runHistorianPrompt(args: {
                     },
                     {
                         transport: Object.assign(
-                            (request: import("../../shared/model-suggestion-retry").PromptArgs) =>
-                                executor.attempt(opened, request),
+                            (request: import("../../shared/model-suggestion-retry").PromptArgs) => {
+                                const selected = request.body?.model;
+                                const modelKey = selected
+                                    ? `${selected.providerID}/${selected.modelID}`
+                                    : undefined;
+                                const system = withContentLanguageDirective(
+                                    agentId === HISTORIAN_EDITOR_AGENT
+                                        ? HISTORIAN_EDITOR_SYSTEM_PROMPT
+                                        : COMPARTMENT_AGENT_SYSTEM_PROMPT,
+                                    args.language,
+                                );
+                                const failure = producerPromptFailureReason({
+                                    sourceLocal: estimateTokens(prompt),
+                                    systemLocal: estimateTokens(system),
+                                    toolsLocal: 0,
+                                    modelKey,
+                                    contextLimitTokens: selected
+                                        ? getSdkContextLimit(
+                                              selected.providerID,
+                                              selected.modelID,
+                                              undefined,
+                                              { reservation: "none" },
+                                          )
+                                        : undefined,
+                                    maxOutputTokens: args.maxOutputTokens ?? 32000,
+                                });
+                                if (failure) throw new Error(failure);
+                                return executor.attempt(opened, request);
+                            },
                             { childSessionId: opened.childSessionId },
                         ),
                         timeoutMs: timeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,

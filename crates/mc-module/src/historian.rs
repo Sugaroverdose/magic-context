@@ -1140,6 +1140,8 @@ pub struct HistorianFireRequest<'a> {
     pub temperature: Option<f64>,
     pub producer_source_tokens: usize,
     pub historian_context_limit_tokens: Option<usize>,
+    /// Fallback windows must belong to their own model, never to the primary model.
+    pub fallback_context_limits: std::collections::BTreeMap<String, usize>,
     pub max_output_tokens: u32,
     pub from_ordinal: u64,
     pub to_ordinal: u64,
@@ -1653,6 +1655,28 @@ where
             request.chunk_fingerprint,
             request.observed_chunk_fingerprint,
         )?;
+        let seed = crate::decision_calibration::DecisionCalibration::for_model(Some(model));
+        let full_tokens = seed.provider_mass(
+            crate::decision_calibration::LocalMass {
+                system: mc_tokenizer::estimate_tokens(request.system.as_ref()) as f64,
+                prose: mc_tokenizer::estimate_tokens(&prompt) as f64,
+                tools: 0.0,
+            },
+            true,
+        );
+        let current_window = if index == 0 {
+            request.historian_context_limit_tokens
+        } else {
+            request.fallback_context_limits.get(model).copied()
+        };
+        let fit_limit = producer_input_token_limit(current_window, request.max_output_tokens);
+        if fit_limit.is_none_or(|limit| {
+            !full_tokens.is_finite() || full_tokens <= 0.0 || full_tokens > limit as f64
+        }) {
+            return Err(HistorianDriveError::Producer(HistorianProducerError::context_overflow(
+                format!("producer_prompt_fit_refused model={model} calibrated_tokens={full_tokens} limit={fit_limit:?}"),
+            )));
+        }
         let loaded = request.store.load(request.session_id)?;
         let mut recent_decision = request.recent_decision.clone();
         if let Some(decision) = recent_decision.as_mut() {
@@ -2788,7 +2812,11 @@ mod tests {
             model_chain: models,
             temperature: None,
             producer_source_tokens: 1,
-            historian_context_limit_tokens: None,
+            historian_context_limit_tokens: Some(200_000),
+            fallback_context_limits: models
+                .iter()
+                .map(|model| (model.clone(), 200_000))
+                .collect(),
             max_output_tokens: 32_000,
             from_ordinal: 2,
             to_ordinal: 4,
@@ -2856,6 +2884,27 @@ mod tests {
             recent_decisions: Vec::new(),
             consecutive_publish_failures: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn calibrated_full_prompt_refuses_before_producer_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_compartment(&store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let models = vec!["anthropic/claude-fable-5-1".to_string()];
+        let prompt = "word ".repeat(6000);
+        let mut request = fire_request(&store, &prompt, &models, &chunk, &prior);
+        request.historian_context_limit_tokens = Some(10_000);
+        request.max_output_tokens = 1000;
+        let mut producer = ScriptedProducer::default();
+        assert!(run_historian_firing(&mut producer, request).await.is_err());
+        assert!(producer.observed_starts.is_empty());
+        let mut missing = fire_request(&store, "small", &models, &chunk, &prior);
+        missing.historian_context_limit_tokens = None;
+        assert!(run_historian_firing(&mut producer, missing).await.is_err());
+        assert!(producer.observed_starts.is_empty());
     }
 
     #[tokio::test]

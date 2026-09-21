@@ -217,3 +217,13 @@ This does not change the OpenCode 2 results above.
 | Whole-system cache stability | OMP 18.2.6's request-body `cch` attestation changes `system[0]`; cache-stability and long-session phase 1 are declared host-imposed divergences, not relaxed assertions. [Evidence](packages/pi-plugin/PARITY.md#35-omp-provider-attestation-prevents-whole-system-byte-parity). |
 | Historian, todo, memory, compaction-off and pressure fixtures | OMP configuration filenames, shared config location, tool transport and macOS cwd spelling required harness corrections; real-host assertions remain enabled. [Adjudication](packages/pi-plugin/PARITY.md#36-omp-parity-fixtures-use-native-configuration-and-wire-conventions). |
 | Same-path window overlay | Pi/OMP product fix classifies the host model window as catalog metadata; observed overlay limits take precedence. Pi hot-reloads; OMP RPC restarts and resumes because its reload callback is a no-op. |
+
+## Static tokenizer decision calibration (in progress)
+
+History materialization converts provider-token allowances to local prose allowances in OpenCode, Pi and Rust. Pressure and exact demotion consume the same allowance; cache identity still uses the configured provider-token budget. The static measurement table is shared JSON, with matching longest-prefix and nearest-family inheritance.
+
+The canonical protected tool-window walk lives in `protection-window.ts` (not `storage-tags.ts`); all TS/Pi consumers share it. Rust applies the same tool ratio while keeping persisted member rows raw. Boundary indexes weight tool and prose source classes on read; neither engine changes tokenizer caches.
+
+Fallback admission now requires complete calibrated counts and a known current-model window. A serialized-byte approximation may reject but cannot admit. OpenCode LKG admission now checks `trusted`. Pi's storage-failure handler currently lacks held system/tool observations at that catch boundary: it refuses replay/raw fallthrough rather than pretending its byte estimate proves fit. The Pi fit helper accepts complete explicit observations and has positive/negative admission tests.
+
+Historian sends count assembled instructions/reference/source text with the selected producer model, reserving output once and retaining the 3% margin. Rust's current assembled request contains only the primary producer window; an unobserved fallback window is refused, not borrowed from the primary model. TS/Pi resolve fallback windows independently. Transport/provider framing and host-hidden additions are not exact provider tokenization.

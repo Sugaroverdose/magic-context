@@ -715,6 +715,7 @@ impl AssembledHistorianFiring {
             temperature: None,
             producer_source_tokens: self.producer_source_tokens,
             historian_context_limit_tokens: self.historian_context_limit_tokens,
+            fallback_context_limits: Default::default(),
             max_output_tokens: self.max_output_tokens,
             from_ordinal: self.from_ordinal,
             to_ordinal: self.to_ordinal,

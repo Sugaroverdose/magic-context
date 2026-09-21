@@ -1112,3 +1112,7 @@ OMP source references, shipped in 18.2.6:
 `pi-coding-agent/src/extensibility/extensions/runner.ts:460,711,1261` (reload handler).
 The overlay test preserves exact 100K/160K denominators, the stale-before-reload
 assertion, and the same session ID through the OMP restart.
+
+## Static decision calibration
+
+Pi history rendering and the shared canonical protected-token walk use the same static seeds as OpenCode/Rust. Provider-reported SDK usage remains unscaled. The raw/replay fit helper recounts the supplied array and requires explicit system/tool observations; the storage-failure catch currently has no complete held observations and must refuse rather than admit on serialized byte size alone. Media and unsupported message shapes cannot establish fit. Historian fit uses assembled user/system text and independently resolves each selected model's window. Provider framing and subprocess-added prompt content remain outside MC's observed representation.

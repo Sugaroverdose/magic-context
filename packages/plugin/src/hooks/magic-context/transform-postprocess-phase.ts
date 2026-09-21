@@ -1129,6 +1129,8 @@ export function evaluateEmergencyFailClosed(input: {
     if (
         input.emergencyRecoveryArmed &&
         estimate?.trusted === true &&
+        Number.isFinite(estimate.tokens) &&
+        estimate.tokens > 0 &&
         typeof limit === "number" &&
         Number.isFinite(limit) &&
         limit > 0 &&

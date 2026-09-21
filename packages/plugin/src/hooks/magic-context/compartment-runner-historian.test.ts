@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import type { PluginContext } from "../../plugin/types";
+import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 afterEach(() => {
+    clearModelsDevCache();
     closeDatabase();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
@@ -46,7 +48,24 @@ test("surfaces a settled assistant error instead of reporting empty historian ou
         },
     } as unknown as PluginContext["client"];
 
+    await refreshModelLimitsFromApi({
+        config: {
+            providers: async () => ({
+                data: {
+                    providers: [
+                        {
+                            id: "google",
+                            models: {
+                                "fixture-model": { limit: { context: 200_000, output: 32000 } },
+                            },
+                        },
+                    ],
+                },
+            }),
+        },
+    });
     const result = await runValidatedHistorianPass({
+        model: "google/fixture-model",
         client,
         db,
         parentSessionId: "parent-provider-error",

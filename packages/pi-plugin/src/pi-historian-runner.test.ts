@@ -264,7 +264,20 @@ async function runHistorianWith(args: {
 		fallbackModels: args.fallbackModels,
 		fallbackModelId: args.fallbackModelId,
 		historianChunkTokens: args.historianChunkTokens ?? 20_000,
-		historianContextLimit: args.historianContextLimit,
+		historianContextLimit: args.historianContextLimit ?? 200_000,
+		producerContextLimits: new Map([
+			[args.historianModel ?? "test/model", 200_000],
+			...(args.fallbackModels ?? []).map(
+				(entry) =>
+					[typeof entry === "string" ? entry : entry.model, 200_000] as [
+						string,
+						number,
+					],
+			),
+			...(args.fallbackModelId
+				? [[args.fallbackModelId, 200_000] as [string, number]]
+				: []),
+		]),
 		maxOutputTokens: args.maxOutputTokens,
 		signal: args.signal,
 		retryBackoffMs: args.retryBackoffMs,

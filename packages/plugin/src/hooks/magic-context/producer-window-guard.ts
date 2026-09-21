@@ -1,3 +1,4 @@
+import { calibrationForModelKey, providerMass } from "./decision-calibration";
 import { estimateTokens } from "./read-session-formatting";
 
 /**
@@ -144,4 +145,26 @@ export function fitAtomicHistorianSourceToProducerWindow(args: {
         ...(boundary ? { splitBoundaryOrdinal: boundary.ordinal } : {}),
         removedTokens: Math.max(0, originalTokens - estimateTokens(best)),
     };
+}
+
+/** Evaluate after instructions and references are included and the actual producer model is selected. */
+export function producerPromptFailureReason(input: {
+    sourceLocal: number;
+    systemLocal: number;
+    toolsLocal: number;
+    modelKey: string | undefined;
+    contextLimitTokens: number | undefined;
+    maxOutputTokens: number;
+}): string | null {
+    const limit = producerInputTokenLimit(input.contextLimitTokens, input.maxOutputTokens);
+    const tokens = providerMass(
+        { prose: input.sourceLocal, system: input.systemLocal, tools: input.toolsLocal },
+        calibrationForModelKey(input.modelKey),
+        true,
+    );
+    if (limit === undefined || !Number.isFinite(tokens) || tokens <= 0)
+        return "producer_prompt_fit_unavailable";
+    return tokens <= limit
+        ? null
+        : `producer_prompt_exceeds_window calibrated_tokens=${tokens} limit=${limit} estimator_margin=0.03`;
 }
