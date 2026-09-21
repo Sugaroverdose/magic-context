@@ -34,6 +34,7 @@ import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
 import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
+import { servedModuleM0Text } from "../../hooks/magic-context/rust-served-m0";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
@@ -583,11 +584,32 @@ export async function registerContext(context: V2Context) {
                 const running = rows
                     .filter((row) => row.type === "compaction" && row.data.status === "running")
                     .at(-1);
+                // In Rust mode the module composes m[0] and the host renders none, so the
+                // checkpoint has to be the module's own baseline. Composing a TypeScript one
+                // here would give the session two different histories: the one the host
+                // stores in its checkpoint and the one the module keeps serving.
+                const moduleBaseline = rustModeModuleClient
+                    ? servedModuleM0Text(draft.sessionID)
+                    : undefined;
+                if (rustModeModuleClient && moduleBaseline === null) {
+                    // No module output has been accepted for this session yet, so there is
+                    // no baseline to answer with. Leaving `result` unset is how this host's
+                    // hook is declined: it hands the summary back to the host's own
+                    // compaction rather than inventing one Magic Context would then have to
+                    // keep serving.
+                    sessionLog(
+                        draft.sessionID,
+                        "v2 compaction declined: rust mode has served no module output to summarize yet",
+                    );
+                    return;
+                }
                 const fold = await folds.supply({
                     sessionID: draft.sessionID,
                     watermark,
                     runningCut: running?.seq,
-                    materialize: () => materialize(draft),
+                    // Kept lazy for the TypeScript lane: materializing writes cache state and
+                    // must only happen when the fold identity is actually new.
+                    materialize: () => moduleBaseline ?? materialize(draft),
                 });
                 draft.result = { summary: fold.submitted };
             } catch (cause) {

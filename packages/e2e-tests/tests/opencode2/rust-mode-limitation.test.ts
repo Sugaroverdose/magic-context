@@ -21,11 +21,16 @@ async function eventually<T>(read: () => T | undefined, timeoutMs = 20_000): Pro
  * surface for the life of the process. OpenCode 2 now builds the same subc module client the
  * OpenCode 1 lane builds, so the setting is honoured and the limitation is retired.
  *
- * What this test pins is the retirement: no downgrade warning, and no rust limitation on either
- * status surface. That the module actually serves the transform is proven against a live module by
- * the hermetic Rust lane; here the module is deliberately unreachable, which is the case that must
- * still leave the status surfaces answering cleanly rather than naming a limitation this host no
- * longer has.
+ * What this test pins is the retirement, with the module deliberately unreachable: the mode is not
+ * downgraded, `MC-S06` is never printed, and neither status surface names a limitation this host no
+ * longer has. The surfaces instead report that the module could not be read, which is what OpenCode
+ * 1 already does in the same situation — `loadRustSessionStatus` and the guard that turns a missing
+ * read into that message are shared by both lanes, and the module is the authority for canonical
+ * session state. Answering with host-side numbers would state a session state that contradicts the
+ * bytes actually being served.
+ *
+ * That the module DOES serve the transform when one is running is proven against a live module by
+ * `rust-mode-module-served.test.ts`.
  */
 test("v2 accepts Rust mode without naming a host limitation", async () => {
     const host = await spawnOpencode2({
@@ -89,14 +94,22 @@ test("v2 accepts Rust mode without naming a host limitation", async () => {
             return (await response.json()) as Record<string, unknown>;
         };
 
+        // Rust mode is running, so the module owns canonical session state. With no
+        // module reachable, both surfaces say exactly that rather than inventing one.
+        // Reaching this branch at all is itself the proof that the configured mode
+        // survived setup: a downgraded session takes the TypeScript branch, which
+        // never consults a module and never produces this message.
         const snapshot = await rpc("sidebar-snapshot");
-        expect(snapshot.error).toBeUndefined();
-        expect(snapshot.hostLimitations).not.toContain("rust_mode_unsupported");
-        expect(snapshot.inputTokens).toBeGreaterThan(0);
+        expect(snapshot.error).toBe(
+            "Rust module status unavailable; canonical session state was not read",
+        );
+        expect(JSON.stringify(snapshot)).not.toContain("rust_mode_unsupported");
 
         const detail = await rpc("status-detail");
-        expect(detail.error).toBeUndefined();
-        expect(detail.hostLimitations).not.toContain("rust_mode_unsupported");
+        expect(detail.error).toBe(
+            "Rust module status unavailable; canonical session state was not read",
+        );
+        expect(JSON.stringify(detail)).not.toContain("rust_mode_unsupported");
 
         // The retired code must not be printed at all: it no longer describes this host.
         const logged = `${host.stdout()}\n${host.stderr()}`

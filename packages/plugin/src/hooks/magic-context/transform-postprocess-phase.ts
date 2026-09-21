@@ -43,6 +43,7 @@ import {
     type PostprocessReplaySnapshot,
     retireDeferredClearedCompactionMarkerState,
     setEmergencyDropSample,
+    setPersistedCompactionMarkerState,
     THINKING_BINDING_RECOVERY_FROZEN_PREFIX,
     thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
@@ -184,7 +185,7 @@ export type DeferredCompactionMarkerClearOutcome =
     | "cas-lost-newer-pending"
     | "cas-lost-already-cleared";
 
-function isSyntheticHeadMessage(message: MessageLike): boolean {
+export function isSyntheticHeadMessage(message: MessageLike): boolean {
     // Structural shape only — an ID-less user message whose every part is
     // marked synthetic. Persisted OpenCode rows always carry an id, so no
     // persisted or foreign row can satisfy this regardless of its metadata;
@@ -522,6 +523,31 @@ export function applyRustModeDeferredCompactionMarker(args: {
             );
             break;
     }
+}
+
+/**
+ * Forget a recorded module boundary whose coordinates no longer describe the host.
+ *
+ * A host that renumbers the conversation invalidates the boundary's ordinal along
+ * with every other saved position, and the module is about to be deleted and
+ * re-seeded, so the record has nothing left to point at. Clearing it lets the
+ * next serve send the full history and accept whatever boundary the re-seeded
+ * module publishes.
+ *
+ * Only a recorded boundary is cleared. A boundary backed by a real OpenCode 1
+ * compaction row is left alone: that row still exists in the host's own store,
+ * and dropping the local state would orphan it. Recorded boundaries are
+ * recognisable by their empty summary message id, which is what a host that
+ * writes no marker rows stores.
+ *
+ * Returns true when a record was cleared.
+ */
+export function clearRustModeBoundaryRecord(db: ContextDatabase, sessionId: string): boolean {
+    setPendingCompactionMarkerState(db, sessionId, null);
+    const state = getPersistedCompactionMarkerState(db, sessionId);
+    if (!state || state.summaryMessageId.length > 0) return false;
+    setPersistedCompactionMarkerState(db, sessionId, null);
+    return true;
 }
 
 export function runRustModePostprocess(args: {
