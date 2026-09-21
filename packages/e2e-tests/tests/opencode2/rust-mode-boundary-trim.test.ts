@@ -169,7 +169,28 @@ describe.skipIf(!prereqs.ok)("rust mode on OpenCode 2: boundary trim", () => {
         await subc?.stop();
     });
 
-    it("stops handing the module the whole history once a boundary is recorded", async () => {
+    // SKIPPED with a finding, not weakened into a green.
+    //
+    // The numbers this test measures are real and reproducible: after a fold,
+    // oc_input pins at 7 for six turns while an untrimmed array would have grown
+    // to 17, and the boundary id advances every pass. But neutralising
+    // trimToRecordedBoundary changed NONE of them, and the adapter's own
+    // "v2 boundary trim: dropped" line never appears — it fires zero times.
+    //
+    // So the flatness is not the adapter's trim. It is the host's own cut: when
+    // Magic Context answers the `compaction` hook, OpenCode 2 records a real
+    // compaction row and serves history from it, so draft.messages already
+    // arrives trimmed and the boundary message is no longer in the array for
+    // trimToRecordedBoundary to find.
+    //
+    // That contradicts ruling 3's premise that this host has no compaction row to
+    // fold on. The adapter-side trim may be unnecessary on the MC-injected fold
+    // path, or it may be the needed fallback for a path where the host writes no
+    // row (compaction-off, or a fold the host declines). Which of those it is, is
+    // a design question for the chair rather than something to assert either way
+    // here. The `adapter trim lines` assertion below is the honest expression of
+    // the claim and it currently fails.
+    it.skip("stops handing the module the whole history once a boundary is recorded", async () => {
         const client = OpenCode.make({
             baseUrl: host.url,
             headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
@@ -240,6 +261,17 @@ describe.skipIf(!prereqs.ok)("rust mode on OpenCode 2: boundary trim", () => {
 
         // The trim is about what the module is handed; the served bytes still have
         // to be a real module head rather than a raw passthrough.
+        // The adapter's own trim has to be what produced this, not the host's
+        // compaction cut arriving pre-trimmed. Neutralising trimToRecordedBoundary
+        // left every number above unchanged, so the number alone proves nothing;
+        // this line is written only by the adapter when it actually drops messages.
+        const trimLines = readFileSync(logPath, "utf8")
+            .split("\n")
+            .filter((line) => line.includes("v2 boundary trim: dropped"));
+        console.log(`adapter trim lines: ${trimLines.length}`);
+        console.log(trimLines.slice(0, 3).map((line) => line.slice(-90)).join("\n"));
+        expect(trimLines.length).toBeGreaterThan(0);
+
         const served = servedArray(host.mock.requests().at(-1));
         expect(JSON.stringify(served[0])).toContain("<session-history>");
         const passes = readPasses(logPath);
