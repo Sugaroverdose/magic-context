@@ -1,6 +1,7 @@
 import { isRecord } from "../../shared/record-type-guard";
 import { droppedInputMarker } from "./dropped-input-guard";
 import { applyEditMarkerToInput } from "./edit-marker";
+import { estimateMessageTokens } from "./final-wire-token-estimate";
 import { stripTagPrefix } from "./tag-content-primitives";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
@@ -397,6 +398,12 @@ export function createToolDropTarget(
     canDrop: () => boolean;
     requiresToolArcSkeleton: boolean;
     readInput: () => Record<string, unknown> | null;
+    measureReclaim: (skeleton: boolean) => {
+        beforeTools: number;
+        afterTools: number;
+        beforeProse: number;
+        afterProse: number;
+    };
 } {
     const drop = (): ToolDropResult => {
         const entry = index.get(compositeKey);
@@ -441,6 +448,26 @@ export function createToolDropTarget(
     };
 
     return {
+        measureReclaim: (skeleton) => {
+            const entry = index.get(compositeKey);
+            const parts = entry?.occurrences.map((occ) => occ.part) ?? [];
+            const count = (parts: unknown[]) =>
+                estimateMessageTokens({
+                    info: { id: "reclaim", role: "assistant" },
+                    parts,
+                } as MessageLike);
+            const before = count(parts);
+            const retained = skeleton ? structuredClone(parts) : [];
+            for (const part of retained) truncateToolPart(part, tagId);
+            const after = count(retained);
+            // Several calls can share one thinking block; credit only tool I/O here to avoid reclaiming it twice.
+            return {
+                beforeTools: before.toolCall,
+                afterTools: after.toolCall,
+                beforeProse: 0,
+                afterProse: 0,
+            };
+        },
         setContent: (content: string): boolean => {
             if (isDropContent(content)) {
                 drop();

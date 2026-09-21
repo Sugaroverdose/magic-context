@@ -4356,6 +4356,9 @@ fn apply_once(
             &tail_for_selection,
             &frozen,
             &SelectionContext {
+                calibration: Some(crate::decision_calibration::DecisionCalibration::for_model(
+                    req.model_key.as_deref(),
+                )),
                 pass_class: selection_class,
                 current_total_input_tokens: usage_input_tokens,
                 ceiling_tokens: context_limit_tokens
@@ -7871,7 +7874,12 @@ fn sel_item_from_flat(block: &FlatBlock, tag_tokens_by_block: &HashMap<&str, usi
         kind,
         provider_executed: block.provider_executed,
         byte_size: block.bytes.len(),
-        token_count: tag_tokens_by_block.get(block.id.as_str()).copied(),
+        token_count: Some(
+            tag_tokens_by_block
+                .get(block.id.as_str())
+                .copied()
+                .unwrap_or_else(|| mc_tokenizer::estimate_tokens(&block.bytes)),
+        ),
         arc_id: block.arc_id.clone(),
     }
 }
@@ -18344,6 +18352,7 @@ pub(crate) mod tests {
             .block_ids;
         assert_eq!(protected.len(), 29);
         let mut ctx = SelectionContext {
+            calibration: None,
             pass_class: PassClass::EmergencyForce,
             current_total_input_tokens: 158_855.0,
             ceiling_tokens: 167_000.0 * 0.85,
@@ -36157,6 +36166,7 @@ pub(crate) mod tests {
             &items,
             &HashSet::new(),
             &SelectionContext {
+                calibration: None,
                 pass_class: PassClass::Execute,
                 current_total_input_tokens: 1_000.0,
                 ceiling_tokens: 2_000.0,
@@ -36427,6 +36437,7 @@ pub(crate) mod tests {
             &items,
             &HashSet::new(),
             &SelectionContext {
+                calibration: None,
                 pass_class: PassClass::Execute,
                 current_total_input_tokens: 0.0,
                 ceiling_tokens: 0.0,

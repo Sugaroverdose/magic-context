@@ -1035,6 +1035,39 @@ function buildAggregateTarget(
     const messageId = occurrences[0]?.message.info.id;
 
     return {
+        measureReclaim(skeleton) {
+            let beforeTools = 0;
+            let afterTools = 0;
+            const authorization = occurrences.map((occ) => occ.part.canRemove?.());
+            const removable =
+                !requiresToolArcSkeleton &&
+                occurrences.every(
+                    (occ, index) =>
+                        occ.part.remove &&
+                        authorization[index] !== false &&
+                        authorization[index] !== "defer",
+                );
+            for (const occ of occurrences) {
+                const before =
+                    occ.kind === "tool_use"
+                        ? JSON.stringify(occ.part.getToolInput?.() ?? {})
+                        : (occ.part.getText() ?? "");
+                beforeTools += estimateTokens(before);
+                if (skeleton || !removable) {
+                    const after =
+                        occ.kind === "tool_use"
+                            ? JSON.stringify(droppedInputMarker(tagId))
+                            : `[dropped §${tagId}§]`;
+                    afterTools += estimateTokens(after);
+                }
+            }
+            return {
+                beforeTools,
+                afterTools: !skeleton && authorization.includes("defer") ? beforeTools : afterTools,
+                beforeProse: 0,
+                afterProse: 0,
+            };
+        },
         setContent(content: string): boolean {
             // Walk all occurrences; mutate every one. Return true if at
             // least one occurrence's content actually changed (used to

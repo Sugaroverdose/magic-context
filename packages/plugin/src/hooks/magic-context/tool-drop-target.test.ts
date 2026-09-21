@@ -678,3 +678,35 @@ describe("tool-drop-target", () => {
         });
     });
 });
+
+it("reclaim preview counts the retained skeleton without mutating the served parts", () => {
+    const messages = [
+        message("m", "assistant", [
+            {
+                type: "tool",
+                callID: "c",
+                tool: "read",
+                state: {
+                    input: { path: "sample.txt" },
+                    output: "word ".repeat(999),
+                    status: "completed",
+                },
+            },
+        ]),
+    ];
+    const bytes = JSON.stringify(messages);
+    const target = createToolDropTarget(
+        "c",
+        [],
+        buildIndex(messages),
+        new ToolMutationBatch(messages),
+        12,
+    );
+    const full = target.measureReclaim(false);
+    const skeleton = target.measureReclaim(true);
+    expect(full.beforeTools).toBeGreaterThan(1000);
+    expect(full.afterTools).toBe(0);
+    expect(skeleton.afterTools).toBeGreaterThan(0);
+    expect(skeleton.afterTools).toBeLessThan(skeleton.beforeTools);
+    expect(JSON.stringify(messages)).toBe(bytes);
+});

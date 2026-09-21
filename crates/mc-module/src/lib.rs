@@ -19857,7 +19857,7 @@ mod tests {
             auto_promote: true,
             user_memory_collection_enabled: false,
             historian_context_limit_tokens: 128_000,
-            historian_context_limit_known: false,
+            historian_context_limit_known: true,
             memory_budget_tokens: 4_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: true,

@@ -1673,6 +1673,13 @@ where
         if fit_limit.is_none_or(|limit| {
             !full_tokens.is_finite() || full_tokens <= 0.0 || full_tokens > limit as f64
         }) {
+            let loaded = request.store.load(request.session_id)?;
+            let mut meta = loaded.meta.clone();
+            meta.historian.last_failure = Some(format!("producer_prompt_fit_refused model={model} calibrated_tokens={full_tokens} limit={fit_limit:?}"));
+            meta.historian.failure_backoff_at_ms = Some(request.failure_backoff_at_ms);
+            request
+                .store
+                .commit(request.session_id, loaded.row_version, &loaded.core, &meta)?;
             return Err(HistorianDriveError::Producer(HistorianProducerError::context_overflow(
                 format!("producer_prompt_fit_refused model={model} calibrated_tokens={full_tokens} limit={fit_limit:?}"),
             )));
