@@ -763,6 +763,35 @@ test("a session first seen with compartments whose raw rows the host has pruned 
     expect(sessionDigest("ses_pruned")).toBe(before);
 });
 
+test("an unstamped session whose harness wrote the other projection is rebased from it", () => {
+    // The upgrade shape the drill found: a 1.x store converted by OpenCode 2
+    // BEFORE the first generation-aware plugin build looked at it. No stamp
+    // exists, but the session's harness label says its coordinates were read
+    // through the 1.x tables, and the host now serves the 2.x projection. The
+    // rebase runs from the implied v1, and the endpoint the conversion moved
+    // is re-derived rather than stamped in place (which is what a plain
+    // first-sight stamp did on the real store: coordinate 686 served at 684).
+    ensureSession("ses_converted_first", "opencode");
+    insertCompartment("ses_converted_first", {
+        sequence: 1,
+        start: 1,
+        end: 4,
+        startMessageId: "msg_a_001_u1",
+        endMessageId: "msg_a_004_a2",
+    });
+
+    const outcome = runRebase("ses_converted_first", "v2", v2Projection(syntheticSplit));
+
+    expect(outcome.status).toBe("rebased");
+    expect(outcome.previousGeneration).toBe("v1");
+    expect(outcome.compartmentsRebased).toBe(1);
+    const moved = compartmentOf("ses_converted_first", 1);
+    expect(moved.rebaseStatus).toBe("ok");
+    expect(moved.endMessage).toBe(5);
+    expect(readCoordinateGeneration(db, "ses_converted_first")).toBe("v2");
+    expect(formatRebaseLogLine(outcome, 1)).toContain("store-generation-rebase v1->v2");
+});
+
 test("a session whose coordinates already match the projection pays only the stamp", () => {
     ensureSession("ses_a");
     insertCompartment("ses_a", {

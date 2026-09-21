@@ -108,6 +108,24 @@ function sessionIsOpenCodeOwned(db: Database, sessionId: string): boolean {
     return harness === "opencode" || harness === "opencode2";
 }
 
+/**
+ * The projection an unstamped session's coordinates were written against,
+ * inferred from the harness that wrote them. A session labelled `opencode`
+ * was read through the 1.x tables; `opencode2` through the 2.x ones. Null when
+ * the label carries no such evidence (no row, or a harness with one store
+ * shape). A session that flipped BEFORE any generation-aware build saw it and
+ * was then relabelled by its newer activity is beyond this: its label already
+ * names the running projection, so it reads as never having moved.
+ */
+function generationImpliedByHarness(db: Database, sessionId: string): CoordinateGeneration | null {
+    const row = db
+        .prepare("SELECT harness FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { harness?: unknown } | null | undefined;
+    if (row?.harness === "opencode") return "v1";
+    if (row?.harness === "opencode2") return "v2";
+    return null;
+}
+
 export function readCoordinateGeneration(
     db: Database,
     sessionId: string,
@@ -449,22 +467,27 @@ export function rebaseSessionCoordinates(
         return emptyOutcome("unchanged", generation, previousGeneration);
     }
 
-    // A session seen for the first time by a generation-aware build has no
-    // previous projection to rebase FROM: every coordinate it holds was written
-    // against the projection this host serves, so nothing can have moved. That
-    // includes compartments whose raw rows the host has since pruned — their
-    // anchors resolve nowhere, but they are exactly as consistent as they were
-    // yesterday. Re-deriving them here would mark most of a long session's
-    // history unresolved on an ordinary upgrade boot, with no store conversion
-    // anywhere. Record the projection and leave every row alone; only a real
-    // change of projection (v1 to v2 or back) re-derives.
-    if (previousGeneration === null) {
+    // A session seen for the first time by a generation-aware build carries no
+    // stamp, but it does carry evidence: the harness that wrote its coordinates.
+    // When that names the projection this host serves, nothing can have moved
+    // (compartments whose raw rows the host has since pruned included: their
+    // anchors resolve nowhere, yet they are exactly as consistent as they were
+    // yesterday, and re-deriving them would mark most of a long session's
+    // history unresolved on an ordinary upgrade boot). When it names the other
+    // projection, the store was converted before this build's first look — the
+    // upgrade shape itself, a 1.x store meeting OpenCode 2 and this plugin in
+    // one boot — and the rebase must run from that implied generation.
+    const impliedGeneration =
+        previousGeneration ?? generationImpliedByHarness(db, sessionId) ?? generation;
+    if (impliedGeneration === generation) {
         stampGeneration(db, sessionId, generation, null);
         return emptyOutcome("stamped", generation, previousGeneration);
     }
 
     const projection = buildProjection(args.readMessages(sessionId));
-    const outcome = emptyOutcome("rebased", generation, previousGeneration);
+    // The outcome and its log line name the projection the rebase actually ran
+    // from, which for an unstamped session is the harness-implied one.
+    const outcome = emptyOutcome("rebased", generation, impliedGeneration);
 
     const compartmentRows = readCompartmentRows(db, "compartments", sessionId);
     const recompRows = readCompartmentRows(db, "recomp_compartments", sessionId);
@@ -539,7 +562,7 @@ export function rebaseSessionCoordinates(
         // whole change: a session that did not actually move must not pay a fold
         // or lose its index, because that would alter bytes the model already saw.
         stampGeneration(db, sessionId, generation, null);
-        return emptyOutcome("stamped", generation, previousGeneration);
+        return emptyOutcome("stamped", generation, impliedGeneration);
     }
 
     db.exec("BEGIN IMMEDIATE");
@@ -628,7 +651,7 @@ export function rebaseSessionCoordinates(
         clearCachedM0M1(db, sessionId);
         stampGeneration(db, sessionId, generation, {
             generation,
-            previousGeneration,
+            previousGeneration: impliedGeneration,
             at: Date.now(),
             unresolvedCompartments:
                 outcome.compartmentsUnresolved + outcome.recompCompartmentsUnresolved,
