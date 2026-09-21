@@ -1,11 +1,12 @@
-//! Adversarial gate over the host-runner pull loop (A2) on top of the A1+B0 gate
-//! fixes.
+//! Adversarial gate over the host-runner claim lane: the arrangement where a
+//! transform pass queues a historian run and a separate host process claims it,
+//! runs the completion, and reports back.
 //!
 //! Every test drives the real dispatcher, the real store and the real restart
-//! path. Each one settles a claim the A2 delivery makes about what survives a
-//! dead claimant, a module restart, or a second project on the same machine.
-//! Where a test records behaviour the delivery did not claim, its name says what
-//! it observed rather than what it approves of.
+//! path. Each one settles one question about what survives a dead claimant, a
+//! module restart, or a second project sharing this machine's store. Where a test
+//! records behaviour nobody promised, its name says what it observed rather than
+//! what it approves of.
 
 use super::*;
 use rusqlite::Connection;
@@ -272,10 +273,14 @@ async fn gate_a_killed_host_loses_the_run_to_the_next_one_and_its_late_report_is
 /// that session publishes it. A second report for the same attempt, after the
 /// publish, is refused.
 ///
-/// This is A2's decision (a) executed rather than simulated. The restart is a real
-/// second `McHandler` over the same store file, opened only after the first one
-/// and its store handle are dropped, so nothing in memory carries the firing
-/// across.
+/// The rule under test is that a report with nowhere to go is kept rather than
+/// discarded: a fold legitimately runs for minutes, so a module restart inside one
+/// is ordinary, and throwing away a provider call the host already paid for is the
+/// worse of the two answers.
+///
+/// The restart is a real second `McHandler` over the same store file, opened only
+/// after the first one and its store handle are dropped, so nothing in memory
+/// carries the firing across.
 #[test]
 fn gate_a_report_that_crosses_a_module_restart_is_stored_and_then_published() {
     let producer = Arc::new(ProducerState::default());
@@ -423,9 +428,9 @@ async fn a2_after_the_restart(
 /// next boot puts the SAME run back on offer, and a claimant continues it with the
 /// same run id and the same chunk fingerprint.
 ///
-/// The fixes park the row before releasing the session precisely so a crash
-/// between the two leaves a row the next boot can pick up rather than one still
-/// advertised to claimants whose session no longer owns it. This drives that
+/// The restart path parks the row before releasing the session precisely so a
+/// crash between the two leaves a row the next boot can pick up rather than one
+/// still advertised to claimants whose session no longer owns it. This drives that
 /// window with the real writers: `park_historian_pending_run` writes the phase,
 /// restart recovery puts it back, and `historian.claim` takes it.
 #[tokio::test(flavor = "current_thread")]
@@ -519,8 +524,8 @@ async fn gate_a_parked_row_goes_back_on_offer_on_the_next_boot_with_the_same_run
     drop(dir);
 }
 
-/// The sweep the fixes added has a caller now: restart recovery runs it, so a row
-/// a previous restart parked is deleted once the run it describes is past its own
+/// The claim sweep has a production caller: restart recovery runs it, so a row a
+/// previous restart parked is deleted once the run it describes is past its own
 /// deadline.
 ///
 /// The row under test is one NOTHING else can reach. A restart that parks a row
@@ -750,9 +755,9 @@ fn tool_bearing_messages() -> Vec<CkIngressMessage> {
 /// A fixture with tool arcs, run down both runners on an emergency pass, with the
 /// dropped-tag counts and both rewrites' sizes printed.
 ///
-/// A2 measured this on a tool-less fixture, where the emergency reduction has no
-/// tool-output tier to drop, so the permanent-content-loss half of the A8
-/// accounting was reported as zero without ever being exercised. This fixture
+/// The earlier measurement used a fixture of plain text, where the emergency
+/// reduction has no tool-output tier to drop at all, so its dropped-tag count came
+/// back zero without the content-loss half ever being exercised. This fixture
 /// carries tool arcs, so the drop tier is real and the number means something.
 #[tokio::test(flavor = "current_thread")]
 async fn gate_the_a8_emergency_accounting_on_a_fixture_that_has_tool_arcs() {
