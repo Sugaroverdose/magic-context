@@ -5528,6 +5528,7 @@ impl McHandler {
                         let action = historian::handle_restart_load(
                             &store,
                             &session_id,
+                            now,
                             now + HISTORIAN_FAILURE_BACKOFF_MS,
                         )?;
                         match action {
@@ -5593,6 +5594,7 @@ impl McHandler {
                     if let Err(e) = historian::handle_restart_load(
                         &store,
                         &session_id,
+                        now,
                         now + HISTORIAN_FAILURE_BACKOFF_MS,
                     ) {
                         eprintln!(
@@ -7301,12 +7303,68 @@ impl McHandler {
         }
     }
 
+    /// The project a claim-lane request may act on, and the version check the rest
+    /// of the management surface applies.
+    ///
+    /// The four claim ops cannot take a `session_id` the way the neighbouring
+    /// management ops do: a claimant polls precisely because it does not know which
+    /// session produced a run. What it can be held to is the channel's own binding.
+    /// One module store serves every project on the machine, the queue row records
+    /// which project queued the run, and `historian.claim` hands back the folded
+    /// conversation transcript — so without this scope a second project's host
+    /// process can list and claim the first project's runs and read its transcripts.
+    ///
+    /// The project is resolved through the authority route exactly as the transform
+    /// that queued the run resolved it, so a workspace member and its authority
+    /// project agree on one key rather than two spellings of the same project.
+    fn historian_lane_binding(
+        &self,
+        channel: u16,
+        request: &Value,
+        operation: &str,
+    ) -> Result<SessionBinding, HandlerOutcome> {
+        if request.get("v").and_then(Value::as_u64) != Some(1) {
+            return Err(HandlerOutcome::Error {
+                code: "bad_request".to_string(),
+                message: format!("{operation} requires v=1"),
+            });
+        }
+        self.facade_binding(channel)
+            .map_err(|_| HandlerOutcome::Error {
+                code: "route_unbound".to_string(),
+                message: format!("{operation} on a channel with no session binding"),
+            })
+    }
+
+    /// The project key a bound channel's runs are queued under: the authority route
+    /// resolution the transform applied when it queued them, so a workspace member
+    /// and its authority project are one key rather than two spellings.
+    fn historian_lane_project(
+        &self,
+        binding: &SessionBinding,
+        store: &McStore,
+    ) -> Result<String, HandlerOutcome> {
+        let route_project_root = binding.project_root.to_string_lossy().to_string();
+        match store.authority_project_for_route(&route_project_root, "memories") {
+            Ok(Some(project)) => Ok(project),
+            Ok(None) => Ok(route_project_root),
+            Err(error) => Err(HandlerOutcome::Error {
+                code: "authority_project_resolution_failed".to_string(),
+                message: error.to_string(),
+            }),
+        }
+    }
+
     /// `historian.pending {session_id?}` — runs waiting for a claimant.
     ///
-    /// Omitting `session_id` lists every session this store serves, because a
+    /// Omitting `session_id` lists every run of the caller's own project, because a
     /// claimant discovers runs by polling, not by already knowing which session
-    /// produced them.
-    fn handle_historian_pending_value(&self, request: &Value) -> HandlerOutcome {
+    /// produced them. Runs queued by any other project are not the caller's to see.
+    fn handle_historian_pending_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
+        let binding = match self.historian_lane_binding(channel, request, "historian.pending") {
+            Ok(binding) => binding,
+            Err(outcome) => return outcome,
+        };
         let session_id = match optional_run_string(request, "session_id") {
             Ok(value) => value,
             Err(outcome) => return outcome,
@@ -7315,7 +7373,11 @@ impl McHandler {
             Some(store) => store,
             None => return self.store_refusal(),
         };
-        match store.list_pending_historian_runs(session_id.as_deref(), now_ms()) {
+        let project_path = match self.historian_lane_project(&binding, store) {
+            Ok(project) => project,
+            Err(outcome) => return outcome,
+        };
+        match store.list_pending_historian_runs(&project_path, session_id.as_deref(), now_ms()) {
             Ok(runs) => respond(json!({
                 "ok": true,
                 "runs": runs
@@ -7342,7 +7404,11 @@ impl McHandler {
     /// claimants reaching for the same run is ordinary operation, and the caller's
     /// response is to move to the next run, not to treat the request as failed.
     /// Malformed requests still fail loudly.
-    fn handle_historian_claim_value(&self, request: &Value) -> HandlerOutcome {
+    fn handle_historian_claim_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
+        let binding = match self.historian_lane_binding(channel, request, "historian.claim") {
+            Ok(binding) => binding,
+            Err(outcome) => return outcome,
+        };
         let run_id = match required_run_string(request, "run_id", "historian.claim") {
             Ok(value) => value,
             Err(outcome) => return outcome,
@@ -7356,7 +7422,11 @@ impl McHandler {
             Some(store) => store,
             None => return self.store_refusal(),
         };
-        match store.claim_historian_run(&run_id, &claimant, now_ms()) {
+        let project_path = match self.historian_lane_project(&binding, store) {
+            Ok(project) => project,
+            Err(outcome) => return outcome,
+        };
+        match store.claim_historian_run(&project_path, &run_id, &claimant, now_ms()) {
             Ok(mc_store::HistorianClaimOutcome::Claimed(claim)) => respond(json!({
                 "ok": true,
                 "run_id": claim.run_id,
@@ -7383,7 +7453,11 @@ impl McHandler {
     }
 
     /// `historian.heartbeat {run_id, token}` — extend the current claim's lease.
-    fn handle_historian_heartbeat_value(&self, request: &Value) -> HandlerOutcome {
+    fn handle_historian_heartbeat_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
+        let binding = match self.historian_lane_binding(channel, request, "historian.heartbeat") {
+            Ok(binding) => binding,
+            Err(outcome) => return outcome,
+        };
         let run_id = match required_run_string(request, "run_id", "historian.heartbeat") {
             Ok(value) => value,
             Err(outcome) => return outcome,
@@ -7396,7 +7470,11 @@ impl McHandler {
             Some(store) => store,
             None => return self.store_refusal(),
         };
-        match store.heartbeat_historian_run(&run_id, &token, now_ms()) {
+        let project_path = match self.historian_lane_project(&binding, store) {
+            Ok(project) => project,
+            Err(outcome) => return outcome,
+        };
+        match store.heartbeat_historian_run(&project_path, &run_id, &token, now_ms()) {
             Ok(mc_store::HistorianHeartbeatOutcome::Extended { claim_deadline_ms }) => {
                 respond(json!({
                     "ok": true,
@@ -7425,7 +7503,11 @@ impl McHandler {
     /// that queued the run, which validates and publishes through exactly the same
     /// code the in-module producer path uses — same parser, same length-cap
     /// refusal, same publish CAS.
-    fn handle_historian_complete_value(&self, request: &Value) -> HandlerOutcome {
+    fn handle_historian_complete_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
+        let binding = match self.historian_lane_binding(channel, request, "historian.complete") {
+            Ok(binding) => binding,
+            Err(outcome) => return outcome,
+        };
         let run_id = match required_run_string(request, "run_id", "historian.complete") {
             Ok(value) => value,
             Err(outcome) => return outcome,
@@ -7438,7 +7520,11 @@ impl McHandler {
             Some(store) => store,
             None => return self.store_refusal(),
         };
-        match store.authorize_historian_report(&run_id, &token) {
+        let project_path = match self.historian_lane_project(&binding, store) {
+            Ok(project) => project,
+            Err(outcome) => return outcome,
+        };
+        match store.authorize_historian_report(&project_path, &run_id, &token) {
             Ok(mc_store::HistorianReportOutcome::Authorized(_)) => {}
             Ok(mc_store::HistorianReportOutcome::Refused(refusal)) => {
                 return respond(json!({ "ok": false, "refusal": refusal.as_wire_str() }));
@@ -13860,10 +13946,10 @@ impl McHandler {
                     self.handle_note_delivery_value(channel, &request, false)
                         .await
                 }
-                "historian.pending" => self.handle_historian_pending_value(&request),
-                "historian.claim" => self.handle_historian_claim_value(&request),
-                "historian.heartbeat" => self.handle_historian_heartbeat_value(&request),
-                "historian.complete" => self.handle_historian_complete_value(&request),
+                "historian.pending" => self.handle_historian_pending_value(channel, &request),
+                "historian.claim" => self.handle_historian_claim_value(channel, &request),
+                "historian.heartbeat" => self.handle_historian_heartbeat_value(channel, &request),
+                "historian.complete" => self.handle_historian_complete_value(channel, &request),
                 "todo_state.set" => self.handle_todo_state_set_value(channel, &request),
                 "session.flush" => self.handle_session_flush_value(channel, &request),
                 "session.recomp" => self.handle_session_recomp_value(channel, &request),
@@ -38478,7 +38564,12 @@ mod tests {
         queue_a_run_for_a_claimant(&store, &project_path, queued_at_ms);
 
         let first = store
-            .claim_historian_run(CLAIM_RUN_ID, "install-uuid-one", queued_at_ms)
+            .claim_historian_run(
+                &project_path,
+                CLAIM_RUN_ID,
+                "install-uuid-one",
+                queued_at_ms,
+            )
             .unwrap();
         let mc_store::HistorianClaimOutcome::Claimed(first) = first else {
             panic!("the first claimant must win: {first:?}");

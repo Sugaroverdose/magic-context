@@ -83,20 +83,18 @@ fn queue_run_for(
         .unwrap();
 }
 
-/// FINDING: the claim lane is reachable from a channel that never bound a
-/// session, and one `historian.pending` with no `session_id` hands every run in
-/// the store to whoever asked — including runs belonging to a different project
-/// than the caller's. `historian.claim` then returns that run's prompt, which is
-/// the folded conversation transcript.
+/// The claim lane is scoped to the channel's binding, like every other
+/// management op that reads session state: an unbound channel is refused
+/// `route_unbound`, and a bound one is never shown a run another project queued.
 ///
-/// Every other management op on this dispatcher that reads session state goes
-/// through `management_binding`, which refuses an unbound channel
-/// (`route_unbound`) and a session that is not the channel's
-/// (`session_mismatch`). The four claim ops do not, by design: a claimant polls
-/// without knowing which session produced a run. The cost of that design is what
-/// this test records.
+/// A claim hands back the run's prompts, which are the folded conversation
+/// transcript. Two projects on one machine share one module store, so without
+/// this scope each project's host process could list the other's runs, read its
+/// transcripts and complete its folds. A claimant still discovers runs by
+/// polling without naming a session — what it cannot do is poll outside its own
+/// project.
 #[tokio::test(flavor = "current_thread")]
-async fn gate_pending_hands_an_unbound_caller_another_projects_run_and_prompt() {
+async fn gate_pending_refuses_an_unbound_caller_and_hides_another_projects_run() {
     let (handler, store, dir, project) =
         handler_with_store(Arc::new(ProducerState::default()), default_test_config());
     let now = now_ms();
@@ -117,8 +115,8 @@ async fn gate_pending_hands_an_unbound_caller_another_projects_run_and_prompt() 
         now,
     );
 
-    // Channel 9 never bound anything. A management op that reads session state
-    // refuses it; the claim lane answers it.
+    // Channel 9 never bound anything. The management op that reads session state
+    // refuses it, and so now does every op in the claim lane.
     let (unbound_code, _) = error_frame(
         handler
             .dispatch_value(
@@ -131,13 +129,26 @@ async fn gate_pending_hands_an_unbound_caller_another_projects_run_and_prompt() 
         unbound_code, "route_unbound",
         "the comparison surface has to actually refuse an unbound channel"
     );
-
-    let listed = call_dispatch_request_on_channel(
-        &handler,
-        9,
+    for request in [
         json!({ "method": "historian.pending", "v": 1 }),
-    )
-    .await;
+        json!({
+            "method": "historian.claim", "v": 1,
+            "run_id": "run-other-project", "claimant_instance_id": "some-other-install",
+        }),
+        json!({ "method": "historian.heartbeat", "v": 1, "run_id": "run-other-project", "token": "t" }),
+        json!({
+            "method": "historian.complete", "v": 1,
+            "run_id": "run-other-project", "token": "t",
+            "output": { "text": "<compartments/>" },
+        }),
+    ] {
+        let (code, _) = error_frame(handler.dispatch_value(9, request.clone()).await);
+        assert_eq!(code, "route_unbound", "{request}");
+    }
+
+    // Channel 7 is bound to `project`. It sees its own run and only its own run.
+    let listed =
+        call_dispatch_request(&handler, json!({ "method": "historian.pending", "v": 1 })).await;
     let run_ids: Vec<&str> = listed["runs"]
         .as_array()
         .unwrap()
@@ -146,39 +157,58 @@ async fn gate_pending_hands_an_unbound_caller_another_projects_run_and_prompt() 
         .collect();
     assert_eq!(
         run_ids,
-        vec!["run-other-project", "run-own-project"],
-        "pending lists every session the store serves, across projects: {listed}"
+        vec!["run-own-project"],
+        "pending lists the caller's own project only: {listed}"
     );
 
-    let claimed = call_dispatch_request_on_channel(
+    let foreign = call_dispatch_request(
         &handler,
-        9,
         json!({
             "method": "historian.claim",
             "v": 1,
             "run_id": "run-other-project",
-            "claimant_instance_id": "some-other-install",
+            "claimant_instance_id": "install-one",
         }),
     )
     .await;
-    assert_eq!(claimed["ok"], json!(true), "{claimed}");
     assert_eq!(
-        claimed["prompt"]["user"],
-        json!("transcript of a project this channel never bound"),
-        "the claim hands the caller the other project's transcript"
+        foreign,
+        json!({ "ok": false, "refusal": "unknown_run" }),
+        "another project's run is answered as one that does not exist, so nothing about it leaks"
+    );
+
+    // The control: the caller's own run claims normally and hands back its prompt,
+    // so the refusal above is about the project rather than about the lane being
+    // closed.
+    let own = call_dispatch_request(
+        &handler,
+        json!({
+            "method": "historian.claim",
+            "v": 1,
+            "run_id": "run-own-project",
+            "claimant_instance_id": "install-one",
+        }),
+    )
+    .await;
+    assert_eq!(own["ok"], json!(true), "{own}");
+    assert_eq!(
+        own["prompt"]["user"],
+        json!("transcript of the bound project")
     );
     drop(dir);
 }
 
-/// FINDING: `v` is documented on all four claim requests and pinned in the wire
-/// fixture, but no handler reads it. A request with no `v`, or with a version
-/// this module has never heard of, is served as if it were `v: 1`.
+/// `v` is documented on all four claim requests and pinned in the wire fixture
+/// (`crates/mc-module/testdata/historian-claim-wire-golden.json`), and every one
+/// of them now reads it: a request with no `v`, or with a version
+/// this module has never heard of, is refused `bad_request` exactly as the
+/// management ops beside them refuse it.
 ///
-/// The management ops next to these refuse a missing or wrong `v` with
-/// `bad_request`, so the difference is a property of the claim lane, not of the
-/// envelope.
+/// A version field that is never read is worse than none, because a future v2
+/// claimant would be silently served v1 semantics instead of being told this
+/// module does not speak v2.
 #[tokio::test(flavor = "current_thread")]
-async fn gate_the_claim_lane_serves_requests_whose_version_it_never_read() {
+async fn gate_the_claim_lane_refuses_a_request_whose_version_it_cannot_serve() {
     let (handler, store, dir, project) =
         handler_with_store(Arc::new(ProducerState::default()), default_test_config());
     queue_run_for(
@@ -203,19 +233,33 @@ async fn gate_the_claim_lane_serves_requests_whose_version_it_never_read() {
         "the comparison surface has to actually require a version"
     );
 
-    for request in [
-        json!({ "method": "historian.pending" }),
-        json!({ "method": "historian.pending", "v": 99 }),
-        json!({ "method": "historian.pending", "v": "not-a-number" }),
+    for method in [
+        "historian.pending",
+        "historian.claim",
+        "historian.heartbeat",
+        "historian.complete",
     ] {
-        let served = call_dispatch_request(&handler, request.clone()).await;
-        assert_eq!(served["ok"], json!(true), "{request} -> {served}");
-        assert_eq!(
-            served["runs"][0]["run_id"],
-            json!("run-versionless"),
-            "{request} -> {served}"
-        );
+        for version in [None, Some(json!(99)), Some(json!("not-a-number"))] {
+            let mut request = json!({
+                "method": method,
+                "run_id": "run-versionless",
+                "claimant_instance_id": "install-one",
+                "token": "0".repeat(32),
+                "output": { "text": "<compartments/>" },
+            });
+            if let Some(version) = version.clone() {
+                request["v"] = version;
+            }
+            let (code, message) = error_frame(handler.dispatch_value(7, request.clone()).await);
+            assert_eq!(code, "bad_request", "{request}");
+            assert!(message.contains("v=1"), "{request} -> {message}");
+        }
     }
+
+    // The control: the same request at the version this module serves is answered.
+    let served =
+        call_dispatch_request(&handler, json!({ "method": "historian.pending", "v": 1 })).await;
+    assert_eq!(served["runs"][0]["run_id"], json!("run-versionless"));
     drop(dir);
 }
 
@@ -300,7 +344,12 @@ async fn gate_a_late_heartbeat_and_a_post_expiry_claim_never_both_win() {
             queued_at_ms,
         );
         let mc_store::HistorianClaimOutcome::Claimed(held) = store
-            .claim_historian_run("run-expiring", "install-one", queued_at_ms)
+            .claim_historian_run(
+                &project.to_string_lossy(),
+                "run-expiring",
+                "install-one",
+                queued_at_ms,
+            )
             .unwrap()
         else {
             panic!("the first claimant must win");
@@ -417,7 +466,12 @@ async fn gate_complete_refuses_a_superseded_an_unknown_and_an_unclaimed_run() {
     );
 
     let mc_store::HistorianClaimOutcome::Claimed(first) = store
-        .claim_historian_run("run-reported", "install-one", queued_at_ms)
+        .claim_historian_run(
+            &project.to_string_lossy(),
+            "run-reported",
+            "install-one",
+            queued_at_ms,
+        )
         .unwrap()
     else {
         panic!("the first claimant must win");
@@ -452,16 +506,17 @@ async fn gate_complete_refuses_a_superseded_an_unknown_and_an_unclaimed_run() {
     drop(dir);
 }
 
-/// FINDING: a heartbeat sent after the run's OWN deadline has passed is answered
-/// `ok: true`, carrying a `claim_deadline_ms` that is already in the past.
+/// A heartbeat sent after the run's OWN deadline has passed is refused
+/// `run_expired` rather than answered `ok` with a lease already in the past.
 ///
-/// The same run is by then unclaimable and unlistable — `historian.pending` and
-/// `historian.claim` both refuse it on the run deadline — so the heartbeat is
-/// the one op in the lane that tells a claimant to keep going after the module
-/// has stopped waiting. A claimant that treats `ok` as "keep working" keeps
-/// spending on a completion that can no longer be delivered.
+/// By then the same run is unclaimable and unlistable — `historian.pending` and
+/// `historian.claim` both refuse it on the run deadline — so an `ok` here would
+/// be the one answer in the lane still telling a claimant to keep going after
+/// the module stopped waiting. A claimant that reads `ok` as "keep working"
+/// would keep paying a provider for a completion that can no longer be
+/// delivered.
 #[tokio::test(flavor = "current_thread")]
-async fn gate_a_heartbeat_after_the_runs_own_deadline_is_answered_ok() {
+async fn gate_a_heartbeat_after_the_runs_own_deadline_is_refused_run_expired() {
     let (handler, store, dir, project) =
         handler_with_store(Arc::new(ProducerState::default()), default_test_config());
     let queued_at_ms = now_ms() - GATE_AWAIT_BUDGET_MS - 1;
@@ -475,7 +530,12 @@ async fn gate_a_heartbeat_after_the_runs_own_deadline_is_answered_ok() {
     );
     // Claimed while the run was still live, so there is a current token to beat with.
     let mc_store::HistorianClaimOutcome::Claimed(held) = store
-        .claim_historian_run("run-past-deadline", "install-one", queued_at_ms)
+        .claim_historian_run(
+            &project.to_string_lossy(),
+            "run-past-deadline",
+            "install-one",
+            queued_at_ms,
+        )
         .unwrap()
     else {
         panic!("the claim has to be taken before the deadline to set this up");
@@ -507,33 +567,25 @@ async fn gate_a_heartbeat_after_the_runs_own_deadline_is_answered_ok() {
     )
     .await;
     assert_eq!(
-        beat["ok"],
-        json!(true),
-        "recorded as observed, not as approved: {beat}"
-    );
-    let granted = beat["claim_deadline_ms"].as_i64().unwrap();
-    assert!(
-        granted < now_ms(),
-        "the lease it grants has already expired: {beat}"
+        beat,
+        json!({ "ok": false, "refusal": "run_expired" }),
+        "the whole lane now agrees the run is over"
     );
     drop(dir);
 }
 
-/// Restart with a run parked for a claimant: A1 says the run is released. It is,
-/// and nothing double-publishes — but the queue row it was advertised through
-/// stays behind, and nothing ever deletes it.
+/// Restart with a run parked for a claimant: the run is released, nothing
+/// double-publishes, and the queue row it was advertised through is parked with
+/// it rather than left offering work no one is waiting for.
 ///
-/// FINDING: after the release the session is `Idle` with no producer run, while
-/// `mc_historian_pending_run` still holds a `pending` row for the released run.
-/// `historian.pending` keeps advertising it until its own deadline passes, and a
-/// claimant that takes the bait is refused `not_pending` after paying for the
-/// round trip. Nothing on the historian's own paths removes the row: not the
-/// restart handler that released the run, and not the expiry sweep, which only
-/// looks at claimed rows. Deleting the session does remove it, so the row lives
-/// as long as the session does — which for a folding session is the whole point
-/// of the session.
+/// A parked row is kept rather than deleted because it still carries the chunk
+/// fingerprint and the prompt bytes, which is exactly what a boot-time
+/// re-publication needs and what re-assembling a chunk would otherwise cost. It
+/// is not offered to claimants while parked, and the claim sweep deletes it once
+/// the run's own deadline passes, so the row cannot outlive the work it stands
+/// for.
 #[tokio::test(flavor = "current_thread")]
-async fn gate_restart_releases_a_parked_run_but_leaves_its_queue_row_behind() {
+async fn gate_restart_releases_a_parked_run_and_parks_its_queue_row() {
     let (handler, store, dir, project) =
         handler_with_store(Arc::new(ProducerState::default()), default_test_config());
     let data_home = dir.path().join("data");
@@ -553,7 +605,7 @@ async fn gate_restart_releases_a_parked_run_but_leaves_its_queue_row_behind() {
     assert_eq!(parked.firing_seq, 1);
 
     // The boot path, called exactly as the transform recovery arm calls it.
-    let action = crate::historian::handle_restart_load(&store, "ses", now + 60_000).unwrap();
+    let action = crate::historian::handle_restart_load(&store, "ses", now, now + 60_000).unwrap();
     assert!(
         matches!(
             action,
@@ -581,30 +633,28 @@ async fn gate_restart_releases_a_parked_run_but_leaves_its_queue_row_behind() {
         "releasing a parked run publishes nothing"
     );
 
-    // The row the run was advertised through is still there.
+    // The row is parked, not deleted: it keeps the fingerprint a re-publication
+    // would need, and it is no longer offered to anyone.
     let rows = queue_rows(&data_home);
     assert_eq!(
         rows,
         vec![(
             "run-parked".to_string(),
             "ses".to_string(),
-            "pending".to_string(),
+            "parked".to_string(),
             None,
-            // The fingerprint is not lost from the store: the released run's copy of
-            // it survives in the orphan queue row, which is what a later
-            // re-publication on boot would need and what nothing reads today.
             "fp-ses".to_string()
         )],
-        "the queue row outlives the run it belonged to"
+        "the queue row is parked with the run it belonged to"
     );
     let still_listed =
         call_dispatch_request(&handler, json!({ "method": "historian.pending", "v": 1 })).await;
     assert_eq!(
-        still_listed["runs"][0]["run_id"],
-        json!("run-parked"),
-        "a released run is still advertised to claimants: {still_listed}"
+        still_listed,
+        json!({ "ok": true, "runs": [] }),
+        "a released run is not advertised to claimants: {still_listed}"
     );
-    let wasted = call_dispatch_request(
+    let refused = call_dispatch_request(
         &handler,
         json!({
             "method": "historian.claim", "v": 1,
@@ -613,30 +663,27 @@ async fn gate_restart_releases_a_parked_run_but_leaves_its_queue_row_behind() {
     )
     .await;
     assert_eq!(
-        wasted,
+        refused,
         json!({ "ok": false, "refusal": "not_pending" }),
-        "taking the bait is refused, so nothing double-publishes"
+        "a claimant that names it anyway is refused, so nothing double-publishes"
     );
 
-    // The sweep does not reclaim it: it only looks at rows a claimant holds.
-    store.expire_historian_claims(now + 60_000).unwrap();
+    // Inside the run's own deadline the row is still adoptable, so the sweep leaves
+    // it alone; past the deadline it is dropped.
+    let run_deadline_ms = now + GATE_AWAIT_BUDGET_MS;
+    let swept = store.expire_historian_claims(run_deadline_ms - 1).unwrap();
+    assert_eq!(swept, mc_store::HistorianSweepOutcome::default());
     assert_eq!(
         queue_rows(&data_home).len(),
         1,
-        "the sweep only touches claimed rows, so a released run's row survives it"
+        "a parked run inside its deadline is what a boot-time re-publication adopts"
     );
-    // Deleting the session does remove it, which bounds the leak at the session's
-    // own lifetime rather than at the run's.
-    let deleted = call_dispatch_request(
-        &handler,
-        json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
-    )
-    .await;
-    assert_eq!(deleted["ok"], json!(true), "{deleted}");
+    let swept = store.expire_historian_claims(run_deadline_ms).unwrap();
+    assert_eq!(swept.dropped, vec!["run-parked".to_string()]);
     assert_eq!(
         queue_rows(&data_home).len(),
         0,
-        "deleting the session is the only path that reclaims the row"
+        "the sweep reclaims the row rather than leaving it for the session to outlive"
     );
     drop(dir);
 }

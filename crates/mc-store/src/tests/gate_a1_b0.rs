@@ -11,6 +11,9 @@ use std::sync::Arc;
 
 const HISTORIAN_QUEUE_TABLE: &str = "mc_historian_pending_run";
 const CLAIM_LANE_MIGRATION_VERSION: u32 = 57;
+/// The project every run in this file is queued under. The claim lane is scoped to
+/// the caller's project, so every call has to present it.
+const GATE_PROJECT: &str = "git:gate";
 
 fn store_path(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join("store.db")
@@ -141,7 +144,7 @@ fn gate_the_claim_queue_then_the_marker_land_in_order_on_a_populated_store() {
         .publish_pending_historian_run(&NewHistorianPendingRun {
             run_id: "run-after-both".to_string(),
             session_id: "ses".to_string(),
-            project_path: "git:gate".to_string(),
+            project_path: GATE_PROJECT.to_string(),
             firing_seq: 1,
             chunk_fingerprint: "fp".to_string(),
             system_prompt: "sys".to_string(),
@@ -153,7 +156,7 @@ fn gate_the_claim_queue_then_the_marker_land_in_order_on_a_populated_store() {
         .unwrap();
     assert_eq!(
         migrated
-            .list_pending_historian_runs(None, 2_000)
+            .list_pending_historian_runs(GATE_PROJECT, None, 2_000)
             .unwrap()
             .len(),
         1
@@ -207,7 +210,7 @@ fn gate_a_store_that_applied_58_first_never_gets_57() {
         .publish_pending_historian_run(&NewHistorianPendingRun {
             run_id: "run-no-table".to_string(),
             session_id: "ses".to_string(),
-            project_path: "git:gate".to_string(),
+            project_path: GATE_PROJECT.to_string(),
             firing_seq: 1,
             chunk_fingerprint: "fp".to_string(),
             system_prompt: "sys".to_string(),
@@ -410,7 +413,7 @@ fn gate_queue_run(
         .publish_pending_historian_run(&NewHistorianPendingRun {
             run_id: run_id.to_string(),
             session_id: session_id.to_string(),
-            project_path: "git:gate".to_string(),
+            project_path: GATE_PROJECT.to_string(),
             firing_seq: 1,
             chunk_fingerprint: "fp".to_string(),
             system_prompt: "sys".to_string(),
@@ -448,7 +451,12 @@ fn gate_a_crowd_of_claimants_on_one_run_mints_exactly_one_token_per_generation()
                 let tokens = Arc::clone(&tokens);
                 scope.spawn(move || {
                     match store
-                        .claim_historian_run("run-crowd", &format!("install-{claimant}"), now_ms)
+                        .claim_historian_run(
+                            GATE_PROJECT,
+                            "run-crowd",
+                            &format!("install-{claimant}"),
+                            now_ms,
+                        )
                         .unwrap()
                     {
                         HistorianClaimOutcome::Claimed(claim) => {
@@ -528,13 +536,18 @@ fn gate_a_reader_never_catches_a_claim_half_applied() {
             {
                 let now_ms = queued_at_ms + round * (HISTORIAN_LEASE_CEILING_MS + 1);
                 round += 1;
-                let _ = writer_store.claim_historian_run("run-raced", "install-a", now_ms);
+                let _ = writer_store.claim_historian_run(
+                    GATE_PROJECT,
+                    "run-raced",
+                    "install-a",
+                    now_ms,
+                );
                 // Hold each half briefly so a reader has a real chance to land in it.
                 std::thread::sleep(std::time::Duration::from_millis(1));
                 let _ =
                     writer_store.expire_historian_claims(now_ms + HISTORIAN_LEASE_CEILING_MS + 1);
                 std::thread::sleep(std::time::Duration::from_millis(1));
-                let _ = writer_store.list_pending_historian_runs(None, now_ms);
+                let _ = writer_store.list_pending_historian_runs(GATE_PROJECT, None, now_ms);
             }
             writer_stop.store(true, Ordering::SeqCst);
         });
@@ -610,4 +623,66 @@ fn gate_a_reader_never_catches_a_claim_half_applied() {
         pending_seen.load(Ordering::SeqCst) > 0,
         "the reader never caught the run between claims"
     );
+}
+
+/// A `pending` poll runs while another connection holds an open write
+/// transaction with uncommitted rows in it, and neither waits for the other.
+///
+/// This is the shape the claim lane lives in: every claimant polls on an
+/// interval against the same file the transform commits to. A poll that took the
+/// store's exclusive write lock would serialize every one of those polls against
+/// real work, for a query that writes nothing. The writer here does what a
+/// transform commit does — `BEGIN IMMEDIATE`, write a session row, commit — and
+/// the poll has to come back with its answer before the writer commits.
+#[test]
+fn gate_a_pending_poll_does_not_block_a_concurrent_transform_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let queued_at_ms = 1_000;
+    gate_queue_run(&store, "run-polled", "ses", queued_at_ms, 660_000);
+
+    // A second connection, exactly as a second process would open it.
+    let writer = rusqlite::Connection::open(store_path(dir.path())).unwrap();
+    // Shorter than the store's own busy timeout, so a poll that DOES contend for
+    // the write lock fails inside this test rather than after it.
+    writer
+        .busy_timeout(std::time::Duration::from_millis(250))
+        .unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    writer
+        .execute(
+            "UPDATE mc_cache_state SET row_version = row_version + 1 WHERE session_id = 'ses'",
+            [],
+        )
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let polled = store
+        .list_pending_historian_runs(GATE_PROJECT, None, queued_at_ms + 1)
+        .expect("a poll must not contend for the write lock a transform commit holds");
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        polled
+            .iter()
+            .map(|run| run.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["run-polled"],
+        "the poll answers from the committed snapshot"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the poll waited {elapsed:?}, which means it queued behind the writer"
+    );
+
+    // And the write that was in flight the whole time commits normally.
+    writer.execute_batch("COMMIT").unwrap();
+    let row_version: i64 = writer
+        .query_row(
+            "SELECT row_version FROM mc_cache_state WHERE session_id = 'ses'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(row_version > 0);
 }

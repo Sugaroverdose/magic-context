@@ -894,6 +894,7 @@ pub enum RestartAction {
 pub fn handle_restart_load(
     store: &McStore,
     session_id: &str,
+    now_ms: i64,
     failure_backoff_at_ms: i64,
 ) -> Result<RestartAction, HistorianStateError> {
     let loaded = store.load(session_id)?;
@@ -918,15 +919,28 @@ pub fn handle_restart_load(
                 chunk_fingerprint: state.chunk_fingerprint,
             })
         }
-        // A parked run is released rather than kept: nothing re-publishes it to the
-        // claim queue after a restart, so keeping it would hold the session's
-        // single-flight slot with no claimant able to arrive. Releasing it costs one
-        // re-assembled chunk on the next trigger and never loses durable output.
+        // A run parked for a claimant is released rather than kept: the task that was
+        // waiting for its report died with the previous process, so keeping the
+        // session on it would hold its single-flight slot for a report nothing can
+        // accept. Releasing costs one re-assembled chunk on the next trigger and never
+        // loses durable output.
         HistorianPhase::Firing
         | HistorianPhase::Reclaiming
         | HistorianPhase::Validating
         | HistorianPhase::Publishing => {
             let firing_seq = state.firing_seq;
+            // The run's queue row is parked in the same breath: parked rows are offered
+            // to nobody, so the released run stops being advertised, while the row keeps
+            // the chunk fingerprint and prompt bytes a boot-time re-publication would
+            // otherwise have to pay to re-assemble. The claim sweep deletes it if
+            // nothing adopts it before the run's own deadline.
+            //
+            // Parking happens BEFORE the session is released so that a crash between the
+            // two leaves a row the next boot parks again, rather than one still
+            // advertised to claimants whose session no longer owns it.
+            if let Some(run_id) = state.producer_run_id.as_deref() {
+                store.park_historian_pending_run(run_id, now_ms)?;
+            }
             let next = abandon(&state, failure_backoff_at_ms);
             persist_historian_state(store, session_id, next)?;
             Ok(RestartAction::AbandonedAndRefireEligible { firing_seq })
@@ -2219,6 +2233,7 @@ where
     let action = handle_restart_load(
         request.store,
         request.session_id,
+        request.now_ms,
         request.failure_backoff_at_ms,
     )?;
     let RestartAction::ReattachProducer {
@@ -3021,6 +3036,10 @@ mod tests {
         assert_ne!(parent, historian_producer_session_id("proj", "84b85b9f", 3));
     }
 
+    /// The project the fixtures fire under, and the one a claimant has to present
+    /// to see the runs they queue.
+    const FIRE_PROJECT: &str = "git:proj";
+
     fn fire_request<'a>(
         store: &'a McStore,
         prompt: &'a str,
@@ -3036,7 +3055,7 @@ mod tests {
         HistorianFireRequest {
             store,
             session_id: "ses",
-            project_path: "git:proj",
+            project_path: FIRE_PROJECT,
             project_slug: "proj",
             system: Cow::Borrowed("role guidance"),
             content_language: None,
@@ -5532,7 +5551,7 @@ mod tests {
             .commit("ses", None, &CoreState::default(), &meta)
             .unwrap();
 
-        let action = handle_restart_load(&store, "ses", 500).unwrap();
+        let action = handle_restart_load(&store, "ses", 400, 500).unwrap();
         assert_eq!(
             action,
             RestartAction::ReattachProducer {
@@ -5579,7 +5598,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            handle_restart_load(&store, "ses", 500).unwrap(),
+            handle_restart_load(&store, "ses", 400, 500).unwrap(),
             RestartAction::Done
         );
         assert_eq!(
@@ -5928,18 +5947,18 @@ mod tests {
     ) -> u32 {
         for _ in 0..200 {
             let pending = store
-                .list_pending_historian_runs(Some("ses"), 123)
+                .list_pending_historian_runs(FIRE_PROJECT, Some("ses"), 123)
                 .expect("the pending queue must be readable");
             if let Some(run) = pending.first() {
                 let mc_store::HistorianClaimOutcome::Claimed(claim) = store
-                    .claim_historian_run(&run.run_id, "install-uuid-one", 123)
+                    .claim_historian_run(FIRE_PROJECT, &run.run_id, "install-uuid-one", 123)
                     .expect("claiming must not fail")
                 else {
                     panic!("the only claimant must win");
                 };
                 assert_eq!(
                     store
-                        .authorize_historian_report(&claim.run_id, &claim.token)
+                        .authorize_historian_report(FIRE_PROJECT, &claim.run_id, &claim.token)
                         .unwrap(),
                     mc_store::HistorianReportOutcome::Authorized(
                         mc_store::HistorianReportAuthorization {
@@ -6014,7 +6033,7 @@ mod tests {
             HistorianPhase::Idle
         );
         assert!(host_store
-            .list_pending_historian_runs(None, 123)
+            .list_pending_historian_runs(FIRE_PROJECT, None, 123)
             .unwrap()
             .is_empty());
     }
@@ -6054,7 +6073,7 @@ mod tests {
             .as_deref()
             .is_some_and(|detail| detail.contains("no report")));
         assert!(host_store
-            .list_pending_historian_runs(None, 123)
+            .list_pending_historian_runs(FIRE_PROJECT, None, 123)
             .unwrap()
             .is_empty());
     }

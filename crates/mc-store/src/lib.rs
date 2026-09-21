@@ -18,7 +18,7 @@ mod historian_claim;
 pub use historian_claim::{
     historian_lease_ms, HistorianClaim, HistorianClaimOutcome, HistorianClaimRefusal,
     HistorianHeartbeatOutcome, HistorianPendingRun, HistorianReportAuthorization,
-    HistorianReportOutcome, HistorianReportRefusal, NewHistorianPendingRun,
+    HistorianReportOutcome, HistorianReportRefusal, HistorianSweepOutcome, NewHistorianPendingRun,
     HISTORIAN_HEARTBEAT_INTERVAL_MS, HISTORIAN_LEASE_CEILING_MS,
 };
 
@@ -2943,8 +2943,15 @@ const MIGRATIONS: &[Migration] = &[
         // write. They are written in the same transaction as the session state,
         // never independently.
         //
-        // Rows are bounded by the number of concurrently folding sessions; terminal
-        // rows are deleted rather than accumulated.
+        // `phase` is one of three values. 'pending': waiting for a claimant.
+        // 'claimed': a claimant holds it until `claim_deadline_ms`. 'parked': the
+        // process that was waiting for the report restarted, so the row is kept for
+        // its chunk fingerprint and prompts but is never offered.
+        //
+        // Rows are bounded by the number of concurrently folding sessions. A run
+        // that reaches a terminal outcome is deleted; a parked one is deleted by the
+        // claim sweep once the run's own deadline passes, so a restart cannot leave
+        // rows behind for the lifetime of the session.
         statements: "
         CREATE TABLE IF NOT EXISTS mc_historian_pending_run (
             run_id               TEXT PRIMARY KEY,
@@ -3034,20 +3041,14 @@ pub const LATEST_MIGRATION_VERSION: u32 = {
 pub const SINGLE_STORE_CAPABLE: bool = false;
 
 /// The migration that introduced the single-store marker columns. Named so the step-through test
-/// and the reserved-version check read as one fact rather than two bare numbers.
+/// reads as one fact rather than two bare numbers.
 pub const SINGLE_STORE_MARKER_MIGRATION_VERSION: u32 = 58;
-
-/// The version the chain reserves but does not carry, because a migration under construction
-/// elsewhere claims it. Recorded here so the gap is a stated fact with a name attached rather
-/// than an unexplained hole a later reader would treat as an accident.
-#[cfg(test)]
-const RESERVED_UNSHIPPED_MIGRATION_VERSION: u32 = 57;
 
 /// The migration versions this binary ships, ascending.
 ///
-/// Tests compare applied versions against this rather than against a contiguous range from 1: the
-/// chain deliberately leaves one version out, so a range would be wrong while still reading as
-/// authoritative.
+/// Tests compare applied versions against this rather than against a hand-written range, so a
+/// migration that is declared but never reaches a store shows up as a difference here. The chain
+/// itself is checked for holes separately, by the contiguity test below.
 #[cfg(test)]
 fn shipped_migration_versions() -> Vec<i64> {
     let mut versions: Vec<i64> = MIGRATIONS
@@ -24016,26 +24017,22 @@ mod tests {
             .contains("note ownership insert is outside the caller project"));
     }
 
-    /// The chain runs 1..=ceiling with exactly one hole, and that hole is the reserved version.
+    /// The chain runs 1..=ceiling with no holes, and no version is claimed twice.
     ///
-    /// Until this change the store's migration versions were contiguous, and the tests that
-    /// checked which migrations a store had applied compared against the range 1..=ceiling. That
-    /// comparison was doing real work: it caught a migration that was declared but never reached
-    /// a store. Those tests now compare against the shipped chain instead, which cannot catch a
-    /// hole, so the hole is checked here instead of going unchecked. A second unexplained gap
-    /// fails this test.
+    /// Other tests compare the versions a store applied against the shipped chain, which cannot
+    /// notice a hole because the hole is in the chain they compare against. A hole matters: a
+    /// store that recorded a later version never goes back for the missing one, so the migration
+    /// that fills the hole would reach fresh stores only. This is the test that fails when a
+    /// version goes missing.
     #[test]
-    fn the_migration_chain_has_exactly_one_reserved_gap() {
+    fn the_migration_chain_is_contiguous_and_claims_each_version_once() {
         let shipped = shipped_migration_versions();
 
         let missing: Vec<i64> = (1..=i64::from(LATEST_MIGRATION_VERSION))
             .filter(|version| !shipped.contains(version))
             .collect();
 
-        assert_eq!(
-            missing,
-            vec![i64::from(RESERVED_UNSHIPPED_MIGRATION_VERSION)]
-        );
+        assert_eq!(missing, Vec::<i64>::new(), "the chain must have no holes");
         assert_eq!(
             shipped.len(),
             shipped
@@ -24105,9 +24102,9 @@ mod tests {
         let earlier_outcome = earlier.migrate(NS, &before_marker).unwrap();
         assert_eq!(
             earlier_outcome.recorded,
-            SINGLE_STORE_MARKER_MIGRATION_VERSION - 2,
-            "version {} is reserved for a migration being written in parallel and must stay unused",
-            SINGLE_STORE_MARKER_MIGRATION_VERSION - 1
+            SINGLE_STORE_MARKER_MIGRATION_VERSION - 1,
+            "the chain is contiguous, so stopping below the marker migration must land on the \
+             version immediately before it"
         );
         assert!(
             !privilege_state_columns(&earlier).contains(&"single_store".to_string()),
