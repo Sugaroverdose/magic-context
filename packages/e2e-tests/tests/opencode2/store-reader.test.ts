@@ -5,8 +5,13 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readSessionChunk, withRawMessageProvider } from "../../../plugin/src/hooks/magic-context/read-session-chunk";
 import { readRawSessionMessagesFromDb } from "../../../plugin/src/hooks/magic-context/read-session-raw";
-import { rawMessages } from "../../../plugin/src/v2/hooks/store";
 import {
+	createV2RawMessageReader,
+	rawMessages,
+} from "../../../plugin/src/v2/hooks/store";
+import {
+	getV2StoreReaderDebugCounters,
+	resetV2StoreReaderDebugCounters,
 	sourceDatabaseFilename,
 	V2StoreReader,
 } from "../../../plugin/src/v2/store-reader";
@@ -116,6 +121,63 @@ test("session_message_reader seq pages idle boundaries and checkpoint window", (
 		writer.close();
 	}
 	expect(() => new V2StoreReader(join(root, "missing.db"))).toThrow();
+});
+
+test("10,000-row raw read pages decode only the requested page and count decodes none", () => {
+	const { root } = isolation();
+	const path = join(root, "bounded-reader.db");
+	const writer = new Database(path);
+	writer.exec(
+		"CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT)",
+	);
+	const insert = writer.prepare(
+		"INSERT INTO session_message VALUES (?, 'ses-long', 'user', ?, ?)",
+	);
+	const insertIdle = writer.prepare(
+		"INSERT INTO session_message VALUES (?, 'ses-long', 'idle', ?, ?)",
+	);
+	writer.transaction(() => {
+		for (let ordinal = 1; ordinal <= 10_000; ordinal++) {
+			const seq = ordinal * 2;
+			if (ordinal % 1_000 === 0) {
+				insertIdle.run(
+					`idle-${ordinal}`,
+					seq - 1,
+					JSON.stringify({ outcome: "succeeded" }),
+				);
+			}
+			insert.run(
+				`message-${ordinal}`,
+				seq,
+				ordinal === 1 ? "not-json" : JSON.stringify({ text: `row ${ordinal}` }),
+			);
+		}
+	})();
+
+	resetV2StoreReaderDebugCounters();
+	const read = createV2RawMessageReader(() => new V2StoreReader(path));
+	try {
+		const page = read.readPage("ses-long", 9_900, 50, 9_990);
+		expect(page).toHaveLength(50);
+		expect(page[0]).toMatchObject({ id: "message-9901", ordinal: 9_901 });
+		expect(page.at(-1)).toMatchObject({ id: "message-9950", ordinal: 9_950 });
+		expect(read.getCount("ses-long")).toBe(10_000);
+		const counters = getV2StoreReaderDebugCounters();
+		expect(counters.decodedRows).toBeLessThanOrEqual(100);
+		expect(counters.operations.messagePage).toEqual({
+			calls: 1,
+			decodedRows: 50,
+			maxDecodedRows: 50,
+		});
+		expect(counters.operations.messageCount).toEqual({
+			calls: 1,
+			decodedRows: 0,
+			maxDecodedRows: 0,
+		});
+		expect(counters.operations.history).toBeUndefined();
+	} finally {
+		writer.close();
+	}
 });
 
 test("latestAssistant selects the newest assistant row by seq and ignores other types", () => {

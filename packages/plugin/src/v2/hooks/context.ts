@@ -74,7 +74,7 @@ import { adaptPayload, HEAD_IDS } from "./payload";
 import { refusesBeforeProvider } from "./provider-admission";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
-import { rawMessages } from "./store";
+import { createV2RawMessageReader } from "./store";
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
 import { resolveUsageReading } from "./usage-reading";
@@ -377,23 +377,12 @@ export async function registerContext(context: V2Context) {
             console.warn("[magic-context] v2 Channel 2 delivery deferred", error);
         }
     });
-    const read = (sessionID: string) => {
-        const reader = new V2StoreReader(
-            gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
-        );
-        try {
-            return rawMessages(reader.history(sessionID));
-        } finally {
-            reader.close();
-        }
-    };
-    const pagedRead = Object.assign(read, {
-        readPage: (sessionID: string, after: number, limit: number, watermark: number) =>
-            read(sessionID)
-                .filter((m) => m.ordinal > after && m.ordinal <= watermark)
-                .slice(0, limit),
-        getCount: (sessionID: string) => read(sessionID).length,
-    });
+    const pagedRead = createV2RawMessageReader(
+        () =>
+            new V2StoreReader(
+                gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
+            ),
+    );
     let transform: ReturnType<typeof createTransform> | undefined;
     let systemPrompt: ReturnType<typeof createSystemPromptHashHandler> | undefined;
     const systemPromptRefreshSessions = new Set<string>();
@@ -581,15 +570,11 @@ export async function registerContext(context: V2Context) {
                 gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
             );
             try {
-                const rows = reader.history(draft.sessionID);
-                const ids = new Set(draft.messages.map((message) => message.id));
-                const watermark = Math.max(
-                    -1,
-                    ...rows.filter((row) => ids.has(row.id)).map((row) => row.seq),
+                const watermark = reader.latestSequenceForIds(
+                    draft.sessionID,
+                    draft.messages.flatMap((message) => (message.id ? [message.id] : [])),
                 );
-                const running = rows
-                    .filter((row) => row.type === "compaction" && row.data.status === "running")
-                    .at(-1);
+                const running = reader.latestRunningCompaction(draft.sessionID);
                 const fold = await folds.supply({
                     sessionID: draft.sessionID,
                     watermark,
@@ -694,7 +679,15 @@ export async function registerContext(context: V2Context) {
                 rawProviders.set(
                     draft.sessionID,
                     setRawMessageProvider(draft.sessionID, {
-                        readMessages: () => read(draft.sessionID),
+                        readMessages: () => pagedRead(draft.sessionID),
+                        readMessagePage: (afterOrdinal, limit, finalWatermark) =>
+                            pagedRead.readPage(
+                                draft.sessionID,
+                                afterOrdinal,
+                                limit,
+                                finalWatermark,
+                            ),
+                        getMessageCount: () => pagedRead.getCount(draft.sessionID),
                     }),
                 );
             transform ??= createTransform({
@@ -794,7 +787,6 @@ export async function registerContext(context: V2Context) {
                     submitted = identity.rendered
                         ? (identity.renderedSummary ?? identity.submitted)
                         : (cut.data.summary ?? "");
-                    const all = reader.history(draft.sessionID);
                     const boundaryID = (
                         db
                             .prepare(
@@ -802,13 +794,16 @@ export async function registerContext(context: V2Context) {
                             )
                             .get(draft.sessionID) as { id: string | null } | null
                     )?.id;
-                    const boundary = all.find((row) => row.id === boundaryID)?.seq ?? -1;
+                    // Restore only rows after the cached message prefix and before the host
+                    // checkpoint; older rows are already present in the cached messages. For
+                    // a recovered fold without a cached boundary id, start at its persisted
+                    // source position rather than reloading the entire retained session.
+                    const boundary =
+                        reader.sequenceForId(draft.sessionID, boundaryID) ?? identity.watermark;
                     const present = new Set(draft.messages.map((message) => message.id));
-                    const restored = all
-                        .filter(
-                            (row) =>
-                                row.seq > boundary && row.seq <= cut.seq && !present.has(row.id),
-                        )
+                    const restored = reader
+                        .range(draft.sessionID, boundary, cut.seq)
+                        .filter((row) => !present.has(row.id))
                         .flatMap((row) => restoreRow(row, draft.model));
                     draft.messages.splice(
                         0,
