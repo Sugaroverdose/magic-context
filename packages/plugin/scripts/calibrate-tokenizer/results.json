@@ -365,7 +365,9 @@
       "ratio_sdk": null
     },
     "error": "/v1/tokenizers/estimate-token-count HTTP 429 (request rejected)",
-    "durationMs": 330
+    "durationMs": 330,
+    "errorClass": "exceeded_current_quota_error",
+    "errorClassSource": "independently confirmed by task owner; no retry performed"
   },
   {
     "method": "tokenizers/estimate-token-count",
@@ -394,7 +396,9 @@
       "ratio_sdk": null
     },
     "error": "/v1/tokenizers/estimate-token-count HTTP 429 (request rejected)",
-    "durationMs": 230
+    "durationMs": 230,
+    "errorClass": "exceeded_current_quota_error",
+    "errorClassSource": "independently confirmed by task owner; no retry performed"
   },
   {
     "method": "paas/v4/tokenizer",
@@ -423,7 +427,9 @@
       "ratio_sdk": null
     },
     "error": "/api/paas/v4/tokenizer HTTP 429 (request rejected)",
-    "durationMs": 2467
+    "durationMs": 2467,
+    "errorClass": "1113 insufficient balance",
+    "errorClassSource": "independently confirmed by task owner; no retry performed"
   },
   {
     "method": "paas/v4/tokenizer",
@@ -452,7 +458,9 @@
       "ratio_sdk": null
     },
     "error": "/api/paas/v4/tokenizer HTTP 429 (request rejected)",
-    "durationMs": 236
+    "durationMs": 236,
+    "errorClass": "1113 insufficient balance",
+    "errorClassSource": "independently confirmed by task owner; no retry performed"
   },
   {
     "method": "paas/v4/tokenizer",
@@ -481,7 +489,9 @@
       "ratio_sdk": null
     },
     "error": "/api/paas/v4/tokenizer HTTP 429 (request rejected)",
-    "durationMs": 258
+    "durationMs": 258,
+    "errorClass": "1113 insufficient balance",
+    "errorClassSource": "independently confirmed by task owner; no retry performed"
   },
   {
     "method": "tokenize-text",
@@ -737,7 +747,8 @@
       "ratio_sdk": null
     },
     "error": "/v1beta/models/gemini-2.5-pro:countTokens HTTP 404 (model or endpoint unavailable)",
-    "durationMs": 130
+    "durationMs": 130,
+    "errorClass": "404"
   },
   {
     "method": "input_tokens",
@@ -767,7 +778,9 @@
     },
     "error": "/v1/responses/input_tokens HTTP 402 (request rejected)",
     "durationMs": 991,
-    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing."
+    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing.",
+    "errorClass": "billing_not_configured",
+    "errorClassSource": "independently confirmed by task owner; no retry performed"
   },
   {
     "method": "input_tokens",
@@ -797,7 +810,9 @@
     },
     "error": "/v1/responses/input_tokens HTTP 402 (request rejected)",
     "durationMs": 1136,
-    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing."
+    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing.",
+    "errorClass": "billing_not_configured",
+    "errorClassSource": "independently confirmed by task owner; no retry performed"
   },
   {
     "method": "input_tokens",
@@ -827,7 +842,9 @@
     },
     "error": "/v1/responses/input_tokens HTTP 402 (request rejected)",
     "durationMs": 1876,
-    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing."
+    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing.",
+    "errorClass": "billing_not_configured",
+    "errorClassSource": "independently confirmed by task owner; no retry performed"
   },
   {
     "method": "input_tokens",
@@ -857,7 +874,9 @@
     },
     "error": "/v1/responses/input_tokens HTTP 402 (request rejected)",
     "durationMs": 989,
-    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing."
+    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing.",
+    "errorClass": "billing_not_configured",
+    "errorClassSource": "independently confirmed by task owner; no retry performed"
   },
   {
     "method": "input_tokens",
@@ -887,6 +906,68 @@
     },
     "error": "/v1/responses/input_tokens HTTP 402 (request rejected)",
     "durationMs": 333,
-    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing."
+    "caveat": "Preflight rendered-context count, baseline-subtracted. Meta usage.input_tokens is cumulative across hosted-tool iterations with injected-token accounting adjustments; it is not final-context occupancy or directly comparable billing.",
+    "errorClass": "billing_not_configured",
+    "errorClassSource": "independently confirmed by task owner; no retry performed"
+  },
+  {
+    "method": "offline_hf_tokenizer",
+    "caveat": "Offline HF raw-text counts without special tokens or a provider chat template; no API model availability or billed-usage equivalence is claimed.",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "deepseek/deepseek-v4-flash",
+    "provider": "deepseek",
+    "modelId": "deepseek-v4-flash",
+    "tokenizerKey": null,
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "SKIP: transformers is not installed; use an isolated environment: python3 -m venv .venv && .venv/bin/python -m pip install transformers tokenizers; then set DEEPSEEK_TOKENIZER_PYTHON=.venv/bin/python",
+    "durationMs": 75
+  },
+  {
+    "method": "offline_hf_tokenizer",
+    "caveat": "Offline HF raw-text counts without special tokens or a provider chat template; no API model availability or billed-usage equivalence is claimed.",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "deepseek/deepseek-v4-pro",
+    "provider": "deepseek",
+    "modelId": "deepseek-v4-pro",
+    "tokenizerKey": null,
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "SKIP: transformers is not installed; use an isolated environment: python3 -m venv .venv && .venv/bin/python -m pip install transformers tokenizers; then set DEEPSEEK_TOKENIZER_PYTHON=.venv/bin/python",
+    "durationMs": 56
   }
 ]

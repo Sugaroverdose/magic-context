@@ -15,7 +15,13 @@ export async function postCountJson(url: string, headers: Record<string, string>
         method: "POST", headers: { ...headers, "content-type": "application/json" },
         body: JSON.stringify(body), signal: AbortSignal.timeout(60_000),
     });
-    if (!response.ok) throw new Error(`${new URL(url).pathname} HTTP ${response.status} (${response.status === 404 ? "model or endpoint unavailable" : response.status === 401 || response.status === 403 ? "credentials or model access refused" : "request rejected"})`);
+    if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { error?: { type?: string; code?: string | number }; code?: string | number } | null;
+        // Only known error classes are safe to log; arbitrary messages may echo input.
+        const known = [payload?.error?.code, payload?.error?.type, payload?.code].map(String).find((code) => ["exceeded_current_quota_error", "billing_not_configured", "1113"].includes(code));
+        const reason = known ?? (response.status === 404 ? "model or endpoint unavailable" : response.status === 401 || response.status === 403 ? "credentials or model access refused" : "request rejected");
+        throw new Error(`${new URL(url).pathname} HTTP ${response.status} (${reason})`);
+    }
     return await response.json() as Record<string, unknown>;
 }
 

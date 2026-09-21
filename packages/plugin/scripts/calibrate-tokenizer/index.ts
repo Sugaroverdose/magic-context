@@ -25,6 +25,7 @@ import { buildProseProbe } from "./prose";
 import { crossCheck } from "./cross-check";
 import { measureAnthropic } from "./providers/anthropic";
 import { type CountAdapter } from "./providers/counting";
+import { measureDeepseekOffline, OFFLINE_CAVEAT } from "./providers/deepseek";
 import { measureMeta, META_COUNT_CAVEAT } from "./providers/meta";
 import { measureGemini } from "./providers/gemini";
 import { measureXai } from "./providers/xai";
@@ -40,7 +41,8 @@ interface AuthFile {
         | { type: "api"; key: string };
 }
 
-const FREE_ADAPTERS: Record<string, { measure: CountAdapter; method: string; env: string; file: string }> = {
+const FREE_ADAPTERS: Record<string, { measure: CountAdapter; method: string; env: string; file: string; offline?: boolean }> = {
+    deepseek: { measure: measureDeepseekOffline, method: "offline_hf_tokenizer", env: "", file: "", offline: true },
     meta: { measure: measureMeta, method: "input_tokens", env: "META_API_KEY", file: "meta.key" },
     google: { measure: measureGemini, method: "countTokens", env: "GEMINI_API_KEY", file: "gemini.key" },
     xai: { measure: measureXai, method: "tokenize-text", env: "XAI_API_KEY", file: "xai.key" },
@@ -203,7 +205,7 @@ async function measureOne(
     let systemApi: number | null = null;
     let toolsApi: number | null = null;
     let error: string | null = null;
-    let caveat: string | undefined = test.provider === "meta" ? META_COUNT_CAVEAT : undefined;
+    let caveat: string | undefined = test.provider === "meta" ? META_COUNT_CAVEAT : test.provider === "deepseek" ? OFFLINE_CAVEAT : undefined;
     const adapter = FREE_ADAPTERS[authProvider(test)];
     let method = adapter?.method ?? (test.provider === "anthropic" && auth.anthropic?.type === "api" ? "count_tokens" : "usage");
     // biome-ignore lint/suspicious/noExplicitAny: encoding type varies
@@ -335,6 +337,10 @@ async function main(): Promise<void> {
         const provider = authProvider(test);
         const adapter = FREE_ADAPTERS[provider];
         if (!adapter) continue;
+        if (adapter.offline) {
+            auth[provider] = { type: "api", key: "" };
+            continue;
+        }
         const path = join(homedir(), ".config", adapter.file);
         const apiKey = process.env[adapter.env]?.trim() || (existsSync(path) ? readFileSync(path, "utf8").trim() : "");
         if (apiKey) auth[provider] = { type: "api", key: apiKey };

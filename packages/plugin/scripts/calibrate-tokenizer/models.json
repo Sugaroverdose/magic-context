@@ -1,6 +1,8 @@
 {
     "_comment": "Models to calibrate. Provider matches auth.json keys. modelId is the provider-native model identifier. tokenizerKey is the matching ai-tokenizer models.json entry (or null to fall back to base claude/o200k_base/etc encoding).",
     "tests": [
+        { "label": "deepseek/deepseek-v4-flash", "provider": "deepseek", "modelId": "deepseek-v4-flash", "tokenizerKey": null },
+        { "label": "deepseek/deepseek-v4-pro", "provider": "deepseek", "modelId": "deepseek-v4-pro", "tokenizerKey": null },
         { "label": "meta/muse-spark-1.3", "provider": "meta", "modelId": "muse-spark-1.3", "tokenizerKey": null },
         { "label": "meta/muse-spark-1.3-contributor", "provider": "meta", "modelId": "muse-spark-1.3-contributor", "tokenizerKey": null },
         { "label": "meta/muse-spark-1.2", "provider": "meta", "modelId": "muse-spark-1.2", "tokenizerKey": null },
