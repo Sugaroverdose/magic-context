@@ -438,9 +438,17 @@ export interface DreamRun {
 export interface LogEntry {
   timestamp: string;
   level: "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR" | null;
+  /** Message-derived bucket (event/transform/dreamer/…) the log page filters on. */
   component: string;
+  /**
+   * Dotted logger name a fleet r2 line writes before its colon
+   * (`magic-context.historian`); the bare module id on older lines.
+   */
+  logger: string;
   session_id: string;
   tags: string[];
+  /** Context bound for a scope (harness, session, agent, root) rather than for one event. */
+  bound: Record<string, string>;
   message: string;
   kv: Record<string, string>;
   raw: string;
