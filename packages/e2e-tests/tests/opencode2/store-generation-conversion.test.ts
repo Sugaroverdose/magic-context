@@ -929,19 +929,11 @@ test("the 2.x-only tail is unresolved and everything else resolves by id", () =>
 
 /**
  * Range recovery for a compartment the way back could not re-anchor is refused,
- * and the compartment that DID re-anchor reaches the wire at its re-derived
- * ordinals.
- *
- * What this deliberately does not assert is that the unresolved compartment is
- * absent from the rendered `<session-history>`. On this build it is still
- * present: the m[0] render path reads its compartments through
- * `readM0Compartments` / `readNewCompartments`
- * (`packages/plugin/src/hooks/magic-context/inject-compartments.ts`), whose
- * column lists omit `rebase_status`, so `rowToM0Compartment` maps every row to
- * `"ok"` and the exclusion added to `prepareCompartmentInjection` never applies
- * to the block the model actually reads. That is reported rather than asserted
- * here, because asserting either side would either fail the lane on a defect
- * this task may not fix or freeze the defect in place.
+ * the compartment that DID re-anchor reaches the wire at its re-derived
+ * ordinals, and the unresolved one is absent from the rendered
+ * `<session-history>`: its heading would name a range ctx_expand refuses, so the
+ * m[0]/m[1] readers filter `rebase_status = 'unresolved'` rows (the first run of
+ * this lane caught them being served).
  */
 test("the unresolved range is refused by ctx_expand and the re-anchored one is served", () => {
     expect(evidence.expandRefusal).toMatch(
@@ -953,6 +945,8 @@ test("the unresolved range is refused by ctx_expand and the re-anchored one is s
     expect(evidence.resolvedHeading).not.toBe("");
     expect(evidence.unresolvedHeading).not.toBe(evidence.resolvedHeading);
     expect(evidence.servedHeadBack).toContain(evidence.resolvedHeading);
+    expect(evidence.unresolvedHeading).not.toBe("");
+    expect(evidence.servedHeadBack).not.toContain(evidence.unresolvedHeading);
 });
 
 test("the way back also serves one HARD fold and four byte-identical defers", () => {
