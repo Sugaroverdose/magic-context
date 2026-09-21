@@ -540,6 +540,22 @@
             ]
         },
         {
+            "path": "tests/opencode2/store-generation-conversion.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Conversion in the loop: the real 1.18.x host writes a session, the real 2.0.5 host converts the store on the same throwaway root, and 1.18.x opens it again, with the plugin loaded on every boot; it boots a second host generation and so runs from the dedicated v2 lane invocation rather than the mode-selected spawn seam",
+            "contract_refs": [
+                "S2-MIGRATION",
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/store-reader.test.ts",
             "tier": "excluded",
             "invocation": {
