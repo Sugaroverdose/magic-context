@@ -23,6 +23,10 @@ import {
 	type DreamTaskFailureState,
 } from "@magic-context/core/features/magic-context/dreamer/task-registry";
 import {
+	type DreamerTickFailure,
+	getDreamerTickFailure,
+} from "@magic-context/core/features/magic-context/dreamer/tick-failure";
+import {
 	emptyMemoryImportanceHistogram,
 	getActiveMemoryImportanceHistogram,
 } from "@magic-context/core/features/magic-context/memory/memory-diagnostics";
@@ -172,6 +176,12 @@ export interface StatusDialogDetail {
 		backlog: ReturnType<typeof getDreamTaskBacklogs>;
 		/** Tasks whose last scheduled run failed; empty when all of them are healthy. */
 		failures: DreamTaskFailureState[];
+		/**
+		 * The stage that stopped the last maintenance pass, or null when the pass
+		 * completed. Not a per-task failure: this is the whole pass never reaching
+		 * the tasks at all.
+		 */
+		tickFailure: DreamerTickFailure | null;
 	};
 	embedding: {
 		state: "off" | "running" | "paused" | "stopped" | "ready" | "waiting";
@@ -305,6 +315,7 @@ function piStatusWarnings(s: StatusDialogDetail): UserFacingFailureKey[] {
 	if (s.lastTransformError) warnings.push("transform_update_failed");
 	if (s.historianFailureCount > 0) warnings.push("historian_unavailable");
 	if (s.dreamer.failures.length > 0) warnings.push("dreamer_task_failing");
+	if (s.dreamer.tickFailure) warnings.push("dreamer_tick_blocked");
 	if (s.configParseFailures.length > 0 || s.hasDeprecatedProtectedTags) {
 		warnings.push("configuration_warning");
 	}
@@ -363,6 +374,7 @@ export function statusViewSourceFromPiDetail(
 		// Pi carries "no expiry" as an infinite remaining time rather than a flag.
 		cacheNeverExpires: s.cacheRemainingMs === Number.POSITIVE_INFINITY,
 		lastDreamerRunAt: s.dreamer.lastRunAt,
+		dreamerTickFailure: s.dreamer.tickFailure,
 		warnings: piStatusWarnings(s),
 	};
 }
@@ -843,6 +855,9 @@ export function buildPiStatusDetail(
 				() => getFailingDreamTasks(deps.db, deps.projectIdentity),
 				[],
 			),
+			// Recorded by the process-wide maintenance timer, so it is read from
+			// the shared store rather than from this project's schedule rows.
+			tickFailure: safeRead(() => getDreamerTickFailure(deps.db), null),
 		},
 		embedding: {
 			state: embeddingState,

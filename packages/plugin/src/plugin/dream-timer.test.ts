@@ -2,9 +2,21 @@ import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+    clearDreamerTickFailure,
+    formatDreamerTickFailure,
+    getDreamerTickFailure,
+} from "../features/magic-context/dreamer/tick-failure";
 import { recordSessionProjectIdentity } from "../features/magic-context/session-project-storage";
 import { markSessionCleanupPending, openDatabase } from "../features/magic-context/storage";
-import { _resetDreamTimerForTests, startDreamScheduleTimer } from "./dream-timer";
+import { _resetHarnessForTesting, type HarnessId, setHarness } from "../shared/harness";
+import type { StatusDetail } from "../shared/rpc-types";
+import { statusSummaryFromDetail } from "../shared/status-summary";
+import {
+    _resetDreamTimerForTests,
+    _setDreamTimerStagesForTests,
+    startDreamScheduleTimer,
+} from "./dream-timer";
 
 /**
  * Regression coverage for the schema-fence / null-DB crash:
@@ -327,3 +339,232 @@ describe("dream-timer dead-directory guard (static)", () => {
         expect(gcIdx).toBeGreaterThan(guardIdx);
     });
 });
+
+/**
+ * Issue 496: message-history maintenance ran before the per-project loop inside
+ * one try, so a throw from it ended the tick before a single task could be
+ * dispatched. On Pi and OMP the orphan sweep threw on every tick, which left
+ * the dreamer completely dead on those hosts while looking idle from outside.
+ * Each stage is now contained on its own, and a stage that fails is recorded so
+ * the difference between "nothing to do" and "never ran" is visible.
+ */
+describe("dreamer tick stage containment", () => {
+    interface TickFixture {
+        /** Fire one interval tick and wait for its asynchronous body to settle. */
+        tick: () => Promise<void>;
+        dispose: () => void;
+    }
+
+    async function startTickFixture(projectIdentities: string[]): Promise<TickFixture> {
+        const timerHandle = { unref: mock(() => {}) } as unknown as ReturnType<typeof setInterval>;
+        const timeoutHandle = { unref: mock(() => {}) } as unknown as ReturnType<typeof setTimeout>;
+        const setTimeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(
+            (() => timeoutHandle) as typeof setTimeout,
+        );
+        const clearTimeoutSpy = spyOn(globalThis, "clearTimeout").mockImplementation(
+            (() => undefined) as typeof clearTimeout,
+        );
+        let intervalCallback: (() => void) | undefined;
+        const setIntervalSpy = spyOn(globalThis, "setInterval").mockImplementation(((
+            callback: () => void,
+        ) => {
+            intervalCallback = callback;
+            return timerHandle;
+        }) as typeof setInterval);
+        const clearIntervalSpy = spyOn(globalThis, "clearInterval").mockImplementation(
+            (() => undefined) as typeof clearInterval,
+        );
+        const directories: string[] = [];
+        const cleanups: Array<(() => void) | undefined> = [];
+        for (const projectIdentity of projectIdentities) {
+            const directory = mkdtempSync(join(tmpdir(), "mc-dream-tick-"));
+            directories.push(directory);
+            cleanups.push(
+                await startDreamScheduleTimer({
+                    directory,
+                    projectIdentity,
+                    harness: "pi",
+                    client: {} as never,
+                    dreamerConfig: { disable: false } as never,
+                    ensureRegistered: async () => undefined,
+                }),
+            );
+        }
+        return {
+            tick: async () => {
+                intervalCallback?.();
+                // The tick body is a detached async function; yielding the loop
+                // repeatedly lets it run to completion before assertions.
+                for (let attempt = 0; attempt < 50; attempt += 1) await Bun.sleep(0);
+            },
+            dispose: () => {
+                for (const cleanup of cleanups) cleanup?.();
+                setTimeoutSpy.mockRestore();
+                clearTimeoutSpy.mockRestore();
+                setIntervalSpy.mockRestore();
+                clearIntervalSpy.mockRestore();
+                for (const directory of directories) {
+                    rmSync(directory, { recursive: true, force: true });
+                }
+            },
+        };
+    }
+
+    function timerDb() {
+        const db = openDatabase();
+        if (!db) throw new Error("test database unavailable");
+        return db;
+    }
+
+    afterEach(() => {
+        _resetDreamTimerForTests();
+        _resetHarnessForTesting();
+        clearDreamerTickFailure(timerDb());
+    });
+
+    for (const harness of ["pi", "omp"] as const satisfies readonly HarnessId[]) {
+        test(`dispatches per-project maintenance on ${harness}, where the orphan sweep cannot run`, async () => {
+            setHarness(harness);
+            clearDreamerTickFailure(timerDb());
+            const maintained: string[] = [];
+            // Only the project stage is replaced: the real message-history
+            // stage has to run, because that is the stage whose throw used to
+            // end the tick on this host.
+            const restoreStages = _setDreamTimerStagesForTests({
+                runProjectMaintenance: async (reg) => {
+                    maintained.push(reg.projectIdentity);
+                },
+            });
+            const fixture = await startTickFixture([
+                `git:tick-${harness}-first`,
+                `git:tick-${harness}-second`,
+            ]);
+
+            try {
+                await fixture.tick();
+
+                expect(maintained).toEqual([
+                    `git:tick-${harness}-first`,
+                    `git:tick-${harness}-second`,
+                ]);
+                // A sweep this host cannot run is parked, not failed, so the
+                // tick is a clean one and reports nothing to the user.
+                expect(getDreamerTickFailure(timerDb())).toBeNull();
+            } finally {
+                restoreStages();
+                fixture.dispose();
+            }
+        });
+    }
+
+    test("keeps running the projects when message-history maintenance throws", async () => {
+        const maintained: string[] = [];
+        const restoreStages = _setDreamTimerStagesForTests({
+            runMessageHistoryMaintenance: async () => {
+                throw new Error("pending cleanup retry exploded");
+            },
+            runProjectMaintenance: async (reg) => {
+                maintained.push(reg.projectIdentity);
+            },
+        });
+        const fixture = await startTickFixture([
+            "git:tick-throwing-first",
+            "git:tick-throwing-second",
+        ]);
+
+        try {
+            await fixture.tick();
+
+            expect(maintained).toEqual(["git:tick-throwing-first", "git:tick-throwing-second"]);
+            const failure = getDreamerTickFailure(timerDb());
+            expect(failure?.stage).toBe("message-history maintenance");
+            expect(failure?.message).toContain("pending cleanup retry exploded");
+        } finally {
+            restoreStages();
+            fixture.dispose();
+        }
+    });
+
+    test("keeps running the remaining projects when one project throws", async () => {
+        const maintained: string[] = [];
+        const restoreStages = _setDreamTimerStagesForTests({
+            runMessageHistoryMaintenance: async () => undefined,
+            runProjectMaintenance: async (reg) => {
+                if (reg.projectIdentity === "git:tick-project-a") {
+                    throw new Error("git sweep exploded");
+                }
+                maintained.push(reg.projectIdentity);
+            },
+        });
+        const fixture = await startTickFixture(["git:tick-project-a", "git:tick-project-b"]);
+
+        try {
+            await fixture.tick();
+
+            expect(maintained).toEqual(["git:tick-project-b"]);
+            const failure = getDreamerTickFailure(timerDb());
+            expect(failure?.stage).toBe("project git:tick-project-a");
+            expect(failure?.message).toContain("git sweep exploded");
+        } finally {
+            restoreStages();
+            fixture.dispose();
+        }
+    });
+
+    test("shows a stopped pass on the status and doctor surfaces, and clears it after a good one", async () => {
+        let stageThrows = true;
+        const restoreStages = _setDreamTimerStagesForTests({
+            runMessageHistoryMaintenance: async () => {
+                if (stageThrows) throw new Error("orphan sweep cannot read this host store");
+            },
+            runProjectMaintenance: async () => undefined,
+        });
+        const fixture = await startTickFixture(["git:tick-surface"]);
+
+        try {
+            await fixture.tick();
+
+            const failure = getDreamerTickFailure(timerDb());
+            expect(failure).not.toBeNull();
+            if (!failure) throw new Error("the stopped pass was not recorded");
+
+            // Doctor prints one line naming the stage and its code.
+            const doctorLine = formatDreamerTickFailure(failure);
+            expect(doctorLine).toContain("MC-D09");
+            expect(doctorLine).toContain("message-history maintenance");
+
+            // /ctx-status raises the matching warning on both hosts, which
+            // share this selector.
+            const summary = statusSummaryFromDetail({
+                ...STATUS_DETAIL_STUB,
+                dreamerTickFailure: failure,
+            } as unknown as StatusDetail);
+            expect(summary.warnings).toContain("dreamer_tick_blocked");
+            expect(
+                statusSummaryFromDetail(STATUS_DETAIL_STUB as unknown as StatusDetail).warnings,
+            ).not.toContain("dreamer_tick_blocked");
+
+            // A pass that gets all the way through takes the warning back down.
+            stageThrows = false;
+            await fixture.tick();
+            expect(getDreamerTickFailure(timerDb())).toBeNull();
+        } finally {
+            restoreStages();
+            fixture.dispose();
+        }
+    });
+});
+
+/** The status fields the warning selector reads, at their empty-but-healthy values. */
+const STATUS_DETAIL_STUB = {
+    inputTokens: 0,
+    contextLimit: 0,
+    usagePercentage: 0,
+    cacheTtl: "1h",
+    cacheTtlSource: "default",
+    executeThreshold: 65,
+    compartmentCount: 0,
+    historianRunning: false,
+    compartmentInProgress: false,
+    memoryCount: 0,
+};

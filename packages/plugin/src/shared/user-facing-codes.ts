@@ -52,6 +52,12 @@ export const USER_FACING_FAILURES = {
         sentence: "Memory maintenance could not finish.",
         action: "Run /ctx-dream again.",
     },
+    dreamer_tick_blocked: {
+        code: "MC-D09",
+        sentence:
+            "Background maintenance is not running: its last pass stopped before it reached the scheduled tasks.",
+        action: "It is retried automatically; if it keeps happening, check the Magic Context log for the stage that stopped and run `npx @cortexkit/magic-context doctor`.",
+    },
     dream_task_needs_tool_loop: {
         code: "MC-D08",
         sentence: "Some memory maintenance tasks need a tool loop this host does not provide.",

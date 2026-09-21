@@ -11,6 +11,10 @@ import {
     stripRemovedAgentConfig,
 } from "@magic-context/core/config/removed-agent-config";
 import { substituteConfigVariables } from "@magic-context/core/config/variable";
+import {
+    formatDreamerTickFailure,
+    getDreamerTickFailure,
+} from "@magic-context/core/features/magic-context/dreamer/tick-failure";
 import type { LocalEmbeddingRuntime } from "@magic-context/core/features/magic-context/memory/embedding-local";
 import {
     type EmbeddingProbeOutcome,
@@ -1558,6 +1562,9 @@ export async function runDoctor(
                 for (const stall of listShadowBackfillStalls(db)) {
                     warn(formatShadowBackfillStall(stall));
                 }
+                const tickFailure = getDreamerTickFailure(db);
+                if (tickFailure) warn(formatDreamerTickFailure(tickFailure));
+                else pass("Background maintenance completed its last pass");
             } finally {
                 db.close();
             }

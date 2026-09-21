@@ -27,6 +27,11 @@ import type {
 import { leaseKeyFor } from "../features/magic-context/dreamer/task-registry";
 import { runDueTasksForProject } from "../features/magic-context/dreamer/task-scheduler";
 import {
+    clearDreamerTickFailure,
+    type DreamerTickFailure,
+    recordDreamerTickFailure,
+} from "../features/magic-context/dreamer/tick-failure";
+import {
     acquireGitSweepLease,
     embedUnembeddedCommits,
     GIT_SWEEP_LEASE_RENEWAL_MS,
@@ -291,8 +296,30 @@ export async function startDreamScheduleTimer(
 }
 
 /**
+ * The stages one tick runs, reached through this object so a test can replace a
+ * stage with a throwing one and prove that its failure stays local.
+ */
+const tickStages = {
+    runMessageHistoryMaintenance,
+    runProjectMaintenance,
+};
+
+/** Swap tick stages for a test; the returned function puts the real ones back. */
+export function _setDreamTimerStagesForTests(overrides: Partial<typeof tickStages>): () => void {
+    const original = { ...tickStages };
+    Object.assign(tickStages, overrides);
+    return () => {
+        Object.assign(tickStages, original);
+    };
+}
+
+/**
  * Single tick body. Runs global message-history maintenance once, then
  * iterates every registered project for its per-directory work.
+ *
+ * Every stage is contained on its own. One stage throwing used to end the whole
+ * tick, which meant a failure in the global maintenance stage silently stopped
+ * task scheduling for every project, on every tick, forever (issue 496).
  */
 function runTick(origin: "startup" | "interval"): void {
     log(`[dreamer] timer tick (${origin}) — projects=${registeredProjects.size}`);
@@ -300,18 +327,40 @@ function runTick(origin: "startup" | "interval"): void {
         try {
             const db = openTimerDatabaseOrNull("maintenance tick");
             if (!db) return;
-            await runMessageHistoryMaintenance(db);
+            // The first stage to fail is the one worth showing: later stages
+            // may well be failing because of it, and one clear cause beats a
+            // list the user has to triage.
+            let failure: DreamerTickFailure | null = null;
+            const noteFailure = (stage: string, error: unknown): void => {
+                failure ??= { at: Date.now(), stage, message: getErrorMessage(error) };
+            };
+
+            try {
+                await tickStages.runMessageHistoryMaintenance(db);
+            } catch (error) {
+                log("[magic-context] timer-triggered message-history maintenance failed:", error);
+                noteFailure("message-history maintenance", error);
+            }
             // Per-project work — git commit indexing, dream schedule check,
             // dream queue processing. We iterate all registered projects so
             // Desktop's "open all projects at once" workflow indexes every one,
             // not just whichever project happened to register the timer first.
             for (const reg of registeredProjects.values()) {
-                if (origin === "startup") {
-                    scheduleInitialProjectRun(reg, db);
-                } else {
-                    await runProjectMaintenance(reg, origin, db);
+                try {
+                    if (origin === "startup") {
+                        scheduleInitialProjectRun(reg, db);
+                    } else {
+                        await tickStages.runProjectMaintenance(reg, origin, db);
+                    }
+                } catch (error) {
+                    log(
+                        `[magic-context] timer-triggered maintenance failed for ${reg.projectIdentity}:`,
+                        error,
+                    );
+                    noteFailure(`project ${reg.projectIdentity}`, error);
                 }
             }
+            persistTickOutcome(db, failure);
             if (origin === "startup") return;
             // Refresh planner stats once per tick (after per-project work).
             // Self-gating: a no-op unless a table's row count drifted enough to
@@ -321,6 +370,20 @@ function runTick(origin: "startup" | "interval"): void {
             log("[magic-context] timer-triggered maintenance check failed:", error);
         }
     })();
+}
+
+/**
+ * Save what this tick did, so `/ctx-status` and `doctor` can tell a dreamer
+ * with nothing to do apart from a dreamer that never got to its work. Storage
+ * trouble here must not itself end the tick.
+ */
+function persistTickOutcome(db: Database, failure: DreamerTickFailure | null): void {
+    try {
+        if (failure) recordDreamerTickFailure(db, failure);
+        else clearDreamerTickFailure(db);
+    } catch (error) {
+        log("[dreamer] could not persist the outcome of this tick:", error);
+    }
 }
 
 async function runMessageHistoryMaintenance(db: Database): Promise<void> {

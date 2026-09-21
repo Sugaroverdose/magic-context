@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { recordDreamerTickFailure } from "@magic-context/core/features/magic-context/dreamer/tick-failure";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import { setSessionWorkMetrics } from "@magic-context/core/features/magic-context/storage-meta-persisted";
@@ -798,6 +799,70 @@ Warning: History compression could not finish this turn. It will retry automatic
 			]) {
 				expect(text).not.toContain(gone);
 			}
+		} finally {
+			closeQuietly(db);
+		}
+	});
+});
+
+/**
+ * On Pi and OMP the background maintenance pass used to die at its first stage
+ * on every tick, and nothing in this overlay said so — an old Dreamer timestamp
+ * reads exactly like a quiet project (issue 496).
+ */
+describe("Pi status overlay: blocked background maintenance", () => {
+	function detailFor(db: ReturnType<typeof createTestDb>, sessionId: string) {
+		insertTag(db, sessionId, "m1", "tool", 4_000, 1);
+		return buildPiStatusDetail(
+			{ getAllTools: () => [] } as never,
+			{
+				...fakeContext(sessionId),
+				getContextUsage: () => ({
+					tokens: 40_000,
+					percent: 20,
+					contextWindow: 200_000,
+				}),
+				getSystemPrompt: () => "system prompt",
+			} as never,
+			{ db, projectIdentity: resolveProjectIdentity(process.cwd()) },
+			sessionId,
+		);
+	}
+
+	it("draws the stage that stopped the last pass, with its code", () => {
+		const db = createTestDb();
+		try {
+			recordDreamerTickFailure(db, {
+				at: Date.now() - 3 * 3_600_000,
+				stage: "message-history maintenance",
+				message: "OpenCode orphan sweep cannot read a omp host store",
+			});
+			const detail = detailFor(db, "ses-status-dreamer-blocked");
+
+			expect(detail.dreamer.tickFailure?.stage).toBe(
+				"message-history maintenance",
+			);
+			const text = renderPiStatusOverlay(detail, plainTheme(), 74).join("\n");
+			expect(text).toContain("Dreamer blocked");
+			expect(text).toContain("MC-D09");
+			// The chat-text surface carries the same code for a Pi host with no
+			// interactive overlay to draw on.
+			expect(formatPiStatusSummary(detail)).toContain("MC-D09");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("says nothing about a blocked dreamer after a pass that completed", () => {
+		const db = createTestDb();
+		try {
+			const detail = detailFor(db, "ses-status-dreamer-healthy");
+
+			expect(detail.dreamer.tickFailure).toBeNull();
+			const text = renderPiStatusOverlay(detail, plainTheme(), 74).join("\n");
+			expect(text).not.toContain("Dreamer blocked");
+			expect(text).not.toContain("MC-D09");
+			expect(formatPiStatusSummary(detail)).not.toContain("MC-D09");
 		} finally {
 			closeQuietly(db);
 		}
