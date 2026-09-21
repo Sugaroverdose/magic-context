@@ -5512,11 +5512,17 @@ impl McHandler {
             _ => None,
         };
         if let Some(parked) = parked_host_run {
-            // Still out with a claimant and still inside its deadline: there is
-            // nothing to do but leave the run where it is. The session keeps its
-            // single-flight slot, which is exactly what it would be doing if this
-            // process had never restarted.
+            // Still out with a claimant and still inside its deadline: the session
+            // keeps its single-flight slot, which is exactly what it would be doing
+            // if this process had never restarted, and there is no report to
+            // validate, so none of the chunk work below is needed.
+            //
+            // Putting the run back on offer IS needed, and is the whole of what this
+            // branch does. A restart can take a row out of the queue while leaving
+            // the run itself alive; without this call the shortcut would skip the
+            // re-publication and the run would sit parked until its deadline.
             if parked.report.is_none() && parked.deadline_ms > now {
+                historian::reoffer_parked_historian_run(&store, &parked.run_id, now);
                 drop(guard);
                 return Some("reattaching");
             }
@@ -18260,6 +18266,7 @@ mod tests {
     // read as one argument instead of being scattered through this module.
     mod gate_a1_b0;
     mod gate_a1_b0_baseline_probe;
+    mod gate_a2;
 
     #[test]
     fn usage_numbers_rejects_implausible_context_limit() {

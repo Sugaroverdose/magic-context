@@ -2300,37 +2300,7 @@ pub fn adopt_historian_run_on_host(
             return Ok(HostRunAdoption::Released { run_id });
         }
         None => {
-            // Take the run out of the queue and then put it straight back, in that
-            // order.
-            //
-            // The park is what stops the run being offered while this process is
-            // re-establishing the state behind it, and it is the same call the
-            // release path makes, so the phase the re-publication has to handle is
-            // written by a writer rather than assumed. It deliberately skips a row a
-            // claimant is still holding: that claimant is heartbeating against this
-            // row and paying for the completion right now, so taking its claim away
-            // would throw away a fold already in flight.
-            //
-            // Re-offering the SAME row is what keeps the chunk this run already owns
-            // — minting a second run for the same range would pay to assemble it
-            // again and leave two runs racing for one publish slot.
-            let parked_here = request
-                .store
-                .park_unclaimed_historian_run(&run_id, request.now_ms)
-                .unwrap_or(false);
-            let republished = request
-                .store
-                .republish_parked_historian_run(&run_id, request.now_ms)
-                .unwrap_or(false);
-            debug_assert!(
-                !parked_here || republished,
-                "a row this pass parked must be the row this pass puts back"
-            );
-            if republished {
-                eprintln!(
-                    "mc-module: historian run {run_id} put back on offer for a claimant after a restart"
-                );
-            }
+            let republished = reoffer_parked_historian_run(request.store, &run_id, request.now_ms);
             return Ok(HostRunAdoption::StillOut {
                 run_id,
                 deadline_ms: parked.deadline_ms,
@@ -2397,6 +2367,42 @@ pub fn adopt_historian_run_on_host(
         producer_run_id: run_id,
         model: "host".to_string(),
     })))
+}
+
+/// Put a run a restart took out of the queue back on offer.
+///
+/// Takes the row out and then puts it straight back, in that order. The park is
+/// what stops the run being offered while this process re-establishes the state
+/// behind it, and it is the same call the release path makes, so the phase the
+/// re-publication has to handle is written by a writer rather than assumed. It
+/// deliberately skips a row a claimant is still holding: that claimant is
+/// heartbeating against this row and paying for the completion right now, so
+/// taking its claim away would throw away a fold already in flight.
+///
+/// Re-offering the SAME row is what keeps the chunk this run already owns —
+/// minting a second run for the same range would pay to assemble it again and
+/// leave two runs racing for one publish slot.
+///
+/// It needs nothing but the run id, which is why the restart path can call it on
+/// the branch that returns before assembling a chunk. Returns whether the row is
+/// on offer because of this call.
+pub fn reoffer_parked_historian_run(store: &McStore, run_id: &str, now_ms: i64) -> bool {
+    let parked_here = store
+        .park_unclaimed_historian_run(run_id, now_ms)
+        .unwrap_or(false);
+    let republished = store
+        .republish_parked_historian_run(run_id, now_ms)
+        .unwrap_or(false);
+    debug_assert!(
+        !parked_here || republished,
+        "a row this pass parked must be the row this pass puts back"
+    );
+    if republished {
+        eprintln!(
+            "mc-module: historian run {run_id} put back on offer for a claimant after a restart"
+        );
+    }
+    republished
 }
 
 pub async fn reattach_historian_producer<P>(
