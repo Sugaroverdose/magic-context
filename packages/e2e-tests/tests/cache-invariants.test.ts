@@ -41,6 +41,7 @@ import {
     mainAgentRequests,
 } from "../src/cache-analysis";
 import { TestHarness } from "../src/harness";
+import { findHistorianOrdinalRange } from '../src/mock-historian';
 import {
     createScenarioHarness,
     forEachHost,
@@ -71,38 +72,11 @@ function isHistorianRequest(body: Record<string, unknown>): boolean {
     return false;
 }
 
-/**
- * Parse the [N] ordinal range from a historian prompt's <new_messages> block.
- *
- * Ordinals are matched ONLY in the exact line-anchored form the historian
- * prompt emits — `[N] U:` / `[N] A:` at the start of a line. Matching any
- * bracketed digit in the prose would pick up stray `[0]`-shaped text (e.g. a
- * prompt that literally mentions `m[0]`), producing a 0-N compartment range
- * that fails the historian's "range maps to raw session lines 1-N" validation.
- * This bit a real test run — the `[N] U:` anchor is the robust contract.
- */
-function findOrdinalRange(body: Record<string, unknown>): { start: number; end: number } | null {
-    const messages = (body.messages as Array<{ content: unknown }> | undefined) ?? [];
-    for (const m of messages) {
-        const blocks = Array.isArray(m.content) ? m.content : [];
-        for (const block of blocks) {
-            const text = (block as { text?: string }).text;
-            if (!text || !text.includes("<new_messages>")) continue;
-            const start = text.indexOf("<new_messages>");
-            const end = text.indexOf("</new_messages>");
-            const scope = end > start ? text.slice(start, end) : text.slice(start);
-            const nums = [...scope.matchAll(/^\[(\d+)\] [UA]:/gm)].map((mm) => Number(mm[1]));
-            if (nums.length > 0) return { start: Math.min(...nums), end: Math.max(...nums) };
-        }
-    }
-    return null;
-}
-
 /** Route historian requests to a valid single-compartment response covering the chunk. */
 function installHistorianMatcher(h: ScenarioHarness): void {
     h.mock.addMatcher((body) => {
         if (!isHistorianRequest(body)) return null;
-        const range = findOrdinalRange(body);
+        const range = findHistorianOrdinalRange(body);
         const usage = {
             input_tokens: 500,
             output_tokens: 200,

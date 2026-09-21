@@ -10,7 +10,7 @@ import {
     isPiFamily,
     type ScenarioHarness,
 } from "../src/scenario-hosts";
-import { buildMockHistorianPayload } from "../src/mock-historian";
+import { buildMockHistorianPayload, findHistorianOrdinalRange } from "../src/mock-historian";
 
 /**
  * Plan v6: deferred compaction marker — publish-time persistence and
@@ -69,28 +69,6 @@ function isHistorianRequest(body: Record<string, unknown>): boolean {
     return false;
 }
 
-function findOrdinalRange(
-    body: Record<string, unknown>,
-): { start: number; end: number } | null {
-    const messages = body.messages as
-        | Array<{ role: string; content: unknown }>
-        | undefined;
-    if (!messages) return null;
-    for (const m of messages) {
-        const contentArr = Array.isArray(m.content) ? m.content : [];
-        for (const block of contentArr) {
-            const text = (block as { text?: string }).text;
-            if (!text || !text.includes("<new_messages>")) continue;
-            const matches = text.matchAll(/\[(\d+)\]/g);
-            const nums: number[] = [];
-            for (const mm of matches) nums.push(Number(mm[1]));
-            if (nums.length === 0) continue;
-            return { start: Math.min(...nums), end: Math.max(...nums) };
-        }
-    }
-    return null;
-}
-
 interface PendingRow {
     pending_compaction_marker_state: string | null;
     compaction_marker_state: string | null;
@@ -130,7 +108,7 @@ forEachHost(import.meta.url, "deferred compaction marker (plan v6)", (host) => {
             // chunk range we receive.
             h.mock.addMatcher((body) => {
                 if (!isHistorianRequest(body)) return null;
-                const range = findOrdinalRange(body);
+                const range = findHistorianOrdinalRange(body);
                 if (!range) {
                     return {
                         text: "<output><compartments></compartments><facts></facts><unprocessed_from>1</unprocessed_from></output>",
