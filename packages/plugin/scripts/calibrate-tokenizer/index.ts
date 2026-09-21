@@ -25,6 +25,7 @@ import { buildProseProbe } from "./prose";
 import { crossCheck } from "./cross-check";
 import { measureAnthropic } from "./providers/anthropic";
 import { type CountAdapter } from "./providers/counting";
+import { measureGemini } from "./providers/gemini";
 import { measureXai } from "./providers/xai";
 import { measureZai } from "./providers/zai";
 import { measureKimi } from "./providers/kimi";
@@ -39,6 +40,7 @@ interface AuthFile {
 }
 
 const FREE_ADAPTERS: Record<string, { measure: CountAdapter; method: string; env: string; file: string }> = {
+    google: { measure: measureGemini, method: "countTokens", env: "GEMINI_API_KEY", file: "gemini.key" },
     xai: { measure: measureXai, method: "tokenize-text", env: "XAI_API_KEY", file: "xai.key" },
     zai: { measure: measureZai, method: "paas/v4/tokenizer", env: "ZAI_API_KEY", file: "zai.key" },
     moonshot: { measure: measureKimi, method: "tokenizers/estimate-token-count", env: "MOONSHOT_API_KEY", file: "kimi.key" },

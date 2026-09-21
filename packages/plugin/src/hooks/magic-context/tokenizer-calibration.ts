@@ -36,6 +36,26 @@ interface CalibrationEntry extends Omit<ModelCalibration, "proseRatio"> {
  * to 1.0/1.0 which is safer than guessing.
  */
 const CALIBRATION_TABLE: CalibrationEntry[] = [
+    // Measured on the public Gemini API. Antigravity OAuth model aliases are
+    // excluded because their tokenization has not been measured.
+    {
+        prefix: "google/gemini-3.8-flash",
+        systemRatio: 0.961167,
+        toolsRatio: 0.967504,
+        proseRatio: 1.006909,
+    },
+    {
+        prefix: "google/gemini-3.7-flash",
+        systemRatio: 0.961167,
+        toolsRatio: 0.967504,
+        proseRatio: 1.006909,
+    },
+    {
+        prefix: "google/gemini-3.1-pro-preview",
+        systemRatio: 0.961167,
+        toolsRatio: 0.967504,
+        proseRatio: 1.006909,
+    },
     // Free count_tokens measurements, 2026-09-21; routed aliases mirror the same
     // upstream tokenizer, following the Opus 4.7/4.8 convention below. Fable 5.2
     // remains neutral because it has not been measured; only 5.1 snapshots match.

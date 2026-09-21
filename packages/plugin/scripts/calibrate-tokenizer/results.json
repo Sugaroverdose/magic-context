@@ -574,5 +574,169 @@
     "error": null,
     "durationMs": 4315,
     "caveat": "Raw SYSTEM text and JSON-serialized chat function tools, without hidden chat/tool prompt framing. Residual method error versus billed chat tokens is unmeasured; local TOOLS denominator retains the canonical fixture serialization."
+  },
+  {
+    "method": "countTokens",
+    "proseRatio": 1.0069089131497475,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": 61794
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 35585,
+        "api": 34757,
+        "ratio": 0.9767317690037938
+      },
+      "history": {
+        "local_raw": 23430,
+        "api": 24463,
+        "ratio": 1.0440887750746906
+      },
+      "memory": {
+        "local_raw": 2351,
+        "api": 2574,
+        "ratio": 1.094853253934496
+      }
+    },
+    "label": "google/gemini-3.8-flash",
+    "provider": "google",
+    "modelId": "gemini-3.8-flash",
+    "tokenizerKey": null,
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": null,
+      "api": 15717,
+      "ratio_raw": 0.961,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": null,
+      "api": 20722,
+      "ratio_raw": 0.968,
+      "ratio_sdk": null
+    },
+    "error": null,
+    "durationMs": 1868
+  },
+  {
+    "method": "countTokens",
+    "proseRatio": 1.0069089131497475,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": 61794
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 35585,
+        "api": 34757,
+        "ratio": 0.9767317690037938
+      },
+      "history": {
+        "local_raw": 23430,
+        "api": 24463,
+        "ratio": 1.0440887750746906
+      },
+      "memory": {
+        "local_raw": 2351,
+        "api": 2574,
+        "ratio": 1.094853253934496
+      }
+    },
+    "label": "google/gemini-3.7-flash",
+    "provider": "google",
+    "modelId": "gemini-3.7-flash",
+    "tokenizerKey": null,
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": null,
+      "api": 15717,
+      "ratio_raw": 0.961,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": null,
+      "api": 20722,
+      "ratio_raw": 0.968,
+      "ratio_sdk": null
+    },
+    "error": null,
+    "durationMs": 1380
+  },
+  {
+    "method": "countTokens",
+    "proseRatio": 1.0069089131497475,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": 61794
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 35585,
+        "api": 34757,
+        "ratio": 0.9767317690037938
+      },
+      "history": {
+        "local_raw": 23430,
+        "api": 24463,
+        "ratio": 1.0440887750746906
+      },
+      "memory": {
+        "local_raw": 2351,
+        "api": 2574,
+        "ratio": 1.094853253934496
+      }
+    },
+    "label": "google/gemini-3.1-pro-preview",
+    "provider": "google",
+    "modelId": "gemini-3.1-pro-preview",
+    "tokenizerKey": null,
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": null,
+      "api": 15717,
+      "ratio_raw": 0.961,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": null,
+      "api": 20722,
+      "ratio_raw": 0.968,
+      "ratio_sdk": null
+    },
+    "error": null,
+    "durationMs": 1523
+  },
+  {
+    "method": "countTokens",
+    "proseRatio": null,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": null
+    },
+    "proseSections": {},
+    "label": "google/gemini-2.5-pro",
+    "provider": "google",
+    "modelId": "gemini-2.5-pro",
+    "tokenizerKey": null,
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": null,
+      "api": null,
+      "ratio_raw": null,
+      "ratio_sdk": null
+    },
+    "error": "/v1beta/models/gemini-2.5-pro:countTokens HTTP 404 (model or endpoint unavailable)",
+    "durationMs": 130
   }
 ]

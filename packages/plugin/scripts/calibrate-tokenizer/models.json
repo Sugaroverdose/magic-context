@@ -1,6 +1,10 @@
 {
     "_comment": "Models to calibrate. Provider matches auth.json keys. modelId is the provider-native model identifier. tokenizerKey is the matching ai-tokenizer models.json entry (or null to fall back to base claude/o200k_base/etc encoding).",
     "tests": [
+        { "label": "google/gemini-3.8-flash", "provider": "google", "modelId": "gemini-3.8-flash", "tokenizerKey": null },
+        { "label": "google/gemini-3.7-flash", "provider": "google", "modelId": "gemini-3.7-flash", "tokenizerKey": null },
+        { "label": "google/gemini-3.1-pro-preview", "provider": "google", "modelId": "gemini-3.1-pro-preview", "tokenizerKey": null },
+        { "label": "google/gemini-2.5-pro", "provider": "google", "modelId": "gemini-2.5-pro", "tokenizerKey": null },
         { "label": "zai/glm-5", "provider": "zai", "modelId": "glm-5", "tokenizerKey": "zai/glm-4.5" },
         { "label": "zai/glm-5.1", "provider": "zai", "modelId": "glm-5.1", "tokenizerKey": "zai/glm-4.5" },
         { "label": "zai/glm-4.7", "provider": "zai", "modelId": "glm-4.7", "tokenizerKey": "zai/glm-4.5" },

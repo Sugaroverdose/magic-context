@@ -73,3 +73,16 @@ Reference: https://docs.x.ai/developers/rest-api-reference/inference/other#token
 | grok-code-fast-1 | tokenize-text | 0.817751 | 0.880494 | 0.880137 | 0.800661 | 1.001109 | 0.950223 |
 
 2026-09-21 cross-check deltas: Grok 4 SYSTEM -0.274303%, TOOLS +0.056132%; Code Fast SYSTEM -0.274303%, TOOLS -1.068095%. Both pass 5%; ratios below one preserve the over-count correction sign. Only measured native-id prefixes gain entries; broader existing fallback entries remain unchanged. Raw tokenization does not measure the provider's hidden chat/tool prompt template; its residual method error versus billed chat tokens is unmeasured, not zero. Passing the historical cross-check bounds fixture disagreement, not arbitrary chat overhead.
+
+## Gemini
+
+References: https://ai.google.dev/gemini-api/docs/generate-content/tokens and https://ai.google.dev/api/tokens. Uses GEMINI_API_KEY or ~/.config/gemini.key in x-goog-api-key; never antigravity OAuth. Calls `/v1beta/models/<id>:countTokens` with generateContentRequest containing systemInstruction, contents, and functionDeclarations with parametersJsonSchema. Baseline-subtracted. Local estimates use the harness's Claude encoding fallback (tokenizerKey null). Missing keys produce a skip rather than trying OAuth.
+
+| Model | Method | SYSTEM | TOOLS | PROSE | Docs | History | Memory |
+|---|---|---:|---:|---:|---:|---:|---:|
+| google/gemini-3.8-flash | countTokens | 0.961167 | 0.967504 | 1.006909 | 0.976732 | 1.044089 | 1.094853 |
+| google/gemini-3.7-flash | countTokens | 0.961167 | 0.967504 | 1.006909 | 0.976732 | 1.044089 | 1.094853 |
+| google/gemini-3.1-pro-preview | countTokens | 0.961167 | 0.967504 | 1.006909 | 0.976732 | 1.044089 | 1.094853 |
+| google/gemini-2.5-pro | countTokens | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+
+2026-09-21: 2.5-pro returned HTTP 404 on the baseline; no entry added. The existing table had no google/antigravity pairing convention, so no antigravity aliases were inferred. No prior Gemini table values exist to cross-check.
