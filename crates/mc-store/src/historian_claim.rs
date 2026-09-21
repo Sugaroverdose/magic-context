@@ -944,6 +944,36 @@ impl McStore {
         Ok(parked > 0)
     }
 
+    /// Stop offering a run that nobody is actively working on, for as long as the
+    /// process that owns it is re-establishing the state behind it.
+    ///
+    /// This is the restart path's park, narrowed to the rows it is safe to take a
+    /// claim away from. A row a claimant is still holding is left exactly as it is:
+    /// that claimant is heartbeating against this row and paying a provider for the
+    /// completion right now, and clearing its token would make its report
+    /// unpublishable for nothing. A row carrying a report is left alone for the
+    /// same reason — the answer is already here.
+    ///
+    /// Returns whether a row moved, so the caller can say which of the two it did.
+    pub fn park_unclaimed_historian_run(
+        &self,
+        run_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, McStoreError> {
+        let parked = self.inner.with_conn_fenced(|tx| {
+            tx.execute(
+                "UPDATE mc_historian_pending_run
+                    SET phase = ?2, claimant_instance_id = NULL, coordinator_token = NULL,
+                        claim_deadline_ms = NULL, updated_at_ms = ?3
+                  WHERE run_id = ?1
+                    AND report_kind IS NULL
+                    AND (phase <> ?4 OR claim_deadline_ms IS NULL OR claim_deadline_ms <= ?3)",
+                params![run_id, PHASE_PARKED, now_ms, PHASE_CLAIMED],
+            )
+        })?;
+        Ok(parked > 0)
+    }
+
     /// Return every run whose claimant stopped reporting to the queue, and park
     /// its session so the next claimant continues the same run. Parked rows whose
     /// run is past its own deadline are deleted in the same pass.

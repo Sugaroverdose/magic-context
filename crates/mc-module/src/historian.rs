@@ -2300,15 +2300,32 @@ pub fn adopt_historian_run_on_host(
             return Ok(HostRunAdoption::Released { run_id });
         }
         None => {
-            // Put the run back on offer rather than assume it is still there. A
-            // restart can take a row out of the queue while leaving the run itself
-            // alive, and re-offering the SAME row is what keeps the chunk this run
-            // already owns — minting a second run for the same range would pay to
-            // assemble it again and leave two runs racing for one publish slot.
+            // Take the run out of the queue and then put it straight back, in that
+            // order.
+            //
+            // The park is what stops the run being offered while this process is
+            // re-establishing the state behind it, and it is the same call the
+            // release path makes, so the phase the re-publication has to handle is
+            // written by a writer rather than assumed. It deliberately skips a row a
+            // claimant is still holding: that claimant is heartbeating against this
+            // row and paying for the completion right now, so taking its claim away
+            // would throw away a fold already in flight.
+            //
+            // Re-offering the SAME row is what keeps the chunk this run already owns
+            // — minting a second run for the same range would pay to assemble it
+            // again and leave two runs racing for one publish slot.
+            let parked_here = request
+                .store
+                .park_unclaimed_historian_run(&run_id, request.now_ms)
+                .unwrap_or(false);
             let republished = request
                 .store
                 .republish_parked_historian_run(&run_id, request.now_ms)
                 .unwrap_or(false);
+            debug_assert!(
+                !parked_here || republished,
+                "a row this pass parked must be the row this pass puts back"
+            );
             if republished {
                 eprintln!(
                     "mc-module: historian run {run_id} put back on offer for a claimant after a restart"
