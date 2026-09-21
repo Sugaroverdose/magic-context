@@ -447,6 +447,12 @@ export function applyRustModeDeferredCompactionMarker(args: {
     sessionId: string;
     boundary: RustMaterializedCompactionBoundary;
     sessionDirectory?: string;
+    /**
+     * How this host applies the boundary. The default writes a compaction row into
+     * OpenCode 1's own store; a host with no such row supplies a function that records
+     * the boundary instead.
+     */
+    applyDeferred?: CompactionMarkerStrategy["applyDeferred"];
 }): void {
     const { boundary } = args;
     if (
@@ -486,7 +492,7 @@ export function applyRustModeDeferredCompactionMarker(args: {
 
     const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
     if (!pending || pending.ordinal > boundary.ordinal) return;
-    const outcome = applyDeferredCompactionMarker(
+    const outcome = (args.applyDeferred ?? applyDeferredCompactionMarker)(
         args.db,
         args.sessionId,
         pending,
@@ -525,6 +531,7 @@ export function runRustModePostprocess(args: {
     projectPath?: string;
     sessionDirectory?: string;
     materializedBoundary?: RustMaterializedCompactionBoundary;
+    compactionMarkerStrategy?: CompactionMarkerStrategy;
     fullFeatureMode: boolean;
     compactionOff?: boolean;
     resolvedProviderID?: string;
@@ -555,13 +562,16 @@ export function runRustModePostprocess(args: {
     }
     if (args.materializedBoundary) {
         applyRustModeDeferredCompactionMarker({
+            ...(args.compactionMarkerStrategy
+                ? { applyDeferred: args.compactionMarkerStrategy.applyDeferred }
+                : {}),
             db: args.db,
             sessionId: args.sessionId,
             boundary: args.materializedBoundary,
             sessionDirectory: args.sessionDirectory,
         });
     }
-    reconcileMarkerRepresentation(
+    (args.compactionMarkerStrategy?.reconcile ?? reconcileMarkerRepresentation)(
         args.messages,
         getPersistedCompactionMarkerState(args.db, args.sessionId),
         {
