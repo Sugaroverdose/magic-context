@@ -44,9 +44,38 @@ export interface V2AgentDomain {
     transform(callback: (editor: V2AgentEditor) => void): Promise<unknown>;
 }
 
+/** What the host hands a registered command when a client invokes it. */
+export interface V2CommandInvocation {
+    sessionID: string;
+    /** `text` is the argument remainder the client typed after the command name. */
+    prompt: { text: string };
+    delivery: string;
+}
+
+export interface V2CommandEditor {
+    add(definition: {
+        name: string;
+        description?: string;
+        execute: (input: V2CommandInvocation) => Promise<void>;
+    }): void;
+}
+
+/**
+ * Server-side command registry. The host keeps the added definitions in a
+ * location-scoped map that `GET /api/command` lists and
+ * `POST /api/session/:sessionID/command` executes, so a command registered here
+ * is reachable from every client, not only the terminal UI.
+ */
+export interface V2CommandDomain {
+    transform(callback: (editor: V2CommandEditor) => void): Promise<unknown>;
+    reload(): Promise<void>;
+}
+
 export interface V2Context {
     location: { directory: string };
     agent: V2AgentDomain;
+    /** Absent on hosts predating the command domain; registration is then skipped. */
+    command?: V2CommandDomain;
     event: { subscribe(options: { signal: AbortSignal }): AsyncIterable<unknown> };
     model: {
         list():

@@ -30,7 +30,7 @@ import {
     toModelEntry,
 } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
-import { dreamFailureCode } from "../../../shared/user-facing-codes";
+import { dreamFailureCode, userFacingFailureCode } from "../../../shared/user-facing-codes";
 import { getCompartmentEvents } from "../compartment-events";
 import {
     getMemoriesByProject,
@@ -330,6 +330,21 @@ function requireDreamClient(client: PluginContext["client"] | undefined): Plugin
 }
 
 /**
+ * Pick the completion transport for a single-shot task: the hidden carrier when
+ * the host supplies one, otherwise the child-session client. Returning the
+ * fields as an object keeps the two transports mutually exclusive at the call
+ * site, so a carrier host never also opens a child session.
+ */
+function requireDreamTransport(deps: DreamTaskExecutorDeps): {
+    client?: PluginContext["client"];
+    hiddenCompletionExecutor?: HiddenCompletionExecutor;
+} {
+    if (deps.hiddenCompletionExecutor)
+        return { hiddenCompletionExecutor: deps.hiddenCompletionExecutor };
+    return { client: requireDreamClient(deps.client) };
+}
+
+/**
  * Build the TaskExecutor the shared task scheduler drives. The scheduler owns the keyed
  * domain lease + holderId and hands them in; this executor runs one task's actual
  * work (LLM loop / specialized runner), renews the lease during the run, aborts
@@ -524,9 +539,15 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 deps.hiddenCompletionExecutor?.capabilities.tools === false &&
                 DREAM_TASK_CAPABILITIES[config.task].requiresTools
             ) {
+                // Name the task and what its tool loop is for. A caller that only
+                // logs the message still records which specific task was refused
+                // and why, instead of one anonymous capability error.
+                const purpose = DREAM_TASK_CAPABILITIES[config.task].toolLoopPurpose;
                 throw new HiddenCompletionRefusal(
                     "hidden_tools_unsupported",
-                    `${config.task} requires tools; opencode2 hidden completions have no tool loop`,
+                    `${config.task} is unavailable on this host (${userFacingFailureCode(
+                        "dream_task_needs_tool_loop",
+                    )})${purpose ? `: it ${purpose}` : ""}`,
                     true,
                 );
             }
@@ -571,9 +592,11 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             }
 
             if (config.task === "review-user-memories") {
+                // Single-shot task: the reviewer answers with one JSON verdict, so a
+                // completion carrier serves it as well as a child-session client.
                 const result = await reviewUserMemories({
                     db,
-                    client: requireDreamClient(deps.client),
+                    ...requireDreamTransport(deps),
                     parentSessionId: parent,
                     sessionDirectory: deps.sessionDirectory,
                     holderId,
@@ -752,9 +775,11 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             }
 
             if (config.task === "promote-primers") {
+                // Host-only task: clustering and the promotion writes happen here,
+                // with no model call, so it must not demand a completion transport.
                 const result = await promotePrimers({
                     db,
-                    client: requireDreamClient(deps.client),
+                    ...(deps.client ? { client: deps.client } : {}),
                     projectIdentity,
                     sessionDirectory: deps.sessionDirectory,
                     holderId,
@@ -796,9 +821,11 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             }
 
             if (config.task === "evaluate-smart-notes") {
+                // Single-shot task: the compiler and the read-only confirmation are
+                // both no-tool prompts; the compiled check runs in the local sandbox.
                 const result = await evaluateSmartNotes({
                     db,
-                    client: requireDreamClient(deps.client),
+                    ...requireDreamTransport(deps),
                     projectIdentity,
                     parentSessionId: parent,
                     sessionDirectory: deps.sessionDirectory,

@@ -22,6 +22,7 @@ import {
     CANONICAL_DREAM_TASKS,
     type DreamTaskBacklogMap,
     type DreamTaskFailureState,
+    toolLoopDreamTasks,
 } from "../features/magic-context/dreamer/task-registry";
 import { getLocalEmbeddingNativeMemoryStats } from "../features/magic-context/memory/embedding-local";
 import {
@@ -1402,7 +1403,7 @@ export function registerRpcHandlers(
                 error: "Rust module status unavailable; canonical session state was not read",
             };
         }
-        return buildStatusDetail(
+        const detail = buildStatusDetail(
             db,
             sessionId,
             dir,
@@ -1412,7 +1413,15 @@ export function registerRpcHandlers(
             injectionBudgetTokens,
             moduleStatus,
             compactionEnabled,
-        ) as unknown as Record<string, unknown>;
+        );
+        // Name the tasks this host cannot run. Only the RPC boundary knows which
+        // completion transport the host supplies, and a user who never sees the
+        // list has no way to tell a task that is unavailable here from one that
+        // simply has no backlog.
+        if (args.hiddenCompletionExecutor?.capabilities.tools === false) {
+            detail.dreamerUnsupportedTasks = toolLoopDreamTasks();
+        }
+        return detail as unknown as Record<string, unknown>;
     });
 
     rpcServer.handle("embed-detail", async (params) => {

@@ -5,6 +5,7 @@ import { createDreamTimerModuleClient } from "../../../plugin/dream-timer-module
 import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { userFacingFailureCode } from "../../../shared/user-facing-codes";
 import { applyMirrorPage, ensureContextStoreUuid } from "../context-authority";
 import {
     getMemoriesByProject,
@@ -2343,6 +2344,12 @@ for (const task of ["curate", "map-memories", "verify", "verify-broad"] as const
         expect(rows).toHaveLength(1);
         expect(rows[0]!.tasks_failed).toBe(1);
         expect(rows[0]!.tasks_succeeded).toBe(0);
-        expect(JSON.stringify(rows[0])).toContain("requires tools");
+        // The recorded refusal must name the task and carry the stable code, so a
+        // reader of dreamer history can tell WHICH task this host cannot run and
+        // why, rather than finding one anonymous capability error.
+        const recorded = JSON.stringify(rows[0]);
+        expect(recorded).toContain(task);
+        expect(recorded).toContain("unavailable on this host");
+        expect(recorded).toContain(userFacingFailureCode("dream_task_needs_tool_loop"));
     });
 }

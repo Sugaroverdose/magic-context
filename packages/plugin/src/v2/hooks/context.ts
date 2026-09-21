@@ -2,6 +2,7 @@ import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
+import { formatUnsupportedDreamTasks } from "../../features/magic-context/dreamer/task-registry";
 import { isFailClosedBlockingError } from "../../features/magic-context/fail-closed-block";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
@@ -50,6 +51,7 @@ import {
 } from "../../shared/prompt-surface-runtime";
 import { pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
+import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
@@ -57,6 +59,7 @@ import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { removeHostSession } from "../host-service";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
+import { registerV2Commands } from "./commands";
 import { DeletedSessionTombstones } from "./deleted-session-tombstones";
 import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { startDreamTrigger } from "./dream-trigger";
@@ -880,7 +883,13 @@ export async function registerContext(context: V2Context) {
                         ? summarizeManualDream(summary)
                         : undefined,
                     unsupportedTasks.length > 0
-                        ? `Unsupported on this host (no tool loop): ${unsupportedTasks.join(", ")}`
+                        ? [
+                              renderUserFacingFailure("dream_task_needs_tool_loop", "plain"),
+                              formatUnsupportedDreamTasks(
+                                  unsupportedTasks,
+                                  userFacingFailureCode("dream_task_needs_tool_loop"),
+                              ),
+                          ].join("\n")
                         : undefined,
                 ]
                     .filter((line) => line !== undefined)
@@ -903,6 +912,15 @@ export async function registerContext(context: V2Context) {
                 );
             });
         return { ok: true };
+    });
+    // Server-side command registration: this is what makes /ctx-* reachable from
+    // `opencode run`, the HTTP API and Desktop rather than only from the terminal
+    // UI's own keymap.
+    await registerV2Commands({
+        command: context.command,
+        rpc: rpcServer,
+        directory,
+        compactionEnabled: !compactionOff,
     });
     // Start the RPC server asynchronously after plugin construction returns so
     // Bun.serve and its discovery-file write do not consume the host's deadline.

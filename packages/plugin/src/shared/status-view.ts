@@ -18,7 +18,11 @@ import { type ConfigParseFailure, formatConfigParseStatusLine } from "./config-d
 import { formatThresholdPercent } from "./format-threshold";
 import type { TailHygieneStatus } from "./rpc-types";
 import { formatTailHygiene } from "./tail-hygiene-status";
-import { renderUserFacingFailure, type UserFacingFailureKey } from "./user-facing-codes";
+import {
+    renderUserFacingFailure,
+    type UserFacingFailureKey,
+    userFacingFailureCode,
+} from "./user-facing-codes";
 import { formatWindowDerivationLine, type WindowGeometryResult } from "./window-geometry";
 
 /** Theme-independent colour role; each host maps these onto its own palette. */
@@ -123,6 +127,12 @@ export interface StatusViewSource {
     readonly compressionBudget: number | null;
     readonly compressionUsage: string | null;
     readonly lastDreamerRunAt?: number | null;
+    /**
+     * Dreamer tasks the running host cannot execute, by name. Shown so the
+     * unavailable maintenance is visible as a named list rather than as a
+     * backlog that silently never falls.
+     */
+    readonly dreamerUnsupportedTasks?: readonly string[];
     readonly memoryCount: number;
     readonly sessionNoteCount?: number;
     readonly readySmartNoteCount?: number;
@@ -336,7 +346,21 @@ function historyRows(source: StatusViewSource, now: number): StatusRow[] {
             tone: "muted",
         });
     }
+    rows.push(...dreamerUnsupportedRows(source));
     return rows;
+}
+
+/** One row naming every Dreamer task this host cannot run, or nothing when it runs them all. */
+function dreamerUnsupportedRows(source: StatusViewSource): StatusRow[] {
+    const unsupported = source.dreamerUnsupportedTasks ?? [];
+    if (unsupported.length === 0) return [];
+    return [
+        {
+            label: "Dreamer unavailable",
+            value: `${unsupported.join(", ")} (${userFacingFailureCode("dream_task_needs_tool_loop")})`,
+            tone: "warning",
+        },
+    ];
 }
 
 /**
@@ -370,6 +394,7 @@ function knowledgeSections(source: StatusViewSource, now: number): StatusSection
             tone: "muted",
         });
     }
+    rows.push(...dreamerUnsupportedRows(source));
     return [{ title: "Knowledge", labelWidth: 23, rows }];
 }
 
