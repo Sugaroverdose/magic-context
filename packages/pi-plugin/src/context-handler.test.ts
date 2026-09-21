@@ -369,8 +369,10 @@ describe("Pi scheduler decision observability", () => {
 			expect(lines).toContain(
 				"pending ops WILL APPLY — reason=deferred_publication, pendingOps=1 context=75.0%",
 			);
+			// The fall-through label names the reclaim ride that granted the pass.
+			// It used to read "scheduler_execute", which is not the permission.
 			expect(lines).toContain(
-				"heuristics WILL RUN — reason=scheduler_execute (pendingOps=1, scheduler=execute), context=75.0%, turn=n/a",
+				"heuristics WILL RUN — reason=ride=explicitFlush+publishedHistory (pendingOps=1, scheduler=execute), context=75.0%, turn=n/a",
 			);
 			expect(getPendingOps(db, sessionId)).toHaveLength(0);
 			expect(
@@ -426,6 +428,77 @@ describe("Pi scheduler decision observability", () => {
 			);
 			expect(lines).toContain(
 				"heuristics WILL NOT RUN — reason=scheduler_defer",
+			);
+		} finally {
+			restoreObserver();
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it("drops explicitFlush from the label when only published history granted the pass", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-decision-log-published-history-ride";
+		const lines: string[] = [];
+		const restoreObserver =
+			contextHandlerInternals.setPendingDecisionLogObserverForTests((line) =>
+				lines.push(line),
+			);
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				heuristics: {},
+				injection: { injectionBudgetTokens: 10_000 },
+				protectedTags: 1,
+			});
+			const handler = fake.handlers.get("context") as Parameters<
+				typeof runPass
+			>[0];
+			const coveredUser = userMessage("covered request", 1);
+			const coveredAssistant = assistantMessage("covered answer", 2);
+			await runPass(handler, sessionId, [coveredUser, coveredAssistant]);
+
+			const reclaimTag = getTagsBySession(db, sessionId).find(
+				(tag) => tag.status === "active",
+			);
+			queuePendingOp(db, sessionId, reclaimTag?.id ?? -1, "drop");
+			appendCompartments(db, sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 2,
+					startMessageId: "entry-0",
+					endMessageId: "entry-1",
+					title: "Published history",
+					content: "U: covered request\nA: covered answer",
+					p1: "U: covered request\nA: covered answer",
+				},
+			]);
+			// Same scenario as the marathon drain above minus the deferred
+			// materialization signal, so explicitFlush is false and published
+			// history is the only ride. A label that ignored the ride signals
+			// would print the same reason for both passes.
+			signalPiDeferredHistoryRefresh(sessionId);
+			lines.length = 0;
+
+			await runPass(
+				handler,
+				sessionId,
+				[
+					coveredUser,
+					coveredAssistant,
+					userMessage("keep steering", 3),
+					assistantToolCall("call-1", "ctx_reduce", {}, 4),
+				],
+				75,
+			);
+
+			expect(lines).toContain(
+				"pending ops WILL APPLY — reason=ride=publishedHistory (scheduler=execute), pendingOps=1 context=75.0%",
+			);
+			expect(lines).toContain(
+				"heuristics WILL RUN — reason=ride=publishedHistory (pendingOps=1, scheduler=execute), context=75.0%, turn=n/a",
 			);
 		} finally {
 			restoreObserver();

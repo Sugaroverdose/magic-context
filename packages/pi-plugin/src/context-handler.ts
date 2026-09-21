@@ -133,7 +133,10 @@ import {
 	applyPendingOperations,
 	RECENT_TOOL_SKELETON_WINDOW,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
-import { hasReclaimRide } from "@magic-context/core/hooks/magic-context/cache-busting-signals";
+import {
+	hasReclaimRide,
+	reclaimRideLabel,
+} from "@magic-context/core/hooks/magic-context/cache-busting-signals";
 import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import {
 	rearmChannel2AfterCoverageAdvancingHardFold,
@@ -5524,7 +5527,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					? "force_materialization"
 					: foldExecutedThisPass && args.schedulerDecision !== "execute"
 						? `m0_hard_fold (drain folded into executed m[0] bust, scheduler=${args.schedulerDecision})`
-						: `scheduler_execute (scheduler=${args.schedulerDecision})`;
+						: `${reclaimRideLabel(rideSignals)} (scheduler=${args.schedulerDecision})`;
 		const pendingOpsDepth = getPendingOpsCount(args.db, args.sessionId);
 		const pendingDecisionLog = `pending ops WILL APPLY — reason=${applyReason}, pendingOps=${pendingOpsDepth === null ? "not loaded (deferred pass)" : pendingOpsDepth} context=${args.contextUsage.percentage.toFixed(1)}%`;
 		sessionLog(args.sessionId, pendingDecisionLog);
@@ -5750,7 +5753,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			? "force_materialization"
 			: foldExecutedThisPass && args.schedulerDecision !== "execute"
 				? `m0_hard_fold (drain folded into executed m[0] bust, scheduler=${args.schedulerDecision})`
-				: `scheduler_execute (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
+				: `${reclaimRideLabel(rideSignals)} (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
 		const heuristicsDecisionLog = `heuristics WILL RUN — reason=${reason}, context=${args.contextUsage.percentage.toFixed(1)}%, turn=n/a`;
 		sessionLog(args.sessionId, heuristicsDecisionLog);
 		pendingDecisionLogObserverForTests?.(heuristicsDecisionLog);
