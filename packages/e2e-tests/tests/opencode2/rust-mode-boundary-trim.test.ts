@@ -9,6 +9,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -20,6 +21,8 @@ import {
 } from "../../src/rust-runner/hermetic-subc";
 
 const prereqs = detectRustModePrereqs();
+
+const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 
 /** One `rust pass:` diagnostic line, reduced to the fields this file reads. */
 interface PassLine {
@@ -99,9 +102,31 @@ function servedArray(request: { body: Record<string, unknown> } | undefined): un
  * is that `oc_input` — the size of the array handed to the module — stops
  * tracking the conversation once a boundary exists.
  *
- * Pressure has to come from real content: the module measures true-raw mass, not
- * the usage numbers the mock reports.
+ * The pressure recipe is the conversion lane's: a 24k context against a 1k output
+ * (a small context with the default 32k output makes 2.0.5's first-request
+ * ceiling negative and the host never reaches the plugin), and ballast built from
+ * varied prose. Repeated filler does not work — the tokenizer collapses it, so a
+ * turn that looks large on the page carries almost no true-raw mass, and the
+ * module measures true-raw mass rather than the usage the mock reports.
  */
+const BALLAST_WORDS = [
+    "boundary", "historian", "compartment", "schedule", "pressure", "tokens",
+    "window", "publish", "transform", "session", "marker", "budget", "eligible",
+    "protected", "ordinal", "snapshot", "replay", "decision", "threshold",
+];
+
+function ballast(tokens: number): string {
+    const target = tokens * 4;
+    const parts: string[] = [];
+    let length = 0;
+    for (let index = 0; length < target; index += 1) {
+        const word = BALLAST_WORDS[index % BALLAST_WORDS.length]!;
+        parts.push(index % 17 === 0 ? `${word}.` : word);
+        length += word.length + 1;
+    }
+    return parts.join(" ");
+}
+
 describe.skipIf(!prereqs.ok)("rust mode on OpenCode 2: boundary trim", () => {
     let host: Awaited<ReturnType<typeof spawnOpencode2>>;
     let subc: HermeticSubcStack;
@@ -120,17 +145,21 @@ describe.skipIf(!prereqs.ok)("rust mode on OpenCode 2: boundary trim", () => {
         });
         host = await spawnOpencode2({
             existingIsolation: fixture,
-            // A small context with the default 32k output makes 2.0.5's first-request
-            // ceiling negative and the host never reaches the plugin; the output limit
-            // has to come down with it.
-            modelContextLimit: 30_000,
-            modelOutputLimit: 1024,
+            modelContextLimit: 24_000,
+            modelOutputLimit: 1_024,
             magicContextConfig: {
                 transform_mode: "rust",
                 subc: { connection_file: subc.connectionFile },
                 memory: { enabled: false },
                 dreamer: { disable: true },
-                execute_threshold_percentage: 25,
+                // The historian model has to sit in the harness sub-block: the shared
+                // resolver reads `historian.<harness>`, and the v2 lane resolves with
+                // "opencode". A top-level `historian.model` resolves to nothing, which
+                // the module reports back as historian_no_fire=no_models — and with no
+                // historian publication there is no compartment, so no boundary.
+                historian: { opencode: { model: "openai/mock-model" } },
+                execute_threshold_percentage: 40,
+                history_budget_percentage: 0.15,
             },
         });
     }, 600_000);
@@ -140,18 +169,7 @@ describe.skipIf(!prereqs.ok)("rust mode on OpenCode 2: boundary trim", () => {
         await subc?.stop();
     });
 
-    // SKIPPED, and deliberately not weakened into something that passes: the claim
-    // it makes is real and unproven. Fourteen turns at a 30k context and a 25%
-    // execute threshold produced ten module passes with `marker_at=none` on every
-    // one, so no boundary was ever published and the trim never ran. The cause is
-    // that the turns do not serialise on this harness — fourteen prompt/wait pairs
-    // complete in about two seconds, where a single completed turn takes roughly
-    // three — so true-raw content never accumulates to the fold trigger, and the
-    // module measures true-raw mass rather than the usage the mock reports. What
-    // this needs is a way to await turn completion on the OpenCode 2 client (the
-    // OpenCode 1 rust harness has one; `session.wait` here returns early), not a
-    // looser assertion.
-    it.skip("stops handing the module the whole history once a boundary is recorded", async () => {
+    it("stops handing the module the whole history once a boundary is recorded", async () => {
         const client = OpenCode.make({
             baseUrl: host.url,
             headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
@@ -160,33 +178,72 @@ describe.skipIf(!prereqs.ok)("rust mode on OpenCode 2: boundary trim", () => {
             location: { directory: host.cwd },
             model: { providerID: "openai", id: "mock-model" },
         });
-        for (let turn = 1; turn <= 14; turn += 1) {
-            host.mock.setDefault({
-                text: `assistant ${turn}`,
-                usage: { input_tokens: 3_000 * turn, output_tokens: 20 },
-            });
-            await client.session.prompt({
-                sessionID: session.id,
-                text: `turn ${turn}: ${"ballast content ".repeat(400)}`,
-            });
+        const prompt = async (text: string) => {
+            await client.session.prompt({ sessionID: session.id, text });
             await client.session.wait(
                 { sessionID: session.id },
                 { signal: AbortSignal.timeout(120_000) },
             );
+        };
+
+        // Keep driving ordinary turns until the module publishes a boundary. Each
+        // round is one real turn; nothing is reached into, the loop just keeps
+        // asking until the durable state this assertion depends on exists.
+        host.mock.setDefault({
+            text: "pressure",
+            usage: { input_tokens: 20_000, output_tokens: 20 },
+        });
+        let boundaryAt = -1;
+        let round = 0;
+        for (; round < 24 && boundaryAt < 0; round += 1) {
+            await prompt(`turn ${round + 1}: durable signal for chunk ${round + 1}. ${ballast(3_000)}`);
+            await waitForPasses(logPath, round + 1);
+            boundaryAt = readCoverage(logPath).findIndex((entry) => entry.markerAt !== "none");
         }
-        await waitForPasses(logPath, 10);
+        // The boundary is recorded during the pass that publishes it, and the trim is
+        // read at the START of a pass, so the first pass that can be trimmed is the
+        // one after it. Drive several more so the steady state is what gets measured.
+        for (let extra = 0; extra < 6; extra += 1) {
+            await prompt(`post-fold turn ${extra + 1}: ${ballast(3_000)}`);
+            await waitForPasses(logPath, round + extra + 2);
+        }
+
         const coverage = readCoverage(logPath);
         console.log(
             `oc_input per pass: ${coverage.map((entry) => `${entry.ocInput}@${entry.markerAt}`).join(" ")}`,
         );
         expect(coverage.length).toBeGreaterThan(0);
-        const folded = coverage.findIndex((entry) => entry.markerAt !== "none");
-        expect(folded).toBeGreaterThan(0);
-        // Before the boundary the array grows with the conversation; after it, the
-        // array starts at the boundary, so it is strictly smaller than the peak.
-        const before = Math.max(...coverage.slice(0, folded).map((entry) => entry.ocInput));
-        const after = coverage[coverage.length - 1]!.ocInput;
-        console.log(`oc_input peak before boundary=${before} final after boundary=${after}`);
-        expect(after).toBeLessThan(before);
+        // A boundary must actually have been published; without one the rest of
+        // this test would be asserting nothing.
+        expect(boundaryAt).toBeGreaterThan(0);
+
+        // Each turn adds a user row and an assistant row, so an untrimmed array
+        // would carry about two more messages on every pass. That is the number
+        // the trim has to beat: what it claims is not "smaller than some earlier
+        // peak" — the pre-fold history is short by construction — but that the
+        // array handed to the module stops tracking the conversation at all.
+        const untrimmed = 2 * coverage.length - 1;
+        const post = coverage.slice(boundaryAt + 1).map((entry) => entry.ocInput);
+        expect(post.length).toBeGreaterThan(2);
+        const final = post[post.length - 1]!;
+        console.log(
+            `post-boundary oc_input: ${post.join(" ")} | untrimmed equivalent at the final pass: ${untrimmed}`,
+        );
+        expect(final).toBeLessThan(untrimmed);
+        // Flat, not merely smaller: the window stays put while the conversation
+        // grows past it, which is what a marker row buys on OpenCode 1.
+        expect(Math.max(...post) - Math.min(...post)).toBeLessThanOrEqual(2);
+        // The boundary itself keeps advancing, so the trim is tracking live
+        // publications rather than pinning one stale id.
+        const boundaries = coverage.slice(boundaryAt).map((entry) => entry.markerAt);
+        expect(new Set(boundaries).size).toBeGreaterThan(1);
+
+        // The trim is about what the module is handed; the served bytes still have
+        // to be a real module head rather than a raw passthrough.
+        const served = servedArray(host.mock.requests().at(-1));
+        expect(JSON.stringify(served[0])).toContain("<session-history>");
+        const passes = readPasses(logPath);
+        expect(passes.some((pass) => pass.servedFrom === "transform" && pass.applied)).toBe(true);
+        console.log(`served m[0] sha256 after the fold: ${sha256(JSON.stringify(served[0]))}`);
     }, 900_000);
 });
