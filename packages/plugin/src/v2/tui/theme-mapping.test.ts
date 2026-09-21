@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import captured from "./__fixtures__/ga-host-theme.json";
 import { flattenTheme } from "./sidebar-mount";
 import type { V2ResolvedTheme } from "./types";
-import captured from "./__fixtures__/ga-host-theme.json";
 
 // The fixture is a recording taken off a running @opencode/cli GA host, not a
 // hand-written object: an earlier mapping read `text.default` / `text.subdued`
