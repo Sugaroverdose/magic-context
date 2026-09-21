@@ -121,7 +121,8 @@ describe("doctor OpenCode compaction-marker conversion check", () => {
         expect(recipe).toContain("DELETE FROM kv WHERE key = 'migration.v1-v2'");
         expect(recipe).toContain("opencode serve --port N");
         expect(recipe).toContain('{"phase":"completed"}');
-        expect(recipe).toContain("note #3157");
+        // User-facing copy must not cite internal session notes.
+        expect(recipe).not.toMatch(/note #\d+/);
         expect(recipe).not.toContain("INSERT INTO session_message");
     });
 });
