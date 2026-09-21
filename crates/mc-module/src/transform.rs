@@ -4609,7 +4609,15 @@ fn apply_once(
         PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
     );
     let is_bust_pass = !req.is_subagent && is_provider_prefix_mutation_pass;
-    if is_bust_pass {
+    // Deferring a late tag protects a provider prefix that has already been served and
+    // must be replayed byte for byte. A subagent has no such prefix: it is never charged
+    // for a cache bust and recomposes its served array on every pass, so a tag first
+    // minted there is safe to render at once and would otherwise stay hidden forever —
+    // no later pass on that session can ever release it. `is_bust_pass` is the wrong
+    // question here precisely because it already answers "is this session paying for a
+    // bust", which a subagent never is.
+    let prefix_replay_must_be_preserved = !req.is_subagent && !is_provider_prefix_mutation_pass;
+    if !prefix_replay_must_be_preserved {
         meta.pending_tag_block_ids.clear();
     } else if serializer_profile == Some(SerializerProfile::OpencodeAiSdk) {
         let mint_end = pending_overlays

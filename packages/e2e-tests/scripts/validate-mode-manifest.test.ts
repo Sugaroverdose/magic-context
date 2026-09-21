@@ -18,7 +18,11 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(73);
+        // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
+        // removed. Adding an OpenCode 2 lane file moves this number and the excluded
+        // list below and nothing else, because those files carry tier "excluded" and
+        // so never enter a TS or Rust invocation list.
+        expect(validation.files.length).toBe(83);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -45,17 +49,27 @@ describe("mode manifest validator", () => {
             "tests/opencode2/adapters-s2-contracts.test.ts",
             "tests/opencode2/adapters-s3-marker-policy.test.ts",
             "tests/opencode2/automatic-s3-paths.test.ts",
+            "tests/opencode2/commands-s2-flush.test.ts",
+            "tests/opencode2/commands-s2-host-registration.test.ts",
+            "tests/opencode2/commands-s2-keymap.test.ts",
             "tests/opencode2/context-s2-lanes.test.ts",
+            "tests/opencode2/dreamer-s2-carrier.test.ts",
             "tests/opencode2/entry-s2-context.test.ts",
             "tests/opencode2/fold-s3-owner.test.ts",
             "tests/opencode2/harness-s3-identity.test.ts",
             "tests/opencode2/hidden-child-ga.test.ts",
+            "tests/opencode2/hidden-child-unbound.test.ts",
             "tests/opencode2/marker-s3-runtime.test.ts",
             "tests/opencode2/pins.test.ts",
             "tests/opencode2/probes.test.ts",
             "tests/opencode2/prompt-surface-s6.test.ts",
+            "tests/opencode2/rpc-s2-listener.test.ts",
             "tests/opencode2/runner.test.ts",
+            "tests/opencode2/rust-mode-limitation.test.ts",
+            "tests/opencode2/sidebar-component.test.ts",
+            "tests/opencode2/status-dialog.test.ts",
             "tests/opencode2/store-reader.test.ts",
+            "tests/opencode2/tool-definition-telemetry.test.ts",
             "tests/window-overlay-reload.test.ts",
         ]);
         expect(new Set([...ts, ...rust]).size).toBe(validation.files.length - excluded.length);
