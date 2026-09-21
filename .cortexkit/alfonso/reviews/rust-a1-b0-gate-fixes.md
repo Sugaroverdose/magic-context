@@ -225,7 +225,7 @@ empty after every one.
 | `cargo test --locked -p mc-store -p mc-module --all-targets --no-fail-fast` | pass — mc-store lib **181**, mc-module lib **1,237** (8 ignored), every integration binary green, **including** `cold_flip_adversarial` (5/5; it was the gate's pre-existing red and is fixed on master) |
 | `cargo clippy --locked --all-targets -- -D warnings` | clean |
 | `cargo fmt --check` | clean |
-| `scripts/run-rust-hermetic-e2e.sh` | pass — 45 files, whole script (see below) |
+| `scripts/run-rust-hermetic-e2e.sh` | **`status=pass`, 45/45 files**, whole script, no retries (see below) |
 
 ### The hermetic e2e group
 
@@ -244,8 +244,9 @@ a code change and neither is committed:
    `tests/pi-rust-degradation-arc-1` and `-4` fail before reaching any assertion; with it
    both pass 3/3.
 
-`rust-timeout-epoch-recovery` — the gate's second pre-existing red — **passes** here, as
-expected from master.
+With both satisfied, the whole script runs green: `[e2e:rust:hermetic:end] status=pass`,
+45 files passing, no `RETRY` line anywhere in the log. `rust-timeout-epoch-recovery` — the
+gate's second pre-existing red — **passes** here, as expected from master.
 
 ## Production isolation
 
