@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
+import {
+    formatUnsupportedDreamTasks,
+    toolLoopDreamTasks,
+} from "../../features/magic-context/dreamer/task-registry";
 import type { DreamTaskRuntimeConfig } from "../../features/magic-context/dreamer/task-scheduler";
 import { resolveManualDreamTask, selectRunnableDreamTasks } from "./dream-manual";
 
@@ -75,6 +79,44 @@ test("selectRunnableDreamTasks keeps every task when the host has a tool loop", 
         runnable: tasks,
         unsupported: [],
     });
+});
+
+test("tool-free tasks stay runnable on a host without a tool loop", () => {
+    // These three answer with one self-contained document, or do host-side
+    // database work with no model call at all, so a host with no tool loop can
+    // still run them.
+    const tasks = [
+        { task: "evaluate-smart-notes", schedule: "0 3 * * *" },
+        { task: "review-user-memories", schedule: "0 3 * * *" },
+        { task: "promote-primers", schedule: "0 3 * * *" },
+    ] as DreamTaskRuntimeConfig[];
+    const selection = selectRunnableDreamTasks({ tasks, toolsSupported: false });
+    expect(selection.unsupported).toEqual([]);
+    expect(selection.runnable.map((config) => config.task)).toEqual([
+        "evaluate-smart-notes",
+        "review-user-memories",
+        "promote-primers",
+    ]);
+});
+
+test("only the genuine tool-loop tasks are refused", () => {
+    expect(toolLoopDreamTasks()).toEqual([
+        "map-memories",
+        "verify",
+        "verify-broad",
+        "curate",
+        "retrospective",
+        "maintain-docs",
+        "refresh-primers",
+    ]);
+});
+
+test("the refusal names each task and why its tool loop is needed", () => {
+    const text = formatUnsupportedDreamTasks(["verify", "maintain-docs"], "MC-D08");
+    expect(text).toContain("- verify: unavailable on this host (MC-D08)");
+    expect(text).toContain("re-check each memory against the code");
+    expect(text).toContain("- maintain-docs: unavailable on this host (MC-D08)");
+    expect(text).toContain("update project documentation");
 });
 
 test("an explicitly requested tool-requiring task is reported unsupported, not run", () => {

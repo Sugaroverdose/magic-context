@@ -52,6 +52,11 @@ export const USER_FACING_FAILURES = {
         sentence: "Memory maintenance could not finish.",
         action: "Run /ctx-dream again.",
     },
+    dream_task_needs_tool_loop: {
+        code: "MC-D08",
+        sentence: "Some memory maintenance tasks need a tool loop this host does not provide.",
+        action: "The remaining tasks still run; the listed ones are skipped on this host.",
+    },
     embedding_substitution_rejected: {
         code: "MC-E01",
         sentence: "Search indexing could not use the selected model.",

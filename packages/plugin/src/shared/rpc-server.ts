@@ -106,6 +106,24 @@ export class MagicContextRpcServer {
         this.handlers.set(method, handler);
     }
 
+    /**
+     * Run a registered handler from inside this process, skipping the HTTP hop.
+     *
+     * A caller that already lives in the server process (a host command callback,
+     * for instance) must reach exactly the handler the TUI reaches over HTTP, so
+     * the two entry points cannot drift apart. The loopback socket, its bearer
+     * token and JSON encoding add nothing here, so they are skipped rather than
+     * paid for; an unknown method is still an error, as it is over HTTP.
+     */
+    async dispatch(
+        method: string,
+        params: Record<string, unknown>,
+    ): Promise<Record<string, unknown>> {
+        const handler = this.handlers.get(method);
+        if (!handler) return { error: `Unknown method: ${method}` };
+        return handler(params);
+    }
+
     /** Start the server on a random port, write port to disk. */
     async start(): Promise<number> {
         if (typeof Bun === "undefined") {

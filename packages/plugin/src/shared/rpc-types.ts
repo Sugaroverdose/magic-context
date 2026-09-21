@@ -6,6 +6,7 @@
 import type {
     DreamTaskBacklogMap,
     DreamTaskFailureState,
+    DreamTaskName,
     DreamTaskProgress,
 } from "../features/magic-context/dreamer/task-registry";
 import type { SynapseLaneDescriptor } from "../features/magic-context/memory/embedding-synapse";
@@ -174,6 +175,12 @@ export interface MemoryImportanceHistogram {
 export interface StatusDetail extends SidebarSnapshot {
     /** ACTIVE-memory importance distribution; unclassified is a subset of total. */
     memoryImportanceHistogram: MemoryImportanceHistogram;
+    /**
+     * Dreamer tasks this host cannot run because it has no tool loop, named so a
+     * user can see which maintenance is unavailable instead of inferring it from
+     * a backlog that never falls. Absent on a host that runs every task.
+     */
+    dreamerUnsupportedTasks?: DreamTaskName[];
     /** True when Rust authority has rerouted host tool and historian paths to the module. */
     hostBackendsModuleSide?: boolean;
     /** Host cursor compared with the module changefeed frontier. */
