@@ -5456,4 +5456,74 @@ mod tests {
         assert!(fire_decision.completed_at_ms.is_some());
         assert_eq!(fire_decision.apply_row_version, loaded.row_version);
     }
+
+    /// REPRODUCTION (pre-`Reclaiming`): after a claimant's lease expires there is no
+    /// transition that admits a second producer for the same run. `producer_started`
+    /// only runs from `Firing` and `fire` refuses every non-`Idle` phase, so the run
+    /// sits in `AwaitingProducer` until the 600s producer await gives up. Delete this
+    /// test when the reproduction is no longer interesting; the recovery it is missing
+    /// is asserted by `lease_expiry_then_reclaim_admits_a_second_producer`.
+    #[test]
+    fn pre_reclaim_lease_expiry_stalls_a_second_producer() {
+        let idle = HistorianDurableState::default();
+        let FireOutcome::Fired(fired) = fire(
+            &idle,
+            1,
+            4,
+            "fp-stall".into(),
+            test_selected_range_identities(),
+            0,
+            CompartmentSetGeneration::default(),
+            1_000,
+            None,
+        )
+        .unwrap() else {
+            panic!("a fresh idle state must fire");
+        };
+        let awaiting =
+            producer_started(&fired, "mc-historian:proj:a:1".into(), "run-1".into()).unwrap();
+        assert_eq!(awaiting.state, HistorianPhase::AwaitingProducer);
+
+        // The first claimant is gone and its lease has expired. A second claimant
+        // trying to take the same run over finds no way in.
+        let second_producer = producer_started(
+            &awaiting,
+            "mc-historian:proj:a:1".into(),
+            "run-1-again".into(),
+        );
+        let error = second_producer.expect_err("today's machine has no re-claim transition");
+        assert!(
+            matches!(
+                error,
+                HistorianStateError::InvalidTransition {
+                    from: HistorianPhase::AwaitingProducer,
+                    event: "producer_started"
+                }
+            ),
+            "expected a refused producer_started, got {error}"
+        );
+
+        // Refiring is refused too, so nothing releases the run before the await budget.
+        let refire = fire(
+            &awaiting,
+            1,
+            4,
+            "fp-stall".into(),
+            test_selected_range_identities(),
+            0,
+            CompartmentSetGeneration::default(),
+            2_000,
+            None,
+        )
+        .unwrap();
+        assert!(
+            matches!(refire, FireOutcome::Busy(_)),
+            "expected the refire to be refused as busy, got {refire:?}"
+        );
+        eprintln!(
+            "STALL REPRODUCED: phase={} producer_run_id={:?}; producer_started refused ({error}); refire=Busy",
+            awaiting.state.as_str(),
+            awaiting.producer_run_id
+        );
+    }
 }
