@@ -19,7 +19,8 @@
       "ratio_sdk": 1.303
     },
     "error": null,
-    "durationMs": 6183
+    "durationMs": 6183,
+    "method": "usage"
   },
   {
     "label": "openai-codex/gpt-5.4",
@@ -41,7 +42,8 @@
       "ratio_sdk": 1.303
     },
     "error": null,
-    "durationMs": 5865
+    "durationMs": 5865,
+    "method": "usage"
   },
   {
     "label": "openai-codex/gpt-5.5",
@@ -63,6 +65,187 @@
       "ratio_sdk": 1.303
     },
     "error": null,
-    "durationMs": 5836
+    "durationMs": 5836,
+    "method": "usage"
+  },
+  {
+    "method": "count_tokens",
+    "proseRatio": 1.5717777415675411,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": 96460
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 35585,
+        "api": 54816,
+        "ratio": 1.5404243360966698
+      },
+      "history": {
+        "local_raw": 23430,
+        "api": 37430,
+        "ratio": 1.597524541186513
+      },
+      "memory": {
+        "local_raw": 2351,
+        "api": 4214,
+        "ratio": 1.7924287537218204
+      }
+    },
+    "label": "anthropic/claude-fable-5-1",
+    "provider": "anthropic",
+    "modelId": "claude-fable-5-1",
+    "tokenizerKey": "anthropic/claude-opus-4.5",
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": 18000,
+      "api": 24716,
+      "ratio_raw": 1.511,
+      "ratio_sdk": 1.373
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": 16477,
+      "api": 33233,
+      "ratio_raw": 1.552,
+      "ratio_sdk": 2.017
+    },
+    "error": null,
+    "durationMs": 1649
+  },
+  {
+    "method": "count_tokens",
+    "proseRatio": 1.5717777415675411,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": 96460
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 35585,
+        "api": 54816,
+        "ratio": 1.5404243360966698
+      },
+      "history": {
+        "local_raw": 23430,
+        "api": 37430,
+        "ratio": 1.597524541186513
+      },
+      "memory": {
+        "local_raw": 2351,
+        "api": 4214,
+        "ratio": 1.7924287537218204
+      }
+    },
+    "label": "anthropic/claude-opus-5",
+    "provider": "anthropic",
+    "modelId": "claude-opus-5",
+    "tokenizerKey": "anthropic/claude-opus-4.5",
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": 18000,
+      "api": 24716,
+      "ratio_raw": 1.511,
+      "ratio_sdk": 1.373
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": 16477,
+      "api": 33233,
+      "ratio_raw": 1.552,
+      "ratio_sdk": 2.017
+    },
+    "error": null,
+    "durationMs": 1728
+  },
+  {
+    "method": "count_tokens",
+    "proseRatio": 1.5717777415675411,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": 96460
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 35585,
+        "api": 54816,
+        "ratio": 1.5404243360966698
+      },
+      "history": {
+        "local_raw": 23430,
+        "api": 37430,
+        "ratio": 1.597524541186513
+      },
+      "memory": {
+        "local_raw": 2351,
+        "api": 4214,
+        "ratio": 1.7924287537218204
+      }
+    },
+    "label": "anthropic/claude-opus-4-7",
+    "provider": "anthropic",
+    "modelId": "claude-opus-4-7",
+    "tokenizerKey": "anthropic/claude-opus-4.5",
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": 18000,
+      "api": 24716,
+      "ratio_raw": 1.511,
+      "ratio_sdk": 1.373
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": 16477,
+      "api": 33622,
+      "ratio_raw": 1.57,
+      "ratio_sdk": 2.041
+    },
+    "error": null,
+    "durationMs": 1531
+  },
+  {
+    "method": "count_tokens",
+    "proseRatio": 1.0579762098745316,
+    "proseTokens": {
+      "local_raw": 61370,
+      "api": 64928
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 35585,
+        "api": 37560,
+        "ratio": 1.0555009133061684
+      },
+      "history": {
+        "local_raw": 23430,
+        "api": 24716,
+        "ratio": 1.0548868971404182
+      },
+      "memory": {
+        "local_raw": 2351,
+        "api": 2652,
+        "ratio": 1.1280306252658443
+      }
+    },
+    "label": "anthropic/claude-sonnet-4-6",
+    "provider": "anthropic",
+    "modelId": "claude-sonnet-4-6",
+    "tokenizerKey": "anthropic/claude-sonnet-4.5",
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": 18000,
+      "api": 16670,
+      "ratio_raw": 1.019,
+      "ratio_sdk": 0.926
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": 16477,
+      "api": 24488,
+      "ratio_raw": 1.143,
+      "ratio_sdk": 1.486
+    },
+    "error": null,
+    "durationMs": 1451
   }
 ]

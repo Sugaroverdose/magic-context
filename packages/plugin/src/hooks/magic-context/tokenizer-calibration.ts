@@ -21,9 +21,11 @@
 export interface ModelCalibration {
     systemRatio: number;
     toolsRatio: number;
+    proseRatio: number;
 }
 
-interface CalibrationEntry extends ModelCalibration {
+interface CalibrationEntry extends Omit<ModelCalibration, "proseRatio"> {
+    proseRatio?: number;
     /** Match against `${providerID}/${modelID}` (case-insensitive). Longest wins. */
     prefix: string;
 }
@@ -34,6 +36,45 @@ interface CalibrationEntry extends ModelCalibration {
  * to 1.0/1.0 which is safer than guessing.
  */
 const CALIBRATION_TABLE: CalibrationEntry[] = [
+    // Free count_tokens measurements, 2026-09-21; routed aliases mirror the same
+    // upstream tokenizer, following the Opus 4.7/4.8 convention below. Fable 5.2
+    // remains neutral because it has not been measured; only 5.1 snapshots match.
+    {
+        prefix: "anthropic/claude-fable-5-1",
+        systemRatio: 1.511497,
+        toolsRatio: 1.551639,
+        proseRatio: 1.571778,
+    },
+    {
+        prefix: "anthropic/claude-opus-5",
+        systemRatio: 1.511497,
+        toolsRatio: 1.551639,
+        proseRatio: 1.571778,
+    },
+    {
+        prefix: "openrouter/anthropic/claude-fable-5-1",
+        systemRatio: 1.511497,
+        toolsRatio: 1.551639,
+        proseRatio: 1.571778,
+    },
+    {
+        prefix: "openrouter/anthropic/claude-opus-5",
+        systemRatio: 1.511497,
+        toolsRatio: 1.551639,
+        proseRatio: 1.571778,
+    },
+    {
+        prefix: "github-copilot/claude-fable-5-1",
+        systemRatio: 1.511497,
+        toolsRatio: 1.551639,
+        proseRatio: 1.571778,
+    },
+    {
+        prefix: "github-copilot/claude-opus-5",
+        systemRatio: 1.511497,
+        toolsRatio: 1.551639,
+        proseRatio: 1.571778,
+    },
     // Anthropic Opus 4.8 — same new tokenizer family as 4.7 (not in ai-tokenizer's
     // claude encoding). Without these it falls to NEUTRAL (1.0/1.0) and the
     // sidebar undercounts System+ToolDefs by ~50%, starving the Conversation
@@ -41,7 +82,12 @@ const CALIBRATION_TABLE: CalibrationEntry[] = [
     { prefix: "anthropic/claude-opus-4-8", systemRatio: 1.51, toolsRatio: 1.57 },
     { prefix: "anthropic/claude-opus-4.8", systemRatio: 1.51, toolsRatio: 1.57 },
     // Anthropic Opus 4.7 — new tokenizer not yet in ai-tokenizer's claude encoding.
-    { prefix: "anthropic/claude-opus-4-7", systemRatio: 1.51, toolsRatio: 1.57 },
+    {
+        prefix: "anthropic/claude-opus-4-7",
+        systemRatio: 1.51,
+        toolsRatio: 1.57,
+        proseRatio: 1.571778,
+    },
     { prefix: "anthropic/claude-opus-4.7", systemRatio: 1.51, toolsRatio: 1.57 },
     // Claude 4.5/4.6 family — ai-tokenizer's claude encoding matches well.
     { prefix: "anthropic/claude-opus-4-5", systemRatio: 1.02, toolsRatio: 1.16 },
@@ -50,7 +96,12 @@ const CALIBRATION_TABLE: CalibrationEntry[] = [
     { prefix: "anthropic/claude-opus-4.6", systemRatio: 1.02, toolsRatio: 1.16 },
     { prefix: "anthropic/claude-sonnet-4-5", systemRatio: 1.02, toolsRatio: 1.16 },
     { prefix: "anthropic/claude-sonnet-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
-    { prefix: "anthropic/claude-sonnet-4-6", systemRatio: 1.02, toolsRatio: 1.14 },
+    {
+        prefix: "anthropic/claude-sonnet-4-6",
+        systemRatio: 1.02,
+        toolsRatio: 1.14,
+        proseRatio: 1.057976,
+    },
     { prefix: "anthropic/claude-sonnet-4.6", systemRatio: 1.02, toolsRatio: 1.14 },
     { prefix: "anthropic/claude-haiku-4-5", systemRatio: 1.02, toolsRatio: 1.16 },
     { prefix: "anthropic/claude-haiku-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
@@ -99,7 +150,7 @@ const CALIBRATION_TABLE: CalibrationEntry[] = [
     { prefix: "opencode-go/kimi-k2.6", systemRatio: 0.87, toolsRatio: 0.86 },
 ];
 
-const NEUTRAL: ModelCalibration = { systemRatio: 1.0, toolsRatio: 1.0 };
+const NEUTRAL: ModelCalibration = { systemRatio: 1.0, toolsRatio: 1.0, proseRatio: 1.0 };
 
 /**
  * Look up calibration ratios for a given `providerID/modelID` key. Performs
@@ -120,7 +171,7 @@ export function resolveModelCalibration(
             best = entry;
         }
     }
-    return best ?? NEUTRAL;
+    return best ? { ...best, proseRatio: best.proseRatio ?? 1.0 } : NEUTRAL;
 }
 
 /**
@@ -131,12 +182,9 @@ export function resolveModelCalibration(
  *   1. **Calibrated** (System, Tool Defs) — local count × measured per-model
  *      ratio. We have empirically derived ratios from `scripts/calibrate-tokenizer/`,
  *      so these match the API to within ~5%.
- *   2. **Verbatim** (Compartments, Facts, Memories) — local raw count, no
- *      scaling. Magic-context owns this content end-to-end (rendered XML,
- *      injected via `prepareCompartmentInjection`), and the compressor uses
- *      the same local count for budget math (`execute-status.ts` "History
- *      block"). Showing a different number here would confuse users and
- *      desync the sidebar from `/ctx-status`.
+ *   2. **Calibrated prose** (Compartments, Facts, Memories, Docs, Profile) —
+ *      local count × measured prose ratio (1.0 when unmeasured). Display-only:
+ *      transform budgets and served bytes continue to use raw local counts.
  *   3. **Residual absorbers** (Conversation, Tool Calls) — proportionally
  *      scaled to absorb whatever's left after (1) and (2). These have the
  *      most genuine drift (mixed user/assistant text + tool I/O) and the
@@ -148,7 +196,7 @@ export function resolveModelCalibration(
  *   - residual local sum === 0 (no conversation or tool calls yet) →
  *     conversation absorbs the full remainder so the bar still adds up.
  *   - non-residual buckets together exceed inputTokens (rare clamp case) →
- *     residuals = 0; calibrated + verbatim are scaled down proportionally so
+ *     residuals = 0; calibrated system/tools + prose are scaled down proportionally so
  *     the sum never exceeds inputTokens.
  *   - rounding: residual ±1 token from rounding lands in the larger residual
  *     bucket so exact equality is preserved.
@@ -171,13 +219,13 @@ export interface CalibrationInput {
     systemLocal: number;
     /** Local raw count (ai-tokenizer) for the tool definitions. */
     toolDefsLocal: number;
-    /** Verbatim — local raw counts displayed unchanged so the sidebar matches `/ctx-status`. */
+    /** Raw first-message (m0) prose counts, calibrated for display only; budgets remain local. */
     compartmentsLocal: number;
     factsLocal: number;
     memoriesLocal: number;
-    /** Verbatim — <project-docs> block in m[0] (stable scaffolding, own budget). */
+    /** Raw — <project-docs> block in the first message (stable scaffolding, own budget). */
     docsLocal: number;
-    /** Verbatim — <user-profile> block in m[0] (stable scaffolding, own budget). */
+    /** Raw — <user-profile> block in the first message (stable scaffolding, own budget). */
     profileLocal: number;
     /** Residual absorbers — proportionally scaled to absorb the remainder. */
     conversationLocal: number;
@@ -203,16 +251,15 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
     let calibratedSystem = Math.round(input.systemLocal * input.calibration.systemRatio);
     let calibratedToolDefs = Math.round(input.toolDefsLocal * input.calibration.toolsRatio);
 
-    // (2) Verbatim buckets: Compartments / Facts / Memories — local raw counts,
-    // no scaling. Same numbers shown in `/ctx-status` "History block" so the
-    // sidebar and status dialog match exactly.
-    let compartments = Math.max(0, input.compartmentsLocal);
-    let facts = Math.max(0, input.factsLocal);
-    let memories = Math.max(0, input.memoriesLocal);
-    let docs = Math.max(0, input.docsLocal);
-    let profile = Math.max(0, input.profileLocal);
+    // (2) First-message prose is calibrated for display, independently of budget accounting.
+    const proseRatio = input.calibration.proseRatio;
+    let compartments = Math.round(Math.max(0, input.compartmentsLocal) * proseRatio);
+    let facts = Math.round(Math.max(0, input.factsLocal) * proseRatio);
+    let memories = Math.round(Math.max(0, input.memoriesLocal) * proseRatio);
+    let docs = Math.round(Math.max(0, input.docsLocal) * proseRatio);
+    let profile = Math.round(Math.max(0, input.profileLocal) * proseRatio);
 
-    // Edge case: calibrated + verbatim already exceed inputTokens. Clamp them
+    // Edge case: calibrated system/tools + prose already exceed inputTokens. Clamp them
     // down proportionally so the residual buckets stay non-negative.
     const nonResidualTotal =
         calibratedSystem + calibratedToolDefs + compartments + facts + memories + docs + profile;

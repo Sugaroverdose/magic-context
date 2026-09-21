@@ -1,27 +1,17 @@
 /**
  * Tokenizer calibration harness.
  *
- * Measures the token-count drift between local ai-tokenizer estimates and
- * actual provider token counts for our real production system prompt and tool
- * definitions. Hits each provider directly using OAuth/API tokens from
- * `~/.local/share/opencode/auth.json`. No OpenCode dependency.
- *
- * For each model:
- *   - Sends a SYSTEM-only request: real production system prompt + minimal user message.
- *   - Sends a TOOLS-only request: real production tools array + minimal user message.
- *   - Captures provider's reported input token count from the actual usage field.
- *   - Counts the same content locally with ai-tokenizer (raw + SDK with model calibration).
- *   - Computes drift ratios.
- *
- * Output: a per-model JSON report with system_ratio and tools_ratio that the
- * sidebar can use as static calibration multipliers.
+ * Measures local tokenizer drift using API-key count_tokens for Anthropic,
+ * with small OAuth usage probes as fallback. PROSE uses only free counts and
+ * public repository bytes plus synthetic history/memory, never private sessions.
+ * Reports baseline-subtracted SYSTEM, TOOLS, PROSE and per-section prose ratios.
  *
  * Usage:
  *   bun run packages/plugin/scripts/calibrate-tokenizer/index.ts
  *   bun run packages/plugin/scripts/calibrate-tokenizer/index.ts --only anthropic/claude-opus-4-7
  *   bun run packages/plugin/scripts/calibrate-tokenizer/index.ts --providers anthropic,openai
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import Tokenizer, { models as aiTokenizerModels } from "ai-tokenizer";
@@ -31,6 +21,8 @@ import * as claudeEncoding from "ai-tokenizer/encoding/claude";
 import * as o200kEncoding from "ai-tokenizer/encoding/o200k_base";
 import * as p50kEncoding from "ai-tokenizer/encoding/p50k_base";
 
+import { buildProseProbe } from "./prose";
+import { resolveModelCalibration } from "../../src/hooks/magic-context/tokenizer-calibration";
 import { measureAnthropic } from "./providers/anthropic";
 import { measureOpenAICodex } from "./providers/openai-codex";
 import { measureOpenAICompatible } from "./providers/openai-compatible";
@@ -53,6 +45,10 @@ interface ModelTestSet {
 }
 
 interface MeasurementResult {
+    method: "count_tokens" | "usage";
+    proseRatio: number | null;
+    proseTokens: { local_raw: number; api: number | null };
+    proseSections: Record<string, { local_raw: number; api: number; ratio: number }>;
     label: string;
     provider: string;
     modelId: string;
@@ -179,12 +175,19 @@ async function measureOne(
     auth: AuthFile,
     systemText: string,
     toolsArray: unknown[],
+    prose: Record<string, string>,
 ): Promise<MeasurementResult> {
     const start = Date.now();
     const local = localCounts(systemText, toolsArray, test.tokenizerKey);
     let systemApi: number | null = null;
     let toolsApi: number | null = null;
     let error: string | null = null;
+    let method: "count_tokens" | "usage" = test.provider === "anthropic" && auth.anthropic?.type === "api" ? "count_tokens" : "usage";
+    // biome-ignore lint/suspicious/noExplicitAny: encoding type varies
+    const tokenizer = new Tokenizer(pickEncoding(test.tokenizerKey) as any);
+    const proseLocal = tokenizer.count(Object.values(prose).join("\n\n"));
+    let proseApi: number | null = null;
+    const proseSections: MeasurementResult["proseSections"] = {};
     try {
         const authEntry = auth[test.provider];
         if (!authEntry) throw new Error(`No auth for provider ${test.provider}`);
@@ -199,7 +202,14 @@ async function measureOne(
             !!authEntry.access;
         let measurements: { systemApi: number | null; toolsApi: number | null };
         if (test.provider === "anthropic") {
-            measurements = await measureAnthropic(test, authEntry, systemText, toolsArray);
+            const measured = await measureAnthropic(test, authEntry, systemText, toolsArray, prose);
+            measurements = measured;
+            method = measured.method;
+            proseApi = measured.proseApi;
+            for (const [name, api] of Object.entries(measured.sections)) {
+                const local_raw = tokenizer.count(prose[name] ?? "");
+                proseSections[name] = { local_raw, api, ratio: api / local_raw };
+            }
         } else if (useCodex) {
             const accountId = extractCodexAccountId(authEntry.access);
             measurements = await measureOpenAICodex(
@@ -219,6 +229,10 @@ async function measureOne(
 
     const durationMs = Date.now() - start;
     return {
+        method,
+        proseRatio: proseApi === null ? null : proseApi / proseLocal,
+        proseTokens: { local_raw: proseLocal, api: proseApi },
+        proseSections,
         label: test.label,
         provider: test.provider,
         modelId: test.modelId,
@@ -275,13 +289,22 @@ async function main(): Promise<void> {
     const testSet = JSON.parse(
         readFileSync(join(here, "models.json"), "utf-8"),
     ) as ModelTestSet;
-    const auth = JSON.parse(
-        readFileSync(join(homedir(), ".local/share/opencode/auth.json"), "utf-8"),
-    ) as AuthFile;
+    const keyPath = join(homedir(), ".config/anthro.key");
+    const key = process.env.ANTHROPIC_API_KEY?.trim() || (existsSync(keyPath) ? readFileSync(keyPath, "utf8").trim() : "");
+    const auth: AuthFile = key ? { anthropic: { type: "api", key } } : {};
+    const prose = buildProseProbe();
 
     let tests = testSet.tests;
-    if (only) tests = tests.filter((t) => t.label === only || t.modelId === only);
+    if (only) tests = tests.filter((t) => only.split(",").includes(t.label) || only.split(",").includes(t.modelId));
     if (providers) tests = tests.filter((t) => providers.includes(t.provider));
+    if (tests.some((test) => !auth[test.provider])) {
+        console.log("Missing API key: usage fallback requires OAuth credentials; jwt auth is not yet supported on count_tokens. PROSE is never sent through usage.");
+        const authPath = join(homedir(), ".local/share/opencode/auth.json");
+        if (existsSync(authPath)) {
+            const fallback = JSON.parse(readFileSync(authPath, "utf8")) as AuthFile;
+            for (const test of tests) if (!auth[test.provider] && fallback[test.provider]) auth[test.provider] = fallback[test.provider];
+        }
+    }
 
     console.log(
         `Calibration harness: ${tests.length} models, system=${systemText.length} chars, tools=${toolsArray.length} (${JSON.stringify(toolsArray).length} chars)`,
@@ -291,7 +314,7 @@ async function main(): Promise<void> {
     const results: MeasurementResult[] = [];
     for (const test of tests) {
         process.stdout.write(`  ${test.label.padEnd(45, " ")} ... `);
-        const r = await measureOne(test, auth, systemText, toolsArray);
+        const r = await measureOne(test, auth, systemText, toolsArray, prose);
         if (r.error) {
             process.stdout.write(`ERROR (${r.durationMs}ms) ${r.error.slice(0, 80)}\n`);
         } else {
@@ -300,10 +323,23 @@ async function main(): Promise<void> {
             );
         }
         results.push(r);
+        console.log(`method=${r.method}, proseRatio=${r.proseRatio ?? "skipped"}`, r.proseSections);
+        if (!r.error && r.method === "count_tokens" && ["claude-opus-4-7", "claude-sonnet-4-6"].includes(test.modelId)) {
+            const shipped = resolveModelCalibration(test.provider, test.modelId);
+            const systemDelta = (r.systemTokens.api ?? 0) / r.systemTokens.local_raw / shipped.systemRatio - 1;
+            const toolsDelta = (r.toolsTokens.api ?? 0) / r.toolsTokens.local_raw / shipped.toolsRatio - 1;
+            console.log(`Cross-check delta: system=${systemDelta * 100}%, tools=${toolsDelta * 100}%`);
+            if (Math.abs(systemDelta) > 0.05 || Math.abs(toolsDelta) > 0.05) {
+                writeFileSync(join(here, "results.json"), JSON.stringify(results, null, 2));
+                throw new Error("Cross-check exceeds 5%; stopped without changing calibration table");
+            }
+        }
     }
 
     const outPath = join(here, "results.json");
-    writeFileSync(outPath, JSON.stringify(results, null, 2), "utf-8");
+    const previous = existsSync(outPath) ? JSON.parse(readFileSync(outPath, "utf8")) as MeasurementResult[] : [];
+    const measuredLabels = new Set(results.map((row) => row.label));
+    writeFileSync(outPath, JSON.stringify([...previous.filter((row) => !measuredLabels.has(row.label)), ...results], null, 2), "utf-8");
     console.log(`\nWrote ${outPath}`);
 
     // Summary
