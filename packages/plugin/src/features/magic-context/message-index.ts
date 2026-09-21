@@ -458,14 +458,23 @@ export function deleteIndexedMessage(db: Database, sessionId: string, messageId:
     return count;
 }
 
+/**
+ * Drop every indexed document, its rowid mapping, the progress watermark and the
+ * derived compression depth for one session. The caller must already hold a
+ * transaction; use `clearIndexedMessages` when it does not.
+ */
+export function clearIndexedMessagesInTransaction(db: Database, sessionId: string): void {
+    getDeleteFtsStatement(db).run(sessionId);
+    getDeleteFtsMapStatement(db).run(sessionId);
+    getDeleteMessageSourceStatement(db).run(sessionId);
+    getDeleteIndexStatement(db).run(sessionId);
+    clearCompressionDepth(db, sessionId);
+}
+
 export function clearIndexedMessages(db: Database, sessionId: string): void {
     const transactionStartedAt = performance.now();
     db.transaction(() => {
-        getDeleteFtsStatement(db).run(sessionId);
-        getDeleteFtsMapStatement(db).run(sessionId);
-        getDeleteMessageSourceStatement(db).run(sessionId);
-        getDeleteIndexStatement(db).run(sessionId);
-        clearCompressionDepth(db, sessionId);
+        clearIndexedMessagesInTransaction(db, sessionId);
     })();
     logSlowWriteTransaction("message_index_clear", transactionStartedAt);
 }

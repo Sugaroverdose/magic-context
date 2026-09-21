@@ -1071,7 +1071,8 @@ function readCompartmentsAfterSequence(
         .prepare(
             `SELECT id, session_id, sequence, start_message, end_message,
                     start_message_id, end_message_id, title, content,
-                    p1, p2, p3, p4, importance, episode_type, legacy, created_at
+                    p1, p2, p3, p4, importance, episode_type, legacy, created_at,
+                    rebase_status
                FROM compartments
               WHERE session_id = ? AND sequence > ?
               ORDER BY sequence ASC`,
@@ -1109,6 +1110,9 @@ function readCompartmentsAfterSequence(
             episodeType: typeof row.episode_type === "string" ? row.episode_type : null,
             legacy: typeof row.legacy === "number" ? row.legacy : 0,
             createdAt: row.created_at as number,
+            rebaseStatus: (row.rebase_status === "unresolved" ? "unresolved" : "ok") as
+                | "ok"
+                | "unresolved",
         }));
 }
 

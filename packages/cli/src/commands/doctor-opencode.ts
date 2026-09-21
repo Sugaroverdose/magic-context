@@ -107,6 +107,13 @@ import {
 } from "./doctor-compartment-boundaries";
 import { reportUnresolvedHarnessRelabel } from "./doctor-harness-relabel";
 import { clearPluginCache } from "./doctor-opencode-cache";
+import {
+    countPendingCoordinateRebases,
+    formatPendingCoordinateRebases,
+    formatUnresolvedCompartmentSession,
+    listUnresolvedCompartments,
+    supportsCoordinateGenerationReporting,
+} from "./doctor-store-generation";
 
 const CLI_PACKAGE_NAME = "@cortexkit/magic-context";
 
@@ -857,6 +864,42 @@ export async function runDoctor(
                     warn(`${dangling.length} compartment(s) have dangling OpenCode boundary ids`);
                     for (const boundary of dangling) {
                         log.warn(`  ${formatDanglingCompartmentBoundary(boundary)}`);
+                    }
+                }
+
+                // Read-only view of the store-projection rebase: what the next
+                // open would re-anchor, and what an earlier open could not.
+                // Doctor never rebases; the plugin owns that on its own pass.
+                if (!supportsCoordinateGenerationReporting(contextDb)) {
+                    log.info(
+                        "Store projection check: this context database predates the coordinate columns",
+                    );
+                } else if (!/\d/.test(activeInstallation.version)) {
+                    log.info(
+                        "Store projection check: OpenCode reported no version, so the running projection is unknown",
+                    );
+                } else {
+                    const pendingRebases = countPendingCoordinateRebases(contextDb, hostGeneration);
+                    const pendingLine = formatPendingCoordinateRebases(
+                        pendingRebases,
+                        hostGeneration,
+                    );
+                    if (pendingRebases.changed + pendingRebases.unrecorded === 0) {
+                        pass(pendingLine);
+                    } else {
+                        log.info(pendingLine);
+                    }
+
+                    const unresolved = listUnresolvedCompartments(contextDb);
+                    if (unresolved.total === 0) {
+                        pass("No compartment is excluded from range recovery by a store change");
+                    } else {
+                        warn(
+                            `${unresolved.total} compartment(s) across ${unresolved.sessions} session(s) could not be re-anchored and are excluded from range recovery`,
+                        );
+                        for (const session of unresolved.top) {
+                            log.warn(`  ${formatUnresolvedCompartmentSession(session)}`);
+                        }
                     }
                 }
             } else {

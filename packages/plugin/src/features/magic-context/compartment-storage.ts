@@ -54,6 +54,16 @@ export interface Compartment {
     /** 1 = pre-v2 flat compartment (no tiers); 0 = v2 tiered. */
     legacy: number;
     createdAt: number;
+    /**
+     * `unresolved` when the store-projection rebase could not re-derive this
+     * compartment's ordinals, because the message its endpoint id names does not
+     * exist in the projection the running host serves. Such a row keeps its
+     * summary text (readable by id) but is excluded from anything that treats
+     * its ordinals as positions: range recovery, injection, and the boundary.
+     * Re-evaluated on every later projection change, so an endpoint that comes
+     * back returns the row to `ok`.
+     */
+    rebaseStatus: "ok" | "unresolved";
 }
 
 export interface SessionFact {
@@ -83,6 +93,7 @@ interface CompartmentRow {
     episode_type: string | null;
     legacy: number | null;
     created_at: number;
+    rebase_status?: string | null;
 }
 
 interface SessionFactRow {
@@ -225,6 +236,7 @@ function toCompartment(row: CompartmentRow): Compartment {
         episodeType: row.episode_type ?? null,
         legacy: typeof row.legacy === "number" ? row.legacy : 0,
         createdAt: row.created_at,
+        rebaseStatus: row.rebase_status === "unresolved" ? "unresolved" : "ok",
     };
 }
 
@@ -249,9 +261,22 @@ export function getCompartments(db: Database, sessionId: string): Compartment[] 
     return rows.map(toCompartment);
 }
 
+/**
+ * Highest message ordinal any compartment covers — the line between compacted
+ * history and the live tail.
+ *
+ * Rows the projection rebase could not re-derive are excluded: their stored
+ * ordinals are positions in a message list the running host no longer serves,
+ * so using one as the boundary would clamp recovery ranges and the protected
+ * tail against an arbitrary message. Excluding them moves the boundary back to
+ * the newest compartment that still resolves, which is recoverable, instead of
+ * pointing confidently at the wrong place.
+ */
 export function getLastCompartmentEndMessage(db: Database, sessionId: string): number {
     const row = db
-        .prepare("SELECT MAX(end_message) as max_end FROM compartments WHERE session_id = ?")
+        .prepare(
+            "SELECT MAX(end_message) as max_end FROM compartments WHERE session_id = ? AND rebase_status != 'unresolved'",
+        )
         .get(sessionId) as { max_end: number | null } | null;
     return row?.max_end ?? -1;
 }
@@ -267,7 +292,7 @@ export function getLastCompartmentEndMessage(db: Database, sessionId: string): n
 export function getLastCompartmentEndMessageId(db: Database, sessionId: string): string | null {
     const row = db
         .prepare(
-            "SELECT end_message_id FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
+            "SELECT end_message_id FROM compartments WHERE session_id = ? AND rebase_status != 'unresolved' ORDER BY sequence DESC LIMIT 1",
         )
         .get(sessionId) as { end_message_id: string | null } | undefined;
     const id = row?.end_message_id;

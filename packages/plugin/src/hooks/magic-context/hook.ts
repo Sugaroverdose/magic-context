@@ -1094,6 +1094,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         scheduler: deps.scheduler,
         contextUsageMap,
         db,
+        // OpenCode 1 reads the `message`/`part` tables, so every ordinal this
+        // host derives is a position in the v1 projection.
+        storeGeneration: "v1",
         channel1StateBySession,
         channel2DirectiveTextBySession,
         protectedTokens: deps.config.protected_tokens,

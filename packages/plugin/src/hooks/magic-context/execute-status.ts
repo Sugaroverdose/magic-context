@@ -17,6 +17,10 @@ import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import { getPendingOps } from "../../features/magic-context/storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
 import { getTagsBySession } from "../../features/magic-context/storage-tags";
+import {
+    formatCoordinateRebaseNotice,
+    readCoordinateRebaseNotice,
+} from "../../features/magic-context/store-generation-rebase";
 import { formatCacheTtlDisplay, resolveCacheTtlDisplay } from "../../shared/cache-ttl-display";
 import {
     type ConfigParseFailure,
@@ -323,10 +327,29 @@ export function executeStatus(
             );
         }
 
+        // What the last store-projection change cost this session. Shown once it
+        // has happened and left until the session ends, because a user whose
+        // queued reduction was discarded has no other way to find that out.
+        const rebaseNotice = readCoordinateRebaseNotice(db, sessionId);
+        const rebaseNoticeLine = rebaseNotice ? formatCoordinateRebaseNotice(rebaseNotice) : null;
+        if (rebaseNotice && rebaseNoticeLine) {
+            lines.push(
+                "",
+                "### Store Conversion",
+                `- The host changed how it stores this conversation (${rebaseNotice.previousGeneration ?? "unrecorded"} → ${rebaseNotice.generation}); saved positions were re-derived from message ids.`,
+                `- ${rebaseNoticeLine}.`,
+            );
+        }
+
         lines.push(
             "",
             "### History Compression",
             `- Compartments: ${compartments.length}`,
+            ...(rebaseNotice && rebaseNotice.unresolvedCompartments > 0
+                ? [
+                      `- Excluded from range recovery: ${rebaseNotice.unresolvedCompartments} (endpoint message no longer in this host's history)`,
+                  ]
+                : []),
             `- History block: ~${historyBlockTokens.toLocaleString()} tokens`,
             ...(budgetTokens
                 ? [

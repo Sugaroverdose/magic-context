@@ -392,7 +392,14 @@ export function prepareCompartmentInjection(
         }
     }
 
-    const compartments = getCompartments(db, sessionId);
+    // A compartment whose endpoints could not be re-derived after the host
+    // changed store projections is left out of the rendered history: its
+    // start/end attributes are the positions it had in a message list this host
+    // no longer serves, so publishing them would invite ctx_expand ranges that
+    // select unrelated messages. The row itself is kept and still reachable by id.
+    const compartments = getCompartments(db, sessionId).filter(
+        (compartment) => compartment.rebaseStatus !== "unresolved",
+    );
     // v2 faithful facts: session_facts is retired as a render source. Facts are
     // promoted to project memory and render via <project-memory>. We no longer
     // read or render session_facts here (matching the runner's removed write
@@ -1930,6 +1937,7 @@ function rowToM0Compartment(row: Record<string, unknown>): M0Compartment {
         episodeType: nullableString(row.episode_type),
         legacy: Number(row.legacy ?? 0),
         createdAt: Number(row.created_at ?? 0),
+        rebaseStatus: row.rebase_status === "unresolved" ? "unresolved" : "ok",
     };
 }
 

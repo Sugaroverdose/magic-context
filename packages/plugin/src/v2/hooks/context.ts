@@ -695,6 +695,10 @@ export async function registerContext(context: V2Context) {
                 }),
                 contextUsageMap: usage,
                 compactionOff,
+                // OpenCode 2 reads `session_message`, which numbers the same
+                // conversation differently from the v1 tables a converted store
+                // still carries.
+                storeGeneration: "v2",
                 // GA owns its native checkpoints; this adapter never writes the v1
                 // synthetic marker rows that the shared off-transition deletes.
                 hostCleanupCompactionMarkers: () => ({
