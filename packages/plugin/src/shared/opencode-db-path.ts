@@ -12,10 +12,25 @@ export interface ResolveOpenCodeDbPathOptions {
     env?: NodeJS.ProcessEnv;
 }
 
+/**
+ * Decide the host generation from the version the executable reports, never
+ * from its name (the public installer places OpenCode 2 at
+ * `~/.opencode/bin/opencode` with a tiny `opencode2` shim beside it). The raw
+ * `--version` stdout carries a program-name prefix ("opencode v2.0.12"), so the
+ * major is the first digit run, not `parseInt` of the whole string.
+ *
+ * OpenCode 2's pre-GA betas were published under the old scope as
+ * `@opencode-ai/*@0.0.0-beta-<n>` (verified: `0.0.0-beta-19234` ships the V2
+ * `host`/`promise`/`effect` contract and the `compaction` hook); at GA the line
+ * moved to `@opencode/*@2.0.x`. A major of 0 therefore does not mean 1.x: the
+ * beta and dev pre-release shapes are OpenCode 2.
+ */
 export function openCodeHostGenerationFromVersion(
     version: string | null | undefined,
 ): OpenCodeHostGeneration {
-    const major = Number.parseInt(version?.match(/\d+/)?.[0] ?? "", 10);
+    const text = version ?? "";
+    if (/(?:^|\s|v)0\.0\.0-(?:beta|dev)-/.test(text)) return "v2";
+    const major = Number.parseInt(text.match(/\d+/)?.[0] ?? "", 10);
     return Number.isFinite(major) && major >= 2 ? "v2" : "v1";
 }
 
