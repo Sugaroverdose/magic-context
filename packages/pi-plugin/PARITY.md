@@ -1116,3 +1116,5 @@ assertion, and the same session ID through the OMP restart.
 ## Static decision calibration
 
 Pi history rendering and the shared canonical protected-token walk use the same static seeds as OpenCode/Rust. Provider-reported SDK usage remains unscaled. The raw/replay fit helper recounts the supplied array and requires explicit system/tool observations; the storage-failure catch currently has no complete held observations and must refuse rather than admit on serialized byte size alone. Media and unsupported message shapes cannot establish fit. Historian fit uses assembled user/system text and independently resolves each selected model's window. Provider framing and subprocess-added prompt content remain outside MC's observed representation.
+
+Tail-hygiene calibration is deferred with TS and Rust rather than introducing a Pi-only policy. Persisted cadence/grace watermarks lack a unit revision; safely rebasing them alongside the active measurement after restart needs an explicit durable epoch/unit transition. Legacy T/U floors remain in effect; see root PARITY.

@@ -58,3 +58,5 @@ assertions from the selected 20-scenario lane.
 ## Static decision calibration
 
 History budget conversion runs inside m0 rendering/HARD materialization, not invalidation. Canonical protected-window tool mass and original-source boundary class mass are calibrated without rewriting stored counts. Fit estimates expose raw components separately; unknown models use the maximum of 2 and the largest static ratio, while family-inherited seeds use their measured class ratios. Raw fallback and LKG require complete observations and a known current-model window. Missing observations can therefore refuse requests previously admitted by the byte proxy. The returned transform array is observable; provider framing and later host rewrites are not.
+
+Tail-hygiene calibration is deferred: persisted cadence/grace watermarks have no unit revision, while the measured baseline is process-local. The implementation does not reinterpret raw-local historical watermarks as real tokens after restart. The root PARITY entry records the required durable epoch/unit transition; legacy T/U floors remain in effect.
