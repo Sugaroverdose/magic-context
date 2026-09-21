@@ -801,9 +801,15 @@ fn check_compartment_trigger_with_index(
     let has_protected_eligible_head =
         boundary.eligible_head.start < boundary.protected_start_ordinal;
 
-    let scan_budget =
-        MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE.max(trigger_budget * TAIL_SIZE_TRIGGER_MULTIPLIER);
-    let chunk = if has_protected_eligible_head {
+    let source_ratio = ctx
+        .boundary
+        .calibration
+        .map_or(1.0, |s| s.prose_ratio.max(s.tools_ratio));
+    let scan_budget = (MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE
+        .max(trigger_budget * TAIL_SIZE_TRIGGER_MULTIPLIER)
+        / source_ratio)
+        .floor();
+    let mut chunk = if has_protected_eligible_head {
         chunked_message_estimate_with_estimator(
             messages,
             boundary.eligible_head.start,
@@ -821,6 +827,7 @@ fn check_compartment_trigger_with_index(
             commit_cluster_count: 0,
         }
     };
+    chunk.tokens = (chunk.tokens * source_ratio).ceil();
     let progress = TriggerProgress {
         eligible_start_ordinal: boundary.eligible_head.start,
         eligible_chunk_tokens: chunk.tokens,

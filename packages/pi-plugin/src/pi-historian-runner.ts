@@ -93,7 +93,10 @@ import {
 	validateHistorianOutput,
 	validateStoredCompartments,
 } from "@magic-context/core/hooks/magic-context/compartment-runner-validation";
-import { resolveKnownHistorianContextLimit } from "@magic-context/core/hooks/magic-context/derive-budgets";
+import {
+	producerSourceLocalBudget,
+	resolveKnownHistorianContextLimit,
+} from "@magic-context/core/hooks/magic-context/derive-budgets";
 import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import { persistFilteredNoise } from "@magic-context/core/hooks/magic-context/persist-filtered-noise";
@@ -470,7 +473,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		historianModel,
 		fallbackModels,
 		fallbackModelId,
-		historianChunkTokens,
+		historianChunkTokens: providerHistorianChunkTokens,
 		historianContextLimit,
 		boundarySnapshot: providedBoundarySnapshot,
 		refreshBoundarySnapshot,
@@ -494,6 +497,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		forceDrainQuota,
 		forceKeepLastCompartment,
 	} = deps;
+	const historianChunkTokens = producerSourceLocalBudget(
+		providerHistorianChunkTokens,
+		piModelRefToCanonical(historianModel ?? fallbackModelId ?? ""),
+	);
 	const runHistorianSubagentWithTransientRetries = (
 		args: Parameters<typeof runHistorianSubagentWithTransientRetriesGuarded>[0],
 	) =>

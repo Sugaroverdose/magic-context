@@ -120,3 +120,9 @@ describe("resolveHistorianContextLimit", () => {
         }
     });
 });
+
+it("historian source allowance uses the producer seed rather than the consumer seed", async () => {
+    const { producerSourceLocalBudget } = await import("./derive-budgets");
+    expect(producerSourceLocalBudget(20000, "anthropic/claude-fable-5-1")).toBe(12724);
+    expect(producerSourceLocalBudget(20000, "unmeasured/model")).toBe(20000);
+});
