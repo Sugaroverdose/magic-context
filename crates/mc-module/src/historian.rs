@@ -5919,6 +5919,169 @@ mod tests {
         ));
     }
 
+    /// Stand in for a claimant: wait for the run to appear on the queue, take it,
+    /// and report `output` for it. Returns the attempt it was granted.
+    async fn claim_and_report(
+        store: &McStore,
+        ledger: &std::sync::Arc<crate::historian_host::HostRunLedger>,
+        output: &str,
+    ) -> u32 {
+        for _ in 0..200 {
+            let pending = store
+                .list_pending_historian_runs(Some("ses"), 123)
+                .expect("the pending queue must be readable");
+            if let Some(run) = pending.first() {
+                let mc_store::HistorianClaimOutcome::Claimed(claim) = store
+                    .claim_historian_run(&run.run_id, "install-uuid-one", 123)
+                    .expect("claiming must not fail")
+                else {
+                    panic!("the only claimant must win");
+                };
+                assert_eq!(
+                    store
+                        .authorize_historian_report(&claim.run_id, &claim.token)
+                        .unwrap(),
+                    mc_store::HistorianReportOutcome::Authorized(
+                        mc_store::HistorianReportAuthorization {
+                            run_id: claim.run_id.clone(),
+                            session_id: "ses".to_string(),
+                            attempt: claim.attempt,
+                        }
+                    )
+                );
+                ledger
+                    .deliver(
+                        &claim.run_id,
+                        crate::historian_host::HostRunReport::Output(producer_output(
+                            output.to_string(),
+                        )),
+                    )
+                    .expect("the firing that queued the run is waiting for this");
+                return claim.attempt;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("the firing never queued a run for a claimant");
+    }
+
+    /// The publish-equivalence bar: one completion, two runners, same compartments.
+    ///
+    /// Feeding the SAME model output down both paths is what isolates the runner
+    /// from everything else. If the published rows differ, the difference came from
+    /// the seam rather than from the model.
+    #[tokio::test(flavor = "current_thread")]
+    async fn both_runners_publish_the_same_compartments_for_the_same_output() {
+        let output = historian_xml("one output, two runners");
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model-a".to_string()];
+
+        let broca_dir = tempfile::tempdir().unwrap();
+        let broca_store = store(broca_dir.path());
+        seed_prior_compartment(&broca_store);
+        let mut producer = ScriptedProducer::default()
+            .with_start(Ok(run_handle("run-broca")))
+            .with_output(Ok(producer_output(output.clone())));
+        let broca_outcome = run_historian_firing(
+            &mut producer,
+            fire_request(&broca_store, "prompt", &models, &chunk, &prior),
+        )
+        .await
+        .expect("the in-module runner publishes");
+        assert!(matches!(broca_outcome, HistorianDriveOutcome::Completed(_)));
+
+        let host_dir = tempfile::tempdir().unwrap();
+        let host_store = store(host_dir.path());
+        seed_prior_compartment(&host_store);
+        let ledger = std::sync::Arc::new(crate::historian_host::HostRunLedger::new());
+        let request = fire_request(&host_store, "prompt", &models, &chunk, &prior);
+        let (host_outcome, attempt) = tokio::join!(
+            run_historian_firing_on_host(&ledger, request, Duration::from_secs(30)),
+            claim_and_report(&host_store, &ledger, &output),
+        );
+        let host_outcome = host_outcome.expect("the host runner publishes");
+        assert!(matches!(host_outcome, HistorianDriveOutcome::Completed(_)));
+        assert_eq!(attempt, 1, "the first claimant gets attempt 1");
+
+        let broca_compartments = broca_store.load_compartments("ses").unwrap();
+        let host_compartments = host_store.load_compartments("ses").unwrap();
+        assert_eq!(broca_compartments, host_compartments);
+        assert_eq!(broca_compartments.len(), 2, "prior plus the published fold");
+
+        // Both runners land back on Idle with the queue emptied.
+        assert_eq!(
+            host_store.historian_state("ses").unwrap().state,
+            HistorianPhase::Idle
+        );
+        assert!(host_store
+            .list_pending_historian_runs(None, 123)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_queued_run_nobody_claims_is_released_rather_than_left_in_flight() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let host_store = store(host_dir.path());
+        seed_prior_compartment(&host_store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model-a".to_string()];
+        let ledger = std::sync::Arc::new(crate::historian_host::HostRunLedger::new());
+
+        let error = run_historian_firing_on_host(
+            &ledger,
+            fire_request(&host_store, "prompt", &models, &chunk, &prior),
+            Duration::from_millis(10),
+        )
+        .await
+        .expect_err("a run nobody reports on cannot publish");
+        assert!(
+            matches!(
+                error,
+                HistorianDriveError::Producer(HistorianProducerError::TimedOut)
+            ),
+            "{error}"
+        );
+
+        // The session is released for the next trigger rather than holding its
+        // single-flight slot, and the queue does not keep offering a run the module
+        // has stopped waiting for.
+        let state = host_store.historian_state("ses").unwrap();
+        assert_eq!(state.state, HistorianPhase::Idle);
+        assert!(state
+            .last_failure
+            .as_deref()
+            .is_some_and(|detail| detail.contains("no report")));
+        assert!(host_store
+            .list_pending_historian_runs(None, 123)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_host_runner_refuses_an_empty_model_chain_like_the_in_module_one() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let host_store = store(host_dir.path());
+        seed_prior_compartment(&host_store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let ledger = std::sync::Arc::new(crate::historian_host::HostRunLedger::new());
+        let error = run_historian_firing_on_host(
+            &ledger,
+            fire_request(&host_store, "prompt", &[], &chunk, &prior),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("there is nothing to send an empty chain to");
+        assert!(matches!(error, HistorianDriveError::NoModels), "{error}");
+        assert_eq!(
+            host_store.historian_state("ses").unwrap().state,
+            HistorianPhase::Idle,
+            "a refusal before firing leaves the session untouched"
+        );
+    }
+
     #[test]
     fn the_in_module_producer_lane_carries_no_claim() {
         let FireOutcome::Fired(fired) = fire(
