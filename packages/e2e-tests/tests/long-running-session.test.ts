@@ -15,7 +15,7 @@ import {
     forEachHost,
     type ScenarioHarness,
 } from "../src/scenario-hosts";
-import { buildMockHistorianPayload } from "../src/mock-historian";
+import { buildMockHistorianPayload, findHistorianOrdinalRange } from "../src/mock-historian";
 import type { MockUsage } from "../src/mock-provider/server";
 import { openTestDb } from "../src/test-db";
 
@@ -202,19 +202,6 @@ function emitToolOnce(pattern: RegExp, input: Record<string, unknown>, usage: Mo
             usage,
         };
     });
-}
-
-function findOrdinalRange(body: Record<string, unknown>): HistorianRange | null {
-    for (const message of requestMessages(body)) {
-        const content = Array.isArray(message.content) ? message.content : [];
-        for (const block of content) {
-            const text = (block as { text?: unknown } | null)?.text;
-            if (typeof text !== "string" || !text.includes("<new_messages>")) continue;
-            const ordinals = [...text.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
-            if (ordinals.length > 0) return { start: Math.min(...ordinals), end: Math.max(...ordinals) };
-        }
-    }
-    return null;
 }
 
 function pendingMarkerColumns(): string {
@@ -477,7 +464,7 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
         const historianCaptures: HistorianCapture[] = [];
         h.mock.addMatcher((body) => {
             if (!isHistorianRequest(body)) return null;
-            const range = findOrdinalRange(body) ?? { start: 1, end: 2 };
+            const range = findHistorianOrdinalRange(body) ?? { start: 1, end: 2 };
             historianCaptures.push({ requestIndex: historianCaptures.length + 1, range });
             return {
                 text: buildMockHistorianPayload({

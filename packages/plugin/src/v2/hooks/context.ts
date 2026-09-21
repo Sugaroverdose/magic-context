@@ -71,6 +71,7 @@ import { startDreamTrigger } from "./dream-trigger";
 import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
 import { modelLimitCacheWarm, warmModelLimitCacheFromCatalog } from "./model-limit-cache";
 import { adaptPayload, HEAD_IDS } from "./payload";
+import { refusesBeforeProvider } from "./provider-admission";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { rawMessages } from "./store";
@@ -444,25 +445,14 @@ export async function registerContext(context: V2Context) {
                     limitFor,
                 });
                 if (reading) {
-                    // The provider's raw 95% wall always refuses. Below that wall,
-                    // use the outgoing model's output-reserved admission limit; a newer
-                    // host compaction may cross that tighter limit and still be sent once
-                    // so its reduced input-token usage can be measured.
-                    const rawContextLimit = rawLimits.get(draftModelKey)?.context;
-                    const providerHardPressure =
-                        typeof rawContextLimit === "number" &&
-                        Number.isFinite(rawContextLimit) &&
-                        rawContextLimit > 0 &&
-                        reading.inputTokens / rawContextLimit >= 0.95;
-                    const hostCompactionReducedUsage =
-                        latestCompaction !== undefined &&
-                        latest !== undefined &&
-                        latestCompaction.seq >= latest.seq;
-                    unsafe =
-                        providerHardPressure ||
-                        (!hostCompactionReducedUsage &&
-                            rawContextLimit !== undefined &&
-                            reading.inputTokens / reading.admissionLimit >= 0.95);
+                    unsafe = refusesBeforeProvider({
+                        inputTokens: reading.inputTokens,
+                        rawContextLimit: rawLimits.get(draftModelKey)?.context,
+                        hostCompactionReducedUsage:
+                            latestCompaction !== undefined &&
+                            latest !== undefined &&
+                            latestCompaction.seq >= latest.seq,
+                    });
                     if (reading.completed !== undefined)
                         updateSessionMeta(usageDb, draft.sessionID, {
                             lastResponseTime: reading.completed,
