@@ -482,5 +482,97 @@
     },
     "error": "/api/paas/v4/tokenizer HTTP 429 (request rejected)",
     "durationMs": 258
+  },
+  {
+    "method": "tokenize-text",
+    "proseRatio": 0.8801374699872887,
+    "proseTokens": {
+      "local_raw": 63723,
+      "api": 56085
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 37810,
+        "api": 30273,
+        "ratio": 0.8006612007405448
+      },
+      "history": {
+        "local_raw": 23438,
+        "api": 23464,
+        "ratio": 1.0011093096680603
+      },
+      "memory": {
+        "local_raw": 2471,
+        "api": 2348,
+        "ratio": 0.9502225819506273
+      }
+    },
+    "label": "xai/grok-4",
+    "provider": "xai",
+    "modelId": "grok-4-latest",
+    "tokenizerKey": "xai/grok-4",
+    "systemTokens": {
+      "local_raw": 17081,
+      "local_sdk": 17773,
+      "api": 13968,
+      "ratio_raw": 0.818,
+      "ratio_sdk": 0.786
+    },
+    "toolsTokens": {
+      "local_raw": 22593,
+      "local_sdk": 16593,
+      "api": 19893,
+      "ratio_raw": 0.88,
+      "ratio_sdk": 1.199
+    },
+    "error": null,
+    "durationMs": 5625,
+    "caveat": "Raw SYSTEM text and JSON-serialized chat function tools, without hidden chat/tool prompt framing. Residual method error versus billed chat tokens is unmeasured; local TOOLS denominator retains the canonical fixture serialization."
+  },
+  {
+    "method": "tokenize-text",
+    "proseRatio": 0.8801374699872887,
+    "proseTokens": {
+      "local_raw": 63723,
+      "api": 56085
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 37810,
+        "api": 30273,
+        "ratio": 0.8006612007405448
+      },
+      "history": {
+        "local_raw": 23438,
+        "api": 23464,
+        "ratio": 1.0011093096680603
+      },
+      "memory": {
+        "local_raw": 2471,
+        "api": 2348,
+        "ratio": 0.9502225819506273
+      }
+    },
+    "label": "xai/grok-code-fast-1",
+    "provider": "xai",
+    "modelId": "grok-code-fast-1",
+    "tokenizerKey": "xai/grok-code-fast-1",
+    "systemTokens": {
+      "local_raw": 17081,
+      "local_sdk": 17409,
+      "api": 13968,
+      "ratio_raw": 0.818,
+      "ratio_sdk": 0.802
+    },
+    "toolsTokens": {
+      "local_raw": 22593,
+      "local_sdk": 16341,
+      "api": 19893,
+      "ratio_raw": 0.88,
+      "ratio_sdk": 1.217
+    },
+    "error": null,
+    "durationMs": 4315,
+    "caveat": "Raw SYSTEM text and JSON-serialized chat function tools, without hidden chat/tool prompt framing. Residual method error versus billed chat tokens is unmeasured; local TOOLS denominator retains the canonical fixture serialization."
   }
 ]

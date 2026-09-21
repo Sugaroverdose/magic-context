@@ -135,6 +135,20 @@ const CALIBRATION_TABLE: CalibrationEntry[] = [
     },
     // OpenAI gpt-5.x — ai-tokenizer's o200k_base matches exactly, tools overcounted ~16%.
     { prefix: "openai/gpt-5", systemRatio: 1.0, toolsRatio: 0.84 },
+    // Raw text counts exclude the provider's hidden chat-message framing;
+    // that framing remains an unmeasured source of error in residual buckets.
+    {
+        prefix: "xai/grok-4-latest",
+        systemRatio: 0.817751,
+        toolsRatio: 0.880494,
+        proseRatio: 0.880137,
+    },
+    {
+        prefix: "xai/grok-code-fast-1",
+        systemRatio: 0.817751,
+        toolsRatio: 0.880494,
+        proseRatio: 0.880137,
+    },
     // xAI Grok — ai-tokenizer overcounts (uses p50k_base which doesn't match Grok exactly).
     { prefix: "xai/grok-4", systemRatio: 0.82, toolsRatio: 0.88 },
     { prefix: "xai/grok-code-fast", systemRatio: 0.82, toolsRatio: 0.89 },

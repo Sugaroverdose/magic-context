@@ -62,3 +62,14 @@ Reference: https://platform.kimi.ai/docs/api/estimate. Adapter sends SYSTEM as a
 Reference: https://docs.z.ai/api-reference/tools/tokenizer. Uses ZAI_API_KEY or ~/.config/zai.key and `POST https://api.z.ai/api/paas/v4/tokenizer`, reading usage.prompt_tokens. SYSTEM is a system message, TOOLS chat function definitions, PROSE user text; each subtracts a minimal-user baseline. Although the documentation's model enum is older, glm-5, glm-5.1 and glm-4.7 are attempted explicitly rather than substituted with another generation.
 
 2026-09-21: all three models returned HTTP 429 on the minimal baseline. Method `paas/v4/tokenizer`; all probe and section ratios unavailable, cross-check not reached. No GLM entries changed or guessed. Configured references are opencode-go/glm-5.1 (1.0/1.06) for 5/5.1 and cerebras/zai-glm-4.7 (1.0/1.09) for 4.7; retry when this key has endpoint access/quota.
+
+## xAI Grok
+
+Reference: https://docs.x.ai/developers/rest-api-reference/inference/other#tokenize-text. Uses XAI_API_KEY or ~/.config/xai.key. `POST https://api.x.ai/v1/tokenize-text` counts the returned token_ids array. SYSTEM sends the unchanged text content of the chat system message; TOOLS sends JSON.stringify of the chat `[{type:"function",function:{name,description,parameters}}]` array mapped from the canonical fixture. PROSE and sections send exact text bytes. There is no wrapper to subtract. The local tools denominator remains JSON.stringify of the canonical fixture, matching historical calibration.
+
+| Measured native id | Method | SYSTEM | TOOLS | PROSE | Docs | History | Memory |
+|---|---|---:|---:|---:|---:|---:|---:|
+| grok-4-latest | tokenize-text | 0.817751 | 0.880494 | 0.880137 | 0.800661 | 1.001109 | 0.950223 |
+| grok-code-fast-1 | tokenize-text | 0.817751 | 0.880494 | 0.880137 | 0.800661 | 1.001109 | 0.950223 |
+
+2026-09-21 cross-check deltas: Grok 4 SYSTEM -0.274303%, TOOLS +0.056132%; Code Fast SYSTEM -0.274303%, TOOLS -1.068095%. Both pass 5%; ratios below one preserve the over-count correction sign. Only measured native-id prefixes gain entries; broader existing fallback entries remain unchanged. Raw tokenization does not measure the provider's hidden chat/tool prompt template; its residual method error versus billed chat tokens is unmeasured, not zero. Passing the historical cross-check bounds fixture disagreement, not arbitrary chat overhead.

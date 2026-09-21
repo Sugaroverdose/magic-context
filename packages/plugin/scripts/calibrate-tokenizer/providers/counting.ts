@@ -4,6 +4,7 @@ export interface CountMeasurement {
     proseApi: number;
     sections: Record<string, number>;
     method: string;
+    caveat?: string;
 }
 
 export type CountAdapter = (model: string, key: string, system: string, tools: unknown[], prose: Record<string, string>) => Promise<CountMeasurement>;

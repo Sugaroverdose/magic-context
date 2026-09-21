@@ -25,6 +25,7 @@ import { buildProseProbe } from "./prose";
 import { crossCheck } from "./cross-check";
 import { measureAnthropic } from "./providers/anthropic";
 import { type CountAdapter } from "./providers/counting";
+import { measureXai } from "./providers/xai";
 import { measureZai } from "./providers/zai";
 import { measureKimi } from "./providers/kimi";
 import { measureOpenAI } from "./providers/openai";
@@ -38,6 +39,7 @@ interface AuthFile {
 }
 
 const FREE_ADAPTERS: Record<string, { measure: CountAdapter; method: string; env: string; file: string }> = {
+    xai: { measure: measureXai, method: "tokenize-text", env: "XAI_API_KEY", file: "xai.key" },
     zai: { measure: measureZai, method: "paas/v4/tokenizer", env: "ZAI_API_KEY", file: "zai.key" },
     moonshot: { measure: measureKimi, method: "tokenizers/estimate-token-count", env: "MOONSHOT_API_KEY", file: "kimi.key" },
     openai: { measure: measureOpenAI, method: "responses/input_tokens", env: "OPENAI_API_KEY", file: "openai.key" },
@@ -60,6 +62,7 @@ interface ModelTestSet {
 
 interface MeasurementResult {
     method: string;
+    caveat?: string;
     proseRatio: number | null;
     proseTokens: { local_raw: number; api: number | null };
     proseSections: Record<string, { local_raw: number; api: number; ratio: number }>;
@@ -196,6 +199,7 @@ async function measureOne(
     let systemApi: number | null = null;
     let toolsApi: number | null = null;
     let error: string | null = null;
+    let caveat: string | undefined;
     const adapter = FREE_ADAPTERS[authProvider(test)];
     let method = adapter?.method ?? (test.provider === "anthropic" && auth.anthropic?.type === "api" ? "count_tokens" : "usage");
     // biome-ignore lint/suspicious/noExplicitAny: encoding type varies
@@ -223,6 +227,7 @@ async function measureOne(
                 : await measureAnthropic(test, authEntry, systemText, toolsArray, prose);
             measurements = measured;
             method = measured.method;
+            if ("caveat" in measured && typeof measured.caveat === "string") caveat = measured.caveat;
             proseApi = measured.proseApi;
             for (const [name, api] of Object.entries(measured.sections)) {
                 const local_raw = tokenizer.count(prose[name] ?? "");
@@ -248,6 +253,7 @@ async function measureOne(
     const durationMs = Date.now() - start;
     return {
         method,
+        ...(caveat ? { caveat } : {}),
         proseRatio: proseApi === null ? null : proseApi / proseLocal,
         proseTokens: { local_raw: proseLocal, api: proseApi },
         proseSections,
