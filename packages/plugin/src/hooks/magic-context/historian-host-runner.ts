@@ -296,7 +296,18 @@ export class HistorianHostRunner {
             .catch((error) => {
                 // A poll is best-effort. The module is the durable record of what is
                 // outstanding, so a failed look costs one cycle and nothing else.
-                this.log(`poll failed: ${describeError(error)}`);
+                //
+                // Deduplicated on the same key a refused poll uses. The module
+                // answers a scope or version fault with an error FRAME rather than a
+                // refusal body, so without this the one fault an operator most needs
+                // to see once - this host is asking a question it is not allowed to
+                // ask - would print on every transform pass for as long as the
+                // misconfiguration lasts.
+                const failure = `poll failed: ${describeError(error)}`;
+                if (this.pendingRefusalLogged !== failure) {
+                    this.pendingRefusalLogged = failure;
+                    this.log(failure);
+                }
             })
             .finally(() => {
                 this.polling = null;

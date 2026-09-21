@@ -410,6 +410,41 @@ describe("host runner gate", () => {
         ).toHaveLength(2);
     });
 
+    it("says once when the module refuses this host's poll outright, however the refusal arrives", async () => {
+        // The module answers a lane op it will not serve - an unbound channel, an
+        // unreadable version - with an error frame, not with `{ok: false, refusal}`.
+        // That reaches the loop as a thrown error rather than as a body, and it is
+        // the one fault worth saying exactly once: it does not clear on its own, so
+        // a line per transform pass would be a line per pass forever.
+        const refusedLane = {
+            call: async () => {
+                throw Object.assign(
+                    new Error("historian.pending on a channel with no session binding"),
+                    {
+                        code: "route_unbound",
+                    },
+                );
+            },
+        };
+        const logs: string[] = [];
+        const runner = new HistorianHostRunner({
+            call: refusedLane.call,
+            claimantInstanceId: "install-host-a",
+            openExecutor: () => undefined,
+            enabled: () => true,
+            log: (message) => logs.push(message),
+            schedule: () => () => {},
+        });
+
+        await runner.pump("ses-a");
+        await runner.pump("ses-a");
+        await runner.pump("ses-a");
+
+        const complaints = logs.filter((line) => line.includes("channel with no session binding"));
+        expect(complaints).toHaveLength(1);
+        expect(logs).toHaveLength(1);
+    });
+
     it("never sees or claims a run belonging to another project", async () => {
         const lane = new ProjectScopedClaimLane();
         lane.queue({
