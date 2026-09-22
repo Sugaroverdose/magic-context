@@ -504,6 +504,14 @@ export function loadSessionDecisions(
             droppedTokens: numberField(row, "dropped_tokens", "applied_drop_tokens") ?? 0,
             droppedCount: appliedDrops ?? 0,
             inputTokens: numberField(row, "input_tokens", "prompt_tokens") ?? 0,
+            inputCount: numberField(row, "oc_input", "input_count"),
+            externalEpoch: booleanField(
+                row,
+                "restart_epoch",
+                "deploy_epoch",
+                "config_epoch",
+                "external_epoch",
+            ),
             flush:
                 booleanField(row, "flush", "flush_applied", "explicit_flush") ||
                 materializeReason === "explicit_flush",
@@ -589,6 +597,8 @@ export function loadSessionDecisions(
             prior.droppedTokens = Math.max(prior.droppedTokens, record.droppedTokens);
             prior.droppedCount = Math.max(prior.droppedCount, record.droppedCount);
             prior.inputTokens = Math.max(prior.inputTokens, record.inputTokens);
+            prior.inputCount ??= record.inputCount;
+            prior.externalEpoch ||= record.externalEpoch;
             prior.flush ||= record.flush;
             prior.source = `${prior.source}+${record.source}`;
             continue;

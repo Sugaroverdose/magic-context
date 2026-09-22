@@ -17,6 +17,7 @@ export type CacheBustDivergenceClass =
     | "usage_missing"
     | "provider_full_miss"
     | "provider_short_read_identical_bytes"
+    | "self_inflicted_epoch"
     | "unaccounted_defer_pass"
     | "unaccounted_double_bust"
     | "unaccounted_tail_rewrite"
@@ -58,6 +59,10 @@ export interface CacheBustDecisionAttribution {
     droppedTokens: number;
     droppedCount: number;
     inputTokens: number;
+    /** Raw OpenCode message count observed by the Rust pass, when logged. */
+    inputCount?: number;
+    /** A restart, deploy, or explicit configuration epoch independently explains epoch_change. */
+    externalEpoch?: boolean;
     flush: boolean;
     source: string;
 }
@@ -86,6 +91,8 @@ export interface CacheBustAttributionInput {
     currentModel?: string;
     /** The meter read short while the reusable byte prefix was unchanged. */
     providerShortReadWithIdenticalPrefix?: boolean;
+    /** Current raw OpenCode message count divided by the preceding pass count. */
+    ocInputStepRatio?: number;
     decision?: CacheBustDecisionAttribution;
 }
 
@@ -180,6 +187,11 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
         divergenceClass: "provider_short_read_identical_bytes",
         accounted: true,
         rule: "provider read fell short while the reusable byte prefix was unchanged; provider-side latency or eviction, not a prompt rewrite",
+    },
+    {
+        divergenceClass: "self_inflicted_epoch",
+        accounted: false,
+        rule: "epoch_change has no restart/deploy/config epoch and raw OpenCode input stepped by at least 4×",
     },
     {
         divergenceClass: "unaccounted_defer_pass",
@@ -335,6 +347,13 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
     if (decision.materialized) {
         if (materializeReason === "model_change") return "accounted_hard_model_change";
         if (materializeReason === "system_hash") return "accounted_hard_system_hash";
+        if (
+            materializeReason === "epoch_change" &&
+            !decision.externalEpoch &&
+            (input.ocInputStepRatio ?? 0) >= 4
+        ) {
+            return "self_inflicted_epoch";
+        }
         if (materializeReason && EPOCH_REASONS.has(materializeReason)) {
             return "accounted_hard_epoch";
         }
