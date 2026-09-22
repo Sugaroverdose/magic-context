@@ -31,6 +31,45 @@ import { primeTailRawMessageCache, withRawSessionMessageCache } from "./read-ses
 import { sendStatusNotification } from "./send-session-notification";
 import type { MessageLike } from "./transform-operations";
 
+/**
+ * A transform blocks the user's turn before provider dispatch, so it may join a historian for at
+ * most one minute. The historian keeps running after this foreground budget and can publish for a
+ * later pass; the provider-sized historian timeout must never become a silent TUI wait.
+ */
+export const HISTORIAN_INLINE_JOIN_BUDGET_MS = 60_000;
+
+export function resolveHistorianInlineJoinBudget(configuredTimeoutMs?: number): number {
+    const requested = configuredTimeoutMs ?? HISTORIAN_INLINE_JOIN_BUDGET_MS;
+    return Math.max(0, Math.min(requested, HISTORIAN_INLINE_JOIN_BUDGET_MS));
+}
+
+export function historianJoinFailClosedMessage(input: {
+    timedOut: boolean;
+    budgetMs: number | null;
+    finalWireEstimate?: { tokens: number; trusted: boolean };
+    contextLimitTokens: number;
+    lastHistorianError?: string | null;
+}): string | null {
+    if (!input.timedOut) return null;
+    const estimate = input.finalWireEstimate;
+    if (
+        estimate?.trusted === true &&
+        Number.isFinite(estimate.tokens) &&
+        estimate.tokens > 0 &&
+        Number.isFinite(input.contextLimitTokens) &&
+        input.contextLimitTokens > 0 &&
+        estimate.tokens < input.contextLimitTokens
+    ) {
+        return null;
+    }
+    const budgetMs = input.budgetMs ?? HISTORIAN_INLINE_JOIN_BUDGET_MS;
+    const seconds = budgetMs / 1000;
+    const reason =
+        input.lastHistorianError?.replace(/\s+/g, " ").trim() ||
+        "background historian is still running";
+    return `historian did not complete within ${seconds} s: ${reason}`;
+}
+
 interface RunCompartmentPhaseArgs {
     hiddenCompletionExecutor?: HiddenCompletionExecutor;
     compactionMarkerStrategy?: HiddenCompartmentRunnerDeps["compactionMarkerStrategy"];
@@ -183,12 +222,16 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
     published: boolean;
     justAwaitedPublication: boolean;
     rebuiltHistoryThisPass: boolean;
+    historianJoinTimedOut: boolean;
+    historianJoinBudgetMs: number | null;
 }> {
     let pendingCompartmentInjection = args.pendingCompartmentInjection;
     let compartmentInProgress = args.sessionMeta.compartmentInProgress;
     let published = false;
     let justAwaitedPublication = false;
     let rebuiltHistoryThisPass = false;
+    let historianJoinTimedOut = false;
+    let historianJoinBudgetMs: number | null = null;
     const historianRunnable = args.historianRunnable !== false;
 
     // Compaction-off mode (issue #266): the historian/compartment phase is
@@ -211,6 +254,8 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             published,
             justAwaitedPublication,
             rebuiltHistoryThisPass,
+            historianJoinTimedOut,
+            historianJoinBudgetMs,
         };
     }
     let rawEligibility: ReturnType<typeof getRawHistoryEligibility> | null =
@@ -279,12 +324,20 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         reason: string,
     ): Promise<"completed" | "timed_out"> {
         sessionLog(args.sessionId, reason);
-        const timeoutMs = args.historianTimeoutMs ?? 120_000; // 2 minutes default
-        const timeout = new Promise<"timeout">((resolve) =>
-            setTimeout(() => resolve("timeout"), timeoutMs),
-        );
-        const result = await Promise.race([activeRun.promise.then(() => "done" as const), timeout]);
+        const timeoutMs = resolveHistorianInlineJoinBudget(args.historianTimeoutMs);
+        historianJoinBudgetMs = timeoutMs;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<"timeout">((resolve) => {
+            timer = setTimeout(() => resolve("timeout"), timeoutMs);
+        });
+        let result: "done" | "timeout";
+        try {
+            result = await Promise.race([activeRun.promise.then(() => "done" as const), timeout]);
+        } finally {
+            if (timer !== undefined) clearTimeout(timer);
+        }
         if (result === "timeout") {
+            historianJoinTimedOut = true;
             sessionLog(
                 args.sessionId,
                 `transform: compartment await timed out after ${timeoutMs}ms — proceeding without waiting`,
@@ -450,7 +503,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 void sendStatusNotification(
                     args.client,
                     args.sessionId,
-                    `⏳ Context at ${args.contextUsage.percentage.toFixed(0)}% — Magic Context is comparting history before continuing. This may take up to 2 minutes.`,
+                    `⏳ Context at ${args.contextUsage.percentage.toFixed(0)}% — Magic Context is comparting history before continuing. This may take up to ${HISTORIAN_INLINE_JOIN_BUDGET_MS / 1000} seconds.`,
                     notifParams,
                 );
             }
@@ -483,5 +536,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         published,
         justAwaitedPublication,
         rebuiltHistoryThisPass,
+        historianJoinTimedOut,
+        historianJoinBudgetMs,
     };
 }

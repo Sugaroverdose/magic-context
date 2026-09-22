@@ -306,7 +306,8 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 					...pinMockAgents(
 						options.magicContextConfig,
 						`${providerID}/${defaultModelID}`,
-						"opencode2",
+						// Both OpenCode host generations use the `agents.*.opencode` config block.
+						"opencode",
 					),
 				},
 				null,

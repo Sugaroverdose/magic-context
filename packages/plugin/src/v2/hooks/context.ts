@@ -25,6 +25,7 @@ import {
 } from "../../features/magic-context/tool-definition-tokens";
 import { assertExecutableToolInput } from "../../hooks/magic-context/dropped-input-guard";
 import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
+import { getSessionErrorInfo } from "../../hooks/magic-context/event-payloads";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import {
     createChatMessageHook,
@@ -80,6 +81,9 @@ import { createV2RawMessageReader } from "./store";
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
 import { resolveUsageReading, usageReadingMatchesDraft } from "./usage-reading";
+
+// The event stream can trail the terminal store row by a scheduler tick; keep failure surfacing fast.
+const HIDDEN_SESSION_ERROR_GRACE_MS = 50;
 
 export function isBlockingV2TransformError(error: unknown): boolean {
     return error instanceof EmergencyFailClosedError || isFailClosedBlockingError(error);
@@ -291,6 +295,7 @@ export async function registerContext(context: V2Context) {
     setOutputReserveConfig(config.output_reserve);
     const queriedModels = new Set<string>();
     const rawLimits = new Map<string, { context: number; input?: number; output?: number }>();
+    const hiddenSessionErrors = new Map<string, unknown>();
     // Draft-authoritative model/variant/agent. Not the v1 event-driven map.
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
@@ -340,6 +345,24 @@ export async function registerContext(context: V2Context) {
             ? await createV2HiddenCompletionExecutor(
                   {
                       ...context.session,
+                      get: async (input) => {
+                          const session = await context.session.get(input);
+                          const error = hiddenSessionErrors.get(input.sessionID);
+                          return error === undefined ? session : { ...session, error };
+                      },
+                      terminalError: async (input) => {
+                          const deadline = Date.now() + HIDDEN_SESSION_ERROR_GRACE_MS;
+                          do {
+                              const error = hiddenSessionErrors.get(input.sessionID);
+                              if (error !== undefined) return error;
+                              await new Promise((resolve) => setTimeout(resolve, 5));
+                          } while (Date.now() < deadline);
+                          return undefined;
+                      },
+                      prompt: async (input) => {
+                          hiddenSessionErrors.delete(input.sessionID);
+                          return context.session.prompt(input);
+                      },
                       // The injected session surface stops short of deletion, so retiring a hidden
                       // child reaches the host's delete route directly — through the registration
                       // the child recorded when it was created, never through whichever service
@@ -534,6 +557,11 @@ export async function registerContext(context: V2Context) {
                 const event = value as { type?: string; data?: { sessionID?: string } };
                 if (!event.data?.sessionID) continue;
                 const sessionID = event.data.sessionID;
+                if (event.type === "session.error") {
+                    const error = getSessionErrorInfo(event.data)?.error;
+                    if (error !== undefined) hiddenSessionErrors.set(sessionID, error);
+                    continue;
+                }
                 if (event.type === "session.deleted") {
                     deletedSessions.add(sessionID);
                     if (db) {
@@ -543,6 +571,7 @@ export async function registerContext(context: V2Context) {
                     rawProviders.get(sessionID)?.();
                     rawProviders.delete(sessionID);
                     usage.delete(sessionID);
+                    hiddenSessionErrors.delete(sessionID);
                     liveModels.delete(sessionID);
                     variants.delete(sessionID);
                     agents.delete(sessionID);

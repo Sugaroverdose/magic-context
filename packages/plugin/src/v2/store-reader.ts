@@ -49,6 +49,7 @@ export interface MessageData {
     content?: Array<Record<string, unknown>>;
     text?: string;
     finish?: string;
+    outcome?: "succeeded" | "failed" | "interrupted";
     error?: unknown;
     model?: { id: string; providerID: string; variant?: string };
     tokens?: {
@@ -487,6 +488,17 @@ export class V2StoreReader {
                     ORDER BY seq DESC LIMIT 1`)
                 .get(sessionID) as RawRow | undefined;
             return row ? (decode(row) as StoreRow<"assistant">) : undefined;
+        });
+    }
+
+    latestIdle(sessionID: string): StoreRow<"idle"> | undefined {
+        return trackDecodeOperation("latestIdle", () => {
+            const row = this.db
+                .prepare(`SELECT id, session_id, type, seq, time_created, data FROM session_message
+                    WHERE session_id = ? AND type = 'idle'
+                    ORDER BY seq DESC LIMIT 1`)
+                .get(sessionID) as RawRow | undefined;
+            return row ? (decode(row) as StoreRow<"idle">) : undefined;
         });
     }
 

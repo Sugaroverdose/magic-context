@@ -53,14 +53,40 @@ const request = (
 
 class Rows {
     private readonly rows = new Map<string, StoreRow<"assistant">[]>();
+    private readonly idle = new Map<string, StoreRow<"idle">[]>();
     private seq = 0;
+    latestAssistantCalls = 0;
+    latestIdleCalls = 0;
 
     latestSequence(sessionID: string): number {
-        return this.rows.get(sessionID)?.at(-1)?.seq ?? -1;
+        return Math.max(
+            this.rows.get(sessionID)?.at(-1)?.seq ?? -1,
+            this.idle.get(sessionID)?.at(-1)?.seq ?? -1,
+        );
     }
 
     latestAssistant(sessionID: string): StoreRow<"assistant"> | undefined {
+        this.latestAssistantCalls += 1;
         return this.rows.get(sessionID)?.at(-1);
+    }
+
+    latestIdle(sessionID: string): StoreRow<"idle"> | undefined {
+        this.latestIdleCalls += 1;
+        return this.idle.get(sessionID)?.at(-1);
+    }
+
+    appendIdle(sessionID: string, outcome: "succeeded" | "failed" | "interrupted") {
+        const row: StoreRow<"idle"> = {
+            id: `message-${++this.seq}`,
+            session_id: sessionID,
+            type: "idle",
+            seq: this.seq,
+            data: { outcome, time: { created: Date.now() } },
+        };
+        const current = this.idle.get(sessionID) ?? [];
+        current.push(row);
+        this.idle.set(sessionID, current);
+        return row;
     }
 
     append(
@@ -73,6 +99,7 @@ class Rows {
             rawTokens?: boolean;
             error?: unknown;
             finish?: string;
+            outcome?: "succeeded" | "failed" | "interrupted";
             omitFinish?: boolean;
         } = {},
     ): StoreRow<"assistant"> {
@@ -84,6 +111,7 @@ class Rows {
             data: {
                 content: [{ type: "text", text }],
                 ...(options.omitFinish ? {} : { finish: options.finish ?? "stop" }),
+                ...(options.outcome === undefined ? {} : { outcome: options.outcome }),
                 ...(options.error === undefined ? {} : { error: options.error }),
                 model: { providerID: "mock", id: options.modelID ?? "cheap" },
                 ...(options.usage === false
@@ -167,6 +195,10 @@ async function setup(
     let promptError: Error | undefined;
     let providerError: unknown;
     let providerErrorUnsettled = false;
+    let terminalOutcome: "succeeded" | "failed" | "interrupted" | undefined;
+    let terminalRowType: "assistant" | "idle" = "assistant";
+    let readableSessionError: unknown;
+    let eventSessionError: unknown;
     let removeError: Error | undefined;
     let delayRowMs = 0;
     let omitUsage = false;
@@ -182,7 +214,13 @@ async function setup(
             return { id };
         },
         async get() {
-            return { model: { providerID: "mock", id: "user" } };
+            return {
+                model: { providerID: "mock", id: "user" },
+                ...(readableSessionError === undefined ? {} : { error: readableSessionError }),
+            };
+        },
+        async terminalError() {
+            return eventSessionError;
         },
         async switchModel(input) {
             switches.push(structuredClone(input));
@@ -217,6 +255,16 @@ async function setup(
                     usage: false,
                     ...(providerErrorUnsettled ? { omitFinish: true } : { finish: "error" }),
                 });
+                return;
+            }
+            if (terminalOutcome !== undefined) {
+                if (terminalRowType === "idle") rows.appendIdle(input.sessionID, terminalOutcome);
+                else
+                    rows.append(input.sessionID, "", {
+                        outcome: terminalOutcome,
+                        usage: false,
+                        omitFinish: true,
+                    });
                 return;
             }
             const write = () =>
@@ -303,6 +351,18 @@ async function setup(
         },
         setProviderErrorUnsettled(value: boolean) {
             providerErrorUnsettled = value;
+        },
+        setTerminalOutcome(value: "succeeded" | "failed" | "interrupted" | undefined) {
+            terminalOutcome = value;
+        },
+        setTerminalRowType(value: "assistant" | "idle") {
+            terminalRowType = value;
+        },
+        setReadableSessionError(value: unknown) {
+            readableSessionError = value;
+        },
+        setEventSessionError(value: unknown) {
+            eventSessionError = value;
         },
         setRemoveError(value: Error | undefined) {
             removeError = value;
@@ -485,6 +545,73 @@ describe("OpenCode 2 hidden child completion", () => {
                 ).value,
             );
             expect(meta.retired_children).toHaveLength(0);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("fails an outcome-only failed assistant in one poll with persisted host detail", async () => {
+        const state = await setup();
+        try {
+            state.setTerminalOutcome("failed");
+            state.setEventSessionError({
+                type: "ProviderModelNotFoundError",
+                message: "ollama-cloud/deepseek-v4.1-flash is unavailable",
+            });
+            const handle = await state.executor.open({ ...run, timeoutMs: 40 });
+            const pollsBefore = state.rows.latestAssistantCalls;
+            const failure = state.executor.attempt(handle, request());
+            await expect(failure).rejects.toThrow("outcome=failed");
+            await expect(failure).rejects.toThrow("ProviderModelNotFoundError");
+            await expect(failure).rejects.toThrow(
+                "ollama-cloud/deepseek-v4.1-flash is unavailable",
+            );
+            expect(state.rows.latestAssistantCalls - pollsBefore).toBe(1);
+            await close(state.executor, handle, false);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("fails an outcome-only idle row in one poll", async () => {
+        const state = await setup();
+        try {
+            state.setTerminalRowType("idle");
+            state.setTerminalOutcome("failed");
+            const handle = await state.executor.open({ ...run, timeoutMs: 40 });
+            const pollsBefore = state.rows.latestIdleCalls;
+            const failure = state.executor.attempt(handle, request());
+            await expect(failure).rejects.toThrow("outcome=failed");
+            await expect(failure).rejects.toThrow('"type":"idle"');
+            expect(state.rows.latestIdleCalls - pollsBefore).toBe(1);
+            await close(state.executor, handle, false);
+
+            state.setTerminalOutcome(undefined);
+            state.setTerminalRowType("assistant");
+            const recovered = await state.executor.open(run);
+            expect(recovered.id).toBe(handle.id);
+            await state.executor.attempt(recovered, request());
+            await close(state.executor, recovered, true);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("treats every OpenCode 2.0.12 assistant outcome as terminal", async () => {
+        const state = await setup();
+        try {
+            state.setTerminalOutcome("interrupted");
+            const interrupted = await state.executor.open({ ...run, timeoutMs: 40 });
+            await expect(state.executor.attempt(interrupted, request())).rejects.toThrow(
+                "outcome=interrupted",
+            );
+            await close(state.executor, interrupted, false);
+
+            state.setTerminalOutcome("succeeded");
+            const succeeded = await state.executor.open({ ...run, timeoutMs: 40 });
+            await state.executor.attempt(succeeded, request());
+            expect((await state.executor.collect(succeeded, 50)).text).toBeNull();
+            await close(state.executor, succeeded, true);
         } finally {
             state.db.close();
         }
