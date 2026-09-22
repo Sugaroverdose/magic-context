@@ -1068,7 +1068,7 @@ test("each rebased session produces one operator-readable log line with its coun
     // gone is reported separately as unresolved, never as a rewrite.
     expect(formatRebaseLogLine(outcome, 12.4)).toBe(
         "INFO store-generation-rebase v1->v2 rows_rewritten=2 unresolved=1 " +
-            "index_rows_rebuilt=7 drops_discarded=0 ms=12 " +
+            "index_rows_rebuilt=7 drops_discarded=0 healed_gaps=0 narrative_gaps=0 ms=12 " +
             "(chunk_windows_deleted=0 depth_rows_dropped=0 part_tags_folded=0 " +
             "lkg_slots_dropped=0 frozen_part_entries_dropped=0)",
     );
