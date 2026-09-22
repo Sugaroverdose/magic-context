@@ -1,6 +1,7 @@
 import {
     acquireCompartmentLease,
     COMPARTMENT_LEASE_RENEWAL_MS,
+    getCompartmentLeaseBlocker,
     releaseCompartmentLease,
     releaseCompartmentLeaseBestEffort,
     renewCompartmentLease,
@@ -136,9 +137,12 @@ export function startCompartmentAgent(
     const holderId = crypto.randomUUID();
     const lease = acquireCompartmentLease(deps.db, deps.sessionId, holderId);
     if (!lease) {
+        const blocker = getCompartmentLeaseBlocker(deps.db, deps.sessionId);
         sessionLog(
             deps.sessionId,
-            "compartment agent skipped: compartment lease held by another process",
+            blocker
+                ? `compartment agent skipped: compartment lease held by another process (holder=${blocker.holderId} pid=${blocker.ownerPid ?? "unknown"} expiresAt=${blocker.expiresAt})`
+                : "compartment agent skipped: compartment lease held by another process (owner unavailable after acquisition race)",
         );
         // The DB lease is the cross-process authority. If this process set the
         // start-intent flag but did not win the lease, no local run will clear it;

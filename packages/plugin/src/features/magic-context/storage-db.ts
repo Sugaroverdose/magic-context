@@ -104,7 +104,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastMigrationOnOpenRefusal = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 89;
+export const LATEST_SUPPORTED_VERSION = 90;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1037,6 +1037,7 @@ export function initializeDatabase(
     CREATE TABLE IF NOT EXISTS compartment_state_lease (
       session_id TEXT PRIMARY KEY NOT NULL,
       holder_id TEXT NOT NULL,
+      owner_pid INTEGER,
       acquired_at INTEGER NOT NULL,
       expires_at INTEGER NOT NULL
     );
@@ -1924,6 +1925,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "merged_reasoning_stripped_ids", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "thinking_binding_recovery_target", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "trailing_blank_decisions", "TEXT DEFAULT ''");
+    ensureColumn(db, "compartment_state_lease", "owner_pid", "INTEGER");
     ensureColumn(db, "compartments", "start_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "compartments", "end_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "memory_embeddings", "model_id", "TEXT");

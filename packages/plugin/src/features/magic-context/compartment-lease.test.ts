@@ -9,6 +9,7 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     acquireCompartmentLease,
+    getCompartmentLeaseBlocker,
     isCompartmentLeaseHeld,
     releaseCompartmentLease,
     renewCompartmentLease,
@@ -52,6 +53,31 @@ describe("compartment state lease", () => {
         const second = acquireCompartmentLease(db, "ses", "holder-a");
         expect(second).not.toBeNull();
         expect(second!.expiresAt).toBeGreaterThan(first!.acquiredAt + 1_000);
+        closeQuietly(db);
+    });
+
+    it("lets another process reclaim an unexpired lease whose owner pid is dead", () => {
+        const db = makeDb();
+        db.prepare(
+            `INSERT INTO compartment_state_lease
+                (session_id, holder_id, owner_pid, acquired_at, expires_at)
+             VALUES (?, ?, ?, ?, ?)`,
+        ).run("ses", "dead-holder", 2_147_483_647, Date.now(), Date.now() + 60_000);
+
+        expect(acquireCompartmentLease(db, "ses", "holder-b")).not.toBeNull();
+        expect(isCompartmentLeaseHeld(db, "ses", "holder-b")).toBe(true);
+        closeQuietly(db);
+    });
+
+    it("reports the live owner that blocks acquisition", () => {
+        const db = makeDb();
+        expect(acquireCompartmentLease(db, "ses", "holder-a")).not.toBeNull();
+        expect(acquireCompartmentLease(db, "ses", "holder-b")).toBeNull();
+
+        const blocker = getCompartmentLeaseBlocker(db, "ses");
+        expect(blocker?.holderId).toBe("holder-a");
+        expect(blocker?.ownerPid).toBe(process.pid);
+        expect(blocker?.expiresAt).toBeGreaterThan(Date.now());
         closeQuietly(db);
     });
 
