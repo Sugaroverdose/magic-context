@@ -643,6 +643,17 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             assertV88CoordinateArm(db);
             populateModuleOwnedRows(db, version, state);
             return;
+        case 89:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            expect(
+                (
+                    db.prepare("PRAGMA table_info(message_fts_rowid_map)").all() as Array<{
+                        name: string;
+                    }>
+                ).map((column) => column.name),
+            ).toContain("message_time_ms");
+            populateModuleOwnedRows(db, version, state);
+            return;
         default:
             throw new Error(`populateForVersion has no arm for migration v${version}`);
     }

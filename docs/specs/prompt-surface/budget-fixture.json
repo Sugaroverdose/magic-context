@@ -59,10 +59,10 @@
       "ctx_expand": { "chars": 791, "tokens": 177 },
       "ctx_note": { "chars": 1499, "tokens": 359 },
       "ctx_memory": { "chars": 912, "tokens": 216 },
-      "ctx_search": { "chars": 777, "tokens": 184 },
-      "totalTokens": 967
+      "ctx_search": { "chars": 945, "tokens": 231 },
+      "totalTokens": 1014
     },
-    "builtInProviderVisibleTotal": 4687
+    "builtInProviderVisibleTotal": 4734
   },
   "mutableProseBaseline": 3720,
   "integerLightCeiling": 1825,

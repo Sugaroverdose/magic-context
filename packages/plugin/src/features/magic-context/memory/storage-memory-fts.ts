@@ -38,11 +38,7 @@ function getSearchStatement(db: Database, dated = false): PreparedStatement {
  * characters are treated as literal content rather than query syntax.
  */
 
-function getUnionSearchStatement(
-    db: Database,
-    arity: number,
-    dated = false,
-): PreparedStatement {
+function getUnionSearchStatement(db: Database, arity: number, dated = false): PreparedStatement {
     const statementRegistry = dated ? datedUnionSearchStatements : unionSearchStatements;
     let statements = statementRegistry.get(arity);
     if (!statements) {
@@ -139,7 +135,7 @@ export function searchMemoriesFTSUnion(
     const rows = sharingFilter.active
         ? db
               .prepare(
-                   `SELECT ${getMemorySelectColumns(db)} FROM memories_fts INNER JOIN memories ON memories.id = memories_fts.rowid WHERE memories.project_path IN (${identities.map(() => "?").join(", ")}) AND memories.status IN ('active', 'permanent') AND (memories.expires_at IS NULL OR memories.expires_at > ?)${dateRange === null ? "" : " AND memories.created_at BETWEEN ? AND ?"} AND memories_fts MATCH ?${sharingFilter.clause} ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id ASC LIMIT ?`,
+                  `SELECT ${getMemorySelectColumns(db)} FROM memories_fts INNER JOIN memories ON memories.id = memories_fts.rowid WHERE memories.project_path IN (${identities.map(() => "?").join(", ")}) AND memories.status IN ('active', 'permanent') AND (memories.expires_at IS NULL OR memories.expires_at > ?)${dateRange === null ? "" : " AND memories.created_at BETWEEN ? AND ?"} AND memories_fts MATCH ?${sharingFilter.clause} ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id ASC LIMIT ?`,
               )
               .all(
                   ...identities,

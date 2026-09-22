@@ -17,12 +17,12 @@ import {
 } from "../../features/magic-context/search";
 import { getVisibleMemoryIds } from "../../hooks/magic-context/inject-compartments";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
-import { parseSearchDateRange, SearchDateRangeError } from "./date-range";
 import {
     CTX_SEARCH_DESCRIPTION,
     CTX_SEARCH_TOOL_NAME,
     DEFAULT_CTX_SEARCH_LIMIT,
 } from "./constants";
+import { parseSearchDateRange, SearchDateRangeError } from "./date-range";
 import type { CtxSearchArgs, CtxSearchSource, CtxSearchToolDeps } from "./types";
 
 export { CTX_SEARCH_LIGHT_DESCRIPTION } from "../light-descriptions";

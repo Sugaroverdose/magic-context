@@ -39,6 +39,19 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
 		return { type: "message", id, message };
 	}
 
+	it("parses Pi JSONL ISO entry timestamps into indexed epoch milliseconds", () => {
+		const entries = [
+			{
+				...messageEntry("user-time", { role: "user", content: "timed" }),
+				timestamp: "2026-09-22T12:34:56.789Z",
+			},
+		];
+
+		expect(convertEntriesToRawMessages(entries)[0]?.createdAt).toBe(
+			Date.parse("2026-09-22T12:34:56.789Z"),
+		);
+	});
+
 	it("skips current custom entries and historical ctx-status custom messages", () => {
 		const entries = [
 			messageEntry("user-1", { role: "user", content: "before" }),

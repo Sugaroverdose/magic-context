@@ -93,7 +93,9 @@ describe("migration v89: indexed message times", () => {
                 message_time_ms: null,
             });
             expect(
-                db.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 89").get(),
+                db
+                    .prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 89")
+                    .get(),
             ).toEqual({ count: 1 });
         } finally {
             closeQuietly(db);

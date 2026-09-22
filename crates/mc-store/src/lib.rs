@@ -4991,6 +4991,7 @@ pub struct StoredMemorySearchRow {
     pub project_path: String,
     pub category: String,
     pub content: String,
+    pub created_at: i64,
     pub updated_at: i64,
 }
 
@@ -14252,7 +14253,7 @@ impl McStore {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = self.inner.with_conn(|conn| {
             let sql = format!(
-                "SELECT id, project_path, category, content, updated_at
+                "SELECT id, project_path, category, content, created_at, updated_at
                    FROM mc_memories
                   WHERE ({sharing})
                     AND status IN ('active', 'permanent')
@@ -14270,7 +14271,8 @@ impl McStore {
                         project_path: row.get(1)?,
                         category: row.get(2)?,
                         content: row.get(3)?,
-                        updated_at: row.get(4)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -14338,7 +14340,7 @@ impl McStore {
 
         let rows = self.inner.with_conn(|conn| {
             let sql = format!(
-                "SELECT id, project_path, category, content, updated_at
+                "SELECT id, project_path, category, content, created_at, updated_at
                    FROM mc_memories
                   WHERE ({sharing})
                     AND status IN ('active', 'permanent')
@@ -14357,7 +14359,8 @@ impl McStore {
                         project_path: r.get(1)?,
                         category: r.get(2)?,
                         content: r.get(3)?,
-                        updated_at: r.get(4)?,
+                        created_at: r.get(4)?,
+                        updated_at: r.get(5)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;

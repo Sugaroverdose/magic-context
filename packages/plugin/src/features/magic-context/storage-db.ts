@@ -875,12 +875,19 @@ function finishDatabaseOpen(
             }
             void startMessageFtsRowidMapBackfill(db)
                 .then(async () => {
-                    const [{ readRawSessionMessages }, { startMessageTimeBackfill }] =
-                        await Promise.all([
-                            import("../../hooks/magic-context/read-session-chunk"),
-                            import("./message-time-backfill"),
-                        ]);
-                    await startMessageTimeBackfill(db, readRawSessionMessages);
+                    const [
+                        { readRawSessionMessagePage, readRawSessionMessages },
+                        { startMessageTimeBackfill },
+                    ] = await Promise.all([
+                        import("../../hooks/magic-context/read-session-chunk"),
+                        import("./message-time-backfill"),
+                    ]);
+                    await startMessageTimeBackfill(
+                        db,
+                        Object.assign(readRawSessionMessages, {
+                            readPage: readRawSessionMessagePage,
+                        }),
+                    );
                 })
                 .catch((error) => {
                     log(

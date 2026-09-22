@@ -23,7 +23,7 @@ import {
     _resetProjectEmbeddingRegistryForTests,
     registerProjectEmbedding,
 } from "./project-embedding-registry";
-import { parseIdShapedQuery, unifiedSearch } from "./search";
+import { parseIdShapedQuery, type UnifiedSearchOptions, unifiedSearch } from "./search";
 import { initializeDatabase } from "./storage-db";
 import { addNote, dismissNote, updateNote } from "./storage-notes";
 import { createPrimer } from "./storage-primers";
@@ -405,6 +405,288 @@ describe("unifiedSearch", () => {
         expect(results.filter((r) => r.source === "message")).toHaveLength(0);
         // Memory results are unaffected by the message-ordinal cutoff.
         expect(results.some((r) => r.source === "memory")).toBe(true);
+    });
+
+    it("filters indexed messages by inclusive time before LIMIT and excludes NULL times", async () => {
+        rawMessagesBySession.set("ses-dated", [
+            {
+                ordinal: 1,
+                id: "outside-before",
+                role: "user",
+                parts: [{ type: "text", text: "temporal needle" }],
+                createdAt: 1_000,
+            },
+            {
+                ordinal: 2,
+                id: "inside-start",
+                role: "assistant",
+                parts: [{ type: "text", text: "temporal needle" }],
+                createdAt: 2_000,
+            },
+            {
+                ordinal: 3,
+                id: "legacy-null",
+                role: "user",
+                parts: [{ type: "text", text: "temporal needle" }],
+                createdAt: null,
+            },
+            {
+                ordinal: 4,
+                id: "inside-end",
+                role: "assistant",
+                parts: [{ type: "text", text: "temporal needle" }],
+                createdAt: 3_000,
+            },
+        ]);
+        ensureMessagesIndexed(db, "ses-dated", readMessages);
+
+        const results = await unifiedSearch(db, "ses-dated", "git:test", "temporal needle", {
+            sources: ["message"],
+            embeddingEnabled: false,
+            from: 2_000,
+            to: 3_000,
+            limit: 10,
+        });
+
+        expect(
+            results
+                .filter((result) => result.source === "message")
+                .map((result) => result.messageId),
+        ).toEqual(["inside-start", "inside-end"]);
+        expect(
+            db
+                .prepare(
+                    "SELECT message_time_ms FROM message_fts_rowid_map WHERE session_id = ? AND message_ordinal = 3",
+                )
+                .get("ses-dated"),
+        ).toEqual({ message_time_ms: null });
+    });
+
+    it("keeps undated search output byte-identical when both bounds are absent", async () => {
+        rawMessagesBySession.set("ses-undated", [
+            {
+                ordinal: 1,
+                id: "undated-1",
+                role: "user",
+                parts: [{ type: "text", text: "stable output needle" }],
+                createdAt: 1_000,
+            },
+        ]);
+        ensureMessagesIndexed(db, "ses-undated", readMessages);
+        const baseOptions: UnifiedSearchOptions = {
+            sources: ["message"],
+            embeddingEnabled: false,
+            limit: 10,
+        };
+
+        const current = await unifiedSearch(
+            db,
+            "ses-undated",
+            "git:test",
+            "stable output needle",
+            baseOptions,
+        );
+        const absent = await unifiedSearch(db, "ses-undated", "git:test", "stable output needle", {
+            ...baseOptions,
+            from: undefined,
+            to: undefined,
+        });
+
+        expect(JSON.stringify(absent)).toBe(JSON.stringify(current));
+    });
+
+    it("filters memories, notes, primers, and git commits by their stored times", async () => {
+        const outsideMemory = insertMemory(db, {
+            projectPath: "git:dated-sources",
+            category: "CONSTRAINTS",
+            content: "range corpus needle outside memory",
+        });
+        const insideMemory = insertMemory(db, {
+            projectPath: "git:dated-sources",
+            category: "CONSTRAINTS",
+            content: "range corpus needle inside memory",
+        });
+        db.prepare("UPDATE memories SET created_at = ? WHERE id = ?").run(1_000, outsideMemory.id);
+        db.prepare("UPDATE memories SET created_at = ? WHERE id = ?").run(3_000, insideMemory.id);
+
+        const outsideNote = addNote(db, "session", {
+            content: "range corpus needle outside note",
+            projectPath: "git:dated-sources",
+            sessionId: "ses-dated-sources",
+        });
+        const insideNote = addNote(db, "session", {
+            content: "range corpus needle inside note",
+            projectPath: "git:dated-sources",
+            sessionId: "ses-dated-sources",
+        });
+        db.prepare("UPDATE notes SET created_at = ? WHERE id = ?").run(1_000, outsideNote.id);
+        db.prepare("UPDATE notes SET created_at = ? WHERE id = ?").run(3_000, insideNote.id);
+
+        const outsidePrimer = createPrimer(db, {
+            projectPath: "git:dated-sources",
+            question: "range corpus needle outside primer",
+            answer: "outside",
+            totalSupport: 2,
+            lastObservedAt: 1_000,
+            sourceCandidateIds: [],
+        });
+        const insidePrimer = createPrimer(db, {
+            projectPath: "git:dated-sources",
+            question: "range corpus needle inside primer",
+            answer: "inside",
+            totalSupport: 2,
+            lastObservedAt: 3_000,
+            sourceCandidateIds: [],
+        });
+        db.prepare("UPDATE primers SET created_at = ? WHERE id = ?").run(1_000, outsidePrimer);
+        db.prepare("UPDATE primers SET created_at = ? WHERE id = ?").run(3_000, insidePrimer);
+
+        db.prepare(
+            `INSERT INTO git_commits
+                (sha, project_path, short_sha, message, author, committed_at, indexed_at)
+             VALUES (?, ?, ?, ?, NULL, ?, ?)`,
+        ).run(
+            "outside-sha",
+            "git:dated-sources",
+            "outside",
+            "range corpus needle outside commit",
+            1_000,
+            1_000,
+        );
+        db.prepare(
+            `INSERT INTO git_commits
+                (sha, project_path, short_sha, message, author, committed_at, indexed_at)
+             VALUES (?, ?, ?, ?, NULL, ?, ?)`,
+        ).run(
+            "inside-sha",
+            "git:dated-sources",
+            "inside",
+            "range corpus needle inside commit",
+            3_000,
+            3_000,
+        );
+
+        const searchSource = (source: "memory" | "note" | "primer" | "git_commit") =>
+            unifiedSearch(db, "ses-dated-sources", "git:dated-sources", "range corpus needle", {
+                sources: [source],
+                limit: 20,
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                gitCommitsEnabled: true,
+                from: 2_000,
+                to: 4_000,
+            });
+        const [memoryResults, noteResults, primerResults, commitResults] = await Promise.all([
+            searchSource("memory"),
+            searchSource("note"),
+            searchSource("primer"),
+            searchSource("git_commit"),
+        ]);
+
+        expect(
+            memoryResults.some(
+                (result) => result.source === "memory" && result.memoryId === insideMemory.id,
+            ),
+        ).toBe(true);
+        expect(
+            memoryResults.some(
+                (result) => result.source === "memory" && result.memoryId === outsideMemory.id,
+            ),
+        ).toBe(false);
+        expect(
+            noteResults.some(
+                (result) => result.source === "note" && result.noteId === insideNote.id,
+            ),
+        ).toBe(true);
+        expect(
+            noteResults.some(
+                (result) => result.source === "note" && result.noteId === outsideNote.id,
+            ),
+        ).toBe(false);
+        expect(
+            primerResults.some(
+                (result) => result.source === "primer" && result.primerId === insidePrimer,
+            ),
+        ).toBe(true);
+        expect(
+            primerResults.some(
+                (result) => result.source === "primer" && result.primerId === outsidePrimer,
+            ),
+        ).toBe(false);
+        expect(
+            commitResults.some(
+                (result) => result.source === "git_commit" && result.sha === "inside-sha",
+            ),
+        ).toBe(true);
+        expect(
+            commitResults.some(
+                (result) => result.source === "git_commit" && result.sha === "outside-sha",
+            ),
+        ).toBe(false);
+    });
+
+    it("filters compartment chunks by indexed boundary-time overlap", async () => {
+        rawMessagesBySession.set("ses-dated-compartment", [
+            {
+                ordinal: 1,
+                id: "u1",
+                role: "user",
+                parts: [{ type: "text", text: "boundary alpha" }],
+                createdAt: 2_000,
+            },
+            {
+                ordinal: 2,
+                id: "a2",
+                role: "assistant",
+                parts: [{ type: "text", text: "boundary omega" }],
+                createdAt: 4_000,
+            },
+        ]);
+        ensureMessagesIndexed(db, "ses-dated-compartment", readMessages);
+        seedCompartmentChunkEmbedding(
+            db,
+            "ses-dated-compartment",
+            "git:dated-compartment",
+            new Float32Array([1, 0]),
+        );
+        queryEmbedding = new Float32Array([1, 0]);
+
+        const overlapping = await unifiedSearch(
+            db,
+            "ses-dated-compartment",
+            "git:dated-compartment",
+            "semantic only title",
+            {
+                sources: ["message"],
+                limit: 10,
+                memoryEnabled: true,
+                embeddingEnabled: true,
+                embedQuery,
+                isEmbeddingRuntimeEnabled,
+                chunkModelIdOverride: "mock:model",
+                from: 3_000,
+                to: 3_000,
+            },
+        );
+        const outside = await unifiedSearch(
+            db,
+            "ses-dated-compartment",
+            "git:dated-compartment",
+            "semantic only title",
+            {
+                sources: ["message"],
+                limit: 10,
+                memoryEnabled: true,
+                embeddingEnabled: true,
+                embedQuery,
+                isEmbeddingRuntimeEnabled,
+                chunkModelIdOverride: "mock:model",
+                from: 5_000,
+            },
+        );
+
+        expect(overlapping.some((result) => result.source === "compartment")).toBe(true);
+        expect(outside.some((result) => result.source === "compartment")).toBe(false);
     });
 
     it("returns note hits with id, status, anchor, and ready_reason text", async () => {

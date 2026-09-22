@@ -85,8 +85,7 @@ function readMessageTimes(
                   lastOrdinal,
               )
             : reader(sessionId).filter(
-                  (message) =>
-                      message.ordinal >= firstOrdinal && message.ordinal <= lastOrdinal,
+                  (message) => message.ordinal >= firstOrdinal && message.ordinal <= lastOrdinal,
               );
         const wantedIds = new Set(sessionRows.map((row) => row.messageId));
         for (const message of messages) {
@@ -146,13 +145,7 @@ export function backfillMessageTimesBatch(
             `UPDATE message_time_backfill_state
                 SET cursor_session_id = ?, cursor_ordinal = ?, completed = ?, updated_at = ?
               WHERE id = ?`,
-        ).run(
-            cursorSessionId,
-            cursorOrdinal,
-            completed ? 1 : 0,
-            Date.now(),
-            BACKFILL_STATE_ID,
-        );
+        ).run(cursorSessionId, cursorOrdinal, completed ? 1 : 0, Date.now(), BACKFILL_STATE_ID);
     })();
     logSlowWriteTransaction("message_time_backfill", transactionStartedAt);
 

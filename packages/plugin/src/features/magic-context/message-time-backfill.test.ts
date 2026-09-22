@@ -36,7 +36,12 @@ function seedIndexedRows(db: Database, sessionId: string, count: number): void {
         "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid) VALUES (?, ?, ?)",
     );
     for (let ordinal = 1; ordinal <= count; ordinal += 1) {
-        const result = insertFts.run(sessionId, ordinal, `${sessionId}-m${ordinal}`, `row ${ordinal}`) as {
+        const result = insertFts.run(
+            sessionId,
+            ordinal,
+            `${sessionId}-m${ordinal}`,
+            `row ${ordinal}`,
+        ) as {
             lastInsertRowid: number | bigint;
         };
         insertMap.run(sessionId, ordinal, Number(result.lastInsertRowid));
@@ -44,12 +49,13 @@ function seedIndexedRows(db: Database, sessionId: string, count: number): void {
 }
 
 function readerFor(rows: ReadonlyMap<string, RawMessage[]>): MessageTimeBackfillReader {
-    const read = ((sessionId: string) => [...(rows.get(sessionId) ?? [])]) as MessageTimeBackfillReader;
+    const read = ((sessionId: string) => [
+        ...(rows.get(sessionId) ?? []),
+    ]) as MessageTimeBackfillReader;
     read.readPage = (sessionId, afterOrdinal, limit, finalWatermark) =>
         (rows.get(sessionId) ?? [])
             .filter(
-                (message) =>
-                    message.ordinal > afterOrdinal && message.ordinal <= finalWatermark,
+                (message) => message.ordinal > afterOrdinal && message.ordinal <= finalWatermark,
             )
             .slice(0, limit);
     return read;
@@ -113,10 +119,7 @@ describe("message time backfill", () => {
             seedIndexedRows(db, "b", 1);
             const failing = readerFor(
                 new Map([
-                    [
-                        "a",
-                        [{ ordinal: 1, id: "a-m1", role: "user", parts: [], createdAt: 10 }],
-                    ],
+                    ["a", [{ ordinal: 1, id: "a-m1", role: "user", parts: [], createdAt: 10 }]],
                 ]),
             );
             const baseReadPage = failing.readPage!;

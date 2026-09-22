@@ -565,9 +565,7 @@ function getBatchedFtsCountStatement(
     let statement = statements.get(key);
     if (!statement) {
         const cutoffSql =
-            cutoff === null
-                ? ""
-                : " AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?";
+            cutoff === null ? "" : " AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?";
         const joinSql =
             dateRange === null
                 ? ""
@@ -606,12 +604,9 @@ function countSessionFtsMatchesBatch(
         if (cutoff !== null) bindings.push(cutoff);
     }
     try {
-        const rows = getBatchedFtsCountStatement(
-            db,
-            ftsQueries.length,
-            cutoff,
-            dateRange,
-        ).all(...bindings) as BatchedFtsCountRow[];
+        const rows = getBatchedFtsCountStatement(db, ftsQueries.length, cutoff, dateRange).all(
+            ...bindings,
+        ) as BatchedFtsCountRow[];
         const counts = Array.from({ length: ftsQueries.length }, () => 0);
         for (const row of rows) {
             if (
@@ -749,16 +744,10 @@ function getFtsMatches(args: {
                   args.query,
                   args.limit,
                   args.workspace.ownIdentities,
-                   args.workspace.shareCategories,
-                   args.dateRange,
-               )
-            : searchMemoriesFTS(
-                  args.db,
-                  args.projectPath,
-                  args.query,
-                  args.limit,
+                  args.workspace.shareCategories,
                   args.dateRange,
-              );
+              )
+            : searchMemoriesFTS(args.db, args.projectPath, args.query, args.limit, args.dateRange);
     } catch (error) {
         log(
             `[search] FTS query failed for "${args.query}": ${error instanceof Error ? error.message : String(error)}`,
@@ -1089,9 +1078,7 @@ function getBatchedMessageSearchStatement(
     let statement = statements.get(key);
     if (!statement) {
         const cutoffSql =
-            cutoff === null
-                ? ""
-                : " AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?";
+            cutoff === null ? "" : " AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?";
         const joinSql =
             dateRange === null
                 ? ""
@@ -1140,12 +1127,9 @@ function runMessageFtsQueriesBatch(
         if (cutoff !== null) bindings.push(cutoff);
         bindings.push(fetchLimit);
     }
-    const rows = getBatchedMessageSearchStatement(
-        db,
-        ftsQueries.length,
-        cutoff,
-        dateRange,
-    ).all(...bindings) as BatchedMessageSearchRow[];
+    const rows = getBatchedMessageSearchStatement(db, ftsQueries.length, cutoff, dateRange).all(
+        ...bindings,
+    ) as BatchedMessageSearchRow[];
     const result = Array.from({ length: ftsQueries.length }, () => [] as NormalizedMessageRow[]);
     for (const row of rows) {
         if (
@@ -1224,10 +1208,10 @@ function searchMessages(args: {
                           args.db,
                           args.sessionId,
                           baseQuery,
-                           fetchLimit,
-                           cutoff,
-                           args.dateRange,
-                       ),
+                          fetchLimit,
+                          cutoff,
+                          args.dateRange,
+                      ),
                       suppressedCount: 0,
                   };
         if (args.diagnostics) {
@@ -1791,9 +1775,7 @@ function searchPrimers(args: {
             .all(
                 ftsQuery,
                 args.projectPath,
-                ...(args.dateRange === null
-                    ? []
-                    : [args.dateRange.from, args.dateRange.to]),
+                ...(args.dateRange === null ? [] : [args.dateRange.from, args.dateRange.to]),
                 args.limit * 3,
             ) as Array<{ id: number; rank: number }>;
         rows.forEach((row, index) => {

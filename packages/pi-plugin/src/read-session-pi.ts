@@ -269,7 +269,8 @@ function rawEntryVersion(entry: MessageEntry): string | number {
 export function parsePiEntryTimestamp(entry: MessageEntry): number | null {
 	const record = entry as unknown as Record<string, unknown>;
 	const raw = record.timestamp;
-	if (typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0) return raw;
+	if (typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0)
+		return raw;
 	if (typeof raw !== "string" || raw.trim().length === 0) return null;
 	const parsed = Date.parse(raw);
 	return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
@@ -324,7 +325,14 @@ function convertEntriesToRawMessageRange(
 	): boolean => {
 		const ordinal = nextOrdinal++;
 		if (ordinal > normalizedAfter && ordinal <= normalizedWatermark) {
-			result.push({ ordinal, id, role, parts: parts(), version, createdAt });
+			result.push({
+				ordinal,
+				id,
+				role,
+				parts: parts(),
+				version,
+				...(createdAt === null ? {} : { createdAt }),
+			});
 		}
 		return (
 			result.length >= normalizedLimit || nextOrdinal > normalizedWatermark
@@ -361,7 +369,7 @@ function convertEntriesToRawMessageRange(
 				version,
 				parsePiEntryTimestamp(entry),
 				() => [
-				...bufferedToolParts,
+					...bufferedToolParts,
 					...attachPiPartVersion(synthesizeUserParts(msg), version),
 				],
 			);
