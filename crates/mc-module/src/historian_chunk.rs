@@ -715,6 +715,7 @@ impl AssembledHistorianFiring {
             temperature: None,
             producer_source_tokens: self.producer_source_tokens,
             historian_context_limit_tokens: self.historian_context_limit_tokens,
+            fallback_context_limits: Default::default(),
             max_output_tokens: self.max_output_tokens,
             from_ordinal: self.from_ordinal,
             to_ordinal: self.to_ordinal,
@@ -744,6 +745,15 @@ pub enum AssembleHistorianFiringOutcome {
     NoFire(HistorianNoFireReason),
 }
 
+/// Convert a producer allowance before formatted-source splitting; tool summaries use the larger class seed.
+fn producer_source_local_budget(provider_tokens: usize, model_key: Option<&str>) -> usize {
+    let seed = crate::decision_calibration::DecisionCalibration::for_model(model_key);
+    crate::decision_calibration::local_budget(
+        provider_tokens as f64,
+        seed.prose_ratio.max(seed.tools_ratio),
+    ) as usize
+}
+
 pub fn assemble_historian_firing(
     store: &McStore,
     messages: &[CkIngressMessage],
@@ -752,6 +762,10 @@ pub fn assemble_historian_firing(
     config: HistorianAssemblerConfig,
     now_ms: i64,
 ) -> Result<AssembleHistorianFiringOutcome, mc_store::McStoreError> {
+    let producer_key = config.model_chain.first().map(String::as_str);
+    let seed = crate::decision_calibration::DecisionCalibration::for_model(producer_key);
+    let source_ratio = seed.prose_ratio.max(seed.tools_ratio);
+    let source_budget = producer_source_local_budget(config.token_budget, producer_key);
     if config.model_chain.is_empty() {
         return Ok(AssembleHistorianFiringOutcome::NoFire(
             HistorianNoFireReason::NoModels,
@@ -799,13 +813,7 @@ pub fn assemble_historian_firing(
             },
         ));
     }
-    let chunk = build_historian_chunk(
-        messages,
-        live,
-        chunk_start,
-        config.token_budget,
-        eligible_end,
-    );
+    let chunk = build_historian_chunk(messages, live, chunk_start, source_budget, eligible_end);
     if chunk.text.is_empty() || chunk.chunk.lines.is_empty() {
         // An empty producer input is not necessarily an empty read. Persist only
         // complete observed ranges so absent raw messages cannot be declared noise.
@@ -866,7 +874,7 @@ pub fn assemble_historian_firing(
     // is no other reducer, so blocking a small chunk leaves the session with zero
     // reclaim at any pressure (CC hard-blocks below ~95%, so emergency alone is
     // insufficient). Where tail reducers exist, keep the floor unless in emergency.
-    if chunk.token_estimate < config.min_chunk_tokens
+    if (chunk.token_estimate as f64 * source_ratio).ceil() < config.min_chunk_tokens as f64
         && !config.in_emergency
         && !config.fold_is_only_reclaim
     {
@@ -917,7 +925,7 @@ pub fn assemble_historian_firing(
     let memories = store.load_active_memories(&config.project_path, now_ms)?;
     let memory_block = render_historian_memory_block(&memories);
     let oversize_atomic_unit =
-        estimate_tokens(&chunk.text) > config.token_budget
+        estimate_tokens(&chunk.text) > source_budget
             && chunk.chunk.completed_tool_arcs.iter().any(|arc| {
                 arc.start <= chunk.chunk.end_index && arc.end >= chunk.chunk.start_index
             });
@@ -935,7 +943,7 @@ pub fn assemble_historian_firing(
             .map(|fitted| fitted.text.clone())
             .unwrap_or_else(|| chunk.text.clone())
     } else {
-        truncate_historian_input_if_needed(&chunk.text, config.token_budget)
+        truncate_historian_input_if_needed(&chunk.text, source_budget)
     };
     let producer_source_tokens = estimate_tokens(&input_source);
     if let Some(fitted) = fitted_atomic_source
@@ -972,7 +980,7 @@ pub fn assemble_historian_firing(
             config.historian_context_limit_tokens,
             config.max_output_tokens,
         );
-        eprintln!("[mc-module][{}] historian oversize admission: range={}-{} rawChunkTokens={} producerSourceTokens={} historianChunkTokens={} guardReason={}", config.session_id, chunk.chunk.start_index, chunk.chunk.end_index, raw_chunk_tokens, producer_source_tokens, config.token_budget, guard_reason.as_deref().unwrap_or("none"));
+        eprintln!("[mc-module][{}] historian oversize admission: range={}-{} rawChunkTokens={} producerSourceTokens={} historianChunkTokens={} guardReason={}", config.session_id, chunk.chunk.start_index, chunk.chunk.end_index, raw_chunk_tokens, producer_source_tokens, source_budget, guard_reason.as_deref().unwrap_or("none"));
     }
     let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
         seed_examples: &reference_blocks.seed_examples,
@@ -2799,5 +2807,20 @@ mod tests {
         let built = project_and_build(&fixture.messages, 1, 1_000, 3);
         assert!(built.text.contains("U: before boundary"));
         assert_eq!(fixture.call_transform()["kind"], "transform");
+    }
+}
+
+#[cfg(test)]
+mod calibration_budget_tests {
+    #[test]
+    fn producer_source_budget_uses_producer_static_seed() {
+        assert_eq!(
+            super::producer_source_local_budget(20000, Some("anthropic/claude-fable-5-1")),
+            12724
+        );
+        assert_eq!(
+            super::producer_source_local_budget(20000, Some("unknown/model")),
+            20000
+        );
     }
 }

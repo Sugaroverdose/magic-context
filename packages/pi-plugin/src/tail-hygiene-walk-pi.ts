@@ -677,15 +677,48 @@ export function refreshPiTailHygieneBaseline(
 	input: PiTailHygieneWalkInput & {
 		cacheBusting: boolean;
 		previous?: TailHygieneBaseline;
+		calibration?: { toolsRatio: number; proseRatio: number };
+		hygieneUnitsVersion?: number;
 		now?: number;
 	},
 ): TailHygieneBaseline {
-	const measured = measurePiTailHygiene(input);
+	const rawMeasured = measurePiTailHygiene(input);
+	const frozenCalibration =
+		!input.cacheBusting && input.previous
+			? {
+					toolsRatio: input.previous.toolsRatio,
+					proseRatio: input.previous.proseRatio,
+					hygieneUnitsVersion: input.previous.hygieneUnitsVersion,
+				}
+			: {
+					toolsRatio: input.calibration?.toolsRatio ?? 1,
+					proseRatio: input.calibration?.proseRatio ?? 1,
+					hygieneUnitsVersion: input.hygieneUnitsVersion ?? 1,
+				};
+	const measured: TailHygieneMeasurement = {
+		...rawMeasured,
+		parts: rawMeasured.parts.map((part) => {
+			const ratio =
+				part.kind === "toolInput" || part.kind === "toolOutput"
+					? frozenCalibration.toolsRatio
+					: part.kind === "text" || part.kind === "file"
+						? frozenCalibration.proseRatio
+						: 1;
+			return {
+				...part,
+				tokens: part.tokens * ratio,
+				uTokens: part.uTokens * ratio,
+			};
+		}),
+	};
 	const now = input.now ?? Date.now();
 	const refrozen = (
 		mismatch?: TailHygienePrefixMismatch,
 	): TailHygieneBaseline => ({
 		...freezeTailHygieneMeasurement(measured),
+		hygieneUnitsVersion: frozenCalibration.hygieneUnitsVersion,
+		toolsRatio: frozenCalibration.toolsRatio,
+		proseRatio: frozenCalibration.proseRatio,
 		baselineGeneration: (input.previous?.baselineGeneration ?? 0) + 1,
 		computedAt: now,
 		evaluable: true,
@@ -738,8 +771,11 @@ export function effectivePiTailHygiene(
 		"baselineU" | "baselineT" | "turnDeltaU" | "turnDeltaT"
 	>,
 ): { u: number; t: number } {
-	const t = Math.max(0, baseline.baselineT + baseline.turnDeltaT);
-	const u = Math.min(t, Math.max(0, baseline.baselineU + baseline.turnDeltaU));
+	const t = Math.ceil(Math.max(0, baseline.baselineT + baseline.turnDeltaT));
+	const u = Math.min(
+		t,
+		Math.ceil(Math.max(0, baseline.baselineU + baseline.turnDeltaU)),
+	);
 	return { u, t };
 }
 

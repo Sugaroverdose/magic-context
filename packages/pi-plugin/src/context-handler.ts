@@ -65,6 +65,11 @@ import {
 	parseCacheTtl,
 	type Scheduler,
 } from "@magic-context/core/features/magic-context/scheduler";
+import {
+	HYGIENE_PROVIDER_UNITS_VERSION,
+	sessionDecisionCalibration,
+	transitionSessionHygieneUnits,
+} from "@magic-context/core/features/magic-context/session-decision-calibration";
 import { recordSessionProjectIdentity } from "@magic-context/core/features/magic-context/session-project-storage";
 import {
 	adoptPiFallbackMessageTag,
@@ -3510,6 +3515,16 @@ export function registerPiContextHandler(
 						message && typeof message === "object"
 							? result.postCommitEntryIdByRef.get(message)
 							: undefined;
+					const hygieneCalibration = sessionDecisionCalibration(
+						options.db,
+						sessionId,
+					);
+					const hygieneUnitsVersion = transitionSessionHygieneUnits(
+						options.db,
+						sessionId,
+						result.bustedThisPass,
+						hygieneCalibration,
+					);
 					const baseline = refreshPiTailHygieneBaseline({
 						messages: outputMessages,
 						tags,
@@ -3519,6 +3534,11 @@ export function registerPiContextHandler(
 						syntheticLeadingCount: result.syntheticLeadingCount,
 						cacheBusting: result.bustedThisPass,
 						previous: getPiChannel1Baseline(sessionId),
+						calibration:
+							hygieneUnitsVersion >= HYGIENE_PROVIDER_UNITS_VERSION
+								? hygieneCalibration
+								: undefined,
+						hygieneUnitsVersion,
 					});
 					const effective = effectivePiTailHygiene(baseline);
 					// One line per invalidation event, not one per pass: the baseline
@@ -6672,10 +6692,42 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 
 	const materialized = injectionResult?.m0Materialized === true;
 	const materializeReason = injectionResult?.m0Reason ?? null;
+	const bustedThisPass =
+		firstRenderBust ||
+		didMutateFromFlushedStatuses ||
+		pendingOpsDidMutate ||
+		heuristicOrReasoningDidMutate ||
+		autoReclaimDidMutateThisPass ||
+		materialized ||
+		historyWasConsumedThisPass;
+	const calibrationBustReason =
+		materialized || firstRenderBust
+			? "fold"
+			: args.forceMaterialization
+				? "force"
+				: pendingOpsDidMutate || didMutateFromFlushedStatuses
+					? "flush"
+					: historyWasConsumedThisPass
+						? "refresh"
+						: args.schedulerDecision === "execute"
+							? "execute"
+							: "unknown";
+	const activeCalibration = sessionDecisionCalibration(
+		args.db,
+		args.sessionId,
+		{
+			bustPermitted: bustedThisPass,
+			bustReason: calibrationBustReason,
+			onAdopt: (message) => sessionLog(args.sessionId, message),
+		},
+	);
 	protectionFloorResolution = resolveProtectionFloor();
 	const protectedTagNumbers = usesTokenProtection
-		? computeProtectionWindow(allTagsForPass, protectionFloorResolution.floor)
-				.protectedTagNumbers
+		? computeProtectionWindow(
+				allTagsForPass,
+				protectionFloorResolution.floor,
+				activeCalibration.toolsRatio,
+			).protectedTagNumbers
 		: newestActiveTagNumbersByCount(allTagsForPass, args.protectedTags);
 	// A defer pass cannot consume queue rows, so preserve the snapshot loaded at
 	// pass start. Execute passes may remove only a subset (protected/incomplete
@@ -6694,15 +6746,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				.map((operation) => operation.tagId),
 		),
 	};
-
-	const bustedThisPass =
-		firstRenderBust ||
-		didMutateFromFlushedStatuses ||
-		pendingOpsDidMutate ||
-		heuristicOrReasoningDidMutate ||
-		autoReclaimDidMutateThisPass ||
-		materialized ||
-		historyWasConsumedThisPass;
 
 	if (bustedThisPass || isCacheBustingPass) {
 		droppedTokens = estimateDroppedTokensFromTagReductions(

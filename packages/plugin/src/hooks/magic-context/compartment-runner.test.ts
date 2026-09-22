@@ -39,13 +39,18 @@ import * as shared from "../../shared";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
-    executeContextRecomp,
-    executeContextRecompWithResult,
+    executeContextRecomp as executeContextRecompImpl,
+    executeContextRecompWithResult as executeContextRecompWithResultImpl,
     getActiveCompartmentRun,
     registerActiveCompartmentRun,
-    runCompartmentAgent,
-    startCompartmentAgent,
+    runCompartmentAgent as runCompartmentAgentImpl,
+    startCompartmentAgent as startCompartmentAgentImpl,
 } from "./compartment-runner";
+import {
+    clearProducerModelObservations,
+    observeProducerModelsForTest,
+    prepareProducerFixture,
+} from "./producer-window-test-support";
 import {
     hasRunnableCompartmentWindow,
     resolveOpenCodeProtectedTailBoundary,
@@ -53,10 +58,25 @@ import {
 import { __ignoredNotificationTest } from "./send-session-notification";
 import { tagMessages } from "./tag-messages";
 
+const runCompartmentAgent: typeof runCompartmentAgentImpl = async (deps) =>
+    runCompartmentAgentImpl(await prepareProducerFixture(deps));
+const executeContextRecomp: typeof executeContextRecompImpl = async (deps, options) =>
+    executeContextRecompImpl(await prepareProducerFixture(deps), options);
+const executeContextRecompWithResult: typeof executeContextRecompWithResultImpl = async (
+    deps,
+    options,
+) => executeContextRecompWithResultImpl(await prepareProducerFixture(deps), options);
+const startCompartmentAgent: typeof startCompartmentAgentImpl = (deps, runAgent) =>
+    startCompartmentAgentImpl(
+        runAgent ? deps : { ...deps, model: deps.model ?? "test/fixture-historian" },
+        runAgent,
+    );
+
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
-beforeEach(() => {
+beforeEach(async () => {
+    await observeProducerModelsForTest(["test/fixture-historian"]);
     // These fixtures end on real user rows, so the notice hold would queue.
     // This file tests recomp behavior, not that gate.
     __ignoredNotificationTest.setHoldDetector(() => false);
@@ -75,6 +95,7 @@ async function runCompartmentAgentWithLease(
 }
 
 afterEach(() => {
+    clearProducerModelObservations();
     __ignoredNotificationTest.reset();
     __resetNotificationStateForTests();
     closeDatabase();
@@ -2092,9 +2113,15 @@ describe("runCompartmentAgent", () => {
         const calls = promptSession.mock.calls as unknown as Array<
             [{ body?: { model?: { providerID: string; modelID: string } } }]
         >;
-        // Call 0 (primary) + call 1 (repair): no model override (agent default).
-        expect(calls[0]?.[0]?.body?.model).toBeUndefined();
-        expect(calls[1]?.[0]?.body?.model).toBeUndefined();
+        // Primary and repair use an explicitly selected model with a known window; an unspecified agent default has no observable window for admission.
+        expect(calls[0]?.[0]?.body?.model).toEqual({
+            providerID: "test",
+            modelID: "fixture-historian",
+        });
+        expect(calls[1]?.[0]?.body?.model).toEqual({
+            providerID: "test",
+            modelID: "fixture-historian",
+        });
         // Call 2: the FIRST configured fallback (sonnet), not the session model.
         expect(calls[2]?.[0]?.body?.model).toEqual({
             providerID: "anthropic",

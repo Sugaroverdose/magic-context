@@ -2,6 +2,7 @@ import {
     getLastCompartmentEndMessage,
     getLastCompartmentEndMessageId,
 } from "../../features/magic-context/compartment-storage";
+import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
 import {
     deriveTagLoadFloor,
     getActiveTagsBySession,
@@ -380,9 +381,13 @@ function getUnsummarizedTailInfo(
                 };
             }
 
-            const scanBudget = Math.max(
-                MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE,
-                triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER,
+            const seed = sessionDecisionCalibration(db, sessionId);
+            const sourceRatio = Math.max(seed.proseRatio, seed.toolsRatio);
+            const scanBudget = Math.floor(
+                Math.max(
+                    MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE,
+                    triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER,
+                ) / sourceRatio,
             );
             const chunk = readSessionChunk(
                 sessionId,
@@ -393,7 +398,7 @@ function getUnsummarizedTailInfo(
             const isMeaningful =
                 chunk.hasMore ||
                 boundary.trueRawEligibleTokens >= MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE ||
-                chunk.tokenEstimate >= MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE ||
+                Math.ceil(chunk.tokenEstimate * sourceRatio) >= MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE ||
                 chunk.messageCount >= MIN_PROACTIVE_TAIL_MESSAGE_COUNT;
 
             return {
@@ -401,7 +406,7 @@ function getUnsummarizedTailInfo(
                 hasNewRawHistory: true,
                 hasProtectedEligibleHead,
                 isMeaningful,
-                tokenEstimate: chunk.tokenEstimate,
+                tokenEstimate: Math.ceil(chunk.tokenEstimate * sourceRatio),
                 chunkHasMore: chunk.hasMore,
                 trueRawEligibleTokens: boundary.trueRawEligibleTokens,
                 commitClusterCount: chunk.commitClusterCount,
@@ -536,7 +541,11 @@ export function checkCompartmentTrigger(
                           taggerFloor,
                       )
                     : 0;
-                const eligibleUpperBound = persistedBound + untaggedUpperBound;
+                const seed = sessionDecisionCalibration(db, sessionId);
+                const eligibleUpperBound = Math.ceil(
+                    (persistedBound + untaggedUpperBound) *
+                        Math.max(1, seed.proseRatio, seed.toolsRatio, seed.systemRatio),
+                );
                 // Smallest token floor any size trigger needs is triggerBudget
                 // (commit_clusters). tail_size needs even more. Equality falls
                 // through to preserve the existing conservative < semantics.

@@ -217,3 +217,35 @@ This does not change the OpenCode 2 results above.
 | Whole-system cache stability | OMP 18.2.6's request-body `cch` attestation changes `system[0]`; cache-stability and long-session phase 1 are declared host-imposed divergences, not relaxed assertions. [Evidence](packages/pi-plugin/PARITY.md#35-omp-provider-attestation-prevents-whole-system-byte-parity). |
 | Historian, todo, memory, compaction-off and pressure fixtures | OMP configuration filenames, shared config location, tool transport and macOS cwd spelling required harness corrections; real-host assertions remain enabled. [Adjudication](packages/pi-plugin/PARITY.md#36-omp-parity-fixtures-use-native-configuration-and-wire-conventions). |
 | Same-path window overlay | Pi/OMP product fix classifies the host model window as catalog metadata; observed overlay limits take precedence. Pi hot-reloads; OMP RPC restarts and resumes because its reload callback is a no-op. |
+
+## Static tokenizer decision calibration
+
+History materialization converts provider-token allowances to local prose allowances in OpenCode, Pi and Rust. Pressure and exact demotion consume the same allowance; cache identity still uses the configured provider-token budget. The static measurement table is shared JSON, with matching longest-prefix and nearest-family inheritance.
+
+The canonical protected tool-window walk lives in `protection-window.ts` (not `storage-tags.ts`); all TS/Pi consumers share it. Rust applies the same tool ratio while keeping persisted member rows raw. Boundary indexes weight tool and prose source classes on read; neither engine changes tokenizer caches.
+
+Fallback admission now requires complete calibrated counts and a known current-model window. A serialized-byte approximation may reject but cannot admit. OpenCode LKG admission now checks `trusted`. Pi's storage-failure handler currently lacks held system/tool observations at that catch boundary: it refuses replay/raw fallthrough rather than pretending its byte estimate proves fit. The Pi fit helper accepts complete explicit observations and has positive/negative admission tests.
+
+Historian sends count assembled instructions/reference/source text with the selected producer model, reserving output once and retaining the 3% margin. Rust's current assembled request contains only the primary producer window; an unobserved fallback window is refused, not borrowed from the primary model. TS/Pi resolve fallback windows independently. Transport/provider framing and host-hidden additions are not exact provider tokenization.
+
+### Tail-hygiene provider units
+
+OpenCode, Pi and Rust now classify the rendered tail in provider-token units. Tool input/output uses the frozen tools ratio; text and file content use the frozen prose ratio. Fractional class mass is accumulated before one aggregate ceiling, while the 0.20/0.40/0.60/0.75 bands remain ratios. The 60K tail, 25K Channel-1 reclaimable and 50K Channel-2 reclaimable floors, cadence growth, post-reduce grace and reminder figures all consume the calibrated totals.
+
+The active ratio is frozen with the session generation. OpenCode/Pi store it under `session_meta.deferred_execute_state.magicContextTokenizerCalibration`; Rust stores the twin in `mc_cache_state.meta.decision_calibration`. Legacy rows remain neutral on defer. The first authorized bust adopts the current static table, converts the persisted U watermarks once and stamps `hygieneUnitsVersion=2` / `hygiene_units_version=2`. No SQL migration or schema-fence movement is required.
+
+Historian source caps now convert using the producer's larger prose/tool seed before formatted-source splitting in TS, Pi and Rust. Main-model trigger mass uses the consumer's class policy independently. The legacy projected-reclaim calculation is still unresolved: its byte-ratio attribution does not establish actual served before/after replacement mass. It must not be reported as calibrated reclaim proof; replacing that projection remains required for complete Phase A.
+
+Emergency planning now separates served mass from reclaimable mass. OpenCode and Pi targets preview current tool input/output and retained skeletons without mutating cached messages; unavailable replacement observations receive no reclaim credit. Shared thinking is not credited per tool, avoiding duplicate reclaim. Rust uses raw active token counts (tokenizing missing counts), class weights and retained skeleton payload counts; it includes a conservative 32-local-token allowance per retained block for the later tag overlay. This may select more Rust candidates than exact host-side previews, never treating the original byte mass as fully reclaimable. Existing pressure-episode latches and protected exemplars are unchanged.
+
+### Static-only calibration lifecycle
+
+Calibration is curated by periodic measurement sweeps and has only `seed` and `family-fallback` provenance. There is no request-level L/P capture, EMA, learned candidate, runtime adaptation or learned-state persistence in OpenCode, Pi or Rust. A binary table revision is adopted only at the next authorized bust and is logged as `calibration revision <old> → <new> adopted (bust=<reason>)`; the revision change itself never originates a HARD.
+
+### Calibration verification and remaining scope
+
+Pinned OpenCode captures compare master `7486664df07096385e3a5985427b335a221a2bd2` with runtime candidate `6eddf386937058ffcde18b88179c3bb987d517f0`. The neutral control preserves the complete captured messages at the same model-change HARD edge. Fable uses the independently supplied 38,173-local history allowance instead of 60,000. A common legacy cached history is then adopted on both revisions: a real tail-only execute preserves its bytes while dropping exactly two eligible tool tags on master and four on the calibrated candidate. Each path then observes four actual scheduler defers, including a restart; neutral messages/system/tools hashes match across revisions. No provider body is reconstructed by a second serializer. Hash evidence and limitations are in `docs/reports/tokenizer-calibration-phase-a-verification.md` and the adjacent gate JSON files.
+
+The fix round reran both full adapter suites under isolated HOME/XDG roots: plugin 5,254 pass / 1 skip / 0 fail; Pi 1,225 pass / 3 skip / 0 fail. Rust's locked `mc-module` suite passed with 1,217 library tests and 8 ignored plus all integration targets; clippy passed with warnings denied.
+
+These records do not close the unresolved legacy projected-reclaim attribution or the complete docs/memory/profile/facts and m1 cap inventory. The standalone full scheduler-to-provider adversarial HTTP matrix is not claimed complete. The table-revision defer freeze and one-time hygiene stamp were exercised on TS and Rust, including restart-shaped durable reloads; the missing-stamp mutation reddened and was restored. Pi child-runner tool schemas and later host/provider framing remain outside static decision calibration.

@@ -74,6 +74,7 @@ import {
 	renderCompartmentAtTier,
 	renderDecayedCompartments,
 } from "@magic-context/core/hooks/magic-context/decay-render";
+import { historyLocalBudget } from "@magic-context/core/hooks/magic-context/decision-calibration";
 import {
 	DEFAULT_MEMORY_BUDGET_TOKENS,
 	DEFAULT_USER_PROFILE_BUDGET_TOKENS,
@@ -1313,8 +1314,10 @@ export function renderM0Pi(
 	// budget (lower budget → higher curve pressure → more demotion), keeping the
 	// shared decay-curve as the single source of pressure math — same approach as
 	// OpenCode renderM0. The materialize loop escalates it when m[0] is over budget.
-	const baseHistoryBudget =
-		state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
+	const baseHistoryBudget = historyLocalBudget(
+		state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS,
+		piModelRefToCanonical(state.hardSignals?.modelKey ?? ""),
+	);
 	const decayed = renderDecayedCompartments({
 		compartments:
 			compartmentsOverride ?? getRenderableCompartmentsPi(db, state),
@@ -1535,8 +1538,10 @@ function renderFreshM0PiNonPersisted(
 	// stable across consecutive fallback passes, so reuse the last persisted value
 	// (or 0 when no cached baseline exists) rather than live Date.now().
 	frozen.markers.materializedAt = cachedMaterializedAt;
-	const historyBudget =
-		state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
+	const historyBudget = historyLocalBudget(
+		state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS,
+		piModelRefToCanonical(state.hardSignals?.modelKey ?? ""),
+	);
 	const memoryBudget =
 		state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS;
 	// Fresh fallback is a last-resort HARD-equivalent render: resolve mural once
@@ -1658,8 +1663,10 @@ export function materializeM0Pi(
 		frozen.workspace,
 		mural,
 	);
-	const historyBudget =
-		state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
+	const historyBudget = historyLocalBudget(
+		state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS,
+		piModelRefToCanonical(state.hardSignals?.modelKey ?? ""),
+	);
 	let attempts = 0;
 	while (
 		historyBudget > 0 &&

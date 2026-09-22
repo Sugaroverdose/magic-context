@@ -18,6 +18,7 @@ import { isFable51ThinkingBindingModel } from "../../features/magic-context/over
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
+import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     type ContextDatabase,
@@ -2311,6 +2312,23 @@ export function createTransform(deps: TransformDeps) {
                 deps.pendingMaterializationSessions.has(sessionId) ||
                 (canConsumeDeferredLate && deferredMaterializationSessions.has(sessionId)) ||
                 protectionFoldWillBust);
+        const calibrationBustReason = protectionFoldWillBust
+            ? "fold"
+            : contextUsage.percentage >= forceMaterializationPercentage
+              ? "force"
+              : deps.pendingMaterializationSessions.has(sessionId)
+                ? "flush"
+                : consumingDeferredEarly || compartmentPhase.justAwaitedPublication
+                  ? "refresh"
+                  : schedulerDecision === "execute"
+                    ? "execute"
+                    : "unknown";
+        sessionDecisionCalibration(db, sessionId, {
+            bustPermitted: protectionCacheBustingPass,
+            modelKey: hardModelKey || currentModelKeyForBoundary,
+            bustReason: calibrationBustReason,
+            onAdopt: (message) => sessionLog(sessionId, message),
+        });
         const protectionUsableSoft = windowGeometry?.usableSoft ?? boundaryContextLimit;
         const protectionFloor = resolveEpochFloorForPass(db, sessionId, {
             configuredOverride: deps.protectedTokens,
@@ -2455,17 +2473,33 @@ export function createTransform(deps: TransformDeps) {
         // here; overflow propagates to native compaction instead of blocking.
         const finalWireTail = describeFinalWireTail(messages);
         let finalWireEstimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
+        if (postTransformResult.bustedThisPass) {
+            try {
+                finalWireEstimate = estimateFinalWireInputTokens({
+                    messages,
+                    systemPromptTokens: sessionMeta.systemPromptTokens,
+                    providerID: modelForBudget?.providerID,
+                    modelID: modelForBudget?.modelID,
+                    agentName: notificationParams.agent,
+                });
+            } catch {
+                sessionLog(
+                    sessionId,
+                    "calibration: completeness=partial reason=unavailable-returned-array-count",
+                );
+            }
+        }
         if (!compactionOff) {
-            // Fresh-tokenize only in the emergency band. This estimate is telemetry,
-            // never an abort gate: provider-accurate accounting is deferred to the
-            // module-side implementation.
+            // Recovery estimates provider input even while reusing cached messages.
+            // Cache-busting passes also retain raw counts for telemetry; samples never drive decisions.
             const emergencyUsagePercentage = usagePercentageSynthetic
                 ? Math.max(95, contextUsage.percentage)
                 : windowGeometry?.usableHard && contextUsage.inputTokens > 0
                   ? (contextUsage.inputTokens / windowGeometry.usableHard) * 100
                   : contextUsage.percentage;
             finalWireEstimate =
-                emergencyUsagePercentage >= 95
+                finalWireEstimate ??
+                (emergencyUsagePercentage >= 95
                     ? estimateFinalWireInputTokens({
                           messages,
                           systemPromptTokens: sessionMeta.systemPromptTokens,
@@ -2473,7 +2507,7 @@ export function createTransform(deps: TransformDeps) {
                           modelID: modelForBudget?.modelID,
                           agentName: notificationParams.agent,
                       })
-                    : undefined;
+                    : undefined);
             if (finalWireEstimate) {
                 sessionLog(
                     sessionId,

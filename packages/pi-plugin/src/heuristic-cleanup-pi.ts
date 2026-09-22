@@ -33,6 +33,7 @@
  */
 
 import { freezePiContentDecision } from "@magic-context/core/features/magic-context/pi-content-decisions";
+import { sessionDecisionCalibration } from "@magic-context/core/features/magic-context/session-decision-calibration";
 import {
 	type ContextDatabase,
 	getActiveTagsBySession,
@@ -49,6 +50,7 @@ import {
 import type { DroppedTokenReduction } from "@magic-context/core/hooks/magic-context/dropped-token-estimate";
 import {
 	type EmergencyDropTag,
+	measureEmergencyTag,
 	planEmergencyDrop,
 } from "@magic-context/core/hooks/magic-context/emergency-drop";
 import { stripSystemInjection } from "@magic-context/core/hooks/magic-context/system-injection-stripper";
@@ -350,7 +352,7 @@ export function applyPiHeuristicCleanup(
 		// Plan ONLY over tags in the live window that would ACTUALLY reclaim
 		// bytes (canDrop, not mere drop() presence) — keeps the floor math equal
 		// to the on-wire tail and avoids phantom under-evict. Mirrors OpenCode.
-		const droppableTags = tags.filter(
+		const candidateTags = tags.filter(
 			(t) =>
 				t.status === "active" &&
 				t.type === "tool" &&
@@ -359,7 +361,33 @@ export function applyPiHeuristicCleanup(
 		// Floor accounting needs the FULL active live-window set (all types) —
 		// narrowing it to the droppable subset folds real conversation/
 		// reasoning tail into the "irreducible prefix" and under-evicts.
-		const activeTags = tags.filter((t) => t.status === "active");
+		const recentTags = new Set(
+			candidateTags
+				.slice()
+				.sort((a, b) => b.tagNumber - a.tagNumber)
+				.slice(0, 20)
+				.map((tag) => tag.tagNumber),
+		);
+		const calibration = sessionDecisionCalibration(db, sessionId);
+		const activeTags = tags
+			.filter((t) => t.status === "active")
+			.map((tag) =>
+				measureEmergencyTag(
+					tag,
+					targets.get(tag.tagNumber),
+					calibration,
+					targets.get(tag.tagNumber)?.requiresToolArcSkeleton === true ||
+						((emergency.usagePercentage ?? 0) < 95 &&
+							recentTags.has(tag.tagNumber)),
+				),
+			);
+		const byTag = new Map(activeTags.map((tag) => [tag.tagNumber, tag]));
+		const droppableTags = candidateTags
+			.flatMap((tag) => {
+				const measured = byTag.get(tag.tagNumber);
+				return measured ? [measured] : [];
+			})
+			.filter((tag) => (tag.reclaimableTokens ?? 0) > 0);
 		sessionLog(
 			sessionId,
 			`emergency candidates: loaded=${tags.length} active=${activeTags.length} activeTools=${activeTags.filter((tag) => tag.type === "tool").length} visibleCompleteTools=${droppableTags.length} windowYields=${(emergency.usagePercentage ?? 0) >= 95} cutoff=${protectedCutoff}`,
@@ -377,13 +405,7 @@ export function applyPiHeuristicCleanup(
 		});
 		if (plan.shouldDrop) {
 			const toDrop = new Set(plan.tagNumbers);
-			const newestEmergencyTags = new Set(
-				droppableTags
-					.slice()
-					.sort((left, right) => right.tagNumber - left.tagNumber)
-					.slice(0, 20)
-					.map((tag) => tag.tagNumber),
-			);
+			const newestEmergencyTags = recentTags;
 			db.transaction(() => {
 				for (const tag of tags) {
 					if (!toDrop.has(tag.tagNumber)) continue;

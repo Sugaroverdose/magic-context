@@ -1,3 +1,4 @@
+import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import {
     getActiveTagsBySession,
@@ -17,6 +18,7 @@ import type { DroppedTokenReduction } from "./dropped-token-estimate";
 import {
     type EmergencyDropTag,
     estimateEmergencyDropReclaimTokens,
+    measureEmergencyTag,
     planEmergencyDrop,
 } from "./emergency-drop";
 import { stripSystemInjection } from "./system-injection-stripper";
@@ -112,14 +114,39 @@ export function applyHeuristicCleanup(
         // would no-op on). This keeps the floor math equal to the on-wire tail
         // and guarantees every selected tag reclaims — no phantom tag counted as
         // reclaimed (which makes the plan stop early and under-evict).
-        const droppableTags = tags.filter(
+        const candidateTags = tags.filter(
             (t) =>
                 t.status === "active" && t.type === "tool" && targets.get(t.tagNumber)?.canDrop?.(),
         );
         // Floor accounting needs the FULL active live-window set (all types) —
         // narrowing it to the droppable subset folds real conversation/
         // reasoning tail into the "irreducible prefix" and under-evicts.
-        const activeTags = tags.filter((t) => t.status === "active");
+        const recentTags = new Set(
+            candidateTags
+                .slice()
+                .sort((a, b) => b.tagNumber - a.tagNumber)
+                .slice(0, 20)
+                .map((tag) => tag.tagNumber),
+        );
+        const calibration = sessionDecisionCalibration(db, sessionId);
+        const activeTags = tags
+            .filter((t) => t.status === "active")
+            .map((tag) =>
+                measureEmergencyTag(
+                    tag,
+                    targets.get(tag.tagNumber),
+                    calibration,
+                    targets.get(tag.tagNumber)?.requiresToolArcSkeleton === true ||
+                        ((emergency.usagePercentage ?? 0) < 95 && recentTags.has(tag.tagNumber)),
+                ),
+            );
+        const measuredByTag = new Map(activeTags.map((tag) => [tag.tagNumber, tag]));
+        const droppableTags = candidateTags
+            .flatMap((tag) => {
+                const measured = measuredByTag.get(tag.tagNumber);
+                return measured ? [measured] : [];
+            })
+            .filter((tag) => (tag.reclaimableTokens ?? 0) > 0);
         const plan = planEmergencyDrop({
             tags: droppableTags as readonly EmergencyDropTag[],
             floorTags: activeTags as readonly EmergencyDropTag[],
@@ -133,13 +160,7 @@ export function applyHeuristicCleanup(
         });
         if (plan.shouldDrop) {
             const toDrop = new Set(plan.tagNumbers);
-            const newestEmergencyTags = new Set(
-                droppableTags
-                    .slice()
-                    .sort((left, right) => right.tagNumber - left.tagNumber)
-                    .slice(0, 20)
-                    .map((tag) => tag.tagNumber),
-            );
+            const newestEmergencyTags = recentTags;
             db.transaction(() => {
                 for (const tag of tags) {
                     if (!toDrop.has(tag.tagNumber)) continue;
@@ -171,7 +192,9 @@ export function applyHeuristicCleanup(
                             tagNumber: tag.tagNumber,
                             mode: result === "removed" ? "full" : "truncated",
                         });
-                        emergencyReclaimedTokens += estimateEmergencyDropReclaimTokens(tag);
+                        emergencyReclaimedTokens += estimateEmergencyDropReclaimTokens(
+                            measuredByTag.get(tag.tagNumber) ?? tag,
+                        );
                     }
                 }
             }).immediate();

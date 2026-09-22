@@ -25,6 +25,7 @@ pub mod compartment_coverage;
 pub mod config;
 mod content_language;
 pub mod decay_render;
+pub mod decision_calibration;
 pub mod divergence;
 pub mod healing;
 pub mod historian;
@@ -5760,6 +5761,14 @@ impl McHandler {
                 &boundary_messages,
                 &TriggerContext {
                     boundary: BoundaryContext {
+                        calibration: Some(
+                            loaded
+                                .meta
+                                .decision_calibration
+                                .as_ref()
+                                .and_then(decision_calibration::DecisionCalibration::from_frozen)
+                                .unwrap_or_else(decision_calibration::DecisionCalibration::neutral),
+                        ),
                         context_limit,
                         // Historian preparation reloads module config independently, but a host-
                         // resolved request threshold is still authoritative for this pass.
@@ -12208,7 +12217,17 @@ impl McHandler {
                 protection_window::pre_snapshot_floor(store.tag_cache_namespace(), session_id)
             })
             .unwrap_or_else(|| protection_window::derive_default_floor(200_000));
-        let window = protection_window::ProtectionWindow::from_persisted_rows(&tags, floor);
+        let window = protection_window::ProtectionWindow::from_persisted_rows_calibrated(
+            &tags,
+            floor,
+            loaded
+                .meta
+                .decision_calibration
+                .as_ref()
+                .and_then(decision_calibration::DecisionCalibration::from_frozen)
+                .unwrap_or_else(decision_calibration::DecisionCalibration::neutral)
+                .tools_ratio,
+        );
         let (deferred, immediate): (Vec<_>, Vec<_>) =
             queueable.iter().copied().partition(|number| {
                 window
@@ -18069,6 +18088,7 @@ mod tests {
 
                 let context = TriggerContext {
                     boundary: BoundaryContext {
+                        calibration: None,
                         context_limit: 200_000.0,
                         execute_threshold_percentage: 65.0,
                         usage_percentage: 70.0,
@@ -18142,6 +18162,7 @@ mod tests {
         let warm_projection = crate::ck_wire::project_messages(&warm_request.messages).unwrap();
         let context = TriggerContext {
             boundary: BoundaryContext {
+                calibration: None,
                 context_limit: 200_000.0,
                 execute_threshold_percentage: 65.0,
                 usage_percentage: 50.0,
@@ -18334,6 +18355,7 @@ mod tests {
             blocks: vec![block("user-6#0", "keep this prompt")],
         });
         let boundary = BoundaryContext {
+            calibration: None,
             context_limit: 1_000.0,
             execute_threshold_percentage: 65.0,
             usage_percentage: 70.0,
@@ -19903,8 +19925,8 @@ mod tests {
             caveman: crate::config::CavemanConfig::default(),
             auto_promote: true,
             user_memory_collection_enabled: false,
-            historian_context_limit_tokens: 128_000,
-            historian_context_limit_known: false,
+            historian_context_limit_tokens: 200_000,
+            historian_context_limit_known: true,
             memory_budget_tokens: 4_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: true,
@@ -30241,6 +30263,7 @@ mod tests {
             content_signature: String::new(),
             channel1_post_reduce_grace_baseline_u: None,
             channel1_post_reduce_grace_pre_level: String::new(),
+            ..Default::default()
         });
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -32235,7 +32258,7 @@ mod tests {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
-        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
+        cache_wrapup_messages(&handler, wrapup_messages(80, 1600));
 
         let body = tool_body(
             handler
@@ -32291,7 +32314,7 @@ mod tests {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
-        cache_wrapup_messages(&handler, wrapup_messages(320, 800));
+        cache_wrapup_messages(&handler, wrapup_messages(320, 1600));
 
         let body = tool_body(
             handler
@@ -32325,7 +32348,7 @@ mod tests {
         *producer.fact_each_run.lock().unwrap() = Some("rust wrapup fact".to_string());
         let (handler, store, _dir, project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
-        cache_wrapup_messages(&handler, wrapup_messages(320, 800));
+        cache_wrapup_messages(&handler, wrapup_messages(320, 1600));
 
         let body = tool_body(
             handler
@@ -32480,7 +32503,7 @@ mod tests {
             route_project_root,
             "memories",
         );
-        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
+        cache_wrapup_messages(&handler, wrapup_messages(80, 1600));
 
         let response = tool_body(
             handler

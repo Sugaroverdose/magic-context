@@ -18,6 +18,7 @@
  */
 
 import { getSdkContextLimit } from "../../shared/models-dev-cache";
+import { calibrationForModelKey, localBudget } from "./decision-calibration";
 
 // 5% of (main_context × execute_threshold) is the "working usable × 5%" basis.
 // This preserves the legacy static behavior for 1M × 40% (60K tail_size ≈ 15%
@@ -121,4 +122,14 @@ export function resolveHistorianContextLimit(historianModelOverride?: string): n
     }
 
     return DEFAULT_HISTORIAN_CONTEXT_FALLBACK;
+}
+
+/** Formatted historian source mixes prose and compact tool records, so use the larger class seed. */
+export function producerSourceLocalBudget(
+    providerTokens: number,
+    modelKey: string | undefined,
+): number {
+    const seed = calibrationForModelKey(modelKey);
+    const ratio = Math.max(seed.proseRatio, seed.toolsRatio);
+    return ratio === 1 ? providerTokens : localBudget(providerTokens, ratio);
 }

@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, openDatabase } from "../features/magic-context/storage";
 import { runValidatedHistorianPass } from "../hooks/magic-context/compartment-runner-historian";
+import {
+    clearProducerModelObservations,
+    observeProducerModelsForTest,
+} from "../hooks/magic-context/producer-window-test-support";
 import type { PluginContext } from "../plugin/types";
 import * as logger from "../shared/logger";
 
@@ -34,6 +38,7 @@ test("v1 six lifecycle sequences are byte-identical to master", async () => {
     });
     try {
         const db = openDatabase();
+        await observeProducerModelsForTest(["mock/primary", "mock/alternate"]);
         for (const scenario of scenarios) {
             events = [];
             let created = 0;
@@ -142,6 +147,7 @@ test("v1 six lifecycle sequences are byte-identical to master", async () => {
         if (process.env.MC_RECORD_V1_SEQUENCES === "1") writeFileSync(golden, bytes);
         else expect(bytes).toBe(readFileSync(golden, "utf8"));
     } finally {
+        clearProducerModelObservations();
         logging.mockRestore();
         random.mockRestore();
         clock.mockRestore();

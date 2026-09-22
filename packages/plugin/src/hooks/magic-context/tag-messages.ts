@@ -250,6 +250,13 @@ export interface TagNormalizationTarget {
 }
 
 export type TagTarget = {
+    /** Non-mutating count of current and replacement token-bearing fields for a planned drop. */
+    measureReclaim?: (skeleton: boolean) => {
+        beforeTools: number;
+        afterTools: number;
+        beforeProse: number;
+        afterProse: number;
+    };
     setContent: (content: string) => boolean;
     getContent?: () => string | null;
     drop?: () => ToolDropResult;

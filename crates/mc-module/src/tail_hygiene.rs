@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use mc_core::CoreState;
 use mc_store::{
     CkOutputKind, McTagRow, MediaBlock, MediaKind, ResultBlockKind, TailHygieneBaseline,
-    TailHygienePartKind, TailHygienePartMeasurement,
+    TailHygienePartKind, TailHygienePartMeasurement, TailHygieneTokenBuckets,
 };
 use sha2::{Digest, Sha256};
 
@@ -20,6 +20,23 @@ pub(crate) const CHANNEL1_FLOOR_TOKENS: i64 = 25_000;
 pub(crate) const CHANNEL1_REFIRE_FLOOR_TOKENS: i64 = 25_000;
 pub(crate) const CHANNEL2_FLOOR_TOKENS: i64 = 50_000;
 pub(crate) const CHANNEL2_SEVERITY_THRESHOLD: f64 = 0.75;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HygieneCalibration {
+    pub(crate) units_version: u8,
+    pub(crate) tools_ratio: f64,
+    pub(crate) prose_ratio: f64,
+}
+
+impl Default for HygieneCalibration {
+    fn default() -> Self {
+        Self {
+            units_version: 1,
+            tools_ratio: 1.0,
+            prose_ratio: 1.0,
+        }
+    }
+}
 
 const RED_KEY_PREFIX: &str = "red:";
 const CAV_KEY_PREFIX: &str = "cav:";
@@ -885,11 +902,47 @@ fn freeze_tail_hygiene_measurement(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn refresh_tail_hygiene_baseline(
     measured: TailHygieneMeasurement,
     cache_busting: bool,
     previous: Option<&TailHygieneBaseline>,
     now_ms: i64,
+) -> TailHygieneRefresh {
+    refresh_tail_hygiene_baseline_calibrated(
+        measured,
+        cache_busting,
+        previous,
+        now_ms,
+        HygieneCalibration::default(),
+    )
+}
+
+fn token_buckets(parts: &[TailHygienePartMeasurement]) -> TailHygieneTokenBuckets {
+    let mut buckets = TailHygieneTokenBuckets::default();
+    for part in parts {
+        let (tail, reclaimable) = (part.tokens.max(0), part.u_tokens.max(0));
+        match part.kind {
+            TailHygienePartKind::ToolInput | TailHygienePartKind::ToolOutput => {
+                buckets.tools_t = buckets.tools_t.saturating_add(tail);
+                buckets.tools_u = buckets.tools_u.saturating_add(reclaimable);
+            }
+            TailHygienePartKind::Text | TailHygienePartKind::File => {
+                buckets.prose_t = buckets.prose_t.saturating_add(tail);
+                buckets.prose_u = buckets.prose_u.saturating_add(reclaimable);
+            }
+            TailHygienePartKind::Excluded => {}
+        }
+    }
+    buckets
+}
+
+pub(crate) fn refresh_tail_hygiene_baseline_calibrated(
+    measured: TailHygieneMeasurement,
+    cache_busting: bool,
+    previous: Option<&TailHygieneBaseline>,
+    now_ms: i64,
+    calibration: HygieneCalibration,
 ) -> TailHygieneRefresh {
     let TailHygieneMeasurement {
         content_signature,
@@ -897,6 +950,16 @@ pub(crate) fn refresh_tail_hygiene_baseline(
         newest_message_part_start,
         ..
     } = measured;
+    let calibration = if !cache_busting {
+        previous.map_or(calibration, |baseline| HygieneCalibration {
+            units_version: baseline.hygiene_units_version.max(1),
+            tools_ratio: baseline.hygiene_tools_ratio,
+            prose_ratio: baseline.hygiene_prose_ratio,
+        })
+    } else {
+        calibration
+    };
+    let effective_token_buckets = token_buckets(&parts);
     // A defer pass cannot attribute an unexplainable change to an append, and this
     // walk measures the rendered tail rather than producing wire bytes, so it
     // re-measures instead of holding the stale baseline until the next cache-busting
@@ -935,6 +998,10 @@ pub(crate) fn refresh_tail_hygiene_baseline(
             baseline: TailHygieneBaseline {
                 turn_delta_u,
                 turn_delta_t,
+                hygiene_units_version: calibration.units_version,
+                hygiene_tools_ratio: calibration.tools_ratio,
+                hygiene_prose_ratio: calibration.prose_ratio,
+                effective_token_buckets,
                 evaluable: true,
                 generation_invalidated: false,
                 content_signature,
@@ -950,6 +1017,10 @@ pub(crate) fn refresh_tail_hygiene_baseline(
             baseline_t: frozen.baseline_t,
             turn_delta_u: frozen.turn_delta_u,
             turn_delta_t: frozen.turn_delta_t,
+            hygiene_units_version: calibration.units_version,
+            hygiene_tools_ratio: calibration.tools_ratio,
+            hygiene_prose_ratio: calibration.prose_ratio,
+            effective_token_buckets,
             baseline_generation: previous
                 .map_or(0, |baseline| baseline.baseline_generation)
                 .saturating_add(1),
@@ -969,6 +1040,21 @@ pub(crate) fn refresh_tail_hygiene_baseline(
 }
 
 pub(crate) fn effective_tail_hygiene(baseline: &TailHygieneBaseline) -> (i64, i64) {
+    if baseline.hygiene_units_version >= 2 {
+        let buckets = &baseline.effective_token_buckets;
+        let calibrated = |tools: i64, prose: i64| -> i64 {
+            let value = tools.max(0) as f64 * baseline.hygiene_tools_ratio
+                + prose.max(0) as f64 * baseline.hygiene_prose_ratio;
+            if value.is_finite() && value >= 0.0 {
+                value.ceil().min(i64::MAX as f64) as i64
+            } else {
+                i64::MAX
+            }
+        };
+        let t = calibrated(buckets.tools_t, buckets.prose_t);
+        let u = calibrated(buckets.tools_u, buckets.prose_u).clamp(0, t);
+        return (u, t);
+    }
     let t = baseline
         .baseline_t
         .saturating_add(baseline.turn_delta_t)
@@ -1077,6 +1163,24 @@ mod tests {
         now_ms: i64,
     ) -> TailHygieneBaseline {
         refresh_tail_hygiene_baseline(measured, cache_busting, previous, now_ms).baseline
+    }
+
+    #[test]
+    fn fable_tool_only_hygiene_calibrates_absolute_floors_before_band() {
+        let baseline = TailHygieneBaseline {
+            hygiene_units_version: 2,
+            hygiene_tools_ratio: 1.551639,
+            hygiene_prose_ratio: 1.571778,
+            effective_token_buckets: TailHygieneTokenBuckets {
+                tools_t: 40_000,
+                tools_u: 20_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (u, t) = effective_tail_hygiene(&baseline);
+        assert_eq!((u, t), (31_033, 62_066));
+        assert_eq!(hygiene_band(u, t), HygieneBand::Firm);
     }
 
     #[test]

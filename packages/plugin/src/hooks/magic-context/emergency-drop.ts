@@ -19,6 +19,8 @@
 
 import { newestCtxReduceTagNumbers } from "../../features/magic-context/reclaim-protection";
 import { TOKENS_PER_BYTE } from "./ctx-reduce-nudge";
+import { estimateTokens } from "./read-session-formatting";
+import type { TagTarget } from "./tag-messages";
 
 /** Reclaim target = fixedFloor + TARGET_FRACTION × (ceiling − fixedFloor). */
 export const TARGET_FRACTION = 0.3;
@@ -72,6 +74,9 @@ export interface EmergencyDropTag {
     /** Tool-arg bytes — `drop()` removes the invocation too, so these reclaim. */
     inputByteSize: number;
     reasoningByteSize: number;
+    /** Provider-token observations from the current representation, never persisted raw tag counts. */
+    servedTokens?: number;
+    reclaimableTokens?: number;
 }
 
 /**
@@ -97,6 +102,8 @@ export interface EmergencyDropPlan {
 }
 
 export function estimateEmergencyDropReclaimTokens(tag: EmergencyDropTag): number {
+    if (tag.reclaimableTokens !== undefined)
+        return Number.isFinite(tag.reclaimableTokens) ? Math.max(0, tag.reclaimableTokens) : 0;
     return Math.round(tagReclaimBytes(tag) * TOKENS_PER_BYTE);
 }
 
@@ -104,17 +111,13 @@ export function estimateEmergencyDropReclaimTokens(tag: EmergencyDropTag): numbe
  * Plan a tiered target-headroom emergency drop. Pure: returns the ordered set of
  * tool tag numbers to drop, a token target, and a reason; the caller applies them.
  *
- * fixedFloor is derived as `currentTotalInputTokens − Σ(active floor-tag tokens)`.
- * Tags cover exactly the live-tail content (messages, tool outputs, files,
- * reasoning); system, tool defs, and m[0]/m[1] are untagged. So this difference
- * IS `system + toolDefs + (primary ? m0 + m1 : 0)` — the irreducible prefix —
- * with no extra plumbing, and it self-adjusts for subagents (no m0/m1 in their
- * total) by construction.
+ * fixedFloor is estimated as current provider input minus measured active-tail mass.
+ * Content with no observable token count remains in that fixed portion. This is
+ * conservative reclaim planning, not proof that every remaining token is irreducible.
  *
  * The two tag sets serve DIFFERENT contracts and must not be conflated:
  * - `floorTags`: the ENTIRE active live-window tag set (all types, including
- *   non-droppable tool tags). Only their token sum matters — it makes
- *   `fixedFloor` the true irreducible prefix. Passing a narrower set (e.g.
+ *   non-droppable tool tags). Their served mass determines the estimated fixed floor. Passing a narrower set (e.g.
  *   tool-only) folds real conversation/reasoning tail into the "floor",
  *   raising the target and systematically under-evicting at the derived force band.
  * - `tags`: the evictable candidates — active tool tags whose drop target
@@ -197,7 +200,7 @@ export function planEmergencyDrop(input: {
     let tailTokens = 0;
     for (const tag of floorTags) {
         if (tag.status !== "active") continue;
-        tailTokens += estimateEmergencyDropReclaimTokens(tag);
+        tailTokens += tag.servedTokens ?? estimateEmergencyDropReclaimTokens(tag);
     }
     const fixedFloor = Math.max(currentTotalInputTokens - tailTokens, 0);
     const workingSpan = Math.max(ceilingTokens - fixedFloor, 0);
@@ -296,4 +299,30 @@ export function planEmergencyDrop(input: {
         reclaimTokens,
         reason: `tiered drop: ${selected.length} tags, reclaim≈${reclaimed}/${reclaimTokens} tokens (floor≈${fixedFloor}, ceiling=${Math.round(ceilingTokens)})`,
     };
+}
+
+/** Count current content and the planned replacement without mutating either cached representation. */
+export function measureEmergencyTag<T extends EmergencyDropTag>(
+    tag: T,
+    target: TagTarget | undefined,
+    calibration: { toolsRatio: number; proseRatio: number },
+    skeleton: boolean,
+): T & EmergencyDropTag {
+    const observation = target?.measureReclaim?.(skeleton);
+    if (observation) {
+        const before =
+            observation.beforeTools * calibration.toolsRatio +
+            observation.beforeProse * calibration.proseRatio;
+        const after =
+            observation.afterTools * calibration.toolsRatio +
+            observation.afterProse * calibration.proseRatio;
+        return { ...tag, servedTokens: before, reclaimableTokens: Math.max(0, before - after) };
+    }
+    const content = target?.getContent?.();
+    const served = content
+        ? estimateTokens(content) *
+          (tag.type === "tool" ? calibration.toolsRatio : calibration.proseRatio)
+        : 0;
+    // No replacement observation means no reclaim credit; original byte_size may describe unserved content.
+    return { ...tag, servedTokens: served, reclaimableTokens: 0 };
 }

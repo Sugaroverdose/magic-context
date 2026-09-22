@@ -2722,3 +2722,66 @@ describe("injectM0M1Pi m[1]-rendered coverage watermark (marker-drain liveness)"
 		}
 	});
 });
+
+it("Fable HARD history uses the real-token budget in Pi", () => {
+	const db = createTestDb();
+	try {
+		const compartments = Array.from({ length: 52 }, (_, i) => ({
+			startMessage: i + 1,
+			endMessage: i + 1,
+			title: `Arc ${i}`,
+			content: "",
+			p1: "P1 summary code decision result ".repeat(640),
+			p2: "P2 summary code decision result ".repeat(320),
+			p3: "P3 summary code decision result ".repeat(160),
+			p4: "P4 summary code decision result ".repeat(48),
+			importance: 50,
+			legacy: 0,
+		}));
+		const state = {
+			sessionId: "calibration-history",
+			projectIdentity: "",
+			projectDirectory: "",
+			memoryEnabled: false,
+			injectDocs: false,
+			historyBudgetTokens: 60000,
+			hardSignals: {
+				modelKey: "anthropic/claude-fable-5-1",
+				systemHash: "",
+				cacheExpired: false,
+				lastResponseTime: 0,
+			},
+		};
+		const actual = renderM0Pi(state, db, "", 1, [], compartments, []);
+		const expected = renderM0Pi(
+			{
+				...state,
+				historyBudgetTokens: 38173,
+				hardSignals: { ...state.hardSignals, modelKey: "unknown/neutral" },
+			},
+			db,
+			"",
+			1,
+			[],
+			compartments,
+			[],
+		);
+		expect(actual).toBe(expected);
+		expect(actual).not.toBe(
+			renderM0Pi(
+				{
+					...state,
+					hardSignals: { ...state.hardSignals, modelKey: "unknown/neutral" },
+				},
+				db,
+				"",
+				1,
+				[],
+				compartments,
+				[],
+			),
+		);
+	} finally {
+		closeQuietly(db);
+	}
+});

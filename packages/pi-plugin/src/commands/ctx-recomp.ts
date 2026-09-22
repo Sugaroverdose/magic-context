@@ -224,6 +224,7 @@ export function registerCtxRecompCommand(
 							}) as never,
 							db: currentDeps.db,
 							sessionId,
+							model: currentDeps.historianModel,
 							historianChunkTokens: currentDeps.historianChunkTokens,
 							directory: cwd,
 							historianTimeoutMs: currentDeps.historianTimeoutMs,

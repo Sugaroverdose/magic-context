@@ -58,6 +58,7 @@ import {
     MEMORY_RENDER_FORMAT_EPOCH,
 } from "./compartment-render-epoch";
 import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
+import { historyLocalBudget } from "./decision-calibration";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -2080,6 +2081,7 @@ export function renderM0(args: {
     historyBudgetTokens?: number;
     userProfileBudgetTokens?: number;
     decayPressureMultiplier?: number;
+    modelKey?: string;
 }): string {
     const sections: string[] = [];
     if (args.projectDocs.length > 0) sections.push(args.projectDocs);
@@ -2094,7 +2096,10 @@ export function renderM0(args: {
     // The +15% drift "pressure multiplier" maps to a proportionally tighter
     // effective budget (lower budget → higher curve pressure → more demotion),
     // keeping decay-curve.ts the single source of pressure math.
-    const baseBudget = args.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
+    const baseBudget = historyLocalBudget(
+        args.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS,
+        args.modelKey,
+    );
     const effectiveBudget = baseBudget / Math.max(1, args.decayPressureMultiplier ?? 1);
     const sessionHistory = renderSessionHistoryWithDecay({
         compartments: args.compartments,
@@ -2314,13 +2319,17 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         facts,
         memoryRenderOptions,
         historyBudgetTokens: options.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS,
+        modelKey: snapshotMarkers.modelKey,
         userProfileBudgetTokens: options.userProfileBudgetTokens,
         decayPressureMultiplier,
         mural,
     });
 
     let attempts = 0;
-    const budget = options.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
+    const budget = historyLocalBudget(
+        options.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS,
+        snapshotMarkers.modelKey,
+    );
     while (budget > 0 && historySliceTokens(m0Text) > budget * 1.05 && attempts < 3) {
         decayPressureMultiplier *= 1.15;
         m0Text = renderM0({
@@ -3154,7 +3163,10 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
               memoryRenderOptions,
           )
         : trimMemoriesToBudgetV2(options.sessionId, memories, memoryBudget);
-    const budget = options.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
+    const budget = historyLocalBudget(
+        options.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS,
+        snapshotMarkers.modelKey,
+    );
     const mural =
         options.memoryEnabled === false
             ? undefined

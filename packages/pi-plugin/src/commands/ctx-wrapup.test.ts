@@ -1,6 +1,14 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it, mock, spyOn } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import { join } from "node:path";
 import {
 	acquireCompartmentLease,
@@ -27,6 +35,10 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getSubagentInvocations } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
 import { recordChildInvocation } from "@magic-context/core/features/magic-context/subagent-token-capture";
+import {
+	clearProducerModelObservations,
+	observeProducerModelsForTest,
+} from "@magic-context/core/hooks/magic-context/producer-window-test-support";
 import * as logger from "@magic-context/core/shared/logger";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -647,3 +659,8 @@ describe("Pi /ctx-wrapup", () => {
 		}
 	});
 });
+
+beforeEach(async () => {
+	await observeProducerModelsForTest(["test/model"]);
+});
+afterEach(clearProducerModelObservations);

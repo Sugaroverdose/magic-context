@@ -156,6 +156,8 @@ pub enum SelKind {
 /// the selection logic needs on top of the raw incoming item.
 #[derive(Debug, Clone)]
 pub struct SelItem {
+    /// Current representation's local-token count for emergency budgeting; it does not change age-based eligibility.
+    pub served_token_count: Option<usize>,
     pub id: String,
     pub ordinal: u64,
     /// Provider-facing role of the owning message.
@@ -179,6 +181,8 @@ pub struct SelItem {
 /// caller-owned). For the isolated build these are supplied directly.
 #[derive(Debug, Clone)]
 pub struct SelectionContext {
+    /// Static token policy for this cache-busting selection pass; None retains legacy uncalibrated math.
+    pub calibration: Option<crate::decision_calibration::DecisionCalibration>,
     pub pass_class: PassClass,
     /// Provider-reported current total input tokens from the request usage sample.
     pub current_total_input_tokens: f64,
@@ -1012,7 +1016,32 @@ fn bytes_to_tokens(bytes: usize) -> f64 {
 
 /// Reconstruct the active floor-tag population. A tool arc is one tag in the TS planner, so its
 /// call/result/reasoning bytes are aggregated before the per-tag token rounding is applied.
-fn active_floor_tokens(items: &[SelItem], frozen_keys: &HashSet<String>) -> f64 {
+fn active_floor_tokens(
+    items: &[SelItem],
+    frozen_keys: &HashSet<String>,
+    calibration: Option<crate::decision_calibration::DecisionCalibration>,
+) -> f64 {
+    if let Some(seed) = calibration {
+        return items
+            .iter()
+            .filter(|item| {
+                !frozen_keys.contains(&item.id)
+                    && item.message_role != SelMessageRole::System
+                    && !matches!(item.kind, SelKind::Opaque | SelKind::Media)
+            })
+            .map(|item| {
+                let ratio = if matches!(
+                    item.kind,
+                    SelKind::ToolCall { .. } | SelKind::ToolResult { .. }
+                ) {
+                    seed.tools_ratio
+                } else {
+                    seed.prose_ratio
+                };
+                item.served_token_count.or(item.token_count).unwrap_or(0) as f64 * ratio
+            })
+            .sum();
+    }
     let mut tool_tag_bytes: HashMap<&str, usize> = HashMap::new();
     let mut tokens = 0.0;
     for item in items.iter().filter(|item| {
@@ -1044,6 +1073,7 @@ fn select_emergency(
     arcs: &[&ToolArc],
     ctx: &SelectionContext,
     all_active_floor_tokens: f64,
+    reclaim_by_arc: &HashMap<String, f64>,
     assessment: &mut Option<mc_store::EmergencyDropAssessment>,
 ) -> HashSet<String> {
     // Guards mirror the TS planner: unknown ceiling/usage → no-op; idempotence latch.
@@ -1065,6 +1095,14 @@ fn select_emergency(
     // sub-threshold fractional remainder at the boundary.
     let reclaim_tokens = (ctx.current_total_input_tokens - target).round();
     if reclaim_tokens <= EMERGENCY_REARM_MIN_TOKENS {
+        *assessment = Some(mc_store::EmergencyDropAssessment {
+            fixed_floor_tokens: fixed_floor,
+            target_tokens: target,
+            required_reclaim_tokens: reclaim_tokens.max(0.0),
+            selected_reclaim_tokens: 0.0,
+            candidate_tokens: 0.0,
+            target_unreachable: reclaim_tokens > 0.0,
+        });
         return HashSet::new();
     }
 
@@ -1124,7 +1162,12 @@ fn select_emergency(
     let candidate_tokens = by_tier
         .values()
         .flatten()
-        .map(|arc| bytes_to_tokens(arc.reclaim_bytes()))
+        .map(|arc| {
+            reclaim_by_arc
+                .get(&arc.arc_id)
+                .copied()
+                .unwrap_or_else(|| bytes_to_tokens(arc.reclaim_bytes()))
+        })
         .sum::<f64>();
     // Walk T3 → T2 → T1, oldest-first within tier, until reclaim met.
     let mut selected: HashSet<String> = HashSet::new();
@@ -1138,7 +1181,10 @@ fn select_emergency(
             });
             for arc in group.iter() {
                 selected.insert(arc.arc_id.clone());
-                reclaimed += bytes_to_tokens(arc.reclaim_bytes());
+                reclaimed += reclaim_by_arc
+                    .get(&arc.arc_id)
+                    .copied()
+                    .unwrap_or_else(|| bytes_to_tokens(arc.reclaim_bytes()));
                 if reclaimed >= reclaim_tokens {
                     break 'outer;
                 }
@@ -1278,11 +1324,53 @@ pub(crate) fn select_reductions_with_outcome(
             // unfrozen tagged-content class contributes to the fixed-floor derivation, including
             // text, media, reasoning, and non-droppable tools; system-prefix and opaque metadata
             // remain outside that population. Only active client tool arcs can be selected below.
-            let all_active_floor_tokens = active_floor_tokens(items, frozen_keys);
+            let all_active_floor_tokens = active_floor_tokens(items, frozen_keys, ctx.calibration);
+            let mut reclaim_by_arc = HashMap::new();
+            if let Some(seed) = ctx.calibration {
+                let recent: HashSet<_> = active_arcs
+                    .iter()
+                    .rev()
+                    .take(RECENT_TOOL_SKELETON_WINDOW)
+                    .map(|a| a.arc_id.as_str())
+                    .collect();
+                for arc in &active_arcs {
+                    let before = items
+                        .iter()
+                        .filter(|item| {
+                            item.arc_id.as_deref() == Some(arc.arc_id.as_str())
+                                && matches!(
+                                    item.kind,
+                                    SelKind::ToolCall { .. } | SelKind::ToolResult { .. }
+                                )
+                        })
+                        .map(|item| {
+                            item.served_token_count.or(item.token_count).unwrap_or(0) as f64
+                        })
+                        .sum::<f64>();
+                    let skeleton = (!ctx.emergency_window_yields
+                        && recent.contains(arc.arc_id.as_str()))
+                        || reasoning_adjacency_collapse_arcs.contains(&arc.arc_id);
+                    // Include a conservative tag-overlay allowance because tag ids are installed by the renderer.
+                    let after = if skeleton {
+                        (arc.call_inputs.len()
+                            * (mc_tokenizer::estimate_tokens(&dropped_input_payload(None)) + 32)
+                            + arc.result_ids.len()
+                                * (mc_tokenizer::estimate_tokens(DROPPED_PLACEHOLDER) + 32))
+                            as f64
+                    } else {
+                        0.0
+                    };
+                    reclaim_by_arc.insert(
+                        arc.arc_id.clone(),
+                        (before - after).max(0.0) * seed.tools_ratio,
+                    );
+                }
+            }
             let emergency_arc_ids = select_emergency(
                 &active_arcs,
                 ctx,
                 all_active_floor_tokens,
+                &reclaim_by_arc,
                 &mut emergency_drop_assessment,
             );
             if ctx.pass_already_busting
@@ -1551,6 +1639,7 @@ mod tests {
     ) -> SelItem {
         let id = call_block_id(mid);
         SelItem {
+            served_token_count: None,
             id: id.clone(),
             ordinal,
             message_role: SelMessageRole::Assistant,
@@ -1567,6 +1656,7 @@ mod tests {
 
     fn tool_result(mid: &str, ordinal: u64, name: &str, bytes: usize) -> SelItem {
         SelItem {
+            served_token_count: None,
             id: result_block_id(mid),
             ordinal,
             message_role: SelMessageRole::NonAssistant,
@@ -1582,6 +1672,7 @@ mod tests {
 
     fn reasoning(mid: &str, ordinal: u64, bytes: usize) -> SelItem {
         SelItem {
+            served_token_count: None,
             id: reasoning_block_id(mid),
             ordinal,
             message_role: SelMessageRole::Assistant,
@@ -1595,6 +1686,7 @@ mod tests {
 
     fn reasoning_with_id(id: &str, arc_id: &str, ordinal: u64, bytes: usize) -> SelItem {
         SelItem {
+            served_token_count: None,
             id: id.to_string(),
             ordinal,
             message_role: SelMessageRole::Assistant,
@@ -1608,6 +1700,7 @@ mod tests {
 
     fn text_with_id(id: &str, ordinal: u64, bytes: usize) -> SelItem {
         SelItem {
+            served_token_count: None,
             id: id.to_string(),
             ordinal,
             message_role: SelMessageRole::NonAssistant,
@@ -1628,6 +1721,7 @@ mod tests {
         bytes: usize,
     ) -> SelItem {
         SelItem {
+            served_token_count: None,
             id: id.to_string(),
             ordinal,
             message_role: SelMessageRole::Assistant,
@@ -1650,6 +1744,7 @@ mod tests {
         bytes: usize,
     ) -> SelItem {
         SelItem {
+            served_token_count: None,
             id: id.to_string(),
             ordinal,
             message_role: SelMessageRole::NonAssistant,
@@ -1727,7 +1822,7 @@ mod tests {
         let arcs = group_arcs(&items, &HashSet::new());
         let arcs = arcs.iter().collect::<Vec<_>>();
         let mut assessment = None;
-        let selected = select_emergency(&arcs, &ctx, 80_000.0, &mut assessment);
+        let selected = select_emergency(&arcs, &ctx, 80_000.0, &HashMap::new(), &mut assessment);
         let report = assessment.as_ref().unwrap();
         assert_eq!(selected.len(), 10);
         assert_eq!(report.fixed_floor_tokens, 62_021.0);
@@ -1737,7 +1832,7 @@ mod tests {
         assert!(report.target_unreachable);
         ctx.tag_window_protected_block_ids
             .extend((1..10).map(|n| result_block_id(&format!("tool-{n}"))));
-        let selected = select_emergency(&arcs, &ctx, 80_000.0, &mut assessment);
+        let selected = select_emergency(&arcs, &ctx, 80_000.0, &HashMap::new(), &mut assessment);
         let report = assessment.as_ref().unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(report.candidate_tokens, 2_000.0);
@@ -1745,15 +1840,42 @@ mod tests {
         ctx.emergency_window_yields = true;
         ctx.current_total_input_tokens = 20_000.0;
         ctx.ceiling_tokens = 20_000.0;
-        let selected = select_emergency(&arcs, &ctx, 20_000.0, &mut assessment);
+        let selected = select_emergency(&arcs, &ctx, 20_000.0, &HashMap::new(), &mut assessment);
         let report = assessment.as_ref().unwrap();
         assert_eq!(selected.len(), 7);
         assert_eq!(report.selected_reclaim_tokens, 14_000.0);
         assert!(!report.target_unreachable);
     }
 
+    #[test]
+    fn calibrated_emergency_uses_current_token_mass_not_original_bytes() {
+        let mut items = Vec::new();
+        for i in 1..=30 {
+            let id = format!("c{i}");
+            items.push(tool_call(&id, i, "bash", serde_json::json!({}), 40_000));
+            items.push(tool_result(&id, i, "bash", 40_000));
+        }
+        for item in &mut items {
+            item.token_count = Some(10);
+        }
+        let mut ctx = base_ctx(PassClass::EmergencyForce);
+        ctx.calibration = Some(crate::decision_calibration::DecisionCalibration::for_model(
+            Some("anthropic/claude-fable-5-1"),
+        ));
+        ctx.current_total_input_tokens = 10_000.0;
+        ctx.ceiling_tokens = 8_000.0;
+        let result = select_reductions_with_outcome(
+            &items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig::default(),
+        );
+        assert!(result.decisions.is_empty());
+    }
+
     fn base_ctx(pass: PassClass) -> SelectionContext {
         SelectionContext {
+            calibration: None,
             pass_class: pass,
             current_total_input_tokens: 0.0,
             ceiling_tokens: 0.0,
@@ -1775,6 +1897,7 @@ mod tests {
     #[test]
     fn natural_bust_drains_a_single_command_remainder() {
         let items = vec![SelItem {
+            served_token_count: None,
             id: "drop".to_string(),
             ordinal: 1,
             message_role: SelMessageRole::NonAssistant,
@@ -1972,6 +2095,7 @@ mod tests {
                         SelMessageRole::NonAssistant
                     };
                     SelItem {
+                        served_token_count: None,
                         id: i.id.clone(),
                         ordinal: i.ordinal,
                         message_role,
@@ -2031,6 +2155,7 @@ mod tests {
                 _ => PassClass::Execute,
             };
             let ctx = SelectionContext {
+                calibration: None,
                 pass_class: pass,
                 current_total_input_tokens: case.ctx.current_total_input_tokens,
                 ceiling_tokens: case.ctx.ceiling_tokens,
@@ -2371,6 +2496,7 @@ mod tests {
         }
         items.push(text_with_id("heavy-text#0", 7, 30_000));
         items.push(SelItem {
+            served_token_count: None,
             id: "heavy-reasoning#0".to_string(),
             ordinal: 8,
             message_role: SelMessageRole::Assistant,
@@ -2381,6 +2507,7 @@ mod tests {
             arc_id: None,
         });
         items.push(SelItem {
+            served_token_count: None,
             id: "irreducible-system#0".to_string(),
             ordinal: 9,
             message_role: SelMessageRole::System,
@@ -2418,6 +2545,7 @@ mod tests {
                 4_000,
             ));
             items.push(SelItem {
+                served_token_count: None,
                 id: format!("{mid}#3"),
                 ordinal,
                 message_role: SelMessageRole::Assistant,
@@ -3324,6 +3452,7 @@ mod tests {
         // plus non-zero pressure/latch fields. last_execute_ordinal stays 0 so c1 is NOT
         // a two-pass drop candidate (keeps it an edit_marker in both).
         let ctx_b = SelectionContext {
+            calibration: None,
             agent_drop_ids: vec![result_block_id("c9")],
             current_total_input_tokens: 123_456.0,
             ceiling_tokens: 200_000.0,
@@ -3413,6 +3542,7 @@ mod tests {
     #[test]
     fn held_agent_drop_never_trickles_when_the_window_slides() {
         let items = vec![SelItem {
+            served_token_count: None,
             id: "held#0".to_string(),
             ordinal: 1,
             message_role: SelMessageRole::NonAssistant,
@@ -3439,6 +3569,7 @@ mod tests {
     fn different_commands_wait_for_a_single_ride_opportunity() {
         let items = vec![
             SelItem {
+                served_token_count: None,
                 id: "held#0".to_string(),
                 ordinal: 1,
                 message_role: SelMessageRole::NonAssistant,
@@ -3449,6 +3580,7 @@ mod tests {
                 arc_id: None,
             },
             SelItem {
+                served_token_count: None,
                 id: "new#0".to_string(),
                 ordinal: 2,
                 message_role: SelMessageRole::NonAssistant,
@@ -3485,6 +3617,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(index, kind)| SelItem {
+                served_token_count: None,
                 id: format!("carrier#{index}"),
                 ordinal: 1,
                 message_role: SelMessageRole::NonAssistant,
@@ -3711,6 +3844,7 @@ mod tests {
         let items = vec![
             reasoning_with_id("left#0", "left#2", 1, 50),
             SelItem {
+                served_token_count: None,
                 id: "left#1".to_string(),
                 ordinal: 1,
                 message_role: SelMessageRole::Assistant,
@@ -3724,6 +3858,7 @@ mod tests {
             tool_call_with_ids("left#3", "left#3", 1, "mcp_read", args, 50),
             tool_result_with_ids("older-result#0", "left#2", 2, "mcp_read", 300),
             SelItem {
+                served_token_count: None,
                 id: "right#0".to_string(),
                 ordinal: 3,
                 message_role: SelMessageRole::Assistant,

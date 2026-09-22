@@ -9,6 +9,7 @@ import { readCoordinateRebaseNotice } from "../../features/magic-context/store-g
 // (compartment-runner-recomp.ts, compartment-runner.ts, tests) keep working
 // unchanged. The implementation moved to ./historian-state-file.ts so Pi
 // can import it without pulling in the full incremental runner.
+import { producerSourceLocalBudget } from "./derive-budgets";
 import { cleanupHistorianStateFile } from "./historian-state-file";
 
 export {
@@ -188,11 +189,17 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         client,
         db,
         sessionId,
-        historianChunkTokens,
+        historianChunkTokens: providerHistorianChunkTokens,
         directory,
         historianTimeoutMs,
         getNotificationParams,
     } = deps;
+    const producerKey =
+        (typeof deps.model === "string" ? deps.model : deps.model?.model) ?? deps.fallbackModelId;
+    const historianChunkTokens = producerSourceLocalBudget(
+        providerHistorianChunkTokens,
+        producerKey,
+    );
     let completedSuccessfully = false;
     let retainDrainReservationForRetryThrottle = false;
     let issueNotified = false;

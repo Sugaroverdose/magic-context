@@ -590,6 +590,7 @@ export function getAllStatusTagTokenTotalsFlat(
     db: Database,
     sessionId: string,
     floor = 0,
+    calibration: { proseRatio: number; toolsRatio: number } = { proseRatio: 1, toolsRatio: 1 },
 ): { totals: Map<string, number>; nullMessageIds: Set<string> } {
     // floor > 0 (OpenCode) loads only the live-wire range (tag_number >= floor):
     // tag_number is monotonic with message order, so every tag below the first
@@ -642,10 +643,10 @@ export function getAllStatusTagTokenTotalsFlat(
             continue;
         }
         if (nullMessageIds.has(owner)) continue;
+        const ratio = row.type === "tool" ? calibration.toolsRatio : calibration.proseRatio;
         const weight =
-            (row.token_count ?? 0) +
-            (row.input_token_count ?? 0) +
-            (row.reasoning_token_count ?? 0);
+            ((row.token_count ?? 0) + (row.input_token_count ?? 0)) * ratio +
+            (row.reasoning_token_count ?? 0) * calibration.proseRatio;
         totals.set(owner, (totals.get(owner) ?? 0) + weight);
     }
     return { totals, nullMessageIds };

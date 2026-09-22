@@ -90,3 +90,34 @@ describe("final outgoing-wire token estimate", () => {
         expect(trimmed.messageTokens.conversation).toBeGreaterThan(0);
     });
 });
+
+it("unknown-model fit inflates raw mass instead of admitting a locally-fitting request", () => {
+    const result = estimate([
+        {
+            info: { id: "m", role: "user" },
+            parts: [{ type: "text", text: "hello" }],
+        } as MessageLike,
+    ]);
+    expect(result.tokens).toBeGreaterThanOrEqual(20000);
+    expect(result.rawTokens).toBeLessThan(11000);
+    expect(result.trusted).toBe(true);
+});
+it("unsupported nontext parts never produce a trusted fit estimate", () => {
+    const result = estimate([
+        {
+            info: { id: "m", role: "user" },
+            parts: [{ type: "audio", data: "unknown" }],
+        } as unknown as MessageLike,
+    ]);
+    expect(result.trusted).toBe(false);
+    expect(result.completeness).toBe("partial");
+});
+it("nonfinite system mass cannot be trusted even with known tool definitions", () => {
+    estimate([]);
+    const result = estimateFinalWireInputTokens({
+        messages: [],
+        ...MODEL,
+        systemPromptTokens: Number.POSITIVE_INFINITY,
+    });
+    expect(result.trusted).toBe(false);
+});

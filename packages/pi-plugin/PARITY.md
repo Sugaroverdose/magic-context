@@ -1112,3 +1112,21 @@ OMP source references, shipped in 18.2.6:
 `pi-coding-agent/src/extensibility/extensions/runner.ts:460,711,1261` (reload handler).
 The overlay test preserves exact 100K/160K denominators, the stale-before-reload
 assertion, and the same session ID through the OMP restart.
+
+## Static decision calibration
+
+Pi history rendering and the shared canonical protected-token walk use the same static seeds as OpenCode/Rust. Provider-reported SDK usage remains unscaled. The raw/replay fit helper recounts the supplied array and requires explicit system/tool observations; the storage-failure catch currently has no complete held observations and must refuse rather than admit on serialized byte size alone. Media and unsupported message shapes cannot establish fit. Historian fit uses assembled user/system text and independently resolves each selected model's window. Provider framing and subprocess-added prompt content remain outside MC's observed representation.
+
+Pi tail-hygiene uses the same session-frozen tools/prose ratios, provider-unit floors, cadence/grace arithmetic and reminder figures as OpenCode and Rust. The shared namespaced JSON stamps `hygieneUnitsVersion=2` on the first authorized bust, converts legacy U watermarks once and keeps defer/restart passes on the previously active unit epoch.
+
+Calibration is static-only (`seed` or `family-fallback`). Pi no longer logs returned-array learning observations and has no P/L sample, EMA, learned provenance, runtime adaptation or learned-state persistence.
+
+## Static calibration gate follow-up
+
+Pi storage-error fallback has no complete held system/tool observation at its admission boundary. A small valid LKG prefix is therefore still refused rather than admitted from its byte size. Durable LKG hydration and SOFT+ refresh continue to be tested; the complete-observation mapped-contraction control separately proves that calibrated fit can admit a genuinely observed request. An already oversized byte proxy now rejects before expensive tokenization.
+
+Historian fixtures explicitly supply primary/fallback window observations. The old 1.02× source-clamping fixture intentionally now refuses the assembled calibrated prompt before transport and leaves coverage unchanged; a raw source allowance did not include all instructions/system mass. `/ctx-recomp` forwards its configured historian model to shared admission rather than relying on an unobservable agent default. Pi's actual child tool schemas and later host framing remain outside the observed system/user prompt representation; no exact provider-token claim is made for those components.
+
+The full Pi suite initially reported 1,193 pass / 3 skip / 31 fail. The affected 344-test groups subsequently reported 340 pass / 4 fail, and the four remaining nested-historian cases passed after their mock window observations were supplied. The environment-only OMP/home and smart-note checks passed without product changes. Pi typecheck passed. No second full suite was run, as requested. Exact commands and counts are committed under `docs/reports/tokenizer-calibration-gates/`.
+
+Tail-hygiene parity is active. Persisted `last_nudge_undropped` and `last_nudge_level.postReduceGraceBaselineU` convert once at the stamped bust; `growthThreshold` is derived from calibrated T. No SQL column, migration, sidecar or fence change was added.

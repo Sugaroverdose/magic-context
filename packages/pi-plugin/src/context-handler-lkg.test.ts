@@ -9,7 +9,10 @@ import {
 	resetEmergencyRecoveryRegistryForTest,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { EmergencyFailClosedError } from "@magic-context/core/hooks/magic-context/emergency-fail-closed";
-import { resetLkgSlotsForTest } from "@magic-context/core/hooks/magic-context/lkg-slot";
+import {
+	getInMemorySlot,
+	resetLkgSlotsForTest,
+} from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 
@@ -180,10 +183,7 @@ describe("Pi context handler LKG replay", () => {
 					);
 					expect(firstServed).toBeDefined();
 					if (!firstServed) throw new Error("Expected an applied capture pass");
-					const expectedReplay = [
-						structuredClone(firstServed.messages.at(-1)),
-						...structuredClone(raw.slice(1)),
-					];
+
 					await nextImmediate();
 					appendCompartments(db, sessionId, [
 						{
@@ -215,46 +215,19 @@ describe("Pi context handler LKG replay", () => {
 						mode === "host"
 							? host.emit(handler as never, raw, ctx)
 							: handler({ messages: raw as never[] }, ctx as never);
-					if (count === 2812) {
-						if (mode === "host") host.assertRefused(await pass, pristine);
-						else {
-							await expect(pass).rejects.toMatchObject({
-								name: "PiStorageBusyError",
-								message:
-									"Magic Context storage is busy; send your message again",
-							});
-						}
-						// The guard stops at the first serialized prefix crossing the wall.
-						let bytes = 0;
-						for (let end = 1; end <= raw.length; end++) {
-							bytes = Buffer.byteLength(
-								JSON.stringify(expectedReplay.slice(0, end)),
-							);
-							if (bytes > 204000 * 4) break;
-						}
-						expect(
-							logLines.find((line) =>
-								line.includes("raw_fallback_over_context_limit"),
-							),
-						).toBe(
-							`raw_fallback_over_context_limit proxy_bytes=${bytes} proxy_tokens=${Math.ceil(bytes / 4)} limit=204000 early_abort=true serialization_failed=false`,
-						);
-					} else {
-						if (mode === "host") {
-							expect(await pass).toEqual(expectedReplay);
-							expect(host.controller.signal.aborted).toBe(false);
-							expect(host.entries).toEqual([]);
-						} else expect((await pass)?.messages).toEqual(expectedReplay);
-						expect(
-							logLines.some((line) =>
-								line.includes("raw_fallback_over_context_limit"),
-							),
-						).toBe(false);
+					// Requests without measured system and tool definitions are refused even when their byte proxy is small.
+					if (mode === "host") host.assertRefused(await pass, pristine);
+					else {
+						await expect(pass).rejects.toMatchObject({
+							name: "PiStorageBusyError",
+							message: "Magic Context storage is busy; send your message again",
+						});
 					}
-					if (count === 300)
-						expect(logLines.join("\n")).toContain(
-							"LKG replay served 300 messages",
-						);
+
+					expect(logLines).toContain(
+						"raw_fallback_refused completeness=partial",
+					);
+					expect(logLines.join("\n")).not.toContain("LKG replay served");
 				} finally {
 					if (locker.inTransaction) locker.exec("ROLLBACK");
 					restoreLog();
@@ -310,7 +283,7 @@ describe("Pi context handler LKG replay", () => {
 						2,
 					),
 				];
-				const rawTail = structuredClone(secondRaw.slice(1));
+
 				const locker = new Database(dbPath);
 				try {
 					db.exec("PRAGMA busy_timeout=0");
@@ -332,24 +305,11 @@ describe("Pi context handler LKG replay", () => {
 					});
 					const served = await host.emit(handler as never, secondRaw, ctx);
 
-					if (tailBytes > 204000 * 4) {
-						host.assertRefused(served, secondRaw);
-						const bytes = Buffer.byteLength(
-							JSON.stringify([...(first?.messages ?? []), ...rawTail]),
-						);
-						expect(logLines).toContain(
-							`raw_fallback_over_context_limit proxy_bytes=${bytes} proxy_tokens=${Math.ceil(bytes / 4)} limit=204000 early_abort=true serialization_failed=false`,
-						);
-					} else {
-						expect(host.controller.signal.aborted).toBe(false);
-						expect(host.entries).toEqual([]);
-						expect(JSON.stringify(served)).toBe(
-							JSON.stringify([...(first?.messages ?? []), ...rawTail]),
-						);
-						expect(logLines).toContain(
-							"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG replay served 2 messages instead of raw 2",
-						);
-					}
+					host.assertRefused(served, secondRaw);
+					expect(logLines).toContain(
+						"raw_fallback_refused completeness=partial",
+					);
+					expect(getInMemorySlot(sessionId)).toBeDefined();
 				} finally {
 					locker.exec("ROLLBACK");
 					closeQuietly(locker);
@@ -400,7 +360,7 @@ describe("Pi context handler LKG replay", () => {
 		}
 	});
 
-	it("refuses LKG when the JSONL entry-id sequence diverges and logs the raw serve", async () => {
+	it("refuses divergent LKG and unmeasured raw fallback", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-lkg-diverged-"));
 		tempDirs.push(dir);
 		const dbPath = join(dir, "context.db");
@@ -427,10 +387,10 @@ describe("Pi context handler LKG replay", () => {
 				db.exec("PRAGMA busy_timeout=0");
 				locker.exec("PRAGMA busy_timeout=0");
 				locker.exec("BEGIN IMMEDIATE");
-				const replay = await runPass(handler, sessionId, editedRaw, [
-					"entry-u1-edited",
-				]);
-				expect(replay).toBeUndefined();
+				await expect(
+					runPass(handler, sessionId, editedRaw, ["entry-u1-edited"]),
+				).rejects.toMatchObject({ code: "PI_STORAGE_BUSY" });
+				expect(logLines).toContain("raw_fallback_refused completeness=partial");
 				expect(logLines).toContain(
 					"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_invalidated_reshape); checking raw 1-message input",
 				);
@@ -463,7 +423,7 @@ describe("Pi context handler LKG replay", () => {
 			db.exec("PRAGMA busy_timeout=0");
 			locker.exec("PRAGMA busy_timeout=0");
 			locker.exec("BEGIN IMMEDIATE");
-			const replay = await runPass(
+			const replay = runPass(
 				handler,
 				sessionId,
 				[
@@ -472,7 +432,8 @@ describe("Pi context handler LKG replay", () => {
 				],
 				["entry-u1", "entry-a1"],
 			);
-			expect(replay).toBeUndefined();
+			await expect(replay).rejects.toMatchObject({ code: "PI_STORAGE_BUSY" });
+			expect(logLines).toContain("raw_fallback_refused completeness=partial");
 			expect(logLines).toContain(
 				"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_miss); checking raw 2-message input",
 			);
@@ -513,18 +474,24 @@ describe("Pi context handler LKG replay", () => {
 				userMessage("persist this prefix", 1),
 				assistantMessage("tail after restart", 2),
 			];
-			const rawTail = structuredClone(secondRaw.slice(1));
+
 			const locker = new Database(dbPath);
 			try {
 				db.exec("PRAGMA busy_timeout=0");
 				locker.exec("PRAGMA busy_timeout=0");
 				locker.exec("BEGIN IMMEDIATE");
-				const replay = await runPass(restartedHandler, sessionId, secondRaw, [
-					"entry-u1",
-					"entry-a1",
-				]);
-				expect(JSON.stringify(replay?.messages)).toBe(
-					JSON.stringify([...(first?.messages ?? []), ...rawTail]),
+				expect(getInMemorySlot(sessionId)).toBeUndefined();
+				await expect(
+					runPass(restartedHandler, sessionId, secondRaw, [
+						"entry-u1",
+						"entry-a1",
+					]),
+				).rejects.toMatchObject({ code: "PI_STORAGE_BUSY" });
+				expect(getInMemorySlot(sessionId)?.jsonPrefix).toContain(
+					"persist this prefix",
+				);
+				expect(getInMemorySlot(sessionId)?.jsonPrefix).not.toContain(
+					"tail after restart",
 				);
 			} finally {
 				locker.exec("ROLLBACK");
@@ -598,19 +565,22 @@ describe("Pi context handler LKG replay", () => {
 				assistantMessage("first tail", 2),
 				userMessage("raw newest tail", 3),
 			];
-			const rawTail = structuredClone(thirdRaw.slice(2));
+
 			const locker = new Database(dbPath);
 			try {
 				db.exec("PRAGMA busy_timeout=0");
 				locker.exec("PRAGMA busy_timeout=0");
 				locker.exec("BEGIN IMMEDIATE");
-				const replay = await runPass(handler, sessionId, thirdRaw, [
-					"entry-u1",
-					"entry-a1",
-					"entry-u2",
-				]);
-				expect(JSON.stringify(replay?.messages)).toBe(
-					JSON.stringify([...(second?.messages ?? []), ...rawTail]),
+				await expect(
+					runPass(handler, sessionId, thirdRaw, [
+						"entry-u1",
+						"entry-a1",
+						"entry-u2",
+					]),
+				).rejects.toMatchObject({ code: "PI_STORAGE_BUSY" });
+				expect(getInMemorySlot(sessionId)?.jsonPrefix).toContain("first tail");
+				expect(getInMemorySlot(sessionId)?.jsonPrefix).not.toContain(
+					"raw newest tail",
 				);
 			} finally {
 				locker.exec("ROLLBACK");

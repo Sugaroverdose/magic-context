@@ -174,7 +174,7 @@ function makeToolMessage(id: string): MessageLike {
             {
                 type: "tool",
                 tool: "bash",
-                state: { output: "x".repeat(4000), status: "completed" },
+                state: { output: "word ".repeat(999), status: "completed" },
             },
         ],
     } as unknown as MessageLike;
@@ -183,6 +183,25 @@ function makeToolMessage(id: string): MessageLike {
 function makeDropTarget(message: MessageLike): TagTarget {
     return {
         message,
+        measureReclaim(skeleton) {
+            const before = estimateMessageTokens(message).toolCall;
+            const clone = structuredClone(message);
+            const index = clone.parts.findIndex(
+                (part) => (part as { type?: string }).type === "tool",
+            );
+            if (index >= 0) {
+                if (skeleton)
+                    (clone.parts[index] as { state: { output: string } }).state.output =
+                        "[dropped]";
+                else clone.parts.splice(index, 1);
+            }
+            return {
+                beforeTools: before,
+                afterTools: estimateMessageTokens(clone).toolCall,
+                beforeProse: 0,
+                afterProse: 0,
+            };
+        },
         setContent: () => false,
         drop: () => {
             const index = message.parts.findIndex(

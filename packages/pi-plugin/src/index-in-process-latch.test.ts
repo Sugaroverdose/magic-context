@@ -1,4 +1,12 @@
-import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -10,6 +18,10 @@ import {
 	openDatabase,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import {
+	clearProducerModelObservations,
+	observeProducerModelsForTest,
+} from "@magic-context/core/hooks/magic-context/producer-window-test-support";
 import {
 	cleanupTestTempDir,
 	createTestTempDir,
@@ -711,3 +723,8 @@ describe("Pi in-process child guard (#247)", () => {
 		expect(child.commands.length).toBeGreaterThan(0);
 	}, 15_000);
 });
+
+beforeEach(async () => {
+	await observeProducerModelsForTest(["test/historian"]);
+});
+afterEach(clearProducerModelObservations);

@@ -75,7 +75,7 @@ import {
 	hasPendingMaterialization,
 	piVariantChangeBustsProviderCache,
 	recordPiLiveModel,
-	registerPiContextHandler,
+	registerPiContextHandler as registerPiContextHandlerImpl,
 	resolvePiHistorianTriggerInputs,
 	signalPiDeferredHistoryRefresh,
 	signalPiDeferredMaterialization,
@@ -3055,7 +3055,7 @@ describe("registerPiContextHandler", () => {
 	it("latches one emergency batch per force-pressure episode and rearms only on safe edges", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-forward-emergency-latch";
-		const largeToolOutput = "x".repeat(12_000);
+		const largeToolOutput = "word ".repeat(2999);
 		try {
 			updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
 			const fake = createFakePi();
@@ -6729,3 +6729,20 @@ it("Pi four pure defer passes preserve served bytes and durable drop state", asy
 		closeQuietly(db);
 	}
 });
+
+function registerPiContextHandler(
+	...args: Parameters<typeof registerPiContextHandlerImpl>
+) {
+	return registerPiContextHandlerImpl(args[0], {
+		...args[1],
+		historianContextLimit: args[1].historianContextLimit ?? 1_000_000,
+		historianChunkTokens: args[1].historianChunkTokens ?? 32_000,
+		historian: args[1].historian
+			? {
+					...args[1].historian,
+					historianContextLimit:
+						args[1].historian.historianContextLimit ?? 1_000_000,
+				}
+			: undefined,
+	});
+}

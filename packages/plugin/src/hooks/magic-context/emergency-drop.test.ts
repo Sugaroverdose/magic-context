@@ -4,6 +4,7 @@ import { describe, expect, it } from "bun:test";
 import { CTX_REDUCE_KEEP } from "../../features/magic-context/reclaim-protection";
 import {
     type EmergencyDropTag,
+    estimateEmergencyDropReclaimTokens,
     planEmergencyDrop,
     resolveToolTier,
     TARGET_FRACTION,
@@ -502,4 +503,20 @@ describe("planEmergencyDrop — token protection window cutoff & >=95% yield (#4
         expect(plan.reason).toBe("no-candidates");
         // Episode latch remains unconsumed (plan returned shouldDrop: false)
     });
+});
+
+it("reclaim measurement charges retained skeleton tokens instead of original tag bytes", () => {
+    expect(
+        estimateEmergencyDropReclaimTokens({
+            tagNumber: 1,
+            type: "tool",
+            status: "active",
+            toolName: "read",
+            byteSize: 400000,
+            inputByteSize: 0,
+            reasoningByteSize: 0,
+            servedTokens: 15516.39,
+            reclaimableTokens: 13964.751,
+        }),
+    ).toBe(13964.751);
 });

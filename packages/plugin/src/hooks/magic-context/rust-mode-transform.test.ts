@@ -47,6 +47,10 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-project-state";
 import {
+    __resetToolDefinitionMeasurements,
+    recordToolDefinition,
+} from "../../features/magic-context/tool-definition-tokens";
+import {
     scheduleOpenCodeTransformDecisionWrite,
     __test as transformDecisionTest,
 } from "../../features/magic-context/transform-decision-log";
@@ -158,6 +162,7 @@ function randomText(random: () => number, length: number): string {
 }
 
 afterEach(() => {
+    __resetToolDefinitionMeasurements();
     closeReadOnlySessionDb();
     transformDecisionTest.reset();
     resetEmergencyRecoveryRegistryForTest();
@@ -215,7 +220,12 @@ function installRawProvider(sessionId: string): void {
 function makeMessages(sessionId: string): MessageLike[] {
     return [
         {
-            info: { id: "m1", role: "user", sessionID: sessionId },
+            info: {
+                id: "m1",
+                role: "user",
+                sessionID: sessionId,
+                model: { providerID: "test-provider", modelID: "test-model" },
+            },
             parts: [{ type: "text", text: "hello" }],
         },
     ];
@@ -235,7 +245,12 @@ function makeDeps(db: ContextDatabase, moduleClient: RustModeModuleClient): Tran
         directory: "/tmp/project",
         projectPath: "/tmp/project",
         memoryConfig: { enabled: false, injectionBudgetTokens: 1000, autoPromote: false },
-        liveModelBySession: new Map(),
+        liveModelBySession: new Map(
+            sessions.map((sessionId) => [
+                sessionId,
+                { providerID: "test-provider", modelID: "test-model" },
+            ]),
+        ),
         sessionDirectoryBySession: new Map(),
         transformMode: "rust",
         rustModeModuleClient: moduleClient,
@@ -247,7 +262,19 @@ function makeMeta(
     db: ContextDatabase,
     sessionId: string,
 ): ReturnType<typeof getOrCreateSessionMeta> {
-    return getOrCreateSessionMeta(db, sessionId);
+    const meta = getOrCreateSessionMeta(db, sessionId);
+    const overflow = getOverflowState(db, sessionId);
+    if (overflow.detectedContextLimit <= 0 && !overflow.needsEmergencyRecovery) {
+        recordDetectedContextLimit(db, sessionId, 200_000, "test-provider/test-model");
+    }
+    recordToolDefinition("test-provider", "test-model", undefined, "read", "read fixture", {
+        type: "object",
+    });
+    if (meta.systemPromptTokens <= 0) {
+        updateSessionMeta(db, sessionId, { systemPromptTokens: 100 });
+        meta.systemPromptTokens = 100;
+    }
+    return meta;
 }
 
 function installAvailabilityDb(sessionId: string, firstUserTools?: Record<string, unknown>): void {
@@ -1794,7 +1821,7 @@ describe("Rust mode authority adapter", () => {
         expect(transformRequest?.tool_present).toBe(true);
         expect(transformRequest?.todo_tool_present).toBe(true);
         expect(transformRequest?.prompt_surface_preset).toBe("full");
-        expect(transformRequest?.prompt_surface_model_key).toBeNull();
+        expect(transformRequest?.prompt_surface_model_key).toBe("test-provider/test-model");
         expect(transformRequest?.prompt_surface_config_identity).toBe(
             promptSurfaceConfigIdentity(undefined),
         );
@@ -3204,7 +3231,8 @@ describe("Rust mode authority adapter", () => {
         installAvailabilityDb(sessionId, {});
         installRawProvider(sessionId);
         const messages = makeMessages(sessionId);
-        messages[0]!.parts = [{ type: "text", text: "x".repeat(600_000) }];
+        messages[0]!.parts = [{ type: "text", text: "row ".repeat(150_000) }];
+        recordDetectedContextLimit(db, sessionId, 1_000_000, "test-provider/test-model");
         const transformCalls: Array<{
             body: Record<string, unknown>;
             attemptClass: string | undefined;
@@ -3261,7 +3289,8 @@ describe("Rust mode authority adapter", () => {
         installAvailabilityDb(sessionId, {});
         installRawProvider(sessionId);
         const messages = makeMessages(sessionId);
-        messages[0]!.parts = [{ type: "text", text: "x".repeat(600_000) }];
+        messages[0]!.parts = [{ type: "text", text: "row ".repeat(150_000) }];
+        recordDetectedContextLimit(db, sessionId, 1_000_000, "test-provider/test-model");
         const transformBodies: Array<Record<string, unknown>> = [];
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, body }) => {
@@ -4331,6 +4360,10 @@ describe("Rust mode authority adapter", () => {
                 ],
             },
         ] as unknown as MessageLike[];
+        recordDetectedContextLimit(db, sessionId, 200_000, "anthropic/fable-5-1");
+        recordToolDefinition("anthropic", "fable-5-1", undefined, "read", "read fixture", {
+            type: "object",
+        });
         const nativeMessages = () => structuredClone(input) as unknown[];
         const moduleClient: RustModeModuleClient = {
             call: async ({ method }) => {
@@ -4512,9 +4545,11 @@ describe("Rust mode authority adapter", () => {
         ] as MessageLike[];
         const meta = makeMeta(db, sessionId);
         db.exec("DROP TABLE session_meta");
-        const output = { messages: [] as unknown[] };
+        const output = { messages: [...input] as unknown[] };
 
-        await transform.run(sessionId, input, output, meta);
+        await expect(transform.run(sessionId, input, output, meta)).rejects.toBeInstanceOf(
+            RawFallbackContextLimitError,
+        );
 
         expect(output.messages).toEqual(input);
         expect(moduleCall).not.toHaveBeenCalled();
@@ -5034,7 +5069,9 @@ describe("Rust mode authority adapter", () => {
         const input = makeMessages(sessionId);
         const output = { messages: [...input] as unknown[] };
 
-        await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+        await expect(
+            transform.run(sessionId, input, output, makeMeta(db, sessionId)),
+        ).rejects.toBeInstanceOf(RawFallbackContextLimitError);
 
         expect(output.messages).toEqual(input);
         expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
@@ -6627,7 +6664,9 @@ describe("LKG durability across restarts", () => {
             modelID: "other-model",
         };
         const switched = { messages: [...switchedInput] as unknown[] };
-        await transform.run(sessionId, switchedInput, switched, makeMeta(db, sessionId));
+        await expect(
+            transform.run(sessionId, switchedInput, switched, makeMeta(db, sessionId)),
+        ).rejects.toBeInstanceOf(RawFallbackContextLimitError);
 
         expect(switched.messages).toEqual(switchedInput);
         expect(getSlot(sessionId)).toBeUndefined();
@@ -6667,8 +6706,10 @@ describe("LKG durability across restarts", () => {
                 },
             ] as MessageLike[];
             const output = { messages: [...switchedInput] as unknown[] };
-            await restarted.run(sessionId, switchedInput, output, makeMeta(db, sessionId));
-            expect(output.messages).toEqual(switchedInput); // raw fallback, not the stale prefix
+            await expect(
+                restarted.run(sessionId, switchedInput, output, makeMeta(db, sessionId)),
+            ).rejects.toBeInstanceOf(RawFallbackContextLimitError);
+            expect(output.messages).toEqual(switchedInput); // Refusal leaves the supplied message array unchanged instead of sending the cached prefix.
             expect(getSlot(sessionId)).toBeUndefined();
             expect(durableSlotCount(db, sessionId)).toBe(0);
         } finally {
@@ -7029,4 +7070,93 @@ describe("rust-mode wire transport (protected_tokens_effective)", () => {
         expect(transformBodies).toHaveLength(1);
         expect(transformBodies[0]?.protected_tokens_effective).toBe(10_240);
     });
+});
+
+it("refuses a tiny untrusted fallback estimate instead of treating the byte proxy as fit proof", async () => {
+    const sessionId = "fit-incomplete-fallback";
+    sessions.push(sessionId);
+    const db = makeDb();
+    installRawProvider(sessionId);
+    const moduleClient: RustModeModuleClient = {
+        call: async () => {
+            throw new Error("unavailable");
+        },
+    };
+    const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+        moduleClient,
+        rawFallbackEstimatorForTests: () => ({
+            tokens: 1,
+            trusted: false,
+            messageTokens: { conversation: 1, toolCall: 0 },
+            systemTokens: 0,
+            toolDefinitionTokens: undefined,
+        }),
+    });
+    const input = makeMessages(sessionId);
+    const output = { messages: [...input] as unknown[] };
+    await expect(
+        transform.run(sessionId, input, output, makeMeta(db, sessionId)),
+    ).rejects.toBeInstanceOf(RawFallbackContextLimitError);
+    expect(output.messages).toEqual(input);
+});
+
+it("refuses LKG plus suffix when tool-definition completeness is lost", async () => {
+    const sessionId = "fit-incomplete-replay";
+    sessions.push(sessionId);
+    const db = makeDb();
+    installRawProvider(sessionId);
+    const input = makeMessages(sessionId);
+    let failing = false;
+    const moduleClient: RustModeModuleClient = {
+        call: async ({ method }) => {
+            if (method !== "transform") return { ok: true };
+            if (failing) throw new Error("unavailable");
+            return { decision: "HARD", row_version: 1, native_messages: structuredClone(input) };
+        },
+    };
+    const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+    const meta = makeMeta(db, sessionId);
+    await transform.run(sessionId, input, { messages: [...input] }, meta);
+    expect(getSlot(sessionId)).toBeDefined();
+    failing = true;
+    __resetToolDefinitionMeasurements();
+    const output = { messages: [...input] as unknown[] };
+    await expect(transform.run(sessionId, input, output, meta)).rejects.toBeInstanceOf(
+        RawFallbackContextLimitError,
+    );
+    expect(output.messages).toEqual(input);
+});
+
+it("unknown calibrated raw fallback refuses a locally fitting request and admits a safe request", async () => {
+    for (const [limit, allowed] of [
+        [10000, false],
+        [50000, true],
+    ] as const) {
+        const sessionId = `calibrated-raw-wall-${limit}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        recordDetectedContextLimit(db, sessionId, limit, "test-provider/test-model");
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                throw new Error("synthetic daemon failure");
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const meta = makeMeta(db, sessionId);
+        meta.systemPromptTokens = 6000;
+        const input = makeMessages(sessionId);
+        const output = { messages: [...input] as unknown[] };
+        if (allowed) {
+            await transform.run(sessionId, input, output, meta);
+            expect(output.messages).toEqual(input);
+        } else {
+            await expect(transform.run(sessionId, input, output, meta)).rejects.toMatchObject({
+                code: "RAW_FALLBACK_CONTEXT_LIMIT",
+                contextLimitTokens: 10000,
+            });
+            expect(output.messages).toEqual(input);
+        }
+    }
 });

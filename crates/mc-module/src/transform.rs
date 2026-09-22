@@ -50,8 +50,9 @@ use crate::selection::{
 use crate::tail_hygiene::{
     channel1_refire_tokens, effective_tail_hygiene, hygiene_band,
     measure_tail_hygiene_with_pending_drops, post_reduce_grace_holds, queued_tag_numbers,
-    real_user_turn_count, refresh_tail_hygiene_baseline, HygieneBand, CHANNEL1_FLOOR_TOKENS,
-    CHANNEL2_FLOOR_TOKENS, CHANNEL2_SEVERITY_THRESHOLD,
+    real_user_turn_count, refresh_tail_hygiene_baseline_calibrated, HygieneBand,
+    HygieneCalibration, CHANNEL1_FLOOR_TOKENS, CHANNEL2_FLOOR_TOKENS,
+    CHANNEL2_SEVERITY_THRESHOLD,
 };
 use mc_core::{classify, CkItem, ClassifierInput, CoreState, FrozenUnit, PassInput, PassPlan};
 use mc_store::{
@@ -1865,6 +1866,27 @@ struct Channel1Decision {
     next_last_nudge: i64,
     next_last_level: String,
     clear_post_reduce_grace: bool,
+}
+
+fn scale_hygiene_watermark(value: i64, tools_ratio: f64) -> i64 {
+    ((value.max(0) as f64) * tools_ratio)
+        .round()
+        .min(i64::MAX as f64) as i64
+}
+
+fn transition_hygiene_units(meta: &mut ModuleMeta, bust_permitted: bool, tools_ratio: f64) -> bool {
+    if !bust_permitted || meta.hygiene_units_version >= 2 {
+        return false;
+    }
+    meta.channel1_last_nudge_undropped =
+        scale_hygiene_watermark(meta.channel1_last_nudge_undropped, tools_ratio);
+    if let Some(baseline) = meta.tail_hygiene_baseline.as_mut() {
+        baseline.channel1_post_reduce_grace_baseline_u = baseline
+            .channel1_post_reduce_grace_baseline_u
+            .map(|value| scale_hygiene_watermark(value, tools_ratio));
+    }
+    meta.hygiene_units_version = 2;
+    true
 }
 
 #[derive(Debug, Default)]
@@ -4246,6 +4268,24 @@ fn apply_once(
         || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
         || loaded.meta.soft_refresh_pending;
     let pass_already_busting = supersession_ride_available;
+    let calibration_candidate =
+        crate::decision_calibration::DecisionCalibration::freeze_for_model(req.model_key.as_deref());
+    let frozen_calibration = loaded
+        .meta
+        .decision_calibration
+        .as_ref()
+        .and_then(crate::decision_calibration::DecisionCalibration::from_frozen);
+    let active_calibration = if pass_already_busting {
+        crate::decision_calibration::DecisionCalibration::for_model(req.model_key.as_deref())
+    } else {
+        frozen_calibration.unwrap_or_else(crate::decision_calibration::DecisionCalibration::neutral)
+    };
+    let calibration_changed = pass_already_busting
+        && loaded
+            .meta
+            .decision_calibration
+            .as_ref()
+            .is_some_and(|previous| previous != &calibration_candidate);
     if !pass_already_busting && !pending_drop_target_ids.is_empty() {
         eprintln!("mc-module: pending drops held session={} reason=no_originating_cache_bust scheduler={:?} historian_active={}", req.session_id, scheduler_outcome.pass, ctx.historian_active);
     }
@@ -4309,9 +4349,10 @@ fn apply_once(
     let protected_tokens_floor = floor_resolution.effective;
     // Pending same-pass mints are not persisted rows yet. Every consumer view below is projected
     // from this one walk over the hydrated mc_tags baseline, independent of the served array.
-    let protection_window = ProtectionWindow::from_persisted_rows(
+    let protection_window = ProtectionWindow::from_persisted_rows_calibrated(
         &tag_rows[..hydrated_tag_count],
         protected_tokens_floor,
+        active_calibration.tools_ratio,
     );
     let tag_window_protected_block_ids = protection_window.row_identities.block_ids.clone();
     let exempt_message_protected_block_ids = [mutation_exempt_mid, lineage_anchor_mid]
@@ -4365,6 +4406,7 @@ fn apply_once(
             &tail_for_selection,
             &frozen,
             &SelectionContext {
+                calibration: Some(active_calibration),
                 pass_class: selection_class,
                 current_total_input_tokens: usage_input_tokens,
                 ceiling_tokens: context_limit_tokens
@@ -4552,6 +4594,21 @@ fn apply_once(
     let mut core = loaded.core.clone();
     log_reasoning_drop_seed_skips(&core, &live, &req.session_id);
     let mut meta = loaded.meta.clone();
+    if pass_already_busting {
+        if calibration_changed {
+            if let Some(previous) = loaded.meta.decision_calibration.as_ref() {
+                eprintln!(
+                    "mc-module: [{}] calibration revision {} → {} adopted (bust={})",
+                    req.session_id,
+                    previous.revision,
+                    calibration_candidate.revision,
+                    materialize_reason.as_deref().unwrap_or("execute")
+                );
+            }
+        }
+        meta.decision_calibration = Some(calibration_candidate);
+        transition_hygiene_units(&mut meta, true, active_calibration.tools_ratio);
+    }
     timings.state_clone = elapsed_ms(state_clone_started_at);
     let state_evolution_started_at = Instant::now();
     meta.boundary_divergence_pending_count = boundary_divergence_pending_count;
@@ -4811,7 +4868,10 @@ fn apply_once(
                         project_path: ctx.project_path,
                         project_directory: ctx.project_directory,
                         now_ms: ctx.now_ms,
-                        history_budget_tokens: ctx.history_budget_tokens,
+                        history_budget_tokens: crate::decay_render::history_local_budget(
+                            ctx.history_budget_tokens,
+                            req.model_key.as_deref(),
+                        ),
                         covered_system_messages: &covered_system_messages,
                         memory_enabled: ctx.memory_enabled,
                         host_backed_memory_ids: serializer_profile
@@ -4916,7 +4976,11 @@ fn apply_once(
                                     project_path: ctx.project_path,
                                     project_directory: ctx.project_directory,
                                     now_ms: ctx.now_ms,
-                                    history_budget_tokens: ctx.history_budget_tokens,
+                                    history_budget_tokens:
+                                        crate::decay_render::history_local_budget(
+                                            ctx.history_budget_tokens,
+                                            req.model_key.as_deref(),
+                                        ),
                                     covered_system_messages: &recut_covered_system_messages,
                                     memory_enabled: ctx.memory_enabled,
                                     host_backed_memory_ids: serializer_profile
@@ -5170,7 +5234,10 @@ fn apply_once(
                             project_path: ctx.project_path,
                             project_directory: ctx.project_directory,
                             now_ms: ctx.now_ms,
-                            history_budget_tokens: ctx.history_budget_tokens,
+                            history_budget_tokens: crate::decay_render::history_local_budget(
+                                ctx.history_budget_tokens,
+                                req.model_key.as_deref(),
+                            ),
                             covered_system_messages: &covered_system_messages,
                             memory_enabled: ctx.memory_enabled,
                             host_backed_memory_ids: serializer_profile
@@ -5578,11 +5645,24 @@ fn apply_once(
         &pending_drop_target_ids,
     );
     let mut current_hygiene_baseline = if is_bust_pass {
-        let refreshed = refresh_tail_hygiene_baseline(
+        let refreshed = refresh_tail_hygiene_baseline_calibrated(
             hygiene_measurement,
             true,
-            loaded.meta.tail_hygiene_baseline.as_ref(),
+            meta.tail_hygiene_baseline.as_ref(),
             ctx.now_ms,
+            HygieneCalibration {
+                units_version: meta.hygiene_units_version.max(1),
+                tools_ratio: if meta.hygiene_units_version >= 2 {
+                    active_calibration.tools_ratio
+                } else {
+                    1.0
+                },
+                prose_ratio: if meta.hygiene_units_version >= 2 {
+                    active_calibration.prose_ratio
+                } else {
+                    1.0
+                },
+            },
         );
         meta.tail_hygiene_baseline = Some(refreshed.baseline.clone());
         Some(refreshed.baseline)
@@ -5592,11 +5672,24 @@ fn apply_once(
             .tail_hygiene_baseline
             .as_ref()
             .map(|previous| {
-                refresh_tail_hygiene_baseline(
+                refresh_tail_hygiene_baseline_calibrated(
                     hygiene_measurement,
                     false,
                     Some(previous),
                     ctx.now_ms,
+                    HygieneCalibration {
+                        units_version: meta.hygiene_units_version.max(1),
+                        tools_ratio: if meta.hygiene_units_version >= 2 {
+                            active_calibration.tools_ratio
+                        } else {
+                            1.0
+                        },
+                        prose_ratio: if meta.hygiene_units_version >= 2 {
+                            active_calibration.prose_ratio
+                        } else {
+                            1.0
+                        },
+                    },
                 )
             })
             .map(|refreshed| {
@@ -7897,6 +7990,12 @@ fn sel_item_from_flat(block: &FlatBlock, tag_tokens_by_block: &HashMap<&str, usi
         ck_wire::CkKind::Opaque(_) => SelKind::Opaque,
     };
     SelItem {
+        served_token_count: Some(
+            tag_tokens_by_block
+                .get(block.id.as_str())
+                .copied()
+                .unwrap_or_else(|| mc_tokenizer::estimate_tokens(&block.bytes)),
+        ),
         id: block.id.clone(),
         ordinal: block.ordinal,
         message_role: match block.role.as_str() {
@@ -14683,6 +14782,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn hygiene_v1_watermarks_convert_once_on_first_bust() {
+        let mut meta = ModuleMeta {
+            channel1_last_nudge_undropped: 20_000,
+            tail_hygiene_baseline: Some(TailHygieneBaseline {
+                channel1_post_reduce_grace_baseline_u: Some(10_000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(!transition_hygiene_units(&mut meta, false, 1.551639));
+        assert_eq!(meta.channel1_last_nudge_undropped, 20_000);
+        assert!(transition_hygiene_units(&mut meta, true, 1.551639));
+        assert_eq!(meta.channel1_last_nudge_undropped, 31_033);
+        assert_eq!(
+            meta.tail_hygiene_baseline
+                .as_ref()
+                .and_then(|baseline| baseline.channel1_post_reduce_grace_baseline_u),
+            Some(15_516)
+        );
+        assert!(!transition_hygiene_units(&mut meta, true, 1.551639));
+        assert_eq!(meta.channel1_last_nudge_undropped, 31_033);
+    }
+
+    #[test]
     fn claude_code_cache_ttl_mapper_is_lossy_because_provider_vocabulary_is_limited() {
         assert_eq!(claude_code_marker_ttl("5m"), "5m");
         assert_eq!(claude_code_marker_ttl("60m"), "1h");
@@ -18471,6 +18595,7 @@ pub(crate) mod tests {
             .block_ids;
         assert_eq!(protected.len(), 29);
         let mut ctx = SelectionContext {
+            calibration: None,
             pass_class: PassClass::EmergencyForce,
             current_total_input_tokens: 158_855.0,
             ceiling_tokens: 167_000.0 * 0.85,
@@ -31780,6 +31905,9 @@ pub(crate) mod tests {
             fn arm_gentle_crossing(s: &McStore, session_id: &str) {
                 let mut loaded = s.load(session_id).unwrap();
                 let baseline = loaded.meta.tail_hygiene_baseline.as_mut().unwrap();
+                // This cache-delivery control seeds legacy arithmetic directly; calibrated
+                // floor behavior is covered by the dedicated Fable hygiene test.
+                baseline.hygiene_units_version = 1;
                 baseline.baseline_u = CHANNEL1_FLOOR_TOKENS - 1;
                 baseline.baseline_t = 100_000;
                 baseline.turn_delta_u = 0;
@@ -36476,6 +36604,7 @@ pub(crate) mod tests {
             &items,
             &HashSet::new(),
             &SelectionContext {
+                calibration: None,
                 pass_class: PassClass::Execute,
                 current_total_input_tokens: 1_000.0,
                 ceiling_tokens: 2_000.0,
@@ -36746,6 +36875,7 @@ pub(crate) mod tests {
             &items,
             &HashSet::new(),
             &SelectionContext {
+                calibration: None,
                 pass_class: PassClass::Execute,
                 current_total_input_tokens: 0.0,
                 ceiling_tokens: 0.0,

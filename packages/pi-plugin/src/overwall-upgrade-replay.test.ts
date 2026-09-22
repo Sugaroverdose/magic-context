@@ -95,7 +95,11 @@ function fixture(
 			cacheTtl: "59m",
 		});
 		const messages = structuredClone(source);
-		const out = await (fake.handlers.get("context") as any)(
+		const handler = fake.handlers.get("context") as unknown as (
+			input: { messages: unknown[] },
+			ctx: unknown,
+		) => Promise<{ messages: unknown[] }>;
+		const out = await handler(
 			{ messages },
 			{
 				...fakeContext(session, process.cwd(), ids, messages),
@@ -107,7 +111,7 @@ function fixture(
 				}),
 			},
 		);
-		return out.messages as any[];
+		return out.messages;
 	};
 	const seed = async () => {
 		await pass(0);

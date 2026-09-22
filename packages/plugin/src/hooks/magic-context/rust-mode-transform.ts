@@ -1966,7 +1966,9 @@ export function createRustModeTransform(
             return false;
         }
         const replayModel =
-            modelFromMessages(currentMessages) ?? findLastAssistantModelFromOpenCodeDb(sessionId);
+            modelFromMessages(currentMessages) ??
+            deps.liveModelBySession?.get(sessionId) ??
+            findLastAssistantModelFromOpenCodeDb(sessionId);
         replayRustModeBindingMismatchStrips({
             db: deps.db,
             sessionId,
@@ -2001,7 +2003,12 @@ export function createRustModeTransform(
                     modelID: replayModel?.modelID,
                     agentName: deps.getNotificationParams?.(sessionId)?.agent,
                 });
-                if (estimate.tokens > replayLimit) {
+                if (
+                    !estimate.trusted ||
+                    !Number.isFinite(estimate.tokens) ||
+                    estimate.tokens <= 0 ||
+                    estimate.tokens > replayLimit
+                ) {
                     sessionLog(
                         sessionId,
                         `lkg_over_context_limit estimated=${estimate.tokens} limit=${replayLimit}`,
@@ -2011,6 +2018,8 @@ export function createRustModeTransform(
             } catch {
                 return false;
             }
+        } else {
+            return false;
         }
         replaceMessagesInPlace(output, replay.messages);
         sessionLog(sessionId, "lkg_replay_served");
@@ -2176,7 +2185,7 @@ export function createRustModeTransform(
         const passUsageSnapshot = loadContextUsage(deps.contextUsageMap, deps.db, sessionId);
         requestInputTokens = Math.max(0, Math.floor(passUsageSnapshot.inputTokens));
         let preflightError: unknown;
-        let model = modelFromMessages(messages);
+        let model = modelFromMessages(messages) ?? deps.liveModelBySession?.get(sessionId);
         if (!model) {
             try {
                 model = findLastAssistantModelFromOpenCodeDb(sessionId) ?? undefined;
@@ -2274,7 +2283,10 @@ export function createRustModeTransform(
                         // The byte proxy above remains available when tokenization does not.
                     }
                 }
-                const refusalTokens = Math.max(estimate?.tokens ?? 0, proxyTokens);
+                const refusalTokens =
+                    estimate?.trusted && Number.isFinite(estimate.tokens) && estimate.tokens > 0
+                        ? Math.max(estimate.tokens, proxyTokens)
+                        : Number.POSITIVE_INFINITY;
                 if (refusalTokens > contextLimit) {
                     sessionLog(
                         sessionId,
@@ -2284,6 +2296,8 @@ export function createRustModeTransform(
                     );
                     throw new RawFallbackContextLimitError(refusalTokens, contextLimit, { cause });
                 }
+            } else {
+                throw new RawFallbackContextLimitError(Number.POSITIVE_INFINITY, 0, { cause });
             }
             replaceMessagesInPlace(output, messages);
         };

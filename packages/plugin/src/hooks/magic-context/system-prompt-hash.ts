@@ -439,7 +439,6 @@ export function createSystemPromptHashHandler(deps: {
 
         // ── Step 3: Persist only after all routing identities are frozen ──
         const systemContent = output.system.join("\n");
-
         // The first stable ctx_reduce verdict and resolved model jointly own the
         // baseline. A provisional tool verdict or unknown model can render a
         // prompt, but neither may persist a hash that the settled route would flip.

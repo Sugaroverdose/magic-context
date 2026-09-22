@@ -54,3 +54,11 @@ assertions from the selected 20-scenario lane.
 | Parented subagent behavior | Host-imposed | GA `Context.session.create` has no parent-link input; hidden work uses unparented roots. The dedicated GA hidden-child test continues to pass. See [hidden completions](../../PARITY.md#3-hidden-completions). |
 | Ignored-notice loop race | Host-imposed | `@opencode/plugin@2.0.5/dist/promise/session.d.ts` exposes `SessionPrompt.delivery` and synthetic delivery, not v1 `noReply`/ignored MessageV2 rows and parentID loop-exit ordering. |
 | V1 signed-thinking store projection | Host-imposed carrier difference | GA stores ordered `session_message` JSON and provider metadata, not v1 message/part rows. The v1-store scenario remains excluded rather than querying a fabricated legacy store. This does not waive signed-thinking preservation. See [host store reader](../../PARITY.md#5-host-store-reader). |
+
+## Static decision calibration
+
+History budget conversion runs inside m0 rendering/HARD materialization, not invalidation. Canonical protected-window tool mass and original-source boundary class mass are calibrated without rewriting stored counts. Fit estimates expose raw components separately; unknown models use the maximum of 2 and the largest static ratio, while family-inherited seeds use their measured class ratios. Raw fallback and LKG require complete observations and a known current-model window. Missing observations can therefore refuse requests previously admitted by the byte proxy. The returned transform array is observable; provider framing and later host rewrites are not.
+
+Tail-hygiene T/U now uses the session-frozen tools/prose ratios for absolute floors, cadence/grace and reminder figures. The active calibration and `hygieneUnitsVersion=2` stamp live under the namespaced `deferred_execute_state.magicContextTokenizerCalibration` JSON object. Legacy watermarks (`last_nudge_undropped` and `last_nudge_level.postReduceGraceBaselineU`) stay raw on defer, convert once at the first authorized bust, and survive restart without a second conversion. `growthThreshold` is derived from calibrated T rather than persisted.
+
+Calibration is static-only (`seed` or `family-fallback`). OpenCode and Rust-hosted paths do not capture request L/P pairs, maintain an EMA, publish learned-candidate provenance or adapt decisions at runtime.
