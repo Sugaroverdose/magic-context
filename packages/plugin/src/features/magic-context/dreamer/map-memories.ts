@@ -22,7 +22,8 @@ import {
     normalizeVerificationFiles,
     recordMemoryMapping,
 } from "../memory";
-import { recordChildInvocation } from "../subagent-token-capture";
+import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
+import type { SubagentInvocationStatus } from "../storage-subagent-invocations";
 import { type LeaseAcquisition, runLeaseGuardedWrite, startLeaseHeartbeat } from "./lease";
 import { assertNoDuplicateManifestIds } from "./manifest-parser";
 import {
@@ -403,7 +404,7 @@ async function mapOneBatch(
             `[dreamer] map-memories batch failed: ${desc.brief}`,
             desc.stackHead ? { stackHead: desc.stackHead } : undefined,
         );
-        recordInvocation(args, startedAt, { status: "failed", error });
+        recordInvocation(args, startedAt, { status: failedInvocationStatus(error), error });
         if (error instanceof DreamerModuleFailureError) throw error;
         // Swallow per-batch failures: the batch's memories stay unmapped and are
         // retried next run. Only an abort/lease-loss should stop the whole task.
@@ -618,7 +619,7 @@ async function applyParsedBatchMappings(
 function recordInvocation(
     args: MapMemoriesArgs,
     startedAt: number,
-    params: { status: "completed" | "failed"; messages?: unknown[]; error?: unknown },
+    params: { status: SubagentInvocationStatus; messages?: unknown[]; error?: unknown },
 ): void {
     if (!args.parentSessionId) return;
     recordChildInvocation({

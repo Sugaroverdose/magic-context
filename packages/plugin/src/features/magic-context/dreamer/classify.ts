@@ -25,7 +25,8 @@ import {
     type Memory,
     setMemoryClassification,
 } from "../memory";
-import { recordChildInvocation } from "../subagent-token-capture";
+import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
+import type { SubagentInvocationStatus } from "../storage-subagent-invocations";
 import {
     buildClassifyPrompt,
     CLASSIFY_SYSTEM_PROMPT,
@@ -437,7 +438,7 @@ async function classifyOneChunk(
             `[dreamer] classify chunk failed: ${desc.brief}`,
             desc.stackHead ? { stackHead: desc.stackHead } : undefined,
         );
-        recordInvocation(args, startedAt, { status: "failed", error: failure });
+        recordInvocation(args, startedAt, { status: failedInvocationStatus(failure), error: failure });
         // A MODULE-authority failure is not safe to downgrade to the guarded
         // TypeScript child path. Surface it so the scheduler records a
         // transient failure and retries the same task instead.
@@ -653,7 +654,7 @@ function recordInvocation(
     args: ClassifyArgs,
     startedAt: number,
     params: {
-        status: "completed" | "failed";
+        status: SubagentInvocationStatus;
         messages?: unknown[];
         error?: unknown;
         completion?: HiddenCompletion;

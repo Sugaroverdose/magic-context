@@ -1717,7 +1717,7 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
                         <td>{formatDateTime(row.started_at)}</td>
                         <td>{row.parent_invocation_id ? `↳ ${row.subagent}` : row.subagent}</td>
                         <td>{row.model_id ?? row.provider_id ?? "—"}</td>
-                        <td>{row.status}</td>
+                        <td>{row.status === "timed_out" ? "Timed out" : row.status === "empty" ? "Empty output" : row.status}</td>
                         <td>
                           {row.ended_at
                             ? `${Math.max(0, row.ended_at - row.started_at).toLocaleString()}ms`

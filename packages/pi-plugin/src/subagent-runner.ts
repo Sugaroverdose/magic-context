@@ -1111,7 +1111,11 @@ export class PiSubagentRunner implements SubagentRunner {
 					? "completed"
 					: result.reason === "abort"
 						? "aborted"
-						: "failed",
+						: result.reason === "timeout"
+							? "timed_out"
+							: result.reason === "no_assistant" || result.reason === "truncated"
+								? "empty"
+								: "failed",
 				messages,
 				providerId:
 					typeof options.model === "string"
