@@ -6983,7 +6983,9 @@ impl<'a> FacadeMutationTxn<'a> {
         else {
             return Ok((NoteDismissOutcome::NotFound, None));
         };
-        if current.project_path != project_path || current.session_id != session_id {
+        if current.project_path != project_path
+            || (current.type_name != "smart" && current.session_id != session_id)
+        {
             return Ok((NoteDismissOutcome::NotOwned, None));
         }
         if current.status == "dismissed" {

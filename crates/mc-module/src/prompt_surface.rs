@@ -38,7 +38,7 @@ const TOOL_LIGHT_DESCRIPTIONS: Option<&[(&str, &str)]> = Some(&[
     ),
     (
         "ctx_note",
-        r#"Session notes: information you have now, attached to work you are deliberately not doing now (findings, a decision with its reasons, a backlog item with evidence; "take a note" from the user always qualifies). Not the next few steps, a plan you are executing, or restart/fold insurance; durable facts are ctx_memory; if the detail lives in a file, carry the path, not a copy. First line = title (<80 chars). write saves; read lists `#id · age · title` rows (note_ids for bodies); update changes one (note_ids=[N]); dismiss retires 1–50. surface_condition parks the note until the system confirms it against repo files, git, GitHub or the web (never this conversation), then returns it as ready."#,
+        r#"Session notes are pending intentions: work you intend to return to, with findings attached ("take a note" always qualifies). Not active steps, an executing plan, or restart insurance; a record of how things stand (world-state, a design at a point in time) with nothing you intend to do about it — that goes stale silently; a fact worth keeping is memory, the rest is nothing. First line = title (<80 chars). write saves; read lists rows (note_ids for bodies); update changes one; dismiss retires 1–50. Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read. surface_condition parks it until an outside check against repo files, git, GitHub or the web holds."#,
     ),
 ]);
 

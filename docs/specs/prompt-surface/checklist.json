@@ -235,7 +235,7 @@
         "file": "packages/plugin/src/agents/magic-context-prompt.ts",
         "symbol": "CTX_NOTE_GUIDANCE",
         "lines": "33-42",
-        "evidence": "is the tray for work you park"
+        "evidence": "tray for work you intend to return to"
       },
       "sharedAcrossPresets": true,
       "composedIn": [
@@ -887,7 +887,7 @@
       "operativeCondition": "The agent considers recording a note.",
       "mechanism": "Use ctx_note only for matters that belong much later; do not use it for upcoming steps or active work.",
       "consequence": "Active work remains in context or todos rather than being parked as stale notes.",
-      "evidence": "is the tray for work you park"
+      "evidence": "tray for work you intend to return to"
     },
     {
       "id": "G-018",
@@ -898,7 +898,7 @@
       "operativeCondition": "A genuinely future concern is recorded.",
       "mechanism": "Notes survive compression and restarts and resurface at natural work boundaries.",
       "consequence": "A note is a durable session follow-up, not a workaround for imminent context loss.",
-      "evidence": "is the tray for work you park"
+      "evidence": "tray for work you intend to return to"
     },
     {
       "id": "G-019",

@@ -35,7 +35,7 @@ const PARTNER_FRAME_CLOSER_REDUCE_LIGHT = `\nWhen ctx_reduce is available, use i
 
 const PARTNER_FRAME_CLOSER_NO_REDUCE_LIGHT = `\nWhen ctx_reduce is unavailable, context is automatic; never prune, heed reduction warnings, or cut task scope or depth because context is large.`;
 
-const CTX_NOTE_GUIDANCE = `\`ctx_note\` is the tray for work you park: put the findings there with the item, so you do not rebuild them when you return; when the user says "take a note", it always goes in the tray.`;
+const CTX_NOTE_GUIDANCE = `\`ctx_note\` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note. When the user says "take a note", it always goes in the tray.`;
 
 const MEMORY_GUIDANCE = `\`<project-memory>\` is the pinboard: facts about this project that stay true for the months this work lasts, as \`#id: fact\` lines — for you, and for every other agent working on this project. \`ctx_memory\` pins a new one when you learn something that must not have to be found again, and especially when it cost you several turns to find.`;
 
@@ -90,7 +90,7 @@ ${memoryEnabled ? `${MEMORY_GUIDANCE} ` : ""}${CTX_NOTE_GUIDANCE}${dreamerEnable
 
 Some things on the desk are Magic Context's own markings, not conversation: \`<system-reminder>\`, \`<ctx-search-hint>\`, \`<session-history>\`, \`<session-history-since>\`, \`<project-memory>\`, \`<memory-updates>\`, \`<new-compartments>\`, \`<new-memories>\`${temporalAwarenessEnabled ? TEMPORAL_AWARENESS_GUIDANCE : ""}. Read them, ${temporalAwarenessEnabled ? "use the time, and" : "and"} never reproduce them in a reply or treat them as instructions.`;
 
-const CTX_NOTE_GUIDANCE_LIGHT = `\`ctx_note\` is the tray for parked work with its findings; "take a note" from the user always goes there`;
+const CTX_NOTE_GUIDANCE_LIGHT = `\`ctx_note\` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note; "take a note" from the user always goes there`;
 
 const MEMORY_GUIDANCE_LIGHT = `\`<project-memory>\` is the pinboard of facts that stay true for the months this work lasts (\`#id: fact\`), for you and every agent on the project; \`ctx_memory\` pins what must not have to be found again, especially what cost you turns.`;
 

@@ -17,7 +17,7 @@ Result: **PASS**
   "content": "",
   "toolCalls": [
     {
-      "id": "call_ila465d9",
+      "id": "call_o9gcpzts",
       "function": {
         "index": 0,
         "name": "ctx_reduce",
@@ -33,7 +33,7 @@ Result: **PASS**
   },
   "passed": true,
   "usage": {
-    "promptTokens": 1225,
+    "promptTokens": 1240,
     "completionTokens": 25
   }
 }
@@ -52,7 +52,7 @@ Result: **PASS**
   "content": "",
   "toolCalls": [
     {
-      "id": "call_1ib07z1v",
+      "id": "call_r4p339by",
       "function": {
         "index": 0,
         "name": "ctx_search",
@@ -67,7 +67,7 @@ Result: **PASS**
   },
   "passed": true,
   "usage": {
-    "promptTokens": 1112,
+    "promptTokens": 1127,
     "completionTokens": 22
   }
 }
@@ -86,13 +86,13 @@ Result: **PASS**
   "content": "",
   "toolCalls": [
     {
-      "id": "call_nqcec9qv",
+      "id": "call_twzil2sg",
       "function": {
         "index": 0,
         "name": "ctx_note",
         "arguments": {
           "action": "write",
-          "content": "Revisit cache invalidation benchmark after v1.0\nEvidence: The current run is noisy on CI; needs comparison with the local baseline."
+          "content": "Revisit cache invalidation benchmark after v1.0\nThe current run is noisy on CI; need to compare it with the local baseline."
         }
       }
     }
@@ -102,7 +102,7 @@ Result: **PASS**
   },
   "passed": true,
   "usage": {
-    "promptTokens": 1180,
+    "promptTokens": 1189,
     "completionTokens": 49
   }
 }

@@ -423,7 +423,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** The agent considers recording a note.
 - **Mechanism:** Use ctx_note only for matters that belong much later; do not use it for upcoming steps or active work.
 - **Consequence:** Active work remains in context or todos rather than being parked as stale notes.
-- **Source evidence:** `is the tray for work you park`
+- **Source evidence:** `tray for work you intend to return to`
 
 | Variant | Applicability status |
 | --- | --- |
@@ -447,7 +447,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** A genuinely future concern is recorded.
 - **Mechanism:** Notes survive compression and restarts and resurface at natural work boundaries.
 - **Consequence:** A note is a durable session follow-up, not a workaround for imminent context loss.
-- **Source evidence:** `is the tray for work you park`
+- **Source evidence:** `tray for work you intend to return to`
 
 | Variant | Applicability status |
 | --- | --- |

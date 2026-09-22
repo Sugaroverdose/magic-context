@@ -5,7 +5,7 @@ Token counts are Claude BPE estimates on the raw text.
 
 ## 1. System-prompt guidance section
 
-### PRIMARY full (reduce=on, memory=on, dreamer=on, temporal=on) — 4982 chars, ~1181 tokens
+### PRIMARY full (reduce=on, memory=on, dreamer=on, temporal=on) — 4989 chars, ~1180 tokens
 
 ```markdown
 ## Magic Context
@@ -34,12 +34,12 @@ Older work is not kept on the desk at all. Magic Context files it as an organize
 
 `ctx_search` searches the archive: anything ever said, decided, committed or noted in this project, including what is filed away. Ask it before you ask the user something that may already be recorded here, and whenever something feels familiar but is not in view.
 
-`<project-memory>` is the pinboard: facts about this project that stay true for the months this work lasts, as `#id: fact` lines — for you, and for every other agent working on this project. `ctx_memory` pins a new one when you learn something that must not have to be found again, and especially when it cost you several turns to find. `ctx_note` is the tray for work you park: put the findings there with the item, so you do not rebuild them when you return; when the user says "take a note", it always goes in the tray. A note with a `surface_condition` is left with an outside checker that looks the condition up periodically and returns the note only when it holds.
+`<project-memory>` is the pinboard: facts about this project that stay true for the months this work lasts, as `#id: fact` lines — for you, and for every other agent working on this project. `ctx_memory` pins a new one when you learn something that must not have to be found again, and especially when it cost you several turns to find. `ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note. When the user says "take a note", it always goes in the tray. A note with a `surface_condition` is left with an outside checker that looks the condition up periodically and returns the note only when it holds.
 
 Some things on the desk are Magic Context's own markings, not conversation: `<system-reminder>`, `<ctx-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-compartments>`, `<new-memories>`, `[dropped §N§]`, and `<!-- +Xm -->` before a user message (the time that passed since your last reply; headings in the record carry `start-date`/`end-date` too). Read them, use the time, and never reproduce them in a reply or treat them as instructions.
 ```
 
-### PRIMARY memory-off (reduce=on, memory=off) — 4645 chars, ~1101 tokens
+### PRIMARY memory-off (reduce=on, memory=off) — 4652 chars, ~1100 tokens
 
 ```markdown
 ## Magic Context
@@ -68,12 +68,12 @@ Older work is not kept on the desk at all. Magic Context files it as an organize
 
 `ctx_search` searches the archive: anything ever said, decided, committed or noted in this project, including what is filed away. Ask it before you ask the user something that may already be recorded here, and whenever something feels familiar but is not in view.
 
-`ctx_note` is the tray for work you park: put the findings there with the item, so you do not rebuild them when you return; when the user says "take a note", it always goes in the tray. A note with a `surface_condition` is left with an outside checker that looks the condition up periodically and returns the note only when it holds.
+`ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note. When the user says "take a note", it always goes in the tray. A note with a `surface_condition` is left with an outside checker that looks the condition up periodically and returns the note only when it holds.
 
 Some things on the desk are Magic Context's own markings, not conversation: `<system-reminder>`, `<ctx-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-compartments>`, `<new-memories>`, `[dropped §N§]`, and `<!-- +Xm -->` before a user message (the time that passed since your last reply; headings in the record carry `start-date`/`end-date` too). Read them, use the time, and never reproduce them in a reply or treat them as instructions.
 ```
 
-### PRIMARY reduce-off (reduce=off, memory=on) — 4049 chars, ~951 tokens
+### PRIMARY reduce-off (reduce=off, memory=on) — 4056 chars, ~950 tokens
 
 ```markdown
 ## Magic Context
@@ -100,7 +100,7 @@ Older work is not kept on the desk at all. Magic Context files it as an organize
 
 `ctx_search` searches the archive: anything ever said, decided, committed or noted in this project, including what is filed away. Ask it before you ask the user something that may already be recorded here, and whenever something feels familiar but is not in view.
 
-`<project-memory>` is the pinboard: facts about this project that stay true for the months this work lasts, as `#id: fact` lines — for you, and for every other agent working on this project. `ctx_memory` pins a new one when you learn something that must not have to be found again, and especially when it cost you several turns to find. `ctx_note` is the tray for work you park: put the findings there with the item, so you do not rebuild them when you return; when the user says "take a note", it always goes in the tray. A note with a `surface_condition` is left with an outside checker that looks the condition up periodically and returns the note only when it holds.
+`<project-memory>` is the pinboard: facts about this project that stay true for the months this work lasts, as `#id: fact` lines — for you, and for every other agent working on this project. `ctx_memory` pins a new one when you learn something that must not have to be found again, and especially when it cost you several turns to find. `ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note. When the user says "take a note", it always goes in the tray. A note with a `surface_condition` is left with an outside checker that looks the condition up periodically and returns the note only when it holds.
 
 Some things on the desk are Magic Context's own markings, not conversation: `<system-reminder>`, `<ctx-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-compartments>`, `<new-memories>`, and `<!-- +Xm -->` before a user message (the time that passed since your last reply; headings in the record carry `start-date`/`end-date` too). Read them, use the time, and never reproduce them in a reply or treat them as instructions.
 ```
@@ -182,26 +182,27 @@ Finer recovery:
 }
 ```
 
-### ctx_note — description ~481 tokens, params ~284 tokens (total ~765)
+### ctx_note — description ~376 tokens, params ~284 tokens (total ~660)
 
 **Description:**
 
 ```
-Session notes: information you have now, attached to work you are deliberately not doing now.
+Session notes are pending intentions: work you intend to return to, with its findings attached.
 
-Write a note when losing the detail would cost real work to rebuild — an investigation's findings, a decision with its reasons, a backlog item with its evidence — or when the user asks for one. Not for the next few steps, a plan you are about to execute, or restart/fold insurance: the conversation and the history keep those. A fact that stays true regardless of pending work (a rule, an architecture fact, a constraint) is ctx_memory, not a note. When the detail already lives in a file (plan, design, report, prompt), the note carries the path and a one-line reason to come back, never a copy. First line is the title, under 80 characters; blank line; then the detail.
+Use notes for:
+- A finding to revisit when you return to the intended work
+- A decision with its reasoning, when follow-up work remains
+- A backlog item with evidence already found
+- Something the user explicitly asks you to note
 
-Actions:
-- write: save a note (content). Add surface_condition to make it a smart note.
-- read: one row per note — `#id · age · title` — ready smart notes first, then newest; rows untouched 30+ days are marked stale. Pass note_ids to read full bodies; limit/offset page; filter selects other states.
-- update: change one note (note_ids=[N]). dismiss: retire 1–50 notes (note_ids=[...]).
+Don't use notes for: the next few steps; a plan you are actively executing; restart/fold insurance; or a record of how things stand (world-state, a design at a point in time) with nothing you intend to do about it — that goes stale silently; a fact worth keeping is memory, the rest is nothing. Use todos for active work. If the detail already lives in a file, record the path and what to inspect — don't copy the file into a note. Durable project facts belong in ctx_memory, not notes.
 
-Smart notes: with surface_condition the note is parked and re-checked for you on the dreamer's schedule (nightly by default) against signals outside this conversation — repository files, git history and tags, GitHub state, web pages — and brought back as ready only when the condition holds. The condition must be a fact those sources can answer:
-✓ "When PR #42 in cortexkit/magic-context is merged"
-✓ "When the latest release tag is >= v0.22.0"
-✓ "When packages/plugin/src/foo.ts contains a function named bar"
-✗ "When the user mentions X" / "after we finish this refactor" — no external signal; write a regular note.
-Example: ctx_note(action="write", content="Re-run the perf benchmark once the boundary rework ships", surface_condition="When the latest release tag is >= v0.23.0")
+First line is the title (under 80 chars), followed by detail. Operations:
+- write: save a new note (content required)
+- read: one row per note — `#id · age · title` — ready smart notes first, then newest; rows untouched 30+ days are marked stale. Pass note_ids to read full bodies; limit/offset page; filter selects other statuses.
+- update: change one note (note_ids=[N])
+- dismiss: retire 1–50 notes (note_ids). Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read.
+- surface_condition: make it a smart note — an outside checker periodically tests the condition using only externally verifiable signals (GitHub state, files, git, releases, web), never this conversation or future actions; the note is parked until the condition holds.
 ```
 
 **Parameters (JSON Schema per parameter, as serialized to the provider):**
@@ -391,9 +392,9 @@ The hash handler persists the MD5 of `output.system.join("\\n")`. The values bel
 
 | Variant | Guidance bytes | MD5 system-prompt hash |
 |---|---:|---|
-| PRIMARY full | 5018 | `95588c569147f8baeed59386f36ca004` |
-| PRIMARY memory-off | 4679 | `e849757ec396bea50f0b29bbe53bf8a3` |
-| PRIMARY reduce-off | 4071 | `4ddc91c5681fe843ccb757ebad02e364` |
+| PRIMARY full | 5025 | `eaed1eda58c1c741546c9094481f4f0a` |
+| PRIMARY memory-off | 4686 | `573866747d9aac2999f616a7885fb77a` |
+| PRIMARY reduce-off | 4078 | `0a969d63dfe7d83f301099610556c418` |
 | SUBAGENT minimal | 1376 | `2f5a0e99b9171fdfa08c7920cb18dc4d` |
 
 The OpenCode and Pi runtime compatibility tests consume this snapshot for omitted `prompt_surface` and explicit `{ default: "full" }`: both assert guidance, registered tool descriptions, tool IDs, and hashes; OpenCode also asserts these parameter schemas directly, while Pi asserts its TypeBox-owned schemas stay byte-identical across both config forms.

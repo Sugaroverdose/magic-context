@@ -38,36 +38,36 @@
   "fullMeasurements": {
     "guidance": {
       "primary-full-reduce-memory-on": {
-        "chars": 4982,
-        "tokens": 1181
+        "chars": 4989,
+        "tokens": 1180
       },
       "primary-full-reduce-memory-off": {
-        "chars": 4645,
-        "tokens": 1101
+        "chars": 4652,
+        "tokens": 1100
       },
       "primary-full-no-reduce-memory-on": {
-        "chars": 4049,
-        "tokens": 951
+        "chars": 4056,
+        "tokens": 950
       },
       "primary-full-no-reduce-memory-off": {
-        "chars": 3712,
-        "tokens": 871
+        "chars": 3719,
+        "tokens": 870
       },
       "primary-full-reduce-dreamer-off": {
-        "chars": 4834,
-        "tokens": 1151
+        "chars": 4841,
+        "tokens": 1150
       },
       "primary-full-reduce-temporal-off": {
-        "chars": 4823,
-        "tokens": 1137
+        "chars": 4830,
+        "tokens": 1136
       },
       "primary-full-reduce-caveman-on": {
-        "chars": 5597,
-        "tokens": 1307
+        "chars": 5604,
+        "tokens": 1306
       },
       "primary-full-reduce-language-on": {
-        "chars": 5182,
-        "tokens": 1227
+        "chars": 5189,
+        "tokens": 1226
       },
       "subagent-reduce": {
         "chars": 1360,
@@ -84,8 +84,8 @@
         "tokens": 257
       },
       "ctx_note": {
-        "chars": 1939,
-        "tokens": 481
+        "chars": 1599,
+        "tokens": 376
       },
       "ctx_memory": {
         "chars": 1121,
@@ -119,9 +119,9 @@
       },
       "totalTokens": 765
     },
-    "builtInProviderVisibleTotal": 3593
+    "builtInProviderVisibleTotal": 3487
   },
-  "mutableProseBaseline": 2828,
+  "mutableProseBaseline": 2722,
   "integerLightCeiling": 1825,
   "includedSurfaces": [
     "The primary built-in full guidance section for the exact feature variant above.",

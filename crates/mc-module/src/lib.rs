@@ -13140,17 +13140,17 @@ impl McHandler {
         let action = string_arg(args, "action")
             .or_else(|| non_empty_string_arg(args, "content").map(|_| "write"))
             .unwrap_or("read");
-        // `note_ids` is the only id field, on the model-facing schema and on
-        // the TS adapter's internal wire alike. `write` and `read` never read
-        // it: tool surfaces that require every declared property make the
-        // model send filler there (issue 460), and filler on an action that
-        // does not use the field must not fail the call. `update` addresses
-        // exactly one note; `dismiss` takes one to fifty.
+        // `note_ids` is the only id field on both the model-facing schema and
+        // the TS adapter's wire. `write` ignores required-surface filler;
+        // targeted `read` and `dismiss` accept one to fifty IDs, while `update`
+        // addresses exactly one note.
         let note_ids = match action {
-            "update" | "dismiss" => {
+            "update" | "dismiss" | "read" if action != "read" || args.get("note_ids").is_some() => {
                 let max = if action == "update" { 1 } else { 50 };
                 let error = if action == "update" {
                     "Error: 'note_ids' must contain exactly one positive integer id when action is 'update'."
+                } else if action == "read" {
+                    "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'read'."
                 } else {
                     "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'."
                 };
@@ -13304,6 +13304,17 @@ impl McHandler {
                 }
             }
             "read" => {
+                if let Some(ids) = note_ids.as_deref() {
+                    let mut notes = Vec::with_capacity(ids.len());
+                    for note_id in ids {
+                        let note = match store.get_note_by_id(project, session, *note_id) {
+                            Ok(note) => note,
+                            Err(error) => return tool_error_result(format!("Error: {error}")),
+                        };
+                        notes.push((*note_id, note));
+                    }
+                    return mcp_text_result(render_notes_by_id(notes), false);
+                }
                 let limit = usize_arg(args, "limit").unwrap_or(25).clamp(1, 100);
                 let offset = usize_arg(args, "offset").unwrap_or(0);
                 let statuses: Vec<&str> = match filter {
@@ -16449,6 +16460,62 @@ fn truncate_expand_preview(value: &str, max_units: usize) -> String {
     format!("{}…", String::from_utf16_lossy(&units[..max_units]))
 }
 
+fn format_note_line(note: &StoredNote) -> String {
+    let status_suffix = if note.status == "active" {
+        String::new()
+    } else {
+        format!(" ({})", note.status)
+    };
+    let anchor = note
+        .anchor_ordinal
+        .map(|ordinal| format!(" ↳ @msg {ordinal}"))
+        .unwrap_or_default();
+    if note.type_name == "smart" {
+        let condition = if note.status == "ready" {
+            note.ready_reason
+                .as_deref()
+                .or(note.surface_condition.as_deref())
+                .unwrap_or("Condition satisfied")
+        } else {
+            note.surface_condition
+                .as_deref()
+                .unwrap_or("No condition recorded")
+        };
+        format!(
+            "- **#{}**{}: {}{}\n  {}: {}",
+            note.id,
+            status_suffix,
+            note.content,
+            anchor,
+            if note.status == "ready" {
+                "Condition met"
+            } else {
+                "Condition"
+            },
+            condition
+        )
+    } else {
+        format!(
+            "- **#{}**{}: {}{}",
+            note.id, status_suffix, note.content, anchor
+        )
+    }
+}
+
+fn render_notes_by_id(notes: Vec<(i64, Option<StoredNote>)>) -> String {
+    format!(
+        "## Notes by ID\n\n{}",
+        notes
+            .into_iter()
+            .map(|(note_id, note)| note
+                .as_ref()
+                .map(format_note_line)
+                .unwrap_or_else(|| format!("- Note #{note_id}: not_found")))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    )
+}
+
 fn render_notes(
     session_notes: Vec<StoredNote>,
     smart_notes: Vec<StoredNote>,
@@ -16460,47 +16527,6 @@ fn render_notes(
     if session_notes.is_empty() && smart_notes.is_empty() {
         return "## Notes\n\nNo session notes or smart notes.".to_string();
     }
-    let format_note = |note: &StoredNote| {
-        let status_suffix = if note.status == "active" {
-            String::new()
-        } else {
-            format!(" ({})", note.status)
-        };
-        let anchor = note
-            .anchor_ordinal
-            .map(|ordinal| format!(" ↳ @msg {ordinal}"))
-            .unwrap_or_default();
-        if note.type_name == "smart" {
-            let condition = if note.status == "ready" {
-                note.ready_reason
-                    .as_deref()
-                    .or(note.surface_condition.as_deref())
-                    .unwrap_or("Condition satisfied")
-            } else {
-                note.surface_condition
-                    .as_deref()
-                    .unwrap_or("No condition recorded")
-            };
-            format!(
-                "- **#{}**{}: {}{}\n  {}: {}",
-                note.id,
-                status_suffix,
-                note.content,
-                anchor,
-                if note.status == "ready" {
-                    "Condition met"
-                } else {
-                    "Condition"
-                },
-                condition
-            )
-        } else {
-            format!(
-                "- **#{}**{}: {}{}",
-                note.id, status_suffix, note.content, anchor
-            )
-        }
-    };
     let footer = |total: usize, shown: usize| {
         let remaining = total.saturating_sub(offset.saturating_add(shown));
         (remaining > 0).then(|| {
@@ -16516,7 +16542,7 @@ fn render_notes(
             "## Session Notes\n\n{}",
             session_notes
                 .iter()
-                .map(&format_note)
+                .map(format_note_line)
                 .collect::<Vec<_>>()
                 .join("\n")
         );
@@ -16536,7 +16562,7 @@ fn render_notes(
             },
             smart_notes
                 .iter()
-                .map(&format_note)
+                .map(format_note_line)
                 .collect::<Vec<_>>()
                 .join("\n\n")
         );
@@ -17079,7 +17105,7 @@ fn note_dismiss_outcome_text(outcome: NoteDismissOutcome) -> &'static str {
     match outcome {
         NoteDismissOutcome::Dismissed => "dismissed",
         NoteDismissOutcome::NotFound => "not_found",
-        NoteDismissOutcome::NotOwned => "not_owned",
+        NoteDismissOutcome::NotOwned => "not_found",
         NoteDismissOutcome::AlreadyDismissed => "already_dismissed",
     }
 }
@@ -17522,21 +17548,22 @@ Finer recovery:
 }
 
 fn ctx_note_description() -> String {
-    r#"Session notes: information you have now, attached to work you are deliberately not doing now.
+    r#"Session notes are pending intentions: work you intend to return to, with its findings attached.
 
-Write a note when losing the detail would cost real work to rebuild — an investigation's findings, a decision with its reasons, a backlog item with its evidence — or when the user asks for one. Not for the next few steps, a plan you are about to execute, or restart/fold insurance: the conversation and the history keep those. A fact that stays true regardless of pending work (a rule, an architecture fact, a constraint) is ctx_memory, not a note. When the detail already lives in a file (plan, design, report, prompt), the note carries the path and a one-line reason to come back, never a copy. First line is the title, under 80 characters; blank line; then the detail.
+Use notes for:
+- A finding to revisit when you return to the intended work
+- A decision with its reasoning, when follow-up work remains
+- A backlog item with evidence already found
+- Something the user explicitly asks you to note
 
-Actions:
-- write: save a note (content). Add surface_condition to make it a smart note.
-- read: one row per note — `#id · age · title` — ready smart notes first, then newest; rows untouched 30+ days are marked stale. Pass note_ids to read full bodies; limit/offset page; filter selects other states.
-- update: change one note (note_ids=[N]). dismiss: retire 1–50 notes (note_ids=[...]).
+Don't use notes for: the next few steps; a plan you are actively executing; restart/fold insurance; or a record of how things stand (world-state, a design at a point in time) with nothing you intend to do about it — that goes stale silently; a fact worth keeping is memory, the rest is nothing. Use todos for active work. If the detail already lives in a file, record the path and what to inspect — don't copy the file into a note. Durable project facts belong in ctx_memory, not notes.
 
-Smart notes: with surface_condition the note is parked and re-checked for you on the dreamer's schedule (nightly by default) against signals outside this conversation — repository files, git history and tags, GitHub state, web pages — and brought back as ready only when the condition holds. The condition must be a fact those sources can answer:
-✓ "When PR #42 in cortexkit/magic-context is merged"
-✓ "When the latest release tag is >= v0.22.0"
-✓ "When packages/plugin/src/foo.ts contains a function named bar"
-✗ "When the user mentions X" / "after we finish this refactor" — no external signal; write a regular note.
-Example: ctx_note(action="write", content="Re-run the perf benchmark once the boundary rework ships", surface_condition="When the latest release tag is >= v0.23.0")"#.to_string()
+First line is the title (under 80 chars), followed by detail. Operations:
+- write: save a new note (content required)
+- read: one row per note — `#id · age · title` — ready smart notes first, then newest; rows untouched 30+ days are marked stale. Pass note_ids to read full bodies; limit/offset page; filter selects other statuses.
+- update: change one note (note_ids=[N])
+- dismiss: retire 1–50 notes (note_ids). Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read.
+- surface_condition: make it a smart note — an outside checker periodically tests the condition using only externally verifiable signals (GitHub state, files, git, releases, web), never this conversation or future actions; the note is parked until the condition holds."#.to_string()
 }
 
 fn ctx_memory_schema() -> Value {
@@ -26104,7 +26131,7 @@ mod tests {
                 "minItems": 1,
                 "maxItems": 50,
                 "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 },
-                "description": "Note ids: exactly one for 'update', one to fifty for 'dismiss'. Ignored by 'write' and 'read'."
+                "description": "Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write."
             })
         );
     }
@@ -26375,6 +26402,30 @@ mod tests {
                 now_ms: 1,
             })
             .unwrap();
+        let foreign_update = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "update", "note_ids": [5], "content": "hijack"}),
+            )
+            .await,
+        );
+        assert_eq!(
+            foreign_update,
+            "Error: Note #5 not found in your session/project or has no compatible fields to update."
+        );
+        let targeted_read = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "read", "note_ids": [4, 5, 999]}),
+            )
+            .await,
+        );
+        assert_eq!(
+            targeted_read,
+            "## Notes by ID\n\n- **#4**: bulk two\n\n- Note #5: not_found\n\n- Note #999: not_found"
+        );
         let already = tool_text(
             call_facade(
                 &handler,
@@ -26394,7 +26445,7 @@ mod tests {
         );
         assert_eq!(
             bulk,
-            "Dismissed 1 of 4 notes.\n- Note #3: already_dismissed\n- Note #4: dismissed\n- Note #5: not_owned\n- Note #999: not_found"
+            "Dismissed 1 of 4 notes.\n- Note #3: already_dismissed\n- Note #4: dismissed\n- Note #5: not_found\n- Note #999: not_found"
         );
         assert_eq!(
             store

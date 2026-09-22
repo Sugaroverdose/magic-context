@@ -35,8 +35,10 @@ import {
 	addNote,
 	dismissNote,
 	dismissNotes,
+	getNoteByIdInScope,
 	getNotes,
 	type Note,
+	type NoteMutationScope,
 	type NoteStatus,
 	setNoteLastReadAt,
 	updateNote,
@@ -177,16 +179,30 @@ function formatDismissResults(
 		(result) => result.outcome === "dismissed",
 	).length;
 	return `Dismissed ${dismissedCount} of ${results.length} notes.\n${results
-		.map((result) => `- Note #${result.noteId}: ${result.outcome}`)
+		.map(
+			(result) =>
+				`- Note #${result.noteId}: ${result.outcome === "not_owned" ? "not_found" : result.outcome}`,
+		)
 		.join("\n")}`;
 }
 
+function formatNotesById(
+	db: ContextDatabase,
+	noteIds: readonly number[],
+	scope: NoteMutationScope,
+): string {
+	return `## Notes by ID\n\n${noteIds
+		.map((noteId) => {
+			const note = getNoteByIdInScope(db, noteId, scope);
+			return note ? formatNoteLine(note) : `- Note #${noteId}: not_found`;
+		})
+		.join("\n\n")}`;
+}
+
 /**
- * Read `note_ids` for the actions that use it. `write` and `read` never look
- * at it: tool surfaces that require every declared property make the model
- * send filler there (issue 460), and filler on an action that does not use
- * the field must not fail the call. `update` addresses exactly one note;
- * `dismiss` takes one to fifty.
+ * Read `note_ids` for targeted reads and mutations. `write` ignores the field
+ * because required-all tool surfaces send filler there. `read` and `dismiss`
+ * accept one to fifty IDs; `update` addresses exactly one note.
  */
 function parseNoteIds(action: string, value: unknown): number[] | string {
 	const max = action === "update" ? 1 : 50;
@@ -200,7 +216,7 @@ function parseNoteIds(action: string, value: unknown): number[] | string {
 	) {
 		return action === "update"
 			? "Error: 'note_ids' must contain exactly one positive integer id when action is 'update'."
-			: "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.";
+			: `Error: 'note_ids' must contain 1 to 50 positive integer ids when action is '${action}'.`;
 	}
 	return value;
 }
@@ -273,7 +289,9 @@ export function createCtxNoteTool(
 			const action =
 				params.action ?? (params.content?.trim() ? "write" : "read");
 			const noteIds =
-				action === "dismiss" || action === "update"
+				action === "dismiss" ||
+				action === "update" ||
+				(action === "read" && params.note_ids !== undefined)
 					? parseNoteIds(action, params.note_ids)
 					: undefined;
 			if (typeof noteIds === "string") return err(noteIds);
@@ -424,15 +442,28 @@ export function createCtxNoteTool(
 				typeof params.offset === "number" && params.offset > 0
 					? Math.floor(params.offset)
 					: 0;
-			const sections = readNotes({
-				db: deps.db,
-				sessionId,
-				cwd: ctx.cwd,
-				resolveProjectIdentity: resolveProject,
-				filter: params.filter,
-				limit,
-				offset,
-			});
+			const projectIdentity = Array.isArray(noteIds)
+				? resolveProject(ctx.cwd)
+				: undefined;
+			if (Array.isArray(noteIds) && !projectIdentity) {
+				return err("Error: Could not resolve project identity for note read.");
+			}
+			const sections = Array.isArray(noteIds)
+				? [
+						formatNotesById(deps.db, noteIds, {
+							projectPath: projectIdentity as string,
+							sessionId,
+						}),
+					]
+				: readNotes({
+						db: deps.db,
+						sessionId,
+						cwd: ctx.cwd,
+						resolveProjectIdentity: resolveProject,
+						filter: params.filter,
+						limit,
+						offset,
+					});
 
 			// Best-effort watermark write so any future note nudge logic
 			// can suppress reminders when the agent has already seen notes.

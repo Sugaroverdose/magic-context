@@ -54,16 +54,16 @@ Tool: [120] U: Can we rename the handler?
 
 ## ctx_note
 
-**What it does.** Session working notes: reminders and follow-ups for later in this session. Not [project memory](/concepts/memory/).
+**What it does.** Session notes are pending intentions: work the agent intends to return to, with findings attached. Findings without an intention are not a note.
 
-**When the agent reaches for it.** “Revisit later” items that are not durable memories and not active todos.
+**When the agent reaches for it.** “Revisit later” work that is not [project memory](/concepts/memory/) or an active todo. A record of how things stand (world-state, a design at a point in time) with nothing you intend to do about it — that goes stale silently; a fact worth keeping is memory, the rest is nothing. Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read.
 
 | Param | Meaning |
 | --- | --- |
 | `action` | `write`, `read`, `update`, `dismiss`. |
 | `content` | Text for `write` / `update`. |
 | `surface_condition` | Creates a **smart note** (hidden until an external condition is true). |
-| `note_ids` | Targets: exactly one id for `update`, one to fifty for `dismiss`; ignored by `write` / `read`. |
+| `note_ids` | Targets: exactly one id for `update`, one to fifty for `dismiss`, or specific full bodies for `read`; ignored by `write`. |
 | `filter` | For `read`: `all`, `active`, `pending`, `ready`, `dismissed`. |
 | `limit` / `offset` | Page `read` results (newest first). |
 
