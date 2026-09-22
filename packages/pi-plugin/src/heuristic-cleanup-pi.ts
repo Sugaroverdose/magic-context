@@ -383,7 +383,10 @@ export function applyPiHeuristicCleanup(
 			);
 		const byTag = new Map(activeTags.map((tag) => [tag.tagNumber, tag]));
 		const droppableTags = candidateTags
-			.map((tag) => byTag.get(tag.tagNumber)!)
+			.flatMap((tag) => {
+				const measured = byTag.get(tag.tagNumber);
+				return measured ? [measured] : [];
+			})
 			.filter((tag) => (tag.reclaimableTokens ?? 0) > 0);
 		sessionLog(
 			sessionId,

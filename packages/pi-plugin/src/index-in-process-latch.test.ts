@@ -1,8 +1,4 @@
 import {
-	clearProducerModelObservations,
-	observeProducerModelsForTest,
-} from "@magic-context/core/hooks/magic-context/producer-window-test-support";
-import {
 	afterEach,
 	beforeEach,
 	describe,
@@ -22,6 +18,10 @@ import {
 	openDatabase,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import {
+	clearProducerModelObservations,
+	observeProducerModelsForTest,
+} from "@magic-context/core/hooks/magic-context/producer-window-test-support";
 import {
 	cleanupTestTempDir,
 	createTestTempDir,

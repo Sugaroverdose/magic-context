@@ -215,22 +215,19 @@ describe("Pi context handler LKG replay", () => {
 						mode === "host"
 							? host.emit(handler as never, raw, ctx)
 							: handler({ messages: raw as never[] }, ctx as never);
-					{
-						// Requests without measured system and tool definitions are refused even when their byte proxy is small.
-						if (mode === "host") host.assertRefused(await pass, pristine);
-						else {
-							await expect(pass).rejects.toMatchObject({
-								name: "PiStorageBusyError",
-								message:
-									"Magic Context storage is busy; send your message again",
-							});
-						}
-
-						expect(logLines).toContain(
-							"raw_fallback_refused completeness=partial",
-						);
-						expect(logLines.join("\n")).not.toContain("LKG replay served");
+					// Requests without measured system and tool definitions are refused even when their byte proxy is small.
+					if (mode === "host") host.assertRefused(await pass, pristine);
+					else {
+						await expect(pass).rejects.toMatchObject({
+							name: "PiStorageBusyError",
+							message: "Magic Context storage is busy; send your message again",
+						});
 					}
+
+					expect(logLines).toContain(
+						"raw_fallback_refused completeness=partial",
+					);
+					expect(logLines.join("\n")).not.toContain("LKG replay served");
 				} finally {
 					if (locker.inTransaction) locker.exec("ROLLBACK");
 					restoreLog();

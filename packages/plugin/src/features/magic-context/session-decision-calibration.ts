@@ -1,7 +1,7 @@
 import {
     calibrationForModelKey,
-    resolveDecisionCalibration,
     type DecisionCalibration,
+    resolveDecisionCalibration,
 } from "../../hooks/magic-context/decision-calibration";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import type { Database } from "../../shared/sqlite";

@@ -1,10 +1,6 @@
 /// <reference types="bun-types" />
 
 import {
-	clearProducerModelObservations,
-	observeProducerModelsForTest,
-} from "@magic-context/core/hooks/magic-context/producer-window-test-support";
-import {
 	afterEach,
 	beforeEach,
 	describe,
@@ -39,6 +35,10 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getSubagentInvocations } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
 import { recordChildInvocation } from "@magic-context/core/features/magic-context/subagent-token-capture";
+import {
+	clearProducerModelObservations,
+	observeProducerModelsForTest,
+} from "@magic-context/core/hooks/magic-context/producer-window-test-support";
 import * as logger from "@magic-context/core/shared/logger";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";

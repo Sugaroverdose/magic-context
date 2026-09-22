@@ -1,8 +1,8 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
-import { Database } from "../../shared/sqlite";
 import { CALIBRATION_TABLE_REVISION } from "../../hooks/magic-context/tokenizer-calibration";
+import { Database } from "../../shared/sqlite";
 import {
     HYGIENE_PROVIDER_UNITS_VERSION,
     sessionDecisionCalibration,
@@ -76,7 +76,8 @@ describe("session decision calibration freeze", () => {
         ]);
 
         const persisted = JSON.parse(
-            db.prepare("SELECT deferred_execute_state FROM session_meta WHERE session_id = ?")
+            db
+                .prepare("SELECT deferred_execute_state FROM session_meta WHERE session_id = ?")
                 .get("session")!.deferred_execute_state as string,
         );
         expect(persisted.unrelatedLegacyKey).toEqual({ retained: true });
