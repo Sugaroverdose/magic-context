@@ -1092,24 +1092,35 @@ describe("deferred compaction marker representation", () => {
             endMessageId: "msg-boundary",
             publishedAt: Date.now(),
         });
+        setPersistedCompactionMarkerState(db, sessionId, {
+            boundaryMessageId: "msg-old-boundary",
+            summaryMessageId: "msg-old-summary",
+            compactionPartId: "prt-old-compaction",
+            summaryPartId: "prt-old-summary",
+            boundaryOrdinal: 5,
+            targetEndMessageId: "msg-old-boundary",
+        });
         const messages = [
             {
                 info: { id: "tail", role: "user", sessionID: sessionId },
                 parts: [{ type: "text", text: "new turn" }],
             },
         ] as unknown as MessageLike[];
-        const drain = () =>
+        const drain = (): string => {
+            const served = structuredClone(messages);
             runRustModePostprocess({
                 db,
                 sessionId,
-                messages: structuredClone(messages),
+                messages: served,
                 sessionDirectory: dataHome,
                 fullFeatureMode: true,
                 tagger: createTagger(),
                 ctxReduceAvailability: { callable: false, frozen: true },
             });
+            return serializeAnthropicWireWithAdjacentAssistantMerge(served);
+        };
 
-        drain();
+        const failedAttemptBytes = drain();
         expect(getPendingCompactionMarkerState(db, sessionId)?.injectAttempts).toBe(1);
 
         mkdirSync(join(dataHome, "opencode"), { recursive: true });
@@ -1127,7 +1138,8 @@ describe("deferred compaction marker representation", () => {
             .run("msg-boundary", sessionId, 1_000, 1_000, JSON.stringify({ role: "user" }));
         opencodeDb.close();
 
-        drain();
+        const healedAttemptBytes = drain();
+        expect(healedAttemptBytes).toBe(failedAttemptBytes);
         expect(getPendingCompactionMarkerState(db, sessionId)).toBeNull();
         expect(getCompactionMarkerHealth(db, sessionId)).toEqual({
             code: null,
