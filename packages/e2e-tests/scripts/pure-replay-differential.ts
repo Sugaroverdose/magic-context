@@ -469,7 +469,7 @@ async function capturePricedCheckout(harness: Awaited<ReturnType<typeof createRe
     await harness.sendPrompt(sessionId, "[[tail-only-bust]]");
     const tailDecisions = await harness.schedulerSince(sessionId, tailCursor);
     const afterTailMaterializedAt = (db.prepare("SELECT cached_m0_materialized_at AS at FROM session_meta WHERE session_id = ?").get(sessionId) as { at: number }).at;
-    if (history() !== commonHistory || afterTailMaterializedAt !== tailMaterializedAt || !tailDecisions.includes("execute")) throw new Error(`tail-only edge did not preserve the generation: latestPriced=${JSON.stringify(latestDecision())} scheduler=${tailDecisions} materializedAtSame=${afterTailMaterializedAt === tailMaterializedAt}`);
+    if (history() !== commonHistory || afterTailMaterializedAt !== tailMaterializedAt || !tailDecisions.includes("execute")) throw new Error(`tail-only edge did not preserve the generation: latestPriced=${JSON.stringify(latestDecision())} scheduler=${tailDecisions} materializedAtSame=${afterTailMaterializedAt === tailMaterializedAt} observed=${harness.schedulerLastLine(sessionId)}`);
     const actualDropped = (db.prepare("SELECT tag_number FROM tags WHERE session_id = ? AND type = 'tool' AND message_id LIKE 'priced-tool-%' AND status = 'dropped' ORDER BY tag_number").all(sessionId) as Array<{ tag_number: number }>).map((r) => r.tag_number);
     if (JSON.stringify(actualDropped) !== JSON.stringify(expectedDropped)) throw new Error(`tail eligibility differs: expected=${expectedDropped} actual=${actualDropped} decision=${JSON.stringify(latestDecision())}`);
     const tailMessagesSha256 = hash(harness.lastMainWireSerialized("messages"));
@@ -494,6 +494,7 @@ function schedulerObserver(logPath: string) {
     const lines = (sessionId: string) => existsSync(logPath) ? readFileSync(logPath, "utf8").split("\n").filter((line) => line.includes(`[${sessionId}]`) && line.includes("transform scheduler:")) : [];
     return {
         schedulerCursor: (sessionId: string) => lines(sessionId).length,
+        schedulerLastLine: (sessionId: string) => lines(sessionId).at(-1),
         schedulerSince: async (sessionId: string, cursor: number) => {
             const deadline = Date.now() + 2000;
             while (lines(sessionId).length <= cursor && Date.now() < deadline) await Bun.sleep(10);
