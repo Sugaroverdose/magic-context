@@ -137,6 +137,7 @@ import {
     contextUsagePassSnapshot,
     loadContextUsage,
     resolveSchedulerDecision,
+    resolveUnknownUsageFromWireEstimate,
 } from "./transform-context-state";
 import { findLastUserMessageId, findSessionId } from "./transform-message-helpers";
 import {
@@ -1137,6 +1138,10 @@ export function createTransform(deps: TransformDeps) {
                     piModelRefToCanonical(lastUsageModelKey) !==
                         piModelRefToCanonical(outgoingModelKey)
                 ) {
+                    const outgoingOverflow = getOverflowState(db, sessionId, outgoingModelKey);
+                    const preserveOutgoingOverflow =
+                        outgoingOverflow.detectedContextLimit > 0 &&
+                        outgoingOverflow.detectedContextLimitModelKey !== null;
                     dropSlot(sessionId, "model-change");
                     sessionLog(
                         sessionId,
@@ -1159,8 +1164,15 @@ export function createTransform(deps: TransformDeps) {
                     // model's pressure math, so clear them too (the proactive arm
                     // below re-arms from scratch against the new model if needed).
                     clearEmergencyDropSample(db, sessionId);
-                    clearDetectedContextLimit(db, sessionId);
-                    clearEmergencyRecovery(db, sessionId);
+                    if (preserveOutgoingOverflow) {
+                        sessionLog(
+                            sessionId,
+                            `transform: preserving detected limit ${outgoingOverflow.detectedContextLimit} and overflow recovery for outgoing model ${outgoingModelKey}`,
+                        );
+                    } else {
+                        clearDetectedContextLimit(db, sessionId);
+                        clearEmergencyRecovery(db, sessionId);
+                    }
                     // Clear the in-memory usage map so loadContextUsage recomputes.
                     deps.contextUsageMap.delete(sessionId);
                     sessionMeta = {
@@ -2165,8 +2177,44 @@ export function createTransform(deps: TransformDeps) {
         // instead of the full-array scan we used to do here.
         const watermark = getMaxDroppedTagNumber(db, sessionId);
 
-        // Reuse the early scheduler result — inputs haven't changed.
-        const contextUsage = contextUsageEarly;
+        // A priced pass may have no provider usage for the outgoing model after a
+        // switch or overflow. The current transformed payload still gives the
+        // emergency selector a conservative pressure sample instead of zero.
+        let contextUsage = contextUsageEarly;
+        const pressureSamplePricedPass =
+            schedulerDecision === "execute" ||
+            isCacheBusting ||
+            contextUsage.percentage >= forceMaterializationPercentage ||
+            deps.pendingMaterializationSessions.has(sessionId) ||
+            (canConsumeDeferredEarly && deferredMaterializationSessions.has(sessionId));
+        if (!compactionOff && contextUsage.inputTokens <= 0 && pressureSamplePricedPass) {
+            try {
+                const pressureEstimate = estimateFinalWireInputTokens({
+                    messages,
+                    systemPromptTokens: sessionMeta.systemPromptTokens,
+                    providerID: modelForBudget?.providerID,
+                    modelID: modelForBudget?.modelID,
+                    agentName: notificationParams.agent,
+                });
+                contextUsage = resolveUnknownUsageFromWireEstimate({
+                    usage: contextUsage,
+                    pricedPass: true,
+                    wireEstimateTokens: pressureEstimate.tokens,
+                    usableHardLimit: windowGeometry?.usableHard,
+                });
+                if (contextUsage.inputTokens > 0) {
+                    sessionLog(
+                        sessionId,
+                        `transform: unknown provider usage; using wire estimate for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} trusted=${pressureEstimate.trusted}`,
+                    );
+                }
+            } catch (error) {
+                sessionLog(
+                    sessionId,
+                    `transform: wire-estimate pressure fallback unavailable: ${getErrorMessage(error)}`,
+                );
+            }
+        }
         const rawGetNotifParams = deps.getNotificationParams;
         const tCompartmentPhase = performance.now();
         const compartmentPhase = await runCompartmentPhase({

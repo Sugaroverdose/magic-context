@@ -98,6 +98,25 @@ describe("catalogModels", () => {
         expect(catalogModels({ data: [mock] })).toEqual([mock]);
     });
 
+    it("lets the outgoing draft override a stale catalog limit", () => {
+        expect(
+            catalogModels(
+                { data: [mock] },
+                {
+                    providerID: "openai",
+                    id: "mock-model",
+                    limit: { context: 1_048_576, output: 32_000 },
+                },
+            ),
+        ).toEqual([
+            {
+                id: "mock-model",
+                providerID: "openai",
+                limit: { context: 1_048_576, output: 32_000 },
+            },
+        ]);
+    });
+
     it("does not iterate a thenable or empty object", () => {
         expect(catalogModels({})).toEqual([]);
         expect(catalogModels(Promise.resolve([mock]))).toEqual([]);

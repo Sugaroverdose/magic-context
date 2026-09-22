@@ -78,7 +78,7 @@ import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { createV2RawMessageReader } from "./store";
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
-import { resolveUsageReading } from "./usage-reading";
+import { resolveUsageReading, usageReadingMatchesDraft } from "./usage-reading";
 
 export function isBlockingV2TransformError(error: unknown): boolean {
     return error instanceof EmergencyFailClosedError || isFailClosedBlockingError(error);
@@ -152,7 +152,10 @@ export function reportPreProviderRefusal(sessionID: string, error: unknown): voi
 }
 
 /** Accept both a raw model array and the 2.0.5 `{ data }` list payload. */
-export function catalogModels(listed: unknown): Array<{
+export function catalogModels(
+    listed: unknown,
+    draftModel?: SessionContext["model"],
+): Array<{
     id: string;
     providerID: string;
     limit: { context: number; input?: number; output?: number };
@@ -162,7 +165,7 @@ export function catalogModels(listed: unknown): Array<{
         : listed && typeof listed === "object" && Array.isArray((listed as { data?: unknown }).data)
           ? (listed as { data: unknown[] }).data
           : [];
-    return rows.flatMap((row) => {
+    const models = rows.flatMap((row) => {
         if (!row || typeof row !== "object") return [];
         const model = row as {
             id?: unknown;
@@ -180,6 +183,23 @@ export function catalogModels(listed: unknown): Array<{
             },
         ];
     });
+    const draftContextLimit = draftModel?.limit?.context;
+    if (
+        draftModel &&
+        typeof draftContextLimit === "number" &&
+        Number.isFinite(draftContextLimit) &&
+        draftContextLimit > 0
+    ) {
+        const key = `${draftModel.providerID}/${draftModel.id}`;
+        const byKey = new Map(models.map((model) => [`${model.providerID}/${model.id}`, model]));
+        byKey.set(key, {
+            id: draftModel.id,
+            providerID: draftModel.providerID,
+            limit: { ...draftModel.limit, context: draftContextLimit },
+        });
+        return [...byKey.values()];
+    }
+    return models;
 }
 
 /** Rewrite Magic Context ctx_* tool descriptions for this draft's model. */
@@ -416,7 +436,7 @@ export async function registerContext(context: V2Context) {
                             >;
                         }
                     >();
-                    for (const model of catalogModels(catalog)) {
+                    for (const model of catalogModels(catalog, draft.model)) {
                         rawLimits.set(`${model.providerID}/${model.id}`, model.limit);
                         const provider = providers.get(model.providerID) ?? {
                             id: model.providerID,
@@ -455,6 +475,7 @@ export async function registerContext(context: V2Context) {
                     limitFor,
                 });
                 if (reading) {
+                    const readingMatchesDraft = usageReadingMatchesDraft(reading, draft.model);
                     unsafe = refusesBeforeProvider({
                         inputTokens: reading.inputTokens,
                         rawContextLimit: rawLimits.get(draftModelKey)?.context,
@@ -476,13 +497,17 @@ export async function registerContext(context: V2Context) {
                     });
                     sessionLog(
                         draft.sessionID,
-                        `v2 usage: inputTokens=${reading.inputTokens} contextLimit=${reading.limit} percentage=${percentage}`,
+                        `v2 usage: inputTokens=${reading.inputTokens} contextLimit=${reading.limit} percentage=${percentage} responseModel=${reading.modelKey ?? "legacy"} draftContextLimit=${reading.admissionLimit} pressure=${readingMatchesDraft ? "current" : "stale-model-ignored"}`,
                     );
-                    usage.set(draft.sessionID, {
-                        usage: { inputTokens: reading.inputTokens, percentage },
-                        hasUsageTokens: true,
-                        updatedAt: Date.now(),
-                    });
+                    if (readingMatchesDraft) {
+                        usage.set(draft.sessionID, {
+                            usage: { inputTokens: reading.inputTokens, percentage },
+                            hasUsageTokens: true,
+                            updatedAt: Date.now(),
+                        });
+                    } else {
+                        usage.delete(draft.sessionID);
+                    }
                 }
             } finally {
                 reader.close();

@@ -22,6 +22,13 @@ export interface UsageReading {
     completed?: number;
 }
 
+export function usageReadingMatchesDraft(
+    reading: UsageReading,
+    draftModel: { providerID: string; id: string },
+): boolean {
+    return reading.modelKey === undefined || reading.modelKey === `${draftModel.providerID}/${draftModel.id}`;
+}
+
 /**
  * Attribute stored usage to the model that produced it while measuring the next
  * request against the outgoing draft model. Partial or non-finite token fields

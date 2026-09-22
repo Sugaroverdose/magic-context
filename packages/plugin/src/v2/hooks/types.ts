@@ -9,7 +9,12 @@ export interface V2Message {
 }
 export interface SessionContext {
     sessionID: string;
-    model: { providerID: string; id: string; variant?: string };
+    model: {
+        providerID: string;
+        id: string;
+        variant?: string;
+        limit?: { context: number; input?: number; output?: number };
+    };
     agent: string;
     messages: V2Message[];
     system: Array<Record<string, unknown>>;

@@ -3734,6 +3734,35 @@ describe("createTransform shrinking model-switch overflow pre-arm", () => {
         expect(abort).not.toHaveBeenCalled();
     });
 
+    it("preserves a provider limit detected for the outgoing model when stored usage is stale", async () => {
+        useTempDataHome("transform-switch-preserve-detected-");
+        const sessionId = "ses-preserve-detected";
+        createOpenCodeDbForTransform(sessionId, [
+            { id: "m-raw-1", role: "user", text: "recent 1" },
+            { id: "m-raw-2", role: "assistant", text: "recent 2" },
+        ]);
+        const db = openDatabase();
+        updateSessionMeta(db, sessionId, {
+            lastContextPercentage: 0.6,
+            lastInputTokens: 1_200,
+            lastObservedModelKey: OLD_KEY,
+            lastUsageContextLimit: 200_000,
+        });
+        recordOverflowDetected(db, sessionId, 1_048_576, NEW_KEY, "provider_overflow");
+        await seedNewModelLimit(1_200_000);
+
+        const { transform } = makeTransform(db, sessionId, NEW_MODEL, {
+            percentage: 0.6,
+            inputTokens: 1_200,
+        });
+        await transform({}, { messages: switchTurnMessages(sessionId) });
+
+        const overflow = getOverflowState(db, sessionId, NEW_KEY);
+        expect(overflow.detectedContextLimit).toBe(1_048_576);
+        expect(overflow.detectedContextLimitModelKey).toBe(NEW_KEY);
+        expect(overflow.needsEmergencyRecovery).toBe(true);
+    });
+
     it("does not abort a stale proactive arm after restart zeroed the input sample", async () => {
         useTempDataHome("transform-shrink-switch-stale-restart-");
         const sessionId = "ses-stale-proactive";

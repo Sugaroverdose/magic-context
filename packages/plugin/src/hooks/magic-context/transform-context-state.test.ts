@@ -12,7 +12,11 @@ import {
 } from "../../features/magic-context/storage";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { computeHardCacheExpired } from "./transform";
-import { contextUsagePassSnapshot, loadContextUsage } from "./transform-context-state";
+import {
+    contextUsagePassSnapshot,
+    loadContextUsage,
+    resolveUnknownUsageFromWireEstimate,
+} from "./transform-context-state";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -41,6 +45,38 @@ function useTempDataHome(prefix: string): void {
 function createUsageMap() {
     return new Map<string, { usage: ContextUsage; updatedAt: number; lastResponseTime?: number }>();
 }
+
+describe("resolveUnknownUsageFromWireEstimate", () => {
+    it("uses an untrusted wire estimate for a priced overflow-recovery pass", () => {
+        expect(
+            resolveUnknownUsageFromWireEstimate({
+                usage: { percentage: 95, inputTokens: 0 },
+                pricedPass: true,
+                wireEstimateTokens: 1_087_566,
+                usableHardLimit: 1_048_576,
+            }),
+        ).toEqual({ percentage: (1_087_566 / 1_048_576) * 100, inputTokens: 1_087_566 });
+    });
+
+    it("does not replace a provider usage sample or estimate an unpriced pass", () => {
+        expect(
+            resolveUnknownUsageFromWireEstimate({
+                usage: { percentage: 50, inputTokens: 500_000 },
+                pricedPass: true,
+                wireEstimateTokens: 1_087_566,
+                usableHardLimit: 1_048_576,
+            }),
+        ).toEqual({ percentage: 50, inputTokens: 500_000 });
+        expect(
+            resolveUnknownUsageFromWireEstimate({
+                usage: { percentage: 0, inputTokens: 0 },
+                pricedPass: false,
+                wireEstimateTokens: 1_087_566,
+                usableHardLimit: 1_048_576,
+            }),
+        ).toEqual({ percentage: 0, inputTokens: 0 });
+    });
+});
 
 describe("loadContextUsage", () => {
     it("trusts the event-updated live map and reloads when that signal changes", () => {
