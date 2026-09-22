@@ -70,15 +70,18 @@ describe("Pi ctx_note smart notes", () => {
 		expect(properties.note_id).toBeUndefined();
 		expect(properties.note_ids).toEqual({
 			type: "array",
+			"~kind": "Array",
+			"~optional": true,
 			items: {
 				type: "integer",
+				"~kind": "Integer",
 				minimum: 1,
 				maximum: Number.MAX_SAFE_INTEGER,
 			},
 			minItems: 1,
 			maxItems: 50,
 			description:
-				"Note ids: exactly one for 'update', one to fifty for 'dismiss'. Ignored by 'write' and 'read'.",
+				"Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write.",
 		});
 	});
 

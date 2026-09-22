@@ -34,9 +34,16 @@ describe("createCtxMemoryTool", () => {
 
 			expect(primary.parameters.properties).not.toHaveProperty("superseded_by");
 			expect(dreamer.parameters.properties).toHaveProperty("superseded_by");
-			expect(JSON.stringify(primary.parameters.properties.action)).not.toContain("list");
-			expect(JSON.stringify(dreamer.parameters.properties.action)).not.toContain("list");
-			expect(Object.keys(list.parameters.properties).sort()).toEqual(["category", "limit"]);
+			expect(
+				JSON.stringify(primary.parameters.properties.action),
+			).not.toContain("list");
+			expect(
+				JSON.stringify(dreamer.parameters.properties.action),
+			).not.toContain("list");
+			expect(Object.keys(list.parameters.properties).sort()).toEqual([
+				"category",
+				"limit",
+			]);
 
 			const ctx = fakeContext("ses-memory") as never;
 			const primaryResult = await primary.execute(

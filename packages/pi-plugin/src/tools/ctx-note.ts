@@ -72,7 +72,8 @@ const ParamsSchema = Type.Object(
 		),
 		content: Type.Optional(
 			Type.String({
-				description: "Note text for write/update: first line is the title (under 80 chars), then the detail.",
+				description:
+					"Note text for write/update: first line is the title (under 80 chars), then the detail.",
 			}),
 		),
 		surface_condition: Type.Optional(
@@ -103,14 +104,12 @@ const ParamsSchema = Type.Object(
 		),
 		limit: Type.Optional(
 			Type.Number({
-				description:
-					"Rows per read (default 25).",
+				description: "Rows per read (default 25).",
 			}),
 		),
 		offset: Type.Optional(
 			Type.Number({
-				description:
-					"Skip this many newest rows (default 0).",
+				description: "Skip this many newest rows (default 0).",
 			}),
 		),
 	},

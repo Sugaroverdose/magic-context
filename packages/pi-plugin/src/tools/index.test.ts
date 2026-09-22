@@ -156,18 +156,24 @@ describe("registerMagicContextTools", () => {
 	it("registers ctx_memory_list only for dreamer child surfaces", () => {
 		const db = createTestDb();
 		try {
-			const registered = new Map<string, { parameters: { properties?: Record<string, unknown> } }>();
+			const registered = new Map<
+				string,
+				{ parameters: { properties?: Record<string, unknown> } }
+			>();
 			const pi = {
-				registerTool: (tool: { name: string; parameters: { properties?: Record<string, unknown> } }) =>
-					registered.set(tool.name, tool),
+				registerTool: (tool: {
+					name: string;
+					parameters: { properties?: Record<string, unknown> };
+				}) => registered.set(tool.name, tool),
 				registerCommand: () => undefined,
 			} as never;
 			registerMagicContextTools(pi, { db, allowDreamerActions: true });
 			expect(registered.has("ctx_memory_list")).toBe(true);
-			expect(Object.keys(registered.get("ctx_memory_list")?.parameters.properties ?? {}).sort()).toEqual([
-				"category",
-				"limit",
-			]);
+			expect(
+				Object.keys(
+					registered.get("ctx_memory_list")?.parameters.properties ?? {},
+				).sort(),
+			).toEqual(["category", "limit"]);
 		} finally {
 			closeQuietly(db);
 		}
@@ -420,9 +426,12 @@ describe("registerMagicContextTools — prompt-surface registration", () => {
 						(fullParameters?.properties?.[name] as { description?: string })
 							?.description,
 					).toBe(
-						(FULL_PARAMETER_DESCRIPTIONS as Record<string, Record<string, string>>)[
-							toolId
-						]?.[name],
+						(
+							FULL_PARAMETER_DESCRIPTIONS as Record<
+								string,
+								Record<string, string>
+							>
+						)[toolId]?.[name],
 					);
 				}
 			}

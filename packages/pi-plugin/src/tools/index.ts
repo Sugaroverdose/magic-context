@@ -17,6 +17,7 @@ import type { ContextDatabase } from "@magic-context/core/features/magic-context
 import type { PromptSurfaceConfig } from "@magic-context/core/shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "@magic-context/core/shared/prompt-surface-runtime";
 import { createPromptSurfaceRuntime } from "@magic-context/core/shared/prompt-surface-runtime";
+import { applyJsonSchemaParameterDescriptions } from "@magic-context/core/tools/parameter-descriptions";
 import { createCtxExpandTool } from "./ctx-expand";
 import { createCtxMemoryListTool, createCtxMemoryTool } from "./ctx-memory";
 import { createCtxNoteTool } from "./ctx-note";
@@ -24,7 +25,6 @@ import { createCtxReduceTool } from "./ctx-reduce";
 import { createCtxSearchTool } from "./ctx-search";
 import { registerTodosCommand } from "./todo-view-pi";
 import { createTodowriteTool } from "./todowrite";
-import { applyJsonSchemaParameterDescriptions } from "@magic-context/core/tools/parameter-descriptions";
 
 const CTX_MEMORY_TOOL_NAME = "ctx_memory";
 
@@ -111,7 +111,9 @@ export function registerMagicContextTools(
 	const registration = promptSurfaceRuntime.resolveRegistration(
 		opts.promptSurface,
 	);
-	const surfaceTool = <T extends { name: string; description: string; parameters: unknown }>(
+	const surfaceTool = <
+		T extends { name: string; description: string; parameters: unknown },
+	>(
 		definition: T,
 	): T => {
 		const parameters = structuredClone(definition.parameters);

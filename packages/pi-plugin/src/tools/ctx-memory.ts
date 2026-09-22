@@ -103,13 +103,7 @@ const DEFAULT_LIST_LIMIT = 10;
 // no other way to look it up. Memory verification (file mapping) and
 // classification are no longer tool actions — the verify and classify dreamer
 // tasks apply them host-side from a manifest.
-const PRIMARY_ACTIONS = [
-	"write",
-	"update",
-	"archive",
-	"merge",
-	"get",
-] as const;
+const PRIMARY_ACTIONS = ["write", "update", "archive", "merge", "get"] as const;
 const ALL_ACTIONS = [...PRIMARY_ACTIONS, "list"] as const;
 type CtxMemoryAction = (typeof ALL_ACTIONS)[number];
 
@@ -1039,13 +1033,22 @@ export function createCtxMemoryTool(
 export function createCtxMemoryListTool(
 	deps: CtxMemoryToolDeps,
 ): ToolDefinition<typeof ListParamsSchema> {
-	const memoryTool = createCtxMemoryTool({ ...deps, allowDreamerActions: true });
+	const memoryTool = createCtxMemoryTool({
+		...deps,
+		allowDreamerActions: true,
+	});
 	return {
 		name: "ctx_memory_list",
 		label: "Magic Context: Memory List",
 		description: CTX_MEMORY_LIST_DESCRIPTION,
 		parameters: ListParamsSchema,
-		async execute(toolCallId, params: CtxMemoryListParams, signal, onUpdate, ctx) {
+		async execute(
+			toolCallId,
+			params: CtxMemoryListParams,
+			signal,
+			onUpdate,
+			ctx,
+		) {
 			return memoryTool.execute(
 				toolCallId,
 				{ ...params, action: "list" } as never,
