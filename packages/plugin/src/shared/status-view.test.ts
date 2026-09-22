@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { StatusDetail } from "./rpc-types";
 import {
     buildStatusView,
+    distributeBarWidths,
     STATUS_COLUMN_GAP,
     statusColumnsFor,
     statusSectionWidth,
@@ -286,6 +287,27 @@ describe("status view model", () => {
         // column past what the dialog has, so the same sections go one column
         // rather than wrapping that value mid-word.
         expect(statusColumnsFor(sections, 84).twoColumn).toBe(false);
+    });
+
+    /**
+     * Rounding each segment's share on its own leaves the bar short of its
+     * container by up to one column per segment, which paints as blank cells
+     * between the coloured runs.
+     */
+    test("distributes the bar width so the segments sum to the bar with no gap", () => {
+        const tokens = view().bar.map((segment) => segment.tokens);
+        for (const width of [20, 56, 84, 88, 120]) {
+            const widths = distributeBarWidths(tokens, width);
+            expect(widths.reduce((sum, value) => sum + value, 0)).toBe(width);
+            expect(widths.every((value) => value >= 1)).toBe(true);
+        }
+        // A category whose share rounds below a column still gets one, so the
+        // bar never drops a segment the legend below it lists.
+        const tiny = distributeBarWidths([1_000_000, 1], 40);
+        expect(tiny.reduce((sum, value) => sum + value, 0)).toBe(40);
+        expect(tiny[1]).toBe(1);
+        // Narrower than the number of categories: the leftmost ones keep a cell.
+        expect(distributeBarWidths([5, 4, 3, 2, 1], 3)).toEqual([1, 1, 1, 0, 0]);
     });
 
     test("breaks the context down by category, with counts and percentages", () => {

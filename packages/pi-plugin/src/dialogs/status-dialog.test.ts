@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { recordDreamerTickFailure } from "@magic-context/core/features/magic-context/dreamer/tick-failure";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory/storage-memory";
@@ -775,6 +776,45 @@ Warning: History compression could not finish this turn. It will retry automatic
 			).join("\n");
 			expect(text).toContain("21.9% · 63,064 / 288,528 tok");
 			expect(text).not.toContain("63,063.522");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	/**
+	 * The bar is drawn from the shared width distribution, so its runs add up to
+	 * the row width. Rounding each segment's share on its own left blank cells
+	 * between the coloured runs.
+	 */
+	it("fills the bar row exactly, with no blank cell between the runs", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-status-bar-width";
+			insertTag(db, sessionId, "m1", "tool", 4_000, 1);
+			const detail = buildPiStatusDetail(
+				{ getAllTools: () => [] } as never,
+				{
+					...fakeContext(sessionId),
+					getContextUsage: () => ({
+						tokens: 40_000,
+						percent: 20,
+						contextWindow: 200_000,
+					}),
+					getSystemPrompt: () => "system prompt",
+				} as never,
+				{ db, projectIdentity: resolveProjectIdentity(process.cwd()) },
+				sessionId,
+			);
+			const innerWidth = 74;
+			const lines = renderPiStatusOverlay(detail, plainTheme(), innerWidth);
+			const barLine = lines.find((line) => line.includes("\u2588"));
+			expect(barLine).toBeDefined();
+			// Every cell of the bar row is a block: a blank cell between two runs
+			// would show up as a shorter visible width than the row it fills.
+			expect(visibleWidth(barLine ?? "")).toBe(innerWidth);
+			expect((barLine ?? "").includes(" \u2588") || (barLine ?? "").includes("\u2588 ")).toBe(
+				false,
+			);
 		} finally {
 			closeQuietly(db);
 		}

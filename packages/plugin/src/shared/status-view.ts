@@ -243,6 +243,68 @@ export function statusColumnsFor(
     return { twoColumn, leftWidth, rightWidth };
 }
 
+/**
+ * Integer column widths for the breakdown bar, summing exactly to `totalWidth`.
+ *
+ * Each segment's proportional share is rounded down and the leftover columns go
+ * to the largest fractional remainders, so the widths always add up to the bar
+ * width. Rounding every segment independently instead leaves the bar short of
+ * its container by up to one column per segment, which paints as blank cells
+ * between the coloured runs.
+ *
+ * Every segment that carries tokens keeps at least one column, so a category
+ * whose share rounds below a column stays visible in the bar.
+ */
+export function distributeBarWidths(
+    tokens: readonly number[],
+    totalWidth: number,
+): number[] {
+    const width = Math.max(0, Math.floor(totalWidth));
+    if (tokens.length === 0) return [];
+    if (width === 0) return tokens.map(() => 0);
+    const weights = tokens.map((value) =>
+        typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0,
+    );
+    const total = weights.reduce((sum, value) => sum + value, 0);
+    if (total <= 0) {
+        // No token counts to weigh by: split the bar as evenly as possible.
+        const base = Math.floor(width / tokens.length);
+        const remainder = width - base * tokens.length;
+        return tokens.map((_value, index) => base + (index < remainder ? 1 : 0));
+    }
+    const floors: number[] = weights.map((weight) => (weight > 0 ? 1 : 0));
+    const assigned = floors.reduce((sum, value) => sum + value, 0);
+    if (assigned > width) {
+        // Narrower than the number of categories: keep the leftmost ones.
+        let remaining = width;
+        return floors.map((value) => {
+            if (value === 0 || remaining === 0) return 0;
+            remaining -= 1;
+            return 1;
+        });
+    }
+    const remaining = width - assigned;
+    const exact = weights.map((weight) => (weight / total) * remaining);
+    const shares = exact.map((value) => Math.floor(value));
+    let leftover = remaining - shares.reduce((sum, value) => sum + value, 0);
+    const byRemainder = exact
+        .map((value, index) => ({
+            index,
+            fraction: value - Math.floor(value),
+            weight: weights[index] ?? 0,
+        }))
+        .sort(
+            (a, b) =>
+                b.fraction - a.fraction || b.weight - a.weight || a.index - b.index,
+        );
+    for (const entry of byRemainder) {
+        if (leftover <= 0) break;
+        shares[entry.index] = (shares[entry.index] ?? 0) + 1;
+        leftover -= 1;
+    }
+    return floors.map((value, index) => value + (shares[index] ?? 0));
+}
+
 /** Compact token count, e.g. 623K. Shared so every host prints one spelling. */
 export function formatStatusTokens(value: number): string {
     if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;

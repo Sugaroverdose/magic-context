@@ -1,4 +1,6 @@
 import { createTextNode as _$createTextNode } from "opentui:runtime-module:%40opentui%2Fsolid";
+import { spread as _$spread } from "opentui:runtime-module:%40opentui%2Fsolid";
+import { mergeProps as _$mergeProps } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { memo as _$memo } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { use as _$use } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { createComponent as _$createComponent } from "opentui:runtime-module:%40opentui%2Fsolid";
@@ -21,7 +23,7 @@ import { createElement as _$createElement } from "opentui:runtime-module:%40open
 import { createMemo, createSignal, onCleanup } from "opentui:runtime-module:solid-js";
 import packageJson from "../../../package.json";
 import { statusSummaryFromDetail } from "../../shared/status-summary";
-import { buildStatusView, statusColumnsFor } from "../../shared/status-view";
+import { buildStatusView, distributeBarWidths, statusColumnsFor } from "../../shared/status-view";
 import { RUST_MODE_HOST_PATHS_LINE } from "../../shared/rust-mode-status";
 const R = props => (() => {
   var _el$ = _$createElement("box"),
@@ -173,6 +175,16 @@ export const StatusDialog = props => {
   const columns = () => statusColumnsFor(view().sections, contentWidth());
   const columnSections = parity => view().sections.filter((_section, index) => index % 2 === parity);
   const hygiene = () => view().hygiene;
+  // Integer segment widths that sum to the bar's own width. Proportional
+  // flexGrow lets the layout engine round each segment on its own, which
+  // leaves blank cells between the coloured runs; the shared helper
+  // distributes the remainder so the bar has no gaps. Before the first
+  // layout there is no width to divide, so the flex fallback stays.
+  const barWidths = () => {
+    const width = contentWidth();
+    if (!Number.isFinite(width) || width <= 0) return null;
+    return distributeBarWidths(view().bar.map(segment => segment.tokens), width);
+  };
   return (() => {
     var _el$1 = _$createElement("box"),
       _el$10 = _$createElement("box"),
@@ -229,25 +241,30 @@ export const StatusDialog = props => {
     _$setProp(_el$18, "width", "100%");
     _$setProp(_el$18, "flexDirection", "row");
     _$setProp(_el$18, "height", 1);
-    _$insert(_el$18, () => view().bar.map(seg => (() => {
-      var _el$23 = _$createElement("box");
-      _$setProp(_el$23, "flexBasis", 0);
-      _$setProp(_el$23, "height", 1);
-      _$effect(_p$ => {
-        var _v$1 = seg.label,
-          _v$10 = Math.max(1, seg.tokens),
-          _v$11 = seg.color;
-        _v$1 !== _p$.e && (_p$.e = _$setProp(_el$23, "key", _v$1, _p$.e));
-        _v$10 !== _p$.t && (_p$.t = _$setProp(_el$23, "flexGrow", _v$10, _p$.t));
-        _v$11 !== _p$.a && (_p$.a = _$setProp(_el$23, "backgroundColor", _v$11, _p$.a));
-        return _p$;
-      }, {
-        e: undefined,
-        t: undefined,
-        a: undefined
-      });
-      return _el$23;
-    })()));
+    _$insert(_el$18, () => view().bar.map((seg, index) => {
+      const widths = barWidths();
+      const fixed = widths ? widths[index] ?? 0 : undefined;
+      return (() => {
+        var _el$23 = _$createElement("box");
+        _$spread(_el$23, _$mergeProps({
+          get key() {
+            return seg.label;
+          }
+        }, () => fixed === undefined ? {
+          flexGrow: Math.max(1, seg.tokens),
+          flexBasis: 0
+        } : {
+          width: fixed,
+          flexShrink: 0
+        }, {
+          "height": 1,
+          get backgroundColor() {
+            return seg.color;
+          }
+        }), false);
+        return _el$23;
+      })();
+    }));
     _$setProp(_el$19, "flexDirection", "column");
     _$setProp(_el$19, "width", "100%");
     _$insert(_el$19, () => view().breakdown.map(row => (() => {
@@ -263,12 +280,12 @@ export const StatusDialog = props => {
       _$insert(_el$25, () => row.label);
       _$insert(_el$26, () => row.value);
       _$effect(_p$ => {
-        var _v$12 = row.label,
-          _v$13 = row.color,
-          _v$14 = t().textMuted;
-        _v$12 !== _p$.e && (_p$.e = _$setProp(_el$24, "key", _v$12, _p$.e));
-        _v$13 !== _p$.t && (_p$.t = _$setProp(_el$25, "fg", _v$13, _p$.t));
-        _v$14 !== _p$.a && (_p$.a = _$setProp(_el$26, "fg", _v$14, _p$.a));
+        var _v$1 = row.label,
+          _v$10 = row.color,
+          _v$11 = t().textMuted;
+        _v$1 !== _p$.e && (_p$.e = _$setProp(_el$24, "key", _v$1, _p$.e));
+        _v$10 !== _p$.t && (_p$.t = _$setProp(_el$25, "fg", _v$10, _p$.t));
+        _v$11 !== _p$.a && (_p$.a = _$setProp(_el$26, "fg", _v$11, _p$.a));
         return _p$;
       }, {
         e: undefined,
@@ -427,10 +444,10 @@ export const StatusDialog = props => {
         _$insertNode(_el$32, _$createTextNode(`Rust Mode`));
         _$insert(_el$34, RUST_MODE_HOST_PATHS_LINE);
         _$effect(_p$ => {
-          var _v$15 = t().text,
-            _v$16 = t().textMuted;
-          _v$15 !== _p$.e && (_p$.e = _$setProp(_el$31, "fg", _v$15, _p$.e));
-          _v$16 !== _p$.t && (_p$.t = _$setProp(_el$34, "fg", _v$16, _p$.t));
+          var _v$12 = t().text,
+            _v$13 = t().textMuted;
+          _v$12 !== _p$.e && (_p$.e = _$setProp(_el$31, "fg", _v$12, _p$.e));
+          _v$13 !== _p$.t && (_p$.t = _$setProp(_el$34, "fg", _v$13, _p$.t));
           return _p$;
         }, {
           e: undefined,
@@ -467,10 +484,10 @@ export const StatusDialog = props => {
           section: section
         })));
         _$effect(_p$ => {
-          var _v$17 = columns().leftWidth,
-            _v$18 = columns().rightWidth;
-          _v$17 !== _p$.e && (_p$.e = _$setProp(_el$36, "width", _v$17, _p$.e));
-          _v$18 !== _p$.t && (_p$.t = _$setProp(_el$37, "width", _v$18, _p$.t));
+          var _v$14 = columns().leftWidth,
+            _v$15 = columns().rightWidth;
+          _v$14 !== _p$.e && (_p$.e = _$setProp(_el$36, "width", _v$14, _p$.e));
+          _v$15 !== _p$.t && (_p$.t = _$setProp(_el$37, "width", _v$15, _p$.t));
           return _p$;
         }, {
           e: undefined,
