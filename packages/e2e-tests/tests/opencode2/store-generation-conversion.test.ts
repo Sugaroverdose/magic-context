@@ -112,7 +112,13 @@ interface Evidence {
     /** The row 2.0.5 derived from that turn; absent from the 1.x tables by construction. */
     syntheticRowId: string;
     v1MaxCompartmentSequence: number;
+    longArmBaselineCompartmentSequence: number;
     postFlipCompartmentSequence: number;
+    syntheticGapOrdinal: number;
+    tailCacheCoveredFromOrdinal: number;
+    tailCacheCoveredToOrdinalBeforePressure: number;
+    longArmHistorianRequestCount: number;
+    existingValidationFailureLines: string[];
     forward: FlipEvidence;
     back: FlipEvidence;
     doctorBetween: string;
@@ -792,6 +798,53 @@ beforeAll(async () => {
             db.close();
         }
     })();
+    const forwardOrdinals = new Map(forwardProjection.map((message) => [message.id, message.ordinal]));
+    const splitOrdinal = forwardOrdinals.get(splitMessageId);
+    const syntheticGapOrdinal = forwardOrdinals.get(syntheticRowId);
+    if (splitOrdinal === undefined || syntheticGapOrdinal !== splitOrdinal + 1) {
+        throw new Error("the converted synthetic row did not immediately follow its source turn");
+    }
+    const healedGapCompartment = forwardCompartments.find(
+        (compartment) => compartment.endMessage === syntheticGapOrdinal,
+    );
+    const followingGapCompartment = forwardCompartments.find(
+        (compartment) => compartment.startMessage === syntheticGapOrdinal + 1,
+    );
+    if (!healedGapCompartment || !followingGapCompartment) {
+        throw new Error("the forward rebase did not produce the expected healed split geometry");
+    }
+
+    // Model a session converted before synthetic-gap absorption was available:
+    // session_meta records the v2 projection, but the converted synthetic row is
+    // still between stored compartment ranges. The latest compartment end is the
+    // tail cache's lower bound, and it sits above the synthetic row in this arm.
+    const gapDb = new Database(fixture.contextDbPath);
+    try {
+        const update = gapDb
+            .prepare(
+                "UPDATE compartments SET end_message = ? WHERE session_id = ? AND sequence = ? AND end_message = ?",
+            )
+            .run(
+                splitOrdinal,
+                sessionId,
+                healedGapCompartment.sequence,
+                syntheticGapOrdinal,
+            );
+        if (update.changes !== 1) throw new Error("failed to recreate the stored synthetic gap");
+    } finally {
+        gapDb.close();
+    }
+    const longArmBaselineCompartments = readCompartments(fixture, sessionId);
+    const tailCacheCoveredFromOrdinal = longArmBaselineCompartments.at(-1)?.endMessage;
+    if (
+        tailCacheCoveredFromOrdinal === undefined ||
+        tailCacheCoveredFromOrdinal <= syntheticGapOrdinal
+    ) {
+        throw new Error("the long conversion arm did not place the synthetic gap below the tail cache");
+    }
+    const longArmBaselineCompartmentSequence = Math.max(
+        ...longArmBaselineCompartments.map((row) => row.sequence),
+    );
 
     for (const pass of [2, 3, 4, 5]) await promptV2(`defer pass ${pass} on the converted store`);
     const forwardFolds = await until(
@@ -816,8 +869,15 @@ beforeAll(async () => {
             (compartment) =>
                 compartment.endMessageId !== null && !v1MessageIds.has(compartment.endMessageId),
         );
+    const longArmHistorianRequestsBefore = mock
+        .requests()
+        .filter((request) => isHistorianRequest(request.body)).length;
     for (let turn = 1; turn <= 8; turn += 1) {
         await promptV2(`2.x turn ${turn}: content only this host's store holds. ${ballast(3_000)}`);
+    }
+    const tailCacheCoveredToOrdinalBeforePressure = v2Projection(fixture, sessionId).at(-1)?.ordinal;
+    if (tailCacheCoveredToOrdinalBeforePressure === undefined) {
+        throw new Error("the long conversion arm has no raw-message tail");
     }
     await driveHistorian(
         promptV2,
@@ -825,6 +885,16 @@ beforeAll(async () => {
         () => tailOnlyCompartment() !== undefined,
     );
     const tailCompartment = tailOnlyCompartment()!;
+    const longArmHistorianRequestCount =
+        mock.requests().filter((request) => isHistorianRequest(request.body)).length -
+        longArmHistorianRequestsBefore;
+    const existingValidationFailureLines = readFileSync(fixture.logPath("v2"), "utf8")
+        .split("\n")
+        .filter(
+            (line) =>
+                line.includes(sessionId) &&
+                line.includes("historian failure: source=existing-validation"),
+        );
 
     await promptV2("2.x tail turn one");
     await promptV2("2.x tail turn two");
@@ -926,7 +996,13 @@ beforeAll(async () => {
         splitMessageId,
         syntheticRowId,
         v1MaxCompartmentSequence: Math.max(...v1Compartments.map((row) => row.sequence)),
+        longArmBaselineCompartmentSequence,
         postFlipCompartmentSequence: tailCompartment.sequence,
+        syntheticGapOrdinal,
+        tailCacheCoveredFromOrdinal,
+        tailCacheCoveredToOrdinalBeforePressure,
+        longArmHistorianRequestCount,
+        existingValidationFailureLines,
         forward: {
             rebaseLines: forwardRebaseLines,
             generation: forwardGeneration,
@@ -976,6 +1052,9 @@ beforeAll(async () => {
     console.log(`[issue-492] forward folds: ${JSON.stringify(forwardFolds)}`);
     console.log(`[issue-492] back folds: ${JSON.stringify(backFolds)}`);
     console.log(`[issue-492] back pins: ${JSON.stringify(backPins)}`);
+    console.log(
+        `[issue-492] long synthetic-gap arm: gap=${syntheticGapOrdinal} tail-cache=${tailCacheCoveredFromOrdinal}-${tailCacheCoveredToOrdinalBeforePressure} historian_requests=${longArmHistorianRequestCount} existing_validation_failures=${existingValidationFailureLines.length}`,
+    );
     console.log(`[issue-492] served head (way back): ${servedHeadBack}`);
     console.log(`[issue-492] doctor (between):\n${doctorProjectionLines(doctorBetween)}`);
     console.log(`[issue-492] doctor (after):\n${doctorProjectionLines(doctorAfter)}`);
@@ -1009,9 +1088,17 @@ test("the conversion split is healed between compartments and the historian publ
     );
     expect(healedPrevious?.endMessageId).toBe(evidence.splitMessageId);
     expect(following).toBeDefined();
-    expect(evidence.postFlipCompartmentSequence).toBeGreaterThan(
-        evidence.v1MaxCompartmentSequence,
+
+    expect(evidence.syntheticGapOrdinal).toBe(syntheticOrdinal!);
+    expect(evidence.tailCacheCoveredFromOrdinal).toBeGreaterThan(evidence.syntheticGapOrdinal);
+    expect(evidence.tailCacheCoveredToOrdinalBeforePressure).toBeGreaterThan(
+        evidence.tailCacheCoveredFromOrdinal,
     );
+    expect(evidence.longArmHistorianRequestCount).toBeGreaterThan(0);
+    expect(evidence.postFlipCompartmentSequence).toBeGreaterThan(
+        evidence.longArmBaselineCompartmentSequence,
+    );
+    expect(evidence.existingValidationFailureLines).toEqual([]);
 });
 
 test("the forward flip logs exactly one rebase that rewrote at least one coordinate", () => {

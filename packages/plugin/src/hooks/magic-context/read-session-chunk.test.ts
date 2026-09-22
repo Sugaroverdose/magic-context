@@ -6,14 +6,19 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { v2NonNarrativeStoredGapRanges } from "./compartment-runner-incremental";
 import { validateHistorianOutput } from "./compartment-runner-validation";
 import {
     getProtectedTailStartOrdinal,
     getRawSessionMessageIdsThrough,
+    primeTailRawMessageCache,
+    readRawSessionMessageRange,
     readRawSessionMessages,
     readSessionChunk,
+    withRawMessageProvider,
     withRawSessionMessageCache,
 } from "./read-session-chunk";
+import type { RawMessage } from "./read-session-raw";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -224,6 +229,133 @@ describe("readSessionChunk", () => {
 
         const freshRead = readRawSessionMessages("ses-cache");
         expect(freshRead).toHaveLength(2);
+    });
+
+    it("reads outside tail-cache coverage without replacing the cached tail", () => {
+        const sessionId = "ses-tail-coverage";
+        const messages: RawMessage[] = Array.from({ length: 120 }, (_, index) => ({
+            id: `m-${index + 1}`,
+            ordinal: index + 1,
+            role: index % 2 === 0 ? "user" : "assistant",
+            parts: [{ type: "text", text: `turn ${index + 1}` }],
+        }));
+        let providerPageReads = 0;
+        let providerFullReads = 0;
+
+        withRawMessageProvider(
+            sessionId,
+            {
+                readMessages: () => {
+                    providerFullReads += 1;
+                    return messages;
+                },
+                getMessageCount: () => messages.length,
+                readMessagePage: (afterOrdinal, limit, finalWatermark) => {
+                    providerPageReads += 1;
+                    return messages
+                        .filter(
+                            (message) =>
+                                message.ordinal > afterOrdinal && message.ordinal <= finalWatermark,
+                        )
+                        .slice(0, limit);
+                },
+            },
+            () =>
+                withRawSessionMessageCache(() => {
+                    expect(
+                        primeTailRawMessageCache({
+                            sessionId,
+                            lastCompartmentEnd: 100,
+                            anchorMessageId: "m-100",
+                        }),
+                    ).toBe(true);
+
+                    providerPageReads = 0;
+                    expect(
+                        readRawSessionMessageRange(sessionId, 50, 50).map((row) => row.id),
+                    ).toEqual(["m-50"]);
+                    expect(providerPageReads).toBe(1);
+
+                    providerPageReads = 0;
+                    expect(
+                        readRawSessionMessageRange(sessionId, 95, 102).map((row) => row.id),
+                    ).toEqual(["m-95", "m-96", "m-97", "m-98", "m-99", "m-100", "m-101", "m-102"]);
+                    expect(providerPageReads).toBe(1);
+
+                    expect(readRawSessionMessages(sessionId)).toHaveLength(120);
+                    expect(providerFullReads).toBe(1);
+
+                    providerPageReads = 0;
+                    expect(
+                        readRawSessionMessageRange(sessionId, 110, 112).map((row) => row.id),
+                    ).toEqual(["m-110", "m-111", "m-112"]);
+                    expect(providerPageReads).toBe(0);
+                }),
+        );
+    });
+
+    it("heals a v2 synthetic gap below tail-cache coverage", () => {
+        const sessionId = "ses-v2-gap-below-tail";
+        const synthetic: RawMessage = {
+            id: "m-44587-synthetic",
+            ordinal: 44_587,
+            role: "user",
+            storeType: "synthetic",
+            parts: [{ type: "text", text: "<system-reminder>converted note</system-reminder>" }],
+        };
+        const tail = Array.from({ length: 7 }, (_, index): RawMessage => {
+            const ordinal = 44_600 + index;
+            return {
+                id: `m-${ordinal}`,
+                ordinal,
+                role: ordinal % 2 === 0 ? "user" : "assistant",
+                parts: [{ type: "text", text: `tail ${ordinal}` }],
+            };
+        });
+        const providerRows = [synthetic, ...tail];
+        const db = new Database(":memory:");
+        db.exec(
+            "CREATE TABLE session_meta (session_id TEXT PRIMARY KEY, coordinate_rebase_notice TEXT)",
+        );
+        db.prepare(
+            "INSERT INTO session_meta (session_id, coordinate_rebase_notice) VALUES (?, ?)",
+        ).run(sessionId, JSON.stringify({ generation: "v2", previousGeneration: "v1", at: 1 }));
+
+        try {
+            const healed = withRawMessageProvider(
+                sessionId,
+                {
+                    readMessages: () => providerRows,
+                    getMessageCount: () => 44_606,
+                    readMessagePage: (afterOrdinal, limit, finalWatermark) =>
+                        providerRows
+                            .filter(
+                                (message) =>
+                                    message.ordinal > afterOrdinal &&
+                                    message.ordinal <= finalWatermark,
+                            )
+                            .slice(0, limit),
+                },
+                () =>
+                    withRawSessionMessageCache(() => {
+                        expect(
+                            primeTailRawMessageCache({
+                                sessionId,
+                                lastCompartmentEnd: 44_600,
+                                anchorMessageId: "m-44600",
+                            }),
+                        ).toBe(true);
+                        return v2NonNarrativeStoredGapRanges(db, sessionId, [
+                            { startMessage: 44_473, endMessage: 44_586 },
+                            { startMessage: 44_588, endMessage: 44_606 },
+                        ]);
+                    }),
+            );
+
+            expect(healed).toEqual([{ start: 44_587, end: 44_587 }]);
+        } finally {
+            closeQuietly(db);
+        }
     });
 
     it("returns raw message ids through an ordinal", () => {

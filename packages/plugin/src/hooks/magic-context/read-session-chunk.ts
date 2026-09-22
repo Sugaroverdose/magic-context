@@ -86,7 +86,14 @@ function estimateBlockTokens(blockText: string): number {
     return count;
 }
 
-let activeRawMessageCache: Map<string, RawMessage[]> | null = null;
+interface RawMessageCacheEntry {
+    messages: RawMessage[];
+    coveredFromOrdinal: number;
+    /** Inclusive coverage end; null means the whole session snapshot was read. */
+    coveredToOrdinal: number | null;
+}
+
+let activeRawMessageCache: Map<string, RawMessageCacheEntry> | null = null;
 // Parallel to activeRawMessageCache, lifecycle-bound to the same scope. Holds the
 // ABSOLUTE session message count when the cached array is a TAIL-ONLY slice (so
 // `.length` would undercount). Consumers that need the true total read it via
@@ -251,12 +258,18 @@ export function withRawSessionMessageCache<T>(fn: () => T): T {
 export function readRawSessionMessages(sessionId: string): RawMessage[] {
     if (activeRawMessageCache) {
         const cached = activeRawMessageCache.get(sessionId);
-        if (cached) {
-            return cached;
+        if (cached?.coveredFromOrdinal === 1 && cached.coveredToOrdinal === null) {
+            return cached.messages;
         }
 
         const messages = readRawSessionMessagesFromSource(sessionId);
-        activeRawMessageCache.set(sessionId, messages);
+        if (!cached) {
+            activeRawMessageCache.set(sessionId, {
+                messages,
+                coveredFromOrdinal: 1,
+                coveredToOrdinal: null,
+            });
+        }
         return messages;
     }
 
@@ -303,7 +316,42 @@ export function getRawSessionMessageOrdinalCount(sessionId: string): number {
 
 const RAW_MESSAGE_RANGE_PAGE_SIZE = 100;
 
-/** Read only the requested absolute-ordinal interval when the provider supports paging. */
+function readRawSessionMessageRangeFromSource(
+    sessionId: string,
+    fromOrdinal: number,
+    toOrdinal: number,
+): RawMessage[] {
+    const provider = sessionProviders.get(sessionId);
+    if (provider && !provider.readMessagePage) {
+        return provider
+            .readMessages()
+            .filter((message) => message.ordinal >= fromOrdinal && message.ordinal <= toOrdinal);
+    }
+    if (!provider && !openCodeDbExists()) return [];
+
+    const messages: RawMessage[] = [];
+    let afterOrdinal = fromOrdinal - 1;
+    while (afterOrdinal < toOrdinal) {
+        const limit = Math.min(RAW_MESSAGE_RANGE_PAGE_SIZE, toOrdinal - afterOrdinal);
+        const page = provider?.readMessagePage
+            ? provider.readMessagePage(afterOrdinal, limit, toOrdinal)
+            : withReadOnlySessionDb((db) =>
+                  readRawSessionMessagePageFromDb(db, sessionId, afterOrdinal, limit, toOrdinal),
+              );
+        if (page.length === 0) break;
+        let nextOrdinal = afterOrdinal;
+        for (const message of page) {
+            if (message.ordinal < fromOrdinal || message.ordinal > toOrdinal) continue;
+            messages.push(message);
+            nextOrdinal = Math.max(nextOrdinal, message.ordinal);
+        }
+        if (nextOrdinal <= afterOrdinal) break;
+        afterOrdinal = nextOrdinal;
+    }
+    return messages;
+}
+
+/** Read the requested absolute-ordinal interval from cache and source as needed. */
 export function readRawSessionMessageRange(
     sessionId: string,
     fromOrdinal: number,
@@ -314,34 +362,26 @@ export function readRawSessionMessageRange(
     if (to < from) return [];
 
     const cached = activeRawMessageCache?.get(sessionId);
-    if (cached) {
-        return cached.filter((message) => message.ordinal >= from && message.ordinal <= to);
-    }
+    if (!cached) return readRawSessionMessageRangeFromSource(sessionId, from, to);
 
-    const provider = sessionProviders.get(sessionId);
-    if (!provider?.readMessagePage) {
-        return readRawSessionMessages(sessionId).filter(
-            (message) => message.ordinal >= from && message.ordinal <= to,
-        );
+    const coveredTo = cached.coveredToOrdinal ?? Number.POSITIVE_INFINITY;
+    const overlapFrom = Math.max(from, cached.coveredFromOrdinal);
+    const overlapTo = Math.min(to, coveredTo);
+    if (overlapTo < overlapFrom) {
+        return readRawSessionMessageRangeFromSource(sessionId, from, to);
     }
 
     const messages: RawMessage[] = [];
-    let afterOrdinal = from - 1;
-    while (afterOrdinal < to) {
-        const page = provider.readMessagePage(
-            afterOrdinal,
-            Math.min(RAW_MESSAGE_RANGE_PAGE_SIZE, to - afterOrdinal),
-            to,
-        );
-        if (page.length === 0) break;
-        let nextOrdinal = afterOrdinal;
-        for (const message of page) {
-            if (message.ordinal < from || message.ordinal > to) continue;
-            messages.push(message);
-            nextOrdinal = Math.max(nextOrdinal, message.ordinal);
-        }
-        if (nextOrdinal <= afterOrdinal) break;
-        afterOrdinal = nextOrdinal;
+    if (from < overlapFrom) {
+        messages.push(...readRawSessionMessageRangeFromSource(sessionId, from, overlapFrom - 1));
+    }
+    messages.push(
+        ...cached.messages.filter(
+            (message) => message.ordinal >= overlapFrom && message.ordinal <= overlapTo,
+        ),
+    );
+    if (overlapTo < to) {
+        messages.push(...readRawSessionMessageRangeFromSource(sessionId, overlapTo + 1, to));
     }
     return messages;
 }
@@ -351,9 +391,8 @@ readRawSessionMessages.getCount = getRawSessionMessageOrdinalCount;
 
 /**
  * Prime the active raw-message cache with a TAIL-ONLY read (only messages
- * at/after the last compartment boundary), so subsequent
- * `readRawSessionMessages(sessionId)` calls in this scope reuse it instead of
- * reading the whole session.
+ * at/after the last compartment boundary), so subsequent bounded reads inside
+ * that interval reuse it instead of reading the whole session.
  *
  * This is the O(tail) path: the compartment-trigger boundary resolution is
  * offset-forward only (its candidate / suffix / range / head-cap / chunk-scan
@@ -366,11 +405,10 @@ readRawSessionMessages.getCount = getRawSessionMessageOrdinalCount;
  * downstream absolute-ordinal computation matches the full read; the true total
  * is stashed in the parallel absolute-count cache for `.length`-style consumers.
  *
- * No-op (returns false) when a provider is registered (Pi: in-memory branch read
- * is already cheap and authoritative), no OpenCode DB exists, the cache is
- * already populated, or no usable boundary anchor exists (e.g. no compartments,
- * or the anchor message was deleted) — in which case the caller falls through to
- * the full read, which is correct (everything is eligible / nothing to skip).
+ * No-op (returns false) when the active provider cannot page and count, no
+ * OpenCode DB exists, the cache is already populated, or no usable boundary
+ * anchor exists (e.g. no compartments, or the anchor message was deleted) — in
+ * which case the caller falls through to the source read.
  */
 export function primeTailRawMessageCache(args: {
     sessionId: string;
@@ -398,7 +436,11 @@ export function primeTailRawMessageCache(args: {
             anchorMessageId
         )
             return false;
-        activeRawMessageCache.set(sessionId, messages);
+        activeRawMessageCache.set(sessionId, {
+            messages,
+            coveredFromOrdinal: lastCompartmentEnd,
+            coveredToOrdinal: lastCompartmentEnd === 1 ? null : absoluteMessageCount,
+        });
         activeAbsoluteCountCache?.set(sessionId, absoluteMessageCount);
         return true;
     }
@@ -408,7 +450,11 @@ export function primeTailRawMessageCache(args: {
         readRawSessionTailFromDb(db, sessionId, lastCompartmentEnd, anchorMessageId),
     );
     if (!result) return false; // anchor not found → caller uses full read
-    activeRawMessageCache.set(sessionId, result.messages);
+    activeRawMessageCache.set(sessionId, {
+        messages: result.messages,
+        coveredFromOrdinal: lastCompartmentEnd,
+        coveredToOrdinal: lastCompartmentEnd === 1 ? null : result.absoluteMessageCount,
+    });
     activeAbsoluteCountCache?.set(sessionId, result.absoluteMessageCount);
     return true;
 }
@@ -446,7 +492,12 @@ export function primeInMemoryTailRawMessageCache(args: {
     const { sessionId, messages, absoluteMessageCount } = args;
     if (!activeRawMessageCache) return false;
     if (activeRawMessageCache.has(sessionId)) return false;
-    activeRawMessageCache.set(sessionId, messages);
+    const coveredFromOrdinal = messages[0]?.ordinal ?? absoluteMessageCount + 1;
+    activeRawMessageCache.set(sessionId, {
+        messages,
+        coveredFromOrdinal,
+        coveredToOrdinal: coveredFromOrdinal === 1 ? null : absoluteMessageCount,
+    });
     activeAbsoluteCountCache?.set(sessionId, absoluteMessageCount);
     return true;
 }
