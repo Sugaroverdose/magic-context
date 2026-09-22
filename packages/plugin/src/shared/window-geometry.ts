@@ -692,14 +692,19 @@ export function formatWindowDerivationLine(
     inputTokens: number,
     result: WindowGeometryResult,
 ): string {
-    const percentage = result.usableSoft > 0 ? (inputTokens / result.usableSoft) * 100 : 0;
     const reserveLabel =
         result.derivation.reserveSource === "wall_margin"
             ? "wall margin"
             : result.derivation.reserveSource === "none"
               ? "reserve"
               : "output reserve";
-    return `Context: ${formatCompactTokens(inputTokens)} / ${formatCompactTokens(result.usableSoft)} usable (${percentage.toFixed(1)}%) — window ${formatCompactTokens(result.derivation.window)} − ${formatCompactTokens(result.derivation.reserve)} ${reserveLabel} [${result.geometry}]`;
+    // One line at the dialog's narrowest width, and no geometry vocabulary: the
+    // bracketed derivation tag (`[shared_truncating]`) names an internal
+    // window-geometry mode, and the percentage is already on the headline row
+    // above this one. The `Context:` prefix is dropped for the same reason — it
+    // pushed the line past the narrowest dialog's content width, where it
+    // wrapped onto a second row.
+    return `${formatCompactTokens(inputTokens)} / ${formatCompactTokens(result.usableSoft)} usable · window ${formatCompactTokens(result.derivation.window)} · ${formatCompactTokens(result.derivation.reserve)} ${reserveLabel}`;
 }
 
 export function formatCompactTokens(value: number): string {

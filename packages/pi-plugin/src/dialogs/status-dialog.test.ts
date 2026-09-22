@@ -509,9 +509,11 @@ Warning: History compression could not finish this turn. It will retry automatic
 			const text = rendered.flat().join("\n");
 			expect(text).not.toContain("Work tokens");
 			// The window derivation is now drawn as the shared line every host
-			// prints verbatim, instead of Pi's own "Window …" rewrite of it.
-			expect(text).toContain("Context:");
-			expect(text).toContain("usable");
+			// prints verbatim, instead of Pi's own "Window …" rewrite of it. The
+			// line no longer carries a `Context:` prefix: it pushed the line past
+			// the narrowest dialog's content width, where it wrapped.
+			expect(text).toContain("usable · window");
+			expect(text).not.toContain("Context:");
 		} finally {
 			closeQuietly(db);
 		}

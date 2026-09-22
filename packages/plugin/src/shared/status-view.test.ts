@@ -310,6 +310,21 @@ describe("status view model", () => {
         expect(distributeBarWidths([5, 4, 3, 2, 1], 3)).toEqual([1, 1, 1, 0, 0]);
     });
 
+    /**
+     * The window line is one line at the dialog's narrowest width and carries no
+     * window-geometry vocabulary: the bracketed derivation tag names an internal
+     * mode, and the percentage is already on the headline row above it.
+     */
+    test("prints the window line without the derivation tag or a second percentage", () => {
+        const line = view().windowLine ?? "";
+        expect(line).toBe("623k / 872k usable · window 904k · 32k output reserve");
+        expect(line).not.toContain("[");
+        expect(line).not.toContain("%");
+        // The narrowest dialog content width is 56 columns (an 88-column dialog
+        // less its padding); a longer line wraps onto a second row.
+        expect(line.length).toBeLessThanOrEqual(56);
+    });
+
     test("breaks the context down by category, with counts and percentages", () => {
         expect(view().breakdown.map((row) => `${row.label} ${row.value}`)).toEqual([
             "System 12K (1.9%)",
