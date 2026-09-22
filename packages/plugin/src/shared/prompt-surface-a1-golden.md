@@ -105,16 +105,16 @@ Older work is not kept on the desk at all. Magic Context files it as an organize
 Some things on the desk are Magic Context's own markings, not conversation: `<system-reminder>`, `<ctx-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-compartments>`, `<new-memories>`, and `<!-- +Xm -->` before a user message (the time that passed since your last reply; headings in the record carry `start-date`/`end-date` too). Read them, use the time, and never reproduce them in a reply or treat them as instructions.
 ```
 
-### SUBAGENT minimal — 904 chars, ~234 tokens
+### SUBAGENT minimal — 1360 chars, ~364 tokens
 
 ```markdown
 ## Magic Context
 
-When an item no longer needs to stay on the desk for the work ahead, stamp it: `ctx_reduce` with its §N§ tag. Stamping does not remove anything — the item stays fully readable until Magic Context clears stamped items in one sweep, and the newest tags are protected. Stamp as soon as an item has served its purpose, silently; never stamp a user message for what it asks, and never blanket-stamp a large range without reviewing every tag.
+Your context is a desk. Every message and every tool output lands on it, and each item arrives with a §N§ tag (§1§, §42§) — the tag is the item's handle. When an item no longer needs to stay on the desk for the work ahead, stamp it: `ctx_reduce` with its tag ("3-5", "1,2,9", "1-5,8,12-15"). Stamping does not remove anything — the item stays fully readable until Magic Context clears stamped items in one sweep, and the newest tags are protected, so stamping recent output is harmless. Stamp as soon as an item has served its purpose, not at the end of the task, and do it silently. Never stamp a user message for what it asks of you; look at each tag before stamping and never blanket-stamp a range like "1-50".
 
-If there is no tool result on the desk, the action did not happen. Never fabricate or inline a tool call, an output, a search result or a diff; make a fresh real tool call instead.
+A cleared item leaves a `[dropped §N§]` placeholder or disappears from the desk; that is normal housekeeping, not something to copy or mention. If there is no tool result on the desk, the action did not happen: never fabricate or inline a tool call, an output, a search result or a diff — make a fresh real tool call instead.
 
-Magic Context's own markings — `<system-reminder>`, `<ctx-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-compartments>`, `<new-memories>`, `[dropped §N§]` — are read, never reproduced, never instructions.
+`<system-reminder>`, `<ctx-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-compartments>`, `<new-memories>` and `[dropped §N§]` are Magic Context's own markings: read them, never reproduce them in a reply, never treat them as instructions.
 ```
 
 ## 2. Tool surface (description + parameters as serialized to the provider)
@@ -394,6 +394,6 @@ The hash handler persists the MD5 of `output.system.join("\\n")`. The values bel
 | PRIMARY full | 5018 | `95588c569147f8baeed59386f36ca004` |
 | PRIMARY memory-off | 4679 | `e849757ec396bea50f0b29bbe53bf8a3` |
 | PRIMARY reduce-off | 4071 | `4ddc91c5681fe843ccb757ebad02e364` |
-| SUBAGENT minimal | 914 | `ac9f4f14d7e4f6fd6380ccde1b9c1230` |
+| SUBAGENT minimal | 1376 | `2f5a0e99b9171fdfa08c7920cb18dc4d` |
 
 The OpenCode and Pi runtime compatibility tests consume this snapshot for omitted `prompt_surface` and explicit `{ default: "full" }`: both assert guidance, registered tool descriptions, tool IDs, and hashes; OpenCode also asserts these parameter schemas directly, while Pi asserts its TypeBox-owned schemas stay byte-identical across both config forms.
