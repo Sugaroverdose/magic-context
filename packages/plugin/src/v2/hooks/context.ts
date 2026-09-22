@@ -679,7 +679,11 @@ export async function registerContext(context: V2Context) {
                 rawProviders.set(
                     draft.sessionID,
                     setRawMessageProvider(draft.sessionID, {
-                        readMessages: () => pagedRead(draft.sessionID),
+                        readMessages: () => {
+                            throw new Error(
+                                "OpenCode 2 per-pass raw history must use bounded provider operations; full readMessages() is reserved for store-generation conversion",
+                            );
+                        },
                         readMessagePage: (afterOrdinal, limit, finalWatermark) =>
                             pagedRead.readPage(
                                 draft.sessionID,
@@ -687,7 +691,18 @@ export async function registerContext(context: V2Context) {
                                 limit,
                                 finalWatermark,
                             ),
+                        readMessageById: (messageId) =>
+                            pagedRead.findById(draft.sessionID, messageId),
+                        readMessagePartsById: (messageId) =>
+                            pagedRead.findById(draft.sessionID, messageId),
+                        readMessageOrdinalById: (messageId) =>
+                            pagedRead.ordinalOf(draft.sessionID, messageId),
+                        readMessageIdOrdinalsForRange: (fromOrdinal, toOrdinal) =>
+                            pagedRead.ordinalMapForRange(draft.sessionID, fromOrdinal, toOrdinal),
+                        readMessageOrdinalPage: (after, limit) =>
+                            pagedRead.readOrdinalPage(draft.sessionID, after, limit),
                         getMessageCount: () => pagedRead.getCount(draft.sessionID),
+                        getStoredMessageCount: () => pagedRead.getStoredCount(draft.sessionID),
                     }),
                 );
             transform ??= createTransform({

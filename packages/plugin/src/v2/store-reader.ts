@@ -91,6 +91,16 @@ export interface V2StoreReaderDebugCounters {
     operations: Record<string, V2StoreReaderDebugOperation>;
 }
 
+export interface V2MessageOrdinalAnchor {
+    timeCreated: number;
+    id: string;
+}
+
+export interface V2MessageOrdinalEntry extends V2MessageOrdinalAnchor {
+    contributesOrdinal: boolean;
+    hasValidInfo: boolean;
+}
+
 const debugSymbol = Symbol.for(V2_STORE_READER_DEBUG_COUNTER_KEY);
 const debugGlobal = globalThis as typeof globalThis & {
     [key: symbol]: V2StoreReaderDebugCounters | undefined;
@@ -277,6 +287,117 @@ export class V2StoreReader {
                 )
                 .get(sessionID, ...RAW_MESSAGE_TYPES) as { count?: number } | undefined;
             return typeof row?.count === "number" ? row.count : 0;
+        });
+    }
+
+    storedMessageCount(sessionID: string): number {
+        return trackDecodeOperation("storedMessageCount", () => {
+            const row = this.db
+                .prepare("SELECT COUNT(*) AS count FROM session_message WHERE session_id = ?")
+                .get(sessionID) as { count?: number } | undefined;
+            return typeof row?.count === "number" ? row.count : 0;
+        });
+    }
+
+    messageById(sessionID: string, id: string): StoreRow | null {
+        return trackDecodeOperation("messageById", () => {
+            const rawTypes = RAW_MESSAGE_TYPES.map(() => "?").join(", ");
+            const row = this.db
+                .prepare(
+                    `SELECT id, session_id, type, seq, data FROM session_message
+                     WHERE session_id = ? AND id = ? AND type IN (${rawTypes}) LIMIT 1`,
+                )
+                .get(sessionID, id, ...RAW_MESSAGE_TYPES) as RawRow | undefined;
+            return row ? decode(row) : null;
+        });
+    }
+
+    messageOrdinalById(sessionID: string, id: string): number | null {
+        return trackDecodeOperation("messageOrdinalById", () => {
+            const rawTypes = RAW_MESSAGE_TYPES.map(() => "?").join(", ");
+            const row = this.db
+                .prepare(
+                    `WITH target AS (
+                        SELECT seq FROM session_message
+                        WHERE session_id = ? AND id = ? AND type IN (${rawTypes})
+                        LIMIT 1
+                    )
+                    SELECT (
+                        SELECT COUNT(*) FROM session_message
+                        WHERE session_id = ?
+                          AND type IN (${rawTypes})
+                          AND seq <= target.seq
+                    ) AS ordinal
+                    FROM target`,
+                )
+                .get(sessionID, id, ...RAW_MESSAGE_TYPES, sessionID, ...RAW_MESSAGE_TYPES) as
+                | { ordinal?: number }
+                | undefined;
+            return typeof row?.ordinal === "number" ? row.ordinal : null;
+        });
+    }
+
+    messageIdOrdinals(
+        sessionID: string,
+        fromOrdinal: number,
+        toOrdinal: number,
+    ): Map<string, number> {
+        return trackDecodeOperation("messageIdOrdinals", () => {
+            if (!Number.isSafeInteger(fromOrdinal) || fromOrdinal < 1)
+                throw new Error("Invalid raw-message range start");
+            if (!Number.isSafeInteger(toOrdinal) || toOrdinal < fromOrdinal)
+                throw new Error("Invalid raw-message range end");
+            const rawTypes = RAW_MESSAGE_TYPES.map(() => "?").join(", ");
+            const rows = this.db
+                .prepare(
+                    `SELECT id FROM session_message
+                     WHERE session_id = ? AND type IN (${rawTypes})
+                     ORDER BY seq ASC LIMIT ? OFFSET ?`,
+                )
+                .all(
+                    sessionID,
+                    ...RAW_MESSAGE_TYPES,
+                    toOrdinal - fromOrdinal + 1,
+                    fromOrdinal - 1,
+                ) as Array<{ id: string }>;
+            return new Map(rows.map((row, index) => [row.id, fromOrdinal + index]));
+        });
+    }
+
+    messageOrdinalPage(
+        sessionID: string,
+        after: V2MessageOrdinalAnchor | null,
+        limit: number,
+    ): V2MessageOrdinalEntry[] {
+        return trackDecodeOperation("messageOrdinalPage", () => {
+            if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000)
+                throw new Error("Invalid page limit");
+            const rows = (
+                after
+                    ? this.db
+                          .prepare(
+                              `SELECT id, type, seq, json_valid(data) AS valid
+                               FROM session_message
+                               WHERE session_id = ? AND (seq > ? OR (seq = ? AND id > ?))
+                               ORDER BY seq ASC, id ASC LIMIT ?`,
+                          )
+                          .all(sessionID, after.timeCreated, after.timeCreated, after.id, limit)
+                    : this.db
+                          .prepare(
+                              `SELECT id, type, seq, json_valid(data) AS valid
+                               FROM session_message
+                               WHERE session_id = ?
+                               ORDER BY seq ASC, id ASC LIMIT ?`,
+                          )
+                          .all(sessionID, limit)
+            ) as Array<{ id: string; type: MessageType; seq: number; valid: number }>;
+            const rawTypes = new Set<MessageType>(RAW_MESSAGE_TYPES);
+            return rows.map((row) => ({
+                id: row.id,
+                timeCreated: row.seq,
+                contributesOrdinal: rawTypes.has(row.type),
+                hasValidInfo: row.valid === 1,
+            }));
         });
     }
 

@@ -53,7 +53,7 @@ import { StateSyncTiming, timedStateSyncDatabase } from "./module-state-sync-tim
 import { isModuleTransportGenerationChangedResult } from "./module-transport";
 import { MODULE_PAGE_MAX_BYTES, moduleRawBlockMappings, moduleWireBodyBytes } from "./module-wire";
 import {
-    readRawSessionMessageIdOrdinals,
+    readRawSessionMessageIdOrdinalsForRange,
     readRawSessionMessageOrdinalById,
     readRawSessionMessagePartsById,
     readRawSessionSeedTail,
@@ -1622,12 +1622,10 @@ export async function buildModuleStateSyncPayload(args: {
                 );
             } else if (previousBoundaryId === null) {
                 if (firstRawOrdinal === undefined) {
-                    const ordinals = [
-                        ...readRawSessionMessageIdOrdinals(args.pass.sessionId).values(),
-                    ]
-                        .filter((ordinal) => ordinal >= 1)
-                        .sort((left, right) => left - right);
-                    firstRawOrdinal = ordinals[0] ?? null;
+                    firstRawOrdinal =
+                        readRawSessionMessageIdOrdinalsForRange(args.pass.sessionId, 1, 1)
+                            .values()
+                            .next().value ?? null;
                 }
                 startOrdinal = firstRawOrdinal;
                 if (startOrdinal !== null) {

@@ -53,7 +53,7 @@ export default { id: "bounded-reader-observer", async setup(context) {
 	};
 }
 
-test("the first OpenCode 2 context pass decodes at most one raw-message page", async () => {
+test("a compartment-heavy first OpenCode 2 pass decodes at most four raw-message pages", async () => {
 	const observer = decodeCounterObserver();
 	const host = await spawnOpencode2({ probePlugin: observer.root });
 	try {
@@ -77,6 +77,12 @@ test("the first OpenCode 2 context pass decodes at most one raw-message page", a
 					"SELECT MAX(seq) AS seq FROM session_message WHERE session_id = ?",
 				)
 				.get(session.id) as { seq: number | null };
+			const initialRaw = store
+				.prepare(
+					"SELECT COUNT(*) AS count FROM session_message WHERE session_id = ? AND type IN ('user', 'synthetic', 'assistant', 'skill', 'shell', 'system')",
+				)
+				.get(session.id) as { count: number };
+			expect(initialRaw.count).toBe(0);
 			// The running host owns its in-memory next-seq counter. Leave a large gap so
 			// its prompt rows cannot collide with fixture rows inserted after startup.
 			const firstSeq = (latest.seq ?? -1) + 1_000_000;
@@ -102,6 +108,47 @@ test("the first OpenCode 2 context pass decodes at most one raw-message page", a
 			store.close();
 		}
 
+		const contextStore = new Database(
+			join(host.env.XDG_DATA_HOME!, "cortexkit", "magic-context", "context.db"),
+		);
+		try {
+			contextStore
+				.prepare(
+					"INSERT OR IGNORE INTO session_meta (session_id, harness) VALUES (?, 'opencode2')",
+				)
+				.run(session.id);
+			contextStore
+				.prepare(
+					"UPDATE session_meta SET coordinate_generation = 'v2', protected_tail_policy_version = 3 WHERE session_id = ?",
+				)
+				.run(session.id);
+			const insertCompartment = contextStore.prepare(
+				`INSERT INTO compartments
+					(session_id, sequence, start_message, end_message, start_message_id,
+					 end_message_id, title, content, p1, p2, p3, p4, importance,
+					 legacy, created_at, harness, rebase_status)
+				 VALUES (?, ?, ?, ?, ?, ?, 'seed', 'seed summary', 'seed', 'seed',
+					 'seed', 'seed', 50, 0, ?, 'opencode2', 'ok')`,
+			);
+			contextStore.transaction(() => {
+				for (let index = 0; index < 50; index++) {
+					const start = index * 98 + 1;
+					const end = (index + 1) * 98;
+					insertCompartment.run(
+						session.id,
+						index + 1,
+						start,
+						end,
+						`msg_bounded_seed_${start - 1}`,
+						`msg_bounded_seed_${end - 1}`,
+						1_800_000_000_000 + index,
+					);
+				}
+			})();
+		} finally {
+			contextStore.close();
+		}
+
 		host.mock.setDefault({
 			text: "bounded read complete",
 			usage: { input_tokens: 100, output_tokens: 10 },
@@ -124,7 +171,10 @@ test("the first OpenCode 2 context pass decodes at most one raw-message page", a
 			expect(operation.maxDecodedRows).toBeLessThanOrEqual(100);
 		}
 		expect(counters.operations.messageCount?.decodedRows ?? 0).toBe(0);
-		expect(counters.decodedRows).toBeLessThanOrEqual(100);
+		// Keep decoded data within four 100-row pages: the test only needs the current
+		// 101-row tail plus bounded snapshot/chunk rechecks, never the 5,000 historical
+		// rows or a decoded traversal of all 50 compartment boundaries.
+		expect(counters.decodedRows).toBeLessThanOrEqual(400);
 	} catch (error) {
 		console.error(host.stderr().slice(-8_000), JSON.stringify(observer.frames()));
 		throw error;

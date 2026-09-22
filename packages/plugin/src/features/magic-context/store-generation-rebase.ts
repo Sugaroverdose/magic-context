@@ -1,4 +1,7 @@
-import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
+import {
+    isStrictGapHealingMessage,
+    type RawMessage,
+} from "../../hooks/magic-context/read-session-raw";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { clearIndexedMessagesInTransaction, ensureMessagesIndexed } from "./message-index";
@@ -42,6 +45,8 @@ export interface StoreGenerationRebaseOutcome {
     queuedReductionsDiscarded: number;
     lkgSlotsDropped: number;
     frozenPartEntriesDropped: number;
+    healedGaps: number;
+    narrativeGaps: number;
 }
 
 /**
@@ -56,6 +61,8 @@ export interface CoordinateRebaseNotice {
     unresolvedCompartments: number;
     discardedReductions: number;
     droppedDepthRows: number;
+    healedGaps: number;
+    narrativeGaps: number;
 }
 
 function emptyOutcome(
@@ -85,6 +92,8 @@ function emptyOutcome(
         queuedReductionsDiscarded: 0,
         lkgSlotsDropped: 0,
         frozenPartEntriesDropped: 0,
+        healedGaps: 0,
+        narrativeGaps: 0,
     };
 }
 
@@ -163,6 +172,8 @@ export function readCoordinateRebaseNotice(
             unresolvedCompartments: count(record.unresolvedCompartments),
             discardedReductions: count(record.discardedReductions),
             droppedDepthRows: count(record.droppedDepthRows),
+            healedGaps: count(record.healedGaps),
+            narrativeGaps: count(record.narrativeGaps),
         };
     } catch {
         return null;
@@ -187,6 +198,16 @@ export function formatCoordinateRebaseNotice(notice: CoordinateRebaseNotice): st
     }
     if (notice.droppedDepthRows > 0) {
         parts.push(`${notice.droppedDepthRows} compression-depth records were rebuilt from zero`);
+    }
+    if (notice.healedGaps > 0) {
+        parts.push(
+            `${notice.healedGaps} non-narrative compartment gap${notice.healedGaps === 1 ? " was" : "s were"} healed`,
+        );
+    }
+    if (notice.narrativeGaps > 0) {
+        parts.push(
+            `${notice.narrativeGaps} narrative compartment gap${notice.narrativeGaps === 1 ? " remains" : "s remain"} for review`,
+        );
     }
     return parts.length === 0 ? null : parts.join("; ");
 }
@@ -238,17 +259,25 @@ interface PlannedNote {
 interface Projection {
     ordinalById: Map<string, number>;
     partCountById: Map<string, number>;
+    nonNarrativeOrdinals: Set<number>;
     messageCount: number;
 }
 
 function buildProjection(messages: readonly RawMessage[]): Projection {
     const ordinalById = new Map<string, number>();
     const partCountById = new Map<string, number>();
+    const nonNarrativeOrdinals = new Set<number>();
     for (const message of messages) {
         ordinalById.set(message.id, message.ordinal);
         partCountById.set(message.id, Array.isArray(message.parts) ? message.parts.length : 0);
+        if (isStrictGapHealingMessage(message)) nonNarrativeOrdinals.add(message.ordinal);
     }
-    return { ordinalById, partCountById, messageCount: messages.length };
+    return {
+        ordinalById,
+        partCountById,
+        nonNarrativeOrdinals,
+        messageCount: messages.length,
+    };
 }
 
 /** The message id an anchor block id (`<messageId>#<block>`) names. */
@@ -308,6 +337,37 @@ function planCompartments(
             previousStatus,
         };
     });
+}
+
+function healNonNarrativeCompartmentGaps(
+    plans: PlannedCompartment[],
+    projection: Projection,
+): { healed: number; narrative: number } {
+    let healed = 0;
+    let narrative = 0;
+    for (let index = 1; index < plans.length; index += 1) {
+        const previous = plans[index - 1];
+        const current = plans[index];
+        if (!previous || !current || previous.status !== "ok" || current.status !== "ok") continue;
+        const gapStart = previous.end + 1;
+        const gapEnd = current.start - 1;
+        if (gapEnd < gapStart) continue;
+
+        let safeToHeal = true;
+        for (let ordinal = gapStart; ordinal <= gapEnd; ordinal += 1) {
+            if (!projection.nonNarrativeOrdinals.has(ordinal)) {
+                safeToHeal = false;
+                break;
+            }
+        }
+        if (safeToHeal) {
+            previous.end = gapEnd;
+            healed += 1;
+        } else {
+            narrative += 1;
+        }
+    }
+    return { healed, narrative };
 }
 
 function compartmentPlanChanges(plan: PlannedCompartment): boolean {
@@ -493,6 +553,8 @@ export function rebaseSessionCoordinates(
     const recompRows = readCompartmentRows(db, "recomp_compartments", sessionId);
     const compartmentPlans = planCompartments(compartmentRows, "compartments", projection);
     const recompPlans = planCompartments(recompRows, "recomp_compartments", projection);
+    const compartmentGapResult = healNonNarrativeCompartmentGaps(compartmentPlans, projection);
+    const recompGapResult = healNonNarrativeCompartmentGaps(recompPlans, projection);
     const notePlans = planNotes(db, sessionId, projection);
 
     // Tags carry the message id plus the part index the text sat at. A host that
@@ -545,6 +607,8 @@ export function rebaseSessionCoordinates(
     const boundaryPlan = planPriorBoundary(db, sessionId, compartmentPlans);
     const partialRangePlan = planRecompPartialRange(db, sessionId, recompPlans);
 
+    outcome.healedGaps = compartmentGapResult.healed + recompGapResult.healed;
+    outcome.narrativeGaps = compartmentGapResult.narrative + recompGapResult.narrative;
     const movedCompartments = compartmentPlans.filter(compartmentPlanChanges);
     const movedRecomp = recompPlans.filter(compartmentPlanChanges);
     const movedNotes = notePlans.filter((plan) => plan.ordinal !== plan.previousOrdinal);
@@ -555,7 +619,9 @@ export function rebaseSessionCoordinates(
         shrunkMessages.length > 0 ||
         indexNeedsRebuild ||
         boundaryPlan !== null ||
-        partialRangePlan !== null;
+        partialRangePlan !== null ||
+        outcome.healedGaps > 0 ||
+        outcome.narrativeGaps > 0;
 
     if (!anythingMoved) {
         // The projection agrees with every saved coordinate. Recording it is the
@@ -657,6 +723,8 @@ export function rebaseSessionCoordinates(
                 outcome.compartmentsUnresolved + outcome.recompCompartmentsUnresolved,
             discardedReductions: outcome.queuedReductionsDiscarded,
             droppedDepthRows: outcome.compressionDepthRowsDropped,
+            healedGaps: outcome.healedGaps,
+            narrativeGaps: outcome.narrativeGaps,
         });
         db.exec("COMMIT");
         committed = true;
@@ -706,6 +774,7 @@ export function formatRebaseLogLine(
         `INFO store-generation-rebase ${outcome.previousGeneration ?? "unrecorded"}->${outcome.generation} ` +
         `rows_rewritten=${rowsRewritten} unresolved=${unresolved} ` +
         `index_rows_rebuilt=${outcome.indexRowsRebuilt} drops_discarded=${outcome.queuedReductionsDiscarded} ` +
+        `healed_gaps=${outcome.healedGaps} narrative_gaps=${outcome.narrativeGaps} ` +
         `ms=${Math.round(elapsedMs)} ` +
         `(chunk_windows_deleted=${outcome.chunkEmbeddingsDeleted} depth_rows_dropped=${outcome.compressionDepthRowsDropped} ` +
         `part_tags_folded=${outcome.partTagsFolded} lkg_slots_dropped=${outcome.lkgSlotsDropped} ` +

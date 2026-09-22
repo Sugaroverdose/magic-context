@@ -111,7 +111,8 @@ interface Evidence {
     splitMessageId: string;
     /** The row 2.0.5 derived from that turn; absent from the 1.x tables by construction. */
     syntheticRowId: string;
-    v1CompartmentEndOrdinal: number;
+    v1MaxCompartmentSequence: number;
+    postFlipCompartmentSequence: number;
     forward: FlipEvidence;
     back: FlipEvidence;
     doctorBetween: string;
@@ -182,6 +183,62 @@ function readCompartments(fixture: ConversionFixture, sessionId: string) {
            FROM compartments WHERE session_id = ? ORDER BY sequence`,
         sessionId,
     );
+}
+
+function placeSyntheticSplitBetweenCompartments(
+    fixture: ConversionFixture,
+    sessionId: string,
+    splitMessageId: string,
+): void {
+    const projection = v1Projection(fixture, sessionId);
+    const split = projection.find((message) => message.id === splitMessageId);
+    const next = projection.find((message) => message.ordinal === (split?.ordinal ?? 0) + 1);
+    if (!split || !next) throw new Error("the synthetic split source has no following v1 message");
+
+    const db = new Database(fixture.contextDbPath);
+    try {
+        const rows = db
+            .prepare(
+                `SELECT id, sequence, start_message, end_message
+                   FROM compartments WHERE session_id = ? ORDER BY sequence`,
+            )
+            .all(sessionId) as Array<{
+            id: number;
+            sequence: number;
+            start_message: number;
+            end_message: number;
+        }>;
+        const existingIndex = rows.findIndex((row) => row.end_message === split.ordinal);
+        if (existingIndex >= 0 && rows[existingIndex + 1]?.start_message === split.ordinal + 1) return;
+        const source = rows.find(
+            (row) => row.start_message <= split.ordinal && row.end_message > split.ordinal,
+        );
+        if (!source) throw new Error("no published compartment can be split at the synthetic turn");
+
+        db.transaction(() => {
+            db.prepare(
+                "UPDATE compartments SET sequence = sequence + 1000 WHERE session_id = ? AND sequence > ?",
+            ).run(sessionId, source.sequence);
+            db.prepare(
+                "UPDATE compartments SET sequence = sequence - 999 WHERE session_id = ? AND sequence > ?",
+            ).run(sessionId, source.sequence + 1000);
+            db.prepare(
+                `INSERT INTO compartments
+                    (session_id, sequence, start_message, end_message, start_message_id,
+                     end_message_id, title, content, p1, p2, p3, p4, importance,
+                     episode_type, legacy, created_at, harness, rebase_status)
+                 SELECT session_id, ?, ?, end_message, ?, end_message_id, title, content,
+                        p1, p2, p3, p4, importance, episode_type, legacy, created_at,
+                        harness, rebase_status
+                   FROM compartments WHERE id = ?`,
+            ).run(source.sequence + 1, split.ordinal + 1, next.id, source.id);
+            db.prepare(
+                "UPDATE compartments SET end_message = ?, end_message_id = ? WHERE id = ?",
+            ).run(split.ordinal, split.id, source.id);
+        })();
+    } finally {
+        db.close();
+    }
 }
 
 function readFtsRows(fixture: ConversionFixture, sessionId: string) {
@@ -535,7 +592,6 @@ beforeAll(async () => {
         30_000,
     );
 
-    const v1Compartments = readCompartments(fixture, sessionId);
     const syntheticParts = (() => {
         const db = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
         try {
@@ -555,6 +611,8 @@ beforeAll(async () => {
         );
     }
     const splitMessageId = syntheticParts[0]!.id;
+    placeSyntheticSplitBetweenCompartments(fixture, sessionId, splitMessageId);
+    const v1Compartments = readCompartments(fixture, sessionId);
 
     // A reduction driven through the real tool rather than inserted, because the
     // part-tag fold the rebase performs only has to respect drops the agent
@@ -601,7 +659,6 @@ beforeAll(async () => {
     // this projection is one the way back will still resolve, and leaving it out
     // would make the search below pick the wrong compartment as the 2.x-only one.
     const v1Before = v1Projection(fixture, sessionId);
-    const v1EndOrdinal = v1Compartments[v1Compartments.length - 1]!.endMessage;
     const markerEvidence = (() => {
         const db = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
         try {
@@ -868,7 +925,8 @@ beforeAll(async () => {
         sessionId,
         splitMessageId,
         syntheticRowId,
-        v1CompartmentEndOrdinal: v1EndOrdinal,
+        v1MaxCompartmentSequence: Math.max(...v1Compartments.map((row) => row.sequence)),
+        postFlipCompartmentSequence: tailCompartment.sequence,
         forward: {
             rebaseLines: forwardRebaseLines,
             generation: forwardGeneration,
@@ -936,16 +994,24 @@ test("OpenCode 2 converts the completed MC marker and serves only its retained t
     expect(evidence.firstConvertedInput).not.toContain(evidence.preBoundarySentinel);
 });
 
-test("the conversion really split a 1.x turn inside the published compartment", () => {
+test("the conversion split is healed between compartments and the historian publishes afterward", () => {
     expect(evidence.syntheticRowId).not.toBe("");
     const projection = new Map(evidence.forward.projection.map((m) => [m.id, m.ordinal]));
     const splitOrdinal = projection.get(evidence.splitMessageId);
     const syntheticOrdinal = projection.get(evidence.syntheticRowId);
     expect(splitOrdinal).toBeDefined();
     expect(syntheticOrdinal).toBe(splitOrdinal! + 1);
-    // The compartment the 1.x historian published ends after the split, which is
-    // what makes its saved end ordinal wrong under the converted projection.
-    expect(evidence.v1CompartmentEndOrdinal).toBeGreaterThan(splitOrdinal!);
+    const healedPrevious = evidence.forward.compartments.find(
+        (compartment) => compartment.endMessage === syntheticOrdinal,
+    );
+    const following = evidence.forward.compartments.find(
+        (compartment) => compartment.startMessage === syntheticOrdinal! + 1,
+    );
+    expect(healedPrevious?.endMessageId).toBe(evidence.splitMessageId);
+    expect(following).toBeDefined();
+    expect(evidence.postFlipCompartmentSequence).toBeGreaterThan(
+        evidence.v1MaxCompartmentSequence,
+    );
 });
 
 test("the forward flip logs exactly one rebase that rewrote at least one coordinate", () => {
@@ -966,7 +1032,15 @@ test("every compartment endpoint resolves to the row its endpoint id names", () 
     for (const compartment of evidence.forward.compartments) {
         expect(compartment.rebaseStatus).toBe("ok");
         expect(compartment.endMessageId).toBeString();
-        expect(projection.get(compartment.endMessageId!)).toBe(compartment.endMessage);
+        const endpointOrdinal = projection.get(compartment.endMessageId!);
+        if (compartment.endMessageId === evidence.splitMessageId) {
+            const syntheticOrdinal = projection.get(evidence.syntheticRowId);
+            expect(endpointOrdinal).toBeDefined();
+            expect(syntheticOrdinal).toBe(endpointOrdinal! + 1);
+            expect(compartment.endMessage).toBe(syntheticOrdinal!);
+        } else {
+            expect(endpointOrdinal).toBe(compartment.endMessage);
+        }
         expect(projection.get(compartment.startMessageId!)).toBe(compartment.startMessage);
     }
 });
