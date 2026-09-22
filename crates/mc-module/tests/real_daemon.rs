@@ -37,6 +37,7 @@ struct LiveDaemon {
     child: Child,
     runtime_dir: PathBuf,
     config_dir: PathBuf,
+    data_home: PathBuf,
     connection_file: PathBuf,
 }
 
@@ -46,6 +47,15 @@ impl Drop for LiveDaemon {
         let _ = self.child.wait();
         let _ = fs::remove_dir_all(&self.runtime_dir);
         let _ = fs::remove_dir_all(&self.config_dir);
+        // The seeded store and the daemon's log live here. Keep them when the test is
+        // failing so the run can be diagnosed; otherwise remove them and the now-empty
+        // temp root, which previously leaked ~1.4 MB into the temp dir per run.
+        if !std::thread::panicking() {
+            let _ = fs::remove_dir_all(&self.data_home);
+            if let Some(root) = self.runtime_dir.parent() {
+                let _ = fs::remove_dir(root);
+            }
+        }
     }
 }
 
@@ -105,7 +115,7 @@ async fn mc_transform_spine_through_real_daemon() {
     // reads it. No test-only wire surface.
     seed_store(&data_home);
 
-    let daemon = spawn_daemon(&daemon_bin, &runtime_dir, &config_dir);
+    let daemon = spawn_daemon(&daemon_bin, &runtime_dir, &config_dir, &data_home);
     wait_for_connection_file(&daemon.connection_file, START_TIMEOUT).await;
 
     let mut module = spawn_module(&module_bin, &daemon.connection_file, &data_home);
@@ -459,10 +469,20 @@ async fn call_raw(consumer: &SubcConsumer, session: &str, body: Value) -> Value 
     serde_json::from_slice(&bytes).unwrap()
 }
 
-fn spawn_daemon(daemon_bin: &Path, runtime_dir: &Path, config_dir: &Path) -> LiveDaemon {
+fn spawn_daemon(
+    daemon_bin: &Path,
+    runtime_dir: &Path,
+    config_dir: &Path,
+    data_home: &Path,
+) -> LiveDaemon {
     let child = Command::new(daemon_bin)
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .env("XDG_CONFIG_HOME", config_dir)
+        // The daemon derives `cortexkit/run` (including `logs/`) from the data home, not
+        // the runtime dir. Without this, a test daemon's log sink resolves to the host's
+        // real `~/.local/share/cortexkit/run/logs/subc.log` and interleaves test boots
+        // with production ones. Sharing the module's data home mirrors production layout.
+        .env("XDG_DATA_HOME", data_home)
         .env("SUBC_PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -473,6 +493,7 @@ fn spawn_daemon(daemon_bin: &Path, runtime_dir: &Path, config_dir: &Path) -> Liv
         child,
         runtime_dir: runtime_dir.to_path_buf(),
         config_dir: config_dir.to_path_buf(),
+        data_home: data_home.to_path_buf(),
         connection_file: runtime_dir.join("subc-connection.json"),
     }
 }
