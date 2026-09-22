@@ -62,6 +62,7 @@ function historianResponseDumpDir(directory: string): string {
     return getProjectMagicContextHistorianDir(directory);
 }
 const MAX_HISTORIAN_RETRIES = 2;
+const unknownProducerWindows = new Set<string>();
 
 const HISTORIAN_REASONING_PART_TYPES = new Set(["reasoning", "thinking", "redacted_thinking"]);
 
@@ -567,22 +568,34 @@ async function runHistorianPrompt(args: {
                                         : COMPARTMENT_AGENT_SYSTEM_PROMPT,
                                     args.language,
                                 );
+                                const contextLimitTokens = selected
+                                    ? getSdkContextLimit(
+                                          selected.providerID,
+                                          selected.modelID,
+                                          undefined,
+                                          { reservation: "none" },
+                                      )
+                                    : undefined;
                                 const failure = producerPromptFailureReason({
                                     sourceLocal: estimateTokens(prompt),
                                     systemLocal: estimateTokens(system),
                                     toolsLocal: 0,
                                     modelKey,
-                                    contextLimitTokens: selected
-                                        ? getSdkContextLimit(
-                                              selected.providerID,
-                                              selected.modelID,
-                                              undefined,
-                                              { reservation: "none" },
-                                          )
-                                        : undefined,
+                                    contextLimitTokens,
                                     maxOutputTokens: args.maxOutputTokens ?? 32000,
                                 });
                                 if (failure) throw new Error(failure);
+                                if (
+                                    modelKey &&
+                                    contextLimitTokens === undefined &&
+                                    !unknownProducerWindows.has(modelKey)
+                                ) {
+                                    unknownProducerWindows.add(modelKey);
+                                    shared.sessionLog(
+                                        parentSessionId,
+                                        `producer window unknown for ${modelKey}: sending unguarded`,
+                                    );
+                                }
                                 return executor.attempt(opened, request);
                             },
                             { childSessionId: opened.childSessionId },
