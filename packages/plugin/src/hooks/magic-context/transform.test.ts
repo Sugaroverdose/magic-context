@@ -64,6 +64,7 @@ import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/mod
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import type { MarkerUpdateOutcome } from "./compaction-marker-manager";
+import { registerActiveCompartmentRun } from "./compartment-runner";
 import { injectM0M1 } from "./inject-compartments";
 import { captureSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { __ignoredNotificationTest } from "./send-session-notification";
@@ -4068,6 +4069,93 @@ describe("createTransform historian failure handling", () => {
         expect(
             loadProtectedTailMeta(db, "ses-empty-head-escape-95").recoveryNoEligibleHeadCount,
         ).toBe(2);
+    });
+
+    it("fails closed with a visible reason when a bounded historian join cannot prove fit", async () => {
+        useTempDataHome("transform-bounded-historian-fail-closed-");
+        const sessionId = "ses-bounded-historian-fail-closed";
+        createOpenCodeDbForTransform(sessionId, [
+            { id: "m-raw-1", role: "user", text: "recent history" },
+        ]);
+        await refreshModelLimitsFromApi({
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            {
+                                id: "test-provider",
+                                models: { "join-100k": { limit: { input: 100_000 } } },
+                            },
+                        ],
+                    },
+                }),
+            },
+        });
+        recordToolDefinition("test-provider", "join-100k", "build", "read", "Read a file", {
+            type: "object",
+        });
+        const db = openDatabase();
+        updateSessionMeta(db, sessionId, { systemPromptTokens: 110_000 });
+        let finishHistorian!: () => void;
+        registerActiveCompartmentRun(
+            sessionId,
+            new Promise<void>((resolve) => {
+                finishHistorian = resolve;
+            }),
+        );
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "defer" as const) },
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 96, inputTokens: 96_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTokens: 0,
+            historianTimeoutMs: 5,
+            client: {
+                session: {
+                    get: mock(async () => ({ data: { directory: "/tmp", title: "Join" } })),
+                    prompt: mock(async () => ({})),
+                },
+            } as unknown as PluginContext["client"],
+            directory: "/tmp",
+            liveModelBySession: new Map([
+                [sessionId, { providerID: "test-provider", modelID: "join-100k" }],
+            ]),
+            getModelKey: () => "test-provider/join-100k",
+            getNotificationParams: () => ({
+                agent: "build",
+                providerId: "test-provider",
+                modelId: "join-100k",
+            }),
+        });
+
+        try {
+            await expect(
+                transform(
+                    {},
+                    {
+                        messages: [
+                            {
+                                info: { id: "m-user", role: "user", sessionID: sessionId },
+                                parts: [{ type: "text", text: "continue" }],
+                            },
+                        ],
+                    },
+                ),
+            ).rejects.toThrow(
+                "historian did not complete within 0.005 s: background historian is still running",
+            );
+        } finally {
+            finishHistorian();
+        }
     });
 
     it("does not abort solely because historian failures exist at 95%", async () => {
