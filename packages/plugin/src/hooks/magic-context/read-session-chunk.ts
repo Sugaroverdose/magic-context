@@ -291,7 +291,11 @@ export function getRawSessionMessageOrdinalCount(sessionId: string): number {
     const provider = sessionProviders.get(sessionId);
     if (provider) {
         if (provider.getMessageCount) return provider.getMessageCount();
-        return provider.readMessages().length;
+        const messages = provider.readMessages();
+        return messages.reduce(
+            (maximum, message) => Math.max(maximum, message.ordinal),
+            messages.length,
+        );
     }
     if (!openCodeDbExists()) return 0;
     return withReadOnlySessionDb((db) => countRawSessionMessageOrdinalsFromDb(db, sessionId));
@@ -599,7 +603,11 @@ export function getRawSessionMessageCount(sessionId: string): number {
     const provider = sessionProviders.get(sessionId);
     if (provider) {
         if (provider.getMessageCount) return provider.getMessageCount();
-        return provider.readMessages().length;
+        const messages = provider.readMessages();
+        return messages.reduce(
+            (maximum, message) => Math.max(maximum, message.ordinal),
+            messages.length,
+        );
     }
     if (!openCodeDbExists()) return 0;
     return withReadOnlySessionDb((db) => getRawSessionMessageCountFromDb(db, sessionId));
