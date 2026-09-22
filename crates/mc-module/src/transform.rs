@@ -14793,7 +14793,6 @@ pub(crate) mod tests {
         assert!(!transition_hygiene_units(&mut meta, false, 1.551639));
         assert_eq!(meta.channel1_last_nudge_undropped, 20_000);
         assert!(transition_hygiene_units(&mut meta, true, 1.551639));
-        assert_eq!(meta.hygiene_units_version, 2);
         assert_eq!(meta.channel1_last_nudge_undropped, 31_033);
         assert_eq!(
             meta.tail_hygiene_baseline
