@@ -26,6 +26,11 @@ export interface UserStatusSummary {
         indexed: number;
         total: number;
     };
+    historianRefusal?: {
+        stage: string;
+        canonicalCause: string;
+        detail: string;
+    };
     warnings: UserFacingFailureKey[];
 }
 
@@ -87,6 +92,7 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
             indexed: 0,
             total: 0,
         },
+        historianRefusal: detail.historianRefusal,
         warnings: [...new Set(warnings)],
     };
 }
@@ -142,7 +148,7 @@ export function renderUserStatusSummary(
     const context = `${summary.usagePercentage.toFixed(1)}% of usable context (${formatCount(summary.inputTokens)} / ${
         summary.usableContextTokens > 0 ? formatCount(summary.usableContextTokens) : "?"
     } tokens)`;
-    const values = [
+    const values: Array<readonly [string, string]> = [
         ["Context", context],
         ["Cache lifetime", summary.cacheLifetime],
         [
@@ -158,7 +164,13 @@ export function renderUserStatusSummary(
             `${formatCount(summary.memoryCount)} memories · ${formatCount(summary.noteCount)} notes`,
         ],
         ["Search indexing", embeddingText(summary)],
-    ] as const;
+    ];
+    if (summary.historianRefusal) {
+        values.push([
+            "Historian refusal",
+            `${summary.historianRefusal.stage} (${summary.historianRefusal.canonicalCause}) — ${summary.historianRefusal.detail}`,
+        ]);
+    }
     const lines =
         style === "markdown"
             ? [
