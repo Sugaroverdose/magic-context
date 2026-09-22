@@ -36,6 +36,7 @@ import {
     addTrailingBlankDecisions,
     armThinkingBindingRecovery,
     clearThinkingBindingRecoveryIf,
+    getCompactionMarkerHealth,
     getMergedReasoningStrippedIds,
     getPersistedCompactionMarkerState,
     getPersistedTodoPermissionDenied,
@@ -1007,6 +1008,145 @@ describe("deferred compaction marker representation", () => {
             ctxReduceAvailability: { callable: false, frozen: true },
         });
         expect(JSON.stringify(replay)).toBe(firstBytes);
+    });
+
+    it("retries a retained marker on every defer and serves byte-identical output", () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-rust-marker-retry-every-defer";
+        const dataHome = mkdtempSync(join(tmpdir(), "postprocess-rust-marker-retry-"));
+        tempDirs.push(dataHome);
+        process.env.XDG_DATA_HOME = dataHome;
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 10,
+                startMessageId: "msg-start",
+                endMessageId: "msg-boundary",
+                title: "history",
+                content: "stable",
+            },
+        ]);
+        setPendingCompactionMarkerState(db, sessionId, {
+            ordinal: 10,
+            endMessageId: "msg-boundary",
+            publishedAt: Date.now(),
+        });
+        const source = [
+            {
+                info: { role: "user", sessionID: sessionId, syntheticHead: true },
+                parts: [{ type: "text", text: "<session-history>stable</session-history>" }],
+            },
+            {
+                info: { id: "tail", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "new turn" }],
+            },
+        ] as unknown as MessageLike[];
+        const served: string[] = [];
+        for (let pass = 0; pass < 4; pass += 1) {
+            const messages = structuredClone(source);
+            runRustModePostprocess({
+                db,
+                sessionId,
+                messages,
+                sessionDirectory: dataHome,
+                fullFeatureMode: true,
+                tagger: createTagger(),
+                ctxReduceAvailability: { callable: false, frozen: true },
+            });
+            served.push(JSON.stringify(messages));
+            if (pass === 2) {
+                expect(getCompactionMarkerHealth(db, sessionId)).toMatchObject({
+                    code: "MC-C11",
+                    attempts: 3,
+                });
+                expect(getPendingCompactionMarkerState(db, sessionId)?.lastInjectError).toContain(
+                    "OpenCode database not found",
+                );
+            }
+        }
+        expect(new Set(served).size).toBe(1);
+    });
+
+    it("clears retry health when the second injection attempt succeeds", () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-rust-marker-retry-heals";
+        const dataHome = mkdtempSync(join(tmpdir(), "postprocess-rust-marker-heal-"));
+        tempDirs.push(dataHome);
+        process.env.XDG_DATA_HOME = dataHome;
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 10,
+                startMessageId: "msg-start",
+                endMessageId: "msg-boundary",
+                title: "history",
+                content: "stable",
+            },
+        ]);
+        setPendingCompactionMarkerState(db, sessionId, {
+            ordinal: 10,
+            endMessageId: "msg-boundary",
+            publishedAt: Date.now(),
+        });
+        setPersistedCompactionMarkerState(db, sessionId, {
+            boundaryMessageId: "msg-old-boundary",
+            summaryMessageId: "msg-old-summary",
+            compactionPartId: "prt-old-compaction",
+            summaryPartId: "prt-old-summary",
+            boundaryOrdinal: 5,
+            targetEndMessageId: "msg-old-boundary",
+        });
+        const messages = [
+            {
+                info: { id: "tail", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "new turn" }],
+            },
+        ] as unknown as MessageLike[];
+        const drain = (): string => {
+            const served = structuredClone(messages);
+            runRustModePostprocess({
+                db,
+                sessionId,
+                messages: served,
+                sessionDirectory: dataHome,
+                fullFeatureMode: true,
+                tagger: createTagger(),
+                ctxReduceAvailability: { callable: false, frozen: true },
+            });
+            return serializeAnthropicWireWithAdjacentAssistantMerge(served);
+        };
+
+        const failedAttemptBytes = drain();
+        expect(getPendingCompactionMarkerState(db, sessionId)?.injectAttempts).toBe(1);
+
+        mkdirSync(join(dataHome, "opencode"), { recursive: true });
+        const opencodeDb = new Database(join(dataHome, "opencode", "opencode.db"));
+        opencodeDb.exec(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
+        );
+        opencodeDb.exec(
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
+        );
+        opencodeDb
+            .prepare(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+            )
+            .run("msg-boundary", sessionId, 1_000, 1_000, JSON.stringify({ role: "user" }));
+        opencodeDb.close();
+
+        const healedAttemptBytes = drain();
+        expect(healedAttemptBytes).toBe(failedAttemptBytes);
+        expect(getPendingCompactionMarkerState(db, sessionId)).toBeNull();
+        expect(getCompactionMarkerHealth(db, sessionId)).toEqual({
+            code: null,
+            attempts: 0,
+            lastError: null,
+            pendingSinceMs: null,
+        });
     });
 
     it("keeps a provisional marker untagged and freezes the callable tag choice", () => {

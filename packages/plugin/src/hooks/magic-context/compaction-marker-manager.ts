@@ -17,10 +17,10 @@ import {
     compareOpenCodeMessagesByCanonicalOrder,
     findBoundaryUserMessage,
     getOpenCodeMessageById,
-    injectCompactionMarker,
     listSessionCompactionMarkers,
     removeCompactionMarker,
     removeForeignCompactionMarker,
+    replaceCompactionMarker,
 } from "../../features/magic-context/compaction-marker";
 import {
     getCompartments,
@@ -310,34 +310,10 @@ export function applyDeferredCompactionMarker(
             };
         }
 
-        // Remove old marker if present. `removeCompactionMarker` returns false
-        // only when the DELETE transaction itself failed (e.g. SQLITE_BUSY).
-        // Keep the summary id so its tag drops atomically when marker state advances.
+        // Replace both host-store row sets under one BEGIN IMMEDIATE. A busy
+        // store fails before deletion; any later failure rolls the deletion back.
         const removedSummaryMessageId = existing?.summaryMessageId ?? null;
-        // No-op success on already-missing rows is fine — that's why retry is
-        // safe. False here means we couldn't even attempt the delete cleanly;
-        // bail to retryable WITHOUT calling inject (avoids leaving two marker
-        // rows for the same boundary).
-        if (existing) {
-            const removed = removeCompactionMarker(existing);
-            if (!removed) {
-                return {
-                    kind: "retryable-failure",
-                    error: new Error(
-                        `failed to remove old compaction marker at ordinal ${existing.boundaryOrdinal}`,
-                    ),
-                };
-            }
-            sessionLog(
-                sessionId,
-                `compaction-marker drain: removed old boundary at ordinal ${existing.boundaryOrdinal}, advancing to ${pending.ordinal}`,
-            );
-        }
-
-        // Inject new marker. The boundary was pre-resolved above, so a null
-        // return here means the INSERT transaction failed and rolled back
-        // cleanly (no half-write); retrying is safe.
-        const result = injectCompactionMarker({
+        const result = replaceCompactionMarker(existing, {
             sessionId,
             endOrdinal: pending.ordinal,
             endMessageId: pending.endMessageId,
@@ -349,7 +325,7 @@ export function applyDeferredCompactionMarker(
             return {
                 kind: "retryable-failure",
                 error: new Error(
-                    `injectCompactionMarker returned null for ordinal ${pending.ordinal}; will retry`,
+                    `atomic marker replacement failed for ordinal ${pending.ordinal}; will retry`,
                 ),
             };
         }
@@ -459,30 +435,7 @@ export function updateCompactionMarkerAfterPublication(
         return false;
     }
 
-    if (existing) {
-        // Boundary moved forward — remove old marker and inject new one.
-        // removeCompactionMarker returns false on failure (it does NOT throw),
-        // so honor the boolean: only clear persisted state after a SUCCESSFUL
-        // removal. Clearing it on a failed removal would orphan the old marker
-        // rows AND, if the injection below also fails, lose the durable retry
-        // path entirely. On removal failure we abort WITHOUT clearing — the
-        // caller (and the next pass) can retry against the still-persisted state.
-        const removed = removeCompactionMarker(existing);
-        if (!removed) {
-            sessionLog(
-                sessionId,
-                `compaction-marker: failed to remove old boundary at ordinal ${existing.boundaryOrdinal}; preserving persisted state for retry (not injecting new marker this pass)`,
-            );
-            return false;
-        }
-        persistMarkerStateAndDropReplacedTag(db, sessionId, null, removedSummaryMessageId);
-        sessionLog(
-            sessionId,
-            `compaction-marker: removed old boundary at ordinal ${existing.boundaryOrdinal}, moving to ${lastCompartmentEnd}`,
-        );
-    }
-
-    const result = injectCompactionMarker({
+    const result = replaceCompactionMarker(existing, {
         sessionId,
         endOrdinal: lastCompartmentEnd,
         endMessageId: targetEndMessageId,

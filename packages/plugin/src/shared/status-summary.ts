@@ -31,6 +31,7 @@ export interface UserStatusSummary {
         canonicalCause: string;
         detail: string;
     };
+    compactionMarker?: StatusDetail["compactionMarker"];
     warnings: UserFacingFailureKey[];
 }
 
@@ -55,6 +56,7 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
         warnings.push("status_log_unavailable");
     }
     if (detail.memoryMirror?.stalled) warnings.push("memory_mirror_stalled");
+    if (detail.compactionMarker?.code) warnings.push("compaction_marker_missing");
     if (detail.memoryAuthorityMismatch) warnings.push("memory_authority_mismatch");
     if ((detail.dreamerFailures?.length ?? 0) > 0) warnings.push("dreamer_task_failing");
     // A whole maintenance pass that never reached its work is a different
@@ -93,6 +95,7 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
             total: 0,
         },
         historianRefusal: detail.historianRefusal,
+        compactionMarker: detail.compactionMarker,
         warnings: [...new Set(warnings)],
     };
 }
@@ -169,6 +172,12 @@ export function renderUserStatusSummary(
         values.push([
             "Historian refusal",
             `${summary.historianRefusal.stage} (${summary.historianRefusal.canonicalCause}) — ${summary.historianRefusal.detail}`,
+        ]);
+    }
+    if (summary.compactionMarker?.code) {
+        values.push([
+            "History boundary marker",
+            `${summary.compactionMarker.code} · ${summary.compactionMarker.attempts} attempts · last error: ${summary.compactionMarker.lastError ?? "unknown"}`,
         ]);
     }
     const lines =

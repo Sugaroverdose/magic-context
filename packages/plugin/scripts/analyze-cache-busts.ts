@@ -835,7 +835,22 @@ export function analyzeSnapshots(
                        previousTotal: prevTotal,
                        previousModel: previous.wireModel,
                        currentModel: current.wireModel,
-                       inheritedFold: attributionDecision !== decision,
+                       ocInputStepRatio: (() => {
+                           if (attributionDecision?.inputCount === undefined) return undefined;
+                           const recentCounts = decisions
+                               .filter(
+                                   (candidate) =>
+                                       candidate.inputCount !== undefined &&
+                                       candidate.inputCount > 0 &&
+                                       candidate.timestampMs < attributionDecision.timestampMs &&
+                                       attributionDecision.timestampMs - candidate.timestampMs <= 120_000,
+                               )
+                               .map((candidate) => candidate.inputCount as number);
+                           return recentCounts.length > 0
+                               ? attributionDecision.inputCount / Math.min(...recentCounts)
+                               : undefined;
+                       })(),
+                        inheritedFold: attributionDecision !== decision,
                       contentEvidence: [previous, current]
                           .flatMap((snapshot) =>
                               snapshot.segments.slice(

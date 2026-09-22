@@ -108,6 +108,11 @@
         "input": { "providerShortReadWithIdenticalPrefix": true }
     },
     {
+        "class": "self_inflicted_epoch",
+        "decision": { "materialized": true, "materializeReason": "epoch_change" },
+        "input": { "ocInputStepRatio": 24.8 }
+    },
+    {
         "class": "unaccounted_defer_pass",
         "decision": { "decision": "defer", "canonicalDecision": "defer" },
         "input": {}

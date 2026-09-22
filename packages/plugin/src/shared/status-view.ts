@@ -115,6 +115,12 @@ export interface StatusViewSource {
     readonly tagCountsAuthoritative?: boolean;
     readonly lastNudgeTokens: number;
     readonly pendingOpsCount: number;
+    readonly compactionMarker?: {
+        readonly code: "MC-C11" | null;
+        readonly attempts: number;
+        readonly lastError: string | null;
+        readonly pendingSinceMs: number | null;
+    };
     readonly protectedTagCount: number;
     readonly isSubagent: boolean;
     readonly cacheTtl: string;
@@ -458,6 +464,13 @@ function statusSections(source: StatusViewSource, now: number): StatusSection[] 
                     value: String(source.pendingOpsCount),
                     tone: source.pendingOpsCount > 0 ? "warning" : "muted",
                 },
+                {
+                    label: "Marker",
+                    value: source.compactionMarker?.code
+                        ? `${source.compactionMarker.code} · ${source.compactionMarker.attempts} attempts · ${source.compactionMarker.lastError ?? "unknown error"}`
+                        : "healthy",
+                    tone: source.compactionMarker?.code ? "warning" : "muted",
+                },
             ],
         },
         {
@@ -492,7 +505,10 @@ function warningBlock(source: StatusViewSource): StatusWarning[] {
             tone: "error" as const,
         })),
         ...(source.warnings ?? []).map((code) => ({
-            text: renderUserFacingFailure(code),
+            text:
+                code === "compaction_marker_missing" && source.compactionMarker?.code
+                    ? `${renderUserFacingFailure(code)} ${source.compactionMarker.attempts} attempts; last error: ${source.compactionMarker.lastError ?? "unknown"}.`
+                    : renderUserFacingFailure(code),
             tone: "warning" as const,
         })),
     ];
