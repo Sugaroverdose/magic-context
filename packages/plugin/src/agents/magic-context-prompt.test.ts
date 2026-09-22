@@ -26,8 +26,8 @@ describe("buildMagicContextSection — generic guidance", () => {
     it("does not emit legacy agent-tailored guidance", () => {
         const out = buildMagicContextSection("atlas", 20, true, false, false, false);
 
-        expect(out).toContain("### Reduction Triggers");
-        expect(out).toContain("Your current task requirements and constraints");
+        expect(out).toContain("### Your desk");
+        expect(out).toContain("no longer needs to stay on the desk for the work ahead");
         expect(out).not.toContain("CRITICAL — you run long sessions");
         expect(out).not.toContain("delegation tool outputs from completed waves");
         expect(out).not.toContain("council member response outputs");
@@ -79,9 +79,9 @@ describe("buildMagicContextSection — subagent mode", () => {
         const out = subagent();
         // Has the marker (injection idempotency) + the tag/ctx_reduce mechanics.
         expect(out).toContain("## Magic Context");
-        expect(out).toContain("§N§ identifiers");
+        expect(out).toContain("§N§ tag");
         expect(out).toContain("ctx_reduce");
-        expect(out).toContain("newest token-mass window");
+        expect(out).toContain("newest tags are protected");
     });
 
     it("OMITS the long-term-partner frame and primary-only guidance", () => {
@@ -99,7 +99,7 @@ describe("buildMagicContextSection — subagent mode", () => {
         const withSeven = buildMagicContextSection(null, 7, true, false, false, false, true);
         const withTwenty = buildMagicContextSection(null, 20, true, false, false, false, true);
         expect(withSeven).toBe(withTwenty);
-        expect(withSeven).toContain("newest token-mass window");
+        expect(withSeven).toContain("newest tags are protected");
     });
 
     it("is much shorter than the full primary block", () => {
@@ -132,8 +132,8 @@ describe("buildMagicContextSection: memory gating", () => {
             true,
         );
         expect(memOn).toBe(legacy);
-        expect(memOn).toContain("Use `ctx_memory`");
-        expect(memOn).toContain("**Save to memory proactively**");
+        expect(memOn).toContain("`<project-memory>` is the pinboard");
+        expect(memOn).toContain("`ctx_memory` pins a new one");
     });
 
     it("memory OFF drops ALL ctx_memory guidance but keeps ctx_search", () => {
@@ -149,10 +149,8 @@ describe("buildMagicContextSection: memory gating", () => {
             false,
         );
         expect(off).not.toContain("ctx_memory");
-        expect(off).not.toContain("Save to memory proactively");
-        expect(off).toContain("Use `ctx_search`");
-        // no dangling blank line where the block was removed
-        expect(off).not.toContain("\n\nUse `ctx_search`");
+        expect(off).not.toContain("pinboard");
+        expect(off).toContain("`ctx_search` searches the archive");
     });
 
     it("memory OFF gates the guidance in no-reduce mode too", () => {
@@ -168,7 +166,7 @@ describe("buildMagicContextSection: memory gating", () => {
             false,
         );
         expect(off).not.toContain("ctx_memory");
-        expect(off).toContain("Use `ctx_search`");
+        expect(off).toContain("`ctx_search` searches the archive");
     });
 });
 
@@ -247,15 +245,8 @@ describe("buildMagicContextSection — compaction-off guidance variant (#266 S4)
         const out = buildMagicContextSection(null, 20, false, false, false, false);
         // No ctx_reduce tool mention.
         expect(out).not.toContain("ctx_reduce");
-        // No §N§ prefix SYSTEM DESCRIPTION / advertising. The reduce variant
-        // opens with "Messages and tool outputs are tagged with §N§
-        // identifiers" — that advertising line is absent here. (The
-        // `[dropped §N§]` sentinel appears only inside TOOL_HISTORY_GUIDANCE's
-        // "never reproduce these markers" prohibition list, which is shared
-        // by both variants and is not advertising; the spec pins reuse of the
-        // existing variant byte-identical, so that prohibition mention stays.)
-        expect(out).not.toContain("tagged with §N§ identifiers");
-        expect(out).not.toContain("Use `ctx_reduce`");
+        expect(out).not.toContain("§N§");
+        expect(out).not.toContain("ctx_reduce");
         // No tag-based-recovery WORKFLOW wording. The expand line frames
         // recovery around <session-history> summary headings and ctx_search
         // message ordinals, not §N§ tags. "tag" appears only inside the
@@ -275,11 +266,9 @@ describe("buildMagicContextSection — compaction-off guidance variant (#266 S4)
 
     it("frames ctx_expand as recovery for summaries / ctx_search hits, not tag-based recovery", () => {
         const out = buildMagicContextSection(null, 20, false, false, false, false);
-        // The expand line in the no-reduce variant references <session-history>
-        // summary headings and ctx_search message ordinals — not §N§ tags.
-        expect(out).toContain("ctx_expand");
+        expect(out).toContain("ctx_expand(start, end)");
         expect(out).toContain("session-history");
-        expect(out).toContain("message ordinals");
+        expect(out).toContain("heading is a pointer into the archive");
     });
 
     it("the reduce variant DOES advertise §N§ and ctx_reduce (contrast for the off-mode assertion)", () => {
@@ -289,7 +278,7 @@ describe("buildMagicContextSection — compaction-off guidance variant (#266 S4)
         // still pass but the off-mode assertion above would go red.
         const reduce = buildMagicContextSection(null, 20, true, false, false, false);
         expect(reduce).toContain("ctx_reduce");
-        expect(reduce).toContain("tagged with §N§ identifiers");
+        expect(reduce).toContain("arrives with a §N§ tag");
     });
 });
 
@@ -333,8 +322,8 @@ describe("buildMagicContextSection — prompt-surface composition", () => {
 
         expect(explicitFull).toBe(implicit);
         expect(light).not.toBe(implicit);
-        expect(light).toContain("In primary sessions with ctx_reduce");
-        expect(light).toContain("NEVER narrate ctx_reduce");
+        expect(light).toContain("### Your desk");
+        expect(light).toContain("Stamp as soon as an item has served its purpose, silently");
         expect(light).toContain("DO NOT mimic this style");
         expect(light).toContain("Keep code, identifiers, file paths");
         expect(light).not.toContain("### Reduction Triggers");
@@ -364,26 +353,26 @@ describe("buildMagicContextSection — prompt-surface composition", () => {
             );
 
         const memoryOff = light({ memory: false });
-        expect(memoryOff).not.toContain("Use `ctx_memory`");
+        expect(memoryOff).not.toContain("`ctx_memory` pins");
         expect(memoryOff).toContain("ctx_search");
 
         const noReduce = light({ reduce: false });
-        expect(noReduce).not.toContain("In primary sessions with ctx_reduce");
-        expect(noReduce).not.toContain("drop grammar");
+        expect(noReduce).not.toContain("§N§");
+        expect(noReduce.slice(noReduce.indexOf("### Your desk"))).not.toContain("ctx_reduce");
 
         const gatedOff = light({ dreamer: false, temporal: false, caveman: false });
-        expect(gatedOff).not.toContain("surface_condition creates");
-        expect(gatedOff).not.toContain("**Temporal awareness**");
+        expect(gatedOff).not.toContain("a `surface_condition` leaves the note");
+        expect(gatedOff).not.toContain("<!-- +Xm -->");
         expect(gatedOff).not.toContain("**BEWARE**");
 
         const gatedOn = light({ dreamer: true, temporal: true, caveman: true, language: "tr" });
-        expect(gatedOn).toContain("surface_condition creates");
-        expect(gatedOn).toContain("**Temporal awareness**");
+        expect(gatedOn).toContain("a `surface_condition` leaves the note");
+        expect(gatedOn).toContain("<!-- +Xm -->");
         expect(gatedOn).toContain("**BEWARE**");
         expect(gatedOn).toContain("Keep code, identifiers, file paths");
 
         const subagent = light({ subagent: true });
-        expect(subagent).toContain("In bounded subagent sessions");
+        expect(subagent).toContain("Stamp a §N§-tagged item");
         expect(subagent).toContain("[dropped §N§]");
         expect(subagent).not.toContain("long-term partner");
         expect(subagent).not.toContain("ctx_search");
@@ -407,10 +396,10 @@ describe("buildMagicContextSection — prompt-surface composition", () => {
 
         expect(output.startsWith(override)).toBe(true);
         expect(output.match(/^## Magic Context$/gm)).toHaveLength(1);
-        expect(output).toContain("**Temporal awareness**");
+        expect(output).toContain("<!-- +Xm -->");
         expect(output).toContain("**BEWARE**: History compression is on");
         expect(output).toContain("Use Turkish (Türkçe) for your natural-language replies");
-        expect(output.indexOf("**Temporal awareness**")).toBeGreaterThan(
+        expect(output.indexOf("<!-- +Xm -->")).toBeGreaterThan(
             output.indexOf("User-owned primary guidance."),
         );
         expect(output).not.toContain("### Reduction Triggers");
@@ -432,7 +421,7 @@ describe("buildMagicContextSection — prompt-surface composition", () => {
             "## Magic Context\n\nPrimary override must not reach subagents.",
         );
 
-        expect(output).toContain("§N§ identifiers");
+        expect(output).toContain("§N§ tag");
         expect(output).not.toContain("Primary override must not reach subagents");
     });
 });
