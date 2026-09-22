@@ -26,7 +26,10 @@ export function usageReadingMatchesDraft(
     reading: UsageReading,
     draftModel: { providerID: string; id: string },
 ): boolean {
-    return reading.modelKey === undefined || reading.modelKey === `${draftModel.providerID}/${draftModel.id}`;
+    return (
+        reading.modelKey === undefined ||
+        reading.modelKey === `${draftModel.providerID}/${draftModel.id}`
+    );
 }
 
 /**

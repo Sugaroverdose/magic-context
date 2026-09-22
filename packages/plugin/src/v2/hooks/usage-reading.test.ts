@@ -33,9 +33,7 @@ test("a switch to a larger model admits on the outgoing window", () => {
     expect(reading?.modelKey).toBe("p/old");
     expect(reading?.admissionLimit).toBe(1_000_000);
     expect(reading!.inputTokens / reading!.admissionLimit).toBeLessThan(0.95);
-    expect(
-        usageReadingMatchesDraft(reading!, { providerID: "p", id: "new" }),
-    ).toBe(false);
+    expect(usageReadingMatchesDraft(reading!, { providerID: "p", id: "new" })).toBe(false);
 });
 
 test("same-model and legacy readings can drive outgoing pressure", () => {

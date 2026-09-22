@@ -94,7 +94,9 @@ describe("applyPendingOperations with protection window set form", () => {
         expect(db).toBeTruthy();
         insertTag(db!, SES, "call-protected", "tool", 4_000, 1);
 
-        let diagnostics: { total: number; mutated: number; reasons: Record<string, number> } | undefined;
+        let diagnostics:
+            | { total: number; mutated: number; reasons: Record<string, number> }
+            | undefined;
         const mutated = applyPendingOperations(
             SES,
             db!,
