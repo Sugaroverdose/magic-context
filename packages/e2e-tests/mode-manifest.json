@@ -472,6 +472,22 @@
             ]
         },
         {
+            "path": "tests/opencode2/bounded-raw-reads.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode 2 adapter reads raw history through bounded store queries (readPage/getCount and the provider id/ordinal lookups) instead of decoding every session_message row; it runs only in the dedicated v2 lane",
+            "contract_refs": [
+                "S2-MIGRATION",
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/converted-store-overwindow.test.ts",
             "tier": "excluded",
             "invocation": {
