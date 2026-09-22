@@ -293,6 +293,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
             resolvedSessionId: sessionId,
             historianChunkTokens: 25_000,
             historianTimeoutMs: 15,
+            skipAwaitForThisPass: true,
             compartmentDirectory: "/tmp",
             messages: [
                 { info: { id: "m1", role: "user" }, parts: [] },
@@ -403,6 +404,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
             resolvedSessionId: sessionId,
             historianChunkTokens: 25_000,
             historianTimeoutMs: 600_000,
+            skipAwaitForThisPass: true,
             compartmentDirectory: "/tmp",
             messages: [
                 { info: { id: "m1", role: "user" }, parts: [] },

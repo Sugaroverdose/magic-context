@@ -1617,8 +1617,6 @@ export function createTransform(deps: TransformDeps) {
             }
             return false;
         };
-        let skipCompartmentAwaitForThisPass = false;
-
         const startRecoveryRun = (): boolean => {
             const scale = emergencyUsagePercentageEarly >= 95 ? 0.25 : 0.5;
             let boundarySnapshot = getRunnableBoundaryForCompartment();
@@ -1688,7 +1686,6 @@ export function createTransform(deps: TransformDeps) {
                     deferredMaterializationSessions.add(sid);
                 },
             });
-            skipCompartmentAwaitForThisPass = true;
             return true;
         };
 
@@ -1699,7 +1696,6 @@ export function createTransform(deps: TransformDeps) {
             emergencyUsagePercentageEarly >= 95 &&
             !recoveryNoHeadEscapeActive
         ) {
-            skipCompartmentAwaitForThisPass = true;
             const emergencyPercentage = contextUsageEarly.percentage.toFixed(1);
             const recoveryStarted = startRecoveryRun();
             // If recovery can't start because there is no eligible pre-tail
@@ -2264,7 +2260,6 @@ export function createTransform(deps: TransformDeps) {
             safeForBackgroundCompression:
                 historianRunnable && (isCacheBusting || schedulerDecision === "execute"),
             deferredHistoryRefreshSessions,
-            skipAwaitForThisPass: skipCompartmentAwaitForThisPass,
             experimentalUserMemories: deps.experimentalUserMemories,
             experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
             historianTwoPass: deps.historianTwoPass,
