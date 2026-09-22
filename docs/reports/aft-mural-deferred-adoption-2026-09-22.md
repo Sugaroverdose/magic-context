@@ -41,9 +41,9 @@ The module fixture now makes the distinction explicit. Replacing the frozen-hash
 
 ## TypeScript lane parity
 
-OpenCode/Pi TypeScript mode already follows the desired contract. `mustMaterialize` compares mural **enablement** as render configuration (`inject-compartments.ts:1616-1623`), but it never compares `cachedM0MuralHash` with the current hash. The deliberate non-trigger list immediately below includes the analogous m0 project-docs hash (`:1727-1730`). The cached mural hash is a record of bytes already frozen into m0, not a HARD predicate.
+OpenCode and Pi TypeScript modes already follow the desired contract. OpenCode `mustMaterialize` compares mural **enablement** as render configuration (`inject-compartments.ts:1616-1623`), but it never compares `cachedM0MuralHash` with the current hash. The deliberate non-trigger list immediately below includes the analogous m0 project-docs hash (`:1727-1730`). Pi has the same shape: `mustMaterializePi` compares `muralEnabled` at `inject-compartments-pi.ts:1084-1090`, never the mural content hash, returns no trigger at `:1226`, and calls `resolveMuralForM0Pi` only while rebuilding m0 (`:671-692`). The cached mural hash is a record of bytes already frozen into m0, not a HARD predicate.
 
-`inject-compartments-mural.test.ts:104` now pins this behavior: mural A is materialized, mural B on a non-busting pass returns `{ value: false, reason: null }` and replays mural A byte-identically, and a subsequent independent `system_hash` HARD adopts mural B.
+`inject-compartments-mural.test.ts:104` pins the OpenCode behavior: mural A is materialized, mural B on a non-busting pass returns `{ value: false, reason: null }` and replays mural A byte-identically, and a subsequent independent `system_hash` HARD adopts mural B. `inject-compartments-pi-mural.test.ts:82` now proves the same sequence for Pi: a changed durable manifest replays the frozen image on defer, then an independent `system_hash` HARD adopts the new image.
 
 ## Sentinel attribution
 

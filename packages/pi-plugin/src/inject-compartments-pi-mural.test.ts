@@ -25,12 +25,15 @@ const FAKE_MURAL_BASE64 = FAKE_MURAL_DATA_URL.slice(
 	"data:image/png;base64,".length,
 );
 
-function muralOption() {
+function muralOption(
+	dataUrl = FAKE_MURAL_DATA_URL,
+	contentHash = "mural-hash-1",
+) {
 	return {
 		enabled: true,
 		supportsVision: true,
-		dataUrl: FAKE_MURAL_DATA_URL,
-		contentHash: "mural-hash-1",
+		dataUrl,
+		contentHash,
 	};
 }
 
@@ -121,6 +124,29 @@ describe("Pi m[0] mural image fold (on-demand render → wire)", () => {
 			expect(deferImage?.data).toBe(FAKE_MURAL_BASE64);
 			expect(deferImage?.data).not.toBe(currentManifestBase64);
 			expect(textOf(deferMessages[0])).toBe(textOf(hardMessages[0]));
+
+			const refreshedMessages = [userMessage("natural hard")];
+			const refreshed = injectM0M1Pi(
+				baseState({
+					mural: muralOption(
+						`data:image/png;base64,${currentManifestBase64}`,
+						"current-pi-manifest",
+					),
+					hardSignals: {
+						systemHash: "sys-next",
+						modelKey: "anthropic/claude-sonnet-4",
+						cacheExpired: false,
+						lastResponseTime: 0,
+					},
+				}),
+				db,
+				refreshedMessages as never,
+				undefined,
+				false,
+			);
+			expect(refreshed.m0Reason).toBe("system_hash");
+			expect(refreshed.m0Materialized).toBe(true);
+			expect(findM0Image(refreshedMessages)?.data).toBe(currentManifestBase64);
 		} finally {
 			closeQuietly(db);
 		}
