@@ -764,9 +764,9 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
             provider: "local",
             model,
             local_runtime: runtimePreference,
-            // Only fold non-default dtype into identity so the default config
-            // produces the byte-identical identity string as before this field
-            // existed (no forced re-embed on upgrade). See issue #259.
+            // Only fold non-default dtype into identity. The runtime fingerprint
+            // separately changes the identity when vector-producing dependencies
+            // change, while fp32 remains the stable default within one runtime.
             ...(dtype && dtype !== DEFAULT_LOCAL_DTYPE ? { local_dtype: dtype } : {}),
         });
     }
