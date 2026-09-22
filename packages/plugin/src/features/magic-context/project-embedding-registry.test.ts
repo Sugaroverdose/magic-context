@@ -248,6 +248,7 @@ function seedOversizedCompartmentWithFts(
 describe("project embedding registry", () => {
     const tempDirs: string[] = [];
     const originalXdgDataHome = process.env.XDG_DATA_HOME;
+    const originalHfEndpoint = process.env.HF_ENDPOINT;
 
     function useTempDb() {
         const dir = mkdtempSync(join(tmpdir(), "project-embedding-registry-"));
@@ -261,6 +262,8 @@ describe("project embedding registry", () => {
         closeDatabase();
         if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
         else process.env.XDG_DATA_HOME = originalXdgDataHome;
+        if (originalHfEndpoint === undefined) delete process.env.HF_ENDPOINT;
+        else process.env.HF_ENDPOINT = originalHfEndpoint;
         for (const dir of tempDirs) {
             try {
                 rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -441,6 +444,37 @@ describe("project embedding registry", () => {
         expect(withCustomQuery.chunkModelId).toBe(withFamilyDefault.chunkModelId);
         expect(withDocumentPrefix.modelId).not.toBe(withFamilyDefault.modelId);
         expect(withDocumentPrefix.chunkModelId).not.toBe(withFamilyDefault.chunkModelId);
+    });
+
+    it("keeps memory and chunk identities byte-identical across HF_ENDPOINT mirrors", () => {
+        const db = useTempDb();
+        const config = localConfig("Xenova/all-MiniLM-L6-v2");
+        const features = { memoryEnabled: true, gitCommitEnabled: true };
+
+        delete process.env.HF_ENDPOINT;
+        const defaultEndpoint = registerProjectEmbedding(
+            db,
+            "identity-default-endpoint",
+            config,
+            features,
+            "/repo",
+        );
+        process.env.HF_ENDPOINT = "https://mirror.example/";
+        const mirrorEndpoint = registerProjectEmbedding(
+            db,
+            "identity-mirror-endpoint",
+            config,
+            features,
+            "/repo",
+        );
+
+        expect({
+            memory: mirrorEndpoint.modelId,
+            chunk: mirrorEndpoint.chunkModelId,
+        }).toEqual({
+            memory: defaultEndpoint.modelId,
+            chunk: defaultEndpoint.chunkModelId,
+        });
     });
 
     it("preserves existing provider and runtime identity goldens", () => {

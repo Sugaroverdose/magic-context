@@ -639,6 +639,8 @@ Controls semantic search for cross-session memories.
 
 Instruction-tuned embedding models are trained to distinguish retrieval queries from passages, so Magic Context automatically prepends the model card's query recipe for Qwen3-Embedding, gte-Qwen instruct, e5 instruct, and Nomic families. Plain local encoders are unchanged. Query instructions affect only live search vectors, not stored document vectors, so changing `query_instruction` does not re-embed the corpus; changing a non-empty `document_prefix` does because it changes every stored vector.
 
+The local provider downloads model files from Hugging Face. Set the standard `HF_ENDPOINT` environment variable to the base URL of a Hugging Face-compatible mirror when `huggingface.co` is unavailable; a trailing slash is optional. The mirror only changes where identical model files are downloaded and does not change embedding identities or trigger re-embedding.
+
 When `provider: "off"`:
 
 - No embeddings are generated. `ctx_memory(write)` skips embedding inline and the background embedding sweep becomes a no-op.

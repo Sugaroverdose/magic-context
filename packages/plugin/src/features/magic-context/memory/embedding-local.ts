@@ -9,6 +9,7 @@ import { shouldEnforcePrivateStoragePermissions } from "../../../shared/storage-
 import { classifyLocalEmbeddingFailure, type EmbeddingFailure } from "./embedding-failure";
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import type { EmbeddingProvider, EmbeddingPurpose } from "./embedding-provider";
+import { configureTransformersRemoteHost } from "./transformers-remote-host";
 
 /** The dtype enum values accepted by @huggingface/transformers' feature-extraction
  *  pipeline (keyof typeof DATA_TYPES in transformers/types/utils/dtypes.d.ts).
@@ -806,9 +807,11 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
                 const env = transformersModule.env as {
                     logLevel?: unknown;
                     cacheDir?: string;
+                    remoteHost?: string;
                     useFS?: boolean;
                     useFSCache?: boolean;
                 };
+                configureTransformersRemoteHost(env);
                 const LogLevel = transformersModule.LogLevel as Record<string, unknown> | undefined;
                 if (LogLevel && "ERROR" in LogLevel) {
                     env.logLevel = LogLevel.ERROR;
