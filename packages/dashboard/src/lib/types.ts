@@ -524,6 +524,7 @@ export interface ModelCatalogs {
   opencode: string[];
   pi: string[];
   omp: string[];
+  opencodeError?: string | null;
 }
 
 export interface ProjectConfigEntry {
