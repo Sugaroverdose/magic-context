@@ -96,7 +96,7 @@ describe("status view model", () => {
     test("carries the section rows the status view is made of", () => {
         expect(rowLabels("Tags")).toEqual(["Active", "Dropped", "Total"]);
         expect(rowLabels("Reductions")).toEqual(["Execute threshold", "Last reduce anchor"]);
-        expect(rowLabels("Pending Queue")).toEqual(["Drops"]);
+        expect(rowLabels("Pending Queue")).toEqual(["Drops", "Marker"]);
         expect(rowLabels("Context Details")).toEqual(["Protected tags", "Subagent"]);
         expect(rowLabels("Cache TTL")).toEqual([
             "Configured",
@@ -106,6 +106,34 @@ describe("status view model", () => {
         ]);
         expect(rowLabels("History Compression")).toEqual(["History block", "Budget", "Dreamer"]);
         expect(rowLabels("Memory")).toEqual(["Active", "Injected"]);
+    });
+
+    test("shows marker retry health only after the bounded budget is exhausted", () => {
+        const healthy = view({
+            compactionMarker: {
+                code: null,
+                attempts: 2,
+                lastError: "database is locked",
+                pendingSinceMs: NOW - 1_000,
+            },
+        });
+        const healthyMarker = healthy.sections
+            .find((section) => section.title === "Pending Queue")
+            ?.rows.find((row) => row.label === "Marker");
+        expect(healthyMarker).toMatchObject({ value: "healthy", tone: "muted" });
+        expect(healthy.warnings).toEqual([]);
+
+        const exhausted = view({
+            compactionMarker: {
+                code: "MC-C11",
+                attempts: 3,
+                lastError: "database is locked",
+                pendingSinceMs: NOW - 2_000,
+            },
+            warnings: ["compaction_marker_missing"],
+        });
+        expect(JSON.stringify(exhausted)).toContain("MC-C11 · 3 attempts · database is locked");
+        expect(exhausted.warnings[0]?.text).toContain("3 attempts; last error: database is locked");
     });
 
     test("drops the rows the single view no longer carries", () => {

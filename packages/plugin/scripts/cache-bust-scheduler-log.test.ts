@@ -40,6 +40,24 @@ test("scheduler fallback keeps the priced row and joins the later defer six seco
     expect(withSchedulerLogFallback([execute], session, `${logPath}.missing`)).toEqual([execute]);
 });
 
+test("Rust pass logs carry raw input counts for self-inflicted epoch attribution", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rust-pass-attribution-"));
+    dirs.push(dir);
+    const logPath = join(dir, "mc.log");
+    writeFileSync(
+        logPath,
+        `[2026-09-22T11:54:37.372Z] [magic-context][ses_aft] rust pass: decision=SOFT reason=coverage_fold scheduler=execute in=513 out=97 applied=true\n` +
+            `[2026-09-22T11:55:23.973Z] [magic-context][ses_aft] rust pass: decision=HARD reason=epoch_change scheduler=defer in=12747 out=87 applied=true\n`,
+    );
+
+    const decisions = withSchedulerLogFallback([], "ses_aft", logPath);
+    expect(decisions).toHaveLength(2);
+    expect(decisions.map((row) => [row.materializeReason, row.inputCount])).toEqual([
+        ["coverage_fold", 513],
+        ["epoch_change", 12_747],
+    ]);
+});
+
 test("analyzer and sentinel discriminate unaccounted_defer_pass from no_mc_pass_row", async () => {
     const { dir, logPath } = fixture();
     const options = { sessionId: session, anthropicDir: dir, openaiDir: join(dir, "missing"), decisions: [execute] };

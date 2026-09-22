@@ -134,6 +134,7 @@ import { resolveHistoryBudgetTokens } from "./transform";
 import { loadContextUsage } from "./transform-context-state";
 import type { MessageLike } from "./transform-operations";
 import {
+    applyRustModeDeferredCompactionMarker,
     replayRustModeBindingMismatchStrips,
     runRustModePostprocess,
 } from "./transform-postprocess-phase";
@@ -3541,6 +3542,15 @@ export function createRustModeTransform(
                     });
                     thinkingBindingRecovery = postprocess.thinkingBindingRecovery;
                     markerAt = postprocess.markerAt;
+                } else {
+                    // Frozen replay bypasses postprocess to preserve exact bytes, but
+                    // host-store repair is out-of-band and must still retry each pass.
+                    applyRustModeDeferredCompactionMarker({
+                        db: deps.db,
+                        sessionId,
+                        boundary: materializedBoundary,
+                        sessionDirectory: directory,
+                    });
                 }
                 const boundaryId = response.boundary_id;
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {

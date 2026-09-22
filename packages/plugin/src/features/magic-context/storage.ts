@@ -213,6 +213,7 @@ export {
     removeAutoSearchHintDecisionByMessageId,
     removeNoteNudgeAnchorByMessageId,
     removeStrippedPlaceholderId,
+    replacePendingCompactionMarkerStateIf,
     reserveProtectedTailDrainTokens,
     resetLastNudgeCycle,
     resetLastNudgeCycleIfTailShrank,

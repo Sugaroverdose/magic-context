@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripSystemInjection } from "../src/hooks/magic-context/system-injection-stripper";
 import { __test, analyzeOpenCodeCacheBustSession } from "./analyze-cache-busts";
+import { type CacheBustDecisionAttribution } from './cache-bust-attribution';
 import { describeBodyPair, normalizeRequestBody } from "./cache-bust-body-sources";
 
 type UsageFixture = {
@@ -411,6 +412,72 @@ describe("analyze-cache-bust dump discovery", () => {
         });
 
         expect(analysis.requests.at(-1)?.divergenceClass).toBe("accounted_hard_system_hash");
+    });
+
+    test("joins slow AFT passes and wakes for an input-step epoch", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-aft-slow-pass-"));
+        tempDirs.push(dir);
+        const session = "ses_313660571ffeZTsf4koSJwk50Q";
+        const requests = [
+            ["2026-09-22T11:54:34.997Z", "baseline", 300_000],
+            ["2026-09-22T11:54:40.313Z", "coverage fold", 10_000],
+            ["2026-09-22T11:55:29.581Z", "epoch rewrite", 10_000],
+        ] as const;
+        for (const [at, text, cacheRead] of requests) {
+            const stem = `${at.replaceAll(":", "-").replace(".", "-")}-${session}`;
+            writeDump(
+                dir,
+                stem,
+                at,
+                session,
+                bodyWithBreakpointMessage(text),
+                responseUsage({
+                    input_tokens: 2,
+                    cache_read_input_tokens: cacheRead,
+                    cache_creation_input_tokens: 200_000,
+                }),
+            );
+        }
+        const decisions: CacheBustDecisionAttribution[] = [
+            {
+                timestampMs: Date.parse("2026-09-22T11:54:36.709Z"),
+                decision: "SOFT",
+                canonicalDecision: "execute",
+                materialized: true,
+                materializeReason: "coverage_fold",
+                emergency: false,
+                droppedTokens: 0,
+                droppedCount: 0,
+                inputTokens: 373_959,
+                inputCount: 513,
+                flush: false,
+                source: "fixture",
+            },
+            {
+                timestampMs: Date.parse("2026-09-22T11:55:13.792Z"),
+                decision: "HARD",
+                canonicalDecision: "HARD",
+                materialized: true,
+                materializeReason: "epoch_change",
+                emergency: false,
+                droppedTokens: 0,
+                droppedCount: 0,
+                inputTokens: 343_741,
+                inputCount: 12_747,
+                flush: false,
+                source: "fixture",
+            },
+        ];
+
+        const analysis = analyzeOpenCodeCacheBustSession({
+            sessionId: session,
+            anthropicDir: dir,
+            openaiDir: join(dir, "missing-openai"),
+            decisions,
+            mcLogPath: null,
+        });
+        expect(analysis.requests[1]?.divergenceClass).not.toBe("no_mc_pass_row");
+        expect(analysis.requests[2]?.divergenceClass).toBe("self_inflicted_epoch");
     });
 
     test("prints complete UTF-8 body bytes separately from reusable normalized prefix bytes", () => {
