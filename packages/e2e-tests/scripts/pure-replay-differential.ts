@@ -63,10 +63,10 @@ async function createReplayHarness() {
 		modelID: priced ? "claude-fable-5-1" : "mock-sonnet",
 		modelContextLimit: 200_000,
 		magicContextConfig: {
-			execute_threshold_percentage: 90,
+			execute_threshold_percentage: priced ? 65 : 90,
 			memory: { auto_search: { enabled: false } },
 			compressor: { enabled: false },
-            ...(priced ? { output_reserve: 0, history_budget_percentage: 1 / 3, protected_tokens: 6000, temporal_awareness: false, historian: { disable: true }, dreamer: { disable: true, inject_docs: false }, memory: { enabled: false, auto_search: { enabled: false } } } : {}),
+            ...(priced ? { output_reserve: 0, history_budget_percentage: 60000 / 130000 + Number.EPSILON, protected_tokens: 6000, temporal_awareness: false, historian: { disable: true }, dreamer: { disable: true, inject_docs: false }, memory: { enabled: false, auto_search: { enabled: false } } } : {}),
 		},
 	} as const;
     if (!tsOnly) {
@@ -448,8 +448,14 @@ async function capturePricedCheckout(harness: Awaited<ReturnType<typeof createRe
     }
     const expectedDropped = rows.filter((r) => !protectedTags.has(r.tag_number)).map((r) => r.tag_number);
     if (expectedDropped.length === 0) throw new Error("tail fixture has no independently eligible tool tags");
-    harness.mock.setDefault({ text: "[[pressure-prime-answer]]", usage: { input_tokens: 181000, output_tokens: 10 } });
+    // With the summarizer disabled, 85.5% pressure authorizes queued drops. Below 95%, the newest protected tool outputs must still survive.
+    harness.mock.script([]);
+    harness.mock.setDefault({ text: "[[pressure-prime-answer]]", usage: { input_tokens: 171000, output_tokens: 10 } });
     await harness.sendPrompt(sessionId, "[[prime-tail-pressure]]");
+    const readPressure = () => db.prepare("SELECT last_input_tokens, last_context_percentage FROM session_meta WHERE session_id = ?").get(sessionId) as { last_input_tokens: number; last_context_percentage: number };
+    const pressureDeadline = Date.now() + 3000;
+    while (readPressure().last_input_tokens < 171000 && Date.now() < pressureDeadline) await Bun.sleep(20);
+    if (readPressure().last_input_tokens < 171000) throw new Error(`pressure priming was not persisted: ${JSON.stringify(readPressure())}`);
     // Seed identical cached history in master and candidate, then queue only tool-tail drops; history must not be re-rendered.
     const commonHistory = `<session-history>\n${renderDecayedCompartments({ compartments, historyBudgetTokens: 60000 })}\n</session-history>`;
     db.prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?").run(Buffer.from(commonHistory), sessionId);

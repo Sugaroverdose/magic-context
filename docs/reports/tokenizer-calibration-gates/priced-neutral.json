@@ -1,0 +1,10 @@
+{
+  "gate": "priced-neutral",
+  "master": "7486664df07096385e3a5985427b335a221a2bd2",
+  "candidate": "6eddf386937058ffcde18b88179c3bb987d517f0",
+  "exit_code": 1,
+  "evidence": [
+    "error: pure replay failed for 7486664df07096385e3a5985427b335a221a2bd2 (exit 1)",
+    "error: tail-only edge did not preserve the generation: latestPriced={\"decision\":\"defer\",\"materialized\":1,\"materialize_reason\":\"model_change\"} scheduler=defer materializedAtSame=true"
+  ]
+}
