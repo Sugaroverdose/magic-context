@@ -27331,6 +27331,36 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_glance_walks_past_the_single_page_clamp() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+
+        // The note reads clamp one page to 1000 rows; a queue past that must
+        // still report its true total, or the footer count would disagree with
+        // the TypeScript legs (which read the whole set).
+        let now = now_ms();
+        for index in 0..1005 {
+            insert_session_note_at(&store, &format!("note {index}"), now - index * 60_000);
+        }
+
+        let glance = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "read", "limit": 1, "offset": 1003}),
+            )
+            .await,
+        );
+
+        assert!(glance.contains("#1004 · 16h · note 1003"));
+        assert!(glance.contains("Showing 1 of 1005 — 1 older"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn note_facade_write_reply_reports_the_active_tray() {
         let producer = Arc::new(ProducerState::default());
         let resolver =

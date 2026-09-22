@@ -14810,6 +14810,10 @@ impl McStore {
     /// the whole set to order it (ready smart notes first, then pending, then
     /// the rest) and to report how many rows remain past the requested page, so
     /// paging happens in the renderer rather than in SQL.
+    ///
+    /// The underlying reads clamp one page to 1000 rows, so walk pages until a
+    /// short one: a queue larger than that must not silently truncate, or the
+    /// footer count and the ordering would disagree with the TypeScript legs.
     pub fn read_glance_notes(
         &self,
         project_path: &str,
@@ -14817,14 +14821,35 @@ impl McStore {
         session_statuses: &[&str],
         smart_statuses: &[&str],
     ) -> Result<Vec<StoredNote>, McStoreError> {
-        let mut notes = self.read_project_notes(
-            project_path,
-            Some(session_id),
-            session_statuses,
-            1000,
-            0,
-        )?;
-        notes.extend(self.read_smart_notes(project_path, smart_statuses, 1000, 0)?);
+        let mut notes = Vec::new();
+        loop {
+            let page = self.read_project_notes(
+                project_path,
+                Some(session_id),
+                session_statuses,
+                GLANCE_PAGE,
+                notes.len(),
+            )?;
+            let short = page.len() < GLANCE_PAGE;
+            notes.extend(page);
+            if short {
+                break;
+            }
+        }
+        let session_count = notes.len();
+        loop {
+            let page = self.read_smart_notes(
+                project_path,
+                smart_statuses,
+                GLANCE_PAGE,
+                notes.len() - session_count,
+            )?;
+            let short = page.len() < GLANCE_PAGE;
+            notes.extend(page);
+            if short {
+                break;
+            }
+        }
         Ok(notes)
     }
 
@@ -14835,7 +14860,21 @@ impl McStore {
         project_path: &str,
         session_id: &str,
     ) -> Result<(usize, Option<i64>), McStoreError> {
-        let notes = self.read_project_notes(project_path, Some(session_id), &["active"], 1000, 0)?;
+        let mut notes = Vec::new();
+        loop {
+            let page = self.read_project_notes(
+                project_path,
+                Some(session_id),
+                &["active"],
+                GLANCE_PAGE,
+                notes.len(),
+            )?;
+            let short = page.len() < GLANCE_PAGE;
+            notes.extend(page);
+            if short {
+                break;
+            }
+        }
         let oldest = notes
             .iter()
             .map(|note| {
@@ -17961,6 +18000,10 @@ fn tag_row_from_sql(r: &rusqlite::Row<'_>) -> rusqlite::Result<McTagRow> {
         source_bytes: r.get(5)?,
     })
 }
+
+/// Page size for the glance's unpaged walks. The note reads clamp one page to
+/// 1000 rows, so the walkers step in that unit and stop on a short page.
+const GLANCE_PAGE: usize = 1000;
 
 const NOTE_SELECT_COLUMNS: &str = "id, type, project_path, session_id, content, status, surface_condition, compiled_provider, compiled_config, compiled_at, compile_status, ready_at, ready_reason, manifest_json, compiled_check, check_hash, check_cron, check_failure_count, check_network_failure_count, check_quarantined_until, check_next_due_at, check_compiled_at, check_false_since_at, check_last_liveness_at, last_checked_at, check_status, check_version, policy_version, harness, anchor_block_id, anchor_ordinal, dismissed_at, dismissal_resolution, status_version, created_at_ms, updated_at_ms, context_store_uuid, context_row_id";
 const NOTE_INSERT_COLUMNS: &str = "type, project_path, session_id, content, status, surface_condition, compiled_provider, compiled_config, compiled_at, compile_status, ready_at, ready_reason, manifest_json, compiled_check, check_hash, check_cron, check_failure_count, check_network_failure_count, check_quarantined_until, check_next_due_at, check_compiled_at, check_false_since_at, check_last_liveness_at, last_checked_at, check_status, check_version, policy_version, harness, anchor_block_id, anchor_ordinal, dismissed_at, dismissal_resolution, status_version, created_at_ms, updated_at_ms, context_store_uuid, context_row_id";
