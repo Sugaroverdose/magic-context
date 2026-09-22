@@ -736,6 +736,50 @@ Warning: History compression could not finish this turn. It will retry automatic
 		}
 	});
 
+	/**
+	 * The tokenizer calibration leaves the hygiene masses fractional; Pi prints
+	 * the same whole token counts as the OpenCode dialog and the sidebar.
+	 */
+	it("prints the hygiene masses as whole token counts", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-status-hygiene-rounding";
+			insertTag(db, sessionId, "m1", "tool", 4_000, 1);
+			const detail = buildPiStatusDetail(
+				{ getAllTools: () => [] } as never,
+				{
+					...fakeContext(sessionId),
+					getContextUsage: () => ({
+						tokens: 40_000,
+						percent: 20,
+						contextWindow: 200_000,
+					}),
+					getSystemPrompt: () => "system prompt",
+				} as never,
+				{ db, projectIdentity: resolveProjectIdentity(process.cwd()) },
+				sessionId,
+			);
+			const text = renderPiStatusOverlay(
+				{
+					...detail,
+					tailHygiene: {
+						u: 63_063.522,
+						t: 288_527.546,
+						severity: 0.2186,
+						evaluable: true,
+						reclaimableToolOutputCount: 3,
+					},
+				},
+				plainTheme(),
+				74,
+			).join("\n");
+			expect(text).toContain("21.9% · 63,064 / 288,528 tok");
+			expect(text).not.toContain("63,063.522");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("draws the shared sections, in order, with the shared labels", () => {
 		const db = createTestDb();
 		try {

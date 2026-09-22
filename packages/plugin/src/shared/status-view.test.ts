@@ -216,6 +216,27 @@ describe("status view model", () => {
         expect(built.footer).toBe("Esc to close");
     });
 
+    /**
+     * The tokenizer calibration leaves the hygiene masses fractional. A token
+     * count is a whole number to the reader, so a raw `63,063.522` beside a
+     * `288,527.546` reads as a measurement error rather than as precision.
+     */
+    test("prints the hygiene masses as whole token counts", () => {
+        const built = view({
+            tailHygiene: {
+                u: 63_063.522,
+                t: 288_527.546,
+                severity: 0.2186,
+                evaluable: true,
+                reclaimableToolOutputCount: 3,
+            },
+        });
+        expect(built.hygiene?.value).toBe("21.9% · 63,064 / 288,528 tok");
+        // The masses are whole numbers; only the percentage keeps a decimal.
+        const masses = (built.hygiene?.value ?? "").split("·")[1] ?? "";
+        expect(masses).not.toMatch(/\d\.\d/);
+    });
+
     test("breaks the context down by category, with counts and percentages", () => {
         expect(view().breakdown.map((row) => `${row.label} ${row.value}`)).toEqual([
             "System 12K (1.9%)",
