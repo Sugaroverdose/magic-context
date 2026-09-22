@@ -33,7 +33,7 @@ import {
 } from "../../hooks/magic-context/hook-handlers";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
-import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
+import { setBoundedRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
@@ -77,7 +77,7 @@ import { adaptPayload, HEAD_IDS } from "./payload";
 import { refusesBeforeProvider } from "./provider-admission";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
-import { createV2RawMessageReader } from "./store";
+import { createV2RawMessageProvider, createV2RawMessageReader } from "./store";
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
 import { resolveUsageReading, usageReadingMatchesDraft } from "./usage-reading";
@@ -795,32 +795,10 @@ export async function registerContext(context: V2Context) {
             if (!rawProviders.has(draft.sessionID))
                 rawProviders.set(
                     draft.sessionID,
-                    setRawMessageProvider(draft.sessionID, {
-                        readMessages: () => {
-                            throw new Error(
-                                "OpenCode 2 per-pass raw history must use bounded provider operations; full readMessages() is reserved for store-generation conversion",
-                            );
-                        },
-                        readMessagePage: (afterOrdinal, limit, finalWatermark) =>
-                            pagedRead.readPage(
-                                draft.sessionID,
-                                afterOrdinal,
-                                limit,
-                                finalWatermark,
-                            ),
-                        readMessageById: (messageId) =>
-                            pagedRead.findById(draft.sessionID, messageId),
-                        readMessagePartsById: (messageId) =>
-                            pagedRead.findById(draft.sessionID, messageId),
-                        readMessageOrdinalById: (messageId) =>
-                            pagedRead.ordinalOf(draft.sessionID, messageId),
-                        readMessageIdOrdinalsForRange: (fromOrdinal, toOrdinal) =>
-                            pagedRead.ordinalMapForRange(draft.sessionID, fromOrdinal, toOrdinal),
-                        readMessageOrdinalPage: (after, limit) =>
-                            pagedRead.readOrdinalPage(draft.sessionID, after, limit),
-                        getMessageCount: () => pagedRead.getCount(draft.sessionID),
-                        getStoredMessageCount: () => pagedRead.getStoredCount(draft.sessionID),
-                    }),
+                    setBoundedRawMessageProvider(
+                        draft.sessionID,
+                        createV2RawMessageProvider(pagedRead, draft.sessionID),
+                    ),
                 );
             transform ??= createTransform({
                 db,

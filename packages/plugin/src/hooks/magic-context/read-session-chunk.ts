@@ -127,6 +127,7 @@ export interface RawMessageProvider {
     readMessagePage?: (afterOrdinal: number, limit: number, finalWatermark: number) => RawMessage[];
     readMessageById?: (messageId: string) => RawMessage | null;
     readMessagePartsById?: (messageId: string) => RawMessageParts | null;
+    hasMessageById?: (messageId: string) => boolean;
     readMessageOrdinalById?: (messageId: string) => number | null;
     readMessageIdOrdinals?: () => Map<string, number>;
     readMessageIdOrdinalsForRange?: (fromOrdinal: number, toOrdinal: number) => Map<string, number>;
@@ -138,6 +139,25 @@ export interface RawMessageProvider {
     getMessageCount?: () => number;
     /** Stored row count including compaction summaries, used for ordinal drift detection. */
     getStoredMessageCount?: () => number;
+}
+
+/**
+ * Provider contract for OpenCode 2 context passes. Every operation is SQL-bounded;
+ * the all-history conversion read is intentionally absent from this interface.
+ */
+export interface BoundedRawMessageProvider {
+    readMessagePage(afterOrdinal: number, limit: number, finalWatermark: number): RawMessage[];
+    readMessageById(messageId: string): RawMessage | null;
+    readMessagePartsById(messageId: string): RawMessageParts | null;
+    hasMessageById(messageId: string): boolean;
+    readMessageOrdinalById(messageId: string): number | null;
+    readMessageIdOrdinalsForRange(fromOrdinal: number, toOrdinal: number): Map<string, number>;
+    readMessageOrdinalPage(
+        after: RawMessageOrdinalAnchor | null,
+        limit: number,
+    ): RawMessageOrdinalEntry[];
+    getMessageCount(): number;
+    getStoredMessageCount(): number;
 }
 
 const sessionProviders = new Map<string, RawMessageProvider>();
@@ -159,6 +179,20 @@ export function setRawMessageProvider(sessionId: string, provider: RawMessagePro
         const current = sessionProviders.get(sessionId);
         if (current === provider) sessionProviders.delete(sessionId);
     };
+}
+
+export function setBoundedRawMessageProvider(
+    sessionId: string,
+    provider: BoundedRawMessageProvider,
+): () => void {
+    return setRawMessageProvider(sessionId, {
+        ...provider,
+        readMessages: () => {
+            throw new Error(
+                "Bounded raw-message providers cannot read complete history; full reads are reserved for store-generation conversion",
+            );
+        },
+    });
 }
 
 /**
@@ -588,6 +622,12 @@ export function readRawSessionMessagePartsById(
     );
 }
 
+export function hasRawSessionMessageById(sessionId: string, messageId: string): boolean {
+    const provider = sessionProviders.get(sessionId);
+    if (provider?.hasMessageById) return provider.hasMessageById(messageId);
+    return readRawSessionMessageById(sessionId, messageId) !== null;
+}
+
 export function readRawSessionMessageOrdinalById(
     sessionId: string,
     messageId: string,
@@ -677,6 +717,8 @@ export interface RawSessionTagKeys {
 export interface RawSessionTagKeyReadOptions {
     db?: Database;
     pageSize?: number;
+    /** First raw ordinal whose tags can become newly compartmentalized. */
+    fromMessageIndex?: number;
     yieldToEventLoop?: () => Promise<void>;
 }
 
@@ -737,7 +779,10 @@ export async function getRawSessionTagKeysThrough(
         return pickNearestPriorOwner(candidates, currentMessageId, times);
     };
 
-    let afterOrdinal = 0;
+    const firstOrdinal = Number.isFinite(options.fromMessageIndex)
+        ? Math.max(1, Math.floor(options.fromMessageIndex ?? 1))
+        : 1;
+    let afterOrdinal = firstOrdinal - 1;
     while (afterOrdinal < finalWatermark) {
         const messages = readRawSessionMessages.readPage(
             sessionId,

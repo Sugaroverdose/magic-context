@@ -3,9 +3,15 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readSessionChunk, withRawMessageProvider } from "../../../plugin/src/hooks/magic-context/read-session-chunk";
+import {
+	getRawSessionTagKeysThrough,
+	readSessionChunk,
+	setBoundedRawMessageProvider,
+	withRawMessageProvider,
+} from "../../../plugin/src/hooks/magic-context/read-session-chunk";
 import { readRawSessionMessagesFromDb } from "../../../plugin/src/hooks/magic-context/read-session-raw";
 import {
+	createV2RawMessageProvider,
 	createV2RawMessageReader,
 	rawMessages,
 } from "../../../plugin/src/v2/hooks/store";
@@ -211,6 +217,75 @@ test("10,000-row raw read pages decode only the requested page and count decodes
 		}
 		expect(counters.operations.history).toBeUndefined();
 	} finally {
+		writer.close();
+	}
+});
+
+test("post-historian drop-key collection decodes only the published chunk", async () => {
+	const { root } = isolation();
+	const path = join(root, "post-historian-bounded-reader.db");
+	const writer = new Database(path);
+	writer.exec(`
+		CREATE TABLE session_message(
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			type TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			time_created INTEGER NOT NULL,
+			data TEXT NOT NULL
+		);
+		CREATE UNIQUE INDEX session_message_session_seq_idx
+			ON session_message(session_id, seq);
+		CREATE INDEX session_message_session_type_seq_idx
+			ON session_message(session_id, type, seq);
+	`);
+	const insert = writer.prepare(
+		"INSERT INTO session_message VALUES (?, 'ses-post-historian', 'user', ?, ?, ?)",
+	);
+	writer.transaction(() => {
+		for (let ordinal = 1; ordinal <= 10_000; ordinal++) {
+			insert.run(
+				`message-${ordinal}`,
+				ordinal,
+				1_800_000_000_000 + ordinal,
+				JSON.stringify({ text: `row ${ordinal}` }),
+			);
+		}
+	})();
+
+	resetV2StoreReaderDebugCounters({ captureQueries: true });
+	const read = createV2RawMessageReader(() => new V2StoreReader(path));
+	const unregister = setBoundedRawMessageProvider(
+		"ses-post-historian",
+		createV2RawMessageProvider(read, "ses-post-historian"),
+	);
+	const started = performance.now();
+	try {
+		await getRawSessionTagKeysThrough("ses-post-historian", 10_000, {
+			pageSize: 32,
+			yieldToEventLoop: async () => {},
+			fromMessageIndex: 9_901,
+		});
+		const elapsedMs = performance.now() - started;
+		const counters = getV2StoreReaderDebugCounters();
+		expect(counters.operations.history).toBeUndefined();
+		expect(counters.operations.messagePage).toEqual({
+			calls: 4,
+			decodedRows: 100,
+			maxDecodedRows: 32,
+		});
+		expect(counters.queries).toHaveLength(4);
+		expect(counters.queries?.every((query) => query.statement.includes("session_message"))).toBe(
+			true,
+		);
+		expect(counters.queries?.reduce((sum, query) => sum + query.rows, 0)).toBe(100);
+		expect(counters.openReaders).toBe(0);
+		expect(counters.readersOpened).toBe(counters.readersClosed);
+		console.log(
+			`[post-historian-bounded-read] rows=${counters.operations.messagePage?.decodedRows ?? 0} calls=${counters.operations.messagePage?.calls ?? 0} elapsed_ms=${elapsedMs.toFixed(3)}`,
+		);
+	} finally {
+		unregister();
 		writer.close();
 	}
 });

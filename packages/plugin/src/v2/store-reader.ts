@@ -88,9 +88,22 @@ export interface V2StoreReaderDebugOperation {
     maxDecodedRows: number;
 }
 
+export interface V2StoreReaderDebugQuery {
+    operation: string;
+    statement: string;
+    rows: number;
+    elapsedMs: number;
+}
+
 export interface V2StoreReaderDebugCounters {
     decodedRows: number;
     operations: Record<string, V2StoreReaderDebugOperation>;
+    openReaders: number;
+    maxOpenReaders: number;
+    readersOpened: number;
+    readersClosed: number;
+    queries?: V2StoreReaderDebugQuery[];
+    captureQueries?: boolean;
 }
 
 export interface V2MessageOrdinalAnchor {
@@ -108,15 +121,60 @@ const debugGlobal = globalThis as typeof globalThis & {
     [key: symbol]: V2StoreReaderDebugCounters | undefined;
 };
 
+const QUERY_STATEMENTS: Readonly<Record<string, string>> = {
+    messagePage: `WITH bounds AS (
+    SELECT the seq immediately before the requested raw ordinal and at the final watermark
+)
+SELECT id, session_id, type, seq, time_created, data FROM session_message, bounds
+WHERE session_id = ? AND type IN (?) AND seq > bounds.after_seq AND seq <= bounds.watermark_seq
+ORDER BY seq ASC LIMIT ?`,
+    messageCount:
+        "SELECT COUNT(*) AS count FROM session_message WHERE session_id = ? AND type IN (?)",
+    storedMessageCount: "SELECT COUNT(*) AS count FROM session_message WHERE session_id = ?",
+    messageById:
+        "SELECT id, session_id, type, seq, time_created, data FROM session_message WHERE session_id = ? AND id = ? AND type IN (?) LIMIT 1",
+    messageExistsById:
+        "SELECT 1 FROM session_message WHERE id = ? AND session_id = ? AND type IN (?) LIMIT 1",
+    messageOrdinalById: `WITH target AS (
+    SELECT seq FROM session_message WHERE session_id = ? AND id = ? AND type IN (?) LIMIT 1
+)
+SELECT (SELECT COUNT(*) FROM session_message WHERE session_id = ? AND type IN (?) AND seq <= target.seq) AS ordinal FROM target`,
+    messageIdOrdinals:
+        "SELECT id FROM session_message WHERE session_id = ? AND type IN (?) ORDER BY seq ASC LIMIT ? OFFSET ?",
+    messageOrdinalPage:
+        "SELECT id, type, seq, json_valid(data) AS valid FROM session_message WHERE session_id = ? AND seq > ? ORDER BY seq ASC, id ASC LIMIT ?",
+};
+
 function debugCounters(): V2StoreReaderDebugCounters {
-    return (debugGlobal[debugSymbol] ??= { decodedRows: 0, operations: {} });
+    const counters = (debugGlobal[debugSymbol] ??= {
+        decodedRows: 0,
+        operations: {},
+        openReaders: 0,
+        maxOpenReaders: 0,
+        readersOpened: 0,
+        readersClosed: 0,
+    });
+    counters.openReaders ??= 0;
+    counters.maxOpenReaders ??= 0;
+    counters.readersOpened ??= 0;
+    counters.readersClosed ??= 0;
+    return counters;
+}
+
+function returnedRowCount(value: unknown): number {
+    if (Array.isArray(value)) return value.length;
+    if (value === null || value === undefined || value === false) return 0;
+    return 1;
 }
 
 function trackDecodeOperation<T>(name: string, operation: () => T): T {
     const counters = debugCounters();
     const before = counters.decodedRows;
+    const started = performance.now();
+    let value: T | undefined;
     try {
-        return operation();
+        value = operation();
+        return value;
     } finally {
         const decodedRows = counters.decodedRows - before;
         const current = counters.operations[name] ?? {
@@ -128,6 +186,15 @@ function trackDecodeOperation<T>(name: string, operation: () => T): T {
         current.decodedRows += decodedRows;
         current.maxDecodedRows = Math.max(current.maxDecodedRows, decodedRows);
         counters.operations[name] = current;
+        const statement = QUERY_STATEMENTS[name];
+        if (counters.captureQueries && statement) {
+            (counters.queries ??= []).push({
+                operation: name,
+                statement,
+                rows: returnedRowCount(value),
+                elapsedMs: performance.now() - started,
+            });
+        }
     }
 }
 
@@ -141,11 +208,26 @@ export function getV2StoreReaderDebugCounters(): V2StoreReaderDebugCounters {
                 { ...operation },
             ]),
         ),
+        openReaders: counters.openReaders,
+        maxOpenReaders: counters.maxOpenReaders,
+        readersOpened: counters.readersOpened,
+        readersClosed: counters.readersClosed,
+        ...(counters.captureQueries
+            ? { captureQueries: true, queries: counters.queries?.map((query) => ({ ...query })) ?? [] }
+            : {}),
     };
 }
 
-export function resetV2StoreReaderDebugCounters(): void {
-    debugGlobal[debugSymbol] = { decodedRows: 0, operations: {} };
+export function resetV2StoreReaderDebugCounters(options: { captureQueries?: boolean } = {}): void {
+    debugGlobal[debugSymbol] = {
+        decodedRows: 0,
+        operations: {},
+        openReaders: 0,
+        maxOpenReaders: 0,
+        readersOpened: 0,
+        readersClosed: 0,
+        ...(options.captureQueries ? { captureQueries: true, queries: [] } : {}),
+    };
 }
 
 function decode(row: RawRow): StoreRow {
@@ -166,6 +248,7 @@ function decode(row: RawRow): StoreRow {
 /** Opens an existing store read-only; missing/corrupt stores propagate errors, never an empty history. */
 export class V2StoreReader {
     private readonly db: Database;
+    private closed = false;
     constructor(path: string) {
         this.db = new Database(path, { readonly: true, fileMustExist: true });
         try {
@@ -174,9 +257,21 @@ export class V2StoreReader {
             this.db.close();
             throw error;
         }
+        const counters = debugCounters();
+        counters.openReaders += 1;
+        counters.readersOpened += 1;
+        counters.maxOpenReaders = Math.max(counters.maxOpenReaders, counters.openReaders);
     }
     close(): void {
-        this.db.close();
+        if (this.closed) return;
+        this.closed = true;
+        try {
+            this.db.close();
+        } finally {
+            const counters = debugCounters();
+            counters.openReaders = Math.max(0, counters.openReaders - 1);
+            counters.readersClosed += 1;
+        }
     }
 
     /** Exclusive cursor, ascending seq. IDs are not chronological in the v2 store. */
@@ -311,6 +406,19 @@ export class V2StoreReader {
                 )
                 .get(sessionID, id, ...RAW_MESSAGE_TYPES) as RawRow | undefined;
             return row ? decode(row) : null;
+        });
+    }
+
+    messageExistsById(sessionID: string, id: string): boolean {
+        return trackDecodeOperation("messageExistsById", () => {
+            const rawTypes = RAW_MESSAGE_TYPES.map(() => "?").join(", ");
+            const row = this.db
+                .prepare(
+                    `SELECT 1 FROM session_message
+                     WHERE id = ? AND session_id = ? AND type IN (${rawTypes}) LIMIT 1`,
+                )
+                .get(id, sessionID, ...RAW_MESSAGE_TYPES);
+            return row != null;
         });
     }
 

@@ -93,7 +93,7 @@ import {
 import {
     getRawSessionTagKeysThrough,
     hasRawMessageProvider,
-    readRawSessionMessageOrdinalById,
+    hasRawSessionMessageById,
     readRawSessionMessageRange,
     readSessionChunk,
 } from "./read-session-chunk";
@@ -155,20 +155,17 @@ export function findDanglingPublicationBoundary(
         startMessageId: string;
         endMessageId: string;
     }>,
-    resolveOrdinal: (
-        sessionId: string,
-        messageId: string,
-    ) => number | null = readRawSessionMessageOrdinalById,
+    messageExists: (sessionId: string, messageId: string) => boolean = hasRawSessionMessageById,
 ): DanglingPublicationBoundary | null {
     for (const compartment of compartments) {
-        if (resolveOrdinal(sessionId, compartment.startMessageId) === null) {
+        if (!messageExists(sessionId, compartment.startMessageId)) {
             return {
                 sequence: compartment.sequence,
                 side: "start",
                 messageId: compartment.startMessageId,
             };
         }
-        if (resolveOrdinal(sessionId, compartment.endMessageId) === null) {
+        if (!messageExists(sessionId, compartment.endMessageId)) {
             return {
                 sequence: compartment.sequence,
                 side: "end",
@@ -797,7 +794,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         const compartmentTagKeys = await getRawSessionTagKeysThrough(
             sessionId,
             lastCompartmentEnd,
-            { db },
+            { db, fromMessageIndex: offset },
         );
         const danglingBoundary = findDanglingPublicationBoundary(sessionId, newCompartments);
         if (danglingBoundary) {
