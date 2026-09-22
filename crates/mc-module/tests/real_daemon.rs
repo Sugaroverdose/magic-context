@@ -49,6 +49,20 @@ impl Drop for LiveDaemon {
     }
 }
 
+/// Owns the test's temp root. The daemon and every module process share the data home
+/// under it, so cleanup cannot belong to any one of them: bind this first so it drops
+/// last, after all of those processes have exited. A failing test keeps the root, since
+/// the seeded store and the daemon's log are what a failed run needs for diagnosis.
+struct TempRoot(PathBuf);
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
 struct ModuleProcess {
     child: Child,
 }
@@ -89,7 +103,9 @@ async fn mc_transform_spine_through_real_daemon() {
         &["build", "-p", "mc-module"],
     );
 
-    let temp = unique_temp_dir("mc-module-real-daemon");
+    // Declared before the daemon and modules so it drops after them.
+    let temp_root = TempRoot(unique_temp_dir("mc-module-real-daemon"));
+    let temp = temp_root.0.clone();
     let runtime_dir = temp.join("runtime");
     let config_dir = temp.join("config");
     let data_home = temp.join("data"); // store lands here (dev_descriptor → XDG_DATA_HOME)
@@ -105,7 +121,7 @@ async fn mc_transform_spine_through_real_daemon() {
     // reads it. No test-only wire surface.
     seed_store(&data_home);
 
-    let daemon = spawn_daemon(&daemon_bin, &runtime_dir, &config_dir);
+    let daemon = spawn_daemon(&daemon_bin, &runtime_dir, &config_dir, &data_home);
     wait_for_connection_file(&daemon.connection_file, START_TIMEOUT).await;
 
     let mut module = spawn_module(&module_bin, &daemon.connection_file, &data_home);
@@ -459,10 +475,20 @@ async fn call_raw(consumer: &SubcConsumer, session: &str, body: Value) -> Value 
     serde_json::from_slice(&bytes).unwrap()
 }
 
-fn spawn_daemon(daemon_bin: &Path, runtime_dir: &Path, config_dir: &Path) -> LiveDaemon {
+fn spawn_daemon(
+    daemon_bin: &Path,
+    runtime_dir: &Path,
+    config_dir: &Path,
+    data_home: &Path,
+) -> LiveDaemon {
     let child = Command::new(daemon_bin)
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .env("XDG_CONFIG_HOME", config_dir)
+        // The daemon derives `cortexkit/run` (including `logs/`) from the data home, not
+        // the runtime dir. Without this, a test daemon's log sink resolves to the host's
+        // real `~/.local/share/cortexkit/run/logs/subc.log` and interleaves test boots
+        // with production ones. Sharing the module's data home mirrors production layout.
+        .env("XDG_DATA_HOME", data_home)
         .env("SUBC_PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
