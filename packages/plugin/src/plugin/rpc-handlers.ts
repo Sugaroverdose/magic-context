@@ -749,9 +749,7 @@ export function buildStatusDetail(
     const historianRefusalDetail =
         moduleHistorian?.last_failure ?? moduleHistorian?.last_no_fire ?? null;
     const historianRefusal =
-        moduleHistorian?.refusal_stage &&
-        moduleHistorian.canonical_cause &&
-        historianRefusalDetail
+        moduleHistorian?.refusal_stage && moduleHistorian.canonical_cause && historianRefusalDetail
             ? {
                   stage: moduleHistorian.refusal_stage,
                   canonicalCause: moduleHistorian.canonical_cause,

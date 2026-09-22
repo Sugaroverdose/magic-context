@@ -212,7 +212,9 @@ describe("status detail text", () => {
         });
 
         expect(status).toContain("Historian refusal:** credential (credential_unavailable)");
-        expect(status).toContain("received=\"open_failed: no apikey credential for provider 'google'\"");
+        expect(status).toContain(
+            "received=\"open_failed: no apikey credential for provider 'google'\"",
+        );
     });
 
     test("does not expose module routing in the summary", () => {
