@@ -3592,6 +3592,9 @@ fn apply_once(
         tagging_surface_requested,
     )?;
     let render_identity = render_identity_base(req, &content_epoch.prompt_surface_epoch);
+    // Do not use a newer mural supplied by this request to decide whether to rebuild the
+    // persisted baseline. Use the mural already stored in the loaded baseline for that decision;
+    // if another trigger rebuilds the baseline, use and persist the request's newer mural.
     let persisted_mural_hash = frozen_mural_hash(&loaded.core).to_string();
     let stable_effective_render_config_base =
         fold_m0_content_epoch(&render_identity, &content_epoch);
@@ -21920,7 +21923,15 @@ pub(crate) mod tests {
             })
         );
         let identity_a = store.load("mural-replay").unwrap().meta.last_render_config;
-        assert!(identity_a.contains("mural-hash-a"));
+        assert!(identity_a.contains("mur:12:mural-hash-a"));
+
+        let before_update = run(&store, &mural_a, &spine());
+        assert_eq!(before_update.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_vec(&first.ck_messages).unwrap(),
+            serde_json::to_vec(&before_update.ck_messages).unwrap(),
+            "the defer before a mural update must replay the frozen prefix"
+        );
 
         let mural_b_defer = request_with_mural(
             "mural-replay",
@@ -21930,10 +21941,16 @@ pub(crate) mod tests {
         );
         let deferred = run(&store, &mural_b_defer, &spine());
         assert_eq!(deferred.action, "SOFT+");
+        assert_eq!(deferred.materialize_reason, None);
         assert_eq!(
-            serde_json::to_vec(&first.ck_messages).unwrap(),
+            serde_json::to_vec(&before_update.ck_messages).unwrap(),
             serde_json::to_vec(&deferred.ck_messages).unwrap(),
             "a live mural change must not self-bust the frozen m0 prefix"
+        );
+        assert_eq!(
+            store.load("mural-replay").unwrap().meta.last_render_config,
+            identity_a,
+            "a defer must not adopt the candidate mural identity"
         );
 
         let mural_b_hard = request_with_mural(
@@ -21946,7 +21963,7 @@ pub(crate) mod tests {
         assert_eq!(folded.action, "HARD");
         let identity_b = store.load("mural-replay").unwrap().meta.last_render_config;
         assert_ne!(identity_b, identity_a);
-        assert!(identity_b.contains("mural-hash-b"));
+        assert!(identity_b.contains("mur:12:mural-hash-b"));
         match &folded.messages()[0].content[1].kind {
             ck_wire::CkKind::Media(media) => {
                 assert_eq!(media.source["url"], json!("data:image/png;base64,Yg=="));
