@@ -556,6 +556,39 @@ export function injectCompactionMarker(
     }
 }
 
+/**
+ * Replace an existing marker and inject its successor under one host-store
+ * write lock. Acquiring that lock before the first DELETE avoids SQLite's
+ * read-to-write upgrade path, where SQLITE_BUSY does not honor busy_timeout.
+ */
+export function replaceCompactionMarker(
+    existing: CompactionMarkerState | null,
+    args: InjectCompactionMarkerArgs,
+): CompactionMarkerState | null {
+    const db = getWritableOpenCodeDb();
+    try {
+        return db
+            .transaction(() => {
+                if (existing) {
+                    db.prepare("DELETE FROM part WHERE id = ?").run(existing.summaryPartId);
+                    db.prepare("DELETE FROM message WHERE id = ?").run(existing.summaryMessageId);
+                    db.prepare("DELETE FROM part WHERE id = ?").run(existing.compactionPartId);
+                }
+                const replacement = injectCompactionMarker(args);
+                if (!replacement) {
+                    throw new Error(`failed to inject replacement marker at ordinal ${args.endOrdinal}`);
+                }
+                return replacement;
+            })
+            .immediate();
+    } catch (error) {
+        log(
+            `[magic-context] compaction-marker: atomic replacement failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return null;
+    }
+}
+
 // ── Foreign-marker scan (fork-orphan hygiene, #263) ─────────────
 
 /**

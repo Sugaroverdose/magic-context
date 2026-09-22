@@ -512,6 +512,83 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
         );
     });
 
+    it("keeps the old marker when BEGIN IMMEDIATE cannot acquire the host-store lock", () => {
+        const dataHome = useTempDataHome("apply-deferred-atomic-lock-");
+        const opencodeDb = createOpenCodeDb(dataHome);
+        insertUserMessage(opencodeDb, "msg-old-boundary", "ses-lock", 500);
+        insertUserMessage(opencodeDb, "msg-boundary", "ses-lock", 1_000);
+        const oldState: PersistedCompactionMarkerState = {
+            boundaryMessageId: "msg-old-boundary",
+            summaryMessageId: "msg-old-summary",
+            compactionPartId: "prt-old-compaction",
+            summaryPartId: "prt-old-summary",
+            boundaryOrdinal: 5,
+            targetEndMessageId: "msg-old-boundary",
+        };
+        insertMarkerRows(opencodeDb, "ses-lock", oldState);
+        closeQuietly(opencodeDb);
+
+        const db = openDatabase();
+        insertCompartment(db, "ses-lock", 10, "msg-boundary");
+        db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run("ses-lock");
+        setPersistedCompactionMarkerState(db, "ses-lock", oldState);
+
+        const locker = new Database(join(dataHome, "opencode", "opencode.db"));
+        locker.exec("BEGIN IMMEDIATE");
+        try {
+            const startedAt = Date.now();
+            const outcome = applyDeferredCompactionMarker(
+                db,
+                "ses-lock",
+                makePending(),
+                dataHome,
+            );
+            expect(outcome.kind).toBe("retryable-failure");
+            expect(Date.now() - startedAt).toBeGreaterThanOrEqual(4_500);
+        } finally {
+            locker.exec("ROLLBACK");
+            closeQuietly(locker);
+        }
+
+        const inspect = new Database(join(dataHome, "opencode", "opencode.db"));
+        expect(inspect.prepare("SELECT COUNT(*) AS n FROM message WHERE id = ?").get(oldState.summaryMessageId)).toEqual({ n: 1 });
+        expect(inspect.prepare("SELECT COUNT(*) AS n FROM part WHERE id IN (?, ?)").get(oldState.compactionPartId, oldState.summaryPartId)).toEqual({ n: 2 });
+        closeQuietly(inspect);
+        expect(getPersistedCompactionMarkerState(db, "ses-lock")).toEqual(oldState);
+    }, 10_000);
+
+    it("rolls direct publication replacement back when insertion fails", () => {
+        const dataHome = useTempDataHome("direct-marker-atomic-rollback-");
+        const opencodeDb = createOpenCodeDb(dataHome);
+        insertUserMessage(opencodeDb, "msg-old-boundary", "ses-direct", 500);
+        insertUserMessage(opencodeDb, "msg-boundary", "ses-direct", 1_000);
+        const oldState: PersistedCompactionMarkerState = {
+            boundaryMessageId: "msg-old-boundary",
+            summaryMessageId: "msg-old-summary",
+            compactionPartId: "prt-old-compaction",
+            summaryPartId: "prt-old-summary",
+            boundaryOrdinal: 5,
+            targetEndMessageId: "msg-old-boundary",
+        };
+        insertMarkerRows(opencodeDb, "ses-direct", oldState);
+        opencodeDb.exec(`CREATE TRIGGER reject_new_marker BEFORE INSERT ON message
+            WHEN NEW.id <> 'msg-old-summary'
+            BEGIN SELECT RAISE(ABORT, 'simulated insert failure'); END`);
+        closeQuietly(opencodeDb);
+
+        const db = openDatabase();
+        insertCompartment(db, "ses-direct", 10, "msg-boundary");
+        db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run("ses-direct");
+        setPersistedCompactionMarkerState(db, "ses-direct", oldState);
+
+        expect(updateCompactionMarkerAfterPublication(db, "ses-direct", 10, dataHome)).toBe(false);
+        const inspect = new Database(join(dataHome, "opencode", "opencode.db"));
+        expect(inspect.prepare("SELECT COUNT(*) AS n FROM message WHERE id = ?").get(oldState.summaryMessageId)).toEqual({ n: 1 });
+        expect(inspect.prepare("SELECT COUNT(*) AS n FROM part WHERE id IN (?, ?)").get(oldState.compactionPartId, oldState.summaryPartId)).toEqual({ n: 2 });
+        closeQuietly(inspect);
+        expect(getPersistedCompactionMarkerState(db, "ses-direct")).toEqual(oldState);
+    });
+
     it("repairs an equal-ordinal marker whose boundary is after the target endMessageId", () => {
         const dataHome = useTempDataHome("apply-deferred-repair-overextended-");
         const opencodeDb = createOpenCodeDb(dataHome);
