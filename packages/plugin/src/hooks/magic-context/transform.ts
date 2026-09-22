@@ -1157,12 +1157,10 @@ export function createTransform(deps: TransformDeps) {
                     clearHistorianFailureState(db, sessionId);
                     clearPersistedReasoningWatermark(db, sessionId);
                     // The emergency-drop watermark is keyed to the prior model's
-                    // ceiling (contextLimit × executeThreshold); a model change
-                    // moves the ceiling, so reset the latch to re-evaluate the
-                    // full tail. The detected-overflow limit + recovery flag were
-                    // specific to the prior model and must not leak into the new
-                    // model's pressure math, so clear them too (the proactive arm
-                    // below re-arms from scratch against the new model if needed).
+                    // ceiling (contextLimit × executeThreshold), so re-evaluate the
+                    // full tail. Clear overflow state only when it is also keyed to
+                    // the prior model; a provider error may already have recorded a
+                    // detected limit for the outgoing model before stale usage is reset.
                     clearEmergencyDropSample(db, sessionId);
                     if (preserveOutgoingOverflow) {
                         sessionLog(
