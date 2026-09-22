@@ -52,16 +52,40 @@ const request = (
 
 class Rows {
     private readonly rows = new Map<string, StoreRow<"assistant">[]>();
+    private readonly idle = new Map<string, StoreRow<"idle">[]>();
     private seq = 0;
     latestAssistantCalls = 0;
+    latestIdleCalls = 0;
 
     latestSequence(sessionID: string): number {
-        return this.rows.get(sessionID)?.at(-1)?.seq ?? -1;
+        return Math.max(
+            this.rows.get(sessionID)?.at(-1)?.seq ?? -1,
+            this.idle.get(sessionID)?.at(-1)?.seq ?? -1,
+        );
     }
 
     latestAssistant(sessionID: string): StoreRow<"assistant"> | undefined {
         this.latestAssistantCalls += 1;
         return this.rows.get(sessionID)?.at(-1);
+    }
+
+    latestIdle(sessionID: string): StoreRow<"idle"> | undefined {
+        this.latestIdleCalls += 1;
+        return this.idle.get(sessionID)?.at(-1);
+    }
+
+    appendIdle(sessionID: string, outcome: "succeeded" | "failed" | "interrupted") {
+        const row: StoreRow<"idle"> = {
+            id: `message-${++this.seq}`,
+            session_id: sessionID,
+            type: "idle",
+            seq: this.seq,
+            data: { outcome, time: { created: Date.now() } },
+        };
+        const current = this.idle.get(sessionID) ?? [];
+        current.push(row);
+        this.idle.set(sessionID, current);
+        return row;
     }
 
     append(
@@ -171,6 +195,7 @@ async function setup(
     let providerError: unknown;
     let providerErrorUnsettled = false;
     let terminalOutcome: "succeeded" | "failed" | "interrupted" | undefined;
+    let terminalRowType: "assistant" | "idle" = "assistant";
     let readableSessionError: unknown;
     let removeError: Error | undefined;
     let delayRowMs = 0;
@@ -228,11 +253,13 @@ async function setup(
                 return;
             }
             if (terminalOutcome !== undefined) {
-                rows.append(input.sessionID, "", {
-                    outcome: terminalOutcome,
-                    usage: false,
-                    omitFinish: true,
-                });
+                if (terminalRowType === "idle") rows.appendIdle(input.sessionID, terminalOutcome);
+                else
+                    rows.append(input.sessionID, "", {
+                        outcome: terminalOutcome,
+                        usage: false,
+                        omitFinish: true,
+                    });
                 return;
             }
             const write = () =>
@@ -322,6 +349,9 @@ async function setup(
         },
         setTerminalOutcome(value: "succeeded" | "failed" | "interrupted" | undefined) {
             terminalOutcome = value;
+        },
+        setTerminalRowType(value: "assistant" | "idle") {
+            terminalRowType = value;
         },
         setReadableSessionError(value: unknown) {
             readableSessionError = value;
@@ -528,6 +558,30 @@ describe("OpenCode 2 hidden child completion", () => {
             await expect(failure).rejects.toThrow("ollama-cloud/deepseek-v4.1-flash is unavailable");
             expect(state.rows.latestAssistantCalls - pollsBefore).toBe(1);
             await close(state.executor, handle, false);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("fails an outcome-only idle row in one poll", async () => {
+        const state = await setup();
+        try {
+            state.setTerminalRowType("idle");
+            state.setTerminalOutcome("failed");
+            const handle = await state.executor.open({ ...run, timeoutMs: 40 });
+            const pollsBefore = state.rows.latestIdleCalls;
+            const failure = state.executor.attempt(handle, request());
+            await expect(failure).rejects.toThrow("outcome=failed");
+            await expect(failure).rejects.toThrow('"type":"idle"');
+            expect(state.rows.latestIdleCalls - pollsBefore).toBe(1);
+            await close(state.executor, handle, false);
+
+            state.setTerminalOutcome(undefined);
+            state.setTerminalRowType("assistant");
+            const recovered = await state.executor.open(run);
+            expect(recovered.id).toBe(handle.id);
+            await state.executor.attempt(recovered, request());
+            await close(state.executor, recovered, true);
         } finally {
             state.db.close();
         }

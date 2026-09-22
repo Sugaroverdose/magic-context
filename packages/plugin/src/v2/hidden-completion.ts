@@ -93,6 +93,7 @@ export interface HiddenChildHost {
 export interface HiddenChildRows {
     latestSequence(sessionID: string): number;
     latestAssistant(sessionID: string): StoreRow<"assistant"> | undefined;
+    latestIdle(sessionID: string): StoreRow<"idle"> | undefined;
 }
 
 export interface V2HiddenCompletionOptions {
@@ -365,9 +366,9 @@ function assistantOutcome(row: StoreRow<"assistant"> | undefined): AssistantOutc
 }
 
 /**
- * OpenCode 2.0.5 settled provider failures with `finish: "error"`; 2.0.12 can instead persist only
- * the terminal session outcome on the assistant row. Either shape proves the child is idle and safe
- * to reuse because the hidden-child hook replaces its complete context before the next prompt.
+ * OpenCode 2.0.5 settled provider failures with `finish: "error"`. Some converted 2.0.12 stores
+ * carry the terminal outcome on the assistant row instead; native 2.0.12 idle rows are handled by
+ * the poller. Either assistant shape proves the child is idle and safe to reuse.
  */
 function settledProviderError(row: StoreRow<"assistant"> | undefined): boolean {
     const outcome = assistantOutcome(row);
@@ -398,10 +399,9 @@ function assistantText(row: StoreRow<"assistant">): string | null {
 }
 
 /**
- * A provider error the host recorded as an assistant row, as opposed to every other way a hidden run
- * can fail (dispatch error, refusal, timeout, abort). Only this class keeps the child alive, so it is
- * a distinct type rather than a shape of the message: a message the next editor rewords would
- * silently turn every quota failure back into a new hidden session per run.
+ * A terminal provider or model-resolution failure persisted by the host, as opposed to an unsettled
+ * dispatch error, timeout, or abort. Only this class keeps the now-idle child alive, so reuse does
+ * not depend on wording that a later editor could accidentally change.
  */
 export class HiddenProviderError extends Error {
     constructor(detail: string) {
@@ -476,22 +476,42 @@ async function awaitAssistantRow(
     signal?: AbortSignal,
 ): Promise<StoreRow<"assistant">> {
     for (;;) {
-        const row = withReader(openReader, (reader) => reader.latestAssistant(childID));
-        if (row && row.seq > afterSeq) {
-            const outcome = assistantOutcome(row);
+        const { assistant, idle } = withReader(openReader, (reader) => ({
+            assistant: reader.latestAssistant(childID),
+            idle: reader.latestIdle(childID),
+        }));
+        const newAssistant = assistant && assistant.seq > afterSeq ? assistant : undefined;
+        const newIdle = idle && idle.seq > afterSeq ? idle : undefined;
+        if (newIdle && (!newAssistant || newIdle.seq > newAssistant.seq)) {
+            const outcome = newIdle.data.outcome;
             if (outcome === "failed" || outcome === "interrupted") {
                 const sessionError = await readSessionError();
                 const details = [
                     `outcome=${outcome}`,
-                    `assistant_row=${errorText(row.data)}`,
+                    `terminal_row=${errorText(newIdle)}`,
                     `session_error=${sessionError === undefined ? "unavailable" : errorText(sessionError)}`,
                 ];
                 throw new HiddenProviderError(details.join("; "));
             }
-            if (row.data.error !== undefined) {
-                throw new HiddenProviderError(errorText(row.data.error));
+            if (outcome === "succeeded" && newAssistant) return newAssistant;
+        }
+        if (newAssistant) {
+            const outcome = assistantOutcome(newAssistant);
+            if (outcome === "failed" || outcome === "interrupted") {
+                const sessionError = await readSessionError();
+                const details = [
+                    `outcome=${outcome}`,
+                    `terminal_row=${errorText(newAssistant)}`,
+                    `session_error=${sessionError === undefined ? "unavailable" : errorText(sessionError)}`,
+                ];
+                throw new HiddenProviderError(details.join("; "));
             }
-            if (typeof row.data.finish === "string" || outcome === "succeeded") return row;
+            if (newAssistant.data.error !== undefined) {
+                throw new HiddenProviderError(errorText(newAssistant.data.error));
+            }
+            if (typeof newAssistant.data.finish === "string" || outcome === "succeeded") {
+                return newAssistant;
+            }
         }
         if (Date.now() >= deadline) {
             throw new Error("Hidden completion timed out waiting for a persisted assistant row");
@@ -672,10 +692,21 @@ export async function createV2HiddenCompletionExecutor(
                 }
                 if (active) {
                     const activeID = active.id;
-                    const latest = withReader(options.openReader, (reader) =>
-                        reader.latestAssistant(activeID),
-                    );
-                    if (!successfulReusableAssistant(latest) && !settledProviderError(latest)) {
+                    const latest = withReader(options.openReader, (reader) => ({
+                        assistant: reader.latestAssistant(activeID),
+                        idle: reader.latestIdle(activeID),
+                    }));
+                    const idleIsNewest =
+                        latest.idle !== undefined &&
+                        (latest.assistant === undefined || latest.idle.seq > latest.assistant.seq);
+                    const idleOutcome = idleIsNewest ? latest.idle?.data.outcome : undefined;
+                    const reusable =
+                        idleOutcome === "failed" ||
+                        idleOutcome === "interrupted" ||
+                        ((idleOutcome === undefined || idleOutcome === "succeeded") &&
+                            (successfulReusableAssistant(latest.assistant) ||
+                                settledProviderError(latest.assistant)));
+                    if (!reusable) {
                         retireChild(active, "newest-assistant-not-reusable");
                         active = undefined;
                     }

@@ -491,6 +491,17 @@ export class V2StoreReader {
         });
     }
 
+    latestIdle(sessionID: string): StoreRow<"idle"> | undefined {
+        return trackDecodeOperation("latestIdle", () => {
+            const row = this.db
+                .prepare(`SELECT id, session_id, type, seq, time_created, data FROM session_message
+                    WHERE session_id = ? AND type = 'idle'
+                    ORDER BY seq DESC LIMIT 1`)
+                .get(sessionID) as RawRow | undefined;
+            return row ? (decode(row) as StoreRow<"idle">) : undefined;
+        });
+    }
+
     /** Include the completed checkpoint itself, matching the host history cut. */
     window(sessionID: string): StoreRow[] {
         return trackDecodeOperation("window", () =>
