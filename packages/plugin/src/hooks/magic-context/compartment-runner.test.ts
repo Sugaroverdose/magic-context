@@ -46,7 +46,11 @@ import {
     runCompartmentAgent as runCompartmentAgentImpl,
     startCompartmentAgent as startCompartmentAgentImpl,
 } from "./compartment-runner";
-import { clearProducerModelObservations, observeProducerModelsForTest, prepareProducerFixture } from './producer-window-test-support';
+import {
+    clearProducerModelObservations,
+    observeProducerModelsForTest,
+    prepareProducerFixture,
+} from "./producer-window-test-support";
 import {
     hasRunnableCompartmentWindow,
     resolveOpenCodeProtectedTailBoundary,
@@ -54,10 +58,19 @@ import {
 import { __ignoredNotificationTest } from "./send-session-notification";
 import { tagMessages } from "./tag-messages";
 
-const runCompartmentAgent: typeof runCompartmentAgentImpl = async (deps) => runCompartmentAgentImpl(await prepareProducerFixture(deps));
-const executeContextRecomp: typeof executeContextRecompImpl = async (deps, options) => executeContextRecompImpl(await prepareProducerFixture(deps), options);
-const executeContextRecompWithResult: typeof executeContextRecompWithResultImpl = async (deps, options) => executeContextRecompWithResultImpl(await prepareProducerFixture(deps), options);
-const startCompartmentAgent: typeof startCompartmentAgentImpl = (deps, runAgent) => startCompartmentAgentImpl(runAgent ? deps : { ...deps, model: deps.model ?? "test/fixture-historian" }, runAgent);
+const runCompartmentAgent: typeof runCompartmentAgentImpl = async (deps) =>
+    runCompartmentAgentImpl(await prepareProducerFixture(deps));
+const executeContextRecomp: typeof executeContextRecompImpl = async (deps, options) =>
+    executeContextRecompImpl(await prepareProducerFixture(deps), options);
+const executeContextRecompWithResult: typeof executeContextRecompWithResultImpl = async (
+    deps,
+    options,
+) => executeContextRecompWithResultImpl(await prepareProducerFixture(deps), options);
+const startCompartmentAgent: typeof startCompartmentAgentImpl = (deps, runAgent) =>
+    startCompartmentAgentImpl(
+        runAgent ? deps : { ...deps, model: deps.model ?? "test/fixture-historian" },
+        runAgent,
+    );
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -2101,8 +2114,14 @@ describe("runCompartmentAgent", () => {
             [{ body?: { model?: { providerID: string; modelID: string } } }]
         >;
         // Primary and repair use an explicitly selected model with a known window; an unspecified agent default has no observable window for admission.
-        expect(calls[0]?.[0]?.body?.model).toEqual({ providerID: "test", modelID: "fixture-historian" });
-        expect(calls[1]?.[0]?.body?.model).toEqual({ providerID: "test", modelID: "fixture-historian" });
+        expect(calls[0]?.[0]?.body?.model).toEqual({
+            providerID: "test",
+            modelID: "fixture-historian",
+        });
+        expect(calls[1]?.[0]?.body?.model).toEqual({
+            providerID: "test",
+            modelID: "fixture-historian",
+        });
         // Call 2: the FIRST configured fallback (sonnet), not the session model.
         expect(calls[2]?.[0]?.body?.model).toEqual({
             providerID: "anthropic",

@@ -70,8 +70,8 @@ export function localBudget(providerTokens: number, ratio: number): number {
 /** Split provider/model at the first slash, retaining any further slashes in the model name. */
 export function calibrationForModelKey(modelKey: string | null | undefined): DecisionCalibration {
     const slash = modelKey?.indexOf("/") ?? -1;
-    return slash > 0
-        ? resolveDecisionCalibration(modelKey!.slice(0, slash), modelKey!.slice(slash + 1))
+    return modelKey != null && slash > 0
+        ? resolveDecisionCalibration(modelKey.slice(0, slash), modelKey.slice(slash + 1))
         : resolveDecisionCalibration(undefined, undefined);
 }
 

@@ -4,7 +4,7 @@ import {
     appendCompartments,
     getCompartments,
 } from "../../features/magic-context/compartment-storage";
-import { getHistorianFailureState } from '../../features/magic-context/storage';
+import { getHistorianFailureState } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
 import { validateHistorianOutput } from "./compartment-runner-validation";
@@ -217,7 +217,9 @@ export function registerIssue424CapacityTests(
             });
             // Source was clipped against unscaled local counts. The unknown-model fit margin plus historian system/instruction text still exceed this fixture's window.
             expect(firstPrompts).toHaveLength(0);
-            expect(getHistorianFailureState(db, sessionId).lastError).toContain("producer_prompt_exceeds_window");
+            expect(getHistorianFailureState(db, sessionId).lastError).toContain(
+                "producer_prompt_exceeds_window",
+            );
             expect(
                 getCompartments(db, sessionId).map((compartment) => [
                     compartment.startMessage,

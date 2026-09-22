@@ -142,7 +142,10 @@ export function applyHeuristicCleanup(
             );
         const measuredByTag = new Map(activeTags.map((tag) => [tag.tagNumber, tag]));
         const droppableTags = candidateTags
-            .map((tag) => measuredByTag.get(tag.tagNumber)!)
+            .flatMap((tag) => {
+                const measured = measuredByTag.get(tag.tagNumber);
+                return measured ? [measured] : [];
+            })
             .filter((tag) => (tag.reclaimableTokens ?? 0) > 0);
         const plan = planEmergencyDrop({
             tags: droppableTags as readonly EmergencyDropTag[],

@@ -64,7 +64,11 @@ export class CalibrationCandidates {
         const id = `${key}:${input.requestId}`;
         const duplicate = this.pending.has(id);
         this.pending.set(id, { ...input, complete: input.complete && !duplicate });
-        while (this.pending.size > 1024) this.pending.delete(this.pending.keys().next().value!);
+        while (this.pending.size > 1024) {
+            const oldest = this.pending.keys().next().value;
+            if (oldest === undefined) break;
+            this.pending.delete(oldest);
+        }
         return {
             ...this.snapshot(
                 key,
@@ -120,8 +124,11 @@ export class CalibrationCandidates {
             return this.snapshot(key, seed, false, "duplicate-or-unidentified-response");
         this.pending.delete(id);
         this.completed.add(responseKey);
-        while (this.completed.size > 2048)
-            this.completed.delete(this.completed.values().next().value!);
+        while (this.completed.size > 2048) {
+            const oldest = this.completed.values().next().value;
+            if (oldest === undefined) break;
+            this.completed.delete(oldest);
+        }
         const prior = this.records.get(key);
         if (
             input.failed ||
@@ -145,7 +152,11 @@ export class CalibrationCandidates {
             completedAt: input.completedAt,
         };
         this.records.set(key, next);
-        while (this.records.size > 1024) this.records.delete(this.records.keys().next().value!);
+        while (this.records.size > 1024) {
+            const oldest = this.records.keys().next().value;
+            if (oldest === undefined) break;
+            this.records.delete(oldest);
+        }
         return {
             ...this.snapshot(key, seed, true),
             sample,

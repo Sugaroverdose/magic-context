@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, openDatabase } from "../features/magic-context/storage";
 import { runValidatedHistorianPass } from "../hooks/magic-context/compartment-runner-historian";
-import { clearProducerModelObservations, observeProducerModelsForTest } from '../hooks/magic-context/producer-window-test-support';
+import {
+    clearProducerModelObservations,
+    observeProducerModelsForTest,
+} from "../hooks/magic-context/producer-window-test-support";
 import type { PluginContext } from "../plugin/types";
 import * as logger from "../shared/logger";
 

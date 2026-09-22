@@ -6,7 +6,10 @@ import { mock } from "bun:test";
 import type { PluginContext } from "../../plugin/types";
 import { runCompartmentAgent } from "./compartment-runner";
 import { registerIssue424CapacityTests } from "./issue-424-capacity-test-support.test";
-import { clearProducerModelObservations, prepareProducerFixture } from './producer-window-test-support';
+import {
+    clearProducerModelObservations,
+    prepareProducerFixture,
+} from "./producer-window-test-support";
 
 registerIssue424CapacityTests(
     "opencode",
@@ -41,18 +44,24 @@ registerIssue424CapacityTests(
                 delete: mock(async () => ({})),
             },
         } as unknown as PluginContext["client"];
-        try { await runCompartmentAgent(await prepareProducerFixture({
-            client,
-            db,
-            sessionId,
-            directory: process.cwd(),
-            historianChunkTokens,
-            historianContextLimit,
-            historianMaxOutputTokens: maxOutputTokens,
-            boundarySnapshot: boundary,
-            compartmentLeaseHolderId: holderId,
-            memoryEnabled: false,
-        })); } finally { clearProducerModelObservations(); }
+        try {
+            await runCompartmentAgent(
+                await prepareProducerFixture({
+                    client,
+                    db,
+                    sessionId,
+                    directory: process.cwd(),
+                    historianChunkTokens,
+                    historianContextLimit,
+                    historianMaxOutputTokens: maxOutputTokens,
+                    boundarySnapshot: boundary,
+                    compartmentLeaseHolderId: holderId,
+                    memoryEnabled: false,
+                }),
+            );
+        } finally {
+            clearProducerModelObservations();
+        }
         return prompts;
     },
 );
