@@ -127,6 +127,7 @@ const insertEmbeddingStatements = new WeakMap<Database, PreparedStatement>();
 const renumberEmbeddingWindowStatements = new WeakMap<Database, PreparedStatement>();
 const searchRowsStatements = new WeakMap<Database, PreparedStatement>();
 const searchRowsByModelStatements = new WeakMap<Database, PreparedStatement>();
+const datedSearchRowsByModelStatements = new WeakMap<Database, PreparedStatement>();
 const searchPoolProbeStatements = new WeakMap<Database, PreparedStatement>();
 const backfillCandidateStatements = new WeakMap<Database, PreparedStatement>();
 const shadowBackfillCandidateStatements = new WeakMap<Database, PreparedStatement>();
@@ -246,6 +247,42 @@ function getSearchRowsStatement(db: Database, withModel: boolean): PreparedState
         map.set(db, stmt);
     }
     return stmt;
+}
+
+function getDatedSearchRowsByModelStatement(db: Database): PreparedStatement {
+    let statement = datedSearchRowsByModelStatements.get(db);
+    if (!statement) {
+        statement = db.prepare(
+            `SELECT e.compartment_id AS compartmentId,
+                    e.session_id AS sessionId,
+                    c.title AS title,
+                    c.start_message AS compartmentStart,
+                    c.end_message AS compartmentEnd,
+                    e.window_index AS windowIndex,
+                    e.start_ordinal AS windowStart,
+                    e.end_ordinal AS windowEnd,
+                    e.chunk_hash AS chunkHash,
+                    e.model_id AS modelId,
+                    e.dims AS dims,
+                    e.vector AS vector
+               FROM compartment_chunk_embeddings e
+               JOIN compartments c ON c.id = e.compartment_id
+               JOIN message_fts_rowid_map AS start_map
+                 ON start_map.session_id = c.session_id
+                AND start_map.message_ordinal = c.start_message
+               JOIN message_fts_rowid_map AS end_map
+                 ON end_map.session_id = c.session_id
+                AND end_map.message_ordinal = c.end_message
+              WHERE e.session_id = ?
+                AND e.project_path = ?
+                AND e.model_id = ?
+                AND start_map.message_time_ms <= ?
+                AND end_map.message_time_ms >= ?
+              ORDER BY e.compartment_id ASC, e.window_index ASC`,
+        );
+        datedSearchRowsByModelStatements.set(db, statement);
+    }
+    return statement;
 }
 
 function getBackfillCandidateStatement(db: Database): PreparedStatement {
@@ -880,9 +917,49 @@ export function loadCompartmentChunkEmbeddingsForSearch(
     sessionId: string,
     projectPath: string,
     modelId: string,
+    dateRange: { from: number; to: number } | null = null,
 ): StoredCompartmentChunkEmbedding[] {
     if (!modelId) {
         throw new Error("loadCompartmentChunkEmbeddingsForSearch requires a current model id");
+    }
+    if (dateRange !== null) {
+        const rows = getDatedSearchRowsByModelStatement(db).all(
+            sessionId,
+            projectPath,
+            modelId,
+            dateRange.to,
+            dateRange.from,
+        ) as SearchChunkRow[];
+        return rows
+            .filter(
+                (row) =>
+                    typeof row.compartmentId === "number" &&
+                    typeof row.sessionId === "string" &&
+                    typeof row.title === "string" &&
+                    typeof row.compartmentStart === "number" &&
+                    typeof row.compartmentEnd === "number" &&
+                    typeof row.windowIndex === "number" &&
+                    typeof row.windowStart === "number" &&
+                    typeof row.windowEnd === "number" &&
+                    typeof row.chunkHash === "string" &&
+                    typeof row.modelId === "string" &&
+                    typeof row.dims === "number" &&
+                    (row.vector instanceof Uint8Array || row.vector instanceof ArrayBuffer),
+            )
+            .map((row) => ({
+                compartmentId: row.compartmentId,
+                sessionId: row.sessionId,
+                title: row.title,
+                startOrdinal: row.compartmentStart,
+                endOrdinal: row.compartmentEnd,
+                windowIndex: row.windowIndex,
+                windowStartOrdinal: row.windowStart,
+                windowEndOrdinal: row.windowEnd,
+                chunkHash: row.chunkHash,
+                modelId: row.modelId,
+                dims: row.dims,
+                vector: toFloat32Array(row.vector),
+            }));
     }
     const key = searchPoolKey(sessionId, projectPath, modelId);
     const pool = getDecodedSearchPool(db);

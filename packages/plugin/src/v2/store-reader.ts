@@ -72,6 +72,7 @@ export interface StoreRow<T extends MessageType = MessageType> {
     session_id: string;
     type: T;
     seq: number;
+    time_created?: number;
     data: T extends "idle" ? IdleData : T extends "compaction" ? CompactionData : MessageData;
 }
 interface RawRow extends Omit<StoreRow, "data"> {
@@ -207,7 +208,7 @@ export class V2StoreReader {
             }
             const rows = (
                 this.db
-                    .prepare(`SELECT id, session_id, type, seq, data FROM session_message
+                    .prepare(`SELECT id, session_id, type, seq, time_created, data FROM session_message
                         WHERE ${predicates.join(" AND ")}
                         ORDER BY seq ASC LIMIT ?`)
                     .all(...parameters, limit) as RawRow[]
@@ -253,7 +254,7 @@ export class V2StoreReader {
                                 ORDER BY seq ASC LIMIT 1 OFFSET ?
                             ), ?) AS watermark_seq
                     )
-                    SELECT id, session_id, type, seq, data FROM session_message, bounds
+                    SELECT id, session_id, type, seq, time_created, data FROM session_message, bounds
                     WHERE session_id = ?
                       AND type IN (${rawTypes})
                       AND seq > bounds.after_seq
@@ -304,7 +305,7 @@ export class V2StoreReader {
             const rawTypes = RAW_MESSAGE_TYPES.map(() => "?").join(", ");
             const row = this.db
                 .prepare(
-                    `SELECT id, session_id, type, seq, data FROM session_message
+                    `SELECT id, session_id, type, seq, time_created, data FROM session_message
                      WHERE session_id = ? AND id = ? AND type IN (${rawTypes}) LIMIT 1`,
                 )
                 .get(sessionID, id, ...RAW_MESSAGE_TYPES) as RawRow | undefined;
@@ -435,7 +436,7 @@ export class V2StoreReader {
         status: "completed" | "running",
     ): StoreRow<"compaction"> | undefined {
         const row = this.db
-            .prepare(`SELECT id, session_id, type, seq, data FROM session_message
+            .prepare(`SELECT id, session_id, type, seq, time_created, data FROM session_message
                 WHERE session_id = ? AND type = 'compaction'
                   AND json_extract(data, '$.status') = ?
                 ORDER BY seq DESC LIMIT 1`)
@@ -481,7 +482,7 @@ export class V2StoreReader {
     latestAssistant(sessionID: string): StoreRow<"assistant"> | undefined {
         return trackDecodeOperation("latestAssistant", () => {
             const row = this.db
-                .prepare(`SELECT id, session_id, type, seq, data FROM session_message
+                .prepare(`SELECT id, session_id, type, seq, time_created, data FROM session_message
                     WHERE session_id = ? AND type = 'assistant'
                     ORDER BY seq DESC LIMIT 1`)
                 .get(sessionID) as RawRow | undefined;

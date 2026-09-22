@@ -22,7 +22,7 @@ function projectRawMessages(
             id: row.id,
             ordinal: ordinalFor(row, index),
             role: row.type === "assistant" ? "assistant" : "user",
-            createdAt: row.data.time?.created,
+            createdAt: row.time_created ?? row.data.time?.created,
             parts:
                 row.type === "assistant"
                     ? (row.data.content ?? []).map((part) => {

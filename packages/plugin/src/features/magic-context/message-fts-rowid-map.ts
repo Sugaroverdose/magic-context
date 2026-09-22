@@ -27,16 +27,22 @@ export interface MessageFtsRowidMapBackfillProgress {
 
 const upsertMapStatements = new WeakMap<Database, PreparedStatement>();
 const rangeReadyStatements = new WeakMap<Database, PreparedStatement>();
+const updateTimeStatements = new WeakMap<Database, PreparedStatement>();
 const activeBackfills = new WeakMap<Database, Promise<void>>();
 
 function getUpsertMapStatement(db: Database): PreparedStatement {
     let statement = upsertMapStatements.get(db);
     if (!statement) {
         statement = db.prepare(
-            `INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid)
-             VALUES (?, ?, ?)
+            `INSERT INTO message_fts_rowid_map
+                 (session_id, message_ordinal, fts_rowid, message_time_ms)
+             VALUES (?, ?, ?, ?)
              ON CONFLICT(session_id, message_ordinal) DO UPDATE SET
-                 fts_rowid = excluded.fts_rowid`,
+                 fts_rowid = excluded.fts_rowid,
+                 message_time_ms = COALESCE(
+                     excluded.message_time_ms,
+                     message_fts_rowid_map.message_time_ms
+                 )`,
         );
         upsertMapStatements.set(db, statement);
     }
@@ -67,12 +73,46 @@ export function recordMessageFtsRowid(
     sessionId: string,
     messageOrdinal: number,
     ftsRowid: number | bigint,
+    messageTimeMs: number | null = null,
 ): void {
     const numericRowid = Number(ftsRowid);
     if (!Number.isSafeInteger(numericRowid) || numericRowid <= 0) {
         throw new Error(`invalid message FTS rowid: ${String(ftsRowid)}`);
     }
-    getUpsertMapStatement(db).run(sessionId, messageOrdinal, numericRowid);
+    const normalizedTime =
+        typeof messageTimeMs === "number" &&
+        Number.isSafeInteger(messageTimeMs) &&
+        messageTimeMs >= 0
+            ? messageTimeMs
+            : null;
+    getUpsertMapStatement(db).run(sessionId, messageOrdinal, numericRowid, normalizedTime);
+}
+
+/** Fill a missing indexed timestamp without changing the FTS row identity. */
+export function recordIndexedMessageTime(
+    db: Database,
+    sessionId: string,
+    messageOrdinal: number,
+    messageTimeMs: number | null | undefined,
+): void {
+    if (
+        typeof messageTimeMs !== "number" ||
+        !Number.isSafeInteger(messageTimeMs) ||
+        messageTimeMs < 0
+    ) {
+        return;
+    }
+    let statement = updateTimeStatements.get(db);
+    if (!statement) {
+        statement = db.prepare(
+            `UPDATE message_fts_rowid_map
+                SET message_time_ms = ?
+              WHERE session_id = ? AND message_ordinal = ?
+                AND message_time_ms IS NULL`,
+        );
+        updateTimeStatements.set(db, statement);
+    }
+    statement.run(messageTimeMs, sessionId, messageOrdinal);
 }
 
 /**

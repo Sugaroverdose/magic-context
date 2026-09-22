@@ -75,7 +75,12 @@ interface BatchedFtsCountRow {
 
 const messageSearchStatements = new WeakMap<Database, PreparedStatement>();
 const messageSearchStatementsWithCutoff = new WeakMap<Database, PreparedStatement>();
+const messageSearchStatementsWithDateRange = new WeakMap<
+    Database,
+    Map<"all" | "cutoff", PreparedStatement>
+>();
 const messageSearchDiagnosticStatements = new WeakMap<Database, PreparedStatement>();
+const messageSearchDiagnosticStatementsWithDateRange = new WeakMap<Database, PreparedStatement>();
 const batchedMessageSearchStatements = new WeakMap<Database, Map<string, PreparedStatement>>();
 const batchedFtsCountStatements = new WeakMap<Database, Map<string, PreparedStatement>>();
 
@@ -104,6 +109,10 @@ export function createUnifiedSearchDiagnostics(): UnifiedSearchDiagnostics {
 
 export interface UnifiedSearchOptions {
     limit?: number;
+    /** Earliest persisted source timestamp in epoch milliseconds (inclusive). */
+    from?: number;
+    /** Latest persisted source timestamp in epoch milliseconds (inclusive). */
+    to?: number;
     memoryEnabled?: boolean;
     embeddingEnabled?: boolean;
     /** Deprecated: message search no longer reads raw messages on the hot path. */
@@ -240,6 +249,24 @@ function normalizeLimit(limit?: number): number {
         return DEFAULT_UNIFIED_SEARCH_LIMIT;
     }
     return Math.max(1, Math.floor(limit));
+}
+
+interface InclusiveDateRange {
+    from: number;
+    to: number;
+}
+
+function normalizeDateRange(from?: number, to?: number): InclusiveDateRange | null {
+    if (from === undefined && to === undefined) return null;
+    return {
+        from:
+            typeof from === "number" && Number.isSafeInteger(from) ? from : Number.MIN_SAFE_INTEGER,
+        to: typeof to === "number" && Number.isSafeInteger(to) ? to : Number.MAX_SAFE_INTEGER,
+    };
+}
+
+function timestampIsInRange(timestamp: number, range: InclusiveDateRange | null): boolean {
+    return range === null || (timestamp >= range.from && timestamp <= range.to);
 }
 
 // ID-shaped short-circuit: when the whole trimmed query is one memory id (with
@@ -387,6 +414,41 @@ function getMessageSearchStatementWithCutoff(db: Database): PreparedStatement {
     return stmt;
 }
 
+/** Date predicates join through the rowid sidecar so NULL legacy times are excluded before LIMIT. */
+function getMessageSearchStatementWithDateRange(
+    db: Database,
+    withCutoff: boolean,
+): PreparedStatement {
+    let statements = messageSearchStatementsWithDateRange.get(db);
+    if (!statements) {
+        statements = new Map();
+        messageSearchStatementsWithDateRange.set(db, statements);
+    }
+    const key = withCutoff ? "cutoff" : "all";
+    let statement = statements.get(key);
+    if (!statement) {
+        statement = db.prepare(
+            `SELECT message_history_fts.message_ordinal AS messageOrdinal,
+                    message_history_fts.message_id AS messageId,
+                    message_history_fts.role AS role,
+                    message_history_fts.content AS content
+               FROM message_history_fts
+               JOIN message_fts_rowid_map AS map
+                 ON map.session_id = message_history_fts.session_id
+                AND map.fts_rowid = message_history_fts.rowid
+              WHERE message_history_fts.session_id = ?
+                AND message_history_fts MATCH ?
+                AND map.message_time_ms BETWEEN ? AND ?
+                ${withCutoff ? "AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?" : ""}
+              ORDER BY bm25(message_history_fts),
+                       CAST(message_history_fts.message_ordinal AS INTEGER) ASC
+              LIMIT ?`,
+        );
+        statements.set(key, statement);
+    }
+    return statement;
+}
+
 /** Explicit tool searches need both eligible rows and the exact number of
  * matching live-tail rows. Materializing the FTS match set once keeps that
  * diagnostic from issuing a second search query, while the ordinary hot path
@@ -437,27 +499,90 @@ function getMessageSearchDiagnosticStatement(db: Database): PreparedStatement {
     return stmt;
 }
 
+function getMessageSearchDiagnosticStatementWithDateRange(db: Database): PreparedStatement {
+    let statement = messageSearchDiagnosticStatementsWithDateRange.get(db);
+    if (!statement) {
+        statement = db.prepare(`
+            WITH matches AS MATERIALIZED (
+                SELECT
+                    message_history_fts.message_ordinal AS messageOrdinal,
+                    message_history_fts.message_id AS messageId,
+                    message_history_fts.role AS role,
+                    message_history_fts.content AS content,
+                    CAST(message_history_fts.message_ordinal AS INTEGER) AS ordinalValue,
+                    bm25(message_history_fts) AS ftsRank
+                FROM message_history_fts
+                JOIN message_fts_rowid_map AS map
+                  ON map.session_id = message_history_fts.session_id
+                 AND map.fts_rowid = message_history_fts.rowid
+                WHERE message_history_fts.session_id = ?
+                  AND message_history_fts MATCH ?
+                  AND map.message_time_ms BETWEEN ? AND ?
+            ),
+            eligible AS (
+                SELECT * FROM matches
+                WHERE ordinalValue <= ?
+                ORDER BY ftsRank, ordinalValue ASC
+                LIMIT ?
+            ),
+            summary AS (
+                SELECT COUNT(*) AS suppressedCount
+                FROM matches
+                WHERE ordinalValue > ?
+            )
+            SELECT
+                eligible.messageOrdinal,
+                eligible.messageId,
+                eligible.role,
+                eligible.content,
+                eligible.ftsRank,
+                summary.suppressedCount,
+                0 AS summaryOnly
+            FROM eligible CROSS JOIN summary
+            UNION ALL
+            SELECT NULL, NULL, NULL, NULL, NULL, summary.suppressedCount, 1
+            FROM summary
+            WHERE NOT EXISTS (SELECT 1 FROM eligible)
+            ORDER BY summaryOnly ASC, ftsRank ASC, messageOrdinal ASC
+        `);
+        messageSearchDiagnosticStatementsWithDateRange.set(db, statement);
+    }
+    return statement;
+}
+
 function getBatchedFtsCountStatement(
     db: Database,
     queryCount: number,
     cutoff: number | null,
+    dateRange: InclusiveDateRange | null,
 ): PreparedStatement {
     let statements = batchedFtsCountStatements.get(db);
     if (!statements) {
         statements = new Map();
         batchedFtsCountStatements.set(db, statements);
     }
-    const key = `${queryCount}:${cutoff === null ? "all" : "cutoff"}`;
+    const key = `${queryCount}:${cutoff === null ? "all" : "cutoff"}:${dateRange === null ? "all-dates" : "dated"}`;
     let statement = statements.get(key);
     if (!statement) {
-        const cutoffSql = cutoff === null ? "" : " AND CAST(message_ordinal AS INTEGER) <= ?";
+        const cutoffSql =
+            cutoff === null
+                ? ""
+                : " AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?";
+        const joinSql =
+            dateRange === null
+                ? ""
+                : ` JOIN message_fts_rowid_map AS map
+                         ON map.session_id = message_history_fts.session_id
+                        AND map.fts_rowid = message_history_fts.rowid`;
+        const dateSql = dateRange === null ? "" : " AND map.message_time_ms BETWEEN ? AND ?";
         statement = db.prepare(
             Array.from(
                 { length: queryCount },
                 (_, index) =>
                     `SELECT ${index} AS queryIndex, COUNT(*) AS count
-                       FROM message_history_fts
-                      WHERE session_id = ? AND message_history_fts MATCH ?${cutoffSql}`,
+                       FROM message_history_fts${joinSql}
+                      WHERE message_history_fts.session_id = ?
+                        AND message_history_fts MATCH ?${dateSql}${cutoffSql}`,
             ).join("\nUNION ALL\n"),
         );
         statements.set(key, statement);
@@ -471,17 +596,22 @@ function countSessionFtsMatchesBatch(
     sessionId: string,
     ftsQueries: readonly string[],
     cutoff: number | null,
+    dateRange: InclusiveDateRange | null,
 ): number[] {
     if (ftsQueries.length === 0) return [];
     const bindings: unknown[] = [];
     for (const query of ftsQueries) {
         bindings.push(sessionId, query);
+        if (dateRange !== null) bindings.push(dateRange.from, dateRange.to);
         if (cutoff !== null) bindings.push(cutoff);
     }
     try {
-        const rows = getBatchedFtsCountStatement(db, ftsQueries.length, cutoff).all(
-            ...bindings,
-        ) as BatchedFtsCountRow[];
+        const rows = getBatchedFtsCountStatement(
+            db,
+            ftsQueries.length,
+            cutoff,
+            dateRange,
+        ).all(...bindings) as BatchedFtsCountRow[];
         const counts = Array.from({ length: ftsQueries.length }, () => 0);
         for (const row of rows) {
             if (
@@ -609,6 +739,7 @@ function getFtsMatches(args: {
     query: string;
     limit: number;
     workspace?: SearchWorkspaceContext;
+    dateRange: InclusiveDateRange | null;
 }): Memory[] {
     try {
         return args.workspace?.isWorkspaced
@@ -618,9 +749,16 @@ function getFtsMatches(args: {
                   args.query,
                   args.limit,
                   args.workspace.ownIdentities,
-                  args.workspace.shareCategories,
-              )
-            : searchMemoriesFTS(args.db, args.projectPath, args.query, args.limit);
+                   args.workspace.shareCategories,
+                   args.dateRange,
+               )
+            : searchMemoriesFTS(
+                  args.db,
+                  args.projectPath,
+                  args.query,
+                  args.limit,
+                  args.dateRange,
+              );
     } catch (error) {
         log(
             `[search] FTS query failed for "${args.query}": ${error instanceof Error ? error.message : String(error)}`,
@@ -744,12 +882,13 @@ async function searchMemories(args: {
     queryModelId?: string | null;
     workspace?: SearchWorkspaceContext;
     visibleMemoryIds?: Set<number> | null;
+    dateRange: InclusiveDateRange | null;
 }): Promise<{ results: MemorySearchResult[]; suppressedVisibleIds: number[] }> {
     if (!args.memoryEnabled) {
         return { results: [], suppressedVisibleIds: [] };
     }
 
-    const memories = args.workspace?.isWorkspaced
+    const unfilteredMemories = args.workspace?.isWorkspaced
         ? getMemoriesByProjects(
               args.db,
               args.workspace.expandedIdentities,
@@ -759,6 +898,9 @@ async function searchMemories(args: {
               args.workspace.shareCategories,
           )
         : getMemoriesByProject(args.db, args.projectPath);
+    const memories = unfilteredMemories.filter((memory) =>
+        timestampIsInRange(memory.createdAt, args.dateRange),
+    );
     if (memories.length === 0) {
         return { results: [], suppressedVisibleIds: [] };
     }
@@ -769,6 +911,7 @@ async function searchMemories(args: {
         query: args.query,
         limit: FTS_SEMANTIC_CANDIDATE_LIMIT,
         workspace: args.workspace,
+        dateRange: args.dateRange,
     });
     const ftsScores = getFtsScores(ftsMatches);
     const semanticCandidates = selectSemanticCandidates({
@@ -862,15 +1005,28 @@ function runMessageFtsQuery(
     ftsQuery: string,
     fetchLimit: number,
     cutoff: number | null,
+    dateRange: InclusiveDateRange | null,
 ): NormalizedMessageRow[] {
     if (ftsQuery.length === 0) return [];
-    // Apply the ordinal cutoff IN SQL (before LIMIT) so live-tail matches can't
-    // crowd out older eligible hits; null cutoff keeps the original statement.
-    const rows = (
-        cutoff !== null
-            ? getMessageSearchStatementWithCutoff(db).all(sessionId, ftsQuery, cutoff, fetchLimit)
-            : getMessageSearchStatement(db).all(sessionId, ftsQuery, fetchLimit)
-    ).map((row) => row as MessageSearchRow);
+    let rawRows: unknown[];
+    if (dateRange !== null) {
+        const bindings: unknown[] = [sessionId, ftsQuery, dateRange.from, dateRange.to];
+        if (cutoff !== null) bindings.push(cutoff);
+        bindings.push(fetchLimit);
+        rawRows = getMessageSearchStatementWithDateRange(db, cutoff !== null).all(...bindings);
+    } else {
+        // Keep the undated path on its original prepared statements and bindings.
+        rawRows =
+            cutoff !== null
+                ? getMessageSearchStatementWithCutoff(db).all(
+                      sessionId,
+                      ftsQuery,
+                      cutoff,
+                      fetchLimit,
+                  )
+                : getMessageSearchStatement(db).all(sessionId, ftsQuery, fetchLimit);
+    }
+    const rows = rawRows.map((row) => row as MessageSearchRow);
 
     const result: NormalizedMessageRow[] = [];
     for (const row of rows) {
@@ -886,11 +1042,28 @@ function runMessageFtsQueryWithDiagnostics(args: {
     ftsQuery: string;
     fetchLimit: number;
     cutoff: number;
+    dateRange: InclusiveDateRange | null;
 }): { rows: NormalizedMessageRow[]; suppressedCount: number } {
     if (args.ftsQuery.length === 0) return { rows: [], suppressedCount: 0 };
-    const rawRows = getMessageSearchDiagnosticStatement(args.db)
-        .all(args.sessionId, args.ftsQuery, args.cutoff, args.fetchLimit, args.cutoff)
-        .map((row) => row as MessageSearchRow);
+    const rawRows = (
+        args.dateRange === null
+            ? getMessageSearchDiagnosticStatement(args.db).all(
+                  args.sessionId,
+                  args.ftsQuery,
+                  args.cutoff,
+                  args.fetchLimit,
+                  args.cutoff,
+              )
+            : getMessageSearchDiagnosticStatementWithDateRange(args.db).all(
+                  args.sessionId,
+                  args.ftsQuery,
+                  args.dateRange.from,
+                  args.dateRange.to,
+                  args.cutoff,
+                  args.fetchLimit,
+                  args.cutoff,
+              )
+    ).map((row) => row as MessageSearchRow);
     const suppressedCount = rawRows[0]?.suppressedCount ?? 0;
     const rows: NormalizedMessageRow[] = [];
     for (const row of rawRows) {
@@ -905,27 +1078,39 @@ function getBatchedMessageSearchStatement(
     db: Database,
     queryCount: number,
     cutoff: number | null,
+    dateRange: InclusiveDateRange | null,
 ): PreparedStatement {
     let statements = batchedMessageSearchStatements.get(db);
     if (!statements) {
         statements = new Map();
         batchedMessageSearchStatements.set(db, statements);
     }
-    const key = `${queryCount}:${cutoff === null ? "all" : "cutoff"}`;
+    const key = `${queryCount}:${cutoff === null ? "all" : "cutoff"}:${dateRange === null ? "all-dates" : "dated"}`;
     let statement = statements.get(key);
     if (!statement) {
-        const cutoffSql = cutoff === null ? "" : " AND CAST(message_ordinal AS INTEGER) <= ?";
+        const cutoffSql =
+            cutoff === null
+                ? ""
+                : " AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?";
+        const joinSql =
+            dateRange === null
+                ? ""
+                : ` JOIN message_fts_rowid_map AS map
+                         ON map.session_id = message_history_fts.session_id
+                        AND map.fts_rowid = message_history_fts.rowid`;
+        const dateSql = dateRange === null ? "" : " AND map.message_time_ms BETWEEN ? AND ?";
         const branches = Array.from(
             { length: queryCount },
             (_, index) => `SELECT * FROM (
                 SELECT ${index} AS queryIndex,
-                       message_ordinal AS messageOrdinal,
-                       message_id AS messageId,
-                       role,
-                       content,
+                       message_history_fts.message_ordinal AS messageOrdinal,
+                       message_history_fts.message_id AS messageId,
+                       message_history_fts.role AS role,
+                       message_history_fts.content AS content,
                        bm25(message_history_fts) AS ftsRank
-                  FROM message_history_fts
-                 WHERE session_id = ? AND message_history_fts MATCH ?${cutoffSql}
+                  FROM message_history_fts${joinSql}
+                 WHERE message_history_fts.session_id = ?
+                   AND message_history_fts MATCH ?${dateSql}${cutoffSql}
                  ORDER BY ftsRank
                  LIMIT ?
             )`,
@@ -945,17 +1130,22 @@ function runMessageFtsQueriesBatch(
     ftsQueries: readonly string[],
     fetchLimit: number,
     cutoff: number | null,
+    dateRange: InclusiveDateRange | null,
 ): NormalizedMessageRow[][] {
     if (ftsQueries.length === 0) return [];
     const bindings: unknown[] = [];
     for (const query of ftsQueries) {
         bindings.push(sessionId, query);
+        if (dateRange !== null) bindings.push(dateRange.from, dateRange.to);
         if (cutoff !== null) bindings.push(cutoff);
         bindings.push(fetchLimit);
     }
-    const rows = getBatchedMessageSearchStatement(db, ftsQueries.length, cutoff).all(
-        ...bindings,
-    ) as BatchedMessageSearchRow[];
+    const rows = getBatchedMessageSearchStatement(
+        db,
+        ftsQueries.length,
+        cutoff,
+        dateRange,
+    ).all(...bindings) as BatchedMessageSearchRow[];
     const result = Array.from({ length: ftsQueries.length }, () => [] as NormalizedMessageRow[]);
     for (const row of rows) {
         if (
@@ -1007,6 +1197,7 @@ function searchMessages(args: {
      * original single-query behavior (unchanged for NL queries / hot path). */
     probes?: string[];
     diagnostics?: UnifiedSearchDiagnostics;
+    dateRange: InclusiveDateRange | null;
 }): MessageSearchResult[] {
     const cutoff = args.maxOrdinal != null && args.maxOrdinal >= 0 ? args.maxOrdinal : null;
     const fetchLimit =
@@ -1026,15 +1217,17 @@ function searchMessages(args: {
                       ftsQuery: baseQuery,
                       fetchLimit,
                       cutoff,
+                      dateRange: args.dateRange,
                   })
                 : {
                       rows: runMessageFtsQuery(
                           args.db,
                           args.sessionId,
                           baseQuery,
-                          fetchLimit,
-                          cutoff,
-                      ),
+                           fetchLimit,
+                           cutoff,
+                           args.dateRange,
+                       ),
                       suppressedCount: 0,
                   };
         if (args.diagnostics) {
@@ -1063,6 +1256,7 @@ function searchMessages(args: {
         args.sessionId,
         sanitizedProbes.map((entry) => entry.query),
         cutoff,
+        args.dateRange,
     );
     const collectBaseDiagnostics = args.diagnostics !== undefined && cutoff !== null;
     const baseOutcome =
@@ -1073,6 +1267,7 @@ function searchMessages(args: {
                   ftsQuery: baseQuery,
                   fetchLimit,
                   cutoff,
+                  dateRange: args.dateRange,
               })
             : null;
     if (args.diagnostics) {
@@ -1088,6 +1283,7 @@ function searchMessages(args: {
         searchQueries,
         fetchLimit,
         cutoff,
+        args.dateRange,
     );
 
     const queryLists: Array<{ rows: NormalizedMessageRow[]; weight: number }> = [];
@@ -1237,6 +1433,7 @@ function searchNotes(args: {
     query: string;
     limit: number;
     probes?: string[];
+    dateRange: InclusiveDateRange | null;
 }): NoteSearchResult[] {
     if (args.limit <= 0) {
         return [];
@@ -1253,7 +1450,7 @@ function searchNotes(args: {
             type: "smart",
             status: NOTE_SEARCHABLE_STATUSES,
         }),
-    ];
+    ].filter((note) => timestampIsInRange(note.createdAt, args.dateRange));
     if (notes.length === 0) {
         return [];
     }
@@ -1336,6 +1533,7 @@ function searchCompartmentChunks(args: {
     limit: number;
     maxOrdinal?: number;
     modelId?: string | null;
+    dateRange: InclusiveDateRange | null;
 }): CompartmentSearchResult[] {
     if (!args.queryEmbedding || args.limit <= 0 || !args.modelId || args.modelId === "off")
         return [];
@@ -1345,6 +1543,7 @@ function searchCompartmentChunks(args: {
         args.sessionId,
         args.projectPath,
         args.modelId,
+        args.dateRange,
     );
     if (rows.length === 0) return [];
 
@@ -1544,6 +1743,7 @@ function searchGitCommits(args: {
      *  searchMemories — never embed twice for one query. */
     queryEmbedding: Float32Array | null;
     queryModelId?: string | null;
+    dateRange: InclusiveDateRange | null;
 }): GitCommitSearchResult[] {
     if (args.limit <= 0) return [];
 
@@ -1551,6 +1751,8 @@ function searchGitCommits(args: {
         limit: args.limit,
         queryEmbedding: args.queryEmbedding,
         queryModelId: args.queryModelId,
+        from: args.dateRange?.from,
+        to: args.dateRange?.to,
     });
     return hits.map(toGitCommitResult);
 }
@@ -1567,8 +1769,11 @@ function searchPrimers(args: {
     limit: number;
     queryEmbedding: Float32Array | null;
     queryModelId: string | null;
+    dateRange: InclusiveDateRange | null;
 }): PrimerSearchResult[] {
-    const primers = getActivePrimers(args.db, args.projectPath);
+    const primers = getActivePrimers(args.db, args.projectPath).filter((primer) =>
+        timestampIsInRange(primer.createdAt, args.dateRange),
+    );
     if (primers.length === 0 || args.limit <= 0) return [];
     const ftsQuery = sanitizeFtsQuery(args.query);
     const ftsRanks = new Map<number, number>();
@@ -1578,11 +1783,19 @@ function searchPrimers(args: {
                 `SELECT p.id AS id, bm25(primers_fts) AS rank
                  FROM primers_fts
                  JOIN primers p ON p.id = primers_fts.rowid
-                 WHERE primers_fts MATCH ? AND p.project_path = ? AND p.status = 'active'
-                 ORDER BY rank ASC
-                 LIMIT ?`,
+                  WHERE primers_fts MATCH ? AND p.project_path = ? AND p.status = 'active'
+                    ${args.dateRange === null ? "" : "AND p.created_at BETWEEN ? AND ?"}
+                  ORDER BY rank ASC
+                  LIMIT ?`,
             )
-            .all(ftsQuery, args.projectPath, args.limit * 3) as Array<{ id: number; rank: number }>;
+            .all(
+                ftsQuery,
+                args.projectPath,
+                ...(args.dateRange === null
+                    ? []
+                    : [args.dateRange.from, args.dateRange.to]),
+                args.limit * 3,
+            ) as Array<{ id: number; rank: number }>;
         rows.forEach((row, index) => {
             ftsRanks.set(row.id, linearDecayScore(index, rows.length));
         });
@@ -1677,6 +1890,8 @@ export function resolveMemoriesByIdsForSearch(args: {
      *  memories are skipped so the agent doesn't see the same content twice. */
     visibleMemoryIds?: Set<number> | null;
     diagnostics?: UnifiedSearchDiagnostics;
+    from?: number;
+    to?: number;
 }): MemorySearchResult[] | null {
     if (args.diagnostics) {
         args.diagnostics.suppressedVisibleMemoryIds = [];
@@ -1698,7 +1913,12 @@ export function resolveMemoriesByIdsForSearch(args: {
     if (fetched.length === 0) {
         return null;
     }
-    const memoriesById = new Map(fetched.map((memory) => [memory.id, memory]));
+    const dateRange = normalizeDateRange(args.from, args.to);
+    const memoriesById = new Map(
+        fetched
+            .filter((memory) => timestampIsInRange(memory.createdAt, dateRange))
+            .map((memory) => [memory.id, memory]),
+    );
     const ordered: Memory[] = [];
     const suppressedVisibleIds = new Set<number>();
     for (const id of args.ids) {
@@ -1744,6 +1964,7 @@ export async function unifiedSearch(
     }
 
     const limit = normalizeLimit(options.limit);
+    const dateRange = normalizeDateRange(options.from, options.to);
     const tierLimit = Math.max(limit * 3, DEFAULT_UNIFIED_SEARCH_LIMIT);
     if (options.diagnostics) {
         options.diagnostics.suppressedVisibleMemoryIds = [];
@@ -1827,6 +2048,7 @@ export async function unifiedSearch(
               maxOrdinal: options.maxMessageOrdinal,
               probes: messageProbes,
               diagnostics: options.diagnostics,
+              dateRange,
           })
         : [];
 
@@ -1858,6 +2080,7 @@ export async function unifiedSearch(
               limit: tierLimit,
               maxOrdinal: options.maxMessageOrdinal,
               modelId: chunkModelId && chunkModelId !== "off" ? chunkModelId : null,
+              dateRange,
           })
         : [];
     const messageLikeResults = mergeMessageAndCompartmentResults({
@@ -1879,6 +2102,7 @@ export async function unifiedSearch(
                       embeddingModelId && embeddingModelId !== "off" ? embeddingModelId : null,
                   workspace,
                   visibleMemoryIds: options.visibleMemoryIds,
+                  dateRange,
               })
             : Promise.resolve({
                   results: [] as MemorySearchResult[],
@@ -1894,6 +2118,7 @@ export async function unifiedSearch(
                       queryEmbedding,
                       queryModelId:
                           embeddingModelId && embeddingModelId !== "off" ? embeddingModelId : null,
+                      dateRange,
                   }),
               )
             : Promise.resolve([] as GitCommitSearchResult[]),
@@ -1907,6 +2132,7 @@ export async function unifiedSearch(
                       queryEmbedding,
                       queryModelId:
                           embeddingModelId && embeddingModelId !== "off" ? embeddingModelId : null,
+                      dateRange,
                   }),
               )
             : Promise.resolve([] as PrimerSearchResult[]),
@@ -1919,6 +2145,7 @@ export async function unifiedSearch(
                       query: trimmedQuery,
                       limit: tierLimit,
                       probes: messageProbes,
+                      dateRange,
                   }),
               )
             : Promise.resolve([] as NoteSearchResult[]),

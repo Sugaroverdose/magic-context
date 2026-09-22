@@ -3094,6 +3094,28 @@ export const MIGRATIONS: Migration[] = [
             }
         },
     },
+    {
+        version: 89,
+        description: "persist indexed message creation times for date-bounded search",
+        up(db: Database): void {
+            if (!tableExists(db, "message_fts_rowid_map")) return;
+            ensureColumn(db, "message_fts_rowid_map", "message_time_ms", "INTEGER");
+            db.exec(`
+                CREATE INDEX IF NOT EXISTS idx_message_fts_rowid_map_session_time
+                    ON message_fts_rowid_map(session_id, message_time_ms);
+                CREATE TABLE IF NOT EXISTS message_time_backfill_state (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    cursor_session_id TEXT NOT NULL DEFAULT '',
+                    cursor_ordinal INTEGER NOT NULL DEFAULT 0,
+                    completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
+                    updated_at INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT OR IGNORE INTO message_time_backfill_state
+                    (id, cursor_session_id, cursor_ordinal, completed, updated_at)
+                VALUES (1, '', 0, 0, 0);
+            `);
+        },
+    },
 ];
 
 /**
