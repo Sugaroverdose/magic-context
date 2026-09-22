@@ -89,6 +89,32 @@ export function isBlockingV2TransformError(error: unknown): boolean {
     return error instanceof EmergencyFailClosedError || isFailClosedBlockingError(error);
 }
 
+/**
+ * Every pre-provider refusal on OpenCode 2 ends the turn with `session.interrupt`, which
+ * the host records as a bare `outcome: "interrupted"` row: no error text reaches the
+ * transcript, and under `opencode service` the server's stderr goes nowhere. The only
+ * durable record of why a turn died is this log line, so it is written before the
+ * interrupt is attempted.
+ */
+function refuseBeforeProvider(
+    session: Pick<V2Context["session"], "interrupt">,
+    sessionID: SessionContext["sessionID"],
+    arm: string,
+    cause?: unknown,
+): Promise<void> {
+    const detail =
+        cause instanceof Error
+            ? `${cause.name}: ${cause.message}`
+            : cause === undefined
+              ? ""
+              : String(cause);
+    sessionLog(
+        sessionID,
+        `v2 refusal: interrupting the turn before the provider request arm=${arm}${detail ? ` cause=${JSON.stringify(detail.slice(0, 500))}` : ""}`,
+    );
+    return interruptBeforeProvider(session, sessionID);
+}
+
 export function createHostSeams(
     context: V2Context,
     read: TransformDeps["hostRawMessages"] & {},
@@ -109,7 +135,11 @@ export function createHostSeams(
         // Draft-backed: v2 never reconstructs the live model from message.updated.
         hostModelFallback: (sessionID) => liveModels.get(sessionID) ?? null,
         hostRefuse: (_client, sessionID) =>
-            interruptBeforeProvider(context.session, sessionID as SessionContext["sessionID"]),
+            refuseBeforeProvider(
+                context.session,
+                sessionID as SessionContext["sessionID"],
+                "transform-fail-closed",
+            ),
     };
 }
 
@@ -644,7 +674,12 @@ export async function registerContext(context: V2Context) {
                 });
                 draft.result = { summary: fold.submitted };
             } catch (cause) {
-                await interruptBeforeProvider(context.session, draft.sessionID);
+                await refuseBeforeProvider(
+                    context.session,
+                    draft.sessionID,
+                    "compaction-fold",
+                    cause,
+                );
                 throw new V2ContextRefusal(
                     "Magic Context could not preserve the host checkpoint.",
                     {
@@ -681,7 +716,7 @@ export async function registerContext(context: V2Context) {
         let postFold = false;
         try {
             if ((await recordUsage(draft)) && !compactionOff) {
-                await interruptBeforeProvider(context.session, draft.sessionID);
+                await refuseBeforeProvider(context.session, draft.sessionID, "usage-admission");
                 return;
             }
             if (!db) return;
@@ -954,7 +989,12 @@ export async function registerContext(context: V2Context) {
                 // These errors mean the shared transform cannot prove a safe prompt.
                 // Native compaction owns recovery when Magic Context compaction is off.
                 if (!compactionOff) {
-                    await interruptBeforeProvider(context.session, draft.sessionID);
+                    await refuseBeforeProvider(
+                        context.session,
+                        draft.sessionID,
+                        "blocking-transform-error",
+                        error,
+                    );
                     throw new V2ContextRefusal("Magic Context refused to send an unsafe prompt.", {
                         cause: error,
                     });
@@ -964,7 +1004,12 @@ export async function registerContext(context: V2Context) {
                     error,
                 );
             } else if (postFold) {
-                await interruptBeforeProvider(context.session, draft.sessionID);
+                await refuseBeforeProvider(
+                    context.session,
+                    draft.sessionID,
+                    "post-fold-restore",
+                    error,
+                );
                 throw new V2ContextRefusal(
                     "Magic Context could not restore the unarchived host history.",
                     { cause: error },
