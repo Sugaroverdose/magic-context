@@ -101,6 +101,70 @@ describe("m[0] mural image fold (on-demand render → wire)", () => {
         }
     });
 
+    it("lets a new mural ride the next natural HARD instead of triggering one", () => {
+        const db = makeDb();
+        try {
+            const state = getOrCreateSessionMeta(db, SESSION_ID) as unknown as M0M1State;
+            const hardSignals = (systemHash: string) => ({
+                systemHash,
+                modelKey: "anthropic/test-model",
+                cacheExpired: false,
+                lastResponseTime: 0,
+            });
+            const firstMessages: MessageLike[] = [];
+            const first = injectM0M1({
+                db,
+                sessionId: SESSION_ID,
+                messages: firstMessages,
+                state,
+                projectPath: undefined,
+                isCacheBustingPass: true,
+                muralEnabled: true,
+                mural: muralOption(FAKE_MURAL_DATA_URL, "mural-hash-a"),
+                hardSignals: hardSignals("system-a"),
+            });
+            expect(first.m0RematerializedThisPass).toBe(true);
+
+            const nextDataUrl = "data:image/png;base64,Yg==";
+            const deferMessages: MessageLike[] = [];
+            const deferred = injectM0M1({
+                db,
+                sessionId: SESSION_ID,
+                messages: deferMessages,
+                state,
+                projectPath: undefined,
+                isCacheBustingPass: false,
+                muralEnabled: true,
+                mural: muralOption(nextDataUrl, "mural-hash-b"),
+                hardSignals: hardSignals("system-a"),
+            });
+            expect(deferred.decision).toEqual({ value: false, reason: null });
+            expect(deferred.m0RematerializedThisPass).toBe(false);
+            expect(deferred.m0Bytes).toEqual(first.m0Bytes);
+            expect(imageUrl(deferMessages)).toBe(FAKE_MURAL_DATA_URL);
+            expect(state.cachedM0MuralHash).toBe("mural-hash-a");
+
+            const hardMessages: MessageLike[] = [];
+            const folded = injectM0M1({
+                db,
+                sessionId: SESSION_ID,
+                messages: hardMessages,
+                state,
+                projectPath: undefined,
+                isCacheBustingPass: false,
+                muralEnabled: true,
+                mural: muralOption(nextDataUrl, "mural-hash-b"),
+                hardSignals: hardSignals("system-b"),
+            });
+            expect(folded.decision).toMatchObject({ value: true, reason: "system_hash" });
+            expect(folded.m0RematerializedThisPass).toBe(true);
+            expect(imageUrl(hardMessages)).toBe(nextDataUrl);
+            expect(state.cachedM0MuralHash).toBe("mural-hash-b");
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     it("folds once when mural is disabled, removes the image, then defers byte-identically", () => {
         const db = makeDb();
         try {

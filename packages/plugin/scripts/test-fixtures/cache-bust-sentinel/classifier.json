@@ -109,8 +109,12 @@
     },
     {
         "class": "self_inflicted_epoch",
-        "decision": { "materialized": true, "materializeReason": "epoch_change" },
-        "input": { "ocInputStepRatio": 24.8 }
+        "decision": {
+            "materialized": true,
+            "materializeReason": "epoch_change",
+            "identityDelta": ["mur"]
+        },
+        "input": {}
     },
     {
         "class": "unaccounted_defer_pass",

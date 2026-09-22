@@ -50,6 +50,9 @@ function rustPassLogDecisions(
         const timestampMs = Date.parse(match[1]);
         if (!Number.isFinite(timestampMs)) return [];
         const reason = match[4] === "none" ? null : match[4];
+        const identityDelta = /\bidentity_delta=([^ ]+)/.exec(line)?.[1]
+            ?.split(",")
+            .filter(Boolean);
         return [{
             timestampMs,
             decision: match[3],
@@ -61,6 +64,7 @@ function rustPassLogDecisions(
             droppedCount: 0,
             inputTokens: 0,
             inputCount: Number(match[5]),
+            identityDelta,
             flush: reason === "explicit_flush",
             source: "rust pass log",
         }];

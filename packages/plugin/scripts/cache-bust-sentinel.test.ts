@@ -151,6 +151,23 @@ describe("cache-bust attribution contract", () => {
         }
     });
 
+    test("a mural-only epoch is self-inflicted unless an external epoch independently explains it", () => {
+        const classify = (externalEpoch: boolean): CacheBustDivergenceClass =>
+            classifyCacheBust({
+                divergenceIndex: 2,
+                previousMessageCount: 10,
+                decision: decision({
+                    materialized: true,
+                    materializeReason: "epoch_change",
+                    identityDelta: ["mur"],
+                    externalEpoch,
+                }),
+            });
+
+        expect(classify(false)).toBe("self_inflicted_epoch");
+        expect(classify(true)).toBe("accounted_hard_epoch");
+    });
+
     test("a zero provider read with no MC pass row is still a provider full miss, not no_mc_pass_row", () => {
         // A billing-header rotation on a subagent session (no decision row) rewrote
         // 322k tokens at read=0; the sentinel woke the operator with

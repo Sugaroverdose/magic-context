@@ -63,6 +63,9 @@ export interface CacheBustDecisionAttribution {
     inputCount?: number;
     /** A restart, deploy, or explicit configuration epoch independently explains epoch_change. */
     externalEpoch?: boolean;
+    /** Names the render-identity components changed during transformation. The `mur` entry
+     * represents mural content; other entries show that an independent identity also changed. */
+    identityDelta?: string[];
     flush: boolean;
     source: string;
 }
@@ -191,7 +194,7 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
     {
         divergenceClass: "self_inflicted_epoch",
         accounted: false,
-        rule: "epoch_change has no restart/deploy/config epoch and raw OpenCode input stepped by at least 4×",
+        rule: "epoch_change has no restart/deploy/config epoch and either only mur: changed or raw OpenCode input stepped by at least 4×",
     },
     {
         divergenceClass: "unaccounted_defer_pass",
@@ -347,10 +350,12 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
     if (decision.materialized) {
         if (materializeReason === "model_change") return "accounted_hard_model_change";
         if (materializeReason === "system_hash") return "accounted_hard_system_hash";
+        const muralOnlyIdentityDelta =
+            decision.identityDelta?.length === 1 && decision.identityDelta[0] === "mur";
         if (
             materializeReason === "epoch_change" &&
             !decision.externalEpoch &&
-            (input.ocInputStepRatio ?? 0) >= 4
+            (muralOnlyIdentityDelta || (input.ocInputStepRatio ?? 0) >= 4)
         ) {
             return "self_inflicted_epoch";
         }
