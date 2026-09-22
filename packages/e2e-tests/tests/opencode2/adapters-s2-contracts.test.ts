@@ -18,6 +18,10 @@ import {
 } from "../../../plugin/src/hooks/magic-context/transform";
 import { abortSessionFailClosed } from "../../../plugin/src/hooks/magic-context/transform-postprocess-phase";
 import {
+	__resetNotificationStateForTests,
+	drainNotifications,
+} from "../../../plugin/src/shared/rpc-notifications";
+import {
 	deliverSynthetic,
 	isAdmittedSynthetic,
 } from "../../../plugin/src/v2/hooks/channel2";
@@ -81,7 +85,8 @@ test("I14 sdk_renames: v2 supplies every host seam, v1 defaults retain function 
 	}
 });
 
-test("I9b v2 fail-closed notice is synthetic-visible before interruption", async () => {
+test("I9b v2 fail-closed notice is TUI-visible and synthetic-visible before interruption", async () => {
+	__resetNotificationStateForTests();
 	const records = new Map<string, unknown>();
 	const order: string[] = [];
 	const visible: Array<{ sessionID: string; text: string }> = [];
@@ -116,9 +121,17 @@ test("I9b v2 fail-closed notice is synthetic-visible before interruption", async
 	expect(order).toEqual(["notice", "interrupt"]);
 	expect(visible).toHaveLength(1);
 	expect(visible[0]).toMatchObject({ sessionID: "ses-emergency", text: notice });
+	expect(drainNotifications(0, "ses-emergency", { sessionOnly: true })).toEqual([
+		expect.objectContaining({
+			type: "toast",
+			payload: { message: notice, variant: "error" },
+			sessionId: "ses-emergency",
+		}),
+	]);
 	expect(
 		[...records.keys()].some((key) => key.startsWith("synthetic/ses-emergency/msg_")),
 	).toBe(true);
+	__resetNotificationStateForTests();
 });
 
 test("I9b interrupt resolved confirmation returns normally", async () => {
