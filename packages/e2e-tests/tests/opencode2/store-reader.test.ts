@@ -281,6 +281,7 @@ test("post-historian drop-key collection decodes only the published chunk", asyn
 			true,
 		);
 		expect(counters.queries?.reduce((sum, query) => sum + query.rows, 0)).toBe(100);
+		expect(counters.queries?.every((query) => query.elapsedMs >= 0)).toBe(true);
 		expect(counters.openReaders).toBe(0);
 		expect(counters.readersOpened).toBe(counters.readersClosed);
 		console.log(

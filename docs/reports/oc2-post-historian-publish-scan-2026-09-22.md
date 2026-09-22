@@ -106,3 +106,18 @@ All reproduction and plan work used generated rows under throwaway roots beneath
 `$TMPDIR/magic-context/`. The OpenCode 2 harness independently checks the spawned
 host with `lsof` at startup and shutdown and rejects any database path outside its
 throwaway root. No live OpenCode, CortexKit, or configuration store was opened.
+
+## Gates
+
+- `packages/plugin: bun run typecheck` — passed.
+- `packages/plugin: bun run lint` — passed.
+- `packages/plugin: bun run test` — passed (5,313 passed, 1 skipped, 0 failed).
+- Focused OpenCode 2 source lane (`store-reader`, adapter contracts, v2 prompt/model seams,
+  bounded reconciliation, and full post-historian runner publication) — passed.
+- OpenCode 1 TypeScript pure replay, base `bbdf4c56943006d23ac7e2607754e1593f47f021`
+  versus the implementation — `RESULT IDENTICAL defer_passes=4`.
+- Full real-host OpenCode 2 lane was attempted under the harness's throwaway roots. Its
+  source-level tests passed, but host cases could not activate because this isolated
+  worktree intentionally had no `dist/index.js`; creating it would require the forbidden
+  distribution build. The lane reported 31 passed and 34 failures, dominated by plugin
+  activation timeouts and an explicit missing-distribution prerequisite.
