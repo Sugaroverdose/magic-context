@@ -199,6 +199,24 @@ describe("status detail text", () => {
         expect(summary).toContain("(MC-M02)");
     });
 
+    test("renders historian refusal stage and received runner text", () => {
+        const detail =
+            "historian refusal stage=credential provider=google model=google/model-a received=\"open_failed: no apikey credential for provider 'google'\"";
+        const status = formatStatusDetailMarkdown({
+            ...STATUS_FIXTURE,
+            historianRefusal: {
+                stage: "credential",
+                canonicalCause: "credential_unavailable",
+                detail,
+            },
+        });
+
+        expect(status).toContain("Historian refusal:** credential (credential_unavailable)");
+        expect(status).toContain(
+            "received=\"open_failed: no apikey credential for provider 'google'\"",
+        );
+    });
+
     test("does not expose module routing in the summary", () => {
         const rustStatus = formatStatusDetailMarkdown({
             ...STATUS_FIXTURE,

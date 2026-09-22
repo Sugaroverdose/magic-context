@@ -311,9 +311,7 @@ describe("explicit shared storage resolution", () => {
         const processListProbeCalls: string[] = [];
         __setRpcIdentityTestHooks({
             processListExecFileSync: ((file: unknown, args?: readonly unknown[]) => {
-                processListProbeCalls.push(
-                    [String(file), ...(args ?? []).map(String)].join(" "),
-                );
+                processListProbeCalls.push([String(file), ...(args ?? []).map(String)].join(" "));
                 return "";
             }) as typeof execFileSync,
         });

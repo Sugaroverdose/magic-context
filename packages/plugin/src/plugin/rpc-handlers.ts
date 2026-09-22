@@ -70,6 +70,7 @@ import {
 } from "../hooks/magic-context/event-resolvers";
 import { executeFlush } from "../hooks/magic-context/execute-flush";
 import { formatEmbedStatusText } from "../hooks/magic-context/format-embed-status";
+import type { RunnerRefusalCanonicalCause } from "../hooks/magic-context/historian-no-fire-cause";
 import { getLiveNotificationParams } from "../hooks/magic-context/hook-handlers";
 import type { LiveSessionState } from "../hooks/magic-context/live-session-state";
 import { getLkgSlotHeapStats } from "../hooks/magic-context/lkg-slot";
@@ -173,6 +174,13 @@ export interface RustSessionStatus {
     pending_m1_age_ms?: number | null;
     wrapup_active?: boolean;
     wrapup_rounds?: number | null;
+    historian?: {
+        last_outcome?: string;
+        last_failure?: string | null;
+        last_no_fire?: string | null;
+        refusal_stage?: "credential" | "provider" | "model" | "resolution" | null;
+        canonical_cause?: RunnerRefusalCanonicalCause | null;
+    };
 }
 const rustStatusInFlight = new Map<string, Promise<RustSessionStatus | undefined>>();
 
@@ -737,6 +745,17 @@ export function buildStatusDetail(
     const moduleMemoryAuthority = moduleStatus?.authority?.memories;
     const moduleMemoryState = moduleMemoryAuthority?.state;
     const moduleFeedHead = moduleStatus?.memory_mirror?.feed_head;
+    const moduleHistorian = moduleStatus?.historian;
+    const historianRefusalDetail =
+        moduleHistorian?.last_failure ?? moduleHistorian?.last_no_fire ?? null;
+    const historianRefusal =
+        moduleHistorian?.refusal_stage && moduleHistorian.canonical_cause && historianRefusalDetail
+            ? {
+                  stage: moduleHistorian.refusal_stage,
+                  canonicalCause: moduleHistorian.canonical_cause,
+                  detail: historianRefusalDetail,
+              }
+            : undefined;
     const detail: StatusDetail = {
         ...base,
         memoryImportanceHistogram: emptyMemoryImportanceHistogram(),
@@ -763,6 +782,7 @@ export function buildStatusDetail(
         lastNudgeTokens: 0,
         lastTransformError: null,
         historianFailureCount: 0,
+        historianRefusal,
         isSubagent: false,
         pendingOps: [],
         contextLimit: 0,

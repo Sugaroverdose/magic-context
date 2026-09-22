@@ -212,6 +212,40 @@ describe("buildStatusDetail — active profile", () => {
     });
 });
 
+describe("buildStatusDetail — historian refusal provenance", () => {
+    test("preserves the runner stage and received text from module status", () => {
+        const db = createTestDb();
+        try {
+            const refusal =
+                "historian refusal stage=credential provider=google model=google/model-a received=\"open_failed: no apikey credential for provider 'google'\"";
+            const detail = buildStatusDetail(
+                db,
+                "ses-refusal-status",
+                process.cwd(),
+                undefined,
+                { transform_mode: "rust" },
+                undefined,
+                undefined,
+                {
+                    historian: {
+                        last_failure: refusal,
+                        refusal_stage: "credential",
+                        canonical_cause: "credential_unavailable",
+                    },
+                },
+            );
+
+            expect(detail.historianRefusal).toEqual({
+                stage: "credential",
+                canonicalCause: "credential_unavailable",
+                detail: refusal,
+            });
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
 describe("buildStatusDetail — memory importance histogram", () => {
     test("returns the exact active distribution and unclassified denominator", () => {
         const db = createTestDb();

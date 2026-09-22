@@ -11,6 +11,7 @@ import type {
 } from "../features/magic-context/dreamer/task-registry";
 import type { DreamerTickFailure } from "../features/magic-context/dreamer/tick-failure";
 import type { SynapseLaneDescriptor } from "../features/magic-context/memory/embedding-synapse";
+import type { RunnerRefusalCanonicalCause } from "../hooks/magic-context/historian-no-fire-cause";
 import type { ConfigParseFailure } from "./config-diagnostics";
 import type { LoggerDiagnostics } from "./logger";
 import type { UserFacingFailureKey } from "./user-facing-codes";
@@ -174,6 +175,12 @@ export interface MemoryImportanceHistogram {
 }
 
 export interface StatusDetail extends SidebarSnapshot {
+    /** Runner refusal provenance reported by the Rust historian, including received text. */
+    historianRefusal?: {
+        stage: "credential" | "provider" | "model" | "resolution";
+        canonicalCause: RunnerRefusalCanonicalCause;
+        detail: string;
+    };
     /** ACTIVE-memory importance distribution; unclassified is a subset of total. */
     memoryImportanceHistogram: MemoryImportanceHistogram;
     /**

@@ -42,6 +42,7 @@ pub mod project_docs;
 pub mod prompt_surface;
 pub mod protection_window;
 mod retained_size;
+pub mod route_targets;
 pub mod scheduler;
 pub mod selection;
 pub mod session_resolver;
@@ -97,8 +98,8 @@ use classify::{
 use config::{derive_historian_chunk_tokens, ConfigCache, McModuleConfig};
 use healing::{tail_reclaim, SerializerProfile};
 use historian::{
-    reattach_historian_producer, run_historian_firing_with_model_cache,
-    HistorianModelUnresolvableCache, HistorianNoFireCause, HistorianProducerDriver,
+    reattach_historian_producer, run_historian_firing_with_model_cache, HistorianNoFireCause,
+    HistorianProducerDriver, HistorianRunnerRefusalCache,
 };
 use historian_chunk::{
     assemble_historian_firing, AssembleHistorianFiringOutcome, AssembledHistorianFiring,
@@ -106,6 +107,7 @@ use historian_chunk::{
 };
 use historian_producer::{HistorianProducer, HistorianProducerConfig, HistorianProducerError};
 use prompt_surface::{PromptSurfacePreset, PromptSurfaceSelection};
+use route_targets::{route_targets, RouteTargetConfig};
 use scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT;
 use selection::SelKind;
 #[cfg(test)]
@@ -3560,7 +3562,7 @@ pub struct McHandler {
     producer_factory: Arc<dyn HistorianProducerFactory>,
     session_resolver: Arc<dyn SessionResolver>,
     config: Mutex<ConfigCache>,
-    historian_model_unresolvable: Arc<HistorianModelUnresolvableCache>,
+    historian_runner_refusals: Arc<HistorianRunnerRefusalCache>,
     #[cfg(test)]
     fixed_config: Option<McModuleConfig>,
     reattaching_sessions: Arc<Mutex<HashSet<String>>>,
@@ -3646,6 +3648,7 @@ pub trait HistorianProducerFactory: Send + Sync {
 
 struct RealHistorianProducerFactory {
     connection_file: PathBuf,
+    route_targets: RouteTargetConfig,
 }
 
 #[async_trait]
@@ -3657,6 +3660,7 @@ impl HistorianProducerFactory for RealHistorianProducerFactory {
         Ok(Box::new(
             HistorianProducer::connect(HistorianProducerConfig {
                 handshake_timeout: Duration::from_secs(2),
+                route_targets: self.route_targets.clone(),
                 ..HistorianProducerConfig::new(
                     self.connection_file.clone(),
                     project_root,
@@ -4103,7 +4107,7 @@ struct HistorianFiringTask {
     project_slug: String,
     firing: AssembledHistorianFiring,
     model_chain_generation: u64,
-    model_unresolvable_cache: Arc<HistorianModelUnresolvableCache>,
+    runner_refusal_cache: Arc<HistorianRunnerRefusalCache>,
     live_guard: SessionSetGuard,
     connect_failure_commit_hook: ConnectFailureCommitHook,
     publication_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
@@ -4133,14 +4137,28 @@ impl McHandler {
     }
 
     pub fn new_with_connection_file(connection_file: Option<PathBuf>) -> Self {
+        Self::new_with_connection_file_and_route_targets(
+            connection_file,
+            RouteTargetConfig::default(),
+        )
+    }
+
+    pub fn new_with_connection_file_and_route_targets(
+        connection_file: Option<PathBuf>,
+        route_targets: RouteTargetConfig,
+    ) -> Self {
         let producer_factory: Arc<dyn HistorianProducerFactory> = match connection_file.clone() {
             Some(path) => Arc::new(RealHistorianProducerFactory {
                 connection_file: path,
+                route_targets: route_targets.clone(),
             }),
             None => Arc::new(MissingProducerFactory),
         };
         let session_resolver: Arc<dyn SessionResolver> = match connection_file {
-            Some(path) => Arc::new(RealSessionResolver::new(path)),
+            Some(path) => Arc::new(RealSessionResolver::new_with_route_targets(
+                path,
+                route_targets,
+            )),
             None => Arc::new(MissingSessionResolver),
         };
         McHandler {
@@ -4149,7 +4167,7 @@ impl McHandler {
             producer_factory,
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
-            historian_model_unresolvable: Arc::new(HistorianModelUnresolvableCache::default()),
+            historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
             #[cfg(test)]
             fixed_config: None,
             reattaching_sessions: Arc::new(Mutex::new(HashSet::new())),
@@ -4497,7 +4515,7 @@ impl McHandler {
             producer_factory: factory,
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
-            historian_model_unresolvable: Arc::new(HistorianModelUnresolvableCache::default()),
+            historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
             fixed_config: Some(config),
             reattaching_sessions: Arc::new(Mutex::new(HashSet::new())),
             live_historian_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -5843,9 +5861,7 @@ impl McHandler {
             .historian_model_chain
             .as_deref()
             .unwrap_or(&cfg.model_chain);
-        let model_chain_generation = self
-            .historian_model_unresolvable
-            .activate_chain(model_chain);
+        let model_chain_generation = self.historian_runner_refusals.activate_chain(model_chain);
         if model_chain.is_empty() {
             let diagnostics = historian_no_fire_diagnostics(NoFireDiagnosticsInput {
                 no_fire: "no_models".into(),
@@ -5867,17 +5883,21 @@ impl McHandler {
             return PreparedHistorianAction::Complete(diagnostics);
         }
         if self
-            .historian_model_unresolvable
-            .all_models_unresolvable(model_chain_generation, model_chain)
+            .historian_runner_refusals
+            .all_models_durably_refused(model_chain_generation, model_chain)
         {
             let failures = self
-                .historian_model_unresolvable
-                .cached_reasons(model_chain_generation, model_chain);
-            let detail = historian::model_unresolvable_detail(&failures, true);
+                .historian_runner_refusals
+                .cached_durable_refusals(model_chain_generation, model_chain);
+            let detail = historian::runner_refusal_detail(&failures, true);
+            let stage = failures
+                .last()
+                .map(|(_, refusal)| refusal.stage)
+                .expect("a fully refused non-empty chain has a refusal");
             let diagnostics = historian_no_fire_diagnostics(NoFireDiagnosticsInput {
-                no_fire: detail.clone(),
-                detail_kind: "model_unresolvable",
-                cause: HistorianNoFireCause::ModelUnresolvable,
+                no_fire: "runner_refusal_chain_exhausted".into(),
+                detail_kind: "runner_refusal",
+                cause: HistorianNoFireCause::from_runner_refusal_stage(stage),
                 extra: Some(&detail),
                 reason: trigger_reason,
                 state,
@@ -5931,7 +5951,12 @@ impl McHandler {
                 }
                 .into(),
                 detail_kind: "backoff",
-                cause: if last_failure
+                cause: if let Some(stage) = last_failure
+                    .as_deref()
+                    .and_then(historian::runner_refusal_stage_from_detail)
+                {
+                    HistorianNoFireCause::from_runner_refusal_stage(stage)
+                } else if last_failure
                     .as_deref()
                     .is_some_and(|detail| detail.contains("chain_exhausted"))
                 {
@@ -6122,7 +6147,7 @@ impl McHandler {
                 project_slug,
                 firing,
                 model_chain_generation,
-                model_unresolvable_cache: Arc::clone(&self.historian_model_unresolvable),
+                runner_refusal_cache: Arc::clone(&self.historian_runner_refusals),
                 live_guard,
                 connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
                 // Organic pressure firings assemble and publish in one continuous drive
@@ -6178,21 +6203,19 @@ impl McHandler {
 
         let cfg = self.effective_config(&binding.project_root);
         let model_chain_generation = self
-            .historian_model_unresolvable
+            .historian_runner_refusals
             .activate_chain(&cfg.model_chain);
         if cfg.model_chain.is_empty() {
             return PreparedWrapupAction::Failed("no historian models are configured".to_string());
         }
         if self
-            .historian_model_unresolvable
-            .all_models_unresolvable(model_chain_generation, &cfg.model_chain)
+            .historian_runner_refusals
+            .all_models_durably_refused(model_chain_generation, &cfg.model_chain)
         {
             let failures = self
-                .historian_model_unresolvable
-                .cached_reasons(model_chain_generation, &cfg.model_chain);
-            return PreparedWrapupAction::Failed(historian::model_unresolvable_detail(
-                &failures, true,
-            ));
+                .historian_runner_refusals
+                .cached_durable_refusals(model_chain_generation, &cfg.model_chain);
+            return PreparedWrapupAction::Failed(historian::runner_refusal_detail(&failures, true));
         }
         let live = projection
             .blocks
@@ -6266,7 +6289,7 @@ impl McHandler {
             project_slug,
             firing,
             model_chain_generation,
-            model_unresolvable_cache: Arc::clone(&self.historian_model_unresolvable),
+            runner_refusal_cache: Arc::clone(&self.historian_runner_refusals),
             live_guard,
             connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
             publication_fence: None,
@@ -6363,7 +6386,7 @@ impl McHandler {
             project_slug,
             firing,
             model_chain_generation,
-            model_unresolvable_cache,
+            runner_refusal_cache,
             live_guard,
             connect_failure_commit_hook,
             publication_fence,
@@ -6385,7 +6408,7 @@ impl McHandler {
                 run_historian_firing_with_model_cache(
                     &mut *producer,
                     request,
-                    Some(model_unresolvable_cache.as_ref()),
+                    Some(runner_refusal_cache.as_ref()),
                     model_chain_generation,
                 )
                 .await
@@ -7507,6 +7530,16 @@ impl McHandler {
                 "consecutive_publish_failures": consecutive_publish_failures,
                 "publish_health_degraded": consecutive_publish_failures >= 3,
                 "last_outcome": historian,
+                "last_failure": &loaded.meta.historian.last_failure,
+                "last_no_fire": &loaded.meta.historian.last_no_fire,
+                "refusal_stage": loaded.meta.historian.last_failure.as_deref()
+                    .or(loaded.meta.historian.last_no_fire.as_deref())
+                    .and_then(historian::runner_refusal_stage_from_detail)
+                    .map(|stage| stage.as_str()),
+                "canonical_cause": loaded.meta.historian.last_failure.as_deref()
+                    .or(loaded.meta.historian.last_no_fire.as_deref())
+                    .and_then(historian::runner_refusal_stage_from_detail)
+                    .map(|stage| stage.canonical_cause()),
                 "recent_decisions": &loaded.meta.historian.recent_decisions,
             },
             // Keep the current-pass attribution separate from the explicitly historical
@@ -17059,22 +17092,18 @@ fn historian_status_summary(state: &mc_store::HistorianDurableState) -> String {
         return format!("fire seq {} {}", state.firing_seq, state.state.as_str());
     }
     if let Some(reason) = state.last_no_fire.as_deref() {
-        return format!("no fire: {}", compact_status_detail(reason));
+        return if historian::runner_refusal_stage_from_detail(reason).is_some() {
+            format!("no fire: {reason}")
+        } else {
+            format!("no fire: {}", compact_status_detail(reason))
+        };
     }
     if let Some(reason) = state.last_failure.as_deref() {
-        if let Some(detail) = reason.strip_prefix(historian::MODEL_UNRESOLVABLE_PUBLISHED_PREFIX) {
-            return format!(
-                "published seq {}; {}",
-                state.firing_seq,
-                compact_status_detail(detail)
-            );
+        if let Some(detail) = reason.strip_prefix(historian::RUNNER_REFUSAL_PUBLISHED_PREFIX) {
+            return format!("published seq {}; {detail}", state.firing_seq);
         }
-        if reason.starts_with(historian::MODEL_UNRESOLVABLE_CHAIN_EXHAUSTED_PREFIX) {
-            return format!(
-                "failed seq {}: {}",
-                state.firing_seq,
-                compact_status_detail(reason)
-            );
+        if reason.starts_with(historian::RUNNER_REFUSAL_CHAIN_EXHAUSTED_PREFIX) {
+            return format!("failed seq {}: {reason}", state.firing_seq);
         }
         return format!("failure: {}", compact_status_detail(reason));
     }
@@ -17533,6 +17562,13 @@ pub fn version_line() -> String {
 }
 
 pub fn manifest(module_id: &str) -> ModuleManifest {
+    manifest_with_route_targets(module_id, &RouteTargetConfig::default())
+}
+
+pub fn manifest_with_route_targets(
+    module_id: &str,
+    resolved_routes: &RouteTargetConfig,
+) -> ModuleManifest {
     // Constructed via the subc-protocol builder (never a struct literal): ModuleManifest is
     // #[non_exhaustive], so builder methods are the only construction path that survives additive
     // field landings. Every field below is set to the exact value the pre-builder struct literal
@@ -17588,7 +17624,7 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
         sub_supervises: false,
     }])
     .consumes(vec![ConsumerRole::ServiceClient {
-        of: vec!["thalamus".to_string()],
+        of: route_targets(resolved_routes),
     }])
     .build()
 }
@@ -17614,6 +17650,29 @@ mod tests {
         StoredCompartment, TagMintInput,
     };
     use tokio::sync::Notify;
+
+    #[test]
+    fn manifest_consumes_follow_the_resolved_runner_target() {
+        let custom = manifest_with_route_targets(
+            "magic-context",
+            &RouteTargetConfig::runner_module("custom-runner"),
+        );
+        assert_eq!(
+            custom.consumes,
+            vec![ConsumerRole::ServiceClient {
+                of: vec!["thalamus".to_string(), "custom-runner".to_string()],
+            }]
+        );
+
+        let hosted =
+            manifest_with_route_targets("magic-context", &RouteTargetConfig::host_runner());
+        assert_eq!(
+            hosted.consumes,
+            vec![ConsumerRole::ServiceClient {
+                of: vec!["thalamus".to_string()],
+            }]
+        );
+    }
 
     #[test]
     fn usage_numbers_rejects_implausible_context_limit() {
@@ -18813,7 +18872,7 @@ mod tests {
         assert_eq!(
             m.consumes,
             vec![ConsumerRole::ServiceClient {
-                of: vec!["thalamus".to_string()]
+                of: vec!["thalamus".to_string(), "broca".to_string()]
             }]
         );
         let ProviderRole::ToolProvider { tools, .. } = &m.provides[0] else {
@@ -20586,23 +20645,18 @@ mod tests {
     }
 
     #[test]
-    fn module_health_line_surfaces_last_historian_model_refusal() {
+    fn module_health_line_surfaces_last_historian_runner_refusal() {
         let health = DispatchHealth::new();
-        health.record_historian_outcome(
-            "published seq 2; model_unresolvable:opencode/model-a: open_failed".to_string(),
-            4,
-        );
+        let outcome = "published seq 2; historian refusal stage=credential provider=opencode model=opencode/model-a received=\"open_failed: no apikey credential for provider 'opencode'\"";
+        health.record_historian_outcome(outcome.to_string(), 4);
 
         let report = health.report(10_000);
         assert!(report.detail.as_deref().is_some_and(|detail| {
             detail.contains("last historian: published seq 2")
-                && detail.contains("model_unresolvable:opencode/model-a")
+                && detail.contains("stage=credential provider=opencode")
         }));
         let metrics = report.metrics.unwrap();
-        assert_eq!(
-            metrics["last_historian_outcome"],
-            json!("published seq 2; model_unresolvable:opencode/model-a: open_failed")
-        );
+        assert_eq!(metrics["last_historian_outcome"], json!(outcome));
         assert_eq!(metrics["historian_recent_decisions_count"], json!(4));
     }
 
@@ -30642,10 +30696,8 @@ mod tests {
         meta.historian.firing_seq = 2;
         meta.historian.failure_backoff_at_ms = None;
         meta.historian.last_no_fire = None;
-        meta.historian.last_failure = Some(
-            "published_with_model_unresolvable:model_unresolvable:opencode/model-a: open_failed: run resolution failed"
-                .to_string(),
-        );
+        let refusal = "published with historian refusal: historian refusal stage=credential provider=opencode model=opencode/model-a received=\"open_failed: run resolution failed: no apikey credential for provider 'opencode'\"";
+        meta.historian.last_failure = Some(refusal.to_string());
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
             .unwrap();
@@ -30659,11 +30711,17 @@ mod tests {
             .as_str()
             .is_some_and(|outcome| {
                 outcome.contains("published seq 2")
-                    && outcome.contains("model_unresolvable:opencode/model-a")
+                    && outcome.contains("stage=credential provider=opencode")
             }));
         assert!(recovered["summary"]
             .as_str()
-            .is_some_and(|summary| summary.contains("model_unresolvable:opencode/model-a")));
+            .is_some_and(|summary| summary.contains("stage=credential provider=opencode")));
+        assert_eq!(recovered["historian"]["refusal_stage"], "credential");
+        assert_eq!(
+            recovered["historian"]["canonical_cause"],
+            "credential_unavailable"
+        );
+        assert_eq!(recovered["historian"]["last_failure"], refusal);
     }
 
     #[tokio::test(flavor = "current_thread")]
