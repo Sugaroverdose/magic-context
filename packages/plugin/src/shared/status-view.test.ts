@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { StatusDetail } from "./rpc-types";
-import { buildStatusView, type StatusViewSource } from "./status-view";
+import {
+    buildStatusView,
+    STATUS_COLUMN_GAP,
+    statusColumnsFor,
+    statusSectionWidth,
+    type StatusViewSource,
+} from "./status-view";
 
 const NOW = 1_730_000_000_000;
 
@@ -235,6 +241,51 @@ describe("status view model", () => {
         // The masses are whole numbers; only the percentage keeps a decimal.
         const masses = (built.hygiene?.value ?? "").split("·")[1] ?? "";
         expect(masses).not.toMatch(/\d\.\d/);
+    });
+
+    /**
+     * A value never wraps, so a section needs `labelWidth + 1 + longest value`
+     * columns. The grid is drawn only when both columns' requirements plus the
+     * gap fit; otherwise the caller draws one column.
+     */
+    test("draws two columns only when both columns' values fit", () => {
+        const sections = view().sections;
+        for (const section of sections) {
+            const longest = Math.max(...section.rows.map((row) => row.value.length));
+            expect(statusSectionWidth(section)).toBe(section.labelWidth + 1 + longest);
+        }
+
+        // The values the dialog actually prints at ~88 columns: the longest is
+        // `~98K tok (100% used)` in History Compression, so both columns fit.
+        const narrowValues = view({
+            cacheTtl: "never",
+            cacheTtlSource: "session",
+            compressionBudget: 98_000,
+            compressionUsage: "100%",
+            lastDreamerRunAt: NOW - 16 * 3_600_000,
+            lastNudgeTokens: 495_000,
+        }).sections;
+        const layout = statusColumnsFor(narrowValues, 84);
+        expect(layout.twoColumn).toBe(true);
+        expect(layout.leftWidth + layout.rightWidth + STATUS_COLUMN_GAP).toBeLessThanOrEqual(84);
+        // The columns are sized from these requirements, so a value in the wider
+        // column cannot wrap inside the narrower one.
+        expect(layout.leftWidth).toBe(
+            Math.max(...narrowValues.filter((_s, i) => i % 2 === 0).map(statusSectionWidth)),
+        );
+        expect(layout.rightWidth).toBe(
+            Math.max(...narrowValues.filter((_s, i) => i % 2 === 1).map(statusSectionWidth)),
+        );
+
+        // One column short of the two requirements plus the gap: no grid.
+        const needed = layout.leftWidth + layout.rightWidth + STATUS_COLUMN_GAP;
+        expect(statusColumnsFor(narrowValues, needed).twoColumn).toBe(true);
+        expect(statusColumnsFor(narrowValues, needed - 1).twoColumn).toBe(false);
+
+        // A long value — the model key on the Configured row — pushes the left
+        // column past what the dialog has, so the same sections go one column
+        // rather than wrapping that value mid-word.
+        expect(statusColumnsFor(sections, 84).twoColumn).toBe(false);
     });
 
     test("breaks the context down by category, with counts and percentages", () => {

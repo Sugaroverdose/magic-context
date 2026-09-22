@@ -21,7 +21,7 @@ import { createElement as _$createElement } from "opentui:runtime-module:%40open
 import { createMemo, createSignal, onCleanup } from "opentui:runtime-module:solid-js";
 import packageJson from "../../../package.json";
 import { statusSummaryFromDetail } from "../../shared/status-summary";
-import { buildStatusView, STATUS_TWO_COLUMN_MIN_COLUMNS } from "../../shared/status-view";
+import { buildStatusView, statusColumnsFor } from "../../shared/status-view";
 import { RUST_MODE_HOST_PATHS_LINE } from "../../shared/rust-mode-status";
 const R = props => (() => {
   var _el$ = _$createElement("box"),
@@ -152,8 +152,8 @@ export const StatusDialog = props => {
   }, {
     version: packageJson.version
   }));
-  // Two columns only when both label columns fit; below that the same sections
-  // are drawn in one column, in the same order, instead of being squeezed.
+  // The dialog's own laid-out width, which is what the sections have to fit
+  // into; the terminal width is only the pre-layout fallback.
   const [dialogWidth, setDialogWidth] = createSignal(0);
   const measureRoot = element => {
     const read = () => {
@@ -166,7 +166,11 @@ export const StatusDialog = props => {
   };
   // paddingLeft + paddingRight below; what the sections get is what is left.
   const contentWidth = () => dialogWidth() > 0 ? dialogWidth() - 4 : terminalColumns();
-  const singleColumn = () => contentWidth() < STATUS_TWO_COLUMN_MIN_COLUMNS;
+  // The shared model decides whether the sections fit in two columns at this
+  // width, and how wide each column has to be; below that the same sections
+  // are drawn in one column, in the same order, instead of being squeezed
+  // into mid-word wraps.
+  const columns = () => statusColumnsFor(view().sections, contentWidth());
   const columnSections = parity => view().sections.filter((_section, index) => index % 2 === parity);
   const hygiene = () => view().hygiene;
   return (() => {
@@ -436,46 +440,54 @@ export const StatusDialog = props => {
       })();
     })(), _el$20);
     _$insert(_el$1, (() => {
-      var _c$5 = _$memo(() => !!singleColumn());
+      var _c$5 = _$memo(() => !!columns().twoColumn);
       return () => _c$5() ? (() => {
-        var _el$35 = _$createElement("box");
-        _$setProp(_el$35, "flexDirection", "column");
+        var _el$35 = _$createElement("box"),
+          _el$36 = _$createElement("box"),
+          _el$37 = _$createElement("box");
+        _$insertNode(_el$35, _el$36);
+        _$insertNode(_el$35, _el$37);
+        _$setProp(_el$35, "flexDirection", "row");
         _$setProp(_el$35, "width", "100%");
-        _$insert(_el$35, () => view().sections.map(section => _$createComponent(StatusSectionView, {
+        _$setProp(_el$35, "gap", 4);
+        _$setProp(_el$36, "flexDirection", "column");
+        _$setProp(_el$36, "flexShrink", 0);
+        _$insert(_el$36, () => columnSections(0).map(section => _$createComponent(StatusSectionView, {
           get t() {
             return t();
           },
           section: section
         })));
+        _$setProp(_el$37, "flexDirection", "column");
+        _$setProp(_el$37, "flexShrink", 0);
+        _$insert(_el$37, () => columnSections(1).map(section => _$createComponent(StatusSectionView, {
+          get t() {
+            return t();
+          },
+          section: section
+        })));
+        _$effect(_p$ => {
+          var _v$17 = columns().leftWidth,
+            _v$18 = columns().rightWidth;
+          _v$17 !== _p$.e && (_p$.e = _$setProp(_el$36, "width", _v$17, _p$.e));
+          _v$18 !== _p$.t && (_p$.t = _$setProp(_el$37, "width", _v$18, _p$.t));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined
+        });
         return _el$35;
       })() : (() => {
-        var _el$36 = _$createElement("box"),
-          _el$37 = _$createElement("box"),
-          _el$38 = _$createElement("box");
-        _$insertNode(_el$36, _el$37);
-        _$insertNode(_el$36, _el$38);
-        _$setProp(_el$36, "flexDirection", "row");
-        _$setProp(_el$36, "width", "100%");
-        _$setProp(_el$36, "gap", 4);
-        _$setProp(_el$37, "flexDirection", "column");
-        _$setProp(_el$37, "flexGrow", 1);
-        _$setProp(_el$37, "flexBasis", 0);
-        _$insert(_el$37, () => columnSections(0).map(section => _$createComponent(StatusSectionView, {
-          get t() {
-            return t();
-          },
-          section: section
-        })));
+        var _el$38 = _$createElement("box");
         _$setProp(_el$38, "flexDirection", "column");
-        _$setProp(_el$38, "flexGrow", 1);
-        _$setProp(_el$38, "flexBasis", 0);
-        _$insert(_el$38, () => columnSections(1).map(section => _$createComponent(StatusSectionView, {
+        _$setProp(_el$38, "width", "100%");
+        _$insert(_el$38, () => view().sections.map(section => _$createComponent(StatusSectionView, {
           get t() {
             return t();
           },
           section: section
         })));
-        return _el$36;
+        return _el$38;
       })();
     })(), _el$20);
     _$insert(_el$1, (() => {

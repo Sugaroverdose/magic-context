@@ -15,7 +15,7 @@ import packageJson from "../../../package.json"
 import { statusSummaryFromDetail } from "../../shared/status-summary"
 import {
     buildStatusView,
-    STATUS_TWO_COLUMN_MIN_COLUMNS,
+    statusColumnsFor,
     type StatusRow,
     type StatusSection,
     type StatusTone,
@@ -112,8 +112,8 @@ export const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
             { version: packageJson.version },
         ),
     )
-    // Two columns only when both label columns fit; below that the same sections
-    // are drawn in one column, in the same order, instead of being squeezed.
+    // The dialog's own laid-out width, which is what the sections have to fit
+    // into; the terminal width is only the pre-layout fallback.
     const [dialogWidth, setDialogWidth] = createSignal(0)
     const measureRoot = (element: any) => {
         const read = () => {
@@ -126,7 +126,11 @@ export const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
     }
     // paddingLeft + paddingRight below; what the sections get is what is left.
     const contentWidth = () => (dialogWidth() > 0 ? dialogWidth() - 4 : terminalColumns())
-    const singleColumn = () => contentWidth() < STATUS_TWO_COLUMN_MIN_COLUMNS
+    // The shared model decides whether the sections fit in two columns at this
+    // width, and how wide each column has to be; below that the same sections
+    // are drawn in one column, in the same order, instead of being squeezed
+    // into mid-word wraps.
+    const columns = () => statusColumnsFor(view().sections, contentWidth())
     const columnSections = (parity: number) =>
         view().sections.filter((_section, index) => index % 2 === parity)
     const hygiene = () => view().hygiene
@@ -225,24 +229,24 @@ export const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 </box>
             )}
 
-            {singleColumn() ? (
-                <box flexDirection="column" width="100%">
-                    {view().sections.map((section) => (
-                        <StatusSectionView t={t()} section={section} />
-                    ))}
-                </box>
-            ) : (
+            {columns().twoColumn ? (
                 <box flexDirection="row" width="100%" gap={4}>
-                    <box flexDirection="column" flexGrow={1} flexBasis={0}>
+                    <box flexDirection="column" width={columns().leftWidth} flexShrink={0}>
                         {columnSections(0).map((section) => (
                             <StatusSectionView t={t()} section={section} />
                         ))}
                     </box>
-                    <box flexDirection="column" flexGrow={1} flexBasis={0}>
+                    <box flexDirection="column" width={columns().rightWidth} flexShrink={0}>
                         {columnSections(1).map((section) => (
                             <StatusSectionView t={t()} section={section} />
                         ))}
                     </box>
+                </box>
+            ) : (
+                <box flexDirection="column" width="100%">
+                    {view().sections.map((section) => (
+                        <StatusSectionView t={t()} section={section} />
+                    ))}
                 </box>
             )}
 

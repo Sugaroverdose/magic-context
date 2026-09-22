@@ -183,14 +183,65 @@ export const STATUS_CATEGORY_COLORS = {
 } as const;
 
 /**
- * Terminal columns below which the two-column section grid is not drawn.
- *
- * Two columns need, per column, the widest label column (19) plus a space plus
- * room for a value (about 14), and the dialog adds four columns of padding and
- * four of gap between the columns: 2 × 34 + 8 = 76. Narrower than that, the
- * sections are drawn in one column instead of squeezing labels into wraps.
+ * Columns reserved between the two section columns when the grid is drawn.
+ * The dialog draws its two columns at equal width with this gap between them.
  */
-export const STATUS_TWO_COLUMN_MIN_COLUMNS = 76;
+export const STATUS_COLUMN_GAP = 4;
+
+/**
+ * Columns one section needs so that neither its labels nor its values wrap:
+ * the label column, one separating space, and the longest value in the section.
+ */
+export function statusSectionWidth(section: StatusSection): number {
+    const longestValue = section.rows.reduce(
+        (longest, row) => Math.max(longest, row.value.length),
+        0,
+    );
+    return section.labelWidth + 1 + longestValue;
+}
+
+/** How the sections are laid out at one content width. */
+export interface StatusColumnLayout {
+    /** True when both columns fit; false means the caller draws one column. */
+    readonly twoColumn: boolean;
+    /** Columns the widest section in the left column needs. */
+    readonly leftWidth: number;
+    /** Columns the widest section in the right column needs. */
+    readonly rightWidth: number;
+}
+
+function widestSectionWidth(sections: readonly StatusSection[]): number {
+    return sections.reduce((widest, section) => Math.max(widest, statusSectionWidth(section)), 0);
+}
+
+/**
+ * Whether the sections fit in two columns at this content width, and how wide
+ * each column has to be.
+ *
+ * A value never wraps, so a section needs `labelWidth + 1 + longest value`
+ * columns and the grid is drawn only when both columns' requirements plus the
+ * gap fit the content width. When they do not, the caller draws the same
+ * sections in one column instead of squeezing values into mid-word wraps.
+ *
+ * The returned widths are the columns' own requirements, so a caller that sizes
+ * its columns from them cannot wrap a value even when the two requirements are
+ * very different. Both renderers call this so neither decides the layout on its
+ * own.
+ */
+export function statusColumnsFor(
+    sections: readonly StatusSection[],
+    contentWidth: number,
+): StatusColumnLayout {
+    const left = sections.filter((_section, index) => index % 2 === 0);
+    const right = sections.filter((_section, index) => index % 2 === 1);
+    const leftWidth = widestSectionWidth(left);
+    const rightWidth = widestSectionWidth(right);
+    const twoColumn =
+        left.length > 0 &&
+        right.length > 0 &&
+        leftWidth + rightWidth + STATUS_COLUMN_GAP <= contentWidth;
+    return { twoColumn, leftWidth, rightWidth };
+}
 
 /** Compact token count, e.g. 623K. Shared so every host prints one spelling. */
 export function formatStatusTokens(value: number): string {
