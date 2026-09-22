@@ -1,5 +1,6 @@
 import { compareOpenCodeMessagesByCanonicalOrder } from "../../features/magic-context/compaction-marker";
 import { newestCtxReduceTagNumbers } from "../../features/magic-context/reclaim-protection";
+import { HYGIENE_PROVIDER_UNITS_VERSION, sessionDecisionCalibration, transitionSessionHygieneUnits } from '../../features/magic-context/session-decision-calibration';
 import {
     addProcessedImageStrippedIds,
     addStaleReduceStrippedIds,
@@ -2868,6 +2869,13 @@ export async function runPostTransformPhase(
                 const previous = args.channel1StateBySession.get(args.sessionId);
                 logTransformTiming(args.sessionId, "pp.tailReads", tTailReads);
                 const tTailMeasure = performance.now();
+                const hygieneCalibration = sessionDecisionCalibration(args.db, args.sessionId);
+                const hygieneUnitsVersion = transitionSessionHygieneUnits(
+                    args.db,
+                    args.sessionId,
+                    bustedThisPass,
+                    hygieneCalibration,
+                );
                 const baseline = refreshTailHygieneBaseline({
                     messages: args.messages,
                     tags,
@@ -2875,6 +2883,11 @@ export async function runPostTransformPhase(
                     pendingDropTagNumbers,
                     cacheBusting: bustedThisPass,
                     previous,
+                    calibration:
+                        hygieneUnitsVersion >= HYGIENE_PROVIDER_UNITS_VERSION
+                            ? hygieneCalibration
+                            : undefined,
+                    hygieneUnitsVersion,
                 });
                 logTransformTiming(args.sessionId, "pp.tailMeasure", tTailMeasure);
                 // One line per invalidation event, not one per pass: the baseline

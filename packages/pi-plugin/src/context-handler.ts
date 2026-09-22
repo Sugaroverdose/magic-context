@@ -65,7 +65,7 @@ import {
 	parseCacheTtl,
 	type Scheduler,
 } from "@magic-context/core/features/magic-context/scheduler";
-import { sessionDecisionCalibration } from "@magic-context/core/features/magic-context/session-decision-calibration";
+import { HYGIENE_PROVIDER_UNITS_VERSION, sessionDecisionCalibration, transitionSessionHygieneUnits } from '@magic-context/core/features/magic-context/session-decision-calibration';
 import { recordSessionProjectIdentity } from "@magic-context/core/features/magic-context/session-project-storage";
 import {
 	adoptPiFallbackMessageTag,
@@ -138,10 +138,6 @@ import {
 	hasReclaimRide,
 	reclaimRideLabel,
 } from "@magic-context/core/hooks/magic-context/cache-busting-signals";
-import {
-	calibrationCandidates,
-	formatCalibrationObservation,
-} from "@magic-context/core/hooks/magic-context/calibration-candidate";
 import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import {
 	rearmChannel2AfterCoverageAdvancingHardFold,
@@ -149,7 +145,6 @@ import {
 } from "@magic-context/core/hooks/magic-context/channel2-cycle";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { evaluateChannel2 } from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
-import { calibrationForModelKey } from "@magic-context/core/hooks/magic-context/decision-calibration";
 import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import {
 	type DroppedTokenReduction,
@@ -3516,6 +3511,16 @@ export function registerPiContextHandler(
 						message && typeof message === "object"
 							? result.postCommitEntryIdByRef.get(message)
 							: undefined;
+					const hygieneCalibration = sessionDecisionCalibration(
+						options.db,
+						sessionId,
+					);
+					const hygieneUnitsVersion = transitionSessionHygieneUnits(
+						options.db,
+						sessionId,
+						result.bustedThisPass,
+						hygieneCalibration,
+					);
 					const baseline = refreshPiTailHygieneBaseline({
 						messages: outputMessages,
 						tags,
@@ -3525,6 +3530,11 @@ export function registerPiContextHandler(
 						syntheticLeadingCount: result.syntheticLeadingCount,
 						cacheBusting: result.bustedThisPass,
 						previous: getPiChannel1Baseline(sessionId),
+						calibration:
+							hygieneUnitsVersion >= HYGIENE_PROVIDER_UNITS_VERSION
+								? hygieneCalibration
+								: undefined,
+						hygieneUnitsVersion,
 					});
 					const effective = effectivePiTailHygiene(baseline);
 					// One line per invalidation event, not one per pass: the baseline
@@ -3727,32 +3737,6 @@ export function registerPiContextHandler(
 				});
 			}
 			capturePiServedArray(sessionId, outputMessages);
-			if (result.bustedThisPass) {
-				try {
-					const raw = tokenizePiMessages(outputMessages as unknown[]);
-					const systemLocal = sessionMetaForPass?.systemPromptTokens ?? 0;
-					const observation = calibrationCandidates.capture({
-						harness: "pi",
-						sessionId,
-						seed: calibrationForModelKey(
-							resolvePiContextModelKey(ctx) ?? "unknown/unknown",
-						),
-						rawTokens: raw.conversation + raw.toolCall + systemLocal,
-						systemLocal,
-						systemObserved: false,
-						complete: false,
-					});
-					sessionLog(
-						sessionId,
-						`${formatCalibrationObservation(observation)} message_local=${raw.conversation + raw.toolCall} system_local=${systemLocal} tool_definitions_local=unobserved`,
-					);
-				} catch {
-					sessionLog(
-						sessionId,
-						"calibration: completeness=partial reason=unavailable-returned-array-count",
-					);
-				}
-			}
 			if (thinkingBindingRecoveryApplied) {
 				try {
 					clearThinkingBindingRecoveryIf(
@@ -6704,12 +6688,36 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 
 	const materialized = injectionResult?.m0Materialized === true;
 	const materializeReason = injectionResult?.m0Reason ?? null;
+	const bustedThisPass =
+		firstRenderBust ||
+		didMutateFromFlushedStatuses ||
+		pendingOpsDidMutate ||
+		heuristicOrReasoningDidMutate ||
+		autoReclaimDidMutateThisPass ||
+		materialized ||
+		historyWasConsumedThisPass;
+	const calibrationBustReason = materialized || firstRenderBust
+		? "fold"
+		: args.forceMaterialization
+			? "force"
+			: pendingOpsDidMutate || didMutateFromFlushedStatuses
+				? "flush"
+				: historyWasConsumedThisPass
+					? "refresh"
+					: args.schedulerDecision === "execute"
+						? "execute"
+						: "unknown";
+	const activeCalibration = sessionDecisionCalibration(args.db, args.sessionId, {
+		bustPermitted: bustedThisPass,
+		bustReason: calibrationBustReason,
+		onAdopt: (message) => sessionLog(args.sessionId, message),
+	});
 	protectionFloorResolution = resolveProtectionFloor();
 	const protectedTagNumbers = usesTokenProtection
 		? computeProtectionWindow(
 				allTagsForPass,
 				protectionFloorResolution.floor,
-				sessionDecisionCalibration(args.db, args.sessionId).toolsRatio,
+				activeCalibration.toolsRatio,
 			).protectedTagNumbers
 		: newestActiveTagNumbersByCount(allTagsForPass, args.protectedTags);
 	// A defer pass cannot consume queue rows, so preserve the snapshot loaded at
@@ -6729,15 +6737,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				.map((operation) => operation.tagId),
 		),
 	};
-
-	const bustedThisPass =
-		firstRenderBust ||
-		didMutateFromFlushedStatuses ||
-		pendingOpsDidMutate ||
-		heuristicOrReasoningDidMutate ||
-		autoReclaimDidMutateThisPass ||
-		materialized ||
-		historyWasConsumedThisPass;
 
 	if (bustedThisPass || isCacheBustingPass) {
 		droppedTokens = estimateDroppedTokensFromTagReductions(
