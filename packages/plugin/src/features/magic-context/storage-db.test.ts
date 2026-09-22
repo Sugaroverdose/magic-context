@@ -303,15 +303,34 @@ describe("explicit shared storage resolution", () => {
         const override = makeTempDir("storage-db-explicit-");
         process.env.MAGIC_CONTEXT_TEST_DATA_DIR = "";
         process.env.NODE_ENV = "development";
+        process.env.XDG_DATA_HOME = override;
         process.env.MAGIC_CONTEXT_STORAGE_DIR = join(override, "shared");
         __setRpcDiscoveryFsForTests({
             readdirSync: (_path, options) => (options?.withFileTypes ? [] : []),
         });
+        const processListProbeCalls: string[] = [];
         __setRpcIdentityTestHooks({
-            processListExecFileSync: (() => "") as typeof execFileSync,
+            processListExecFileSync: ((file: unknown, args?: readonly unknown[]) => {
+                processListProbeCalls.push(
+                    [String(file), ...(args ?? []).map(String)].join(" "),
+                );
+                return "";
+            }) as typeof execFileSync,
         });
-        const db = openDatabase();
+
+        const startedAt = performance.now();
+        const db = openDatabase({ busyTimeoutMs: 0 });
+        const elapsedMs = performance.now() - startedAt;
+
         expect(db).not.toBeNull();
+        expect(elapsedMs).toBeLessThan(1_000);
+        expect(processListProbeCalls[0]).toBe("ps -axo pid=,command=");
+        expect(processListProbeCalls.slice(1)).toHaveLength(2);
+        expect(
+            processListProbeCalls.slice(1).every((call) => /^ps -o ppid= -p \d+$/.test(call)),
+        ).toBe(true);
+        const timeout = db!.prepare("PRAGMA busy_timeout").get() as { timeout: number };
+        expect(timeout.timeout).toBe(0);
         const dbPath = join(override, "shared", "context.db");
         expect(existsSync(dbPath)).toBe(true);
         expect(statSync(join(override, "shared")).mode & 0o777).toBe(0o700);
