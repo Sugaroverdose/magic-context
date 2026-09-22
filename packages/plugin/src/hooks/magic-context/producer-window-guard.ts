@@ -162,8 +162,8 @@ export function producerPromptFailureReason(input: {
         calibrationForModelKey(input.modelKey),
         true,
     );
-    if (limit === undefined || !Number.isFinite(tokens) || tokens <= 0)
-        return "producer_prompt_fit_unavailable";
+    if (limit === undefined) return null;
+    if (!Number.isFinite(tokens) || tokens <= 0) return "producer_prompt_fit_unavailable";
     return tokens <= limit
         ? null
         : `producer_prompt_exceeds_window calibrated_tokens=${tokens} limit=${limit} estimator_margin=0.03`;

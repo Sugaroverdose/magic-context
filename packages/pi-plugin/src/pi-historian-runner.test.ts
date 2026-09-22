@@ -243,6 +243,8 @@ async function runHistorianWith(args: {
 	forceKeepLastCompartment?: boolean;
 	historianChunkTokens?: number;
 	historianContextLimit?: number;
+	producerContextLimits?: ReadonlyMap<string, number>;
+	resolveHostContextLimit?: (model: string) => number | undefined;
 	maxOutputTokens?: number;
 	beforeRun?: (db: ReturnType<typeof createTestDb>) => void;
 	ensureProjectRegistered?: Parameters<
@@ -264,20 +266,25 @@ async function runHistorianWith(args: {
 		fallbackModels: args.fallbackModels,
 		fallbackModelId: args.fallbackModelId,
 		historianChunkTokens: args.historianChunkTokens ?? 20_000,
-		historianContextLimit: args.historianContextLimit ?? 200_000,
-		producerContextLimits: new Map([
-			[args.historianModel ?? "test/model", 200_000],
-			...(args.fallbackModels ?? []).map(
-				(entry) =>
-					[typeof entry === "string" ? entry : entry.model, 200_000] as [
-						string,
-						number,
-					],
-			),
-			...(args.fallbackModelId
-				? [[args.fallbackModelId, 200_000] as [string, number]]
-				: []),
-		]),
+		historianContextLimit: args.resolveHostContextLimit
+			? undefined
+			: (args.historianContextLimit ?? 200_000),
+		producerContextLimits:
+			args.producerContextLimits ??
+			new Map([
+				[args.historianModel ?? "test/model", 200_000],
+				...(args.fallbackModels ?? []).map(
+					(entry) =>
+						[typeof entry === "string" ? entry : entry.model, 200_000] as [
+							string,
+							number,
+						],
+				),
+				...(args.fallbackModelId
+					? [[args.fallbackModelId, 200_000] as [string, number]]
+					: []),
+			]),
+		resolveHostContextLimit: args.resolveHostContextLimit,
 		maxOutputTokens: args.maxOutputTokens,
 		signal: args.signal,
 		retryBackoffMs: args.retryBackoffMs,
@@ -300,6 +307,48 @@ async function runHistorianWith(args: {
 }
 
 describe("runPiHistorian", () => {
+	it("uses the Pi registry with an empty cache and sends without a window when registry misses", async () => {
+		for (const known of [true, false]) {
+			const runner = runnerReturning([successXml()]);
+			const logSpy = spyOn(loggerModule, "sessionLog").mockImplementation(
+				() => {},
+			);
+			const { db } = await runHistorianWith({
+				runner,
+				historianModel: `test/uncached-${known}`,
+				producerContextLimits: new Map(),
+				resolveHostContextLimit: () => (known ? 200_000 : undefined),
+			});
+			try {
+				expect(runner.run).toHaveBeenCalledTimes(1);
+				expect(logSpy).toHaveBeenCalledWith(
+					"ses-historian",
+					known
+						? `historian producer window for test/uncached-${known}: 200000 (host registry)`
+						: `producer window unknown for test/uncached-${known}: sending unguarded`,
+				);
+			} finally {
+				logSpy.mockRestore();
+				closeQuietly(db);
+			}
+		}
+	});
+
+	it("releases reserved drain tokens when the producer refuses before dispatch", async () => {
+		const { db, runner } = await runHistorianWith({
+			outputs: [successXml()],
+			historianContextLimit: 32_001,
+			maxOutputTokens: 32_000,
+		});
+		try {
+			expect(runner.run).not.toHaveBeenCalled();
+			expect(
+				loadProtectedTailMeta(db, "ses-historian").protectedTailDrainTokens,
+			).toBe(0);
+		} finally {
+			closeQuietly(db);
+		}
+	});
 	it("does not spawn beyond the producer window and still spawns within the margin", async () => {
 		const messages = rawMessages();
 		const firstMessage = messages[0];

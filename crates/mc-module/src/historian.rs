@@ -1799,7 +1799,20 @@ where
             request.fallback_context_limits.get(model).copied()
         };
         let fit_limit = producer_input_token_limit(current_window, request.max_output_tokens);
-        if fit_limit.is_none_or(|limit| {
+        if current_window.is_none() {
+            static UNKNOWN_WINDOWS: std::sync::OnceLock<
+                std::sync::Mutex<std::collections::HashSet<String>>,
+            > = std::sync::OnceLock::new();
+            let seen = UNKNOWN_WINDOWS.get_or_init(Default::default);
+            if seen
+                .lock()
+                .expect("unknown window log mutex")
+                .insert(model.clone())
+            {
+                eprintln!("[mc-module] producer window unknown for {model}: sending unguarded");
+            }
+        }
+        if fit_limit.is_some_and(|limit| {
             !full_tokens.is_finite() || full_tokens <= 0.0 || full_tokens > limit as f64
         }) {
             let loaded = request.store.load(request.session_id)?;
@@ -3073,8 +3086,13 @@ mod tests {
         assert!(producer.observed_starts.is_empty());
         let mut missing = fire_request(&store, "small", &models, &chunk, &prior);
         missing.historian_context_limit_tokens = None;
-        assert!(run_historian_firing(&mut producer, missing).await.is_err());
-        assert!(producer.observed_starts.is_empty());
+        let mut missing_producer = ScriptedProducer::default()
+            .with_start(Ok(run_handle("run-unknown")))
+            .with_output(Ok(producer_output(historian_xml("unknown window"))));
+        assert!(run_historian_firing(&mut missing_producer, missing)
+            .await
+            .is_ok());
+        assert_eq!(missing_producer.observed_starts.len(), 1);
     }
 
     #[tokio::test]
@@ -3274,6 +3292,28 @@ mod tests {
         assert_eq!(loaded.meta.publication_floor_ordinal, Some(4));
         assert!(loaded.meta.block_identity_by_mid.contains_key("m5"));
         assert_eq!(store.load_compartments("ses").unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fallback_without_a_known_window_still_dispatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_compartment(&store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model-a".into(), "prov/model-b".into()];
+        let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+        request.fallback_context_limits.clear();
+        let mut producer = ScriptedProducer::default()
+            .with_start(Err(HistorianProducerError::retryable_model_failure(
+                "primary failed",
+            )))
+            .with_start(Ok(run_handle("run-fallback-unknown")))
+            .with_output(Ok(producer_output(historian_xml(
+                "fallback with unknown window",
+            ))));
+        assert!(run_historian_firing(&mut producer, request).await.is_ok());
+        assert_eq!(producer.observed_starts.len(), 2);
     }
 
     #[tokio::test]

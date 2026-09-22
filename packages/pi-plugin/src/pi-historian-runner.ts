@@ -231,8 +231,11 @@ async function sleepWithAbort(
 	});
 }
 
+const loggedProducerWindows = new Set<string>();
+
 async function runHistorianSubagentWithTransientRetriesGuarded(args: {
 	resolveContextLimit?: (model: string) => number | undefined;
+	onDispatch?: () => void;
 	runner: SubagentRunner;
 	options: SubagentRunOptions;
 	sessionId: string;
@@ -263,6 +266,7 @@ async function runHistorianSubagentWithTransientRetriesGuarded(args: {
 				maxOutputTokens: args.options.maxOutputTokens ?? 32000,
 			});
 			if (failure) throw new Error(failure);
+			args.onDispatch?.();
 			result = await args.runner.run({
 				...args.options,
 				// The historian runner owns fallback iteration because every candidate's
@@ -398,6 +402,8 @@ export interface PiHistorianDeps {
 	/** Known context limit for the same resolved historian model. Unknown means no producer guard. */
 	historianContextLimit?: number;
 	producerContextLimits?: ReadonlyMap<string, number>;
+	/** Live Pi/OMP registry lookup; its models include host snapshot and custom overrides. */
+	resolveHostContextLimit?: (model: string) => number | undefined;
 	/** Boundary resolved by the Pi trigger/recovery decision with the real model context. */
 	boundarySnapshot?: ProtectedTailBoundarySnapshot;
 	/**
@@ -506,10 +512,30 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 	) =>
 		runHistorianSubagentWithTransientRetriesGuarded({
 			...args,
-			resolveContextLimit: (model) =>
-				model === piModelRefToCanonical(historianModel ?? "")
-					? (historianContextLimit ?? deps.producerContextLimits?.get(model))
-					: deps.producerContextLimits?.get(model),
+			onDispatch: () => {
+				producerDispatched = true;
+			},
+			resolveContextLimit: (model) => {
+				const hostWindow = deps.resolveHostContextLimit?.(model);
+				const primaryWindow =
+					model === piModelRefToCanonical(historianModel)
+						? historianContextLimit
+						: undefined;
+				const suppliedWindow = deps.producerContextLimits?.get(model);
+				const cachedWindow = resolveKnownHistorianContextLimit(model);
+				const window =
+					hostWindow ?? primaryWindow ?? suppliedWindow ?? cachedWindow;
+				if (!loggedProducerWindows.has(model)) {
+					loggedProducerWindows.add(model);
+					sessionLog(
+						sessionId,
+						window === undefined
+							? `producer window unknown for ${model}: sending unguarded`
+							: `historian producer window for ${model}: ${window} (${hostWindow !== undefined ? "host registry" : primaryWindow !== undefined ? "configured" : suppliedWindow !== undefined ? "supplied" : "persisted cache"})`,
+					);
+				}
+				return window;
+			},
 		});
 
 	let issueNotified = false;
@@ -539,6 +565,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 	};
 	let completedSuccessfully = false;
 	let retainDrainReservationForRetryThrottle = false;
+	let producerDispatched = false;
 	let drainReservation: ReturnType<
 		typeof reserveProtectedTailDrainTokens
 	>["reservation"] = null;
@@ -808,7 +835,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			});
 			if (producerWindowFailure) {
 				telemetry.failureReason = producerWindowFailure;
-				retainDrainReservationForRetryThrottle = true;
+				rollbackDrainReservation();
 				incrementHistorianFailure(db, sessionId, producerWindowFailure);
 				sessionLog(
 					sessionId,
@@ -1080,6 +1107,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			}
 
 			if (validatedPass.kind !== "ok") {
+				if (!producerDispatched) retainDrainReservationForRetryThrottle = false;
 				const errorMsg =
 					validatedPass.kind === "validation-failed"
 						? validatedPass.error

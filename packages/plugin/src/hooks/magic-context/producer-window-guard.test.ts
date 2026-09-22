@@ -61,5 +61,5 @@ test("complete producer prompt uses producer calibration and refuses previously 
     };
     expect(producerPromptFailureReason(input)).not.toBeNull();
     expect(producerPromptFailureReason({ ...input, contextLimitTokens: 20000 })).toBeNull();
-    expect(producerPromptFailureReason({ ...input, contextLimitTokens: undefined })).not.toBeNull();
+    expect(producerPromptFailureReason({ ...input, contextLimitTokens: undefined })).toBeNull();
 });

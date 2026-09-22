@@ -4170,6 +4170,15 @@ function spawnPiHistorianRun(args: {
 				fallbackModelId,
 				historianChunkTokens: historian.historianChunkTokens,
 				historianContextLimit: historian.historianContextLimit,
+				resolveHostContextLimit: (model) => {
+					const slash = model.indexOf("/");
+					if (slash < 1) return undefined;
+					const window = ctx.modelRegistry?.find(
+						model.slice(0, slash),
+						model.slice(slash + 1),
+					)?.contextWindow;
+					return isSaneLimit(window) ? window : undefined;
+				},
 				boundarySnapshot,
 				refreshBoundarySnapshot,
 				currentContextLimit,
