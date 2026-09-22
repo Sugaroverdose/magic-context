@@ -325,10 +325,7 @@ function readRawSessionMessageRangeFromSource(
     if (provider && !provider.readMessagePage) {
         return provider
             .readMessages()
-            .filter(
-                (message) =>
-                    message.ordinal >= fromOrdinal && message.ordinal <= toOrdinal,
-            );
+            .filter((message) => message.ordinal >= fromOrdinal && message.ordinal <= toOrdinal);
     }
     if (!provider && !openCodeDbExists()) return [];
 
@@ -339,13 +336,7 @@ function readRawSessionMessageRangeFromSource(
         const page = provider?.readMessagePage
             ? provider.readMessagePage(afterOrdinal, limit, toOrdinal)
             : withReadOnlySessionDb((db) =>
-                  readRawSessionMessagePageFromDb(
-                      db,
-                      sessionId,
-                      afterOrdinal,
-                      limit,
-                      toOrdinal,
-                  ),
+                  readRawSessionMessagePageFromDb(db, sessionId, afterOrdinal, limit, toOrdinal),
               );
         if (page.length === 0) break;
         let nextOrdinal = afterOrdinal;
@@ -382,9 +373,7 @@ export function readRawSessionMessageRange(
 
     const messages: RawMessage[] = [];
     if (from < overlapFrom) {
-        messages.push(
-            ...readRawSessionMessageRangeFromSource(sessionId, from, overlapFrom - 1),
-        );
+        messages.push(...readRawSessionMessageRangeFromSource(sessionId, from, overlapFrom - 1));
     }
     messages.push(
         ...cached.messages.filter(
@@ -392,9 +381,7 @@ export function readRawSessionMessageRange(
         ),
     );
     if (overlapTo < to) {
-        messages.push(
-            ...readRawSessionMessageRangeFromSource(sessionId, overlapTo + 1, to),
-        );
+        messages.push(...readRawSessionMessageRangeFromSource(sessionId, overlapTo + 1, to));
     }
     return messages;
 }

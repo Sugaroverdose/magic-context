@@ -255,8 +255,7 @@ describe("readSessionChunk", () => {
                     return messages
                         .filter(
                             (message) =>
-                                message.ordinal > afterOrdinal &&
-                                message.ordinal <= finalWatermark,
+                                message.ordinal > afterOrdinal && message.ordinal <= finalWatermark,
                         )
                         .slice(0, limit);
                 },
@@ -272,24 +271,15 @@ describe("readSessionChunk", () => {
                     ).toBe(true);
 
                     providerPageReads = 0;
-                    expect(readRawSessionMessageRange(sessionId, 50, 50).map((row) => row.id)).toEqual([
-                        "m-50",
-                    ]);
+                    expect(
+                        readRawSessionMessageRange(sessionId, 50, 50).map((row) => row.id),
+                    ).toEqual(["m-50"]);
                     expect(providerPageReads).toBe(1);
 
                     providerPageReads = 0;
                     expect(
                         readRawSessionMessageRange(sessionId, 95, 102).map((row) => row.id),
-                    ).toEqual([
-                        "m-95",
-                        "m-96",
-                        "m-97",
-                        "m-98",
-                        "m-99",
-                        "m-100",
-                        "m-101",
-                        "m-102",
-                    ]);
+                    ).toEqual(["m-95", "m-96", "m-97", "m-98", "m-99", "m-100", "m-101", "m-102"]);
                     expect(providerPageReads).toBe(1);
 
                     expect(readRawSessionMessages(sessionId)).toHaveLength(120);
