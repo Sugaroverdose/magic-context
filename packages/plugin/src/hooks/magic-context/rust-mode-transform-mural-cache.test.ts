@@ -4,6 +4,7 @@ import { insertMemory } from "../../features/magic-context/memory";
 import { runMigrations } from "../../features/magic-context/migrations";
 import * as muralRenderer from "../../features/magic-context/mural/render-mural";
 import { resolveMuralWire } from "../../features/magic-context/mural/render-trigger";
+import { getMural, upsertMural } from "../../features/magic-context/mural/storage-mural";
 import {
     computeCueContentHash,
     setMuralCue,
@@ -20,7 +21,11 @@ import { Database } from "../../shared/sqlite";
 import { resetLkgSlotsForTest } from "./lkg-slot";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
-import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
+import {
+    createRustModeTransform,
+    type RustModeModuleClient,
+    type RustModeTransformOptions,
+} from "./rust-mode-transform";
 import type { TransformDeps } from "./transform";
 import type { MessageLike } from "./transform-operations";
 
@@ -51,7 +56,11 @@ async function refreshCatalog(vision: boolean): Promise<void> {
     expect(modelSupportsVision(providerID, modelID)).toBe(vision);
 }
 
-function createFixture(sessionId: string, disableCache = false) {
+function createFixture(
+    sessionId: string,
+    disableCache = false,
+    muralResolverForTests?: RustModeTransformOptions["muralResolverForTests"],
+) {
     const db = new Database(":memory:") as ContextDatabase;
     initializeDatabase(db);
     runMigrations(db);
@@ -84,6 +93,7 @@ function createFixture(sessionId: string, disableCache = false) {
         );
     }
     const muralOnPass: boolean[] = [];
+    const muralHashOnPass: Array<string | undefined> = [];
     const modelOnPass: unknown[] = [];
     let rowVersion = 0;
     const messages: MessageLike[] = [
@@ -96,7 +106,11 @@ function createFixture(sessionId: string, disableCache = false) {
         call: async ({ method, body }) => {
             if (method !== "transform") return { ok: true };
             const request = body as {
-                mural?: { data_url?: string; supports_vision?: boolean };
+                mural?: {
+                    data_url?: string;
+                    content_hash?: string;
+                    supports_vision?: boolean;
+                };
                 model_key?: string;
             };
             const hasMural = typeof request.mural?.data_url === "string";
@@ -105,6 +119,7 @@ function createFixture(sessionId: string, disableCache = false) {
                 expect(request.mural?.supports_vision).toBe(true);
             }
             muralOnPass.push(hasMural);
+            muralHashOnPass.push(request.mural?.content_hash);
             modelOnPass.push(request.model_key);
             return {
                 decision: "HARD",
@@ -138,11 +153,13 @@ function createFixture(sessionId: string, disableCache = false) {
         moduleClient,
         allowAuthorityProtocolBypassForTests: true,
         disableHotPathIoCachesForTests: disableCache,
+        muralResolverForTests,
         scheduleLkgCapture: (capture) => capture(),
     });
     return {
         db,
         muralOnPass,
+        muralHashOnPass,
         modelOnPass,
         async run() {
             const input = structuredClone(messages);
@@ -209,6 +226,46 @@ for (const scenario of [
         }
     });
 }
+
+test("an updated durable artifact reaches the next HARD response instead of the stale memo", async () => {
+    const durableResolver: NonNullable<RustModeTransformOptions["muralResolverForTests"]> = (
+        db,
+        projectIdentity,
+    ) => {
+        const artifact = projectIdentity ? getMural(db, projectIdentity) : null;
+        return artifact
+            ? {
+                  enabled: true,
+                  supportsVision: true,
+                  dataUrl: `data:image/png;base64,${artifact.image.toString("base64")}`,
+                  contentHash: artifact.contentHash,
+              }
+            : { enabled: true, supportsVision: true };
+    };
+    const fixture = createFixture("mural-cache-artifact-update", false, durableResolver);
+    const writeArtifact = (contentHash: string, renderedAt: number): void => {
+        upsertMural(fixture.db, {
+            projectPath: project,
+            image: Buffer.from(contentHash),
+            contentHash,
+            renderedAt,
+            model: null,
+            memoryIds: [],
+            width: 1,
+            height: 1,
+        });
+    };
+    try {
+        await refreshCatalog(true);
+        writeArtifact("mural-hash-a", 100);
+        await fixture.run();
+        writeArtifact("mural-hash-b", 200);
+        await fixture.run();
+        expect(fixture.muralHashOnPass).toEqual(["mural-hash-a", "mural-hash-b"]);
+    } finally {
+        fixture.dispose();
+    }
+});
 
 test("unchanged vision verdict keeps the PNG cached across catalog refreshes and HARD responses", async () => {
     const fixture = createFixture("mural-cache-stable-verdict");

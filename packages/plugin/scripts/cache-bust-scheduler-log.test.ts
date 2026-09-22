@@ -47,14 +47,16 @@ test("Rust pass logs carry raw input counts for self-inflicted epoch attribution
     writeFileSync(
         logPath,
         `[2026-09-22T11:54:37.372Z] [magic-context][ses_aft] rust pass: decision=SOFT reason=coverage_fold scheduler=execute in=513 out=97 applied=true\n` +
-            `[2026-09-22T11:55:23.973Z] [magic-context][ses_aft] rust pass: decision=HARD reason=epoch_change scheduler=defer in=12747 out=87 applied=true\n`,
+            `[2026-09-22T11:55:23.973Z] [magic-context][ses_aft] rust pass: decision=HARD reason=epoch_change scheduler=defer identity_delta=mur in=12747 out=87 applied=true\n`,
     );
 
     const decisions = withSchedulerLogFallback([], "ses_aft", logPath);
     expect(decisions).toHaveLength(2);
-    expect(decisions.map((row) => [row.materializeReason, row.inputCount])).toEqual([
-        ["coverage_fold", 513],
-        ["epoch_change", 12_747],
+    expect(
+        decisions.map((row) => [row.materializeReason, row.inputCount, row.identityDelta]),
+    ).toEqual([
+        ["coverage_fold", 513, undefined],
+        ["epoch_change", 12_747, ["mur"]],
     ]);
 });
 

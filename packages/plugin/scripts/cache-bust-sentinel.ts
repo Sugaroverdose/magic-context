@@ -449,6 +449,35 @@ export function loadSessionDecisions(
     };
     const booleanField = (row: Record<string, unknown>, ...keys: string[]): boolean =>
         keys.some((key) => row[key] === true || row[key] === 1 || row[key] === "true");
+    const stringListField = (
+        row: Record<string, unknown>,
+        ...keys: string[]
+    ): string[] | undefined => {
+        for (const key of keys) {
+            const value = row[key];
+            if (Array.isArray(value)) {
+                const strings = value.filter(
+                    (entry): entry is string => typeof entry === "string" && entry.length > 0,
+                );
+                if (strings.length > 0) return strings;
+            }
+            if (typeof value !== "string" || value.length === 0) continue;
+            try {
+                const parsed = JSON.parse(value);
+                if (Array.isArray(parsed)) {
+                    const strings = parsed.filter(
+                        (entry): entry is string =>
+                            typeof entry === "string" && entry.length > 0,
+                    );
+                    if (strings.length > 0) return strings;
+                }
+            } catch {
+                const strings = value.split(",").filter(Boolean);
+                if (strings.length > 0) return strings;
+            }
+        }
+        return undefined;
+    };
     const normalize = (
         row: Record<string, unknown>,
         source: string,
@@ -512,6 +541,7 @@ export function loadSessionDecisions(
                 "config_epoch",
                 "external_epoch",
             ),
+            identityDelta: stringListField(row, "identity_delta", "render_identity_delta"),
             flush:
                 booleanField(row, "flush", "flush_applied", "explicit_flush") ||
                 materializeReason === "explicit_flush",
@@ -599,6 +629,7 @@ export function loadSessionDecisions(
             prior.inputTokens = Math.max(prior.inputTokens, record.inputTokens);
             prior.inputCount ??= record.inputCount;
             prior.externalEpoch ||= record.externalEpoch;
+            prior.identityDelta ??= record.identityDelta;
             prior.flush ||= record.flush;
             prior.source = `${prior.source}+${record.source}`;
             continue;

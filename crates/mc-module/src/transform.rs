@@ -1558,6 +1558,10 @@ pub struct TransformResponse {
     /// The classifier's raw cause for a HARD/SOFT decision. Unknown future causes are retained.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub materialize_reason: Option<String>,
+    /// Names the render-identity components changed by this pass. The `mur` entry represents
+    /// mural content and lets cache-bust attribution distinguish mural-only epoch changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identity_delta: Vec<String>,
     /// First position where the newly served block sequence differs from the previous sequence,
     /// excluding blocks added only at the end.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -1649,6 +1653,7 @@ impl TransformResponse {
             scheduler_decision: None,
             scheduler_defer_reason: None,
             materialize_reason: None,
+            identity_delta: Vec::new(),
             first_divergence: None,
             timings: None,
             boundary_id: String::new(),
@@ -1688,6 +1693,7 @@ impl TransformResponse {
             scheduler_decision: None,
             scheduler_defer_reason: None,
             materialize_reason: None,
+            identity_delta: Vec::new(),
             first_divergence: None,
             timings: None,
             boundary_id: String::new(),
@@ -3282,6 +3288,10 @@ fn apply_additive_only(
                 .defer_reason
                 .map(|reason| reason.as_str().to_string()),
             materialize_reason,
+            identity_delta: render_identity_delta(
+                &loaded.meta.last_render_config,
+                &meta.last_render_config,
+            ),
             first_divergence: None,
             timings: Some(timings),
             boundary_id: String::new(),
@@ -3592,6 +3602,9 @@ fn apply_once(
         tagging_surface_requested,
     )?;
     let render_identity = render_identity_base(req, &content_epoch.prompt_surface_epoch);
+    // Do not use a newer mural supplied by this request to decide whether to rebuild the
+    // persisted baseline. Use the mural already stored in the loaded baseline for that decision;
+    // if another trigger rebuilds the baseline, use and persist the request's newer mural.
     let persisted_mural_hash = frozen_mural_hash(&loaded.core).to_string();
     let stable_effective_render_config_base =
         fold_m0_content_epoch(&render_identity, &content_epoch);
@@ -6328,6 +6341,10 @@ fn apply_once(
                 .defer_reason
                 .map(|reason| reason.as_str().to_string()),
             materialize_reason,
+            identity_delta: render_identity_delta(
+                &loaded.meta.last_render_config,
+                &meta.last_render_config,
+            ),
             first_divergence,
             timings: Some(timings),
             boundary_id: core.boundary_id.clone(),
@@ -6649,6 +6666,43 @@ fn frozen_mural_hash(core: &CoreState) -> &str {
         .find(|unit| unit.key == M0_MURAL_KEY)
         .map(|unit| unit.reset_rule.as_str())
         .unwrap_or("")
+}
+
+fn render_identity_parts(render_config: &str) -> (&str, Option<&str>, &str) {
+    if let Some(start) = render_config.rfind(";mur:") {
+        if let Some(relative_end) = render_config[start + 1..].find(']') {
+            let end = start + 1 + relative_end;
+            return (
+                &render_config[..start],
+                Some(&render_config[start + 1..end]),
+                &render_config[end..],
+            );
+        }
+    }
+    if let Some(start) = render_config.rfind("|mural:") {
+        return (
+            &render_config[..start],
+            Some(&render_config[start + 1..]),
+            "",
+        );
+    }
+    if let Some(base) = render_config.strip_suffix(']') {
+        return (base, None, "]");
+    }
+    (render_config, None, "")
+}
+
+fn render_identity_delta(previous: &str, current: &str) -> Vec<String> {
+    let previous = render_identity_parts(previous);
+    let current = render_identity_parts(current);
+    let mut delta = Vec::new();
+    if previous.1 != current.1 {
+        delta.push("mur".to_string());
+    }
+    if previous.0 != current.0 || previous.2 != current.2 {
+        delta.push("other".to_string());
+    }
+    delta
 }
 
 fn render_config_base(render_config: &str) -> &str {
@@ -21873,6 +21927,14 @@ pub(crate) mod tests {
             request
         }
 
+        assert_eq!(
+            render_identity_delta(
+                "cfg|m0epoch[ws:0:;mur:12:mural-hash-a]",
+                "cfg|m0epoch[ws:0:;mur:12:mural-hash-b]",
+            ),
+            vec!["mur"]
+        );
+
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let mural_a = request_with_mural(
@@ -21920,7 +21982,15 @@ pub(crate) mod tests {
             })
         );
         let identity_a = store.load("mural-replay").unwrap().meta.last_render_config;
-        assert!(identity_a.contains("mural-hash-a"));
+        assert!(identity_a.contains("mur:12:mural-hash-a"));
+
+        let before_update = run(&store, &mural_a, &spine());
+        assert_eq!(before_update.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_vec(&first.ck_messages).unwrap(),
+            serde_json::to_vec(&before_update.ck_messages).unwrap(),
+            "the defer before a mural update must replay the frozen prefix"
+        );
 
         let mural_b_defer = request_with_mural(
             "mural-replay",
@@ -21930,10 +22000,17 @@ pub(crate) mod tests {
         );
         let deferred = run(&store, &mural_b_defer, &spine());
         assert_eq!(deferred.action, "SOFT+");
+        assert_eq!(deferred.materialize_reason, None);
+        assert!(deferred.identity_delta.is_empty());
         assert_eq!(
-            serde_json::to_vec(&first.ck_messages).unwrap(),
+            serde_json::to_vec(&before_update.ck_messages).unwrap(),
             serde_json::to_vec(&deferred.ck_messages).unwrap(),
             "a live mural change must not self-bust the frozen m0 prefix"
+        );
+        assert_eq!(
+            store.load("mural-replay").unwrap().meta.last_render_config,
+            identity_a,
+            "a defer must not adopt the candidate mural identity"
         );
 
         let mural_b_hard = request_with_mural(
@@ -21944,9 +22021,10 @@ pub(crate) mod tests {
         );
         let folded = run(&store, &mural_b_hard, &spine());
         assert_eq!(folded.action, "HARD");
+        assert_eq!(folded.identity_delta, vec!["mur", "other"]);
         let identity_b = store.load("mural-replay").unwrap().meta.last_render_config;
         assert_ne!(identity_b, identity_a);
-        assert!(identity_b.contains("mural-hash-b"));
+        assert!(identity_b.contains("mur:12:mural-hash-b"));
         match &folded.messages()[0].content[1].kind {
             ck_wire::CkKind::Media(media) => {
                 assert_eq!(media.source["url"], json!("data:image/png;base64,Yg=="));
