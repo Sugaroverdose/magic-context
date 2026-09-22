@@ -1,4 +1,8 @@
-import { describe, expect, it } from "bun:test";
+import {
+	clearProducerModelObservations,
+	observeProducerModelsForTest,
+} from "@magic-context/core/hooks/magic-context/producer-window-test-support";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { replaceAllCompartmentState } from "@magic-context/core/features/magic-context/compartment-storage";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import {
@@ -790,3 +794,12 @@ describe("Pi Magic Context commands", () => {
 		expect(consumeDeferredMaterialization(sessionId)).toBe(false);
 	});
 });
+
+beforeEach(async () => {
+	await observeProducerModelsForTest([
+		"test/model",
+		"anthropic/claude",
+		"anthropic/claude-from-project-b",
+	]);
+});
+afterEach(clearProducerModelObservations);

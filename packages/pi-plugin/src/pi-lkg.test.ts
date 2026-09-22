@@ -319,6 +319,11 @@ it("Pi high-fill recovery replays a mapped contraction with 16 stable host entri
 			204000,
 			() => {},
 			new Error("database is locked"),
+			{
+				modelKey: "openai-codex/gpt-5.6-sol",
+				systemTokens: 100,
+				toolDefinitionTokens: 0,
+			},
 		),
 	).toThrow();
 	const replay = harness.coordinator.replay(next);
@@ -335,6 +340,11 @@ it("Pi high-fill recovery replays a mapped contraction with 16 stable host entri
 			204000,
 			() => {},
 			new Error("database is locked"),
+			{
+				modelKey: "openai-codex/gpt-5.6-sol",
+				systemTokens: 100,
+				toolDefinitionTokens: 0,
+			},
 		),
 	).not.toThrow();
 });

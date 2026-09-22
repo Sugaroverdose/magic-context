@@ -55,6 +55,12 @@ export function assertPiRawFallbackFits(
 		serializationFailed = true;
 	}
 	const proxyTokens = Math.ceil(bytes / 4);
+	if (serializationFailed || proxyTokens > contextLimit) {
+		log(
+			`raw_fallback_over_context_limit proxy_bytes=${bytes} proxy_tokens=${proxyTokens} limit=${contextLimit} early_abort=true serialization_failed=${serializationFailed}`,
+		);
+		throw new PiStorageBusyError({ cause });
+	}
 	const complete = messages.every((message) => {
 		if (!message || typeof message !== "object") return false;
 		const m = message as { role?: string; content?: unknown };

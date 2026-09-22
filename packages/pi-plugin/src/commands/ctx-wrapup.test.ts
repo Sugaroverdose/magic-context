@@ -1,6 +1,18 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it, mock, spyOn } from "bun:test";
+import {
+	clearProducerModelObservations,
+	observeProducerModelsForTest,
+} from "@magic-context/core/hooks/magic-context/producer-window-test-support";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import { join } from "node:path";
 import {
 	acquireCompartmentLease,
@@ -647,3 +659,8 @@ describe("Pi /ctx-wrapup", () => {
 		}
 	});
 });
+
+beforeEach(async () => {
+	await observeProducerModelsForTest(["test/model"]);
+});
+afterEach(clearProducerModelObservations);
