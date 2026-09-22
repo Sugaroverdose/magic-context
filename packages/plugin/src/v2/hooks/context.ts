@@ -468,9 +468,7 @@ export async function registerContext(context: V2Context) {
         }
     });
     const openStoreReader = () =>
-        new V2StoreReader(
-            gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
-        );
+        new V2StoreReader(gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"));
     const pagedRead = createV2RawMessageReader(openStoreReader);
     const readAllForConversion = (sessionID: string) =>
         readAllV2RawMessagesForConversion(openStoreReader, sessionID);

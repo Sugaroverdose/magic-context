@@ -24,6 +24,14 @@ import type { PluginContext } from "../../plugin/types";
 import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createV2RawMessageProvider, createV2RawMessageReader } from "../../v2/hooks/store";
+import {
+    getV2StoreReaderDebugCounters,
+    RAW_MESSAGE_TYPES,
+    resetV2StoreReaderDebugCounters,
+    V2_MESSAGE_PAGE_SQL,
+    V2StoreReader,
+} from "../../v2/store-reader";
 import { runCompartmentAgent } from "./compartment-runner";
 import {
     clearProducerModelObservations,
@@ -39,17 +47,6 @@ import {
     setRawMessageProvider,
 } from "./read-session-chunk";
 import type { RawMessage } from "./read-session-raw";
-import {
-    createV2RawMessageProvider,
-    createV2RawMessageReader,
-} from "../../v2/hooks/store";
-import {
-    getV2StoreReaderDebugCounters,
-    RAW_MESSAGE_TYPES,
-    resetV2StoreReaderDebugCounters,
-    V2_MESSAGE_PAGE_SQL,
-    V2StoreReader,
-} from "../../v2/store-reader";
 
 function createDb(): Database {
     const db = new Database(":memory:");
@@ -662,9 +659,9 @@ describe("runCompartmentAgent wrapup controls", () => {
                 .filter((detail) => detail.includes("session_message"));
             expect(sessionMessageSteps.length).toBeGreaterThan(0);
             expect(sessionMessageSteps.every((detail) => detail.includes("SEARCH"))).toBe(true);
-            expect(sessionMessageSteps.some((detail) => detail.includes("session_message_session"))).toBe(
-                true,
-            );
+            expect(
+                sessionMessageSteps.some((detail) => detail.includes("session_message_session")),
+            ).toBe(true);
         } finally {
             logSpy.mockRestore();
             closeQuietly(store);

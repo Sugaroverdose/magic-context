@@ -230,7 +230,10 @@ export function getV2StoreReaderDebugCounters(): V2StoreReaderDebugCounters {
         readersOpened: counters.readersOpened,
         readersClosed: counters.readersClosed,
         ...(counters.captureQueries
-            ? { captureQueries: true, queries: counters.queries?.map((query) => ({ ...query })) ?? [] }
+            ? {
+                  captureQueries: true,
+                  queries: counters.queries?.map((query) => ({ ...query })) ?? [],
+              }
             : {}),
     };
 }
@@ -351,7 +354,9 @@ export class V2StoreReader {
             const pageSize = Math.min(limit, finalWatermark - afterOrdinal);
             if (pageSize <= 0) return [];
             const maximumSeq = Number.MAX_SAFE_INTEGER;
-            const rows = this.db.prepare(V2_MESSAGE_PAGE_SQL).all(
+            const rows = this.db
+                .prepare(V2_MESSAGE_PAGE_SQL)
+                .all(
                     afterOrdinal,
                     sessionID,
                     ...RAW_MESSAGE_TYPES,

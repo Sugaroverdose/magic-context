@@ -10,7 +10,10 @@ import { readCoordinateRebaseNotice } from "../../features/magic-context/store-g
 // unchanged. The implementation moved to ./historian-state-file.ts so Pi
 // can import it without pulling in the full incremental runner.
 import { producerSourceLocalBudget } from "./derive-budgets";
-import { finishHistorianPublishStage, startHistorianPublishStage } from './historian-publish-stage-logger';
+import {
+    finishHistorianPublishStage,
+    startHistorianPublishStage,
+} from "./historian-publish-stage-logger";
 import { cleanupHistorianStateFile } from "./historian-state-file";
 
 export {
@@ -790,7 +793,10 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         const holderId = deps.compartmentLeaseHolderId;
         if (!holderId) {
             sessionLog(sessionId, "historian publish skipped: missing compartment lease holder");
-            sessionLog(sessionId, "historian output discarded: reason=missing_compartment_lease_holder");
+            sessionLog(
+                sessionId,
+                "historian output discarded: reason=missing_compartment_lease_holder",
+            );
             rollbackDrainReservation();
             return;
         }
@@ -966,12 +972,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             );
             logSlowWriteTransaction("historian-publish", transactionStartedAt);
         } catch (error) {
-            finishHistorianPublishStage(
-                sessionId,
-                "publish-txn",
-                transactionStartedAt,
-                "failed",
-            );
+            finishHistorianPublishStage(sessionId, "publish-txn", transactionStartedAt, "failed");
             throw error;
         } finally {
             if (!published) {

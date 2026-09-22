@@ -6,7 +6,10 @@ import type {
     StoredCompartmentRange,
     ValidatedHistorianPassResult,
 } from "./compartment-runner-types";
-import { finishHistorianPublishStage, startHistorianPublishStage } from './historian-publish-stage-logger';
+import {
+    finishHistorianPublishStage,
+    startHistorianPublishStage,
+} from "./historian-publish-stage-logger";
 import { completedToolArcCrossesBoundary } from "./read-session-true-raw-tokens";
 
 const MIN_RECOMP_CHUNK_TOKEN_BUDGET = 20;

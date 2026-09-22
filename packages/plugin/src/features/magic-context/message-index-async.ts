@@ -111,9 +111,7 @@ export interface BoundedMessageReconciliationSource {
     getCount(sessionId: string): number;
 }
 
-export type MessageReconciliationSource =
-    | FullReadMessages
-    | BoundedMessageReconciliationSource;
+export type MessageReconciliationSource = FullReadMessages | BoundedMessageReconciliationSource;
 type ReadSingleMessage = (sessionId: string, messageId: string) => RawMessage | null;
 type IncrementalMessageSource = ReadSingleMessage | RawMessage;
 

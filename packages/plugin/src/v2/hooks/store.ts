@@ -221,8 +221,7 @@ export function createV2RawMessageProvider(
         readMessageOrdinalById: (messageID) => reader.ordinalOf(sessionID, messageID),
         readMessageIdOrdinalsForRange: (fromOrdinal, toOrdinal) =>
             reader.ordinalMapForRange(sessionID, fromOrdinal, toOrdinal),
-        readMessageOrdinalPage: (after, limit) =>
-            reader.readOrdinalPage(sessionID, after, limit),
+        readMessageOrdinalPage: (after, limit) => reader.readOrdinalPage(sessionID, after, limit),
         getMessageCount: () => reader.getCount(sessionID),
         getStoredMessageCount: () => reader.getStoredCount(sessionID),
     };
