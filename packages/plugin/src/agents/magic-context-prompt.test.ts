@@ -79,6 +79,7 @@ describe("buildMagicContextSection — subagent mode", () => {
         const out = subagent();
         // Has the marker (injection idempotency) + the tag/ctx_reduce mechanics.
         expect(out).toContain("## Magic Context");
+        expect(out).toContain("Your context is a desk");
         expect(out).toContain("§N§ tag");
         expect(out).toContain("ctx_reduce");
         expect(out).toContain("newest tags are protected");
@@ -372,7 +373,7 @@ describe("buildMagicContextSection — prompt-surface composition", () => {
         expect(gatedOn).toContain("Keep code, identifiers, file paths");
 
         const subagent = light({ subagent: true });
-        expect(subagent).toContain("Stamp a §N§-tagged item");
+        expect(subagent).toContain("Your context is a desk");
         expect(subagent).toContain("[dropped §N§]");
         expect(subagent).not.toContain("long-term partner");
         expect(subagent).not.toContain("ctx_search");
