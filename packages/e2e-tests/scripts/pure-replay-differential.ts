@@ -448,7 +448,14 @@ async function capturePricedCheckout(harness: Awaited<ReturnType<typeof createRe
     }
     const expectedDropped = rows.filter((r) => !protectedTags.has(r.tag_number)).map((r) => r.tag_number);
     if (expectedDropped.length === 0) throw new Error("tail fixture has no independently eligible tool tags");
-    // With the summarizer disabled, 85.5% pressure authorizes queued drops. Below 95%, the newest protected tool outputs must still survive.
+    // Seed identical cached history in master and candidate; queued tool drops must not re-render it.
+    const commonHistory = `<session-history>\n${renderDecayedCompartments({ compartments, historyBudgetTokens: 60000 })}\n</session-history>`;
+    db.prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?").run(Buffer.from(commonHistory), sessionId);
+    db.close();
+    await harness.restart();
+    db = harness.openFixtureWriter();
+    // Supply a fresh provider sample after restart: cold startup has no live pressure proof.
+    // At 85.5% the scheduler admits tool drops without the >=95% protection-window override.
     harness.mock.script([]);
     harness.mock.setDefault({ text: "[[pressure-prime-answer]]", usage: { input_tokens: 171000, output_tokens: 10 } });
     await harness.sendPrompt(sessionId, "[[prime-tail-pressure]]");
@@ -456,13 +463,7 @@ async function capturePricedCheckout(harness: Awaited<ReturnType<typeof createRe
     const pressureDeadline = Date.now() + 3000;
     while (readPressure().last_input_tokens < 171000 && Date.now() < pressureDeadline) await Bun.sleep(20);
     if (readPressure().last_input_tokens < 171000) throw new Error(`pressure priming was not persisted: ${JSON.stringify(readPressure())}`);
-    // Seed identical cached history in master and candidate, then queue only tool-tail drops; history must not be re-rendered.
-    const commonHistory = `<session-history>\n${renderDecayedCompartments({ compartments, historyBudgetTokens: 60000 })}\n</session-history>`;
-    db.prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?").run(Buffer.from(commonHistory), sessionId);
     for (const row of rows) queuePendingOp(db, sessionId, row.tag_number, "drop", Date.now());
-    db.close();
-    await harness.restart();
-    db = harness.openFixtureWriter();
     harness.mock.setDefault({ text: "[[tail-answer]]", usage });
     const tailMaterializedAt = (db.prepare("SELECT cached_m0_materialized_at AS at FROM session_meta WHERE session_id = ?").get(sessionId) as { at: number }).at;
     const tailCursor = harness.schedulerCursor(sessionId);
@@ -473,6 +474,9 @@ async function capturePricedCheckout(harness: Awaited<ReturnType<typeof createRe
     const actualDropped = (db.prepare("SELECT tag_number FROM tags WHERE session_id = ? AND type = 'tool' AND message_id LIKE 'priced-tool-%' AND status = 'dropped' ORDER BY tag_number").all(sessionId) as Array<{ tag_number: number }>).map((r) => r.tag_number);
     if (JSON.stringify(actualDropped) !== JSON.stringify(expectedDropped)) throw new Error(`tail eligibility differs: expected=${expectedDropped} actual=${actualDropped} decision=${JSON.stringify(latestDecision())}`);
     const tailMessagesSha256 = hash(harness.lastMainWireSerialized("messages"));
+    const settledDeadline = Date.now() + 3000;
+    while (readPressure().last_input_tokens > 1000 && Date.now() < settledDeadline) await Bun.sleep(20);
+    if (readPressure().last_input_tokens > 1000) throw new Error("tail response usage did not settle before defer checks");
     const passes: ReplayPass[] = [];
     for (let i = 0; i < 4; i++) {
         if (i === 2) { db.close(); await harness.restart(); db = harness.openFixtureWriter(); }
