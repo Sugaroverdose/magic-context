@@ -34,10 +34,7 @@ interface RawMuralIdentityRow {
 
 const muralIdentityStatements = new WeakMap<Database, PreparedStatement>();
 
-export function getMuralIdentity(
-    db: Database,
-    projectPath: string,
-): MuralManifestIdentity | null {
+export function getMuralIdentity(db: Database, projectPath: string): MuralManifestIdentity | null {
     try {
         let statement = muralIdentityStatements.get(db);
         if (!statement) {
