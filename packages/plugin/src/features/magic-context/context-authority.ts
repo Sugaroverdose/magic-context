@@ -218,9 +218,17 @@ export function installAuthorityManagedMarker(
     });
 }
 
-export function removeAuthorityManagedMarker(db: Database, projectPath: string): void {
+export function removeAuthorityManagedMarker(
+    db: Database,
+    projectPath: string,
+    onMarkerReleased?: () => void,
+): void {
     withPrivilegedWriter(db, () => {
-        db.prepare("DELETE FROM authority_managed WHERE project_path = ?").run(projectPath);
+        const removed = db
+            .prepare("DELETE FROM authority_managed WHERE project_path = ?")
+            .run(projectPath);
+        // The deletion is the completion claim; invalidation commits or rolls back with it.
+        if (removed.changes > 0) onMarkerReleased?.();
     });
 }
 
@@ -247,7 +255,11 @@ export async function reconcileAuthorityMarker(args: {
     db: Database;
     projectPath: string;
     module: AuthorityModuleClient;
-}): Promise<{ status: "legacy" | "ok" | "repaired"; authority: AuthorityStatus | null }> {
+    onMarkerReleased?: () => void;
+}): Promise<{
+    status: "legacy" | "ok" | "repaired" | "released";
+    authority: AuthorityStatus | null;
+}> {
     const contextStoreUuid = ensureContextStoreUuid(args.db);
     const marker = getAuthorityManagedMarker(args.db, args.projectPath);
     if (marker) {
@@ -260,6 +272,35 @@ export async function reconcileAuthorityMarker(args: {
                 }),
             ),
         );
+        const completed =
+            marker.context_store_uuid === contextStoreUuid &&
+            statuses.every(
+                ({ authority }, index) =>
+                    authority === null ||
+                    (authority !== undefined &&
+                        authority.state === "TS" &&
+                        authority.context_store_uuid === contextStoreUuid &&
+                        authority.project === args.projectPath &&
+                        authority.domain === AUTHORITY_DOMAINS[index]),
+            );
+        if (completed) {
+            let released = false;
+            // Do not remove a marker replaced while the module status was in flight.
+            // The comparison and existing privileged removal share one writer transaction.
+            withPrivilegedWriter(args.db, () => {
+                const current = getAuthorityManagedMarker(args.db, args.projectPath);
+                if (
+                    !current ||
+                    current.context_store_uuid !== marker.context_store_uuid ||
+                    current.marked_at !== marker.marked_at ||
+                    getContextStoreUuid(args.db) !== contextStoreUuid
+                )
+                    return;
+                removeAuthorityManagedMarker(args.db, args.projectPath, args.onMarkerReleased);
+                released = true;
+            });
+            if (released) return { status: "released", authority: null };
+        }
         return {
             status: "ok",
             authority: statuses.find((result) => result.authority !== null)?.authority ?? null,
@@ -681,6 +722,7 @@ export async function drainAuthority(args: {
     module: AuthorityModuleClient;
     checksum: string | (() => string);
     limit?: number;
+    onMarkerReleased?: () => void;
 }): Promise<AuthorityDrainResult> {
     if (!args.module.authorityDrain) {
         throw new Error("authority drain is unavailable on this module client");
@@ -855,7 +897,7 @@ export async function drainAuthority(args: {
             ),
         );
         if (remaining.every((result) => !result.authority || result.authority.state === "TS")) {
-            removeAuthorityManagedMarker(args.db, args.projectPath);
+            removeAuthorityManagedMarker(args.db, args.projectPath, args.onMarkerReleased);
         }
         return finished;
     }
