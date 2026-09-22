@@ -22,7 +22,10 @@ import { createCtxReduceTools } from "../src/tools/ctx-reduce/tools";
 import { createCtxSearchTools } from "../src/tools/ctx-search/tools";
 
 const preset = process.argv[2] === "light" ? "light" : "full";
-const outPath = resolve(process.argv[3] ?? `.cortexkit/alfonso/reviews/surface-review-${preset}.md`);
+const repoRoot = resolve(import.meta.dir, "..", "..", "..");
+const outPath = resolve(
+    process.argv[3] ?? resolve(repoRoot, ".cortexkit", "alfonso", "reviews", `surface-review-${preset}.md`),
+);
 
 const tokenizer = new Tokenizer(claudeEncoding);
 const t = (s: string) => tokenizer.count(s);
