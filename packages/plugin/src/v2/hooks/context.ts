@@ -698,11 +698,7 @@ export async function registerContext(context: V2Context) {
                         readMessageOrdinalById: (messageId) =>
                             pagedRead.ordinalOf(draft.sessionID, messageId),
                         readMessageIdOrdinalsForRange: (fromOrdinal, toOrdinal) =>
-                            pagedRead.ordinalMapForRange(
-                                draft.sessionID,
-                                fromOrdinal,
-                                toOrdinal,
-                            ),
+                            pagedRead.ordinalMapForRange(draft.sessionID, fromOrdinal, toOrdinal),
                         readMessageOrdinalPage: (after, limit) =>
                             pagedRead.readOrdinalPage(draft.sessionID, after, limit),
                         getMessageCount: () => pagedRead.getCount(draft.sessionID),

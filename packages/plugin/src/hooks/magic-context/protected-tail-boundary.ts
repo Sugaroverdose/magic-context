@@ -1130,9 +1130,8 @@ export function validateBoundarySnapshot(args: {
         return { ok: false, reason: "stale_snapshot", detail: "raw message count shrank" };
     }
     const idAt = (ordinal: number): string | null =>
-        readRawSessionMessageIdOrdinalsForRange(snapshot.sessionId, ordinal, ordinal)
-            .keys()
-            .next().value ?? null;
+        readRawSessionMessageIdOrdinalsForRange(snapshot.sessionId, ordinal, ordinal).keys().next()
+            .value ?? null;
     const checks: Array<[number, string | null, string]> = [
         [snapshot.offset, snapshot.offsetMessageId, "offset"],
         [snapshot.rawMessageCountAtTrigger, snapshot.rawLastMessageIdAtTrigger, "last"],

@@ -1,10 +1,10 @@
 import { embedAndStoreCompartmentChunks } from "../../features/magic-context/compartment-embedding";
 import { insertCompartmentEvents } from "../../features/magic-context/compartment-events";
-import { readCoordinateRebaseNotice } from "../../features/magic-context/store-generation-rebase";
 import {
     appendCompartments,
     getCompartments,
 } from "../../features/magic-context/compartment-storage";
+import { readCoordinateRebaseNotice } from "../../features/magic-context/store-generation-rebase";
 // Re-export the historian-state-file helpers so existing callers
 // (compartment-runner-recomp.ts, compartment-runner.ts, tests) keep working
 // unchanged. The implementation moved to ./historian-state-file.ts so Pi
@@ -49,7 +49,6 @@ import {
     tallyFactsByCategory,
 } from "../../features/magic-context/storage-historian-runs";
 import { updateSessionMeta } from "../../features/magic-context/storage-meta";
-import { isStrictGapHealingMessage } from "./read-session-raw";
 import { insertPrimerCandidates } from "../../features/magic-context/storage-primers";
 import { getLatestHistorianInvocationId } from "../../features/magic-context/storage-subagent-invocations";
 import { insertUserMemoryCandidates } from "../../features/magic-context/user-memory/storage-user-memory";
@@ -99,6 +98,7 @@ import {
 } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
+import { isStrictGapHealingMessage } from "./read-session-raw";
 import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendStatusNotification } from "./send-session-notification";
 

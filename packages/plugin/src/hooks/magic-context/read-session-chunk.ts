@@ -122,10 +122,7 @@ export interface RawMessageProvider {
     readMessagePartsById?: (messageId: string) => RawMessageParts | null;
     readMessageOrdinalById?: (messageId: string) => number | null;
     readMessageIdOrdinals?: () => Map<string, number>;
-    readMessageIdOrdinalsForRange?: (
-        fromOrdinal: number,
-        toOrdinal: number,
-    ) => Map<string, number>;
+    readMessageIdOrdinalsForRange?: (fromOrdinal: number, toOrdinal: number) => Map<string, number>;
     readMessageOrdinalPage?: (
         after: RawMessageOrdinalAnchor | null,
         limit: number,
@@ -392,7 +389,10 @@ export function primeTailRawMessageCache(args: {
             lastCompartmentEnd,
             absoluteMessageCount,
         );
-        if (messages.find((message) => message.ordinal === lastCompartmentEnd)?.id !== anchorMessageId)
+        if (
+            messages.find((message) => message.ordinal === lastCompartmentEnd)?.id !==
+            anchorMessageId
+        )
             return false;
         activeRawMessageCache.set(sessionId, messages);
         activeAbsoluteCountCache?.set(sessionId, absoluteMessageCount);
@@ -507,12 +507,8 @@ export function readRawSessionMessageIdOrdinalsForRange(
           ? new Map(provider.readMessages().map((message) => [message.id, message.ordinal]))
           : !openCodeDbExists()
             ? new Map<string, number>()
-            : withReadOnlySessionDb((db) =>
-                  readRawSessionMessageIdOrdinalsFromDb(db, sessionId),
-              );
-    return new Map(
-        [...all].filter(([, ordinal]) => ordinal >= from && ordinal <= to),
-    );
+            : withReadOnlySessionDb((db) => readRawSessionMessageIdOrdinalsFromDb(db, sessionId));
+    return new Map([...all].filter(([, ordinal]) => ordinal >= from && ordinal <= to));
 }
 
 export function readRawSessionMessageIdOrdinals(sessionId: string): Map<string, number> {

@@ -20,9 +20,7 @@ import {
 } from "../features/magic-context/store-generation-rebase";
 import { v2NonNarrativeStoredGapRanges } from "../hooks/magic-context/compartment-runner-incremental";
 import { validateStoredCompartments } from "../hooks/magic-context/compartment-runner-validation";
-import {
-    withRawMessageProvider,
-} from "../hooks/magic-context/read-session-chunk";
+import { withRawMessageProvider } from "../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../hooks/magic-context/read-session-raw";
 import { Database } from "../shared/sqlite";
 import { rawMessages } from "./hooks/store";
@@ -314,9 +312,7 @@ test("v2 notice compatibility tolerates an older synthetic-only stored gap", () 
         startMessageId: "msg_a_004_a2",
         endMessageId: "msg_a_006_a3",
     });
-    db.prepare(
-        "UPDATE session_meta SET coordinate_rebase_notice = ? WHERE session_id = ?",
-    ).run(
+    db.prepare("UPDATE session_meta SET coordinate_rebase_notice = ? WHERE session_id = ?").run(
         JSON.stringify({ generation: "v2", previousGeneration: "v1", at: 1 }),
         "ses_a",
     );
@@ -370,9 +366,7 @@ test("a narrative row between rebased compartments remains a reported gap", () =
         [1, 3],
         [5, 7],
     ]);
-    expect(validateStoredCompartments(compartments)).toBe(
-        "gap before message 5 (expected 4)",
-    );
+    expect(validateStoredCompartments(compartments)).toBe("gap before message 5 (expected 4)");
     expect(readCoordinateRebaseNotice(db, "ses_a")).toMatchObject({
         generation: "v2",
         healedGaps: 0,
