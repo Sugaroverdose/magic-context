@@ -40,6 +40,7 @@ test("I14 sdk_renames: v2 supplies all four host seams, v1 defaults retain funct
 	const defaults = resolveTransformHostSeams({});
 	expect(defaults).toEqual({
 		hostRawMessages: readRawSessionMessages,
+		hostMessageReconciliationSource: readRawSessionMessages,
 		hostProtectedTailBoundary: resolveOpenCodeProtectedTailBoundary,
 		hostModelFallback: findLastAssistantModelFromOpenCodeDb,
 		hostRefuse: abortSessionFailClosed,
@@ -48,7 +49,7 @@ test("I14 sdk_renames: v2 supplies all four host seams, v1 defaults retain funct
 		readPage: () => [],
 		getCount: () => 0,
 	});
-	const supplied = createHostSeams({} as V2Context, read, new Map());
+	const supplied = createHostSeams({} as V2Context, read, read, new Map());
 	const resolved = resolveTransformHostSeams(supplied);
 	for (const key of Object.keys(defaults) as Array<keyof typeof defaults>) {
 		expect(typeof supplied[key]).toBe("function");

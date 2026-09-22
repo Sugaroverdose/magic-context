@@ -33,7 +33,7 @@ import {
 } from "../../hooks/magic-context/hook-handlers";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
-import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
+import { setBoundedRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
@@ -77,7 +77,11 @@ import { adaptPayload, HEAD_IDS } from "./payload";
 import { refusesBeforeProvider } from "./provider-admission";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
-import { createV2RawMessageReader } from "./store";
+import {
+    createV2RawMessageProvider,
+    createV2RawMessageReader,
+    readAllV2RawMessagesForConversion,
+} from "./store";
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
 import { resolveUsageReading, usageReadingMatchesDraft } from "./usage-reading";
@@ -117,16 +121,22 @@ function refuseBeforeProvider(
 
 export function createHostSeams(
     context: V2Context,
-    read: TransformDeps["hostRawMessages"] & {},
+    readAllForConversion: TransformDeps["hostRawMessages"] & {},
+    reconciliationSource: NonNullable<TransformDeps["hostMessageReconciliationSource"]>,
     liveModels: NonNullable<TransformDeps["liveModelBySession"]>,
 ): Required<
     Pick<
         TransformDeps,
-        "hostRawMessages" | "hostProtectedTailBoundary" | "hostModelFallback" | "hostRefuse"
+        | "hostRawMessages"
+        | "hostMessageReconciliationSource"
+        | "hostProtectedTailBoundary"
+        | "hostModelFallback"
+        | "hostRefuse"
     >
 > {
     return {
-        hostRawMessages: read,
+        hostRawMessages: readAllForConversion,
+        hostMessageReconciliationSource: reconciliationSource,
         hostProtectedTailBoundary: (args) =>
             resolveOpenCodeProtectedTailBoundary({
                 ...args,
@@ -457,12 +467,11 @@ export async function registerContext(context: V2Context) {
             console.warn("[magic-context] v2 Channel 2 delivery deferred", error);
         }
     });
-    const pagedRead = createV2RawMessageReader(
-        () =>
-            new V2StoreReader(
-                gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
-            ),
-    );
+    const openStoreReader = () =>
+        new V2StoreReader(gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"));
+    const pagedRead = createV2RawMessageReader(openStoreReader);
+    const readAllForConversion = (sessionID: string) =>
+        readAllV2RawMessagesForConversion(openStoreReader, sessionID);
     let transform: ReturnType<typeof createTransform> | undefined;
     let systemPrompt: ReturnType<typeof createSystemPromptHashHandler> | undefined;
     const systemPromptRefreshSessions = new Set<string>();
@@ -731,7 +740,7 @@ export async function registerContext(context: V2Context) {
                     db,
                     sessionId: draft.sessionID,
                     generation: "v2",
-                    readMessages: pagedRead,
+                    readMessages: readAllForConversion,
                 });
             } catch (error) {
                 sessionLog(
@@ -795,32 +804,10 @@ export async function registerContext(context: V2Context) {
             if (!rawProviders.has(draft.sessionID))
                 rawProviders.set(
                     draft.sessionID,
-                    setRawMessageProvider(draft.sessionID, {
-                        readMessages: () => {
-                            throw new Error(
-                                "OpenCode 2 per-pass raw history must use bounded provider operations; full readMessages() is reserved for store-generation conversion",
-                            );
-                        },
-                        readMessagePage: (afterOrdinal, limit, finalWatermark) =>
-                            pagedRead.readPage(
-                                draft.sessionID,
-                                afterOrdinal,
-                                limit,
-                                finalWatermark,
-                            ),
-                        readMessageById: (messageId) =>
-                            pagedRead.findById(draft.sessionID, messageId),
-                        readMessagePartsById: (messageId) =>
-                            pagedRead.findById(draft.sessionID, messageId),
-                        readMessageOrdinalById: (messageId) =>
-                            pagedRead.ordinalOf(draft.sessionID, messageId),
-                        readMessageIdOrdinalsForRange: (fromOrdinal, toOrdinal) =>
-                            pagedRead.ordinalMapForRange(draft.sessionID, fromOrdinal, toOrdinal),
-                        readMessageOrdinalPage: (after, limit) =>
-                            pagedRead.readOrdinalPage(draft.sessionID, after, limit),
-                        getMessageCount: () => pagedRead.getCount(draft.sessionID),
-                        getStoredMessageCount: () => pagedRead.getStoredCount(draft.sessionID),
-                    }),
+                    setBoundedRawMessageProvider(
+                        draft.sessionID,
+                        createV2RawMessageProvider(pagedRead, draft.sessionID),
+                    ),
                 );
             transform ??= createTransform({
                 db,
@@ -883,7 +870,7 @@ export async function registerContext(context: V2Context) {
                     injectionBudgetTokens: config.memory.injection_budget_tokens,
                     autoPromote: config.memory.auto_promote,
                 },
-                ...createHostSeams(context, pagedRead, liveModels),
+                ...createHostSeams(context, readAllForConversion, pagedRead, liveModels),
             });
             const admitted = new Set<string>();
             for (const message of draft.messages) {

@@ -1,7 +1,9 @@
+import type { BoundedRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import type {
     RawMessage,
     RawMessageOrdinalAnchor,
     RawMessageOrdinalEntry,
+    RawMessageParts,
 } from "../../hooks/magic-context/read-session-raw";
 import {
     type MessageType,
@@ -74,44 +76,47 @@ export function rawMessagePage(rows: readonly StoreRow[], afterOrdinal: number):
     return projectRawMessages(rows, (_row, index) => afterOrdinal + index + 1);
 }
 
-export type V2RawMessageReader = ((sessionID: string) => RawMessage[]) & {
-    readPage: (
+export interface V2RawMessageReader {
+    readPage(
         sessionID: string,
         afterOrdinal: number,
         limit: number,
         finalWatermark: number,
-    ) => RawMessage[];
-    findById: (sessionID: string, messageID: string) => RawMessage | null;
-    ordinalOf: (sessionID: string, messageID: string) => number | null;
-    ordinalMapForRange: (
+    ): RawMessage[];
+    findById(sessionID: string, messageID: string): RawMessage | null;
+    findPartsById(sessionID: string, messageID: string): RawMessageParts | null;
+    hasById(sessionID: string, messageID: string): boolean;
+    ordinalOf(sessionID: string, messageID: string): number | null;
+    ordinalMapForRange(
         sessionID: string,
         fromOrdinal: number,
         toOrdinal: number,
-    ) => Map<string, number>;
-    readOrdinalPage: (
+    ): Map<string, number>;
+    readOrdinalPage(
         sessionID: string,
         after: RawMessageOrdinalAnchor | null,
         limit: number,
-    ) => RawMessageOrdinalEntry[];
-    getCount: (sessionID: string) => number;
-    getStoredCount: (sessionID: string) => number;
-};
+    ): RawMessageOrdinalEntry[];
+    getCount(sessionID: string): number;
+    getStoredCount(sessionID: string): number;
+}
 
-/**
- * Use the callable full read only when converting data between store generations,
- * because that repair must inspect every message part to preserve part-index tags.
- * Normal context and indexing passes use the SQL-bounded page and count methods.
- */
+/** The only V2 full-history reader: store-generation conversion must inspect every part. */
+export function readAllV2RawMessagesForConversion(
+    openReader: () => V2StoreReader,
+    sessionID: string,
+): RawMessage[] {
+    const reader = openReader();
+    try {
+        return rawMessages(reader.history(sessionID));
+    } finally {
+        reader.close();
+    }
+}
+
+/** Build the SQL-bounded reader used by context, indexing, and historian passes. */
 export function createV2RawMessageReader(openReader: () => V2StoreReader): V2RawMessageReader {
-    const read = (sessionID: string) => {
-        const reader = openReader();
-        try {
-            return rawMessages(reader.history(sessionID));
-        } finally {
-            reader.close();
-        }
-    };
-    return Object.assign(read, {
+    return {
         readPage: (
             sessionID: string,
             afterOrdinal: number,
@@ -135,6 +140,23 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
                 const row = reader.messageById(sessionID, messageID);
                 if (ordinal === null || row === null) return null;
                 return rawMessagePage([row], ordinal - 1)[0] ?? null;
+            } finally {
+                reader.close();
+            }
+        },
+        findPartsById: (sessionID: string, messageID: string) => {
+            const reader = openReader();
+            try {
+                const row = reader.messageById(sessionID, messageID);
+                return row ? (rawMessagePage([row], 0)[0] ?? null) : null;
+            } finally {
+                reader.close();
+            }
+        },
+        hasById: (sessionID: string, messageID: string) => {
+            const reader = openReader();
+            try {
+                return reader.messageExistsById(sessionID, messageID);
             } finally {
                 reader.close();
             }
@@ -183,5 +205,24 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
                 reader.close();
             }
         },
-    });
+    };
+}
+
+export function createV2RawMessageProvider(
+    reader: V2RawMessageReader,
+    sessionID: string,
+): BoundedRawMessageProvider {
+    return {
+        readMessagePage: (afterOrdinal, limit, finalWatermark) =>
+            reader.readPage(sessionID, afterOrdinal, limit, finalWatermark),
+        readMessageById: (messageID) => reader.findById(sessionID, messageID),
+        readMessagePartsById: (messageID) => reader.findPartsById(sessionID, messageID),
+        hasMessageById: (messageID) => reader.hasById(sessionID, messageID),
+        readMessageOrdinalById: (messageID) => reader.ordinalOf(sessionID, messageID),
+        readMessageIdOrdinalsForRange: (fromOrdinal, toOrdinal) =>
+            reader.ordinalMapForRange(sessionID, fromOrdinal, toOrdinal),
+        readMessageOrdinalPage: (after, limit) => reader.readOrdinalPage(sessionID, after, limit),
+        getMessageCount: () => reader.getCount(sessionID),
+        getStoredMessageCount: () => reader.getStoredCount(sessionID),
+    };
 }

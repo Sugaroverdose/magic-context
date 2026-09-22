@@ -24,12 +24,14 @@ export function queueDropsForCompartmentalizedMessages(
     sessionId: string,
     upToMessageIndex: number,
     observedKeys: RawSessionTagKeys,
+    fromMessageIndex?: number,
 ): void;
 export function queueDropsForCompartmentalizedMessages(
     db: Database,
     sessionId: string,
     upToMessageIndex: number,
     observedKeys?: RawSessionTagKeys,
+    fromMessageIndex = 1,
 ): Promise<void> | void {
     if (!observedKeys) {
         return getRawSessionTagKeysThrough(sessionId, upToMessageIndex, { db }).then((keys) =>
@@ -64,6 +66,6 @@ export function queueDropsForCompartmentalizedMessages(
 
     sessionLog(
         sessionId,
-        `compartment agent: queued ${dropsQueued} drops for messages 0-${upToMessageIndex}`,
+        `compartment agent: queued ${dropsQueued} drops for messages ${fromMessageIndex}-${upToMessageIndex}`,
     );
 }
