@@ -23,6 +23,7 @@ import {
     resolveMuralWire,
 } from "../../features/magic-context/mural/render-trigger";
 import type { MuralWireOptions } from "../../features/magic-context/mural/resolve-mural";
+import { getMuralIdentity } from "../../features/magic-context/mural/storage-mural";
 import { isFable51ThinkingBindingModel } from "../../features/magic-context/overflow-detection";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import type { getOrCreateSessionMeta } from "../../features/magic-context/storage";
@@ -1742,14 +1743,24 @@ export function createRustModeTransform(
         // Cache the candidate mural for the next permitted HARD (prefix rebuild);
         // the Rust module keeps already-served m0 prefix bytes frozen on passes
         // without cache-bust permission.
-        const key = JSON.stringify([
-            state.muralGeneration,
-            state.muralCuePoolVersion,
-            projectIdentity ?? null,
-            modelKey ?? null,
-            budgetTokens ?? null,
-            modelKeyAcceptsImages(modelKey),
-        ]);
+        // Reading only the mural's persisted identity avoids loading PNG bytes or rendering on
+        // the hot path, while detecting murals written outside this transform process so the
+        // cached candidate is invalidated.
+        const artifactIdentity = projectIdentity
+            ? getMuralIdentity(deps.db, projectIdentity)
+            : null;
+        const cacheKey = (artifact: typeof artifactIdentity): string =>
+            JSON.stringify([
+                state.muralGeneration,
+                state.muralCuePoolVersion,
+                projectIdentity ?? null,
+                modelKey ?? null,
+                budgetTokens ?? null,
+                modelKeyAcceptsImages(modelKey),
+                artifact?.contentHash ?? null,
+                artifact?.renderedAt ?? null,
+            ]);
+        const key = cacheKey(artifactIdentity);
         if (options.disableHotPathIoCachesForTests !== true && state.muralCache?.key === key) {
             return state.muralCache.value;
         }
@@ -1760,7 +1771,10 @@ export function createRustModeTransform(
             true,
             budgetTokens,
         );
-        state.muralCache = { key, value };
+        const resolvedArtifactIdentity = projectIdentity
+            ? getMuralIdentity(deps.db, projectIdentity)
+            : null;
+        state.muralCache = { key: cacheKey(resolvedArtifactIdentity), value };
         return value;
     };
 
