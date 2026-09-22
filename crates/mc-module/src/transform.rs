@@ -50,8 +50,9 @@ use crate::selection::{
 use crate::tail_hygiene::{
     channel1_refire_tokens, effective_tail_hygiene, hygiene_band,
     measure_tail_hygiene_with_pending_drops, post_reduce_grace_holds, queued_tag_numbers,
-    real_user_turn_count, refresh_tail_hygiene_baseline, HygieneBand, CHANNEL1_FLOOR_TOKENS,
-    CHANNEL2_FLOOR_TOKENS, CHANNEL2_SEVERITY_THRESHOLD,
+    real_user_turn_count, refresh_tail_hygiene_baseline_calibrated, HygieneBand,
+    HygieneCalibration, CHANNEL1_FLOOR_TOKENS, CHANNEL2_FLOOR_TOKENS,
+    CHANNEL2_SEVERITY_THRESHOLD,
 };
 use mc_core::{classify, CkItem, ClassifierInput, CoreState, FrozenUnit, PassInput, PassPlan};
 use mc_store::{
@@ -1865,6 +1866,25 @@ struct Channel1Decision {
     next_last_nudge: i64,
     next_last_level: String,
     clear_post_reduce_grace: bool,
+}
+
+fn transition_hygiene_units(meta: &mut ModuleMeta, bust_permitted: bool, tools_ratio: f64) -> bool {
+    if !bust_permitted || meta.hygiene_units_version >= 2 {
+        return false;
+    }
+    let scale = |value: i64| {
+        ((value.max(0) as f64) * tools_ratio)
+            .round()
+            .min(i64::MAX as f64) as i64
+    };
+    meta.channel1_last_nudge_undropped = scale(meta.channel1_last_nudge_undropped);
+    if let Some(baseline) = meta.tail_hygiene_baseline.as_mut() {
+        baseline.channel1_post_reduce_grace_baseline_u = baseline
+            .channel1_post_reduce_grace_baseline_u
+            .map(scale);
+    }
+    meta.hygiene_units_version = 2;
+    true
 }
 
 #[derive(Debug, Default)]
@@ -4246,6 +4266,24 @@ fn apply_once(
         || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
         || loaded.meta.soft_refresh_pending;
     let pass_already_busting = supersession_ride_available;
+    let calibration_candidate =
+        crate::decision_calibration::DecisionCalibration::freeze_for_model(req.model_key.as_deref());
+    let frozen_calibration = loaded
+        .meta
+        .decision_calibration
+        .as_ref()
+        .and_then(crate::decision_calibration::DecisionCalibration::from_frozen);
+    let active_calibration = if pass_already_busting {
+        crate::decision_calibration::DecisionCalibration::for_model(req.model_key.as_deref())
+    } else {
+        frozen_calibration.unwrap_or_else(crate::decision_calibration::DecisionCalibration::neutral)
+    };
+    let calibration_changed = pass_already_busting
+        && loaded
+            .meta
+            .decision_calibration
+            .as_ref()
+            .is_some_and(|previous| previous != &calibration_candidate);
     if !pass_already_busting && !pending_drop_target_ids.is_empty() {
         eprintln!("mc-module: pending drops held session={} reason=no_originating_cache_bust scheduler={:?} historian_active={}", req.session_id, scheduler_outcome.pass, ctx.historian_active);
     }
@@ -4312,8 +4350,7 @@ fn apply_once(
     let protection_window = ProtectionWindow::from_persisted_rows_calibrated(
         &tag_rows[..hydrated_tag_count],
         protected_tokens_floor,
-        crate::decision_calibration::DecisionCalibration::for_model(req.model_key.as_deref())
-            .tools_ratio,
+        active_calibration.tools_ratio,
     );
     let tag_window_protected_block_ids = protection_window.row_identities.block_ids.clone();
     let exempt_message_protected_block_ids = [mutation_exempt_mid, lineage_anchor_mid]
@@ -4367,9 +4404,7 @@ fn apply_once(
             &tail_for_selection,
             &frozen,
             &SelectionContext {
-                calibration: Some(crate::decision_calibration::DecisionCalibration::for_model(
-                    req.model_key.as_deref(),
-                )),
+                calibration: Some(active_calibration),
                 pass_class: selection_class,
                 current_total_input_tokens: usage_input_tokens,
                 ceiling_tokens: context_limit_tokens
@@ -4557,6 +4592,21 @@ fn apply_once(
     let mut core = loaded.core.clone();
     log_reasoning_drop_seed_skips(&core, &live, &req.session_id);
     let mut meta = loaded.meta.clone();
+    if pass_already_busting {
+        if calibration_changed {
+            if let Some(previous) = loaded.meta.decision_calibration.as_ref() {
+                eprintln!(
+                    "mc-module: [{}] calibration revision {} → {} adopted (bust={})",
+                    req.session_id,
+                    previous.revision,
+                    calibration_candidate.revision,
+                    materialize_reason.as_deref().unwrap_or("execute")
+                );
+            }
+        }
+        meta.decision_calibration = Some(calibration_candidate);
+        transition_hygiene_units(&mut meta, true, active_calibration.tools_ratio);
+    }
     timings.state_clone = elapsed_ms(state_clone_started_at);
     let state_evolution_started_at = Instant::now();
     meta.boundary_divergence_pending_count = boundary_divergence_pending_count;
@@ -5593,11 +5643,24 @@ fn apply_once(
         &pending_drop_target_ids,
     );
     let mut current_hygiene_baseline = if is_bust_pass {
-        let refreshed = refresh_tail_hygiene_baseline(
+        let refreshed = refresh_tail_hygiene_baseline_calibrated(
             hygiene_measurement,
             true,
-            loaded.meta.tail_hygiene_baseline.as_ref(),
+            meta.tail_hygiene_baseline.as_ref(),
             ctx.now_ms,
+            HygieneCalibration {
+                units_version: meta.hygiene_units_version.max(1),
+                tools_ratio: if meta.hygiene_units_version >= 2 {
+                    active_calibration.tools_ratio
+                } else {
+                    1.0
+                },
+                prose_ratio: if meta.hygiene_units_version >= 2 {
+                    active_calibration.prose_ratio
+                } else {
+                    1.0
+                },
+            },
         );
         meta.tail_hygiene_baseline = Some(refreshed.baseline.clone());
         Some(refreshed.baseline)
@@ -5607,11 +5670,24 @@ fn apply_once(
             .tail_hygiene_baseline
             .as_ref()
             .map(|previous| {
-                refresh_tail_hygiene_baseline(
+                refresh_tail_hygiene_baseline_calibrated(
                     hygiene_measurement,
                     false,
                     Some(previous),
                     ctx.now_ms,
+                    HygieneCalibration {
+                        units_version: meta.hygiene_units_version.max(1),
+                        tools_ratio: if meta.hygiene_units_version >= 2 {
+                            active_calibration.tools_ratio
+                        } else {
+                            1.0
+                        },
+                        prose_ratio: if meta.hygiene_units_version >= 2 {
+                            active_calibration.prose_ratio
+                        } else {
+                            1.0
+                        },
+                    },
                 )
             })
             .map(|refreshed| {
@@ -6207,19 +6283,6 @@ fn apply_once(
             "mc-module: trailing-blank-heal session={} mid={} reason=source_without_trailing_blank pass_row={}",
             req.session_id, mid, row_version,
         );
-    }
-    if is_bust_pass {
-        let key = req.model_key.as_deref();
-        let seed = crate::decision_calibration::DecisionCalibration::for_model(key);
-        let raw_returned_json_local: usize = ck_messages
-            .iter()
-            .map(|message| {
-                mc_tokenizer::estimate_tokens(
-                    std::str::from_utf8(&message.canonical_bytes).unwrap_or(""),
-                )
-            })
-            .sum();
-        eprintln!("calibration: model={} seed={}/{}/{} sample=unavailable ema=unavailable n=0 source={} completeness=partial raw_returned_json_local={} reason=system-tools-correlation-unobserved tool_io_policy=tool-schema-seed", key.unwrap_or("unknown/unknown"), seed.system_ratio, seed.tools_ratio, seed.prose_ratio, crate::decision_calibration::seed_source(key), raw_returned_json_local);
     }
     timings.store_memories = m1_revision_read_timings.memories_ms;
     timings.store_notes = m1_revision_read_timings.notes_ms;
@@ -14714,6 +14777,32 @@ pub(crate) mod tests {
         let resolved = config.resolve_cache_ttl_with_provenance(model_key);
         ctx.cache_ttl = resolved.value;
         ctx.cache_ttl_provenance = resolved.provenance;
+    }
+
+    #[test]
+    fn hygiene_v1_watermarks_convert_once_on_first_bust() {
+        let mut meta = ModuleMeta {
+            channel1_last_nudge_undropped: 20_000,
+            tail_hygiene_baseline: Some(TailHygieneBaseline {
+                channel1_post_reduce_grace_baseline_u: Some(10_000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(!transition_hygiene_units(&mut meta, false, 1.551639));
+        assert_eq!(meta.channel1_last_nudge_undropped, 20_000);
+        assert!(transition_hygiene_units(&mut meta, true, 1.551639));
+        assert_eq!(meta.hygiene_units_version, 2);
+        assert_eq!(meta.channel1_last_nudge_undropped, 31_033);
+        assert_eq!(
+            meta.tail_hygiene_baseline
+                .as_ref()
+                .and_then(|baseline| baseline.channel1_post_reduce_grace_baseline_u),
+            Some(15_516)
+        );
+        assert!(!transition_hygiene_units(&mut meta, true, 1.551639));
+        assert_eq!(meta.channel1_last_nudge_undropped, 31_033);
     }
 
     #[test]

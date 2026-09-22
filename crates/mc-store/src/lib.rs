@@ -4111,14 +4111,35 @@ pub struct TailHygienePartMeasurement {
     pub queued_for_drop: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailHygieneTokenBuckets {
+    pub tools_t: i64,
+    pub prose_t: i64,
+    pub tools_u: i64,
+    pub prose_u: i64,
+}
+
+fn one_f64() -> f64 {
+    1.0
+}
+
 /// Durable hygiene metrics used by both reminder channels, measured relative to the currently
 /// live tail rather than the full history.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TailHygieneBaseline {
     pub baseline_u: i64,
     pub baseline_t: i64,
     pub turn_delta_u: i64,
     pub turn_delta_t: i64,
+    /// Provider-unit epoch and the frozen class ratios used by effective_token_buckets.
+    #[serde(default)]
+    pub hygiene_units_version: u8,
+    #[serde(default = "one_f64")]
+    pub hygiene_tools_ratio: f64,
+    #[serde(default = "one_f64")]
+    pub hygiene_prose_ratio: f64,
+    #[serde(default)]
+    pub effective_token_buckets: TailHygieneTokenBuckets,
     pub baseline_generation: u64,
     pub computed_at_ms: i64,
     pub evaluable: bool,
@@ -4168,6 +4189,18 @@ pub struct EmergencyDropAssessment {
     pub selected_reclaim_tokens: f64,
     pub candidate_tokens: f64,
     pub target_unreachable: bool,
+}
+
+/// Calibration frozen at the session's last authorized bust boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrozenDecisionCalibration {
+    pub revision: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub system_ratio: f64,
+    pub tools_ratio: f64,
+    pub prose_ratio: f64,
+    pub source: String,
 }
 
 /// The non-CoreState durable blob: bootstrap + epoch-detection + coverage watermark.
@@ -4418,6 +4451,13 @@ pub struct ModuleMeta {
     /// asynchronous reduction acknowledgements use the same floor as transforms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected_tokens_effective: Option<u64>,
+    /// Decision calibration frozen at the last authorized bust. Absent legacy state stays
+    /// neutral until the next bust so a binary table update cannot alter a defer decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_calibration: Option<FrozenDecisionCalibration>,
+    /// Unit epoch for persisted hygiene cadence/grace watermarks.
+    #[serde(default)]
+    pub hygiene_units_version: u8,
     /// Reclaimable-token amount at the last Channel-1 append or suppression reset.
     #[serde(default)]
     pub channel1_last_nudge_undropped: i64,
