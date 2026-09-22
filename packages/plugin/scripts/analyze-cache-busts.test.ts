@@ -185,6 +185,40 @@ describe("analyze-cache-bust dump discovery", () => {
         );
     });
 
+    test("repeated epoch HARD decisions on one session are attributed to self-inflicted epochs", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-double-epoch-"));
+        tempDirs.push(dir);
+        const session = "ses_doubleEpoch";
+        const start = Date.parse("2026-09-20T16:00:00.000Z");
+        for (const [index, text] of ["initial", "first epoch", "second epoch"].entries()) {
+            const at = new Date(start + index * 6_000).toISOString();
+            writeDump(
+                dir,
+                `2026-09-20T16-00-${String(index * 6).padStart(2, "0")}-000Z-00000${index + 1}-${session}`,
+                at,
+                session,
+                bodyWithBreakpointMessage(text),
+                responseUsage({ input_tokens: 100, cache_read_input_tokens: index === 0 ? 20_000 : 100, cache_creation_input_tokens: index === 0 ? 0 : 19_900 }),
+            );
+        }
+        const decisions = [6_000, 12_000].map((offset) => ({
+            timestampMs: start + offset,
+            decision: "defer",
+            materialized: true,
+            materializeReason: "epoch_change",
+            identityDelta: ["other"],
+            emergency: false,
+            droppedTokens: 0,
+            droppedCount: 0,
+            inputTokens: 100,
+            flush: false,
+            source: "fixture",
+        }));
+        const rows = __test.analyzeSnapshots(snapshotsFor(dir, session), decisions);
+        expect(rows[1]?.divergenceClass).toBe("accounted_hard_epoch");
+        expect(rows[2]?.divergenceClass).toBe("self_inflicted_epoch");
+    });
+
     test("skips an unmetered pass as a baseline for the next real short-read bust", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-usage-missing-baseline-"));
         tempDirs.push(dir);

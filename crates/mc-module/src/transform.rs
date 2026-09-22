@@ -6692,6 +6692,27 @@ fn render_identity_parts(render_config: &str) -> (&str, Option<&str>, &str) {
     (render_config, None, "")
 }
 
+fn render_identity_epoch_fields(
+    identity: &str,
+) -> Option<(&str, std::collections::BTreeMap<String, &str>)> {
+    let (base, suffix) = identity.split_once("|m0epoch[")?;
+    let suffix = suffix.strip_suffix(']')?;
+    let mut fields = std::collections::BTreeMap::new();
+    let mut remaining = suffix;
+    while !remaining.is_empty() {
+        let (label, rest) = remaining.split_once(':')?;
+        let (length, rest) = rest.split_once(':')?;
+        let length = length.parse::<usize>().ok()?;
+        let value = rest.get(..length)?;
+        fields.insert(label.to_string(), value);
+        remaining = rest.get(length..)?;
+        if !remaining.is_empty() {
+            remaining = remaining.strip_prefix(';')?;
+        }
+    }
+    Some((base, fields))
+}
+
 fn render_identity_delta(previous: &str, current: &str) -> Vec<String> {
     let previous = render_identity_parts(previous);
     let current = render_identity_parts(current);
@@ -6700,7 +6721,28 @@ fn render_identity_delta(previous: &str, current: &str) -> Vec<String> {
         delta.push("mur".to_string());
     }
     if previous.0 != current.0 || previous.2 != current.2 {
-        delta.push("other".to_string());
+        let previous_epoch = format!("{}{}", previous.0, previous.2);
+        let current_epoch = format!("{}{}", current.0, current.2);
+        if let (Some((old_base, old_fields)), Some((new_base, new_fields))) = (
+            render_identity_epoch_fields(&previous_epoch),
+            render_identity_epoch_fields(&current_epoch),
+        ) {
+            if old_base != new_base {
+                delta.push("base".to_string());
+            }
+            for label in old_fields.keys().chain(new_fields.keys()) {
+                if old_fields.get(label) != new_fields.get(label)
+                    && !delta.iter().any(|part| part == label)
+                {
+                    delta.push(label.clone());
+                }
+            }
+            if previous.2 != current.2 {
+                delta.push("suffix".to_string());
+            }
+        } else {
+            delta.push("other".to_string());
+        }
     }
     delta
 }
@@ -21909,6 +21951,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn render_identity_delta_names_epoch_fields_without_exposing_values() {
+        assert_eq!(
+            render_identity_delta(
+                "cfg|m0epoch[ws:3:old;upg:0:;mem:0:]",
+                "cfg|m0epoch[ws:3:new;upg:0:;mem:0:]",
+            ),
+            vec!["ws"]
+        );
+        assert_eq!(
+            render_identity_delta(
+                "cfg|m0epoch[ws:0:;upg:0:;mem:0:]",
+                "cfg|m0epoch[ws:0:;upg:0:;mem:0:;pse:3:abc]",
+            ),
+            vec!["pse"]
+        );
+        assert_eq!(
+            render_identity_delta(
+                "old|m0epoch[ws:0:;upg:0:;mem:0:]",
+                "new|m0epoch[ws:0:;upg:0:;mem:0:]",
+            ),
+            vec!["base"]
+        );
+        assert_eq!(
+            render_identity_delta(
+                "cfg|m0epoch[ws:3:a;b;upg:0:;mem:0:]",
+                "cfg|m0epoch[ws:3:a;c;upg:0:;mem:0:]",
+            ),
+            vec!["ws"]
+        );
+    }
+
+    #[test]
     fn mural_changes_wait_for_a_natural_hard_and_then_replay_byte_identically() {
         fn request_with_mural(
             session: &str,
@@ -22021,7 +22095,7 @@ pub(crate) mod tests {
         );
         let folded = run(&store, &mural_b_hard, &spine());
         assert_eq!(folded.action, "HARD");
-        assert_eq!(folded.identity_delta, vec!["mur", "other"]);
+        assert_eq!(folded.identity_delta, vec!["mur", "base"]);
         let identity_b = store.load("mural-replay").unwrap().meta.last_render_config;
         assert_ne!(identity_b, identity_a);
         assert!(identity_b.contains("mur:12:mural-hash-b"));
