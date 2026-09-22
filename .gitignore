@@ -125,3 +125,6 @@ packages/*/.cortexkit/
 # Same shape: the issue 485 fixture generator checks the pre-fix package out here.
 # The script removes it on the way out, but an interrupted run leaves it behind.
 .issue-485-pure-*/
+
+# Build residue from a sibling toolchain (Xcode/SwiftPM), never a project artifact
+.build/
