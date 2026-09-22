@@ -549,15 +549,15 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
         await send(sessionId, "turn 9: first post-trigger turn records the nudge anchor", "phase 3 nudge anchor");
         let nudgeMarker = await send(sessionId, "turn 10: second post-trigger turn should receive the note nudge", "phase 3 nudge delivery");
         let nudgeBody = (await mainRequestForMarker(nudgeMarker)).body;
-        for (let retry = 0; retry < 4 && !JSON.stringify(nudgeBody).includes("deferred note"); retry += 1) {
+        for (let retry = 0; retry < 4 && !JSON.stringify(nudgeBody).includes("notes ready"); retry += 1) {
             nudgeMarker = await send(sessionId, `turn ${11 + retry}: extra post-trigger turn for persisted nudge delivery`, "phase 3 nudge delivery retry");
             nudgeBody = (await mainRequestForMarker(nudgeMarker)).body;
         }
-        expect(JSON.stringify(nudgeBody)).toContain("deferred note");
+        expect(JSON.stringify(nudgeBody)).toContain("notes ready");
         replayNudgeMarker = await send(sessionId, "turn 15: note nudge sticky replay should be byte-identical", "phase 3 nudge replay");
         const replayNudgeBody = (await mainRequestForMarker(replayNudgeMarker)).body;
-        expect(JSON.stringify(replayNudgeBody)).toContain("deferred note");
-        expect(readMeta<{ note_nudge_anchors: string }>(sessionId, "note_nudge_anchors")?.note_nudge_anchors ?? "").toContain("deferred note");
+        expect(JSON.stringify(replayNudgeBody)).toContain("notes ready");
+        expect(readMeta<{ note_nudge_anchors: string }>(sessionId, "note_nudge_anchors")?.note_nudge_anchors ?? "").toContain("notes ready");
         }
         // The 15-minute cooldown uses process-local wall-clock time; this long test cannot advance it without sleeping.
 

@@ -71,7 +71,7 @@ describe("createCtxNoteTools", () => {
         const readResult = await tools.ctx_note.execute({ action: "read" }, toolContext());
 
         expect(writeResult).toContain("Saved session note #1");
-        expect(readResult).toContain("## Session Notes");
+        expect(readResult).toContain("## Notes");
         expect(readResult).toContain("#1");
         expect(readResult).toContain("Remember the user prefers build on integrate.");
     });
@@ -422,7 +422,7 @@ describe("createCtxNoteTools", () => {
         );
 
         expect(result).not.toContain("'content' is required");
-        expect(result).toContain("## Session Notes");
+        expect(result).toContain("## Notes");
         expect(result).toContain("An existing note");
     });
 
@@ -435,7 +435,11 @@ describe("createCtxNoteTools", () => {
             { action: "write", content: "Anchored decision" },
             toolContext(),
         );
-        const readResult = await tools.ctx_note.execute({ action: "read" }, toolContext());
+        // The anchor belongs to the full body, so read the note by id.
+        const readResult = await tools.ctx_note.execute(
+            { action: "read", note_ids: [1] },
+            toolContext(),
+        );
 
         expect(readResult).toContain("↳ @msg 512");
         expect(readResult).toContain("ctx_expand(start=N-x, end=N)");
@@ -446,7 +450,10 @@ describe("createCtxNoteTools", () => {
             { action: "write", content: "Unanchored decision" },
             toolContext(),
         );
-        const readResult = await tools.ctx_note.execute({ action: "read" }, toolContext());
+        const readResult = await tools.ctx_note.execute(
+            { action: "read", note_ids: [1] },
+            toolContext(),
+        );
 
         expect(readResult).not.toContain("↳ @msg");
         expect(readResult).not.toContain("ctx_expand(start=N-x");
@@ -457,6 +464,20 @@ describe("createCtxNoteTools", () => {
 
         expect(result).toContain("Error");
         expect(result).toContain("'content' is required");
+    });
+
+    it("reports the active tray on the write reply", async () => {
+        const first = await tools.ctx_note.execute(
+            { action: "write", content: "first tray item" },
+            toolContext(),
+        );
+        const second = await tools.ctx_note.execute(
+            { action: "write", content: "second tray item" },
+            toolContext(),
+        );
+
+        expect(first).toBe("Saved session note #1. 1 active, oldest 0m.");
+        expect(second).toBe("Saved session note #2. 2 active, oldest 0m.");
     });
 
     it("dismisses session notes and can still inspect them with filter='all'", async () => {
@@ -678,8 +699,9 @@ describe("createCtxNoteTools", () => {
             },
             toolContext(),
         );
+        // The condition lives on the full body, so read the note by id.
         const readAllResult = await tools.ctx_note.execute(
-            { action: "read", filter: "all" },
+            { action: "read", note_ids: [1] },
             toolContext(),
         );
 
@@ -688,7 +710,38 @@ describe("createCtxNoteTools", () => {
         expect(readAllResult).toContain("When PR #108 is merged");
     });
 
-    it("pages read newest-first with limit/offset and a continuation footer", async () => {
+    it("lists parked smart notes in the default view and drops them under filter='active'", async () => {
+        tools = createCtxNoteTools({
+            db,
+            dreamerEnabled: true,
+            resolveProjectPath: () => "git:project-a",
+        });
+        await tools.ctx_note.execute(
+            {
+                action: "write",
+                content: "Parked smart note",
+                surface_condition: "When the release lands",
+            },
+            toolContext(),
+        );
+        await tools.ctx_note.execute(
+            { action: "write", content: "Plain session note" },
+            toolContext(),
+        );
+
+        const defaultView = await tools.ctx_note.execute({ action: "read" }, toolContext());
+        const activeOnly = await tools.ctx_note.execute(
+            { action: "read", filter: "active" },
+            toolContext(),
+        );
+
+        expect(defaultView).toContain("Parked smart note · pending");
+        expect(defaultView).toContain("Plain session note");
+        expect(activeOnly).toContain("Plain session note");
+        expect(activeOnly).not.toContain("Parked smart note");
+    });
+
+    it("pages the glance with limit/offset and a continuation footer", async () => {
         for (let i = 1; i <= 30; i += 1) {
             await tools.ctx_note.execute(
                 { action: "write", content: `note number ${i}` },
@@ -702,7 +755,7 @@ describe("createCtxNoteTools", () => {
         expect(firstPage).toContain("note number 6"); // 25th newest present
         expect(firstPage).not.toContain("note number 5\n"); // older than page 1
         expect(firstPage).toContain(
-            'Showing 25 of 30 (newest first) — 5 older: ctx_note(action="read", offset=25)',
+            'Showing 25 of 30 — 5 older: ctx_note(action="read", offset=25)',
         );
 
         // Older page via offset.
@@ -735,7 +788,7 @@ describe("createCtxNoteTools", () => {
             { action: "read", limit: 5, offset: 100 },
             toolContext(),
         );
-        expect(page).toContain("## 🔔 Ready Smart Notes");
+        expect(page).toContain("## Notes");
         expect(page).toContain("ready note 5");
         expect(page).toContain("ready note 1");
         expect(page).not.toContain("ready note 6\n");

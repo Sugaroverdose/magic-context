@@ -2208,7 +2208,9 @@ describe("registerPiContextHandler", () => {
 			expect(textOf(result.messages[0] as never)).toContain(
 				'<instruction name="deferred_notes">',
 			);
-			expect(textOf(result.messages[0] as never)).toContain("1 deferred note");
+			expect(textOf(result.messages[0] as never)).toContain(
+				"0 notes ready, 1 active",
+			);
 		} finally {
 			closeQuietly(db);
 		}
@@ -2267,6 +2269,12 @@ describe("registerPiContextHandler", () => {
 			expect(
 				textOf(onceMore.messages[0] as never).match(/deferred_notes/g),
 			).toHaveLength(1);
+			// The replayed delivery must be the exact bytes that were delivered:
+			// the text is stored with its anchor and never recomputed, so a later
+			// pass cannot pick a different note and bust the prompt cache.
+			expect(textOf(onceMore.messages[0] as never)).toBe(
+				textOf(result.messages[0] as never),
+			);
 		} finally {
 			closeQuietly(db);
 		}
