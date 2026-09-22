@@ -70,19 +70,19 @@ const ctxSearchArgsShape = {
         .string()
         .optional()
         .describe(
-            "Search query. Matches against memory content, Primers, git commit messages, and raw user/assistant message text.",
+            "A natural-language question carrying the exact terms you expect in the answer.",
         ),
-    limit: tool.schema.number().optional().describe("Maximum results to return (default: 10)"),
-    from: tool.schema.string().optional().describe("Earliest date, YYYY-MM-DD (inclusive)"),
+    limit: tool.schema.number().optional().describe("Maximum results (default 10)."),
+    from: tool.schema.string().optional().describe("Earliest date, YYYY-MM-DD (inclusive)."),
     to: tool.schema
         .string()
         .optional()
-        .describe("Latest date, YYYY-MM-DD (inclusive; default open)"),
+        .describe("Latest date, YYYY-MM-DD (inclusive; default open)."),
     sources: tool.schema
         .array(tool.schema.enum(["memory", "message", "git_commit", "primer", "note"]))
         .optional()
         .describe(
-            'Optional. Restrict to specific sources. Examples: ["primer"] for standing project explanations, ["git_commit"] for "when did we change X", ["memory"] for naming conventions, ["message"] for "did we discuss this earlier", ["note"] for parked decisions or follow-ups, ["git_commit","message"] for regression hunts. Omit for a broad search across all enabled sources; pass [] to search no sources.',
+            "Restrict to these sources; omit for all. [] searches none.",
         ),
 };
 // The tool definition exposes only the documented argument shape to the model

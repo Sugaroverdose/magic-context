@@ -684,12 +684,12 @@ const STRICT_TOOL_ALLOWLIST_ENTRIES: readonly (readonly [
 	// curate (base `dreamer`): memory-pool hygiene via ctx_memory ONLY. It is in
 	// DREAMER_ACTION_AGENTS so the lean extension registers ctx_memory; this
 	// allow-list then strips ALL 7 built-ins, leaving only the extension-provided
-	// ctx_memory (curate never reads code — a separate verify task owns that).
-	["dreamer", ["ctx_memory"]],
+	// ctx_memory plus ctx_memory_list (curate never reads code — a separate verify task owns that).
+	["dreamer", ["ctx_memory", "ctx_memory_list"]],
 	// Pi dreamer facade default when body.agent is absent (`dreamer/index.ts`).
-	// Same ctx_memory-only lock as `dreamer`; must stay in sync with
+	// Same memory-tool-only lock as `dreamer`; must stay in sync with
 	// DREAMER_ACTION_AGENTS (every member needs a strict entry).
-	["magic-context-dreamer", ["ctx_memory"]],
+	["magic-context-dreamer", ["ctx_memory", "ctx_memory_list"]],
 ];
 
 const STRICT_TOOL_ALLOWLIST: ReadonlyMap<string, readonly string[]> = new Map(

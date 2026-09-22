@@ -35,7 +35,7 @@ const ParamsSchema = Type.Object(
 	{
 		drop: Type.Optional(
 			Type.String({
-				description: "Tag IDs to drop entirely. Ranges: '3-5', '1,2,9'",
+				description: 'Tag IDs to drop: "3-5", "1,2,9", "1-5,8,12-15".',
 			}),
 		),
 	},

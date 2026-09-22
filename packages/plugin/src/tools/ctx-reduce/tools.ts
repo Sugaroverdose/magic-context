@@ -54,7 +54,7 @@ const ctxReduceArgsShape = {
     drop: tool.schema
         .string()
         .optional()
-        .describe("Tag IDs to drop entirely. Ranges: '3-5', '1,2,9'"),
+        .describe('Tag IDs to drop: "3-5", "1,2,9", "1-5,8,12-15".'),
 };
 // The tool definition exposes only the documented argument shape to the model
 // provider, but older callers may still send extra arguments. Parse with

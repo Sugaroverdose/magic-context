@@ -62,6 +62,7 @@ import { isDisposedInstanceDirectory } from "./plugin/instance-disposal";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
 import { isDebugRpcEnabled, registerRpcHandlers } from "./plugin/rpc-handlers";
 import { createToolRegistry } from "./plugin/tool-registry";
+import { CTX_MEMORY_LIST_TOOL_NAME } from "./tools/ctx-memory";
 import { claimConfigParseFailuresOnce } from "./shared/config-diagnostics";
 import { buildOpenCodeConfigWarningBanner } from "./shared/config-warning-surface";
 import {
@@ -406,6 +407,7 @@ const server: Plugin = async (ctx) => {
         rustToolBackends: magicContextRuntime.rustToolBackends,
         promptSurfaceRuntime,
         registrationPromptSurface: loadedPluginConfig.registrationPromptSurface,
+        includeDreamerOnlyTools: true,
     });
 
     // v22 deferred legacy-memory identity backfill. createSessionHooks() opens
@@ -905,6 +907,10 @@ const server: Plugin = async (ctx) => {
                 if (pluginConfig.enabled !== true) {
                     return;
                 }
+                config.permission = {
+                    ...(config.permission ?? {}),
+                    [CTX_MEMORY_LIST_TOOL_NAME]: "deny",
+                } as typeof config.permission;
                 // See buildHiddenAgentConfig (agents/hidden-agent-registrations.ts)
                 // for permission precedence and hard `steps`/`maxSteps` cap semantics.
                 const commandConfig = {

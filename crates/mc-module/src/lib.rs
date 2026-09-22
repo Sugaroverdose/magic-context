@@ -17477,19 +17477,66 @@ pub fn dev_descriptor_at(data_home: &str) -> StorageDescriptor {
 }
 
 fn ctx_memory_description() -> String {
-    "Save and maintain durable project memories for facts that should stay useful in later turns. Use write for a new standalone fact, update when an existing memory changed, archive when a memory is wrong or obsolete, and merge when several memories describe the same fact. Keep each memory concise and understandable without this chat's surrounding context.".to_string()
+    r#"Durable facts about this project, shared with every agent working on it and kept for the months this work lasts.
+
+Your active memories are already in <project-memory> as `#id: fact` lines. Write one when you learn something that must not have to be found again — a project rule, an architectural fact, a hard-won constraint, a config value, a naming convention — and especially when it cost you turns to find. One standalone fact per memory, phrased to make sense on its own. A pending intention with its evidence ("do X later, here is what we know") is ctx_note, not memory.
+
+Actions:
+- write: new memory (content + category).
+- update: rewrite one memory whose fact changed (ids: [one], content; category optional to recategorize).
+- archive: retire wrong or obsolete memories (ids: [one or more], optional reason).
+- merge: collapse duplicates into one (ids: [two or more], content).
+- get: fetch by id (ids: 1–20), readable in every status.
+Examples: category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode" · category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale""#.to_string()
 }
 
 fn ctx_search_description() -> String {
-    "Your long-term recall for this project — search everything that ever happened here, not just what's currently visible.\n\nRetrieval matches meaning as well as exact words and fuses them, so phrasing matters: phrase `query` as a natural-language question that still contains the exact terms you expect in the answer (paths, symbols, config keys, error strings); a bare keyword stack finds less than a question carrying the same words.\n- Good: \"where is the retry backoff for the upload client configured?\"\n- Bad: \"upload client retry backoff config\"\n\nReach for it when something feels familiar but isn't in view: \"did we solve this before?\", \"what did we decide about X?\", \"when did this break?\", \"where does Y live?\". Results only contain things you CANNOT currently see — memories already shown in <project-memory> and the live conversation tail are filtered out. A query that is just one or more memory ids (e.g. `#7234` or `12, 34`) bypasses text search and resolves those ids directly.\n\nSources (omit for a broad search across all):\n- memory: curated cross-session project knowledge — rules, constraints, conventions.\n- message: the raw conversation behind your compacted history. Hits include message ordinals — expand the surrounding exchange with ctx_expand(start=N-10, end=N+5).\n- git_commit: this repository's commit history.\n- note: parked decisions and follow-ups with their recorded text.\n\nPicking sources:\n- \"when did this change / was this working before\" → [\"git_commit\", \"message\"]\n- \"did we discuss this earlier\" → [\"message\"]\n- \"did we decide something about this / leave a follow-up\" → [\"note\"]\n- \"what's our convention / rule for X\" → [\"memory\"]".to_string()
+    r#"Search the archive — everything that ever happened in this project, not just what is on your desk.
+
+Retrieval matches meaning and exact words and fuses them, so phrase `query` as a natural-language question that still carries the exact terms you expect in the answer (paths, symbols, config keys, error strings); a bare keyword stack finds less.
+- "where is the opencode source code path?"  (a location you once knew)
+- "why did we choose SQLite over postgres?"  (a decision and its reasons)
+- "how does the dreamer lease work?"  (a mechanism discussed or implemented earlier)
+- Not: "upload client retry backoff config"
+
+Results only contain what you CANNOT currently see — memories already in <project-memory> and the live tail are filtered out. A query that is just memory ids (`#7234`, `12, 34`) resolves them directly.
+
+Sources (omit for all):
+- memory — rules, constraints, conventions; "what's our convention for X"
+- message — the raw conversation behind compacted history; "did we discuss this"; hits carry ordinals for ctx_expand(start=N-10, end=N+5)
+- git_commit — commit history; "when did this change" (pair with message for regression hunts)
+- note — parked follow-ups with their recorded text; "did we leave a follow-up"
+Use from/to to restrict every source to an inclusive UTC date range."#.to_string()
 }
 
 fn ctx_expand_description() -> String {
-    "Recover compacted conversation ranges. The default view serves persisted historian chunk transcripts; verbose=true separately previews each cached raw message part, including tool-output sizes, so an ordinal can be recovered in full while that bounded snapshot is available.".to_string()
+    r#"Recover the original conversation behind your compacted history.
+
+Earlier turns are summarized in <session-history> under `## start-end · date · title` headings; each heading stands for the raw messages in that ordinal range. When the summary isn't enough — exact wording, a value, an error message, the reasoning behind a decision — expand the range: ctx_expand(start=120, end=245). Also works around a ctx_search message hit: start=N-10, end=N+5. Ranges after the last compartment are your live tail — already visible, not expandable.
+
+Returns the raw transcript as [N] U:/A: lines, capped at ~15K tokens; an oversized range returns the head and says where to continue.
+
+Finer recovery:
+- verbose=true lists each message separately with its ordinal and a per-part preview (tool calls with output sizes) so you can pick one.
+- message=N returns that one message in full — every text part and every tool call's complete input and output — from stored history. This is the way back to a tool output you released with ctx_reduce; if the message was deleted from history it says so."#.to_string()
 }
 
 fn ctx_note_description() -> String {
-    "Save or inspect durable session notes for future follow-ups. update changes one note (note_ids=[N]); dismiss retires 1–50 (note_ids). surface_condition is accepted and recorded, but condition evaluation arrives later on this leg.".to_string()
+    r#"Session notes: information you have now, attached to work you are deliberately not doing now.
+
+Write a note when losing the detail would cost real work to rebuild — an investigation's findings, a decision with its reasons, a backlog item with its evidence — or when the user asks for one. Not for the next few steps, a plan you are about to execute, or restart/fold insurance: the conversation and the history keep those. A fact that stays true regardless of pending work (a rule, an architecture fact, a constraint) is ctx_memory, not a note. When the detail already lives in a file (plan, design, report, prompt), the note carries the path and a one-line reason to come back, never a copy. First line is the title, under 80 characters; blank line; then the detail.
+
+Actions:
+- write: save a note (content). Add surface_condition to make it a smart note.
+- read: one row per note — `#id · age · title` — ready smart notes first, then newest; rows untouched 30+ days are marked stale. Pass note_ids to read full bodies; limit/offset page; filter selects other states.
+- update: change one note (note_ids=[N]). dismiss: retire 1–50 notes (note_ids=[...]).
+
+Smart notes: with surface_condition the note is parked and re-checked for you on the dreamer's schedule (nightly by default) against signals outside this conversation — repository files, git history and tags, GitHub state, web pages — and brought back as ready only when the condition holds. The condition must be a fact those sources can answer:
+✓ "When PR #42 in cortexkit/magic-context is merged"
+✓ "When the latest release tag is >= v0.22.0"
+✓ "When packages/plugin/src/foo.ts contains a function named bar"
+✗ "When the user mentions X" / "after we finish this refactor" — no external signal; write a regular note.
+Example: ctx_note(action="write", content="Re-run the perf benchmark once the boundary rework ships", surface_condition="When the latest release tag is >= v0.23.0")"#.to_string()
 }
 
 fn ctx_memory_schema() -> Value {
@@ -17500,16 +17547,16 @@ fn ctx_memory_schema() -> Value {
             "action": {
                 "type": "string",
                 "enum": ["write", "update", "archive", "merge", "get"],
-                "description": "Operation to perform."
+                "description": "write | update | archive | merge | get"
             },
             "category": {
                 "type": "string",
-                "description": "Memory category: one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, or NAMING. Required for write; optional on update to recategorize, and omission keeps the current category."
+                "description": "Kind of fact (required for write; on update/merge optional, omitted keeps the current category)."
             },
             "content": {
                 "type": "string",
                 "maxLength": 65536,
-                "description": "Standalone memory text. Required for write, update, and merge."
+                "description": "The memory text — one standalone fact (write, update, merge)."
             },
             "id": {
                 "type": "integer",
@@ -17520,7 +17567,7 @@ fn ctx_memory_schema() -> Value {
                 "type": "array",
                 "maxItems": 100,
                 "items": { "type": "integer", "minimum": 1 },
-                "description": "Memory ids. For update provide exactly one. For archive provide one or more. For merge, the first id is kept and updated, and the remaining ids are superseded. For get provide one to twenty ids."
+                "description": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get."
             },
             "target_id": {
                 "type": "integer",
@@ -17536,7 +17583,7 @@ fn ctx_memory_schema() -> Value {
             "reason": {
                 "type": "string",
                 "maxLength": 4096,
-                "description": "Optional short reason for archive."
+                "description": "Why it is being archived (optional)."
             },
             "memory_project": {
                 "type": "string",
@@ -17554,22 +17601,22 @@ fn ctx_search_schema() -> Value {
             "query": {
                 "type": "string",
                 "maxLength": 1024,
-                "description": "Search query. Matches against memory content, Primers, git commit messages, and raw user/assistant message text."
+                "description": "A natural-language question carrying the exact terms you expect in the answer."
             },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 25,
                 "default": 8,
-                "description": "Maximum number of matches to return."
+                "description": "Maximum results (default 10)."
             },
             "from": {
                 "type": "string",
-                "description": "Earliest date, YYYY-MM-DD (inclusive)"
+                "description": "Earliest date, YYYY-MM-DD (inclusive)."
             },
             "to": {
                 "type": "string",
-                "description": "Latest date, YYYY-MM-DD (inclusive; default open)"
+                "description": "Latest date, YYYY-MM-DD (inclusive; default open)."
             },
         }
     })
@@ -17580,10 +17627,10 @@ fn ctx_expand_schema() -> Value {
         "type": "object",
         "additionalProperties": true,
         "properties": {
-            "start": { "type": "integer", "minimum": 0, "description": "First message ordinal to expand." },
-            "end": { "type": "integer", "minimum": 0, "description": "Last message ordinal to expand, inclusive." },
-            "verbose": { "type": "boolean", "description": "With start/end: list each message separately with its ordinal [N] and per-part preview, including each tool call's output size, so one message can be recovered by ordinal." },
-            "message": { "type": "integer", "minimum": 0, "description": "Recover one message by ordinal in full from the cached raw request when available, otherwise its persisted historian chunk transcript." },
+            "start": { "type": "integer", "minimum": 0, "description": "First ordinal of the range — a compartment's start, or an ordinal from a ctx_search hit." },
+            "end": { "type": "integer", "minimum": 0, "description": "Last ordinal of the range, inclusive — a compartment's end." },
+            "verbose": { "type": "boolean", "description": "With start/end: one entry per message with ordinal and per-part preview instead of the transcript." },
+            "message": { "type": "integer", "minimum": 0, "description": "Recover ONE message in full by ordinal (all text, all tool inputs and outputs). Use alone, without start/end." },
         }
     })
 }
@@ -17593,13 +17640,13 @@ fn ctx_note_schema() -> Value {
         "type": "object",
         "additionalProperties": true,
         "properties": {
-            "action": { "type": "string", "enum": ["write", "read", "update", "dismiss"], "description": "Operation to perform. Defaults to write when content is provided, otherwise read." },
-            "content": { "type": "string", "maxLength": 65536, "description": "Note text for write/update, or optional dismissal resolution when action is dismiss." },
-            "note_ids": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 }, "description": "Note ids: exactly one for 'update', one to fifty for 'dismiss'. Ignored by 'write' and 'read'." },
-            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25, "description": "Maximum active notes to return." },
-            "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest notes in each section." },
-            "filter": { "type": "string", "enum": ["all", "active", "pending", "ready", "dismissed"], "description": "Optional read filter. Defaults to active session notes plus ready smart notes." },
-            "surface_condition": { "type": "string", "maxLength": 4096, "description": "Optional externally checkable condition to record with the note. Evaluation arrives later." },
+            "action": { "type": "string", "enum": ["write", "read", "update", "dismiss"], "description": "write | read | update | dismiss. Defaults to write when content is given, else read." },
+            "content": { "type": "string", "maxLength": 65536, "description": "Note text for write/update: first line is the title (under 80 chars), then the detail." },
+            "note_ids": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 }, "description": "Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write." },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25, "description": "Rows per read (default 25)." },
+            "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest rows (default 0)." },
+            "filter": { "type": "string", "enum": ["all", "active", "pending", "ready", "dismissed"], "description": "Read filter: active (default: active + ready), all, pending (unsurfaced smart notes), ready, dismissed." },
+            "surface_condition": { "type": "string", "maxLength": 4096, "description": "Makes this a smart note: a condition an outside checker can verify on its own, periodically — repository state, releases, web pages, anything it can look up — never something only this conversation knows. The note is parked until the condition holds." },
             "memory_project": { "type": "string", "description": "Resolved MC project identity supplied by the host transport." },
         }
     })
@@ -27740,7 +27787,12 @@ mod tests {
             by_name["ctx_reduce"].schema,
             json!({
                 "type": "object",
-                "properties": { "drop": { "type": "string" } },
+                "properties": {
+                    "drop": {
+                        "type": "string",
+                        "description": "Tag IDs to drop: \"3-5\", \"1,2,9\", \"1-5,8,12-15\"."
+                    }
+                },
                 "required": ["drop"],
                 "additionalProperties": false
             }),

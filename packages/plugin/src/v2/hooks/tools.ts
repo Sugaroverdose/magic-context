@@ -8,7 +8,7 @@ import { setCtxReduceRegisteredGlobally } from "../../hooks/magic-context/ctx-re
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "../../plugin/embedding-bootstrap";
 import type { Database } from "../../shared/sqlite";
 import { createCtxExpandTools } from "../../tools/ctx-expand";
-import { createCtxMemoryTools } from "../../tools/ctx-memory";
+import { createCtxMemoryListTools, createCtxMemoryTools } from "../../tools/ctx-memory";
 import { createCtxNoteTools } from "../../tools/ctx-note";
 import { createCtxReduceTools } from "../../tools/ctx-reduce";
 import { createCtxSearchTools } from "../../tools/ctx-search";
@@ -43,7 +43,9 @@ export async function registerTools(
         ...createCtxExpandTools({ db }),
         ...createCtxNoteTools({ ...project, dreamerEnabled: isDreamerRunnable(config) }),
         ...createCtxSearchTools(project),
-        ...(config.memory.enabled ? createCtxMemoryTools(project) : {}),
+        ...(config.memory.enabled
+            ? { ...createCtxMemoryTools(project), ...createCtxMemoryListTools(project) }
+            : {}),
     };
     const controller = new AbortController();
     await context.tool.transform?.((editor) => {

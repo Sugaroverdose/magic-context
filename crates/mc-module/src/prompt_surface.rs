@@ -22,28 +22,88 @@ const GUIDANCE_LIGHT_NO_REDUCE: Option<&str> =
 const TOOL_LIGHT_DESCRIPTIONS: Option<&[(&str, &str)]> = Some(&[
     (
         "ctx_reduce",
-        "Queue a tagged reduction request for asynchronous delivery.",
+        r#"Stamp an item as no longer needed for the work ahead. Not a delete: stamping QUEUES it, the item stays readable until Magic Context clears stamped items in one sweep, newest tags are protected, and a cleared item goes to the archive (recent: a [dropped §N§] placeholder; older: removed) recoverable via ctx_expand(message=N). The question is "does this need to stay on my desk for what comes next?" — a file you keep editing stays, the grep that found it goes. Stamp used reads/searches/outputs, acted-on build/test output, redundant dumps, extracted pasted payloads; keep user messages, your own text, unresolved errors, raw evidence, exact wording that may matter. Look at each tag; never blanket-stamp "1-50". Grammar: "3-5", "1,2,9", "1-5,8,12-15"."#,
     ),
     (
         "ctx_memory",
-        "Maintain standalone durable project facts: write new knowledge, update changed facts, archive obsolete facts, and merge duplicates.",
+        r#"Durable facts about this project, shared with every agent on it and kept for the months this work lasts; active ones are already in <project-memory> as `#id: fact`. Write one standalone fact when it must not have to be found again — a rule, an architecture fact, a constraint, a config value, a naming convention — especially what cost you turns. A pending intention with evidence is ctx_note, not memory. write (content + category); update one id (content; category optional); archive one or more ids (reason optional); merge two or more ids (content); get 1–20 ids in any status."#,
     ),
     (
         "ctx_search",
-        "Before answering from memory, keyword-search saved memories, notes, and compacted summaries; this Claude Code leg is literal, not semantic.",
+        r#"Search the archive — everything that ever happened here that is not on your desk: memories not in <project-memory>, compacted conversation, commits, notes. Phrase query as a natural-language question carrying the exact terms you expect ("where is the opencode source code path?", "why did we choose SQLite over postgres?", "how does the dreamer lease work?") — a keyword stack finds less. Sources (omit for all): memory (rules, conventions), message (compacted conversation; hits carry ordinals for ctx_expand), git_commit (when did this change), note (parked follow-ups). Memory ids alone (`#7234`) resolve directly. from/to restrict every source to an inclusive UTC date range."#,
     ),
     (
         "ctx_expand",
-        "Recover the persisted historian U:/A:/TC: transcript for a compacted conversation range.",
+        "Recover raw conversation behind a <session-history> heading or around a ctx_search hit: ctx_expand(start, end) returns [N] U:/A: lines (~15K-token cap; oversized ranges return the head and where to continue). verbose=true lists messages with per-part previews to pick one; message=N returns that message in full, including a tool output released with ctx_reduce. Ranges after the last compartment are your live tail, not expandable.",
     ),
     (
         "ctx_note",
-        "Save or inspect future session follow-ups; surface_condition is recorded but not evaluated on this Claude Code leg.",
+        r#"Session notes: information you have now, attached to work you are deliberately not doing now (findings, a decision with its reasons, a backlog item with evidence; "take a note" from the user always qualifies). Not the next few steps, a plan you are executing, or restart/fold insurance; durable facts are ctx_memory; if the detail lives in a file, carry the path, not a copy. First line = title (<80 chars). write saves; read lists `#id · age · title` rows (note_ids for bodies); update changes one (note_ids=[N]); dismiss retires 1–50. surface_condition parks the note until the system confirms it against repo files, git, GitHub or the web (never this conversation), then returns it as ready."#,
     ),
 ]);
 
-const CTX_REDUCE_DESCRIPTION: &str =
-    "Acknowledge a tagged reduction request for asynchronous delivery";
+const CTX_REDUCE_DESCRIPTION: &str = r#"Stamp an item on your desk as no longer needed for the work ahead. Not a delete: stamping QUEUES it, the item stays fully readable until Magic Context clears stamped items in one sweep, and the newest tags are protected so stamping recent output is harmless. A cleared item goes to the archive — a recent one leaves a `[dropped §N§]` placeholder, an older one leaves nothing — and `ctx_expand(message=N)` is the way back. So the question before stamping is not "have I finished reading this?" but "does this need to stay on my desk for what comes next?" — a file you read and will keep editing stays; the grep that found it goes.
+
+Stamp: file reads, search results and tool outputs the work ahead no longer needs; build/test output after you acted on it; repeated or redundant dumps; data written to disk; status/log output that only confirmed what you expected; a large block pasted inside a user message once you have used it.
+Keep: user messages (never stamp one for its directive), your own conversation text, unresolved errors, raw evidence you haven't extracted yet, and outputs whose exact wording may still matter.
+
+Look at each tag before stamping it; never blanket-stamp a range like "1-50". Many small targeted stamps beat one sweep. `drop` accepts "3-5", "1,2,9", "1-5,8,12-15"."#;
+
+fn schema_with_preset_descriptions(
+    tool_id: &str,
+    mut schema: serde_json::Value,
+    preset: PromptSurfacePreset,
+) -> serde_json::Value {
+    if preset != PromptSurfacePreset::Light {
+        return schema;
+    }
+    let descriptions: &[(&str, &str)] = match tool_id {
+        "ctx_reduce" => &[("drop", "Tag IDs: \"3-5\", \"1,2,9\", \"1-5,8,12-15\".")],
+        "ctx_expand" => &[
+            ("start", "First ordinal — a compartment's start or a search hit."),
+            ("end", "Last ordinal, inclusive."),
+            ("verbose", "With start/end: one entry per message with previews instead of the transcript."),
+            ("message", "Recover ONE message in full by ordinal; use without start/end."),
+        ],
+        "ctx_note" => &[
+            ("action", "write | read | update | dismiss (default: write with content, else read)."),
+            ("content", "Note text: first line title (<80 chars), then detail."),
+            ("surface_condition", "A condition an outside checker can verify on its own, periodically (repository, releases, web — anything it can look up); never something only this conversation knows."),
+            ("filter", "Read filter: active (default), all, pending, ready, dismissed."),
+            ("limit", "Rows per read (default 25)."),
+            ("offset", "Skip newest rows (default 0)."),
+            ("note_ids", "One id for update, 1–50 for dismiss, any for read (full bodies). Ignored by write."),
+        ],
+        "ctx_memory" => &[
+            ("action", "write | update | archive | merge | get"),
+            ("content", "One standalone fact (write, update, merge)."),
+            ("category", "Kind of fact (required for write; optional on update/merge)."),
+            ("ids", "Ids from <project-memory>: one for update, 1+ for archive, 2+ for merge, 1–20 for get."),
+            ("reason", "Why it is archived (optional)."),
+        ],
+        "ctx_search" => &[
+            ("query", "A natural-language question carrying the exact terms you expect in the answer."),
+            ("limit", "Maximum results (default 10)."),
+            ("from", "Earliest date, YYYY-MM-DD (inclusive)."),
+            ("to", "Latest date, YYYY-MM-DD (inclusive; default open)."),
+        ],
+        _ => &[],
+    };
+    if let Some(properties) = schema
+        .get_mut("properties")
+        .and_then(|value| value.as_object_mut())
+    {
+        for (name, description) in descriptions {
+            if let Some(property) = properties
+                .get_mut(*name)
+                .and_then(|value| value.as_object_mut())
+            {
+                property.insert("description".to_string(), json!(description));
+            }
+        }
+    }
+    schema
+}
 
 pub const PROMPT_SURFACE_TOOL_IDS: [&str; 5] = [
     "ctx_reduce",
@@ -179,38 +239,61 @@ pub fn module_tools(selection: &PromptSurfaceSelection) -> Vec<Tool> {
             execution_mode: ExecutionMode::Pure,
             // This exact advertised shape is the Thalamus authorization contract. Prompt-surface
             // selection may replace only the top-level description.
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "drop": { "type": "string" }
-                },
-                "required": ["drop"],
-                "additionalProperties": false
-            }),
+            schema: schema_with_preset_descriptions(
+                "ctx_reduce",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "drop": {
+                            "type": "string",
+                            "description": "Tag IDs to drop: \"3-5\", \"1,2,9\", \"1-5,8,12-15\"."
+                        }
+                    },
+                    "required": ["drop"],
+                    "additionalProperties": false
+                }),
+                selection.preset,
+            ),
         },
         Tool {
             name: "ctx_memory".to_string(),
             description: Some(description("ctx_memory", ctx_memory_description())),
             execution_mode: ExecutionMode::Mutating,
-            schema: ctx_memory_schema(),
+            schema: schema_with_preset_descriptions(
+                "ctx_memory",
+                ctx_memory_schema(),
+                selection.preset,
+            ),
         },
         Tool {
             name: "ctx_expand".to_string(),
             description: Some(description("ctx_expand", ctx_expand_description())),
             execution_mode: ExecutionMode::Pure,
-            schema: ctx_expand_schema(),
+            schema: schema_with_preset_descriptions(
+                "ctx_expand",
+                ctx_expand_schema(),
+                selection.preset,
+            ),
         },
         Tool {
             name: "ctx_search".to_string(),
             description: Some(description("ctx_search", ctx_search_description())),
             execution_mode: ExecutionMode::Pure,
-            schema: ctx_search_schema(),
+            schema: schema_with_preset_descriptions(
+                "ctx_search",
+                ctx_search_schema(),
+                selection.preset,
+            ),
         },
         Tool {
             name: "ctx_note".to_string(),
             description: Some(description("ctx_note", ctx_note_description())),
             execution_mode: ExecutionMode::Mutating,
-            schema: ctx_note_schema(),
+            schema: schema_with_preset_descriptions(
+                "ctx_note",
+                ctx_note_schema(),
+                selection.preset,
+            ),
         },
     ]
 }
@@ -310,6 +393,24 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 mod tests {
     use super::*;
 
+    fn without_descriptions(mut value: serde_json::Value) -> serde_json::Value {
+        match &mut value {
+            serde_json::Value::Object(fields) => {
+                fields.remove("description");
+                for child in fields.values_mut() {
+                    *child = without_descriptions(child.take());
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    *child = without_descriptions(child.take());
+                }
+            }
+            _ => {}
+        }
+        value
+    }
+
     #[test]
     fn light_slots_serve_authored_guidance_and_descriptions() {
         for variant in [GuidanceVariant::Full, GuidanceVariant::NoReduce] {
@@ -334,7 +435,15 @@ mod tests {
         assert_eq!(light_tools.len(), full_tools.len());
         for (light, full) in light_tools.iter().zip(full_tools) {
             assert_eq!(light.name, full.name);
-            assert_eq!(light.schema, full.schema);
+            if light.name == "ctx_search" {
+                assert_eq!(light.schema, full.schema);
+            } else {
+                assert_ne!(light.schema, full.schema);
+            }
+            assert_eq!(
+                without_descriptions(light.schema.clone()),
+                without_descriptions(full.schema.clone())
+            );
             assert_eq!(light.execution_mode, full.execution_mode);
             assert_ne!(light.description, full.description);
         }
@@ -357,7 +466,10 @@ mod tests {
         assert_eq!(tools.len(), legacy.len());
         for (actual, expected) in tools.iter().zip(legacy) {
             assert_eq!(actual.name, expected.name);
-            assert_eq!(actual.schema, expected.schema);
+            assert_eq!(
+                without_descriptions(actual.schema.clone()),
+                without_descriptions(expected.schema.clone())
+            );
             assert_eq!(actual.execution_mode, expected.execution_mode);
         }
         assert_eq!(

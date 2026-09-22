@@ -233,36 +233,39 @@ const ctxNoteArgsShape = {
         .enum(["write", "read", "dismiss", "update"])
         .optional()
         .describe(
-            "Operation to perform. Defaults to 'write' when content is provided, otherwise 'read'.",
+            "write | read | update | dismiss. Defaults to write when content is given, else read.",
         ),
-    content: tool.schema.string().optional().describe("Note text to store when action is 'write'."),
+    content: tool.schema
+        .string()
+        .optional()
+        .describe("Note text for write/update: first line is the title (under 80 chars), then the detail."),
     surface_condition: tool.schema
         .string()
         .optional()
         .describe(
-            "Externally verifiable condition for smart notes. A separate background agent (dreamer) checks this using gh CLI, web fetches, file reads, git, etc. — NOT your conversation history. Use only for things like GitHub PR/issue state, release tags, file contents, or workflow runs. DO NOT use for 'when the user mentions X' / 'when we revisit Y' / 'when relevant to current task' — dreamer has no access to session context. For session-relative reminders, omit this and write a regular note.",
+            "Makes this a smart note: a condition an outside checker can verify on its own, periodically — repository state, releases, web pages, anything it can look up — never something only this conversation knows. The note is parked until the condition holds.",
         ),
     filter: tool.schema
         .enum(["all", "active", "pending", "ready", "dismissed"])
         .optional()
         .describe(
-            "Optional read filter. Defaults to active session notes + ready smart notes. Use 'all' to inspect every status or 'pending' to inspect unsurfaced smart notes.",
+            "Read filter: active (default: active + ready), all, pending (unsurfaced smart notes), ready, dismissed.",
         ),
     limit: tool.schema
         .number()
         .optional()
-        .describe("Max notes per section for read, newest first (default: 25)"),
+        .describe("Rows per read (default 25)."),
     offset: tool.schema
         .number()
         .optional()
-        .describe("Skip this many newest notes for read — page older ones (default: 0)"),
+        .describe("Skip this many newest rows (default 0)."),
     note_ids: tool.schema
         .array(tool.schema.number().int().min(1))
         .min(1)
         .max(50)
         .optional()
         .describe(
-            "Note ids: exactly one for 'update', one to fifty for 'dismiss'. Ignored by 'write' and 'read'.",
+            "Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write.",
         ),
 };
 // The tool definition exposes only the documented argument shape to the model

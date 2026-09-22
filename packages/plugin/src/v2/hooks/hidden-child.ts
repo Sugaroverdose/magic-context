@@ -3,17 +3,19 @@ import {
     type HiddenRunIdentity,
 } from "../../hooks/magic-context/compartment-runner-types";
 import { stripWellFormedLeadingTagPrefix } from "../../hooks/magic-context/tag-content-primitives";
+import { DREAMER_AGENT } from "../../agents/dreamer";
 import type { PromptArgs } from "../../shared/model-suggestion-retry";
 import type { SessionContext, V2AgentDomain } from "./types";
 
 export const HIDDEN_HISTORIAN_AGENT = "historian";
 export const HIDDEN_DREAMER_AGENT = "dreamer-classifier";
+export const HIDDEN_CURATE_AGENT = DREAMER_AGENT;
 
 export async function registerHiddenChildAgents(
     agent: Pick<V2AgentDomain, "transform">,
 ): Promise<void> {
     await agent.transform((editor) => {
-        for (const id of [HIDDEN_HISTORIAN_AGENT, HIDDEN_DREAMER_AGENT]) {
+        for (const id of [HIDDEN_HISTORIAN_AGENT, HIDDEN_DREAMER_AGENT, HIDDEN_CURATE_AGENT]) {
             editor.update(id, (config) => {
                 config.system = "Magic Context hidden completion carrier.";
                 config.description = "Internal Magic Context hidden completion carrier.";
@@ -22,7 +24,19 @@ export async function registerHiddenChildAgents(
                 config.request.settings = {};
                 config.request.headers = {};
                 config.request.body = {};
-                config.permissions = [{ action: "*", resource: "*", effect: "deny" }];
+                config.permissions = [
+                    { action: "*", resource: "*", effect: "deny" },
+                    ...(id === HIDDEN_CURATE_AGENT
+                        ? [
+                              { action: "tool", resource: "ctx_memory", effect: "allow" as const },
+                              {
+                                  action: "tool",
+                                  resource: "ctx_memory_list",
+                                  effect: "allow" as const,
+                              },
+                          ]
+                        : []),
+                ];
             });
         }
     });
@@ -164,7 +178,15 @@ export class HiddenChildHook {
         // Replaced wholesale, never merged: the carrier sends exactly the
         // authored options and never inherits the host's own generation defaults.
         draft.options = authoredOptions(attempt);
-        draft.tools = {};
+        const dreamerTools =
+            attempt.identity.agent === DREAMER_AGENT
+                ? Object.fromEntries(
+                      ["ctx_memory", "ctx_memory_list"].flatMap((id) =>
+                          draft.tools[id] ? [[id, draft.tools[id]]] : [],
+                      ),
+                  )
+                : {};
+        draft.tools = dreamerTools;
         attempt.shaped = true;
         return true;
     }

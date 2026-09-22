@@ -66,19 +66,19 @@ const ParamsSchema = Type.Object(
 				],
 				{
 					description:
-						"Operation to perform. Defaults to 'write' when content is provided, otherwise 'read'.",
+						"write | read | update | dismiss. Defaults to write when content is given, else read.",
 				},
 			),
 		),
 		content: Type.Optional(
 			Type.String({
-				description: "Note text to store when action is 'write'.",
+				description: "Note text for write/update: first line is the title (under 80 chars), then the detail.",
 			}),
 		),
 		surface_condition: Type.Optional(
 			Type.String({
 				description:
-					"Externally verifiable condition for smart notes. A background checker verifies it using ONLY outside signals (GitHub state via gh, files on disk, git history, web) — it cannot see this conversation. Use for PR/issue state, release tags, file contents, workflow runs. NOT for 'when the user mentions X' / 'when we revisit Y' — write a regular note instead.",
+					"Makes this a smart note: a condition an outside checker can verify on its own, periodically — repository state, releases, web pages, anything it can look up — never something only this conversation knows. The note is parked until the condition holds.",
 			}),
 		),
 		note_ids: Type.Optional(
@@ -88,7 +88,7 @@ const ParamsSchema = Type.Object(
 					minItems: 1,
 					maxItems: 50,
 					description:
-						"Note ids: exactly one for 'update', one to fifty for 'dismiss'. Ignored by 'write' and 'read'.",
+						"Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write.",
 				},
 			),
 		),
@@ -97,20 +97,20 @@ const ParamsSchema = Type.Object(
 				FILTER_VALUES.map((value) => Type.Literal(value)),
 				{
 					description:
-						"Optional read filter. Defaults to active session notes + ready smart notes. Use 'all' to inspect every status or 'pending' to inspect unsurfaced smart notes.",
+						"Read filter: active (default: active + ready), all, pending (unsurfaced smart notes), ready, dismissed.",
 				},
 			),
 		),
 		limit: Type.Optional(
 			Type.Number({
 				description:
-					"Max notes per section for read, newest first (default: 25)",
+					"Rows per read (default 25).",
 			}),
 		),
 		offset: Type.Optional(
 			Type.Number({
 				description:
-					"Skip this many newest notes for read — page older ones (default: 0)",
+					"Skip this many newest rows (default 0).",
 			}),
 		),
 	},

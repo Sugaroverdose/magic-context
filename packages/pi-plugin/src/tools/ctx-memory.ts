@@ -10,16 +10,16 @@
  *    - update: rewrite a memory's content (recomputes normalized_hash + queues re-embed)
  *    - merge: combine N memories into one canonical, supersede the rest
  *
- *  Dreamer-only (gated on `allowDreamerActions: true`):
- *    - list: list active memories for the current project
+ *  Dreamer-only:
+ *    - ctx_memory_list: list active memories for the current project through a separate tool
  *  (memory verification + classification are no longer tool actions — the verify
  *   and classify dreamer tasks apply them host-side from a manifest.)
  *
  * Allowlist gating mirrors OpenCode's `allowedActions` deps field. In OpenCode,
  * the dreamer subagent gets the full action surface because `toolContext.agent
- * === DREAMER_AGENT`. Pi has no agent identity inside child processes, so we
- * use an explicit flag (`--magic-context-dreamer-actions`) wired through the
- * subagent extension entry. Same effective behavior, different transport.
+ * === DREAMER_AGENT`. Pi has no agent identity inside child processes, so the
+ * lean subagent extension registers ctx_memory_list only when the parent passes
+ * `--magic-context-dreamer-actions`. Same effective behavior, different transport.
  *
  * Parity reference (OpenCode):
  *   - `tools/ctx-memory/types.ts` for action enum
@@ -83,31 +83,34 @@ import {
 	storedPathBelongsToWorkspace,
 } from "@magic-context/core/features/magic-context/workspaces";
 import { log } from "@magic-context/core/shared/logger";
-import { CTX_MEMORY_DESCRIPTION } from "@magic-context/core/tools/ctx-memory/constants";
+import {
+	CTX_MEMORY_DESCRIPTION,
+	CTX_MEMORY_LIST_DESCRIPTION,
+} from "@magic-context/core/tools/ctx-memory/constants";
 import { runImmediateTransaction } from "@magic-context/core/tools/ctx-memory/verification-recording";
 import { unwrapImitatedReducedArgs } from "@magic-context/core/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
 
 const DEFAULT_LIST_LIMIT = 10;
 
-// Mirrors OpenCode CTX_MEMORY_DREAMER_ACTIONS. `delete` was removed — it was an
-// exact alias of `archive` (both soft-archive); `archive` is the single
-// soft-remove action. Primary agents get write/archive/update/merge/get on the
-// memories they already see (with ids) in the injected project-memory block;
-// `list` (bulk enumeration) stays dreamer-only. `get` is the id-shaped read
+// Mirrors OpenCode's internal action vocabulary. `delete` was removed — it was
+// an exact alias of `archive` (both soft-archive); `archive` is the single
+// soft-remove action. ctx_memory advertises write/update/archive/merge/get on the
+// memories agents already see; `list` remains internal so ctx_memory_list can
+// reuse the handler without advertising bulk enumeration on ctx_memory. `get` is the id-shaped read
 // that the user-facing <project-memory> ids imply but no other primary action
 // covered — the agent is given a memory id (dashboard, guidance) and there is
 // no other way to look it up. Memory verification (file mapping) and
 // classification are no longer tool actions — the verify and classify dreamer
 // tasks apply them host-side from a manifest.
-const ALL_ACTIONS = [
+const PRIMARY_ACTIONS = [
 	"write",
-	"archive",
 	"update",
+	"archive",
 	"merge",
 	"get",
-	"list",
 ] as const;
+const ALL_ACTIONS = [...PRIMARY_ACTIONS, "list"] as const;
 type CtxMemoryAction = (typeof ALL_ACTIONS)[number];
 
 const DREAMER_ONLY_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set(["list"]);
@@ -117,16 +120,16 @@ const GET_MAX_IDS = 20;
 const ParamsShape = {
 	action: Type.Optional(
 		Type.Union(
-			ALL_ACTIONS.map((a) => Type.Literal(a)),
+			PRIMARY_ACTIONS.map((a) => Type.Literal(a)),
 			{
-				description: "What to do: write, update, archive, merge, get, or list",
+				description: "write | update | archive | merge | get",
 			},
 		),
 	),
 	content: Type.Optional(
 		Type.String({
 			description:
-				"The memory text — one standalone fact (required for write, update, merge)",
+				"The memory text — one standalone fact (write, update, merge).",
 		}),
 	),
 	category: Type.Optional(
@@ -134,27 +137,46 @@ const ParamsShape = {
 			V2_MEMORY_CATEGORIES.map((c) => Type.Literal(c)),
 			{
 				description:
-					"What kind of fact this is (required for write; optional merge override)",
+					"Kind of fact (required for write; on update/merge optional, omitted keeps the current category).",
 			},
 		),
 	),
 	ids: Type.Optional(
 		Type.Array(Type.Number(), {
 			description:
-				"Target memory id(s) from <project-memory>: update takes exactly one, archive one or more, merge two or more, get one to twenty",
+				"Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
 		}),
 	),
 	limit: Type.Optional(
 		Type.Number({
-			description: "Max results for list (default: 10)",
+			description: "Max results for list (default 10).",
 		}),
 	),
 	reason: Type.Optional(
 		Type.String({
-			description: "Why the memory is being archived (optional, recommended)",
+			description: "Why it is being archived (optional).",
 		}),
 	),
 };
+const ListParamsSchema = Type.Object(
+	{
+		category: Type.Optional(
+			Type.Union(
+				V2_MEMORY_CATEGORIES.map((category) => Type.Literal(category)),
+				{
+					description:
+						"Kind of fact (required for write; on update/merge optional, omitted keeps the current category).",
+				},
+			),
+		),
+		limit: Type.Optional(
+			Type.Number({ description: "Max results for list (default 10)." }),
+		),
+	},
+	{ additionalProperties: true },
+);
+type CtxMemoryListParams = Static<typeof ListParamsSchema>;
+
 const PrimaryParamsSchema = Type.Object(ParamsShape, {
 	additionalProperties: true,
 });
@@ -362,9 +384,8 @@ export interface CtxMemoryToolDeps {
 	embeddingEnabled?: boolean;
 	/** Resolve a directory's project identity, allowing home only when user-level configuration enables it. */
 	resolveProjectIdentity?: (directory: string) => string | undefined;
-	/** When true, the dreamer-only `list` action is exposed. Set by the subagent
-	 *  extension entry when the parent passes `--magic-context-dreamer-actions`.
-	 *  Default: false (primary set only: write/archive/update/merge). */
+	/** When true, Curate-only execution fields and guards are enabled. The separate
+	 *  ctx_memory_list registration uses this mode to reuse the list handler. */
 	allowDreamerActions?: boolean;
 }
 
@@ -374,14 +395,10 @@ export function createCtxMemoryTool(
 	const dreamerAllowed = deps.allowDreamerActions === true;
 	const resolveProject =
 		deps.resolveProjectIdentity ?? resolveProjectIdentityForSession;
-	const description = dreamerAllowed
-		? `${CTX_MEMORY_DESCRIPTION}\n- list: enumerate stored memories (maintenance sessions).`
-		: CTX_MEMORY_DESCRIPTION;
-
 	return {
 		name: "ctx_memory",
 		label: "Magic Context: Memory",
-		description,
+		description: CTX_MEMORY_DESCRIPTION,
 		parameters: dreamerAllowed ? DreamerParamsSchema : PrimaryParamsSchema,
 		async execute(
 			_toolCallId,
@@ -1015,6 +1032,27 @@ export function createCtxMemoryTool(
 			}
 
 			return err("Error: Unknown action.");
+		},
+	};
+}
+
+export function createCtxMemoryListTool(
+	deps: CtxMemoryToolDeps,
+): ToolDefinition<typeof ListParamsSchema> {
+	const memoryTool = createCtxMemoryTool({ ...deps, allowDreamerActions: true });
+	return {
+		name: "ctx_memory_list",
+		label: "Magic Context: Memory List",
+		description: CTX_MEMORY_LIST_DESCRIPTION,
+		parameters: ListParamsSchema,
+		async execute(toolCallId, params: CtxMemoryListParams, signal, onUpdate, ctx) {
+			return memoryTool.execute(
+				toolCallId,
+				{ ...params, action: "list" } as never,
+				signal,
+				onUpdate,
+				ctx,
+			);
 		},
 	};
 }

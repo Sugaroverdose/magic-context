@@ -19,25 +19,25 @@ const ctxExpandArgsShape = {
         .number()
         .optional()
         .describe(
-            'First message ordinal to expand — a compartment\'s start="N" attribute, or an ordinal from a ctx_search message hit',
+            "First ordinal of the range — a compartment's start, or an ordinal from a ctx_search hit.",
         ),
     end: tool.schema
         .number()
         .optional()
         .describe(
-            'Last message ordinal to expand (inclusive) — a compartment\'s end="M" attribute',
+            "Last ordinal of the range, inclusive — a compartment's end.",
         ),
     verbose: tool.schema
         .boolean()
         .optional()
         .describe(
-            "With start/end: list each message separately with its ordinal [N] and per-part preview (each tool call shown with its output size), so you can pick one to recover in full by ordinal.",
+            "With start/end: one entry per message with ordinal and per-part preview instead of the transcript.",
         ),
     message: tool.schema
         .number()
         .optional()
         .describe(
-            "Full untruncated recovery of ONE message by its ordinal (every text part + every tool call's complete input/output). Use an ordinal from a compartment, ctx_search hit, or verbose range. Recovers a tool output you dropped with ctx_reduce.",
+            "Recover ONE message in full by ordinal (all text, all tool inputs and outputs). Use alone, without start/end.",
         ),
 };
 // The tool definition exposes only the documented argument shape to the model
