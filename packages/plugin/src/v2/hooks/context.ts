@@ -17,6 +17,7 @@ import {
     recordOverflowDetected,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import { rebaseSessionCoordinates } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
 import {
     getCurrentToolSetHash,
@@ -623,6 +624,26 @@ export async function registerContext(context: V2Context) {
                 return;
             }
             if (!db) return;
+            // OpenCode 2 exposes system and message transformation through one
+            // context hook, with the system handler running first below. Rebase
+            // before it so a converted session initializes the new host's prompt
+            // hash instead of comparing against the previous host and arming a
+            // redundant follow-up fold. The shared transform sees the new stamp
+            // later in this pass and treats its own rebase call as a no-op.
+            try {
+                rebaseSessionCoordinates({
+                    db,
+                    sessionId: draft.sessionID,
+                    generation: "v2",
+                    readMessages: pagedRead,
+                });
+            } catch (error) {
+                sessionLog(
+                    draft.sessionID,
+                    "store projection rebase failed before system prompt (retrying in transform):",
+                    error,
+                );
+            }
             systemPrompt ??= createSystemPromptHashHandler({
                 db,
                 dreamerEnabled: config.dreamer !== undefined && !config.dreamer.disable,

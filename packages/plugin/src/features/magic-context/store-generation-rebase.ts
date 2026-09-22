@@ -712,9 +712,15 @@ export function rebaseSessionCoordinates(
             );
         }
 
-        // The cached prefix bytes embed the ranges this pass just corrected, so
-        // the next pass must rebuild them rather than replay the old render.
+        // The cached prefix bytes contain the ranges corrected by this pass, so
+        // the next pass must regenerate those bytes instead of replaying the old
+        // render. Clear the previous host's system-prompt hash at the same time so
+        // the new host can establish its baseline without scheduling another HARD
+        // fold after this initial rebuild.
         clearCachedM0M1(db, sessionId);
+        db.prepare("UPDATE session_meta SET system_prompt_hash = '' WHERE session_id = ?").run(
+            sessionId,
+        );
         stampGeneration(db, sessionId, generation, {
             generation,
             previousGeneration: impliedGeneration,

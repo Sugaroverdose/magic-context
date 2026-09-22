@@ -1,5 +1,6 @@
 import { beforeEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+
 import {
     getCompartments,
     getLastCompartmentEndMessage,
@@ -9,6 +10,7 @@ import {
     getLastIndexedOrdinal,
 } from "../features/magic-context/message-index";
 import { runMigrations } from "../features/magic-context/migrations";
+import { getOrCreateSessionMeta } from "../features/magic-context/storage";
 import { initializeDatabase } from "../features/magic-context/storage-db";
 import {
     type CoordinateGeneration,
@@ -20,8 +22,14 @@ import {
 } from "../features/magic-context/store-generation-rebase";
 import { v2NonNarrativeStoredGapRanges } from "../hooks/magic-context/compartment-runner-incremental";
 import { validateStoredCompartments } from "../hooks/magic-context/compartment-runner-validation";
+import {
+    clearCtxReduceAvailability,
+    resolveCtxReduceAvailabilityFromMessages,
+} from "../hooks/magic-context/ctx-reduce-availability";
+import { clearInjectionCache, injectM0M1 } from "../hooks/magic-context/inject-compartments";
 import { withRawMessageProvider } from "../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../hooks/magic-context/read-session-raw";
+import { createSystemPromptHashHandler } from "../hooks/magic-context/system-prompt-hash";
 import { Database } from "../shared/sqlite";
 import { rawMessages } from "./hooks/store";
 import type { StoreRow } from "./store-reader";
@@ -175,6 +183,8 @@ function v2Projection(rows: StoreRow[]): RawMessage[] {
 let db: Database;
 
 beforeEach(() => {
+    clearCtxReduceAvailability("ses_a");
+    clearInjectionCache("ses_a");
     db = new Database(":memory:");
     initializeDatabase(db);
     runMigrations(db);
@@ -909,6 +919,102 @@ test("an unstamped session whose harness wrote the other projection is rebased f
     expect(readCoordinateGeneration(db, "ses_converted_first")).toBe("v2");
     expect(formatRebaseLogLine(outcome, 1)).toContain("store-generation-rebase v1->v2");
 });
+
+for (const lane of [
+    { generation: "v2" as const, source: "v1" as const, systemPromptRunsFirst: true },
+    { generation: "v1" as const, source: "v2" as const, systemPromptRunsFirst: false },
+]) {
+    test(`${lane.source}->${lane.generation} rebase records the new host system hash without a second HARD`, async () => {
+        const sessionId = "ses_a";
+        ensureSession(sessionId);
+        insertCompartment(sessionId, {
+            sequence: 1,
+            start: 1,
+            end: lane.source === "v1" ? 4 : 5,
+            startMessageId: "msg_a_001_u1",
+            endMessageId: "msg_a_004_a2",
+        });
+        resolveCtxReduceAvailabilityFromMessages(sessionId, [
+            { info: { role: "user", tools: { "*": true } } },
+        ]);
+        const historyRefreshSessions = new Set<string>();
+        const systemPromptRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
+        const promptHash = createSystemPromptHashHandler({
+            db,
+            dreamerEnabled: false,
+            historyRefreshSessions,
+            systemPromptRefreshSessions,
+            pendingMaterializationSessions,
+            lastHeuristicsTurnId: new Map(),
+        });
+        const model = { providerID: "provider", modelID: "model" };
+        const previousSystem = ["Host one prompt. Today's date: 2026-09-21"];
+        await promptHash.handler({ sessionID: sessionId, model }, { system: previousSystem });
+        const h1 = getOrCreateSessionMeta(db, sessionId).systemPromptHash;
+        expect(h1).not.toBe("");
+
+        db.prepare(
+            `UPDATE session_meta
+                SET coordinate_generation = ?, coordinate_rebase_notice = ?,
+                    cached_m0_bytes = X'6d30', cached_m1_bytes = X'6d31',
+                    cached_m0_system_hash = ?
+              WHERE session_id = ?`,
+        ).run(
+            lane.source,
+            JSON.stringify({ generation: lane.source, previousGeneration: lane.generation, at: 1 }),
+            h1,
+            sessionId,
+        );
+
+        const projection =
+            lane.generation === "v2" ? v2Projection(syntheticSplit) : v1Projection(sessionId);
+        expect(runRebase(sessionId, lane.generation, projection).status).toBe("rebased");
+
+        const hardReasons: string[] = [];
+        const foldPass = () => {
+            const state = getOrCreateSessionMeta(db, sessionId);
+            const result = injectM0M1({
+                db,
+                sessionId,
+                state,
+                historyBudgetTokens: 98_000,
+                isCacheBustingPass: pendingMaterializationSessions.has(sessionId),
+                hardSignals: {
+                    systemHash: state.systemPromptHash,
+                    modelKey: `${model.providerID}/${model.modelID}`,
+                    cacheExpired: false,
+                    lastResponseTime: 0,
+                },
+            });
+            if (result.m0RematerializedThisPass && result.decision.reason) {
+                hardReasons.push(result.decision.reason);
+            }
+            return result.decision.reason ?? "cache_hit";
+        };
+        const runNewHostSystemPrompt = async () => {
+            const system = ["Host two prompt. Today's date: 2026-09-22"];
+            await promptHash.handler({ sessionID: sessionId, model }, { system });
+            expect(system.join("\n")).toContain("Today's date: 2026-09-22");
+            expect(system.join("\n")).not.toContain("Today's date: 2026-09-21");
+        };
+
+        if (lane.systemPromptRunsFirst) await runNewHostSystemPrompt();
+        expect(foldPass()).toBe("first_render");
+        if (!lane.systemPromptRunsFirst) await runNewHostSystemPrompt();
+        if (lane.systemPromptRunsFirst) await runNewHostSystemPrompt();
+        expect(foldPass()).toBe("cache_hit");
+        if (!lane.systemPromptRunsFirst) await runNewHostSystemPrompt();
+
+        const h2 = getOrCreateSessionMeta(db, sessionId).systemPromptHash;
+        expect(h2).not.toBe("");
+        expect(h2).not.toBe(h1);
+        expect(historyRefreshSessions.has(sessionId)).toBe(false);
+        expect(systemPromptRefreshSessions.has(sessionId)).toBe(false);
+        expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
+        expect(hardReasons).toEqual(["first_render"]);
+    });
+}
 
 test("a session whose coordinates already match the projection pays only the stamp", () => {
     ensureSession("ses_a");
