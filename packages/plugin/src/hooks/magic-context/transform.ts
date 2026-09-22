@@ -1458,6 +1458,18 @@ export function createTransform(deps: TransformDeps) {
               ? (contextUsageEarly.inputTokens / windowGeometry.usableHard) * 100
               : contextUsageEarly.percentage;
         const currentModelKeyForBoundary = deps.getModelKey?.(sessionId);
+        const providerProvenLimitForRecovery =
+            earlyStateSnapshot.overflow.needsEmergencyRecovery &&
+            earlyStateSnapshot.overflow.emergencyRecoveryOrigin === "provider_overflow" &&
+            typeof currentModelKeyForBoundary === "string" &&
+            currentModelKeyForBoundary.length > 0 &&
+            earlyStateSnapshot.overflow.detectedContextLimit > 0 &&
+            piModelRefToCanonical(
+                earlyStateSnapshot.overflow.detectedContextLimitModelKey ?? "",
+            ) === piModelRefToCanonical(currentModelKeyForBoundary)
+                ? earlyStateSnapshot.overflow.detectedContextLimit
+                : undefined;
+        const providerProvenInputForRecovery = persistedUsageBeforeResets?.usage.inputTokens;
         const thresholdContextLimit =
             resolvedContextLimit && resolvedContextLimit > 0
                 ? resolvedContextLimit
@@ -2388,12 +2400,20 @@ export function createTransform(deps: TransformDeps) {
                     usage: contextUsage,
                     pricedPass: true,
                     wireEstimateTokens: pressureEstimate.tokens,
+                    wireEstimateTrusted: pressureEstimate.trusted,
+                    providerProvenInputTokens: providerProvenInputForRecovery,
+                    providerProvenLimitTokens: providerProvenLimitForRecovery,
                     usableHardLimit: windowGeometry?.usableHard,
                 });
                 if (contextUsage.inputTokens > 0) {
+                    const usedProviderInput =
+                        !pressureEstimate.trusted &&
+                        providerProvenLimitForRecovery !== undefined &&
+                        providerProvenInputForRecovery !== undefined &&
+                        contextUsage.inputTokens >= providerProvenInputForRecovery;
                     sessionLog(
                         sessionId,
-                        `transform: unknown provider usage; using wire estimate for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} trusted=${pressureEstimate.trusted}`,
+                        `transform: unknown provider usage; using ${usedProviderInput ? "provider-proven input" : "wire estimate"} for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} trusted=${pressureEstimate.trusted} wireTokens=${pressureEstimate.tokens}`,
                     );
                 }
             } catch (error) {

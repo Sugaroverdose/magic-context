@@ -2098,6 +2098,7 @@ export function recordOverflowDetected(
     modelKey?: string | null,
     origin: EmergencyRecoveryOrigin = "provider_overflow",
     provenance: ContextLimitProvenance = "unknown",
+    reportedInputTokens?: number,
 ): void {
     // Arm before the durable write so an unreadable or failed write remains fail-closed.
     emergencyRecoveryArmedSessions.add(sessionId);
@@ -2108,8 +2109,12 @@ export function recordOverflowDetected(
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
         const prior = db
-            .prepare("SELECT needs_emergency_recovery FROM session_meta WHERE session_id = ?")
-            .get(sessionId) as { needs_emergency_recovery?: number } | undefined;
+            .prepare(
+                "SELECT needs_emergency_recovery, detected_context_limit FROM session_meta WHERE session_id = ?",
+            )
+            .get(sessionId) as
+            | { needs_emergency_recovery?: number; detected_context_limit?: number }
+            | undefined;
         if (
             origin === "provider_overflow" &&
             typeof prior?.needs_emergency_recovery === "number" &&
@@ -2131,6 +2136,22 @@ export function recordOverflowDetected(
             db.prepare(
                 "UPDATE session_meta SET needs_emergency_recovery = 1, emergency_recovery_origin = ?, observed_safe_input_tokens = 0, cache_alert_sent = 0 WHERE session_id = ?",
             ).run(origin, sessionId);
+        }
+        if (
+            origin === "provider_overflow" &&
+            typeof reportedInputTokens === "number" &&
+            Number.isFinite(reportedInputTokens) &&
+            reportedInputTokens > 0
+        ) {
+            const effectiveLimit =
+                typeof reportedLimit === "number" && reportedLimit > 0
+                    ? reportedLimit
+                    : (prior?.detected_context_limit ?? 0);
+            const percentage =
+                effectiveLimit > 0 ? (reportedInputTokens / effectiveLimit) * 100 : 100;
+            db.prepare(
+                "UPDATE session_meta SET last_input_tokens = ?, last_context_percentage = MAX(last_context_percentage, ?), last_response_time = ? WHERE session_id = ?",
+            ).run(reportedInputTokens, percentage, Date.now(), sessionId);
         }
     })();
 }

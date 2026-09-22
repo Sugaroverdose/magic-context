@@ -99,6 +99,7 @@ export function handlePiProviderFailure(args: {
 		modelKey,
 		"provider_overflow",
 		overflow.reportedLimitProvenance,
+		overflow.reportedInputTokens,
 	);
 	return {
 		kind: "overflow",

@@ -49,11 +49,27 @@ export function resolveUnknownUsageFromWireEstimate(input: {
     usage: ContextUsage;
     pricedPass: boolean;
     wireEstimateTokens: number | undefined;
+    wireEstimateTrusted?: boolean;
+    providerProvenInputTokens?: number;
+    providerProvenLimitTokens?: number;
     usableHardLimit: number | undefined;
 }): ContextUsage {
     if (input.usage.inputTokens > 0 || !input.pricedPass) return input.usage;
-    const tokens = input.wireEstimateTokens;
-    if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens <= 0) return input.usage;
+    const wireTokens = input.wireEstimateTokens;
+    if (typeof wireTokens !== "number" || !Number.isFinite(wireTokens) || wireTokens <= 0) {
+        return input.usage;
+    }
+    const providerTokens = input.providerProvenInputTokens;
+    const providerLimit = input.providerProvenLimitTokens;
+    const canUseProviderMass =
+        input.wireEstimateTrusted === false &&
+        typeof providerTokens === "number" &&
+        Number.isFinite(providerTokens) &&
+        providerTokens > 0 &&
+        typeof providerLimit === "number" &&
+        Number.isFinite(providerLimit) &&
+        providerLimit > 0;
+    const tokens = canUseProviderMass ? Math.max(wireTokens, providerTokens) : wireTokens;
     const limit = input.usableHardLimit;
     const estimatedPercentage =
         typeof limit === "number" && Number.isFinite(limit) && limit > 0

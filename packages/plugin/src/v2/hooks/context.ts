@@ -10,6 +10,7 @@ import { createScheduler } from "../../features/magic-context/scheduler";
 import {
     clearSession,
     getOrCreateSessionMeta,
+    getOverflowState,
     isDatabasePersisted,
     markSessionCleanupPending,
     openDatabase,
@@ -348,6 +349,7 @@ export async function registerContext(context: V2Context) {
     }
     const tools =
         db && isDatabasePersisted(db) ? await registerTools(context, db, config) : undefined;
+    const usage: TransformDeps["contextUsageMap"] = new Map();
     await context.session.hook("http.response", async (draft) => {
         if (!db || draft.kind !== "primary" || draft.response.ok) return;
         const detection = detectOverflow(await draft.response.clone().text());
@@ -370,7 +372,22 @@ export async function registerContext(context: V2Context) {
                 modelKey,
                 "provider_overflow",
                 detection.reportedLimitProvenance,
+                detection.reportedInputTokens,
             );
+            if (detection.reportedInputTokens) {
+                const provenLimit = getOverflowState(db, draft.sessionID, modelKey).detectedContextLimit;
+                usage.set(draft.sessionID, {
+                    usage: {
+                        inputTokens: detection.reportedInputTokens,
+                        percentage:
+                            provenLimit > 0
+                                ? (detection.reportedInputTokens / provenLimit) * 100
+                                : 100,
+                    },
+                    hasUsageTokens: true,
+                    updatedAt: Date.now(),
+                });
+            }
         }
     });
     const hiddenChildHook = new HiddenChildHook();
@@ -432,7 +449,6 @@ export async function registerContext(context: V2Context) {
               })
             : undefined;
     const historianModels = resolveHistorianModel(config, "opencode");
-    const usage: TransformDeps["contextUsageMap"] = new Map();
     const channel1: NonNullable<TransformDeps["channel1StateBySession"]> = new Map();
     const variants = new Map<string, string | undefined>();
     const agents = new Map<string, string>();

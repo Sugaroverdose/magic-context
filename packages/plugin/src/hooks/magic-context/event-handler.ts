@@ -419,6 +419,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     overflowModelKey,
                     "provider_overflow",
                     detection.reportedLimitProvenance,
+                    detection.reportedInputTokens,
                 );
                 sessionLog(
                     errInfo.sessionID,
@@ -573,6 +574,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                                 overflowModelKey,
                                 "provider_overflow",
                                 detection.reportedLimitProvenance,
+                                detection.reportedInputTokens,
                             );
                             sessionLog(
                                 info.sessionID,

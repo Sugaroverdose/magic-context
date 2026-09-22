@@ -119,6 +119,8 @@ const THINKING_BINDING_MISMATCH_PATTERN = /bound to a different conversation/i;
 export interface OverflowDetection {
     /** True if the error message matches a known overflow pattern. */
     isOverflow: boolean;
+    /** Provider-reported token count for the rejected input, when present. */
+    reportedInputTokens?: number;
     /** Reported context limit in tokens, if extractable from the message. */
     reportedLimit?: number;
     /** Whether the number is a prompt-only ceiling or a combined context window. */
@@ -263,9 +265,11 @@ export function detectOverflow(error: unknown): OverflowDetection {
     }
 
     const reportedLimit = parseReportedLimit(message);
+    const reportedInputTokens = parseReportedInputTokens(message);
 
     return {
         isOverflow: true,
+        reportedInputTokens,
         reportedLimit: reportedLimit?.value,
         reportedLimitProvenance: reportedLimit?.provenance,
         matchedPattern: matched?.source,
@@ -277,6 +281,24 @@ export function detectOverflow(error: unknown): OverflowDetection {
  * of the known patterns matches. Returns undefined when no plausible number
  * can be extracted. Guards against false matches via plausibility clamp.
  */
+export function parseReportedInputTokens(message: string): number | undefined {
+    if (!message) return undefined;
+    const patterns = [
+        /prompt is too long:\s*(\d+)/i,
+        /input token count\s*(\d+)/i,
+        /input length\s*(\d+)/i,
+        /prompt was\s*(\d+)/i,
+        /messages resulted in\s*(\d+)\s*tokens?/i,
+    ];
+    for (const pattern of patterns) {
+        const raw = message.match(pattern)?.[1];
+        if (!raw) continue;
+        const value = Number.parseInt(raw, 10);
+        if (Number.isFinite(value) && value > 0) return value;
+    }
+    return undefined;
+}
+
 export function parseReportedLimit(message: string): ReportedContextLimit | undefined {
     if (!message) return undefined;
     for (const { pattern, provenance } of LIMIT_EXTRACTION_PATTERNS) {

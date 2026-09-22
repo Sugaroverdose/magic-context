@@ -198,6 +198,52 @@ describe("adaptPayload", () => {
         });
     });
 
+    describe("#given a converted OpenCode 1 tool part with state.content", () => {
+        it("#then the drop pipeline measures and rewrites the converted output", () => {
+            const context = draft([
+                {
+                    id: "msg-converted",
+                    role: "assistant",
+                    content: [
+                        {
+                            type: "tool",
+                            id: "call-converted",
+                            name: "read",
+                            state: {
+                                status: "completed",
+                                input: { path: "large.log" },
+                                content: [{ type: "text", text: "converted output".repeat(20_000) }],
+                            },
+                        },
+                    ],
+                },
+            ]);
+            const payload = adaptPayload(context);
+            const owner = payload.messages[0];
+            const projected = owner.parts[0] as { state: { output: string } };
+            expect(projected.state.output.length).toBeGreaterThan(100_000);
+            const target = createToolDropTarget(
+                "call-converted",
+                [],
+                indexMessage(owner),
+                new ToolMutationBatch(payload.messages),
+                11,
+            );
+
+            expect(target.truncate()).toBe("truncated");
+            payload.commit();
+
+            expect(context.messages[0]?.content[0]).toMatchObject({
+                type: "tool",
+                id: "call-converted",
+                state: {
+                    input: { dropped: "[dropped §11§]" },
+                    content: [{ type: "text", text: "[dropped §11§]" }],
+                },
+            });
+        });
+    });
+
     describe("#given no pipeline changes", () => {
         it("#then commit() round-trips the host messages", () => {
             const original = toolTurn("msg-1", "call-1", "shell", "output");

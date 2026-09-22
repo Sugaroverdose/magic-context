@@ -161,6 +161,40 @@ describe("planEmergencyDrop — floorTags/tags split", () => {
 });
 
 describe("planEmergencyDrop — target math", () => {
+    it("turns a converted 1.09M provider sample into a non-empty emergency batch", () => {
+        const toolTags = Array.from({ length: 3 }, (_, index) =>
+            tag(index + 1, "read", 1, {
+                servedTokens: 315_000,
+                reclaimableTokens: 315_000,
+            }),
+        );
+        const base = {
+            tags: toolTags,
+            floorTags: toolTags,
+            maxTag: 3,
+            protectedCutoff: null,
+            ceilingTokens: 681_574,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+            usagePercentage: 104,
+        };
+
+        const underestimated = planEmergencyDrop({
+            ...base,
+            currentTotalInputTokens: 56_180,
+        });
+        const providerSized = planEmergencyDrop({
+            ...base,
+            currentTotalInputTokens: 1_091_002,
+        });
+
+        expect(underestimated.tagNumbers).toHaveLength(0);
+        expect(underestimated.reason).toContain("reclaim<=min");
+        expect(providerSized.shouldDrop).toBe(true);
+        expect(providerSized.tagNumbers).toHaveLength(3);
+        expect(providerSized.reclaimTokens).toBeGreaterThan(700_000);
+    });
+
     it("computes target = fixedFloor + 0.30 × (ceiling − fixedFloor)", () => {
         // 10 tags × 4000 bytes × 0.25 = 10000 tail tokens; usage 30000 →
         // fixedFloor = 30000 - 10000 = 20000. ceiling 160000 →
