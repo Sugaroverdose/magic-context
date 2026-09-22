@@ -251,6 +251,9 @@ export function isLocalEmbeddingRuntimeBroken(
     );
 }
 
+const HUGGING_FACE_DOWNLOAD_MIRROR_HINT =
+    " If a Hugging Face model download fails because huggingface.co is unreachable, set HF_ENDPOINT to a compatible mirror.";
+
 export function formatLocalEmbeddingRuntimeDoctorWarning(
     status: BrokenLocalEmbeddingRuntimeStatus,
 ): string {
@@ -258,19 +261,24 @@ export function formatLocalEmbeddingRuntimeDoctorWarning(
         return (
             "Embedding provider: local — configured/selected onnxruntime-web (WASM) is unavailable — " +
             `${status.wasmReason}. Reinstall the plugin package or select embedding.local_runtime: native ` +
-            "only on a host where its native runtime is safe."
+            "only on a host where its native runtime is safe." +
+            HUGGING_FACE_DOWNLOAD_MIRROR_HINT
         );
     }
     if (status.state !== "both-broken") {
         const knownUnavailable = knownUnavailableNativeBinding(status);
         if (knownUnavailable) {
-            return `Embedding provider: local — ${intelMacNativeGuidance(knownUnavailable.packageVersion)} WASM fallback is unavailable, so embeddings will not work.`;
+            return (
+                `Embedding provider: local — ${intelMacNativeGuidance(knownUnavailable.packageVersion)} WASM fallback is unavailable, so embeddings will not work.` +
+                HUGGING_FACE_DOWNLOAD_MIRROR_HINT
+            );
         }
         return (
             "Embedding provider: local — onnxruntime-node native binding missing — " +
             `${describeNativeFailure(status)}; its postinstall likely failed. Embeddings will not work. ` +
             "Reinstall with network access to the npm registry and GitHub releases, " +
-            "or switch `embedding.provider` to an HTTP endpoint (`openai-compatible`)."
+            "or switch `embedding.provider` to an HTTP endpoint (`openai-compatible`)." +
+            HUGGING_FACE_DOWNLOAD_MIRROR_HINT
         );
     }
 
@@ -279,14 +287,16 @@ export function formatLocalEmbeddingRuntimeDoctorWarning(
         return (
             `Embedding provider: local — ${intelMacNativeGuidance(knownUnavailable.packageVersion)} ` +
             `The WASM fallback is also unavailable: ${status.wasmReason}. Reinstall may repair the WASM package only; ` +
-            "otherwise switch `embedding.provider` to an HTTP endpoint (`openai-compatible`)."
+            "otherwise switch `embedding.provider` to an HTTP endpoint (`openai-compatible`)." +
+            HUGGING_FACE_DOWNLOAD_MIRROR_HINT
         );
     }
     return (
         "Embedding provider: local — native runtime and WASM fallback both unavailable — " +
         `native: ${describeNativeFailure(status.nativeFailure)}; WASM: ${status.wasmReason}; ` +
         "their install or postinstall likely failed. Reinstall with network access to the npm registry and GitHub releases, " +
-        "or switch `embedding.provider` to an HTTP endpoint (`openai-compatible`)."
+        "or switch `embedding.provider` to an HTTP endpoint (`openai-compatible`)." +
+        HUGGING_FACE_DOWNLOAD_MIRROR_HINT
     );
 }
 

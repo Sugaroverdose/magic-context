@@ -248,6 +248,7 @@ function seedOversizedCompartmentWithFts(
 describe("project embedding registry", () => {
     const tempDirs: string[] = [];
     const originalXdgDataHome = process.env.XDG_DATA_HOME;
+    const originalHfEndpoint = process.env.HF_ENDPOINT;
 
     function useTempDb() {
         const dir = mkdtempSync(join(tmpdir(), "project-embedding-registry-"));
@@ -261,6 +262,8 @@ describe("project embedding registry", () => {
         closeDatabase();
         if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
         else process.env.XDG_DATA_HOME = originalXdgDataHome;
+        if (originalHfEndpoint === undefined) delete process.env.HF_ENDPOINT;
+        else process.env.HF_ENDPOINT = originalHfEndpoint;
         for (const dir of tempDirs) {
             try {
                 rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -443,7 +446,38 @@ describe("project embedding registry", () => {
         expect(withDocumentPrefix.chunkModelId).not.toBe(withFamilyDefault.chunkModelId);
     });
 
-    it("preserves existing provider and runtime identity goldens", () => {
+    it("keeps memory and chunk identities byte-identical across HF_ENDPOINT mirrors", () => {
+        const db = useTempDb();
+        const config = localConfig("Xenova/all-MiniLM-L6-v2");
+        const features = { memoryEnabled: true, gitCommitEnabled: true };
+
+        delete process.env.HF_ENDPOINT;
+        const defaultEndpoint = registerProjectEmbedding(
+            db,
+            "identity-default-endpoint",
+            config,
+            features,
+            "/repo",
+        );
+        process.env.HF_ENDPOINT = "https://mirror.example/";
+        const mirrorEndpoint = registerProjectEmbedding(
+            db,
+            "identity-mirror-endpoint",
+            config,
+            features,
+            "/repo",
+        );
+
+        expect({
+            memory: mirrorEndpoint.modelId,
+            chunk: mirrorEndpoint.chunkModelId,
+        }).toEqual({
+            memory: defaultEndpoint.modelId,
+            chunk: defaultEndpoint.chunkModelId,
+        });
+    });
+
+    it("pins provider and runtime identity goldens", () => {
         const db = useTempDb();
         const features = { memoryEnabled: true, gitCommitEnabled: true };
         const local = registerProjectEmbedding(
@@ -478,9 +512,9 @@ describe("project embedding registry", () => {
             providerIdentity: local.providerIdentity,
             runtimeFingerprint: local.runtimeFingerprint,
         }).toEqual({
-            providerIdentity: "embedding-provider:c447205ebd551e83d18c4fd5fd8fc357",
+            providerIdentity: "embedding-provider:ac1a4f8f0674f430a6c85a0e1a43a86a",
             runtimeFingerprint:
-                "embedding-provider:c447205ebd551e83d18c4fd5fd8fc357:4bc2bab437bc88bc",
+                "embedding-provider:ac1a4f8f0674f430a6c85a0e1a43a86a:4bc2bab437bc88bc",
         });
         expect({
             providerIdentity: openai.providerIdentity,
@@ -543,7 +577,7 @@ describe("project embedding registry", () => {
         ).resolves.toBeNull();
     });
 
-    it("default local config (no local_dtype) keeps the golden identity — no re-embed on upgrade (#259)", () => {
+    it("default local config keeps the current runtime golden without a dtype-only re-embed (#259)", () => {
         const db = useTempDb();
         const features = { memoryEnabled: true, gitCommitEnabled: true };
         const noDtype = registerProjectEmbedding(
@@ -553,10 +587,10 @@ describe("project embedding registry", () => {
             features,
             "/repo",
         );
-        // Must match the golden local identity from the test above — adding
-        // the local_dtype field must NOT change the default identity string.
+        // Must match the runtime-versioned golden above. Omitting local_dtype
+        // does not add another identity term because fp32 remains the default.
         expect(noDtype.providerIdentity).toBe(
-            "embedding-provider:c447205ebd551e83d18c4fd5fd8fc357",
+            "embedding-provider:ac1a4f8f0674f430a6c85a0e1a43a86a",
         );
     });
 

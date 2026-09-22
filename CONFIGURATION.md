@@ -236,7 +236,7 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `compaction.enabled` | `boolean` | `true` | When `false`, use compaction-off mode: keep Magic Context's knowledge layer and let native compaction (or nothing) own the context window. Boot-resolved; restart after changing it. See below. |
 | `commit_cluster_trigger` | `object` | See below | Controls the commit-cluster historian trigger. |
 | `system_prompt_injection` | `object` | See below | Controls whether and where Magic Context augments the system prompt; lets you opt specific agents out. |
-| `keep_subagents` | `boolean` | `false` | OpenCode 1 debug option: keep child sessions instead of deleting them on success. On OpenCode 2 the host does not expose removal to plugins, so reusable historian/Dreamer roots are always retained and this option has no effect on them; use `doctor list-hidden-sessions` and remove unwanted roots manually. |
+| `keep_subagents` | `boolean` | `false` | OpenCode 1 debug option: keep every settled Magic Context child session instead of deleting it after success: historian, all Dreamer tasks, smart-note evaluation and compilation, user-memory review, and memory migration. Kept Dreamer children can contain memory-pool text and user messages from other sessions of the same operator; their full transcript stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect. On OpenCode 2 the host does not expose removal to plugins, so reusable historian/Dreamer roots are always retained and this option has no effect on them; use `doctor list-hidden-sessions` and remove unwanted roots manually. |
 | `todowrite` | `object` | See below | **Pi only.** Controls Magic Context's built-in `todowrite` tool and persistent task overlay. OpenCode has its own built-in `todowrite`, so this setting has no effect there. |
 | `sqlite` | `object` | See below | Per-connection SQLite tuning for Magic Context's own `context.db`. |
 | `storage.enforce_private_permissions` | `boolean` | `true` | User-config-only. Keep owner-only `0700` directories and `0600` files. Set `false` only for an externally managed trusted-group deployment; Magic Context will never re-tighten storage permissions. |
@@ -638,6 +638,8 @@ Controls semantic search for cross-session memories.
 | `document_prefix` | `string` | model-family recipe | OpenAI-compatible stored-document prefix. Empty for Qwen3/gte/e5 instruct and `"search_document: "` for Nomic by default. User-level only. |
 
 Instruction-tuned embedding models are trained to distinguish retrieval queries from passages, so Magic Context automatically prepends the model card's query recipe for Qwen3-Embedding, gte-Qwen instruct, e5 instruct, and Nomic families. Plain local encoders are unchanged. Query instructions affect only live search vectors, not stored document vectors, so changing `query_instruction` does not re-embed the corpus; changing a non-empty `document_prefix` does because it changes every stored vector.
+
+The local provider downloads model files from Hugging Face. Set the standard `HF_ENDPOINT` environment variable to the base URL of a Hugging Face-compatible mirror when `huggingface.co` is unavailable; a trailing slash is optional. The mirror only changes where identical model files are downloaded and does not change embedding identities or trigger re-embedding.
 
 When `provider: "off"`:
 

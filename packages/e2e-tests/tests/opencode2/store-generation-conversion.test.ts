@@ -1144,12 +1144,19 @@ test("the search index matches the v2 projection with no duplicate ordinals", ()
     expect(new Set(ids).size).toBe(ids.length);
 });
 
-test("the converted store serves one HARD fold and four byte-identical defers", () => {
+test("the converted store serves one HARD and four byte-identical cache hits", () => {
     expect(evidence.forward.pins).toHaveLength(5);
     expect(new Set(evidence.forward.pins.slice(1)).size).toBe(1);
     const folds = evidence.forward.folds.slice(0, 5);
     expect(folds).toHaveLength(5);
     expect(folds.map((fold) => fold.rematerialized)).toEqual([true, false, false, false, false]);
+    expect(["first_render", "system_hash"]).toContain(folds[0]?.reason);
+    expect(folds.slice(1).map((fold) => fold.reason)).toEqual([
+        "cache_hit",
+        "cache_hit",
+        "cache_hit",
+        "cache_hit",
+    ]);
 });
 
 test("doctor reports the pending flip the next open would perform", () => {
@@ -1215,12 +1222,21 @@ test("the unresolved range is refused by ctx_expand and both compartments are se
     expect(evidence.servedHeadBack).toContain(evidence.unresolvedHeading);
 });
 
-test("the way back also serves one HARD fold and four byte-identical defers", () => {
+test("the way back serves exactly one first-render HARD across the flip and follow-ups", () => {
     expect(evidence.back.pins).toHaveLength(5);
     expect(new Set(evidence.back.pins.slice(1)).size).toBe(1);
     const folds = evidence.back.folds.slice(0, 5);
     expect(folds).toHaveLength(5);
     expect(folds.map((fold) => fold.rematerialized)).toEqual([true, false, false, false, false]);
+    const flipAndTwoFollowUps = folds.slice(0, 3);
+    expect(flipAndTwoFollowUps.map((fold) => fold.reason)).toEqual([
+        "first_render",
+        "cache_hit",
+        "cache_hit",
+    ]);
+    expect(
+        flipAndTwoFollowUps.filter((fold) => fold.rematerialized).map((fold) => fold.reason),
+    ).toEqual(["first_render"]);
 });
 
 test("doctor reports the compartments the way back could not re-anchor", () => {

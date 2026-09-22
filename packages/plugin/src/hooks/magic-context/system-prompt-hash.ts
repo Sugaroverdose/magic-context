@@ -388,6 +388,10 @@ export function createSystemPromptHashHandler(deps: {
         if (liveSystemContent.length === 0) return;
         const previousHash = sessionMetaEarly?.systemPromptHash ?? "";
         const hasPersistedHash = previousHash !== "" && previousHash !== "0";
+        // When the durable system-prompt hash is cleared, the new host must
+        // establish a new baseline. Discard the session's sticky date instead of
+        // reusing the date line frozen for the earlier host projection.
+        if (!hasPersistedHash) stickyDateBySession.delete(sessionId);
         // Every element carrying a date line participates in freezing. Only MC
         // injects the line today, but a host prompt carrying the same format
         // must not leave a second live date that busts the hash at midnight.
@@ -503,6 +507,12 @@ export function createSystemPromptHashHandler(deps: {
                 updateSessionMeta(deps.db, sessionId, {
                     systemPromptHash: currentHash,
                     systemPromptTokens,
+                    // On OpenCode 1, messages.transform runs before system.transform.
+                    // After a rebase clears the previous host baseline, the first
+                    // m[0] render records no system-prompt hash. Store this request's
+                    // hash with that cached render so the following pass recognizes
+                    // the unchanged system prompt and reuses the cache.
+                    cachedM0SystemHash: hasPersistedHash ? undefined : currentHash,
                 });
             } catch (error) {
                 sessionLog(sessionId, "system prompt meta persist failed (fail-open):", error);
