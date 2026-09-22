@@ -9,7 +9,7 @@ This is an execution record, not a declaration that the full Phase A inventory i
 - Every host comparison used fresh throwaway HOME/XDG roots, synthetic prompts, the existing OpenCode mock-provider capture and no paid completion, live database, private prompt dump or credentials.
 - Both extracted refs use one throwaway project path so system/tool comparisons do not conceal different working-directory prompts. The instrument is held constant; application code comes from each pinned ref.
 
-## Gate: four actual defers
+## Gate: matching wire captures and seeded consecutive defers
 
 Executed:
 
@@ -22,7 +22,7 @@ bun packages/e2e-tests/scripts/pure-replay-differential.ts --ts-only \
 6eddf386937058ffcde18b88179c3bb987d517f0
 ```
 
-The owned throwaway root was removed after the command. Result: **IDENTICAL, four actual consecutive `defer` decisions on both revisions**. The comparator now requires exactly four defers and compares actual captured messages, system and tools using the existing capture serializer; it no longer silently skips pairs of non-defer decisions.
+The owned throwaway root was removed after the command. Result: **IDENTICAL, four corresponding captured requests**. The original decision labels came from the persisted decision ledger. The later priced gate strengthens this: it reads current per-request scheduler observations, establishes a nonempty cached generation and verifies four actual defers including restart. The comparator uses the existing serializer for captured messages/system/tools, not a new provider serializer.
 
 | Pass | Message bytes | Messages SHA-256, equal on both refs |
 |---|---:|---|
@@ -37,7 +37,7 @@ The E2E package's `tsc --noEmit` was attempted. It reports 11 diagnostics in unc
 
 The earlier message-only differential also passed after runtime commits `7a4060b3afd9494062ceee9f424e1cbcad8a3187`, `daab52e32a7bac1ff36e45bbad889e053644e6fc`, `f026f1fe64712aedb69393a4c55f5964bb040709`, `3532a5b1c71ea8d4b59230665aa508b9b6ba52e9`, and `f5b35b07485e22cab122037e6c6e7c1395c4bdaf`. Each had the four message hashes above against pinned master. No row required a defer-divergence rollback.
 
-This gate does not by itself establish the separate seeded-HARD/restart/table-revision or priced neutral/Fable comparisons.
+This initial comparison does not by itself prove a table-revision transition. The seeded HARD, tail-only and restart checks below supply the later priced evidence.
 
 ## Other executed checks
 
@@ -49,6 +49,47 @@ This gate does not by itself establish the separate seeded-HARD/restart/table-re
 - Targeted history, protection, producer, fallback/replay, emergency, system-hook, event-hook and candidate-EMA tests: passed. Full adapter suite gates are recorded separately when executed.
 - AFT diagnostics were incomplete because authoritative TypeScript/Biome producers were unavailable; compiler/typecheck gates are the authority.
 - Migration delta check against master covering `**/migrations.ts`, `**/storage-db.ts` and `crates/mc-store`: empty.
+
+## Gate: priced neutral and Fable comparison
+
+Committed evidence: [`priced-neutral.json`](tokenizer-calibration-gates/priced-neutral.json) and [`priced-fable.json`](tokenizer-calibration-gates/priced-fable.json). Both compare the pinned revisions above using the same real OpenCode capture harness and isolated fixture project path.
+
+The fixture creates 52 real raw messages, seeds 52 versioned compartments, restarts to load those rows, and switches mock-sonnet to Fable to cause an existing model-change HARD. It supplies explicit model windows and output reservation. Neutral mode overrides only the resolver inside both extracted throwaway refs; no production configuration knob is added. Expectations supply local budgets **60,000** and **38,173** independently of the production calibration conversion.
+
+| Capture | Master | Candidate |
+|---|---|---|
+| Neutral HARD messages SHA | `1c3f62d971bbeeb35805064dc6352e13037f0e6297b196e34163accdca89d458` | same |
+| Fable HARD messages SHA | `1c3f62d971bbeeb35805064dc6352e13037f0e6297b196e34163accdca89d458` | `5cea1515c7ac3f022da203550cbf1011a1cee161490205b98a47ba5f8b6ac868` |
+| Fable history SHA | `4ce19ae00732aa6549dfe829aaf01c8ee6da2dd212b86f9ac5a0718c2511a777` | `e5a3fd05041f16ea952e2aab1a46a59b1d99e0f4c733bfb5681714e9000d0a52` |
+| Fable history local allowance | 60,000 | 38,173 |
+| Independently expected and actually dropped tool tags at tail-only execute | `[56,59]` | `[56,59,62,65]` |
+
+For the tail-only scenario both revisions adopt the same legacy cached history, SHA `4ce19ae00732aa6549dfe829aaf01c8ee6da2dd212b86f9ac5a0718c2511a777`. A fresh 85.5% provider sample after restart authorizes queued drops without yielding the protection window at 95%. The execute preserves cached history bytes **and its materialization timestamp**. It does not manufacture a HARD to pass the test.
+
+Each path then observes four consecutive scheduler defers, with another restart between defers two and three. Cached history remains equal. In neutral mode all four corresponding messages/system/tools hashes also match between master and candidate. Fable intentionally produces different tail wire hashes because four rather than two tool tags are eligible. The runner's legacy terminal word `IDENTICAL` in the priced artifact means its **priced expectation predicate passed**, not that Fable's deliberately changed whole message arrays are equal. The individual hashes and expected/actual tag sets are the authority. The runner now prints `PRICED_EXPECTATIONS_MET` for that mode to remove the ambiguity; this output-label change does not alter the captured requests or predicate.
+
+## Gate: suites and compiler checks
+
+- [`full-plugin.json`](tokenizer-calibration-gates/full-plugin.json): 5,213 pass / 1 skip / 37 fail on the one full serial run. [`plugin-followup.json`](tokenizer-calibration-gates/plugin-followup.json): all failing groups covered by **68 pass / 0 fail**, with plugin/Pi typechecks passing. The existing v1 six-sequence byte golden was not regenerated.
+- [`full-pi.json`](tokenizer-calibration-gates/full-pi.json): 1,193 pass / 3 skip / 31 fail on the one full serial run. [`pi-followup.json`](tokenizer-calibration-gates/pi-followup.json): affected groups had **340 pass / 4 fail**, followed by **4 pass / 0 fail** for those remaining nested-historian cases and a clean Pi typecheck. The four OMP HOME errors and smart-note check passed unchanged once the isolated HOME existed.
+- The expanded gate instrument was typechecked after its edits. Two Bun-versus-cross-runtime SQLite declaration mismatches were corrected at the fixture/helper boundary; the final E2E check reports only the same 11 diagnostics in unchanged files, none in the gate script. This is not represented as a clean E2E package typecheck.
+- The owner requested that recorded gates not be repeated. Accordingly these are **initial full-suite results plus passing targeted follow-ups**, not claims of a second all-green full run.
+- [`cargo.json`](tokenizer-calibration-gates/cargo.json) preserves the already-passed full `cargo test -p mc-module` and clippy gates. Source-equivalence inspection confirmed no Rust, manifest, shared-fixture or seed-table changes since the validated runtime revision; no repeat build was needed.
+
+Fixture changes do not bypass fit predicates. They declare mock model identities and model-specific windows. The 1.02× atomic-source case intentionally changes contract: raw-source clipping no longer authorizes the complete calibrated prompt; no producer prompt is sent and no range is published. Likewise incomplete Pi raw/LKG requests are refused, while durable capture/hydration and an explicitly observed fitting replay remain covered. Those intentional changes are stated in commit messages and the release-note draft.
+
+## Gate: recorded mutation controls
+
+[`mutation-evidence.json`](tokenizer-calibration-gates/mutation-evidence.json) contains nine executed **NON-VACUITY BREAK** records with the sole reddened test, positive controls and the staged/nonempty/restored-empty diff evidence. They cover unknown-envelope raw fallback, raw completeness, LKG completeness, emergency disarm, unsupported parts, TS complete producer fit, Pi calibrated wall, Pi missing observations and Rust producer admission before start. All mutants were restored; none is in the source tree. These runs were preserved rather than repeated.
+
+## Explicit limitations and remaining release work
+
+- Tail-hygiene T/U and persisted cadence/grace watermark conversion is deferred under the no-persistence constraint, as allowed by the owner. It requires a safe unit/epoch transition; the existing raw values are not reinterpreted.
+- Legacy historian projected-reclaim attribution and the full docs/memory/profile/facts/m1 cap inventory remain unresolved. The runtime delivery is not a declaration that every original section-3 row is complete.
+- No mutation disabling defer freeze was executed against the strengthened host fixture. N=2→3 and table-revision changes were not driven inside that real-host sequence. Candidate-EMA unit controls do cover initialization, updates, rejected samples and no activation at N=3.
+- The full scheduler-to-provider adversarial HTTP matrix on every harness is not claimed. Actual caller/unit controls prove refusal of locally fitting over-wall estimates and positive fitting controls; the producer capacity fixtures observe real executor/SDK submission callbacks, not paid provider completions.
+- Pi/main and hostless-Rust calibration observations remain partial where system/tools or response correlation are unavailable. Pi child tool schemas and later host/provider framing are not part of an exact full-provider tokenization proof.
+- No migration, schema fence movement, new knob, learned-state persistence or wire dump was introduced. The migration delta is empty for `**/migrations.ts`, `**/storage-db.ts` and `crates/mc-store`.
 
 ## Fable fixture units
 

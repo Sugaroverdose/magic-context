@@ -1120,3 +1120,13 @@ Pi history rendering and the shared canonical protected-token walk use the same 
 Tail-hygiene calibration is deferred with TS and Rust rather than introducing a Pi-only policy. Persisted cadence/grace watermarks lack a unit revision; safely rebasing them alongside the active measurement after restart needs an explicit durable epoch/unit transition. Legacy T/U floors remain in effect; see root PARITY.
 
 On priced passes Pi now logs the raw count of its final returned message array plus the held system count, with static-seed provenance. Held tool definitions and a same-request completion identity are unavailable at this boundary, so completeness stays partial and no P/L sample increases N. There is no persistence, migration, new configuration knob or learned decision activation.
+
+## Static calibration gate follow-up
+
+Pi storage-error fallback has no complete held system/tool observation at its admission boundary. A small valid LKG prefix is therefore still refused rather than admitted from its byte size. Durable LKG hydration and SOFT+ refresh continue to be tested; the complete-observation mapped-contraction control separately proves that calibrated fit can admit a genuinely observed request. An already oversized byte proxy now rejects before expensive tokenization.
+
+Historian fixtures explicitly supply primary/fallback window observations. The old 1.02× source-clamping fixture intentionally now refuses the assembled calibrated prompt before transport and leaves coverage unchanged; a raw source allowance did not include all instructions/system mass. `/ctx-recomp` forwards its configured historian model to shared admission rather than relying on an unobservable agent default. Pi's actual child tool schemas and later host framing remain outside the observed system/user prompt representation; no exact provider-token claim is made for those components.
+
+The full Pi suite initially reported 1,193 pass / 3 skip / 31 fail. The affected 344-test groups subsequently reported 340 pass / 4 fail, and the four remaining nested-historian cases passed after their mock window observations were supplied. The environment-only OMP/home and smart-note checks passed without product changes. Pi typecheck passed. No second full suite was run, as requested. Exact commands and counts are committed under `docs/reports/tokenizer-calibration-gates/`.
+
+Tail-hygiene T/U and cadence/grace watermark calibration remains explicitly deferred: persisted raw masses have no unit/table epoch to distinguish them from provider-token values after restart. No persistence field, migration, sidecar or fence change was added. Candidate EMA remains inactive, and Pi's uncorrelated/partial measurements never increase N.
