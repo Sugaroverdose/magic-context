@@ -466,6 +466,20 @@ describe("createCtxNoteTools", () => {
         expect(result).toContain("'content' is required");
     });
 
+    it("reports the active tray on the write reply", async () => {
+        const first = await tools.ctx_note.execute(
+            { action: "write", content: "first tray item" },
+            toolContext(),
+        );
+        const second = await tools.ctx_note.execute(
+            { action: "write", content: "second tray item" },
+            toolContext(),
+        );
+
+        expect(first).toBe("Saved session note #1. 1 active, oldest 0m.");
+        expect(second).toBe("Saved session note #2. 2 active, oldest 0m.");
+    });
+
     it("dismisses session notes and can still inspect them with filter='all'", async () => {
         await tools.ctx_note.execute({ action: "write", content: "First note" }, toolContext());
         const dismissResult = await tools.ctx_note.execute(
