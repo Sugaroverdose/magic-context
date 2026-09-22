@@ -13293,8 +13293,11 @@ impl McHandler {
                                         now_ms: now,
                                     })
                                     .map_err(|error| error.to_string())?;
+                                let tray = tx
+                                    .active_session_note_tray(project, session)
+                                    .map_err(|error| error.to_string())?;
                                 facade_text_response(
-                                    format!("Saved session note #{}.", note.id),
+                                    format_write_reply(note.id, tray, now),
                                     false,
                                 )
                             },
@@ -13313,12 +13316,12 @@ impl McHandler {
                         };
                         notes.push((*note_id, note));
                     }
-                    return mcp_text_result(render_notes_by_id(notes), false);
+                    return mcp_text_result(finish_read_reply(render_notes_by_id(notes, now)), false);
                 }
                 let limit = usize_arg(args, "limit").unwrap_or(25).clamp(1, 100);
                 let offset = usize_arg(args, "offset").unwrap_or(0);
                 let statuses: Vec<&str> = match filter {
-                    None => vec!["active", "ready"],
+                    None => vec!["active", "ready", "pending"],
                     Some("active") => vec!["active"],
                     Some("pending") => vec!["pending"],
                     Some("ready") => vec!["ready"],
@@ -13336,56 +13339,25 @@ impl McHandler {
                             .to_string(),
                     ),
                 };
+                // The default view is the tray: active session notes plus every
+                // smart note, ready or still parked. An explicit filter applies
+                // the same statuses to both types.
                 let session_statuses = if filter.is_none() {
                     vec!["active"]
                 } else {
                     statuses.clone()
                 };
-                let smart_statuses = if filter.is_none() {
-                    vec!["ready"]
-                } else {
-                    statuses
-                };
-                let session_notes = match store.read_project_notes(
+                let smart_statuses = statuses;
+                let notes = match store.read_glance_notes(
                     project,
-                    Some(session),
+                    session,
                     &session_statuses,
-                    limit,
-                    offset,
+                    &smart_statuses,
                 ) {
                     Ok(notes) => notes,
                     Err(error) => return tool_error_result(format!("Error: {error}")),
                 };
-                let smart_notes =
-                    match store.read_smart_notes(project, &smart_statuses, limit, offset) {
-                        Ok(notes) => notes,
-                        Err(error) => return tool_error_result(format!("Error: {error}")),
-                    };
-                let session_total = match store.count_notes_by_type(
-                    project,
-                    "session",
-                    Some(session),
-                    &session_statuses,
-                ) {
-                    Ok(total) => total,
-                    Err(error) => return tool_error_result(format!("Error: {error}")),
-                };
-                let smart_total =
-                    match store.count_notes_by_type(project, "smart", None, &smart_statuses) {
-                        Ok(total) => total,
-                        Err(error) => return tool_error_result(format!("Error: {error}")),
-                    };
-                mcp_text_result(
-                    render_notes(
-                        session_notes,
-                        smart_notes,
-                        session_total,
-                        smart_total,
-                        offset,
-                        filter.is_none(),
-                    ),
-                    false,
-                )
+                mcp_text_result(finish_read_reply(render_glance(notes, limit, offset, now)), false)
             }
             "update" => {
                 let note_id = note_ids
@@ -16460,119 +16432,199 @@ fn truncate_expand_preview(value: &str, max_units: usize) -> String {
     format!("{}…", String::from_utf16_lossy(&units[..max_units]))
 }
 
-fn format_note_line(note: &StoredNote) -> String {
-    let status_suffix = if note.status == "active" {
+/// Title clip for a glance row. Mirrors `GLANCE_TITLE_MAX` in
+/// `packages/plugin/src/tools/ctx-note/render.ts`.
+const GLANCE_TITLE_MAX: usize = 80;
+/// A note untouched for this long is marked stale in the glance.
+const STALE_AFTER_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// The reply for a read that has nothing to show.
+const EMPTY_READ_REPLY: &str = "## Notes\n\nNo session notes or smart notes.";
+
+/// The timestamp a note's age is measured from: its last update, or its
+/// creation when it has never been updated.
+fn note_touched_at(note: &StoredNote) -> i64 {
+    if note.updated_at_ms > 0 {
+        note.updated_at_ms
+    } else {
+        note.created_at_ms
+    }
+}
+
+/// Compact age: `5m`, `3h`, `2d`, `6w`.
+fn format_note_age(touched_at: i64, now_ms: i64) -> String {
+    let elapsed = (now_ms - touched_at).max(0);
+    let minutes = elapsed / 60_000;
+    if minutes < 60 {
+        return format!("{minutes}m");
+    }
+    let hours = elapsed / 3_600_000;
+    if hours < 24 {
+        return format!("{hours}h");
+    }
+    let days = elapsed / 86_400_000;
+    if days < 7 {
+        return format!("{days}d");
+    }
+    format!("{}w", days / 7)
+}
+
+/// First line of the note content, clipped to `max` characters with `…`.
+/// Counts Unicode scalar values, matching the TypeScript renderer's
+/// `[...firstLine]` spread.
+fn clip_note_title(content: &str, max: usize) -> String {
+    let first_line = content.lines().next().unwrap_or("").trim();
+    let characters = first_line.chars().collect::<Vec<_>>();
+    if characters.len() <= max {
+        return first_line.to_string();
+    }
+    format!("{}…", characters[..max].iter().collect::<String>())
+}
+
+/// One glance row: `#id · age · title`, plus `· <status>` for anything that is
+/// not active and `· stale` when the note has not been touched for 30 days.
+fn format_glance_row(note: &StoredNote, now_ms: i64) -> String {
+    let touched_at = note_touched_at(note);
+    let mut markers: Vec<&str> = Vec::new();
+    if note.status != "active" {
+        markers.push(note.status.as_str());
+    }
+    if now_ms - touched_at >= STALE_AFTER_MS {
+        markers.push("stale");
+    }
+    let suffix = if markers.is_empty() {
         String::new()
     } else {
-        format!(" ({})", note.status)
+        format!(" · {}", markers.join(" · "))
     };
+    format!(
+        "#{} · {} · {}{}",
+        note.id,
+        format_note_age(touched_at, now_ms),
+        clip_note_title(&note.content, GLANCE_TITLE_MAX),
+        suffix
+    )
+}
+
+/// Glance order: ready smart notes first, then pending smart notes, then every
+/// other status — each group newest first.
+fn order_glance_notes(mut notes: Vec<StoredNote>) -> Vec<StoredNote> {
+    notes.sort_by(|left, right| {
+        right
+            .updated_at_ms
+            .cmp(&left.updated_at_ms)
+            .then(right.id.cmp(&left.id))
+    });
+    let mut ready = Vec::new();
+    let mut pending = Vec::new();
+    let mut rest = Vec::new();
+    for note in notes {
+        match note.status.as_str() {
+            "ready" => ready.push(note),
+            "pending" => pending.push(note),
+            _ => rest.push(note),
+        }
+    }
+    ready.extend(pending);
+    ready.extend(rest);
+    ready
+}
+
+/// The whole glance: one row per note, then the one-line paging footer.
+fn render_glance(notes: Vec<StoredNote>, limit: usize, offset: usize, now_ms: i64) -> String {
+    let ordered = order_glance_notes(notes);
+    let total = ordered.len();
+    let page = ordered
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    if page.is_empty() {
+        return EMPTY_READ_REPLY.to_string();
+    }
+    let rows = page
+        .iter()
+        .map(|note| format_glance_row(note, now_ms))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let remaining = total.saturating_sub(offset.saturating_add(page.len()));
+    let footer = if remaining > 0 {
+        format!(
+            "\n\nShowing {} of {total} — {remaining} older: ctx_note(action=\"read\", offset={})",
+            page.len(),
+            offset.saturating_add(page.len())
+        )
+    } else {
+        String::new()
+    };
+    format!("## Notes\n\n{rows}{footer}")
+}
+
+/// Full body for one note in the bodies-by-id view: `#id`, age, status, the
+/// content, and the `↳ @msg N` anchor when the note carries one. Smart notes
+/// also carry the condition that parked them.
+fn format_note_body(note: &StoredNote, now_ms: i64) -> String {
+    let touched_at = note_touched_at(note);
     let anchor = note
         .anchor_ordinal
         .map(|ordinal| format!(" ↳ @msg {ordinal}"))
         .unwrap_or_default();
-    if note.type_name == "smart" {
-        let condition = if note.status == "ready" {
-            note.ready_reason
-                .as_deref()
-                .or(note.surface_condition.as_deref())
-                .unwrap_or("Condition satisfied")
-        } else {
-            note.surface_condition
-                .as_deref()
-                .unwrap_or("No condition recorded")
-        };
-        format!(
-            "- **#{}**{}: {}{}\n  {}: {}",
-            note.id,
-            status_suffix,
-            note.content,
-            anchor,
-            if note.status == "ready" {
-                "Condition met"
-            } else {
-                "Condition"
-            },
-            condition
-        )
-    } else {
-        format!(
-            "- **#{}**{}: {}{}",
-            note.id, status_suffix, note.content, anchor
-        )
+    let head = format!(
+        "- **#{}** · {} · {}: {}{}",
+        note.id,
+        format_note_age(touched_at, now_ms),
+        note.status,
+        note.content,
+        anchor
+    );
+    if note.type_name != "smart" {
+        return head;
     }
+    let condition = if note.status == "ready" {
+        note.ready_reason
+            .as_deref()
+            .or(note.surface_condition.as_deref())
+            .unwrap_or("Condition satisfied")
+    } else {
+        note.surface_condition
+            .as_deref()
+            .unwrap_or("No condition recorded")
+    };
+    format!(
+        "{head}\n  {}: {condition}",
+        if note.status == "ready" {
+            "Condition met"
+        } else {
+            "Condition"
+        }
+    )
 }
 
-fn render_notes_by_id(notes: Vec<(i64, Option<StoredNote>)>) -> String {
+/// Bodies-by-id view. Ids that are unknown or owned by someone else render the
+/// same `not_found` line, so the reply never discloses whether an inaccessible
+/// note exists.
+fn render_notes_by_id(notes: Vec<(i64, Option<StoredNote>)>, now_ms: i64) -> String {
     format!(
         "## Notes by ID\n\n{}",
         notes
             .into_iter()
             .map(|(note_id, note)| note
                 .as_ref()
-                .map(format_note_line)
+                .map(|note| format_note_body(note, now_ms))
                 .unwrap_or_else(|| format!("- Note #{note_id}: not_found")))
             .collect::<Vec<_>>()
             .join("\n\n")
     )
 }
 
-fn render_notes(
-    session_notes: Vec<StoredNote>,
-    smart_notes: Vec<StoredNote>,
-    session_total: usize,
-    smart_total: usize,
-    offset: usize,
-    default_sections: bool,
-) -> String {
-    if session_notes.is_empty() && smart_notes.is_empty() {
-        return "## Notes\n\nNo session notes or smart notes.".to_string();
+/// The anchor hint and dismiss footer every read reply ends with. The hint is
+/// only shown when at least one note carries an anchor, so notes written before
+/// anchoring don't advertise a capability their output doesn't show. Mirrors
+/// the TypeScript renderer's read tail.
+fn finish_read_reply(body: String) -> String {
+    if body == EMPTY_READ_REPLY {
+        return body;
     }
-    let footer = |total: usize, shown: usize| {
-        let remaining = total.saturating_sub(offset.saturating_add(shown));
-        (remaining > 0).then(|| {
-            format!(
-                "Showing {shown} of {total} (newest first) — {remaining} older: ctx_note(action=\"read\", offset={})",
-                offset.saturating_add(shown)
-            )
-        })
-    };
-    let mut sections = Vec::new();
-    if !session_notes.is_empty() {
-        let mut section = format!(
-            "## Session Notes\n\n{}",
-            session_notes
-                .iter()
-                .map(format_note_line)
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-        if let Some(footer) = footer(session_total, session_notes.len()) {
-            section.push_str("\n\n");
-            section.push_str(&footer);
-        }
-        sections.push(section);
-    }
-    if !smart_notes.is_empty() {
-        let mut section = format!(
-            "{}\n\n{}",
-            if default_sections {
-                "## 🔔 Ready Smart Notes"
-            } else {
-                "## Smart Notes"
-            },
-            smart_notes
-                .iter()
-                .map(format_note_line)
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        );
-        if let Some(footer) = footer(smart_total, smart_notes.len()) {
-            section.push_str("\n\n");
-            section.push_str(&footer);
-        }
-        sections.push(section);
-    }
-    let body = sections.join("\n\n");
     let anchor_hint = if body.contains("↳ @msg ") {
         "\n\n↳ @msg N marks the conversation tail when a note was written. To see what led to it: ctx_expand(start=N-x, end=N) (pick x for how far back to look)."
     } else {
@@ -16581,6 +16633,18 @@ fn render_notes(
     format!(
         "{body}{anchor_hint}\n\nTo dismiss a stale note: ctx_note(action=\"dismiss\", note_ids=[N])"
     )
+}
+
+/// The write reply: the saved-note line plus the tray line, so the writer sees
+/// the backlog at the moment they add to it.
+fn format_write_reply(note_id: i64, tray: (usize, Option<i64>), now_ms: i64) -> String {
+    let base = format!("Saved session note #{note_id}.");
+    match tray {
+        (count, Some(oldest)) if count > 0 => {
+            format!("{base} {count} active, oldest {}.", format_note_age(oldest, now_ms))
+        }
+        _ => base,
+    }
 }
 
 // The facade never panics on agent input; an absent or malformed id stays a typed tool error.
@@ -26445,7 +26509,7 @@ mod tests {
         );
         assert_eq!(
             targeted_read,
-            "## Notes by ID\n\n- **#4**: bulk two\n\n- Note #5: not_found\n\n- Note #999: not_found"
+            "## Notes by ID\n\n- **#4** · 0m · active: bulk two\n\n- Note #5: not_found\n\n- Note #999: not_found\n\nTo dismiss a stale note: ctx_note(action=\"dismiss\", note_ids=[N])"
         );
         let already = tool_text(
             call_facade(
@@ -27023,7 +27087,7 @@ mod tests {
         assert_eq!(post_migration.compile_status.as_deref(), Some("compiled"));
 
         let output = tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
-        assert!(output.contains("## 🔔 Ready Smart Notes"));
+        assert!(output.contains("## Notes"));
         assert!(output.contains("seeded before migration 52"));
         assert!(output.contains("seeded after migration 52"));
 
@@ -27095,6 +27159,199 @@ mod tests {
         assert!(page.contains("ready note 4"));
         assert!(page.contains("ready note 0"));
         assert!(!page.contains("ready note 104"));
+    }
+
+    /// Insert one session note with an explicit timestamp so the glance's age
+    /// and stale markers are deterministic.
+    fn insert_session_note_at(store: &McStore, content: &str, now_ms: i64) -> i64 {
+        store
+            .insert_note(NoteInput {
+                project_path: "/repo",
+                route_project_root: None,
+                session_id: "session",
+                content,
+                surface_condition: None,
+                anchor_block_id: None,
+                now_ms,
+            })
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_glance_lists_one_row_per_note_with_age_and_stale_markers() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+
+        let now = now_ms();
+        let day = 24 * 60 * 60 * 1000;
+        // A ready smart note, a parked smart note, and three plain notes: one
+        // fresh, one two days old, one untouched for 40 days.
+        let ready = store
+            .insert_project_note(NoteWriteInput {
+                project_path: "/repo",
+                route_project_root: None,
+                session_id: Some("session"),
+                content: "Ready smart item",
+                surface_condition: Some("condition"),
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
+                anchor_block_id: None,
+                anchor_ordinal: None,
+                now_ms: now - 5 * day,
+            })
+            .unwrap();
+        store
+            .write_note_evaluation(NoteEvaluationInput {
+                project_path: "/repo",
+                note_id: ready.id,
+                source_revision: ready.status_version,
+                verdict: true,
+                compiled_check: None,
+                manifest_json: None,
+                check_hash: None,
+                next_due_at: None,
+                now_ms: now - 5 * day,
+            })
+            .unwrap();
+        store
+            .insert_project_note(NoteWriteInput {
+                project_path: "/repo",
+                route_project_root: None,
+                session_id: Some("session"),
+                content: "Parked smart item",
+                surface_condition: Some("condition"),
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
+                anchor_block_id: None,
+                anchor_ordinal: None,
+                now_ms: now - 2 * day,
+            })
+            .unwrap();
+        insert_session_note_at(&store, "Fresh plain item", now);
+        insert_session_note_at(&store, "Two-day-old plain item", now - 2 * day);
+        insert_session_note_at(&store, "Forty-day-old plain item", now - 40 * day);
+
+        let glance = tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
+
+        // Ready smart notes first, then pending, then plain notes newest first.
+        assert_eq!(
+            glance,
+            "## Notes\n\n\
+             #1 · 5d · Ready smart item · ready\n\
+             #2 · 2d · Parked smart item · pending\n\
+             #3 · 0m · Fresh plain item\n\
+             #4 · 2d · Two-day-old plain item\n\
+             #5 · 5w · Forty-day-old plain item · stale\n\n\
+             To dismiss a stale note: ctx_note(action=\"dismiss\", note_ids=[N])"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_glance_pages_with_a_one_line_footer() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+
+        let now = now_ms();
+        for index in 0..30 {
+            insert_session_note_at(&store, &format!("note {index}"), now - index * 60_000);
+        }
+
+        let first = tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
+        assert!(first.contains("#1 · 0m · note 0"));
+        assert!(first.contains("#25 · 24m · note 24"));
+        assert!(!first.contains("note 25\n"));
+        assert!(first.contains(
+            "Showing 25 of 30 — 5 older: ctx_note(action=\"read\", offset=25)"
+        ));
+
+        let second = tool_text(
+            call_facade(&handler, "ctx_note", json!({"action": "read", "offset": 25})).await,
+        );
+        assert!(second.contains("note 25"));
+        assert!(second.contains("note 29"));
+        assert!(!second.contains("older: ctx_note"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_bodies_by_id_keep_the_given_order_and_hide_foreign_ids() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+
+        let now = now_ms();
+        insert_session_note_at(&store, "first body", now);
+        insert_session_note_at(&store, "second body", now);
+        store
+            .insert_note(NoteInput {
+                project_path: "/repo",
+                route_project_root: None,
+                session_id: "other-session",
+                content: "foreign body",
+                surface_condition: None,
+                anchor_block_id: None,
+                now_ms: now,
+            })
+            .unwrap();
+
+        let bodies = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "read", "note_ids": [2, 1, 3, 999]}),
+            )
+            .await,
+        );
+
+        assert_eq!(
+            bodies,
+            "## Notes by ID\n\n\
+             - **#2** · 0m · active: second body\n\n\
+             - **#1** · 0m · active: first body\n\n\
+             - Note #3: not_found\n\n\
+             - Note #999: not_found\n\n\
+             To dismiss a stale note: ctx_note(action=\"dismiss\", note_ids=[N])"
+        );
+        assert!(!bodies.contains("foreign body"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_write_reply_reports_the_active_tray() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+
+        let now = now_ms();
+        insert_session_note_at(&store, "older tray item", now - 2 * 24 * 60 * 60 * 1000);
+
+        let reply = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "write", "content": "new tray item"}),
+            )
+            .await,
+        );
+
+        assert_eq!(reply, "Saved session note #2. 2 active, oldest 2d.");
     }
 
     #[tokio::test(flavor = "current_thread")]

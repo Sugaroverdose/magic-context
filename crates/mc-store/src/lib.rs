@@ -6873,6 +6873,36 @@ impl<'a> FacadeMutationTxn<'a> {
         load_note_tx(self.tx, self.tx.last_insert_rowid()).map_err(|error| error.to_string())
     }
 
+    /// The active session-note tray inside a facade mutation: how many notes it
+    /// holds and when the oldest one was last touched. Backs the write reply's
+    /// backlog line, which must reflect the note just inserted.
+    pub fn active_session_note_tray(
+        &self,
+        project_path: &str,
+        session_id: &str,
+    ) -> Result<(usize, Option<i64>), String> {
+        let mut statement = self
+            .tx
+            .prepare(
+                "SELECT created_at_ms, updated_at_ms FROM mc_notes
+                 WHERE project_path = ?1 AND type = 'session' AND session_id = ?2
+                   AND status = 'active'",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![project_path, session_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let oldest = rows
+            .iter()
+            .map(|(created_at, updated_at)| if *updated_at > 0 { *updated_at } else { *created_at })
+            .min();
+        Ok((rows.len(), oldest))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn update_note_cas(
         &self,
@@ -14774,6 +14804,49 @@ impl McStore {
                 Ok(rows)
             })
             .map_err(Into::into)
+    }
+
+    /// Every note the glance shows, unpaged and newest-first. The glance needs
+    /// the whole set to order it (ready smart notes first, then pending, then
+    /// the rest) and to report how many rows remain past the requested page, so
+    /// paging happens in the renderer rather than in SQL.
+    pub fn read_glance_notes(
+        &self,
+        project_path: &str,
+        session_id: &str,
+        session_statuses: &[&str],
+        smart_statuses: &[&str],
+    ) -> Result<Vec<StoredNote>, McStoreError> {
+        let mut notes = self.read_project_notes(
+            project_path,
+            Some(session_id),
+            session_statuses,
+            1000,
+            0,
+        )?;
+        notes.extend(self.read_smart_notes(project_path, smart_statuses, 1000, 0)?);
+        Ok(notes)
+    }
+
+    /// The active session-note tray: how many notes it holds and when the
+    /// oldest one was last touched. Backs the write reply's backlog line.
+    pub fn active_session_note_tray(
+        &self,
+        project_path: &str,
+        session_id: &str,
+    ) -> Result<(usize, Option<i64>), McStoreError> {
+        let notes = self.read_project_notes(project_path, Some(session_id), &["active"], 1000, 0)?;
+        let oldest = notes
+            .iter()
+            .map(|note| {
+                if note.updated_at_ms > 0 {
+                    note.updated_at_ms
+                } else {
+                    note.created_at_ms
+                }
+            })
+            .min();
+        Ok((notes.len(), oldest))
     }
 
     pub fn count_notes_by_type(

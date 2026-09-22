@@ -37,6 +37,9 @@ import {
 	dismissNotes,
 	getNoteByIdInScope,
 	getNotes,
+	getPendingSmartNotes,
+	getReadySmartNotes,
+	getSessionNotes,
 	type Note,
 	type NoteMutationScope,
 	type NoteStatus,
@@ -44,6 +47,13 @@ import {
 	updateNote,
 } from "@magic-context/core/features/magic-context/storage";
 import { CTX_NOTE_DESCRIPTION } from "@magic-context/core/tools/ctx-note/constants";
+import {
+	EMPTY_READ_REPLY,
+	formatWriteReply,
+	noteTouchedAt,
+	renderGlance,
+	renderNotesById,
+} from "@magic-context/core/tools/ctx-note/render";
 import { unwrapImitatedReducedArgs } from "@magic-context/core/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
 
@@ -148,27 +158,6 @@ function captureAnchorOrdinal(
 	}
 }
 
-function anchorSuffix(note: Note): string {
-	return note.anchorOrdinal !== null ? ` ↳ @msg ${note.anchorOrdinal}` : "";
-}
-
-function formatNoteLine(note: Note): string {
-	if (note.type === "smart") {
-		// For smart notes, surface the condition / readyReason alongside
-		// the note content so the agent can act on it. When the note is
-		// `ready`, we prefer `readyReason` (set by dreamer at surfacing
-		// time) over the original `surfaceCondition`.
-		const conditionLine =
-			note.status === "ready"
-				? (note.readyReason ?? note.surfaceCondition ?? "Condition satisfied")
-				: (note.surfaceCondition ?? "No condition recorded");
-		const statusSuffix = note.status === "active" ? "" : ` (${note.status})`;
-		return `- **#${note.id}**${statusSuffix}: ${note.content}${anchorSuffix(note)}\n  *Condition*: ${conditionLine}`;
-	}
-	const statusSuffix = note.status === "active" ? "" : ` (${note.status})`;
-	return `- **#${note.id}**${statusSuffix}: ${note.content}${anchorSuffix(note)}`;
-}
-
 const DISMISS_FOOTER =
 	'\n\nTo dismiss a stale note: ctx_note(action="dismiss", note_ids=[N])';
 
@@ -190,13 +179,15 @@ function formatNotesById(
 	db: ContextDatabase,
 	noteIds: readonly number[],
 	scope: NoteMutationScope,
+	nowMs: number,
 ): string {
-	return `## Notes by ID\n\n${noteIds
-		.map((noteId) => {
-			const note = getNoteByIdInScope(db, noteId, scope);
-			return note ? formatNoteLine(note) : `- Note #${noteId}: not_found`;
-		})
-		.join("\n\n")}`;
+	return renderNotesById(
+		noteIds.map((noteId) => ({
+			noteId,
+			note: getNoteByIdInScope(db, noteId, scope),
+		})),
+		nowMs,
+	);
 }
 
 /**
@@ -222,24 +213,23 @@ function parseNoteIds(action: string, value: unknown): number[] | string {
 }
 
 /** Default page size for read. Long-running sessions accumulate hundreds of
- *  notes; read pages newest-first and points the caller at older pages.
- *  Mirrors OpenCode's ctx-note tool. */
+ *  notes; the glance keeps one short row per note so a large queue stays
+ *  readable, and the footer points at the older pages. Mirrors OpenCode's
+ *  ctx-note tool. */
 const DEFAULT_READ_LIMIT = 25;
 
-function paginateNewestFirst(
-	notes: Note[],
-	limit: number,
-	offset: number,
-): { page: Note[]; total: number; footer: string | null } {
-	const total = notes.length;
-	const newestFirst = [...notes].reverse();
-	const page = newestFirst.slice(offset, offset + limit);
-	const remaining = total - offset - page.length;
-	const footer =
-		remaining > 0
-			? `Showing ${page.length} of ${total} (newest first) — ${remaining} older: ctx_note(action="read", offset=${offset + page.length})`
-			: null;
-	return { page, total, footer };
+/** The tray line appended to a write reply: how many active session notes the
+ *  writer now holds and how old the oldest one is. */
+function writeTray(db: ContextDatabase, sessionId: string): {
+	activeCount: number;
+	oldestTouchedAt: number | null;
+} {
+	const active = getSessionNotes(db, sessionId);
+	const oldest = active.reduce<number | null>((min, note) => {
+		const touchedAt = noteTouchedAt(note);
+		return min === null || touchedAt < min ? touchedAt : min;
+	}, null);
+	return { activeCount: active.length, oldestTouchedAt: oldest };
 }
 
 export interface CtxNoteToolDeps {
@@ -315,7 +305,7 @@ export function createCtxNoteTool(
 							anchorOrdinal,
 						});
 						return ok(
-							`Saved session note #${note.id}.\nwake plane active — create a scheduled wake instead; stored as a plain note.`,
+							`${formatWriteReply(note.id, writeTray(deps.db, sessionId), Date.now())}\nwake plane active — create a scheduled wake instead; stored as a plain note.`,
 						);
 					}
 					if (dreamerEnabled !== true) {
@@ -350,7 +340,13 @@ export function createCtxNoteTool(
 					content,
 					anchorOrdinal,
 				});
-				return ok(`Saved session note #${note.id}.`);
+				return ok(
+					formatWriteReply(
+						note.id,
+						writeTray(deps.db, sessionId),
+						Date.now(),
+					),
+				);
 			}
 
 			if (action === "dismiss") {
@@ -448,22 +444,24 @@ export function createCtxNoteTool(
 			if (Array.isArray(noteIds) && !projectIdentity) {
 				return err("Error: Could not resolve project identity for note read.");
 			}
-			const sections = Array.isArray(noteIds)
-				? [
-						formatNotesById(deps.db, noteIds, {
-							projectPath: projectIdentity as string,
+			const nowMs = Date.now();
+			const body = Array.isArray(noteIds)
+				? formatNotesById(
+						deps.db,
+						noteIds,
+						{ projectPath: projectIdentity as string, sessionId },
+						nowMs,
+					)
+				: renderGlance(
+						readGlanceNotes({
+							db: deps.db,
 							sessionId,
+							cwd: ctx.cwd,
+							resolveProjectIdentity: resolveProject,
+							filter: params.filter,
 						}),
-					]
-				: readNotes({
-						db: deps.db,
-						sessionId,
-						cwd: ctx.cwd,
-						resolveProjectIdentity: resolveProject,
-						filter: params.filter,
-						limit,
-						offset,
-					});
+						{ limit, offset, nowMs },
+					);
 
 			// Best-effort watermark write so any future note nudge logic
 			// can suppress reminders when the agent has already seen notes.
@@ -473,11 +471,10 @@ export function createCtxNoteTool(
 				// ignore — watermark is a hint, not correctness
 			}
 
-			if (sections.length === 0) {
-				return ok("## Notes\n\nNo session notes or smart notes.");
+			if (body === EMPTY_READ_REPLY) {
+				return ok(EMPTY_READ_REPLY);
 			}
 
-			const body = sections.join("\n\n");
 			// Only surface the anchor hint when at least one note carries one.
 			const anchorHint = body.includes("↳ @msg ")
 				? "\n\n↳ @msg N marks the conversation tail when a note was written. To see what led to it: ctx_expand(start=N-x, end=N) (pick x for how far back to look)."
@@ -490,64 +487,34 @@ export function createCtxNoteTool(
 /**
  * Read both session notes and smart notes for the current project, applying
  * the requested filter. The DEFAULT (filter undefined) matches OpenCode's
- * `buildReadSections` mixed-view branch: active session notes + READY
- * smart notes. This is the "what should I act on now?" view.
+ * mixed view: active session notes + every smart note, ready or still parked.
+ * This is the "what should I act on now?" view.
  *
  * Explicit filter='active' is DIFFERENT — it returns all active notes of
  * BOTH types, including active (not-yet-ready) smart notes. This matches
- * OpenCode parity (see packages/plugin/src/tools/ctx-note/tools.ts:46-95).
+ * OpenCode parity (see packages/plugin/src/tools/ctx-note/tools.ts).
  *
- * Returns an array of markdown sections (one per note category that has
- * matches). Caller joins with `\n\n` and appends the dismiss footer.
+ * Returns the notes for the glance renderer to order and page.
  */
-function readNotes(args: {
+function readGlanceNotes(args: {
 	db: ContextDatabase;
 	sessionId: string;
 	cwd: string;
 	resolveProjectIdentity: (directory: string) => string | undefined;
 	filter: CtxNoteReadFilter | undefined;
-	limit: number;
-	offset: number;
-}): string[] {
+}): Note[] {
 	const projectIdentity = args.resolveProjectIdentity(args.cwd);
 
 	if (args.filter === undefined) {
-		// Default mixed view: active session notes + READY smart notes.
-		// We split the smart-note status filter (we want ONLY ready,
-		// not all active) so the agent doesn't get spammed with
-		// pending notes that haven't been validated by dreamer yet.
-		const sessionNotes = getNotes(args.db, {
-			sessionId: args.sessionId,
-			type: "session",
-			status: "active",
-		});
+		// Default mixed view: active session notes + every smart note.
+		const sessionNotes = getSessionNotes(args.db, args.sessionId);
 		const readySmartNotes = projectIdentity
-			? getNotes(args.db, {
-					projectPath: projectIdentity,
-					type: "smart",
-					status: "ready",
-				})
+			? getReadySmartNotes(args.db, projectIdentity)
 			: [];
-		const sections: string[] = [];
-		if (sessionNotes.length > 0) {
-			const { page, footer } = paginateNewestFirst(
-				sessionNotes,
-				args.limit,
-				args.offset,
-			);
-			const lines = page.map(formatNoteLine).join("\n");
-			sections.push(
-				`## Session Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`,
-			);
-		}
-		// Ready smart notes are few by construction (condition-gated) and
-		// time-sensitive — always show all of them, unpaged.
-		if (readySmartNotes.length > 0) {
-			sections.push(
-				`## 🔔 Ready Smart Notes\n\n${readySmartNotes.map(formatNoteLine).join("\n\n")}`,
-			);
-		}
-		return sections;
+		const pendingSmartNotes = projectIdentity
+			? getPendingSmartNotes(args.db, projectIdentity)
+			: [];
+		return [...sessionNotes, ...readySmartNotes, ...pendingSmartNotes];
 	}
 
 	// Explicit filter: same status applied to both session and smart
@@ -574,27 +541,5 @@ function readNotes(args: {
 				status,
 			})
 		: [];
-
-	const sections: string[] = [];
-	if (sessionNotes.length > 0) {
-		const { page, footer } = paginateNewestFirst(
-			sessionNotes,
-			args.limit,
-			args.offset,
-		);
-		const lines = page.map(formatNoteLine).join("\n");
-		sections.push(
-			`## Session Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`,
-		);
-	}
-	if (smartNotes.length > 0) {
-		const { page, footer } = paginateNewestFirst(
-			smartNotes,
-			args.limit,
-			args.offset,
-		);
-		const lines = page.map(formatNoteLine).join("\n\n");
-		sections.push(`## Smart Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`);
-	}
-	return sections;
+	return [...sessionNotes, ...smartNotes];
 }

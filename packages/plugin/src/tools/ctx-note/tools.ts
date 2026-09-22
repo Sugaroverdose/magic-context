@@ -14,6 +14,7 @@ import {
     dismissNote,
     dismissNotes,
     getNotes,
+    getPendingSmartNotes,
     getReadySmartNotes,
     getSessionNotes,
     type Note,
@@ -33,6 +34,13 @@ import type { Database } from "../../shared/sqlite";
 import { renderCapabilityRefusal } from "../../shared/user-facing-codes";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_NOTE_DESCRIPTION } from "./constants";
+import {
+    EMPTY_READ_REPLY,
+    formatWriteReply,
+    noteTouchedAt,
+    renderGlance,
+    renderNotesById,
+} from "./render";
 import type { CtxNoteArgs, CtxNoteReadFilter } from "./types";
 
 export { CTX_NOTE_LIGHT_DESCRIPTION } from "../light-descriptions";
@@ -63,80 +71,31 @@ function captureAnchorOrdinal(db: Database, sessionId: string): number | null {
     }
 }
 
-function anchorSuffix(note: Note): string {
-    return note.anchorOrdinal !== null ? ` ↳ @msg ${note.anchorOrdinal}` : "";
-}
-
-function formatNoteLine(note: Note): string {
-    const statusSuffix = note.status === "active" ? "" : ` (${note.status})`;
-
-    if (note.type === "session") {
-        return `- **#${note.id}**${statusSuffix}: ${note.content}${anchorSuffix(note)}`;
-    }
-
-    const conditionText =
-        note.status === "ready"
-            ? (note.readyReason ?? note.surfaceCondition ?? "Condition satisfied")
-            : (note.surfaceCondition ?? "No condition recorded");
-    const conditionLabel = note.status === "ready" ? "Condition met" : "Condition";
-
-    return `- **#${note.id}**${statusSuffix}: ${note.content}${anchorSuffix(note)}\n  ${conditionLabel}: ${conditionText}`;
-}
-
 const DISMISS_FOOTER = '\n\nTo dismiss a stale note: ctx_note(action="dismiss", note_ids=[N])';
 
 /** Default page size for read. Long-running sessions accumulate hundreds of
- *  notes; dumping all of them burns output tokens and buries the recent ones,
- *  so read pages newest-first and tells the caller how to reach older pages. */
+ *  notes; the glance keeps one short row per note so a large queue stays
+ *  readable, and the footer points at the older pages. */
 const DEFAULT_READ_LIMIT = 25;
 
-function paginateNewestFirst(
-    notes: Note[],
-    limit: number,
-    offset: number,
-): { page: Note[]; total: number; footer: string | null } {
-    const total = notes.length;
-    const newestFirst = [...notes].reverse();
-    const page = newestFirst.slice(offset, offset + limit);
-    const remaining = total - offset - page.length;
-    const footer =
-        remaining > 0
-            ? `Showing ${page.length} of ${total} (newest first) — ${remaining} older: ctx_note(action="read", offset=${offset + page.length})`
-            : null;
-    return { page, total, footer };
-}
-
-function buildReadSections(args: {
+/** The notes a read shows. The default view is the tray: active session notes
+ *  plus every smart note, ready or still parked. An explicit filter selects one
+ *  status across both types. */
+function readGlanceNotes(args: {
     db: Database;
     sessionId: string;
     projectIdentity?: string;
     filter?: CtxNoteReadFilter;
-    limit: number;
-    offset: number;
-}): string[] {
+}): Note[] {
     if (args.filter === undefined) {
         const sessionNotes = getSessionNotes(args.db, args.sessionId);
         const readySmartNotes = args.projectIdentity
             ? getReadySmartNotes(args.db, args.projectIdentity)
             : [];
-        const sections: string[] = [];
-
-        if (sessionNotes.length > 0) {
-            const { page, footer } = paginateNewestFirst(sessionNotes, args.limit, args.offset);
-            const lines = page.map((note) => formatNoteLine(note)).join("\n");
-            sections.push(`## Session Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`);
-        }
-
-        if (readySmartNotes.length > 0) {
-            const { page, footer } = paginateNewestFirst(readySmartNotes, args.limit, args.offset);
-            sections.push(
-                `## 🔔 Ready Smart Notes\n\n${page
-                    .map((note) => formatNoteLine(note))
-                    .join("\n\n")}${footer ? `\n\n${footer}` : ""}`,
-            );
-        }
-
-        return sections;
+        const pendingSmartNotes = args.projectIdentity
+            ? getPendingSmartNotes(args.db, args.projectIdentity)
+            : [];
+        return [...sessionNotes, ...readySmartNotes, ...pendingSmartNotes];
     }
 
     const statusByFilter: Record<
@@ -166,22 +125,21 @@ function buildReadSections(args: {
               status: statusByFilter[args.filter],
           })
         : [];
+    return [...sessionNotes, ...smartNotes];
+}
 
-    const sections: string[] = [];
-
-    if (sessionNotes.length > 0) {
-        const { page, footer } = paginateNewestFirst(sessionNotes, args.limit, args.offset);
-        const lines = page.map((note) => formatNoteLine(note)).join("\n");
-        sections.push(`## Session Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`);
-    }
-
-    if (smartNotes.length > 0) {
-        const { page, footer } = paginateNewestFirst(smartNotes, args.limit, args.offset);
-        const lines = page.map((note) => formatNoteLine(note)).join("\n\n");
-        sections.push(`## Smart Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`);
-    }
-
-    return sections;
+/** The tray line appended to a write reply: how many active session notes the
+ *  writer now holds and how old the oldest one is. */
+function writeTray(db: Database, sessionId: string): {
+    activeCount: number;
+    oldestTouchedAt: number | null;
+} {
+    const active = getSessionNotes(db, sessionId);
+    const oldest = active.reduce<number | null>((min, note) => {
+        const touchedAt = noteTouchedAt(note);
+        return min === null || touchedAt < min ? touchedAt : min;
+    }, null);
+    return { activeCount: active.length, oldestTouchedAt: oldest };
 }
 
 function noteAuthorityRefusal(_args: CtxNoteArgs, action: RustNoteToolRequest["action"]): string {
@@ -285,13 +243,12 @@ function formatNotesById(
     db: Database,
     noteIds: readonly number[],
     scope: NoteMutationScope,
+    nowMs: number,
 ): string {
-    return `## Notes by ID\n\n${noteIds
-        .map((noteId) => {
-            const note = getNoteByIdInScope(db, noteId, scope);
-            return note ? formatNoteLine(note) : `- Note #${noteId}: not_found`;
-        })
-        .join("\n\n")}`;
+    return renderNotesById(
+        noteIds.map((noteId) => ({ noteId, note: getNoteByIdInScope(db, noteId, scope) })),
+        nowMs,
+    );
 }
 
 /**
@@ -452,7 +409,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                             content,
                             anchorOrdinal,
                         });
-                        return `Saved session note #${note.id}.\nwake plane active — create a scheduled wake instead; stored as a plain note.`;
+                        return `${formatWriteReply(note.id, writeTray(deps.db, sessionId), Date.now())}\nwake plane active — create a scheduled wake instead; stored as a plain note.`;
                     }
                     if (!deps.dreamerEnabled) {
                         return "Error: Smart notes require dreamer to be enabled. Enable dreamer in magic-context.jsonc to use surface_condition.";
@@ -477,7 +434,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
 
                 // Simple session note
                 const note = addNote(deps.db, "session", { sessionId, content, anchorOrdinal });
-                return `Saved session note #${note.id}.`;
+                return formatWriteReply(note.id, writeTray(deps.db, sessionId), Date.now());
             }
 
             if (action === "dismiss") {
@@ -544,21 +501,23 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             if (Array.isArray(noteIds) && !projectIdentity) {
                 return `Error: Could not resolve project identity for note read: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
             }
-            const sections = Array.isArray(noteIds)
-                ? [
-                      formatNotesById(deps.db, noteIds, {
-                          projectPath: projectIdentity as string,
+            const nowMs = Date.now();
+            const body = Array.isArray(noteIds)
+                ? formatNotesById(
+                      deps.db,
+                      noteIds,
+                      { projectPath: projectIdentity as string, sessionId },
+                      nowMs,
+                  )
+                : renderGlance(
+                      readGlanceNotes({
+                          db: deps.db,
+                          filter: args.filter,
+                          projectIdentity,
                           sessionId,
                       }),
-                  ]
-                : buildReadSections({
-                      db: deps.db,
-                      filter: args.filter,
-                      projectIdentity,
-                      sessionId,
-                      limit,
-                      offset,
-                  });
+                      { limit, offset, nowMs },
+                  );
 
             // Record read watermark so note-nudger can suppress reminders
             // when the agent has already seen notes in recent context and no
@@ -569,11 +528,10 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 // Best-effort — the watermark is a suppression hint, not correctness.
             }
 
-            if (sections.length === 0) {
-                return "## Notes\n\nNo session notes or smart notes.";
+            if (body === EMPTY_READ_REPLY) {
+                return EMPTY_READ_REPLY;
             }
 
-            const body = sections.join("\n\n");
             // Only surface the anchor hint when at least one note carries one,
             // so notes written before anchoring (or with no indexed tail) don't
             // advertise a capability their output doesn't show.
