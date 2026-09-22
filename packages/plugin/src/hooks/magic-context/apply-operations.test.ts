@@ -88,6 +88,48 @@ describe("applyPendingOperations with protection window set form", () => {
         expect(getTagById(db!, SES, tag2)?.status).toBe("active");
     });
 
+    it("reports why a selected synthetic batch cannot mutate the visible payload", () => {
+        useTempDataHome("apply-noop-reason-");
+        const db = openDatabase();
+        expect(db).toBeTruthy();
+        insertTag(db!, SES, "call-protected", "tool", 4_000, 1);
+
+        let diagnostics: { total: number; mutated: number; reasons: Record<string, number> } | undefined;
+        const mutated = applyPendingOperations(
+            SES,
+            db!,
+            new Map([
+                [
+                    1,
+                    {
+                        canDrop: () => true,
+                        truncate: () => "truncated" as const,
+                        drop: () => "removed" as const,
+                        setContent: () => true,
+                    },
+                ],
+            ]),
+            new Set([1]),
+            undefined,
+            undefined,
+            [{ id: 0, sessionId: SES, tagId: 1, operation: "drop", queuedAt: 0 }],
+            new Set(),
+            undefined,
+            (batch) => {
+                diagnostics = batch;
+            },
+        );
+
+        expect(mutated).toBe(false);
+        expect(diagnostics).toEqual({
+            source: "synthetic",
+            total: 1,
+            mutated: 0,
+            persistedWithoutMutation: 0,
+            reasons: { protected: 1 },
+        });
+    });
+
     it("declares and enforces empty-window behavior: empty set protects zero tool tags, but non-tool tags are never automatic reclaim targets", () => {
         useTempDataHome("apply-empty-");
         const db = openDatabase();
