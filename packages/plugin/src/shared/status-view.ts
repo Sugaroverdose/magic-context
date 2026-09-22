@@ -424,7 +424,7 @@ function cacheRows(source: StatusViewSource, now: number): StatusRow[] {
             label: "Last response",
             value:
                 source.lastResponseTime > 0
-                    ? `${Math.round((now - source.lastResponseTime) / 1000)}s ago`
+                    ? formatRelativeTime(source.lastResponseTime, now)
                     : "never",
             tone: "text",
         },

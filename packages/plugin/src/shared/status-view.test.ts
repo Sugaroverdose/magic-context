@@ -325,6 +325,21 @@ describe("status view model", () => {
         expect(line.length).toBeLessThanOrEqual(56);
     });
 
+    /**
+     * `Last response 180s ago` is a raw stopwatch reading; the sidebar and the
+     * Dreamer rows say `3m ago` for the same age.
+     */
+    test("humanizes the last-response age like the other age rows", () => {
+        const row = (lastResponseTime: number) =>
+            view({ lastResponseTime })
+                .sections.find((section) => section.title === "Cache TTL")
+                ?.rows.find((entry) => entry.label === "Last response")?.value;
+        expect(row(NOW - 180_000)).toBe("3m ago");
+        expect(row(NOW - 42_000)).toBe("just now");
+        expect(row(NOW - 2 * 3_600_000)).toBe("2h ago");
+        expect(row(0)).toBe("never");
+    });
+
     test("breaks the context down by category, with counts and percentages", () => {
         expect(view().breakdown.map((row) => `${row.label} ${row.value}`)).toEqual([
             "System 12K (1.9%)",
