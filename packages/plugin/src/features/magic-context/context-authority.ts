@@ -247,7 +247,10 @@ export async function reconcileAuthorityMarker(args: {
     db: Database;
     projectPath: string;
     module: AuthorityModuleClient;
-}): Promise<{ status: "legacy" | "ok" | "repaired"; authority: AuthorityStatus | null }> {
+}): Promise<{
+    status: "legacy" | "ok" | "repaired" | "released";
+    authority: AuthorityStatus | null;
+}> {
     const contextStoreUuid = ensureContextStoreUuid(args.db);
     const marker = getAuthorityManagedMarker(args.db, args.projectPath);
     if (marker) {
@@ -260,6 +263,35 @@ export async function reconcileAuthorityMarker(args: {
                 }),
             ),
         );
+        const completed =
+            marker.context_store_uuid === contextStoreUuid &&
+            statuses.every(
+                ({ authority }, index) =>
+                    authority === null ||
+                    (authority !== undefined &&
+                        authority.state === "TS" &&
+                        authority.context_store_uuid === contextStoreUuid &&
+                        authority.project === args.projectPath &&
+                        authority.domain === AUTHORITY_DOMAINS[index]),
+            );
+        if (completed) {
+            let released = false;
+            // Do not remove a marker replaced while the module status was in flight.
+            // The comparison and existing privileged removal share one writer transaction.
+            withPrivilegedWriter(args.db, () => {
+                const current = getAuthorityManagedMarker(args.db, args.projectPath);
+                if (
+                    !current ||
+                    current.context_store_uuid !== marker.context_store_uuid ||
+                    current.marked_at !== marker.marked_at ||
+                    getContextStoreUuid(args.db) !== contextStoreUuid
+                )
+                    return;
+                removeAuthorityManagedMarker(args.db, args.projectPath);
+                released = true;
+            });
+            if (released) return { status: "released", authority: null };
+        }
         return {
             status: "ok",
             authority: statuses.find((result) => result.authority !== null)?.authority ?? null,

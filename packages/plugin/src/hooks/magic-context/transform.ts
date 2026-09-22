@@ -6,6 +6,7 @@ import {
     ensureContextStoreUuid,
     getAuthorityManagedMarker,
     observeAuthorityRouting,
+    reconcileAuthorityMarker,
 } from "../../features/magic-context/context-authority";
 import {
     isLinkedGitWorktree,
@@ -408,6 +409,7 @@ export async function recoverTsAuthorityProject(args: {
     projectRoot: string;
     module: RustModeModuleClient;
 }): Promise<TsAuthorityRecoveryOutcome> {
+    if (!getAuthorityManagedMarker(args.db, args.projectPath)) return "completed";
     const module = authorityModuleForProject(args.module, args.projectRoot);
     const domains = ["memories", "notes"] as const;
     const statuses = await Promise.all(
@@ -468,12 +470,19 @@ export async function recoverTsAuthorityProject(args: {
         drainedDomain = true;
     }
 
-    // drainAuthority removes the shared marker only after every domain is TS.
-    // After a completed replay, bump the project memory epoch once so the memory
-    // view re-renders any changes mirrored during recovery.
-    if (drainedDomain && !getAuthorityManagedMarker(args.db, args.projectPath)) {
-        bumpProjectMemoryEpoch(args.db, args.projectPath);
-        observeAuthorityRouting(args.projectPath, "TS");
+    // A previous process may have finished the drain before removing its marker.
+    // Use the same identity-checked heal as startup reconciliation, not another drain.
+    const reconciliation =
+        !drainedDomain && getAuthorityManagedMarker(args.db, args.projectPath)
+            ? await reconcileAuthorityMarker({ db: args.db, projectPath: args.projectPath, module })
+            : null;
+    if (!getAuthorityManagedMarker(args.db, args.projectPath)) {
+        // Only the caller that completed a drain or removed the marker invalidates
+        // the memory view; repeated or concurrent completed recovery is a no-op.
+        if (drainedDomain || reconciliation?.status === "released") {
+            bumpProjectMemoryEpoch(args.db, args.projectPath);
+            observeAuthorityRouting(args.projectPath, "TS");
+        }
         return "completed";
     }
     return "retryable";
