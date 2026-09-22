@@ -6,10 +6,35 @@ export interface RawMessageParts {
     parts: unknown[];
     createdAt?: number | null;
     version?: string | number | null;
+    /** Native store row type when the host exposes one; intentionally absent on v1. */
+    storeType?: string;
 }
 
 export interface RawMessage extends RawMessageParts {
     ordinal: number;
+}
+
+/** Strictly classify rows that carry no user/assistant narrative and may fill a range gap. */
+export function isStrictGapHealingMessage(message: RawMessage): boolean {
+    if (message.storeType === "synthetic") return true;
+    let sawTool = false;
+    for (const part of message.parts) {
+        if (!part || typeof part !== "object" || Array.isArray(part)) return false;
+        const record = part as Record<string, unknown>;
+        const type = typeof record.type === "string" ? record.type : "";
+        if (type === "tool" || type === "tool_use" || type === "tool_result") {
+            sawTool = true;
+            continue;
+        }
+        const text =
+            typeof record.text === "string"
+                ? record.text
+                : typeof record.content === "string"
+                  ? record.content
+                  : "";
+        if (text.trim().length > 0 || type.length > 0) return false;
+    }
+    return sawTool;
 }
 
 export interface RawMessageOrdinalAnchor {

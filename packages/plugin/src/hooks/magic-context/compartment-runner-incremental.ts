@@ -4,6 +4,7 @@ import {
     appendCompartments,
     getCompartments,
 } from "../../features/magic-context/compartment-storage";
+import { readCoordinateRebaseNotice } from "../../features/magic-context/store-generation-rebase";
 // Re-export the historian-state-file helpers so existing callers
 // (compartment-runner-recomp.ts, compartment-runner.ts, tests) keep working
 // unchanged. The implementation moved to ./historian-state-file.ts so Pi
@@ -93,15 +94,41 @@ import {
     getRawSessionTagKeysThrough,
     hasRawMessageProvider,
     readRawSessionMessageOrdinalById,
+    readRawSessionMessageRange,
     readSessionChunk,
 } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
+import { isStrictGapHealingMessage } from "./read-session-raw";
 import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendStatusNotification } from "./send-session-notification";
 
 /** Suppress repeated historian failure notifications — at most once per 60 seconds per session */
 const HISTORIAN_ALERT_COOLDOWN_MS = 60 * 1000;
+
+export function v2NonNarrativeStoredGapRanges(
+    db: HiddenCompartmentRunnerDeps["db"],
+    sessionId: string,
+    compartments: ReadonlyArray<{ startMessage: number; endMessage: number }>,
+): Array<{ start: number; end: number }> {
+    if (readCoordinateRebaseNotice(db, sessionId)?.generation !== "v2") return [];
+    const safeRanges: Array<{ start: number; end: number }> = [];
+    for (let index = 1; index < compartments.length; index += 1) {
+        const previous = compartments[index - 1];
+        const current = compartments[index];
+        if (!previous || !current) continue;
+        const start = previous.endMessage + 1;
+        const end = current.startMessage - 1;
+        if (end < start) continue;
+        const messages = readRawSessionMessageRange(sessionId, start, end);
+        const ordinals = new Set(messages.map((message) => message.ordinal));
+        const complete =
+            ordinals.size === end - start + 1 &&
+            messages.every((message) => isStrictGapHealingMessage(message));
+        if (complete) safeRanges.push({ start, end });
+    }
+    return safeRanges;
+}
 const lastHistorianAlertBySession = new Map<string, number>();
 
 function shouldSuppressHistorianAlert(sessionId: string): boolean {
@@ -276,7 +303,10 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         // v2: session facts are no longer read here — the unbounded existing_state
         // dump is gone. Facts dedup against <project-memory> in the prompt instead.
 
-        const existingValidationError = validateStoredCompartments(priorCompartments);
+        const existingValidationError = validateStoredCompartments(
+            priorCompartments,
+            v2NonNarrativeStoredGapRanges(db, sessionId, priorCompartments),
+        );
         if (existingValidationError) {
             sessionLog(
                 sessionId,

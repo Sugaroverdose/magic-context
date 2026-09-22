@@ -111,7 +111,14 @@ interface Evidence {
     splitMessageId: string;
     /** The row 2.0.5 derived from that turn; absent from the 1.x tables by construction. */
     syntheticRowId: string;
-    v1CompartmentEndOrdinal: number;
+    v1MaxCompartmentSequence: number;
+    longArmBaselineCompartmentSequence: number;
+    postFlipCompartmentSequence: number;
+    syntheticGapOrdinal: number;
+    tailCacheCoveredFromOrdinal: number;
+    tailCacheCoveredToOrdinalBeforePressure: number;
+    longArmHistorianRequestCount: number;
+    existingValidationFailureLines: string[];
     forward: FlipEvidence;
     back: FlipEvidence;
     doctorBetween: string;
@@ -120,6 +127,13 @@ interface Evidence {
     unresolvedHeading: string;
     resolvedHeading: string;
     servedHeadBack: string;
+    markerBoundaryId: string;
+    markerCreated: number;
+    markerCompleted: number;
+    convertedMarkerCount: number;
+    firstConvertedInput: string;
+    preBoundarySentinel: string;
+    postBoundarySentinel: string;
 }
 
 interface FlipEvidence {
@@ -175,6 +189,62 @@ function readCompartments(fixture: ConversionFixture, sessionId: string) {
            FROM compartments WHERE session_id = ? ORDER BY sequence`,
         sessionId,
     );
+}
+
+function placeSyntheticSplitBetweenCompartments(
+    fixture: ConversionFixture,
+    sessionId: string,
+    splitMessageId: string,
+): void {
+    const projection = v1Projection(fixture, sessionId);
+    const split = projection.find((message) => message.id === splitMessageId);
+    const next = projection.find((message) => message.ordinal === (split?.ordinal ?? 0) + 1);
+    if (!split || !next) throw new Error("the synthetic split source has no following v1 message");
+
+    const db = new Database(fixture.contextDbPath);
+    try {
+        const rows = db
+            .prepare(
+                `SELECT id, sequence, start_message, end_message
+                   FROM compartments WHERE session_id = ? ORDER BY sequence`,
+            )
+            .all(sessionId) as Array<{
+            id: number;
+            sequence: number;
+            start_message: number;
+            end_message: number;
+        }>;
+        const existingIndex = rows.findIndex((row) => row.end_message === split.ordinal);
+        if (existingIndex >= 0 && rows[existingIndex + 1]?.start_message === split.ordinal + 1) return;
+        const source = rows.find(
+            (row) => row.start_message <= split.ordinal && row.end_message > split.ordinal,
+        );
+        if (!source) throw new Error("no published compartment can be split at the synthetic turn");
+
+        db.transaction(() => {
+            db.prepare(
+                "UPDATE compartments SET sequence = sequence + 1000 WHERE session_id = ? AND sequence > ?",
+            ).run(sessionId, source.sequence);
+            db.prepare(
+                "UPDATE compartments SET sequence = sequence - 999 WHERE session_id = ? AND sequence > ?",
+            ).run(sessionId, source.sequence + 1000);
+            db.prepare(
+                `INSERT INTO compartments
+                    (session_id, sequence, start_message, end_message, start_message_id,
+                     end_message_id, title, content, p1, p2, p3, p4, importance,
+                     episode_type, legacy, created_at, harness, rebase_status)
+                 SELECT session_id, ?, ?, end_message, ?, end_message_id, title, content,
+                        p1, p2, p3, p4, importance, episode_type, legacy, created_at,
+                        harness, rebase_status
+                   FROM compartments WHERE id = ?`,
+            ).run(source.sequence + 1, split.ordinal + 1, next.id, source.id);
+            db.prepare(
+                "UPDATE compartments SET end_message = ?, end_message_id = ? WHERE id = ?",
+            ).run(split.ordinal, split.id, source.id);
+        })();
+    } finally {
+        db.close();
+    }
 }
 
 function readFtsRows(fixture: ConversionFixture, sessionId: string) {
@@ -528,7 +598,6 @@ beforeAll(async () => {
         30_000,
     );
 
-    const v1Compartments = readCompartments(fixture, sessionId);
     const syntheticParts = (() => {
         const db = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
         try {
@@ -548,6 +617,8 @@ beforeAll(async () => {
         );
     }
     const splitMessageId = syntheticParts[0]!.id;
+    placeSyntheticSplitBetweenCompartments(fixture, sessionId, splitMessageId);
+    const v1Compartments = readCompartments(fixture, sessionId);
 
     // A reduction driven through the real tool rather than inserted, because the
     // part-tag fold the rebase performs only has to respect drops the agent
@@ -594,7 +665,66 @@ beforeAll(async () => {
     // this projection is one the way back will still resolve, and leaving it out
     // would make the search below pick the wrong compartment as the 2.x-only one.
     const v1Before = v1Projection(fixture, sessionId);
-    const v1EndOrdinal = v1Compartments[v1Compartments.length - 1]!.endMessage;
+    const markerEvidence = (() => {
+        const db = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
+        try {
+            const marker = db
+                .prepare(
+                    `SELECT json_extract(data, '$.parentID') AS boundaryId,
+                            json_extract(data, '$.time.created') AS created,
+                            json_extract(data, '$.time.completed') AS completed
+                       FROM message
+                      WHERE session_id = ?
+                        AND json_extract(data, '$.summary') = 1
+                        AND json_extract(data, '$.providerID') = 'magic-context'
+                      ORDER BY time_created DESC, id DESC
+                      LIMIT 1`,
+                )
+                .get(sessionId) as
+                | { boundaryId: string; created: number; completed: number }
+                | undefined;
+            if (!marker) throw new Error("the 1.x historian left no Magic Context marker");
+
+            const userTextRows = db
+                .prepare(
+                    `SELECT p.message_id AS id, json_extract(p.data, '$.text') AS text
+                       FROM part p
+                       JOIN message m ON m.id = p.message_id AND m.session_id = p.session_id
+                      WHERE p.session_id = ?
+                        AND json_extract(m.data, '$.role') = 'user'
+                        AND json_extract(p.data, '$.type') = 'text'
+                      ORDER BY m.time_created, m.id, p.time_created, p.id`,
+                )
+                .all(sessionId) as Array<{ id: string; text: string }>;
+            const projection = new Map(v1Before.map((message) => [message.id, message.ordinal]));
+            const boundaryOrdinal = projection.get(marker.boundaryId);
+            if (boundaryOrdinal === undefined) {
+                throw new Error(`marker boundary ${marker.boundaryId} is absent from the v1 projection`);
+            }
+            const authored = userTextRows
+                .map((row) => ({ ...row, ordinal: projection.get(row.id) }))
+                .filter(
+                    (row): row is { id: string; text: string; ordinal: number } =>
+                        typeof row.ordinal === "number" && typeof row.text === "string",
+                );
+            const before = authored.find((row) => row.ordinal < boundaryOrdinal);
+            const after = authored.findLast((row) => row.ordinal > boundaryOrdinal);
+            if (!before || !after) {
+                throw new Error(
+                    `marker boundary ${marker.boundaryId} did not leave both a compacted prefix and a retained tail`,
+                );
+            }
+            return {
+                boundaryId: marker.boundaryId,
+                created: marker.created,
+                completed: marker.completed,
+                preBoundarySentinel: before.text.slice(0, 96),
+                postBoundarySentinel: after.text.slice(0, 96),
+            };
+        } finally {
+            db.close();
+        }
+    })();
     v1Stopped = true;
     await v1.stop();
 
@@ -616,6 +746,19 @@ beforeAll(async () => {
         headers: { authorization: `Basic ${btoa(`opencode:${v2.password}`)}` },
     });
     await waitForPluginActive(v2Client, fixture.cwd);
+    const convertedMarkerCount = (() => {
+        const db = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
+        try {
+            const row = db
+                .prepare(
+                    "SELECT COUNT(*) AS count FROM session_message WHERE id = ? AND type = 'compaction'",
+                )
+                .get(markerEvidence.boundaryId) as { count: number };
+            return row.count;
+        } finally {
+            db.close();
+        }
+    })();
     const promptV2: PromptDriver = async (text) => {
         await v2Client.session.prompt({ sessionID: sessionId, text });
         await v2Client.session.wait(
@@ -626,6 +769,12 @@ beforeAll(async () => {
 
     const forwardFirstRequest = mock.requests().length;
     await promptV2("first prompt on the converted store");
+    const firstConvertedRequest = mock
+        .requests()
+        .slice(forwardFirstRequest)
+        .find((request) => JSON.stringify(request.body.input ?? "").includes("first prompt on the converted store"));
+    if (!firstConvertedRequest) throw new Error("the first converted prompt reached no v2 provider input");
+    const firstConvertedInput = JSON.stringify(firstConvertedRequest.body.input);
     const forwardRebaseLines = rebaseLinesFor(fixture, "v2", sessionId);
     const forwardCompartments = readCompartments(fixture, sessionId);
     const forwardProjection = v2Projection(fixture, sessionId);
@@ -649,6 +798,53 @@ beforeAll(async () => {
             db.close();
         }
     })();
+    const forwardOrdinals = new Map(forwardProjection.map((message) => [message.id, message.ordinal]));
+    const splitOrdinal = forwardOrdinals.get(splitMessageId);
+    const syntheticGapOrdinal = forwardOrdinals.get(syntheticRowId);
+    if (splitOrdinal === undefined || syntheticGapOrdinal !== splitOrdinal + 1) {
+        throw new Error("the converted synthetic row did not immediately follow its source turn");
+    }
+    const healedGapCompartment = forwardCompartments.find(
+        (compartment) => compartment.endMessage === syntheticGapOrdinal,
+    );
+    const followingGapCompartment = forwardCompartments.find(
+        (compartment) => compartment.startMessage === syntheticGapOrdinal + 1,
+    );
+    if (!healedGapCompartment || !followingGapCompartment) {
+        throw new Error("the forward rebase did not produce the expected healed split geometry");
+    }
+
+    // Model a session converted before synthetic-gap absorption was available:
+    // session_meta records the v2 projection, but the converted synthetic row is
+    // still between stored compartment ranges. The latest compartment end is the
+    // tail cache's lower bound, and it sits above the synthetic row in this arm.
+    const gapDb = new Database(fixture.contextDbPath);
+    try {
+        const update = gapDb
+            .prepare(
+                "UPDATE compartments SET end_message = ? WHERE session_id = ? AND sequence = ? AND end_message = ?",
+            )
+            .run(
+                splitOrdinal,
+                sessionId,
+                healedGapCompartment.sequence,
+                syntheticGapOrdinal,
+            );
+        if (update.changes !== 1) throw new Error("failed to recreate the stored synthetic gap");
+    } finally {
+        gapDb.close();
+    }
+    const longArmBaselineCompartments = readCompartments(fixture, sessionId);
+    const tailCacheCoveredFromOrdinal = longArmBaselineCompartments.at(-1)?.endMessage;
+    if (
+        tailCacheCoveredFromOrdinal === undefined ||
+        tailCacheCoveredFromOrdinal <= syntheticGapOrdinal
+    ) {
+        throw new Error("the long conversion arm did not place the synthetic gap below the tail cache");
+    }
+    const longArmBaselineCompartmentSequence = Math.max(
+        ...longArmBaselineCompartments.map((row) => row.sequence),
+    );
 
     for (const pass of [2, 3, 4, 5]) await promptV2(`defer pass ${pass} on the converted store`);
     const forwardFolds = await until(
@@ -673,8 +869,15 @@ beforeAll(async () => {
             (compartment) =>
                 compartment.endMessageId !== null && !v1MessageIds.has(compartment.endMessageId),
         );
+    const longArmHistorianRequestsBefore = mock
+        .requests()
+        .filter((request) => isHistorianRequest(request.body)).length;
     for (let turn = 1; turn <= 8; turn += 1) {
         await promptV2(`2.x turn ${turn}: content only this host's store holds. ${ballast(3_000)}`);
+    }
+    const tailCacheCoveredToOrdinalBeforePressure = v2Projection(fixture, sessionId).at(-1)?.ordinal;
+    if (tailCacheCoveredToOrdinalBeforePressure === undefined) {
+        throw new Error("the long conversion arm has no raw-message tail");
     }
     await driveHistorian(
         promptV2,
@@ -682,6 +885,16 @@ beforeAll(async () => {
         () => tailOnlyCompartment() !== undefined,
     );
     const tailCompartment = tailOnlyCompartment()!;
+    const longArmHistorianRequestCount =
+        mock.requests().filter((request) => isHistorianRequest(request.body)).length -
+        longArmHistorianRequestsBefore;
+    const existingValidationFailureLines = readFileSync(fixture.logPath("v2"), "utf8")
+        .split("\n")
+        .filter(
+            (line) =>
+                line.includes(sessionId) &&
+                line.includes("historian failure: source=existing-validation"),
+        );
 
     await promptV2("2.x tail turn one");
     await promptV2("2.x tail turn two");
@@ -782,7 +995,14 @@ beforeAll(async () => {
         sessionId,
         splitMessageId,
         syntheticRowId,
-        v1CompartmentEndOrdinal: v1EndOrdinal,
+        v1MaxCompartmentSequence: Math.max(...v1Compartments.map((row) => row.sequence)),
+        longArmBaselineCompartmentSequence,
+        postFlipCompartmentSequence: tailCompartment.sequence,
+        syntheticGapOrdinal,
+        tailCacheCoveredFromOrdinal,
+        tailCacheCoveredToOrdinalBeforePressure,
+        longArmHistorianRequestCount,
+        existingValidationFailureLines,
         forward: {
             rebaseLines: forwardRebaseLines,
             generation: forwardGeneration,
@@ -809,6 +1029,13 @@ beforeAll(async () => {
             ? `## ${resolvedForHeading.startMessage}-${resolvedForHeading.endMessage} `
             : "",
         servedHeadBack,
+        markerBoundaryId: markerEvidence.boundaryId,
+        markerCreated: markerEvidence.created,
+        markerCompleted: markerEvidence.completed,
+        convertedMarkerCount,
+        firstConvertedInput,
+        preBoundarySentinel: markerEvidence.preBoundarySentinel,
+        postBoundarySentinel: markerEvidence.postBoundarySentinel,
     };
     // Printed, not just asserted: the delivery record for this change quotes the
     // rebase lines, the served-byte pins and the doctor counts, and they can only
@@ -825,6 +1052,9 @@ beforeAll(async () => {
     console.log(`[issue-492] forward folds: ${JSON.stringify(forwardFolds)}`);
     console.log(`[issue-492] back folds: ${JSON.stringify(backFolds)}`);
     console.log(`[issue-492] back pins: ${JSON.stringify(backPins)}`);
+    console.log(
+        `[issue-492] long synthetic-gap arm: gap=${syntheticGapOrdinal} tail-cache=${tailCacheCoveredFromOrdinal}-${tailCacheCoveredToOrdinalBeforePressure} historian_requests=${longArmHistorianRequestCount} existing_validation_failures=${existingValidationFailureLines.length}`,
+    );
     console.log(`[issue-492] served head (way back): ${servedHeadBack}`);
     console.log(`[issue-492] doctor (between):\n${doctorProjectionLines(doctorBetween)}`);
     console.log(`[issue-492] doctor (after):\n${doctorProjectionLines(doctorAfter)}`);
@@ -834,16 +1064,41 @@ afterAll(async () => {
     for (const stop of cleanup.reverse()) await stop().catch(() => undefined);
 });
 
-test("the conversion really split a 1.x turn inside the published compartment", () => {
+test("OpenCode 2 converts the completed MC marker and serves only its retained tail", () => {
+    expect(evidence.markerCompleted).toBe(evidence.markerCreated);
+    expect(evidence.convertedMarkerCount).toBe(1);
+    expect(evidence.markerBoundaryId).not.toBe("");
+    expect(evidence.firstConvertedInput).toContain("first prompt on the converted store");
+    expect(evidence.firstConvertedInput).toContain(evidence.postBoundarySentinel);
+    expect(evidence.firstConvertedInput).not.toContain(evidence.preBoundarySentinel);
+});
+
+test("the conversion split is healed between compartments and the historian publishes afterward", () => {
     expect(evidence.syntheticRowId).not.toBe("");
     const projection = new Map(evidence.forward.projection.map((m) => [m.id, m.ordinal]));
     const splitOrdinal = projection.get(evidence.splitMessageId);
     const syntheticOrdinal = projection.get(evidence.syntheticRowId);
     expect(splitOrdinal).toBeDefined();
     expect(syntheticOrdinal).toBe(splitOrdinal! + 1);
-    // The compartment the 1.x historian published ends after the split, which is
-    // what makes its saved end ordinal wrong under the converted projection.
-    expect(evidence.v1CompartmentEndOrdinal).toBeGreaterThan(splitOrdinal!);
+    const healedPrevious = evidence.forward.compartments.find(
+        (compartment) => compartment.endMessage === syntheticOrdinal,
+    );
+    const following = evidence.forward.compartments.find(
+        (compartment) => compartment.startMessage === syntheticOrdinal! + 1,
+    );
+    expect(healedPrevious?.endMessageId).toBe(evidence.splitMessageId);
+    expect(following).toBeDefined();
+
+    expect(evidence.syntheticGapOrdinal).toBe(syntheticOrdinal!);
+    expect(evidence.tailCacheCoveredFromOrdinal).toBeGreaterThan(evidence.syntheticGapOrdinal);
+    expect(evidence.tailCacheCoveredToOrdinalBeforePressure).toBeGreaterThan(
+        evidence.tailCacheCoveredFromOrdinal,
+    );
+    expect(evidence.longArmHistorianRequestCount).toBeGreaterThan(0);
+    expect(evidence.postFlipCompartmentSequence).toBeGreaterThan(
+        evidence.longArmBaselineCompartmentSequence,
+    );
+    expect(evidence.existingValidationFailureLines).toEqual([]);
 });
 
 test("the forward flip logs exactly one rebase that rewrote at least one coordinate", () => {
@@ -864,7 +1119,15 @@ test("every compartment endpoint resolves to the row its endpoint id names", () 
     for (const compartment of evidence.forward.compartments) {
         expect(compartment.rebaseStatus).toBe("ok");
         expect(compartment.endMessageId).toBeString();
-        expect(projection.get(compartment.endMessageId!)).toBe(compartment.endMessage);
+        const endpointOrdinal = projection.get(compartment.endMessageId!);
+        if (compartment.endMessageId === evidence.splitMessageId) {
+            const syntheticOrdinal = projection.get(evidence.syntheticRowId);
+            expect(endpointOrdinal).toBeDefined();
+            expect(syntheticOrdinal).toBe(endpointOrdinal! + 1);
+            expect(compartment.endMessage).toBe(syntheticOrdinal!);
+        } else {
+            expect(endpointOrdinal).toBe(compartment.endMessage);
+        }
         expect(projection.get(compartment.startMessageId!)).toBe(compartment.startMessage);
     }
 });

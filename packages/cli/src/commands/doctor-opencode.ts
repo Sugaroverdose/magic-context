@@ -106,6 +106,11 @@ import {
 import { runV22BackfillCommands, type V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
 import { reportAuthorityMarkers } from "./doctor-authority";
 import {
+    checkOpenCodeCompactionMarkerConversion,
+    formatOpenCodeCompactionMarkerConversion,
+    formatOpenCodeV2ReconversionRecipe,
+} from "./doctor-compaction-markers";
+import {
     formatDanglingCompartmentBoundary,
     listDanglingCompartmentBoundaries,
 } from "./doctor-compartment-boundaries";
@@ -727,7 +732,7 @@ function logOpenCodeInstallationTable(installations: OpenCodeInstallationReport[
 }
 
 export async function runDoctor(
-    options: { force?: boolean; issue?: boolean } & V22BackfillCommandArgs = {},
+    options: { force?: boolean; fix?: boolean; issue?: boolean } & V22BackfillCommandArgs = {},
 ): Promise<number> {
     migrateConfigLocationsForCli(process.cwd(), log);
 
@@ -845,6 +850,42 @@ export async function runDoctor(
     else fail(openCodeDbCheck.message);
 
     if (openCodeDbCheck.ok) {
+        let markerDb: Database | null = null;
+        try {
+            markerDb = new Database(openCodeDbResolution.path, {
+                readonly: !options.fix,
+                fileMustExist: true,
+            });
+            const report = checkOpenCodeCompactionMarkerConversion(markerDb, {
+                fix: options.fix,
+            });
+            const summary = formatOpenCodeCompactionMarkerConversion(report);
+            if (report.missingBefore === 0) {
+                pass(summary);
+            } else if (options.fix && report.missingAfter === 0) {
+                pass(`${summary}; repaired=${report.repaired}`);
+                fixed += report.repaired;
+            } else if (options.fix) {
+                warn(`${summary}; repaired=${report.repaired}, but some rows remain unconvertible`);
+            } else {
+                warn(`${summary}; run \`magic-context doctor --fix\` before upgrading OpenCode`);
+            }
+
+            if (report.recoveryRequired) {
+                const [heading, ...details] = formatOpenCodeV2ReconversionRecipe(
+                    openCodeDbResolution.path,
+                );
+                warn(heading ?? "OpenCode 2 conversion recovery is required");
+                for (const detail of details) log.warn(`  ${detail}`);
+            }
+        } catch (error) {
+            warn(
+                `OpenCode compaction marker conversion check unavailable: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        } finally {
+            markerDb?.close();
+        }
+
         let contextDb: ReturnType<typeof openExistingContextDatabase> = null;
         let sessionDb: Database | null = null;
         try {
