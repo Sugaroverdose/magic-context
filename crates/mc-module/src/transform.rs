@@ -6128,9 +6128,18 @@ fn apply_once(
     let first_divergence =
         divergence::first_divergence(&loaded.meta.served_output_fingerprint, &served_fingerprints);
     timings.divergence = elapsed_ms(divergence_started_at);
-    let first_divergence_json = first_divergence
-        .as_ref()
-        .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
+    let identity_delta =
+        render_identity_delta(&loaded.meta.last_render_config, &meta.last_render_config);
+    let first_divergence_json = first_divergence.as_ref().map(|divergence| {
+        let mut record = serde_json::to_value(divergence).expect("divergence is serializable");
+        // Keep changed render-identity components with a divergent pass trace.
+        if !identity_delta.is_empty() {
+            record["identity_delta"] = serde_json::json!(identity_delta);
+            record.to_string()
+        } else {
+            serde_json::to_string(divergence).expect("divergence is serializable")
+        }
+    });
     // Pinning the baseline is itself a hold, and it is the one hold that can never expire on
     // its own: the pinned fingerprint is only released by a pass that reprices the prefix.
     // Gate it on the same question every other hold asks, so a session that has no served
@@ -16969,10 +16978,11 @@ pub(crate) mod tests {
             Some("inserted#0")
         );
         let trace = store.load_pass_trace(session).unwrap().unwrap();
-        let inserted_json = serde_json::to_string(inserted_divergence).unwrap();
+        let inserted_json: Value =
+            serde_json::from_str(trace.first_divergence.as_deref().unwrap()).unwrap();
         assert_eq!(
-            trace.first_divergence.as_deref(),
-            Some(inserted_json.as_str())
+            inserted_json,
+            serde_json::to_value(inserted_divergence).unwrap()
         );
 
         let removed_request = req(session, "cfg0", vec![item("a", 0, "a"), item("c", 3, "c")]);
