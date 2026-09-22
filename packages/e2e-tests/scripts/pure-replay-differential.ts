@@ -20,6 +20,8 @@ type ReplayPass = {
 	decision: string | null;
 	bytes: number;
 	sha256: string;
+	systemSha256: string;
+	toolsSha256: string;
 };
 
 type RefReplay = {
@@ -68,6 +70,15 @@ async function createReplayHarness() {
 	const { TestHarness } = await import("../src/harness");
 	const harness = await TestHarness.create(options);
 	try {
+		const fixtureWorkdir = valueAfter("--fixture-workdir");
+		if (fixtureWorkdir) {
+			if (resolve(fixtureWorkdir) !== join(dirname(REPO_ROOT), "fixture-work"))
+				throw new Error(
+					"fixture workdir must be inside the throwaway comparison root",
+				);
+			mkdirSync(fixtureWorkdir, { recursive: true });
+			harness.opencode.env.workdir = fixtureWorkdir;
+		}
 		const path = join(harness.opencode.env.configDir, "opencode.json");
 		const config = JSON.parse(readFileSync(path, "utf8"));
 		config.provider[options.providerID] = config.provider["mock-anthropic"];
@@ -129,6 +140,16 @@ async function captureCurrentCheckout(
 			});
 			await harness.sendPrompt(sessionId, `[[pure-replay-prompt-${index}]]`);
 			const wire = harness.lastMainWireSerialized("messages");
+			const request = harness.mainRequests().at(-1);
+			if (
+				!request ||
+				!Object.hasOwn(request.body, "system") ||
+				!Object.hasOwn(request.body, "tools")
+			)
+				throw new Error("main capture lacks system/tools fields");
+			// lastMainWireSerialized reads the requested body field unchanged. Its historical TypeScript signature permits only messages/input, so widen the field choice here without introducing another serializer.
+			const system = harness.lastMainWireSerialized("system" as "messages");
+			const tools = harness.lastMainWireSerialized("tools" as "messages");
 			const decision = (
 				db
 					.prepare(
@@ -141,6 +162,8 @@ async function captureCurrentCheckout(
 				decision: decision ?? null,
 				bytes: Buffer.byteLength(wire),
 				sha256: createHash("sha256").update(wire).digest("hex"),
+				systemSha256: createHash("sha256").update(system).digest("hex"),
+				toolsSha256: createHash("sha256").update(tools).digest("hex"),
 			});
 		}
 		return { ref, commit, passes };
@@ -210,6 +233,8 @@ function captureRef(
 		[
 			"packages/e2e-tests/scripts/pure-replay-differential.ts",
 			...(tsOnly ? ["--ts-only"] : []),
+			"--fixture-workdir",
+			join(sharedRoot, "fixture-work"),
 			"--single-ref",
 			ref,
 			"--single-commit",
@@ -236,13 +261,13 @@ function printRef(result: RefReplay): void {
 	console.log(`REF ${result.ref} ${result.commit}`);
 	for (const pass of result.passes) {
 		console.log(
-			`PASS ${pass.pass} decision=${pass.decision ?? "unknown"} bytes=${pass.bytes} sha256=${pass.sha256}`,
+			`PASS ${pass.pass} decision=${pass.decision ?? "unknown"} bytes=${pass.bytes} sha256=${pass.sha256} system_sha256=${pass.systemSha256} tools_sha256=${pass.toolsSha256}`,
 		);
 	}
 }
 
 function compare(left: RefReplay, right: RefReplay): boolean {
-	let identical = true;
+	let identical = left.passes.length === 4 && right.passes.length === 4;
 	for (
 		let index = 0;
 		index < Math.max(left.passes.length, right.passes.length);
@@ -250,13 +275,14 @@ function compare(left: RefReplay, right: RefReplay): boolean {
 	) {
 		const leftPass = left.passes[index];
 		const rightPass = right.passes[index];
-		if (leftPass?.decision !== "defer" && rightPass?.decision !== "defer")
-			continue;
+
 		const same =
 			leftPass?.decision === "defer" &&
 			rightPass?.decision === "defer" &&
 			leftPass.bytes === rightPass.bytes &&
-			leftPass.sha256 === rightPass.sha256;
+			leftPass.sha256 === rightPass.sha256 &&
+			leftPass.systemSha256 === rightPass.systemSha256 &&
+			leftPass.toolsSha256 === rightPass.toolsSha256;
 		identical &&= same;
 		console.log(
 			`DEFER PASS ${index + 1} ${same ? "IDENTICAL" : "DIVERGENT"} left_bytes=${leftPass?.bytes ?? "missing"} left_sha256=${leftPass?.sha256 ?? "missing"} right_bytes=${rightPass?.bytes ?? "missing"} right_sha256=${rightPass?.sha256 ?? "missing"}`,
