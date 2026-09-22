@@ -654,6 +654,17 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             ).toContain("message_time_ms");
             populateModuleOwnedRows(db, version, state);
             return;
+        case 90:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            expect(
+                (
+                    db.prepare("PRAGMA table_info(compartment_state_lease)").all() as Array<{
+                        name: string;
+                    }>
+                ).map((column) => column.name),
+            ).toContain("owner_pid");
+            populateModuleOwnedRows(db, version, state);
+            return;
         default:
             throw new Error(`populateForVersion has no arm for migration v${version}`);
     }

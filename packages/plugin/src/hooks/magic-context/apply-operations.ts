@@ -53,6 +53,14 @@ export const RECENT_TOOL_SKELETON_WINDOW = 20;
 export function buildReplacementContent(tagId: number): string {
     return `[dropped \u00a7${tagId}\u00a7]`;
 }
+export interface PendingOperationBatchDiagnostics {
+    source: "pending" | "synthetic" | "mixed";
+    total: number;
+    mutated: number;
+    persistedWithoutMutation: number;
+    reasons: Record<string, number>;
+}
+
 export function applyPendingOperations(
     sessionId: string,
     db: ContextDatabase,
@@ -77,8 +85,15 @@ export function applyPendingOperations(
     editMarkerTagIds: ReadonlySet<number> = new Set(),
     /** Reports only reductions that changed the live message representation. */
     onTagReduced?: (reduction: DroppedTokenReduction) => void,
+    /** Reports why selected operations did or did not change the visible payload. */
+    onBatchComplete?: (diagnostics: PendingOperationBatchDiagnostics) => void,
 ): boolean {
     let didMutateMessage = false;
+    let diagnostics: PendingOperationBatchDiagnostics | undefined;
+    const reject = (reason: string): void => {
+        if (!diagnostics) return;
+        diagnostics.reasons[reason] = (diagnostics.reasons[reason] ?? 0) + 1;
+    };
     let admitted = false;
     let startedAt = 0;
     try {
@@ -94,6 +109,18 @@ export function applyPendingOperations(
                 ...pendingOps.map((op) => ({ op, synthetic: false })),
                 ...syntheticPendingOps.map((op) => ({ op, synthetic: true })),
             ];
+            diagnostics = {
+                source:
+                    pendingOps.length > 0 && syntheticPendingOps.length > 0
+                        ? "mixed"
+                        : syntheticPendingOps.length > 0
+                          ? "synthetic"
+                          : "pending",
+                total: opsToApply.length,
+                mutated: 0,
+                persistedWithoutMutation: 0,
+                reasons: {},
+            };
 
             // Newest-K tool calls at THIS moment — the skeleton window. Computed
             // once per apply pass over all tool tags (any status: the window
@@ -107,13 +134,16 @@ export function applyPendingOperations(
             );
 
             for (const { op: pendingOp, synthetic } of opsToApply) {
+                let operationMutated = false;
                 const tagStatus = tagStatusById.get(pendingOp.tagId);
                 if (tagStatus === "compacted" || tagStatus === "dropped") {
+                    reject("already_reduced");
                     if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
                     continue;
                 }
 
                 if (protectedTagIds.has(pendingOp.tagId)) {
+                    reject("protected");
                     continue;
                 }
 
@@ -126,7 +156,14 @@ export function applyPendingOperations(
                     // only rides an already-mutating pass when the target can actually
                     // reclaim bytes right now; real pending ops keep their legacy
                     // absent persistence semantics for user-requested ctx_reduce.
-                    if (!isToolTag || target?.canDrop?.() !== true) continue;
+                    if (!isToolTag) {
+                        reject("synthetic_non_tool");
+                        continue;
+                    }
+                    if (target?.canDrop?.() !== true) {
+                        reject("synthetic_target_not_droppable");
+                        continue;
+                    }
                 }
 
                 let shouldPersistDrop = false;
@@ -137,9 +174,11 @@ export function applyPendingOperations(
                         // window. Frozen as drop_mode="edit_marker", replayed by mode.
                         const markResult = target?.editMarker?.() ?? "absent";
                         if (markResult === "incomplete" || markResult === "absent") {
+                            reject(`edit_marker_${markResult}`);
                             continue;
                         }
                         didMutateMessage = true;
+                        operationMutated = true;
                         onTagReduced?.({ tagNumber: pendingOp.tagId, mode: "edit_marker" });
                         updateTagDropMode(db, sessionId, pendingOp.tagId, "edit_marker");
                         shouldPersistDrop = true;
@@ -149,11 +188,15 @@ export function applyPendingOperations(
                             truncResult === "incomplete" ||
                             (synthetic && truncResult !== "truncated")
                         ) {
+                            reject(`truncate_${truncResult}`);
                             continue;
                         }
                         if (truncResult === "truncated") {
                             didMutateMessage = true;
+                            operationMutated = true;
                             onTagReduced?.({ tagNumber: pendingOp.tagId, mode: "truncated" });
+                        } else {
+                            reject(`truncate_${truncResult}`);
                         }
                         updateTagDropMode(db, sessionId, pendingOp.tagId, "truncated");
                         shouldPersistDrop = true;
@@ -163,11 +206,15 @@ export function applyPendingOperations(
                             dropResult === "incomplete" ||
                             (synthetic && dropResult !== "removed")
                         ) {
+                            reject(`drop_${dropResult}`);
                             continue;
                         }
                         if (dropResult === "removed") {
                             didMutateMessage = true;
+                            operationMutated = true;
                             onTagReduced?.({ tagNumber: pendingOp.tagId, mode: "full" });
+                        } else {
+                            reject(`drop_${dropResult}`);
                         }
                         updateTagDropMode(db, sessionId, pendingOp.tagId, "full");
                         shouldPersistDrop = true;
@@ -178,6 +225,7 @@ export function applyPendingOperations(
                     const changed = target.setContent(replacement);
                     if (changed) {
                         didMutateMessage = true;
+                        operationMutated = true;
                         const originalCharacters =
                             typeof priorContent === "string"
                                 ? priorContent.length
@@ -187,15 +235,23 @@ export function applyPendingOperations(
                             mode: "partial",
                             removedCharacters: Math.max(0, originalCharacters - replacement.length),
                         });
+                    } else {
+                        reject("content_unchanged");
                     }
                     shouldPersistDrop = true;
                 } else if (!synthetic) {
+                    reject("target_absent");
                     shouldPersistDrop = true;
                 }
 
-                if (!shouldPersistDrop) continue;
+                if (!shouldPersistDrop) {
+                    reject("not_persisted");
+                    continue;
+                }
                 updateTagStatus(db, sessionId, pendingOp.tagId, "dropped");
                 if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
+                if (operationMutated) diagnostics.mutated += 1;
+                else diagnostics.persistedWithoutMutation += 1;
             }
         }).immediate();
     } catch (error) {
@@ -216,6 +272,19 @@ export function applyPendingOperations(
         throw error;
     } finally {
         if (admitted) logSlowWriteTransaction("apply_pending_operations", startedAt);
+    }
+    if (diagnostics) {
+        onBatchComplete?.(diagnostics);
+        if (diagnostics.total > 0 && diagnostics.mutated === 0) {
+            const reasons = Object.entries(diagnostics.reasons)
+                .sort(([left], [right]) => left.localeCompare(right))
+                .map(([reason, count]) => `${reason}:${count}`)
+                .join(",");
+            sessionLog(
+                sessionId,
+                `pending operations no-op: source=${diagnostics.source} total=${diagnostics.total} persisted=${diagnostics.persistedWithoutMutation} reasons=${reasons || "none"}`,
+            );
+        }
     }
     return didMutateMessage;
 }

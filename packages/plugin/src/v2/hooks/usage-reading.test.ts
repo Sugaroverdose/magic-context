@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { resolveUsageReading } from "./usage-reading";
+import { resolveUsageReading, usageReadingMatchesDraft } from "./usage-reading";
 
 const windows: Record<string, number> = { old: 200_000, new: 1_000_000 };
 const limitFor = (_providerID: string, modelID: string) => windows[modelID] ?? 0;
@@ -33,6 +33,23 @@ test("a switch to a larger model admits on the outgoing window", () => {
     expect(reading?.modelKey).toBe("p/old");
     expect(reading?.admissionLimit).toBe(1_000_000);
     expect(reading!.inputTokens / reading!.admissionLimit).toBeLessThan(0.95);
+    expect(usageReadingMatchesDraft(reading!, { providerID: "p", id: "new" })).toBe(false);
+});
+
+test("same-model and legacy readings can drive outgoing pressure", () => {
+    const same = resolveUsageReading({
+        rowModel: { providerID: "p", id: "new" },
+        draftModel: { providerID: "p", id: "new" },
+        tokens: { input: 10 },
+        limitFor,
+    });
+    const legacy = resolveUsageReading({
+        draftModel: { providerID: "p", id: "new" },
+        tokens: { input: 10 },
+        limitFor,
+    });
+    expect(usageReadingMatchesDraft(same!, { providerID: "p", id: "new" })).toBe(true);
+    expect(usageReadingMatchesDraft(legacy!, { providerID: "p", id: "new" })).toBe(true);
 });
 
 test("a row without model metadata records no modelKey and admits on the draft window", () => {

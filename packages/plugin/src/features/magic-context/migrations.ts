@@ -3116,6 +3116,14 @@ export const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 90,
+        description: "record compartment lease owner pids",
+        up(db: Database): void {
+            if (!tableExists(db, "compartment_state_lease")) return;
+            ensureColumn(db, "compartment_state_lease", "owner_pid", "INTEGER");
+        },
+    },
 ];
 
 /**

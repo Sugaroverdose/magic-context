@@ -137,6 +137,7 @@ import {
     contextUsagePassSnapshot,
     loadContextUsage,
     resolveSchedulerDecision,
+    resolveUnknownUsageFromWireEstimate,
 } from "./transform-context-state";
 import { findLastUserMessageId, findSessionId } from "./transform-message-helpers";
 import {
@@ -1137,6 +1138,10 @@ export function createTransform(deps: TransformDeps) {
                     piModelRefToCanonical(lastUsageModelKey) !==
                         piModelRefToCanonical(outgoingModelKey)
                 ) {
+                    const outgoingOverflow = getOverflowState(db, sessionId, outgoingModelKey);
+                    const preserveOutgoingOverflow =
+                        outgoingOverflow.detectedContextLimit > 0 &&
+                        outgoingOverflow.detectedContextLimitModelKey !== null;
                     dropSlot(sessionId, "model-change");
                     sessionLog(
                         sessionId,
@@ -1152,15 +1157,20 @@ export function createTransform(deps: TransformDeps) {
                     clearHistorianFailureState(db, sessionId);
                     clearPersistedReasoningWatermark(db, sessionId);
                     // The emergency-drop watermark is keyed to the prior model's
-                    // ceiling (contextLimit × executeThreshold); a model change
-                    // moves the ceiling, so reset the latch to re-evaluate the
-                    // full tail. The detected-overflow limit + recovery flag were
-                    // specific to the prior model and must not leak into the new
-                    // model's pressure math, so clear them too (the proactive arm
-                    // below re-arms from scratch against the new model if needed).
+                    // ceiling (contextLimit × executeThreshold), so re-evaluate the
+                    // full tail. Clear overflow state only when it is also keyed to
+                    // the prior model; a provider error may already have recorded a
+                    // detected limit for the outgoing model before stale usage is reset.
                     clearEmergencyDropSample(db, sessionId);
-                    clearDetectedContextLimit(db, sessionId);
-                    clearEmergencyRecovery(db, sessionId);
+                    if (preserveOutgoingOverflow) {
+                        sessionLog(
+                            sessionId,
+                            `transform: preserving detected limit ${outgoingOverflow.detectedContextLimit} and overflow recovery for outgoing model ${outgoingModelKey}`,
+                        );
+                    } else {
+                        clearDetectedContextLimit(db, sessionId);
+                        clearEmergencyRecovery(db, sessionId);
+                    }
                     // Clear the in-memory usage map so loadContextUsage recomputes.
                     deps.contextUsageMap.delete(sessionId);
                     sessionMeta = {
@@ -2165,8 +2175,7 @@ export function createTransform(deps: TransformDeps) {
         // instead of the full-array scan we used to do here.
         const watermark = getMaxDroppedTagNumber(db, sessionId);
 
-        // Reuse the early scheduler result — inputs haven't changed.
-        const contextUsage = contextUsageEarly;
+        let contextUsage = contextUsageEarly;
         const rawGetNotifParams = deps.getNotificationParams;
         const tCompartmentPhase = performance.now();
         const compartmentPhase = await runCompartmentPhase({
@@ -2329,6 +2338,37 @@ export function createTransform(deps: TransformDeps) {
             bustReason: calibrationBustReason,
             onAdopt: (message) => sessionLog(sessionId, message),
         });
+        // A cache-busting pass can lack input-token usage for the selected model
+        // after a switch or overflow. Estimate from the transformed payload so
+        // emergency tool-output reclaim does not skip the pass as unknown usage.
+        if (contextUsage.inputTokens <= 0 && protectionCacheBustingPass) {
+            try {
+                const pressureEstimate = estimateFinalWireInputTokens({
+                    messages,
+                    systemPromptTokens: sessionMeta.systemPromptTokens,
+                    providerID: modelForBudget?.providerID,
+                    modelID: modelForBudget?.modelID,
+                    agentName: notificationParams.agent,
+                });
+                contextUsage = resolveUnknownUsageFromWireEstimate({
+                    usage: contextUsage,
+                    pricedPass: true,
+                    wireEstimateTokens: pressureEstimate.tokens,
+                    usableHardLimit: windowGeometry?.usableHard,
+                });
+                if (contextUsage.inputTokens > 0) {
+                    sessionLog(
+                        sessionId,
+                        `transform: unknown provider usage; using wire estimate for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} trusted=${pressureEstimate.trusted}`,
+                    );
+                }
+            } catch (error) {
+                sessionLog(
+                    sessionId,
+                    `transform: wire-estimate pressure fallback unavailable: ${getErrorMessage(error)}`,
+                );
+            }
+        }
         const protectionUsableSoft = windowGeometry?.usableSoft ?? boundaryContextLimit;
         const protectionFloor = resolveEpochFloorForPass(db, sessionId, {
             configuredOverride: deps.protectedTokens,

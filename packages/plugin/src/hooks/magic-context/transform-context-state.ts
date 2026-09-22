@@ -45,6 +45,26 @@ export function contextUsagePassSnapshot(sessionMeta: SessionMeta): ContextUsage
     };
 }
 
+export function resolveUnknownUsageFromWireEstimate(input: {
+    usage: ContextUsage;
+    pricedPass: boolean;
+    wireEstimateTokens: number | undefined;
+    usableHardLimit: number | undefined;
+}): ContextUsage {
+    if (input.usage.inputTokens > 0 || !input.pricedPass) return input.usage;
+    const tokens = input.wireEstimateTokens;
+    if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens <= 0) return input.usage;
+    const limit = input.usableHardLimit;
+    const estimatedPercentage =
+        typeof limit === "number" && Number.isFinite(limit) && limit > 0
+            ? (tokens / limit) * 100
+            : input.usage.percentage;
+    return {
+        inputTokens: tokens,
+        percentage: Math.max(input.usage.percentage, estimatedPercentage),
+    };
+}
+
 export function loadContextUsage(
     contextUsageMap: Map<string, ContextUsageCacheEntry>,
     db: ContextDatabase,
