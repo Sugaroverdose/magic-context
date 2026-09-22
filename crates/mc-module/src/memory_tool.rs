@@ -144,6 +144,8 @@ pub struct MemorySearchOptions<'a> {
     pub include_messages: bool,
     pub include_notes: bool,
     pub excluded_memory_ids: &'a BTreeSet<i64>,
+    pub from_ms: Option<i64>,
+    pub to_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -383,6 +385,8 @@ pub fn search_memories_and_compartments_for_session(
             include_messages: true,
             include_notes: true,
             excluded_memory_ids: &excluded_memory_ids,
+            from_ms: None,
+            to_ms: None,
         },
     )
 }
@@ -419,10 +423,17 @@ pub fn search_available_corpora_for_session_with_diagnostics(
         });
     }
 
+    let in_range = |timestamp: i64| {
+        options.from_ms.is_none_or(|from| timestamp >= from)
+            && options.to_ms.is_none_or(|to| timestamp <= to)
+    };
     let mut ranked = Vec::new();
     let mut suppressed_visible_memory_ids = Vec::new();
     if options.include_memories {
         for memory in store.search_visible_memory_contents(project_path, query)? {
+            if !in_range(memory.created_at) {
+                continue;
+            }
             if first_match(&memory.content, query).is_none() {
                 continue;
             }
@@ -435,6 +446,9 @@ pub fn search_available_corpora_for_session_with_diagnostics(
     }
     if options.include_messages {
         for compartment in store.search_compartments_like(session_id, query)? {
+            if !in_range(compartment.created_at) {
+                continue;
+            }
             if let Some(hit) = compartment_search_hit(compartment, query) {
                 ranked.push(hit);
             }
@@ -442,6 +456,9 @@ pub fn search_available_corpora_for_session_with_diagnostics(
     }
     if options.include_notes {
         for note in store.search_notes_like(project_path, session_id, query)? {
+            if !in_range(note.created_at_ms) {
+                continue;
+            }
             if let Some(hit) = note_search_hit(note, query) {
                 ranked.push(hit);
             }
@@ -483,6 +500,8 @@ pub fn resolve_memory_ids_for_search(
         ids,
         limit,
         excluded_memory_ids,
+        None,
+        None,
     )?
     .results)
 }
@@ -493,6 +512,8 @@ pub fn resolve_memory_ids_for_search_with_diagnostics(
     ids: &[i64],
     limit: usize,
     excluded_memory_ids: &BTreeSet<i64>,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
 ) -> Result<MemoryIdSearchOutcome, MemoryToolError> {
     if ids.is_empty() || limit == 0 {
         return Ok(MemoryIdSearchOutcome {
@@ -511,6 +532,11 @@ pub fn resolve_memory_ids_for_search_with_diagnostics(
         let Some(memory) = visible.get(id) else {
             continue;
         };
+        if from_ms.is_some_and(|from| memory.created_at < from)
+            || to_ms.is_some_and(|to| memory.created_at > to)
+        {
+            continue;
+        }
         if excluded_memory_ids.contains(id) {
             suppressed_visible_memory_ids.push(*id);
             continue;
@@ -1249,6 +1275,86 @@ mod tests {
     }
 
     #[test]
+    fn dated_search_filters_memories_notes_and_compartment_summaries_before_ranking() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = "git:dated";
+        let session_id = "session-dated";
+        let outside_memory = insert(
+            &store,
+            project,
+            "CONSTRAINTS",
+            "dated needle outside",
+            1_000,
+        );
+        let inside_memory = insert(&store, project, "CONSTRAINTS", "dated needle inside", 3_000);
+        let outside_note = insert_note(
+            &store,
+            project,
+            session_id,
+            "dated needle outside note",
+            1_000,
+        );
+        let inside_note = insert_note(
+            &store,
+            project,
+            session_id,
+            "dated needle inside note",
+            3_000,
+        );
+        let mut outside_compartment = comp(1, "dated needle outside compartment", "body", None);
+        outside_compartment.created_at = 1_000;
+        let mut inside_compartment = comp(2, "dated needle inside compartment", "body", None);
+        inside_compartment.created_at = 3_000;
+        store
+            .replace_compartments(session_id, &[outside_compartment, inside_compartment])
+            .unwrap();
+
+        let excluded = BTreeSet::new();
+        let outcome = search_available_corpora_for_session_with_diagnostics(
+            &store,
+            project,
+            session_id,
+            "dated needle",
+            MemorySearchOptions {
+                limit: 20,
+                include_memories: true,
+                include_messages: true,
+                include_notes: true,
+                excluded_memory_ids: &excluded,
+                from_ms: Some(2_000),
+                to_ms: Some(4_000),
+            },
+        )
+        .unwrap();
+
+        assert!(outcome
+            .results
+            .iter()
+            .any(|result| result.id == inside_memory));
+        assert!(!outcome
+            .results
+            .iter()
+            .any(|result| result.id == outside_memory));
+        assert!(outcome
+            .results
+            .iter()
+            .any(|result| result.id == inside_note));
+        assert!(!outcome
+            .results
+            .iter()
+            .any(|result| result.id == outside_note));
+        assert!(outcome
+            .results
+            .iter()
+            .any(|result| result.sequence == Some(2)));
+        assert!(!outcome
+            .results
+            .iter()
+            .any(|result| result.sequence == Some(1)));
+    }
+
+    #[test]
     fn note_search_excludes_dismissed_rows_and_scores_keyword_relevance() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -1292,6 +1398,8 @@ mod tests {
                 include_messages: false,
                 include_notes: true,
                 excluded_memory_ids: &excluded,
+                from_ms: None,
+                to_ms: None,
             },
         )
         .unwrap();

@@ -49,6 +49,23 @@ describe("createCtxSearchTools", () => {
         expect(result).toBe("Error: 'query' is required.");
     });
 
+    it("rejects an invalid date instead of silently searching without it", async () => {
+        const tools = createCtxSearchTools({
+            db,
+            resolveProjectPath: () => "/repo/project",
+            memoryEnabled: false,
+            embeddingEnabled: false,
+            readMessages: () => [],
+        });
+
+        const result = await tools.ctx_search.execute(
+            { query: "needle", from: "2026-02-30" },
+            toolContext(),
+        );
+
+        expect(result).toBe("Error: Invalid 'from' date; use YYYY-MM-DD or a full ISO datetime.");
+    });
+
     it("formats empty search results", async () => {
         const tools = createCtxSearchTools({
             db,

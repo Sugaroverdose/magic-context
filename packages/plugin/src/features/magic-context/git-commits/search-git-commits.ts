@@ -13,8 +13,11 @@ import { loadProjectCommitEmbeddings } from "./storage-git-commit-embeddings";
 import type { StoredGitCommit } from "./storage-git-commits";
 
 const ftsStatements = new WeakMap<Database, PreparedStatement>();
+const datedFtsStatements = new WeakMap<Database, PreparedStatement>();
 const ftsPlainStatements = new WeakMap<Database, PreparedStatement>();
+const datedFtsPlainStatements = new WeakMap<Database, PreparedStatement>();
 const getBySHAsStatements = new WeakMap<Database, PreparedStatement>();
+const datedGetBySHAsStatements = new WeakMap<Database, PreparedStatement>();
 
 interface CommitRow {
     sha: string;
@@ -38,8 +41,9 @@ function rowToCommit(row: CommitRow): StoredGitCommit {
     };
 }
 
-function getFtsStatement(db: Database): PreparedStatement {
-    let stmt = ftsStatements.get(db);
+function getFtsStatement(db: Database, dated = false): PreparedStatement {
+    const statements = dated ? datedFtsStatements : ftsStatements;
+    let stmt = statements.get(db);
     if (!stmt) {
         stmt = db.prepare(
             `SELECT c.sha AS sha, c.project_path AS project_path, c.short_sha AS short_sha,
@@ -47,38 +51,45 @@ function getFtsStatement(db: Database): PreparedStatement {
                     c.committed_at AS committed_at, c.indexed_at AS indexed_at
              FROM git_commits_fts
              INNER JOIN git_commits c ON c.sha = git_commits_fts.sha
-             WHERE c.project_path = ? AND git_commits_fts MATCH ?
+             WHERE c.project_path = ?
+               ${dated ? "AND c.committed_at BETWEEN ? AND ?" : ""}
+               AND git_commits_fts MATCH ?
              ORDER BY bm25(git_commits_fts) LIMIT ?`,
         );
-        ftsStatements.set(db, stmt);
+        statements.set(db, stmt);
     }
     return stmt;
 }
 
-function getLikeFallbackStatement(db: Database): PreparedStatement {
-    let stmt = ftsPlainStatements.get(db);
+function getLikeFallbackStatement(db: Database, dated = false): PreparedStatement {
+    const statements = dated ? datedFtsPlainStatements : ftsPlainStatements;
+    let stmt = statements.get(db);
     if (!stmt) {
         stmt = db.prepare(
             `SELECT sha, project_path, short_sha, message, author, committed_at, indexed_at
              FROM git_commits
-             WHERE project_path = ? AND lower(message) LIKE '%' || lower(?) || '%'
+             WHERE project_path = ?
+               ${dated ? "AND committed_at BETWEEN ? AND ?" : ""}
+               AND lower(message) LIKE '%' || lower(?) || '%'
              ORDER BY committed_at DESC LIMIT ?`,
         );
-        ftsPlainStatements.set(db, stmt);
+        statements.set(db, stmt);
     }
     return stmt;
 }
 
-function getBySHAsStatement(db: Database): PreparedStatement {
-    let stmt = getBySHAsStatements.get(db);
+function getBySHAsStatement(db: Database, dated = false): PreparedStatement {
+    const statements = dated ? datedGetBySHAsStatements : getBySHAsStatements;
+    let stmt = statements.get(db);
     if (!stmt) {
         stmt = db.prepare(
             `SELECT sha, project_path, short_sha, message, author, committed_at, indexed_at
                FROM git_commits
-              WHERE project_path = ?
-                AND sha IN (SELECT value FROM json_each(?))`,
+               WHERE project_path = ?
+                 ${dated ? "AND committed_at BETWEEN ? AND ?" : ""}
+                 AND sha IN (SELECT value FROM json_each(?))`,
         );
-        getBySHAsStatements.set(db, stmt);
+        statements.set(db, stmt);
     }
     return stmt;
 }
@@ -103,6 +114,8 @@ export interface SearchGitCommitsOptions {
     queryEmbedding?: Float32Array | null;
     /** ID of the model that generated queryEmbedding; commit vectors are read only from the same model space. */
     queryModelId?: string | null;
+    from?: number;
+    to?: number;
 }
 
 function clamp01(value: number): number {
@@ -127,14 +140,18 @@ export function searchGitCommitsSync(
     const ftsWeight = options.ftsWeight ?? 0.3;
     const singleSourcePenalty = options.singleSourcePenalty ?? 0.8;
     const fetchLimit = Math.max(options.limit * 3, 30);
+    const dated = options.from !== undefined || options.to !== undefined;
+    const from = options.from ?? Number.MIN_SAFE_INTEGER;
+    const to = options.to ?? Number.MAX_SAFE_INTEGER;
 
     // ---- FTS pass -------------------------------------------------------
     const ftsCandidates: StoredGitCommit[] = [];
     const sanitized = sanitizeFtsQuery(trimmed);
     if (sanitized.length > 0) {
         try {
-            for (const row of getFtsStatement(db).all(
+            for (const row of getFtsStatement(db, dated).all(
                 projectPath,
+                ...(dated ? [from, to] : []),
                 sanitized,
                 fetchLimit,
             ) as CommitRow[]) {
@@ -149,8 +166,9 @@ export function searchGitCommitsSync(
 
     // LIKE fallback when FTS returned nothing (short tokens, exact-substring queries)
     if (ftsCandidates.length === 0) {
-        for (const row of getLikeFallbackStatement(db).all(
+        for (const row of getLikeFallbackStatement(db, dated).all(
             projectPath,
+            ...(dated ? [from, to] : []),
             trimmed,
             fetchLimit,
         ) as CommitRow[]) {
@@ -183,8 +201,9 @@ export function searchGitCommitsSync(
     // SQLite's positional-parameter limit for large semantic pools.
     const semanticOnlyShas = [...semanticScores.keys()].filter((sha) => !bySha.has(sha));
     if (semanticOnlyShas.length > 0) {
-        const rows = getBySHAsStatement(db).all(
+        const rows = getBySHAsStatement(db, dated).all(
             projectPath,
+            ...(dated ? [from, to] : []),
             JSON.stringify(semanticOnlyShas),
         ) as CommitRow[];
         for (const row of rows) bySha.set(row.sha, rowToCommit(row));

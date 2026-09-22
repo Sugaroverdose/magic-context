@@ -34,6 +34,10 @@ import {
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { CTX_SEARCH_DESCRIPTION } from "@magic-context/core/tools/ctx-search/constants";
+import {
+	parseSearchDateRange,
+	SearchDateRangeError,
+} from "@magic-context/core/tools/ctx-search/date-range";
 import { unwrapImitatedReducedArgs } from "@magic-context/core/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
 
@@ -50,6 +54,16 @@ const ParamsSchema = Type.Object(
 		limit: Type.Optional(
 			Type.Number({
 				description: "Maximum results to return (default: 10)",
+			}),
+		),
+		from: Type.Optional(
+			Type.String({
+				description: "Earliest date, YYYY-MM-DD (inclusive)",
+			}),
+		),
+		to: Type.Optional(
+			Type.String({
+				description: "Latest date, YYYY-MM-DD (inclusive; default open)",
 			}),
 		),
 		sources: Type.Optional(
@@ -119,6 +133,8 @@ export function createCtxSearchTool(
 			params = unwrapImitatedReducedArgs(params, ["query"], {
 				query: "string",
 				limit: "number",
+				from: "string",
+				to: "string",
 				sources: {
 					type: "array",
 					items: "string",
@@ -130,6 +146,17 @@ export function createCtxSearchTool(
 			if (!query) {
 				return {
 					content: [{ type: "text", text: "Error: 'query' is required." }],
+					details: undefined,
+					isError: true,
+				};
+			}
+			let dateRange: ReturnType<typeof parseSearchDateRange>;
+			try {
+				dateRange = parseSearchDateRange(params.from, params.to);
+			} catch (error) {
+				if (!(error instanceof SearchDateRangeError)) throw error;
+				return {
+					content: [{ type: "text", text: `Error: ${error.message}` }],
 					details: undefined,
 					isError: true,
 				};
@@ -192,6 +219,7 @@ export function createCtxSearchTool(
 					limit: Math.max(normalizeLimit(params.limit), idShape.length),
 					visibleMemoryIds,
 					diagnostics,
+					...dateRange,
 				});
 				if (
 					idResults !== null ||
@@ -243,6 +271,7 @@ export function createCtxSearchTool(
 					// (parity with OpenCode's ctx_search). Pi auto-search leaves
 					// this off to protect its latency budget.
 					explicitSearch: true,
+					...dateRange,
 				},
 			);
 

@@ -265,6 +265,17 @@ function rawEntryVersion(entry: MessageEntry): string | number {
 		: entry.id;
 }
 
+/** Pi/OMP persist JSONL entry timestamps as ISO strings; tolerate numeric SDK fixtures too. */
+export function parsePiEntryTimestamp(entry: MessageEntry): number | null {
+	const record = entry as unknown as Record<string, unknown>;
+	const raw = record.timestamp;
+	if (typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0)
+		return raw;
+	if (typeof raw !== "string" || raw.trim().length === 0) return null;
+	const parsed = Date.parse(raw);
+	return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
 function attachPiPartVersion(
 	parts: unknown[],
 	version: string | number,
@@ -303,16 +314,25 @@ function convertEntriesToRawMessageRange(
 	let hasPendingToolParts = false;
 	let pendingFirstRealId = "";
 	let pendingFirstRealVersion: string | number = "";
+	let pendingFirstCreatedAt: number | null = null;
 
 	const appendMessage = (
 		id: string,
 		role: string,
 		version: string | number,
+		createdAt: number | null,
 		parts: () => unknown[],
 	): boolean => {
 		const ordinal = nextOrdinal++;
 		if (ordinal > normalizedAfter && ordinal <= normalizedWatermark) {
-			result.push({ ordinal, id, role, parts: parts(), version });
+			result.push({
+				ordinal,
+				id,
+				role,
+				parts: parts(),
+				version,
+				...(createdAt === null ? {} : { createdAt }),
+			});
 		}
 		return (
 			result.length >= normalizedLimit || nextOrdinal > normalizedWatermark
@@ -335,6 +355,7 @@ function convertEntriesToRawMessageRange(
 			if (pendingFirstRealId === "") {
 				pendingFirstRealId = entry.id;
 				pendingFirstRealVersion = version;
+				pendingFirstCreatedAt = parsePiEntryTimestamp(entry);
 			}
 			continue;
 		}
@@ -342,14 +363,21 @@ function convertEntriesToRawMessageRange(
 		if (role === "user") {
 			const version = rawEntryVersion(entry);
 			const bufferedToolParts = pendingToolParts;
-			const done = appendMessage(entry.id, "user", version, () => [
-				...bufferedToolParts,
-				...attachPiPartVersion(synthesizeUserParts(msg), version),
-			]);
+			const done = appendMessage(
+				entry.id,
+				"user",
+				version,
+				parsePiEntryTimestamp(entry),
+				() => [
+					...bufferedToolParts,
+					...attachPiPartVersion(synthesizeUserParts(msg), version),
+				],
+			);
 			pendingToolParts = [];
 			hasPendingToolParts = false;
 			pendingFirstRealId = "";
 			pendingFirstRealVersion = "";
+			pendingFirstCreatedAt = null;
 			if (done) break;
 			continue;
 		}
@@ -363,19 +391,25 @@ function convertEntriesToRawMessageRange(
 					`${SYNTH_USER_ID_PREFIX}${pendingId}`,
 					"user",
 					pendingVersion,
+					pendingFirstCreatedAt,
 					() => bufferedToolParts,
 				);
 				pendingToolParts = [];
 				hasPendingToolParts = false;
 				pendingFirstRealId = "";
 				pendingFirstRealVersion = "";
+				pendingFirstCreatedAt = null;
 				if (done) break;
 			}
 
 			const version = rawEntryVersion(entry);
 			if (
-				appendMessage(entry.id, "assistant", version, () =>
-					attachPiPartVersion(synthesizeAssistantParts(msg), version),
+				appendMessage(
+					entry.id,
+					"assistant",
+					version,
+					parsePiEntryTimestamp(entry),
+					() => attachPiPartVersion(synthesizeAssistantParts(msg), version),
 				)
 			) {
 				break;
@@ -391,6 +425,7 @@ function convertEntriesToRawMessageRange(
 				entry.id,
 				typeof role === "string" ? role : "unknown",
 				rawEntryVersion(entry),
+				parsePiEntryTimestamp(entry),
 				() => [],
 			)
 		) {
@@ -407,6 +442,7 @@ function convertEntriesToRawMessageRange(
 			`${SYNTH_USER_ID_PREFIX}${pendingFirstRealId}`,
 			"user",
 			pendingFirstRealVersion,
+			pendingFirstCreatedAt,
 			() => pendingToolParts,
 		);
 	}
@@ -441,10 +477,11 @@ export function convertEntriesToRawMessagePage(
 	);
 }
 
-interface MessageEntry {
+export interface MessageEntry {
 	type: "message";
 	id: string;
 	message: unknown;
+	timestamp?: string | number;
 }
 
 function isMessageEntry(value: unknown): value is MessageEntry {

@@ -802,6 +802,42 @@ describe("m[0]/m[1] materialization", () => {
         expect(rendered.m0Text).toContain("## 1-2 · 2026-01-02→03 · dated compartment");
     });
 
+    it("renders byte-identical headings from indexed times without reopening the host store", () => {
+        db = makeDb();
+        storeDatedCompartment();
+        const start = new Date(2026, 0, 2, 12).getTime();
+        const end = new Date(2026, 0, 3, 12).getTime();
+        createOpenCodeMessageTimes([
+            { id: "m1", timestamp: start },
+            { id: "m2", timestamp: end },
+        ]);
+        const state = readStateFromMeta();
+        const fallback = materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            temporalAwareness: true,
+        }).m0Text;
+
+        db.prepare(
+            `INSERT INTO message_fts_rowid_map
+                (session_id, message_ordinal, fts_rowid, message_time_ms)
+             VALUES (?, ?, ?, ?), (?, ?, ?, ?)`,
+        ).run(SESSION_ID, 1, 10_001, start, SESSION_ID, 2, 10_002, end);
+        closeReadOnlySessionDb();
+        rmSync(join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db"), { force: true });
+        clearInjectionCache(SESSION_ID);
+
+        const indexed = materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            temporalAwareness: true,
+        }).m0Text;
+        expect(indexed).toBe(fallback);
+        expect(indexed).toContain("## 1-2 · 2026-01-02→03 · dated compartment");
+    });
+
     it("omits compartment date ranges from m[0] when temporal awareness is disabled", () => {
         db = makeDb();
         storeDatedCompartment();

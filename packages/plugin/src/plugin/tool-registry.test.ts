@@ -86,7 +86,7 @@ describe("createToolRegistry — memory gating", () => {
                 "offset",
                 "note_ids",
             ],
-            ctx_search: ["query", "limit", "sources"],
+            ctx_search: ["query", "limit", "from", "to", "sources"],
             ctx_memory: ["action", "content", "category", "ids", "limit", "reason"],
         };
 

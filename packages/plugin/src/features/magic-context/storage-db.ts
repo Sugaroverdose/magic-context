@@ -104,7 +104,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastMigrationOnOpenRefusal = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 88;
+export const LATEST_SUPPORTED_VERSION = 89;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -873,11 +873,27 @@ function finishDatabaseOpen(
                     `[magic-context] tool-owner backfill failed (continuing with lazy adoption fallback): ${getErrorMessage(error)}`,
                 );
             }
-            void startMessageFtsRowidMapBackfill(db).catch((error) => {
-                log(
-                    `[magic-context] message FTS rowid-map backfill failed (will resume next startup): ${getErrorMessage(error)}`,
-                );
-            });
+            void startMessageFtsRowidMapBackfill(db)
+                .then(async () => {
+                    const [
+                        { readRawSessionMessagePage, readRawSessionMessages },
+                        { startMessageTimeBackfill },
+                    ] = await Promise.all([
+                        import("../../hooks/magic-context/read-session-chunk"),
+                        import("./message-time-backfill"),
+                    ]);
+                    await startMessageTimeBackfill(
+                        db,
+                        Object.assign(readRawSessionMessages, {
+                            readPage: readRawSessionMessagePage,
+                        }),
+                    );
+                })
+                .catch((error) => {
+                    log(
+                        `[magic-context] message-index backfill failed (will resume next startup): ${getErrorMessage(error)}`,
+                    );
+                });
         };
         if (bootQuietRemainingMs() > 0) scheduleAfterBootQuiet(runBackfills);
         else runBackfills();
@@ -1441,6 +1457,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       session_id TEXT NOT NULL,
       message_ordinal INTEGER NOT NULL,
       fts_rowid INTEGER NOT NULL,
+      message_time_ms INTEGER,
       PRIMARY KEY(session_id, message_ordinal)
     );
 
@@ -1453,6 +1470,17 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     INSERT OR IGNORE INTO message_fts_rowid_map_backfill_state
       (id, watermark_rowid, completed, updated_at)
     VALUES (1, 0, 0, 0);
+
+    CREATE TABLE IF NOT EXISTS message_time_backfill_state (
+      id INTEGER PRIMARY KEY CHECK(id = 1),
+      cursor_session_id TEXT NOT NULL DEFAULT '',
+      cursor_ordinal INTEGER NOT NULL DEFAULT 0,
+      completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
+      updated_at INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT OR IGNORE INTO message_time_backfill_state
+      (id, cursor_session_id, cursor_ordinal, completed, updated_at)
+    VALUES (1, '', 0, 0, 0);
 
     CREATE TABLE IF NOT EXISTS message_history_index (
       session_id TEXT PRIMARY KEY,
@@ -1781,6 +1809,12 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE INDEX IF NOT EXISTS idx_memories_project_category_hash ON memories(project_path, category, normalized_hash);
     CREATE INDEX IF NOT EXISTS idx_message_history_index_updated_at ON message_history_index(updated_at);
   `);
+
+    ensureColumn(db, "message_fts_rowid_map", "message_time_ms", "INTEGER");
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_message_fts_rowid_map_session_time
+        ON message_fts_rowid_map(session_id, message_time_ms);
+    `);
 
     ensureColumn(db, "primer_candidates", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
     ensureColumn(db, "primer_candidates", "source_start_message_id", "TEXT NOT NULL DEFAULT ''");

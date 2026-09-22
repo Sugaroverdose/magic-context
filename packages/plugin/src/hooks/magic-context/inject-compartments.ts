@@ -1894,21 +1894,47 @@ function nullableString(value: unknown): string | null {
  * persisted bytes without consulting live timestamps.
  */
 function withCompartmentDates(
+    db: Database,
     sessionId: string,
     compartments: M0Compartment[],
     temporalAwareness: boolean | undefined,
 ): M0Compartment[] {
     if (!temporalAwareness || compartments.length === 0) return compartments;
 
-    const messageIds = new Set<string>();
+    const ordinals = new Set<number>();
     for (const compartment of compartments) {
-        if (compartment.startMessageId) messageIds.add(compartment.startMessageId);
-        if (compartment.endMessageId) messageIds.add(compartment.endMessageId);
+        ordinals.add(compartment.startMessage);
+        ordinals.add(compartment.endMessage);
     }
-    const times = getMessageTimesFromOpenCodeDb(sessionId, Array.from(messageIds));
+    const indexedRows = db
+        .prepare(
+            `SELECT message_ordinal AS ordinal, message_time_ms AS time
+               FROM message_fts_rowid_map
+              WHERE session_id = ?
+                AND message_time_ms IS NOT NULL
+                AND message_ordinal IN (SELECT value FROM json_each(?))`,
+        )
+        .all(sessionId, JSON.stringify([...ordinals])) as Array<{ ordinal: number; time: number }>;
+    const indexedTimes = new Map(indexedRows.map((row) => [row.ordinal, row.time]));
+    const fallbackIds = new Set<string>();
+    for (const compartment of compartments) {
+        if (!indexedTimes.has(compartment.startMessage) && compartment.startMessageId) {
+            fallbackIds.add(compartment.startMessageId);
+        }
+        if (!indexedTimes.has(compartment.endMessage) && compartment.endMessageId) {
+            fallbackIds.add(compartment.endMessageId);
+        }
+    }
+    const fallbackTimes =
+        fallbackIds.size > 0
+            ? getMessageTimesFromOpenCodeDb(sessionId, Array.from(fallbackIds))
+            : new Map<string, number>();
     return compartments.map((compartment) => {
-        const startMs = times.get(compartment.startMessageId);
-        const endMs = times.get(compartment.endMessageId);
+        const startMs =
+            indexedTimes.get(compartment.startMessage) ??
+            fallbackTimes.get(compartment.startMessageId);
+        const endMs =
+            indexedTimes.get(compartment.endMessage) ?? fallbackTimes.get(compartment.endMessageId);
         if (startMs === undefined || endMs === undefined) return compartment;
         return {
             ...compartment,
@@ -2282,7 +2308,12 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         throw error;
     }
 
-    compartments = withCompartmentDates(options.sessionId, compartments, options.temporalAwareness);
+    compartments = withCompartmentDates(
+        options.db,
+        options.sessionId,
+        compartments,
+        options.temporalAwareness,
+    );
 
     const memoryBudget = options.memoryInjectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS;
     const memoryRenderOptions: MemoryRenderOptions = {
@@ -2675,6 +2706,7 @@ function renderM1WithMetadata(
     if (memoryUpdates.block) blocks.push(memoryUpdates.block);
 
     const newCompartments = withCompartmentDates(
+        options.db,
         options.sessionId,
         readNewCompartments(options.db, options.sessionId, markers.maxCompartmentSeq).filter(
             (c) => !isNoContentCompartment(c),
@@ -3120,6 +3152,7 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
     const compartments = options.compactionOff
         ? []
         : withCompartmentDates(
+              options.db,
               options.sessionId,
               readM0Compartments(options.db, options.sessionId),
               options.temporalAwareness,

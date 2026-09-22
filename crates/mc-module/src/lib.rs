@@ -62,7 +62,7 @@ use std::time::{Duration, Instant};
 use mc_store::MEMORY_VISIBILITY_MUTATION_CATEGORY;
 use tokio::sync::Notify;
 
-use chrono::{Local, TimeZone};
+use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
 use cortexkit_lease::LeaseError;
 use cortexkit_store::StoreError;
 use cortexkit_store_types::{sqlite_store_path, Isolation, StorageBackend, StorageDescriptor};
@@ -12754,6 +12754,19 @@ impl McHandler {
             .filter(|value| *value > 0)
             .unwrap_or(8)
             .clamp(1, 25);
+        let from_ms = match parse_search_date_bound(args, "from", false) {
+            Ok(value) => value,
+            Err(error) => return tool_error_result(format!("Error: {error}")),
+        };
+        let to_ms = match parse_search_date_bound(args, "to", true) {
+            Ok(value) => value,
+            Err(error) => return tool_error_result(format!("Error: {error}")),
+        };
+        if matches!((from_ms, to_ms), (Some(from), Some(to)) if from > to) {
+            return tool_error_result(
+                "Error: Invalid date range; 'from' must be on or before 'to'.".to_string(),
+            );
+        }
         let sources = facade_search_sources(args);
         let facade_scope = match self
             .resolve_facade_scope(channel, Some(args), "memories", false)
@@ -12804,6 +12817,8 @@ impl McHandler {
                     &ids,
                     limit.max(ids.len()),
                     &visible_memory_ids,
+                    from_ms,
+                    to_ms,
                 ) {
                     Ok(outcome)
                         if outcome.results.is_some()
@@ -12837,6 +12852,8 @@ impl McHandler {
                 include_messages: sources.message,
                 include_notes: sources.note,
                 excluded_memory_ids: &visible_memory_ids,
+                from_ms,
+                to_ms,
             },
         ) {
             Ok(outcome) => mcp_text_result(
@@ -15485,6 +15502,43 @@ fn usize_arg(args: &Map<String, Value>, key: &str) -> Option<usize> {
         .and_then(|value| usize::try_from(value).ok())
 }
 
+fn parse_search_date_bound(
+    args: &Map<String, Value>,
+    key: &str,
+    end_of_day: bool,
+) -> Result<Option<i64>, String> {
+    let milliseconds_key = format!("{key}_ms");
+    if let Some(value) = args.get(&milliseconds_key) {
+        return value
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| format!("Invalid '{milliseconds_key}' timestamp."));
+    }
+    let Some(value) = args.get(key) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_str() else {
+        return Err(format!(
+            "Invalid '{key}' date; use YYYY-MM-DD or a full ISO datetime."
+        ));
+    };
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        let start = date
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight is valid")
+            .and_utc()
+            .timestamp_millis();
+        return Ok(Some(if end_of_day {
+            start + 24 * 60 * 60 * 1000 - 1
+        } else {
+            start
+        }));
+    }
+    DateTime::parse_from_rfc3339(value)
+        .map(|date| Some(date.with_timezone(&Utc).timestamp_millis()))
+        .map_err(|_| format!("Invalid '{key}' date; use YYYY-MM-DD or a full ISO datetime."))
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CtxExpandMode {
     Message(i64),
@@ -17509,6 +17563,14 @@ fn ctx_search_schema() -> Value {
                 "default": 8,
                 "description": "Maximum number of matches to return."
             },
+            "from": {
+                "type": "string",
+                "description": "Earliest date, YYYY-MM-DD (inclusive)"
+            },
+            "to": {
+                "type": "string",
+                "description": "Latest date, YYYY-MM-DD (inclusive; default open)"
+            },
         }
     })
 }
@@ -17650,6 +17712,28 @@ mod tests {
         StoredCompartment, TagMintInput,
     };
     use tokio::sync::Notify;
+
+    #[test]
+    fn search_date_bounds_are_utc_inclusive_and_reject_invalid_values() {
+        let date_args = serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+            "from": "2026-09-22",
+            "to": "2026-09-22"
+        }))
+        .unwrap();
+        assert_eq!(
+            parse_search_date_bound(&date_args, "from", false).unwrap(),
+            Some(1_790_035_200_000)
+        );
+        assert_eq!(
+            parse_search_date_bound(&date_args, "to", true).unwrap(),
+            Some(1_790_121_599_999)
+        );
+        let invalid = serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+            "from": "2026-02-30"
+        }))
+        .unwrap();
+        assert!(parse_search_date_bound(&invalid, "from", false).is_err());
+    }
 
     #[test]
     fn manifest_consumes_follow_the_resolved_runner_target() {

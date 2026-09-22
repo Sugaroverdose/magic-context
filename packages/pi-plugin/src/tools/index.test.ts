@@ -119,7 +119,7 @@ describe("registerMagicContextTools", () => {
 			registerMagicContextTools(pi, { db });
 
 			const expectedFields: Record<string, string[]> = {
-				ctx_search: ["query", "limit", "sources"],
+				ctx_search: ["query", "limit", "from", "to", "sources"],
 				ctx_memory: ["action", "content", "category", "ids", "limit", "reason"],
 				ctx_note: [
 					"action",

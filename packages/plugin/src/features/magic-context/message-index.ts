@@ -11,7 +11,11 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { removeSystemReminders } from "../../shared/system-directive";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { clearCompressionDepth } from "./compression-depth-storage";
-import { messageFtsOrdinalRangeIsMapped, recordMessageFtsRowid } from "./message-fts-rowid-map";
+import {
+    messageFtsOrdinalRangeIsMapped,
+    recordIndexedMessageTime,
+    recordMessageFtsRowid,
+} from "./message-fts-rowid-map";
 import { deleteSessionScopedRows, SESSION_SCOPED_TABLES } from "./storage-session-tables";
 
 interface MessageHistoryIndexRow {
@@ -286,6 +290,7 @@ function insertMessageFtsRow(
     messageId: string,
     role: string,
     content: string,
+    messageTimeMs: number | null | undefined,
 ): void {
     const result = getInsertMessageStatement(db).run(
         sessionId,
@@ -294,7 +299,13 @@ function insertMessageFtsRow(
         role,
         content,
     ) as { lastInsertRowid: number | bigint };
-    recordMessageFtsRowid(db, sessionId, messageOrdinal, result.lastInsertRowid);
+    recordMessageFtsRowid(
+        db,
+        sessionId,
+        messageOrdinal,
+        result.lastInsertRowid,
+        messageTimeMs ?? null,
+    );
 }
 
 interface CountRow {
@@ -326,7 +337,13 @@ function getMessageSourceSnapshot(message: RawMessage): {
 
 export function getMessageIndexSourceIdentity(message: RawMessage): string {
     const source = getMessageSourceSnapshot(message);
-    return JSON.stringify([source.ordinal, source.sourceVersion, source.contentHash, source.role]);
+    return JSON.stringify([
+        source.ordinal,
+        source.sourceVersion,
+        source.contentHash,
+        source.role,
+        message.createdAt ?? null,
+    ]);
 }
 
 export function isMessageIndexSourceCurrent(
@@ -515,6 +532,7 @@ function indexSingleMessageInTransaction(
 
     if (message.ordinal <= currentWatermark) {
         if (isMessageIndexSourceCurrent(db, sessionId, message)) {
+            recordIndexedMessageTime(db, sessionId, message.ordinal, message.createdAt);
             return false;
         }
         // Replacing before the legacy row is mapped would insert the revision while
@@ -530,7 +548,15 @@ function indexSingleMessageInTransaction(
         getDeleteMessageFtsMapStatement(db).run(sessionId, sessionId, message.id);
         const content = setMessageSource(db, sessionId, message, now);
         if (content.length > 0 && (message.role === "user" || message.role === "assistant")) {
-            insertMessageFtsRow(db, sessionId, message.ordinal, message.id, message.role, content);
+            insertMessageFtsRow(
+                db,
+                sessionId,
+                message.ordinal,
+                message.id,
+                message.role,
+                content,
+                message.createdAt,
+            );
         }
         setIndexProgress(
             db,
@@ -559,7 +585,15 @@ function indexSingleMessageInTransaction(
         (message.role === "user" || message.role === "assistant") &&
         !isMessageAlreadyIndexed(db, sessionId, message.id)
     ) {
-        insertMessageFtsRow(db, sessionId, message.ordinal, message.id, message.role, content);
+        insertMessageFtsRow(
+            db,
+            sessionId,
+            message.ordinal,
+            message.id,
+            message.role,
+            content,
+            message.createdAt,
+        );
         inserted = true;
     }
 
@@ -579,6 +613,7 @@ export function indexSingleMessage(db: Database, sessionId: string, message: Raw
         message.ordinal <= currentWatermark &&
         isMessageIndexSourceCurrent(db, sessionId, message)
     ) {
+        recordIndexedMessageTime(db, sessionId, message.ordinal, message.createdAt);
         return false;
     }
     const dirtyFloorBeforeAttempt = getDirtyIndexFloor(db, sessionId);
@@ -692,7 +727,15 @@ export function indexMessagesAfterOrdinal(
             ) {
                 continue;
             }
-            insertMessageFtsRow(db, sessionId, message.ordinal, message.id, message.role, content);
+            insertMessageFtsRow(
+                db,
+                sessionId,
+                message.ordinal,
+                message.id,
+                message.role,
+                content,
+                message.createdAt,
+            );
             inserted += 1;
         }
 

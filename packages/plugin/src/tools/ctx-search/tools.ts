@@ -22,6 +22,7 @@ import {
     CTX_SEARCH_TOOL_NAME,
     DEFAULT_CTX_SEARCH_LIMIT,
 } from "./constants";
+import { parseSearchDateRange, SearchDateRangeError } from "./date-range";
 import type { CtxSearchArgs, CtxSearchSource, CtxSearchToolDeps } from "./types";
 
 export { CTX_SEARCH_LIGHT_DESCRIPTION } from "../light-descriptions";
@@ -72,6 +73,11 @@ const ctxSearchArgsShape = {
             "Search query. Matches against memory content, Primers, git commit messages, and raw user/assistant message text.",
         ),
     limit: tool.schema.number().optional().describe("Maximum results to return (default: 10)"),
+    from: tool.schema.string().optional().describe("Earliest date, YYYY-MM-DD (inclusive)"),
+    to: tool.schema
+        .string()
+        .optional()
+        .describe("Latest date, YYYY-MM-DD (inclusive; default open)"),
     sources: tool.schema
         .array(tool.schema.enum(["memory", "message", "git_commit", "primer", "note"]))
         .optional()
@@ -94,6 +100,8 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             args = unwrapImitatedReducedArgs(args, ["query"], {
                 query: "string",
                 limit: "number",
+                from: "string",
+                to: "string",
                 sources: {
                     type: "array",
                     items: "string",
@@ -104,6 +112,13 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             const query = args.query?.trim();
             if (!query) {
                 return "Error: 'query' is required.";
+            }
+            let dateRange: ReturnType<typeof parseSearchDateRange>;
+            try {
+                dateRange = parseSearchDateRange(args.from, args.to);
+            } catch (error) {
+                if (error instanceof SearchDateRangeError) return `Error: ${error.message}`;
+                throw error;
             }
 
             // Only search message history up to the last compartment boundary —
@@ -160,6 +175,7 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                     limit: Math.max(normalizeLimit(args.limit), idShape.length),
                     visibleMemoryIds,
                     diagnostics,
+                    ...dateRange,
                 });
                 if (idResults !== null || diagnostics.suppressedVisibleMemoryIds.length > 0) {
                     return formatSearchResults(
@@ -204,6 +220,7 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                     // recall for symbol/command/path lookups. Auto-search hints
                     // (the hot path) leave this off to protect their latency.
                     explicitSearch: true,
+                    ...dateRange,
                 },
             );
 
