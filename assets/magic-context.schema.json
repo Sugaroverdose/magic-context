@@ -2310,7 +2310,7 @@
     },
     "keep_subagents": {
       "default": false,
-      "description": "Debug: keep the child sessions Magic Context spawns for its own subagents (historian, dreamer) instead of deleting them on success. Useful for short-term inspection/data collection — their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect.",
+      "description": "Debug: keep every settled Magic Context child session instead of deleting it after success: historian, all Dreamer tasks, smart-note evaluation and compilation, user-memory review, and memory migration. Kept Dreamer children can contain memory-pool text and user messages from other sessions of the same operator; their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect.",
       "type": "boolean"
     },
     "debug_rpc": {

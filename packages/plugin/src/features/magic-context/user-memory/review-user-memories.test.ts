@@ -85,7 +85,7 @@ describe("reviewUserMemories", () => {
         db.close();
     });
 
-    test("deletes a settled privacy child even when keep_subagents is enabled", async () => {
+    test("keeps a settled privacy child because keep_subagents covers the privacy class", async () => {
         setKeepSubagents(true);
         const db = freshDb();
         insertUserMemoryCandidates(db, [
@@ -128,7 +128,7 @@ describe("reviewUserMemories", () => {
             promotionThreshold: 1,
         });
 
-        expect(deleted).toEqual(["settled-user-memories"]);
+        expect(deleted).toEqual([]);
         expect(client.session.update).not.toHaveBeenCalled();
         db.close();
     });
