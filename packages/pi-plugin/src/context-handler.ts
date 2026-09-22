@@ -65,7 +65,11 @@ import {
 	parseCacheTtl,
 	type Scheduler,
 } from "@magic-context/core/features/magic-context/scheduler";
-import { HYGIENE_PROVIDER_UNITS_VERSION, sessionDecisionCalibration, transitionSessionHygieneUnits } from '@magic-context/core/features/magic-context/session-decision-calibration';
+import {
+	HYGIENE_PROVIDER_UNITS_VERSION,
+	sessionDecisionCalibration,
+	transitionSessionHygieneUnits,
+} from "@magic-context/core/features/magic-context/session-decision-calibration";
 import { recordSessionProjectIdentity } from "@magic-context/core/features/magic-context/session-project-storage";
 import {
 	adoptPiFallbackMessageTag,
@@ -6696,22 +6700,27 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		autoReclaimDidMutateThisPass ||
 		materialized ||
 		historyWasConsumedThisPass;
-	const calibrationBustReason = materialized || firstRenderBust
-		? "fold"
-		: args.forceMaterialization
-			? "force"
-			: pendingOpsDidMutate || didMutateFromFlushedStatuses
-				? "flush"
-				: historyWasConsumedThisPass
-					? "refresh"
-					: args.schedulerDecision === "execute"
-						? "execute"
-						: "unknown";
-	const activeCalibration = sessionDecisionCalibration(args.db, args.sessionId, {
-		bustPermitted: bustedThisPass,
-		bustReason: calibrationBustReason,
-		onAdopt: (message) => sessionLog(args.sessionId, message),
-	});
+	const calibrationBustReason =
+		materialized || firstRenderBust
+			? "fold"
+			: args.forceMaterialization
+				? "force"
+				: pendingOpsDidMutate || didMutateFromFlushedStatuses
+					? "flush"
+					: historyWasConsumedThisPass
+						? "refresh"
+						: args.schedulerDecision === "execute"
+							? "execute"
+							: "unknown";
+	const activeCalibration = sessionDecisionCalibration(
+		args.db,
+		args.sessionId,
+		{
+			bustPermitted: bustedThisPass,
+			bustReason: calibrationBustReason,
+			onAdopt: (message) => sessionLog(args.sessionId, message),
+		},
+	);
 	protectionFloorResolution = resolveProtectionFloor();
 	const protectedTagNumbers = usesTokenProtection
 		? computeProtectionWindow(

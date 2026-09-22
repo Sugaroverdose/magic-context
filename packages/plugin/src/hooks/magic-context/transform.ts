@@ -18,7 +18,7 @@ import { isFable51ThinkingBindingModel } from "../../features/magic-context/over
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
-import { sessionDecisionCalibration } from '../../features/magic-context/session-decision-calibration';
+import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     type ContextDatabase,

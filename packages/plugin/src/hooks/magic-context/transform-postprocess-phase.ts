@@ -1,6 +1,10 @@
 import { compareOpenCodeMessagesByCanonicalOrder } from "../../features/magic-context/compaction-marker";
 import { newestCtxReduceTagNumbers } from "../../features/magic-context/reclaim-protection";
-import { HYGIENE_PROVIDER_UNITS_VERSION, sessionDecisionCalibration, transitionSessionHygieneUnits } from '../../features/magic-context/session-decision-calibration';
+import {
+    HYGIENE_PROVIDER_UNITS_VERSION,
+    sessionDecisionCalibration,
+    transitionSessionHygieneUnits,
+} from "../../features/magic-context/session-decision-calibration";
 import {
     addProcessedImageStrippedIds,
     addStaleReduceStrippedIds,

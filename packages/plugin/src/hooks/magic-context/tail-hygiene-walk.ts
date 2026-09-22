@@ -1126,10 +1126,7 @@ export function effectiveTailHygiene(
     baseline: Pick<TailHygieneBaseline, "baselineU" | "baselineT" | "turnDeltaU" | "turnDeltaT">,
 ): { u: number; t: number } {
     const t = Math.ceil(Math.max(0, baseline.baselineT + baseline.turnDeltaT));
-    const u = Math.min(
-        t,
-        Math.ceil(Math.max(0, baseline.baselineU + baseline.turnDeltaU)),
-    );
+    const u = Math.min(t, Math.ceil(Math.max(0, baseline.baselineU + baseline.turnDeltaU)));
     return { u, t };
 }
 

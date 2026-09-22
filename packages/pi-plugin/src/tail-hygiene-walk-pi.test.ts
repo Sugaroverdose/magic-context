@@ -12,7 +12,11 @@ import {
 	rearmChannel2AfterCoverageAdvancingHardFold,
 	rearmChannel2AfterMeasuredCollapse,
 } from "@magic-context/core/hooks/magic-context/channel2-cycle";
-import { buildChannel1Reminder, decideChannel1, evaluateChannel2 } from '@magic-context/core/hooks/magic-context/ctx-reduce-nudge';
+import {
+	buildChannel1Reminder,
+	decideChannel1,
+	evaluateChannel2,
+} from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
 import * as formattingModule from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { PI_CTX_REDUCE_KEEP } from "./heuristic-cleanup-pi";
 import {
@@ -115,8 +119,11 @@ function measuredBand(u: number, t: number): string {
 
 describe("Pi rendered-tail hygiene walk", () => {
 	it("calibrates the Fable tool-only hygiene floors and reminder figures", () => {
-		const tokenizer = spyOn(formattingModule, "estimateTokens").mockImplementation(
-			(content) => (content.startsWith("fable-output-") ? 10_000 : 0),
+		const tokenizer = spyOn(
+			formattingModule,
+			"estimateTokens",
+		).mockImplementation((content) =>
+			content.startsWith("fable-output-") ? 10_000 : 0,
 		);
 		try {
 			const messages: object[] = [];
@@ -140,9 +147,7 @@ describe("Pi rendered-tail hygiene walk", () => {
 					},
 				);
 				ids.push(owner, `${owner}-result`);
-				tags.push(
-					tag(number, callId, "tool", { toolOwnerMessageId: owner }),
-				);
+				tags.push(tag(number, callId, "tool", { toolOwnerMessageId: owner }));
 			}
 			const baseline = refreshPiTailHygieneBaseline({
 				messages,
@@ -162,7 +167,11 @@ describe("Pi rendered-tail hygiene walk", () => {
 			});
 
 			expect(effective).toEqual({ u: 31_033, t: 62_066 });
-			expect(decision).toMatchObject({ fire: true, band: "firm", level: "firm" });
+			expect(decision).toMatchObject({
+				fire: true,
+				band: "firm",
+				level: "firm",
+			});
 			expect(buildChannel1Reminder("firm", effective.u, 4)).toContain(
 				"4 spent tool outputs (~31k tokens)",
 			);

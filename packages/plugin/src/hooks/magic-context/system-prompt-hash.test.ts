@@ -1228,4 +1228,3 @@ describe("OpenCode prompt-surface guidance epochs", () => {
         }
     });
 });
-

@@ -779,8 +779,8 @@ describe("tail hygiene image content memoization", () => {
     });
 
     it("calibrates the Fable tool-only hygiene floors and reminder figures", () => {
-        const tokenizer = spyOn(formattingModule, "estimateTokens").mockImplementation(
-            (content) => (content.startsWith("fable-output-") ? 10_000 : 0),
+        const tokenizer = spyOn(formattingModule, "estimateTokens").mockImplementation((content) =>
+            content.startsWith("fable-output-") ? 10_000 : 0,
         );
         try {
             const messages = [1, 2, 3, 4].map((number) =>
