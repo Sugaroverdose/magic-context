@@ -584,8 +584,17 @@ export function analyzeJoinedPasses(
 			),
 			...current.intervening.map((entry) => entry.toolName ?? entry.type),
 		].join("\n");
+		// A first divergence at or past the previous body's length is a pure append:
+		// every byte the provider could have reused is unchanged, so a short read on
+		// that request is the provider serving a shallower prefix entry (seen after an
+		// unmetered, failed request on openai-codex), not a prompt rewrite by MC.
+		const pureAppend =
+			bodyDivergence !== undefined &&
+			previousBody !== undefined &&
+			bodyDivergence.index >= previousBody.messages.length;
 		const divergenceClass = bust
 			? classifyCacheBust({
+					providerShortReadWithIdenticalPrefix: pureAppend,
 					divergenceIndex,
 					previousMessageCount:
 						previousBody?.messages.length ?? previous.ledger.message_count,
@@ -599,14 +608,14 @@ export function analyzeJoinedPasses(
 								previousBody?.messages[bodyDivergence.index]
 							)?.bytes
 						: undefined,
-						rewrittenTokens,
-						promptTokens: prevTotal,
-						providerComparableRead: current.usage.cacheRead,
-						directInput: current.usage.input,
-						previousTotal: prevTotal,
-						previousModel: previousBody?.wireModel,
-						currentModel: currentBody?.wireModel,
-						contentEvidence,
+					rewrittenTokens,
+					promptTokens: prevTotal,
+					providerComparableRead: current.usage.cacheRead,
+					directInput: current.usage.input,
+					previousTotal: prevTotal,
+					previousModel: previousBody?.wireModel,
+					currentModel: currentBody?.wireModel,
+					contentEvidence,
 					compactionSeam,
 					inheritedFold: attributionDecision !== decision,
 					decision: attributionDecision,
