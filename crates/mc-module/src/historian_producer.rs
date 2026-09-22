@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use subc_control::{ClientControlRequest, ClientControlResponse, ConsumerIdentity};
 use subc_protocol::{
-    BindIdentity, ErrorBody, Flags, Frame, FrameBuildError, FrameType, Priority, RouteTarget,
+    BindIdentity, ErrorBody, Flags, Frame, FrameBuildError, FrameType, Priority,
     SUBC_LAUNCH_NONCE_ENV, SUBC_MODULE_ID_ENV,
 };
 use subc_transport::{
@@ -25,11 +25,7 @@ use subc_transport::{
 };
 use tokio::net::TcpStream;
 
-/// The owned-leg runner module the historian producer opens routes to. Renamed
-/// llm-runner -> broca in the fleet cut; this binary ships in the same deploy
-/// beat as the daemon's module-key rename, so the default flips with it
-/// atomically (a full daemon kickstart bounces every module in that window).
-const DEFAULT_RUNNER_MODULE_ID: &str = "broca";
+use crate::route_targets::{RegisteredRoute, RouteTargetConfig};
 
 /// Output budget for a historian summarization pass. llm-runner's default (4k) truncated
 /// a real 50k-input chunk mid-XML on the rig: a tiered compartment doc for a full chunk
@@ -66,15 +62,80 @@ pub const ERROR_CLASS_WIRE_SET: [&str; 4] = [
     "context_overflow",
 ];
 
-/// Broca route-open contract used to distinguish a model/provider resolution refusal from
-/// transport failures that happen to share the same outer `open_failed` code.
-pub const MODEL_UNRESOLVABLE_OPEN_CODES: [&str; 1] = ["open_failed"];
-pub const MODEL_UNRESOLVABLE_OPEN_MESSAGE_LITERALS: [&str; 4] = [
+/// Runner route-open contract. The received text remains authoritative; these literals only
+/// identify the stage that produced it.
+pub const RUNNER_REFUSAL_OPEN_CODES: [&str; 1] = ["open_failed"];
+pub const RUNNER_REFUSAL_OPEN_MESSAGE_LITERALS: [&str; 4] = [
     "run resolution failed",
     "no apikey credential for provider",
     "unknown provider",
     "unknown model",
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerRefusalStage {
+    Credential,
+    Provider,
+    Model,
+    /// The runner refused route resolution without a more specific credential/catalog literal.
+    Resolution,
+}
+
+impl RunnerRefusalStage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Credential => "credential",
+            Self::Provider => "provider",
+            Self::Model => "model",
+            Self::Resolution => "resolution",
+        }
+    }
+
+    pub const fn canonical_cause(self) -> &'static str {
+        match self {
+            Self::Credential => "credential_unavailable",
+            Self::Provider => "provider_unknown",
+            Self::Model => "model_unknown",
+            Self::Resolution => "runner_resolution_failed",
+        }
+    }
+
+    pub const fn is_durable(self) -> bool {
+        matches!(self, Self::Provider | Self::Model)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerRefusal {
+    pub stage: RunnerRefusalStage,
+    pub received_code: String,
+    pub received_message: String,
+}
+
+impl RunnerRefusal {
+    fn from_open_body(body: &ProducerErrorBody) -> Option<Self> {
+        if !RUNNER_REFUSAL_OPEN_CODES.contains(&body.code.as_str()) {
+            return None;
+        }
+        let message = body.message.to_ascii_lowercase();
+        // Specific stages take precedence because the credential/provider/model messages are
+        // commonly nested below the generic "run resolution failed" text.
+        let stage = if message.contains(RUNNER_REFUSAL_OPEN_MESSAGE_LITERALS[1]) {
+            RunnerRefusalStage::Credential
+        } else if message.contains(RUNNER_REFUSAL_OPEN_MESSAGE_LITERALS[2]) {
+            RunnerRefusalStage::Provider
+        } else if message.contains(RUNNER_REFUSAL_OPEN_MESSAGE_LITERALS[3]) {
+            RunnerRefusalStage::Model
+        } else {
+            RunnerRefusalStage::Resolution
+        };
+        Some(Self {
+            stage,
+            received_code: body.code.clone(),
+            received_message: body.message.clone(),
+        })
+    }
+}
 
 static DEPRECATED_HEURISTIC_USES: AtomicU64 = AtomicU64::new(0);
 
@@ -228,7 +289,7 @@ pub struct HistorianProducerConfig {
     pub connection_file: PathBuf,
     pub project_root: PathBuf,
     pub harness: String,
-    pub module_id: String,
+    pub route_targets: RouteTargetConfig,
     pub handshake_timeout: Duration,
     pub request_timeout: Duration,
     pub await_timeout: Duration,
@@ -244,7 +305,7 @@ impl HistorianProducerConfig {
             connection_file: connection_file.into(),
             project_root: project_root.into(),
             harness: harness.into(),
-            module_id: DEFAULT_RUNNER_MODULE_ID.to_string(),
+            route_targets: RouteTargetConfig::default(),
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             await_timeout: DEFAULT_AWAIT_TIMEOUT,
@@ -281,6 +342,7 @@ pub enum HistorianProducerError {
         retracted: bool,
     },
     MissingSession,
+    HostRunnerRequiresHostTransport,
     UnexpectedStreamEnd,
     TimedOut,
     RunFailed {
@@ -415,20 +477,12 @@ impl HistorianProducerError {
         )
     }
 
-    /// Return the structured route-open body only when Broca says the selected model or
-    /// provider cannot be resolved. Other `open_failed` bodies remain transport failures.
-    pub fn model_unresolvable_open_body(&self) -> Option<&ProducerErrorBody> {
+    /// Parse a route-open refusal while preserving the runner's code and message verbatim.
+    pub fn runner_refusal(&self) -> Option<RunnerRefusal> {
         let HistorianProducerError::Subc(body) = self else {
             return None;
         };
-        if !MODEL_UNRESOLVABLE_OPEN_CODES.contains(&body.code.as_str()) {
-            return None;
-        }
-        let message = body.message.to_ascii_lowercase();
-        MODEL_UNRESOLVABLE_OPEN_MESSAGE_LITERALS
-            .iter()
-            .any(|literal| message.contains(literal))
-            .then_some(body)
+        RunnerRefusal::from_open_body(body)
     }
 
     fn heuristic_decision(&self) -> DeprecatedHeuristicDecision {
@@ -522,6 +576,9 @@ impl fmt::Display for HistorianProducerError {
             HistorianProducerError::MissingSession => {
                 write!(f, "historian producer has no bound session")
             }
+            HistorianProducerError::HostRunnerRequiresHostTransport => {
+                write!(f, "host historian runner does not use a subc module route")
+            }
             HistorianProducerError::UnexpectedStreamEnd => write!(
                 f,
                 "subscribe stream ended before the run terminal control unit"
@@ -563,6 +620,7 @@ impl Error for HistorianProducerError {
             | HistorianProducerError::MissingRunId
             | HistorianProducerError::SendQueued { .. }
             | HistorianProducerError::MissingSession
+            | HistorianProducerError::HostRunnerRequiresHostTransport
             | HistorianProducerError::UnexpectedStreamEnd
             | HistorianProducerError::TimedOut
             | HistorianProducerError::RunFailed { .. }
@@ -893,10 +951,13 @@ impl HistorianProducer {
             .session_id
             .clone()
             .ok_or(HistorianProducerError::MissingSession)?;
+        let target = self
+            .config
+            .route_targets
+            .target(RegisteredRoute::HistorianRunner)
+            .ok_or(HistorianProducerError::HostRunnerRequiresHostTransport)?;
         let request = ClientControlRequest::RouteOpen {
-            target: RouteTarget::ManagementSurface {
-                module_id: self.config.module_id.clone(),
-            },
+            target,
             identity: BindIdentity::new(
                 self.config.project_root.clone(),
                 self.config.harness.clone(),
@@ -1519,10 +1580,10 @@ mod tests {
     }
 
     #[test]
-    fn model_unresolvable_open_literals_match_pinned_broca_contract() {
-        assert_eq!(MODEL_UNRESOLVABLE_OPEN_CODES, ["open_failed"]);
+    fn runner_refusal_literals_map_to_the_reporting_stage() {
+        assert_eq!(RUNNER_REFUSAL_OPEN_CODES, ["open_failed"]);
         assert_eq!(
-            MODEL_UNRESOLVABLE_OPEN_MESSAGE_LITERALS,
+            RUNNER_REFUSAL_OPEN_MESSAGE_LITERALS,
             [
                 "run resolution failed",
                 "no apikey credential for provider",
@@ -1531,21 +1592,49 @@ mod tests {
             ]
         );
 
-        let live = HistorianProducerError::Subc(ProducerErrorBody::untagged(
+        let cases = [
+            (
+                "open failed: run resolution failed: no apikey credential for provider 'google'",
+                RunnerRefusalStage::Credential,
+            ),
+            (
+                "open failed: run resolution failed: unknown provider 'missing'",
+                RunnerRefusalStage::Provider,
+            ),
+            (
+                "open failed: run resolution failed: unknown model 'missing'",
+                RunnerRefusalStage::Model,
+            ),
+            (
+                "open failed: run resolution failed: malformed runner selection",
+                RunnerRefusalStage::Resolution,
+            ),
+        ];
+        for (message, expected_stage) in cases {
+            let error =
+                HistorianProducerError::Subc(ProducerErrorBody::untagged("open_failed", message));
+            let refusal = error.runner_refusal().expect("runner refusal");
+            assert_eq!(refusal.stage, expected_stage);
+            assert_eq!(refusal.received_code, "open_failed");
+            assert_eq!(refusal.received_message, message);
+        }
+
+        let unmatched = HistorianProducerError::Subc(ProducerErrorBody::untagged(
             "open_failed",
-            "open failed: run resolution failed: no apikey credential for provider 'opencode' (credential id 'apikey:opencode')",
+            "open failed: route closed before bind completed",
         ));
-        assert!(live.model_unresolvable_open_body().is_some());
+        assert_eq!(
+            unmatched
+                .runner_refusal()
+                .expect("unmatched open refusal")
+                .stage,
+            RunnerRefusalStage::Resolution
+        );
         let wrong_outer_code = HistorianProducerError::Subc(ProducerErrorBody::untagged(
             "route_rejected",
             "run resolution failed: unknown provider 'opencode'",
         ));
-        assert!(wrong_outer_code.model_unresolvable_open_body().is_none());
-        let transport_open = HistorianProducerError::Subc(ProducerErrorBody::untagged(
-            "open_failed",
-            "open failed: route closed before bind completed",
-        ));
-        assert!(transport_open.model_unresolvable_open_body().is_none());
+        assert!(wrong_outer_code.runner_refusal().is_none());
     }
 
     #[test]
@@ -1868,7 +1957,7 @@ mod tests {
             connection_file: server.connection_file.clone(),
             project_root: std::env::current_dir().unwrap(),
             harness: "mc-test".to_string(),
-            module_id: "llm-runner".to_string(),
+            route_targets: RouteTargetConfig::runner_module("llm-runner"),
             handshake_timeout: Duration::from_secs(2),
             request_timeout: Duration::from_secs(2),
             await_timeout: Duration::from_secs(2),

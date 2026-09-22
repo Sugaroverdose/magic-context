@@ -9,7 +9,8 @@
 use std::error::Error;
 use std::path::PathBuf;
 
-use mc_module::{manifest, McHandler, DEFAULT_MODULE_ID};
+use mc_module::route_targets::RouteTargetConfig;
+use mc_module::{manifest_with_route_targets, McHandler, DEFAULT_MODULE_ID};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -26,10 +27,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .unwrap_or_else(|| DEFAULT_MODULE_ID.to_string());
 
     let connection_file = parse_subc_arg(std::env::args_os().skip(1))?;
+    let route_targets = RouteTargetConfig::default();
     subc_client_rs::serve_with(
         &connection_file,
-        manifest(&module_id),
-        McHandler::new_with_connection_file(Some(connection_file.clone())),
+        manifest_with_route_targets(&module_id, &route_targets),
+        McHandler::new_with_connection_file_and_route_targets(
+            Some(connection_file.clone()),
+            route_targets,
+        ),
     )
     .await?;
     Ok(())
