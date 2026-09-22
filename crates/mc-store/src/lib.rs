@@ -6898,7 +6898,13 @@ impl<'a> FacadeMutationTxn<'a> {
             .map_err(|error| error.to_string())?;
         let oldest = rows
             .iter()
-            .map(|(created_at, updated_at)| if *updated_at > 0 { *updated_at } else { *created_at })
+            .map(|(created_at, updated_at)| {
+                if *updated_at > 0 {
+                    *updated_at
+                } else {
+                    *created_at
+                }
+            })
             .min();
         Ok((rows.len(), oldest))
     }

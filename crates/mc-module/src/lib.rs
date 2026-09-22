@@ -13296,10 +13296,7 @@ impl McHandler {
                                 let tray = tx
                                     .active_session_note_tray(project, session)
                                     .map_err(|error| error.to_string())?;
-                                facade_text_response(
-                                    format_write_reply(note.id, tray, now),
-                                    false,
-                                )
+                                facade_text_response(format_write_reply(note.id, tray, now), false)
                             },
                         ),
                         "notes",
@@ -13316,7 +13313,10 @@ impl McHandler {
                         };
                         notes.push((*note_id, note));
                     }
-                    return mcp_text_result(finish_read_reply(render_notes_by_id(notes, now)), false);
+                    return mcp_text_result(
+                        finish_read_reply(render_notes_by_id(notes, now)),
+                        false,
+                    );
                 }
                 let limit = usize_arg(args, "limit").unwrap_or(25).clamp(1, 100);
                 let offset = usize_arg(args, "offset").unwrap_or(0);
@@ -13357,7 +13357,10 @@ impl McHandler {
                     Ok(notes) => notes,
                     Err(error) => return tool_error_result(format!("Error: {error}")),
                 };
-                mcp_text_result(finish_read_reply(render_glance(notes, limit, offset, now)), false)
+                mcp_text_result(
+                    finish_read_reply(render_glance(notes, limit, offset, now)),
+                    false,
+                )
             }
             "update" => {
                 let note_id = note_ids
@@ -16641,7 +16644,10 @@ fn format_write_reply(note_id: i64, tray: (usize, Option<i64>), now_ms: i64) -> 
     let base = format!("Saved session note #{note_id}.");
     match tray {
         (count, Some(oldest)) if count > 0 => {
-            format!("{base} {count} active, oldest {}.", format_note_age(oldest, now_ms))
+            format!(
+                "{base} {count} active, oldest {}.",
+                format_note_age(oldest, now_ms)
+            )
         }
         _ => base,
     }
@@ -27273,12 +27279,15 @@ mod tests {
         assert!(first.contains("#1 · 0m · note 0"));
         assert!(first.contains("#25 · 24m · note 24"));
         assert!(!first.contains("note 25\n"));
-        assert!(first.contains(
-            "Showing 25 of 30 — 5 older: ctx_note(action=\"read\", offset=25)"
-        ));
+        assert!(first.contains("Showing 25 of 30 — 5 older: ctx_note(action=\"read\", offset=25)"));
 
         let second = tool_text(
-            call_facade(&handler, "ctx_note", json!({"action": "read", "offset": 25})).await,
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "read", "offset": 25}),
+            )
+            .await,
         );
         assert!(second.contains("note 25"));
         assert!(second.contains("note 29"));
