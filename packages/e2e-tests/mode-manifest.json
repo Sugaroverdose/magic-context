@@ -472,6 +472,22 @@
             ]
         },
         {
+            "path": "tests/opencode2/converted-store-overwindow.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Conversion in the loop: the real 1.x host creates completed tool output, the real 2.x host converts the same throwaway store, and the first cache-busting model-switch pass must reclaim the over-window converted tail before one provider request; it runs only in the dedicated v2 lane",
+            "contract_refs": [
+                "S2-MIGRATION",
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/dreamer-s2-carrier.test.ts",
             "tier": "excluded",
             "invocation": {
