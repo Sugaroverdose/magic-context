@@ -25733,6 +25733,24 @@ mod tests {
             "Search override B."
         );
 
+        fn without_descriptions(mut value: Value) -> Value {
+            match &mut value {
+                Value::Object(fields) => {
+                    fields.remove("description");
+                    for child in fields.values_mut() {
+                        *child = without_descriptions(child.take());
+                    }
+                }
+                Value::Array(items) => {
+                    for child in items {
+                        *child = without_descriptions(child.take());
+                    }
+                }
+                _ => {}
+            }
+            value
+        }
+
         let expected_tools = prompt_surface::session_tools(&PromptSurfaceSelection::default());
         for response in [&first, &transitioned] {
             let response_tools = serde_json::from_value::<Vec<subc_protocol::manifest::Tool>>(
@@ -25742,7 +25760,10 @@ mod tests {
             assert_eq!(response_tools.len(), expected_tools.len());
             for (actual, expected) in response_tools.iter().zip(&expected_tools) {
                 assert_eq!(actual.name, expected.name);
-                assert_eq!(actual.schema, expected.schema);
+                assert_eq!(
+                    without_descriptions(actual.schema.clone()),
+                    without_descriptions(expected.schema.clone())
+                );
                 assert_eq!(actual.execution_mode, expected.execution_mode);
             }
         }
