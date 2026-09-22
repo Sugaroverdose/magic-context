@@ -139,8 +139,10 @@ export function createHostSeams(
             }),
         // Draft-backed: v2 never reconstructs the live model from message.updated.
         hostModelFallback: (sessionID) => liveModels.get(sessionID) ?? null,
-        hostRefusalNotice: (_client, sessionID, message) =>
-            deliverSynthetic(context, sessionID, message).then(() => undefined),
+        hostRefusalNotice: async (_client, sessionID, message) => {
+            pushNotification("toast", { message, variant: "error" }, sessionID);
+            await deliverSynthetic(context, sessionID, message);
+        },
         hostRefuse: (_client, sessionID) =>
             refuseBeforeProvider(
                 context.session,
