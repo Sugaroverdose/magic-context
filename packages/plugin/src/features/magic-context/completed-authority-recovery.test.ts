@@ -12,6 +12,7 @@ import { insertMemory } from "./memory/storage-memory";
 import { runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
 import { addNote } from "./storage-notes";
+import { bumpProjectMemoryEpoch, getProjectState } from "./storage-project-state";
 
 const PROJECT = "git:completed-authority-recovery";
 
@@ -186,4 +187,33 @@ describe("completed authority handoff recovery", () => {
             db.close();
         }
     });
+});
+
+test("marker release and memory invalidation roll back together", async () => {
+    const db = fixture();
+    const before = getAuthorityManagedMarker(db, PROJECT);
+    const module = moduleWithStatus(async (args) => ({
+        authority: { ...args, state: "TS", generation: 3 },
+    }));
+    try {
+        await expect(
+            reconcileAuthorityMarker({
+                db,
+                projectPath: PROJECT,
+                module,
+                onMarkerReleased: () => {
+                    bumpProjectMemoryEpoch(db, PROJECT);
+                    throw new Error("invalidation failed");
+                },
+            }),
+        ).rejects.toThrow("invalidation failed");
+        expect(getAuthorityManagedMarker(db, PROJECT)).toEqual(before);
+        expect(getProjectState(db, PROJECT)?.projectMemoryEpoch ?? 0).toBe(0);
+        expectWritesFenced(db);
+        expect(db.prepare("SELECT enabled FROM context_privilege_state WHERE id=1").get()).toEqual({
+            enabled: 0,
+        });
+    } finally {
+        db.close();
+    }
 });

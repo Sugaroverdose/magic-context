@@ -410,6 +410,11 @@ export async function recoverTsAuthorityProject(args: {
     module: RustModeModuleClient;
 }): Promise<TsAuthorityRecoveryOutcome> {
     if (!getAuthorityManagedMarker(args.db, args.projectPath)) return "completed";
+    let releasedMarker = false;
+    const onMarkerReleased = () => {
+        bumpProjectMemoryEpoch(args.db, args.projectPath);
+        releasedMarker = true;
+    };
     const module = authorityModuleForProject(args.module, args.projectRoot);
     const domains = ["memories", "notes"] as const;
     const statuses = await Promise.all(
@@ -452,6 +457,7 @@ export async function recoverTsAuthorityProject(args: {
                 projectPath: args.projectPath,
                 domain,
                 module,
+                onMarkerReleased,
                 checksum: () => {
                     const table = domain === "memories" ? "memories" : "notes";
                     const rows = args.db
@@ -472,17 +478,17 @@ export async function recoverTsAuthorityProject(args: {
 
     // A previous process may have finished the drain before removing its marker.
     // Use the same identity-checked heal as startup reconciliation, not another drain.
-    const reconciliation =
-        !drainedDomain && getAuthorityManagedMarker(args.db, args.projectPath)
-            ? await reconcileAuthorityMarker({ db: args.db, projectPath: args.projectPath, module })
-            : null;
+    if (!drainedDomain && getAuthorityManagedMarker(args.db, args.projectPath)) {
+        await reconcileAuthorityMarker({
+            db: args.db,
+            projectPath: args.projectPath,
+            module,
+            onMarkerReleased,
+        });
+    }
     if (!getAuthorityManagedMarker(args.db, args.projectPath)) {
-        // Only the caller that completed a drain or removed the marker invalidates
-        // the memory view; repeated or concurrent completed recovery is a no-op.
-        if (drainedDomain || reconciliation?.status === "released") {
-            bumpProjectMemoryEpoch(args.db, args.projectPath);
-            observeAuthorityRouting(args.projectPath, "TS");
-        }
+        // Only the caller that atomically released the marker owns this transition.
+        if (releasedMarker) observeAuthorityRouting(args.projectPath, "TS");
         return "completed";
     }
     return "retryable";

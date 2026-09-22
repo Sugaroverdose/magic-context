@@ -173,3 +173,65 @@ for (const mode of ["failed-status", "preparing-notes"] as const) {
         }
     });
 }
+
+test("drain completion racing with completed-handoff recovery invalidates once", async () => {
+    const db = new Database(":memory:");
+    initializeDatabase(db);
+    runMigrations(db);
+    const projectPath = "git:drain-release-interleaving";
+    installAuthorityManagedMarker(db, projectPath);
+    let notesState: "MODULE" | "DRAINING" | "TS" = "MODULE";
+    let announceFinished!: () => void;
+    let resumeFinish!: () => void;
+    const finished = new Promise<void>((resolve) => {
+        announceFinished = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+        resumeFinish = resolve;
+    });
+    const module: RustModeModuleClient = {
+        call: async () => ({ ok: true }),
+        authorityStatus: async (args) => ({
+            authority: {
+                ...args,
+                state: args.domain === "notes" ? notesState : "TS",
+                generation: 3,
+            },
+        }),
+        authorityDrain: async (args) => {
+            notesState = args.action === "finish" ? "TS" : "DRAINING";
+            if (args.action === "finish") {
+                announceFinished();
+                await resume;
+            }
+            return {
+                authority: {
+                    ...args,
+                    state: notesState,
+                    generation: 3,
+                    captured_upper_bound: 0,
+                    coordinator_token: "fixture-token",
+                },
+            };
+        },
+        mirrorPull: async () => {
+            throw new Error("empty notes drain must not pull");
+        },
+    };
+    const recover = () =>
+        recoverTsAuthorityProject({ db, projectPath, projectRoot: "/fixture-root", module });
+    const draining = recover();
+    try {
+        await finished;
+        expect(await recover()).toBe("completed");
+        expect(getProjectState(db, projectPath)?.projectMemoryEpoch).toBe(1);
+        resumeFinish();
+        expect(await draining).toBe("completed");
+        expect(getAuthorityManagedMarker(db, projectPath)).toBeNull();
+        expect(getProjectState(db, projectPath)?.projectMemoryEpoch).toBe(1);
+    } finally {
+        resumeFinish();
+        await draining.catch(() => undefined);
+        db.close();
+    }
+});
