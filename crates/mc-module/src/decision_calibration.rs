@@ -55,7 +55,8 @@ impl DecisionCalibration {
             system_ratio: frozen.system_ratio,
             tools_ratio: frozen.tools_ratio,
             prose_ratio: frozen.prose_ratio,
-            seeded: frozen.source == "family-fallback" || ratios.into_iter().any(|ratio| ratio != 1.0),
+            seeded: frozen.source == "family-fallback"
+                || ratios.into_iter().any(|ratio| ratio != 1.0),
             unknown_fit_ratio: seeds()
                 .iter()
                 .flat_map(|seed| [seed.system_ratio, seed.tools_ratio, seed.prose_ratio])
@@ -67,7 +68,9 @@ impl DecisionCalibration {
         let key = model_key.unwrap_or("").to_lowercase();
         let (provider_id, model_id) = key
             .split_once('/')
-            .map_or(("unknown", "unknown"), |(provider, model)| (provider, model));
+            .map_or(("unknown", "unknown"), |(provider, model)| {
+                (provider, model)
+            });
         let calibration = Self::for_model(model_key);
         FrozenDecisionCalibration {
             revision: CALIBRATION_TABLE_REVISION.to_string(),
@@ -311,17 +314,24 @@ mod tests {
         };
         let restarted: mc_store::ModuleMeta =
             serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
-        let defer = DecisionCalibration::from_frozen(
-            restarted.decision_calibration.as_ref().unwrap(),
-        )
-        .unwrap();
+        let defer =
+            DecisionCalibration::from_frozen(restarted.decision_calibration.as_ref().unwrap())
+                .unwrap();
         assert_eq!(defer.tools_ratio, 1.551639);
-        assert_eq!(restarted.decision_calibration.unwrap().revision, "frozen-family-v1");
+        assert_eq!(
+            restarted.decision_calibration.unwrap().revision,
+            "frozen-family-v1"
+        );
 
         let adopted = DecisionCalibration::freeze_for_model(Some("unknown/new-model"));
         meta.decision_calibration = Some(adopted.clone());
         assert_eq!(adopted.revision, CALIBRATION_TABLE_REVISION);
-        assert_eq!(DecisionCalibration::from_frozen(&adopted).unwrap().tools_ratio, 1.0);
+        assert_eq!(
+            DecisionCalibration::from_frozen(&adopted)
+                .unwrap()
+                .tools_ratio,
+            1.0
+        );
     }
 
     #[test]

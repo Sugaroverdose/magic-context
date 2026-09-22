@@ -51,8 +51,7 @@ use crate::tail_hygiene::{
     channel1_refire_tokens, effective_tail_hygiene, hygiene_band,
     measure_tail_hygiene_with_pending_drops, post_reduce_grace_holds, queued_tag_numbers,
     real_user_turn_count, refresh_tail_hygiene_baseline_calibrated, HygieneBand,
-    HygieneCalibration, CHANNEL1_FLOOR_TOKENS, CHANNEL2_FLOOR_TOKENS,
-    CHANNEL2_SEVERITY_THRESHOLD,
+    HygieneCalibration, CHANNEL1_FLOOR_TOKENS, CHANNEL2_FLOOR_TOKENS, CHANNEL2_SEVERITY_THRESHOLD,
 };
 use mc_core::{classify, CkItem, ClassifierInput, CoreState, FrozenUnit, PassInput, PassPlan};
 use mc_store::{
@@ -4268,8 +4267,9 @@ fn apply_once(
         || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
         || loaded.meta.soft_refresh_pending;
     let pass_already_busting = supersession_ride_available;
-    let calibration_candidate =
-        crate::decision_calibration::DecisionCalibration::freeze_for_model(req.model_key.as_deref());
+    let calibration_candidate = crate::decision_calibration::DecisionCalibration::freeze_for_model(
+        req.model_key.as_deref(),
+    );
     let frozen_calibration = loaded
         .meta
         .decision_calibration
