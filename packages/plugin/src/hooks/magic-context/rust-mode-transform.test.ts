@@ -3075,11 +3075,11 @@ describe("Rust mode authority adapter", () => {
         ).toBe(true);
         expect(transformBodies.at(-1)?.tool_present).toBe(true);
         expect(transformBodies.at(-1)?.todo_tool_present).toBe(true);
-        expect(capabilityInvalidations).toBe(1);
+        expect(capabilityInvalidations).toBe(0);
         expect(output.messages).toEqual(native);
     });
 
-    it("reconciles the restarted module before retrying a full transform", async () => {
+    it("does not reseed after a healthy pass loses its delta base", async () => {
         const sessionId = `rust-restart-resync-${Date.now()}`;
         sessions.push(sessionId);
         const db = makeDb();
@@ -3087,28 +3087,29 @@ describe("Rust mode authority adapter", () => {
         installRawProvider(sessionId);
         const calls: string[] = [];
         const native = [{ role: "assistant", parts: [{ type: "text", text: "stable" }] }];
-        let firstTransform = true;
+        let transforms = 0;
         const moduleClient: RustModeModuleClient = {
             invalidateStateSyncCapabilities: () => undefined,
             call: async ({ method }) => {
                 calls.push(method);
                 if (method === "state_sync") return { ok: true };
                 if (method !== "transform") return { ok: true };
-                if (firstTransform) {
-                    firstTransform = false;
-                    return { status: "need_full_sync" };
-                }
-                return { decision: "SOFT+", native_messages: native };
+                transforms += 1;
+                if (transforms === 2) return { status: "need_full_sync" };
+                return { decision: transforms === 3 ? "HARD" : "SOFT+", native_messages: native };
             },
         };
         const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
-        const messages = makeMessages(sessionId);
-        const output = { messages: messages as unknown[] };
+        for (let pass = 0; pass < 22; pass += 1) {
+            const messages = makeMessages(sessionId);
+            const output = { messages: messages as unknown[] };
+            await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
+            expect(output.messages).toEqual(native);
+        }
 
-        await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
-
-        expect(calls).toEqual(["state_sync", "transform", "state_sync", "transform"]);
-        expect(output.messages).toEqual(native);
+        expect(calls.filter((method) => method === "state_sync")).toHaveLength(1);
+        expect(calls.filter((method) => method === "transform")).toHaveLength(23);
+        expect(transforms).toBe(23);
     });
 
     it("restarts a paged transform series after an attempt mismatch", async () => {
@@ -5490,7 +5491,7 @@ describe("prepareRustMemoryAuthority mixed restore", () => {
         ).toThrow("managed by the Rust module");
     });
 
-    it("keeps MODULE memory and note values over conflicting TS rows during full-sync recovery", async () => {
+    it("keeps MODULE memory and note values over conflicting TS rows during delta-cache recovery", async () => {
         const sessionId = `rust-authority-conflict-${Date.now()}`;
         sessions.push(sessionId);
         const db = makeDb();
@@ -5595,7 +5596,7 @@ describe("prepareRustMemoryAuthority mixed restore", () => {
         const input = makeMessages(sessionId);
         await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
 
-        expect(stateSyncBodies).toHaveLength(2);
+        expect(stateSyncBodies).toHaveLength(1);
         expect(JSON.stringify(stateSyncBodies)).not.toContain("stale TS memory");
         expect(JSON.stringify(stateSyncBodies)).not.toContain("stale TS note");
         expect(db.prepare("SELECT content FROM memories WHERE id = 501").get()).toEqual({
@@ -7101,7 +7102,7 @@ it("refuses a tiny untrusted fallback estimate instead of treating the byte prox
     expect(output.messages).toEqual(input);
 });
 
-it("refuses LKG plus suffix when tool-definition completeness is lost", async () => {
+it("refuses LKG plus suffix when no tool-definition envelope exists", async () => {
     const sessionId = "fit-incomplete-replay";
     sessions.push(sessionId);
     const db = makeDb();
@@ -7122,10 +7123,45 @@ it("refuses LKG plus suffix when tool-definition completeness is lost", async ()
     failing = true;
     __resetToolDefinitionMeasurements();
     const output = { messages: [...input] as unknown[] };
-    await expect(transform.run(sessionId, input, output, meta)).rejects.toBeInstanceOf(
-        RawFallbackContextLimitError,
-    );
+    const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+    try {
+        await expect(transform.run(sessionId, input, output, meta)).rejects.toBeInstanceOf(
+            RawFallbackContextLimitError,
+        );
+        const lines = logSpy.mock.calls.map(([, message]) => String(message));
+        expect(lines.some((line) => line.startsWith("lkg_fit_untrusted"))).toBe(true);
+        expect(lines.some((line) => line.startsWith("lkg_over_context_limit"))).toBe(false);
+    } finally {
+        logSpy.mockRestore();
+    }
     expect(output.messages).toEqual(input);
+});
+
+it("serves a fitting LKG with an envelope from another measured model", async () => {
+    const sessionId = "fit-envelope-replay";
+    sessions.push(sessionId);
+    const db = makeDb();
+    installRawProvider(sessionId);
+    const input = makeMessages(sessionId);
+    let failing = false;
+    const moduleClient: RustModeModuleClient = {
+        call: async ({ method }) => {
+            if (method !== "transform") return { ok: true };
+            if (failing) throw new Error("module timed out");
+            return { decision: "HARD", row_version: 1, native_messages: structuredClone(input) };
+        },
+    };
+    const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+    const meta = makeMeta(db, sessionId);
+    await transform.run(sessionId, input, { messages: [...input] }, meta);
+    expect(getSlot(sessionId)).toBeDefined();
+    __resetToolDefinitionMeasurements();
+    recordToolDefinition("test-provider", "previous-model", "default", "read", "Read a file", {});
+    failing = true;
+    const output = { messages: [...input] as unknown[] };
+    await transform.run(sessionId, input, output, meta);
+    expect(output.messages).toEqual(input);
+    expect(transform.getState(sessionId).lkgRepresentationFrozen).toBe(true);
 });
 
 it("unknown calibrated raw fallback refuses a locally fitting request and admits a safe request", async () => {

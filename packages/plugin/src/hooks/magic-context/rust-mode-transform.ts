@@ -2030,7 +2030,7 @@ export function createRustModeTransform(
                 ) {
                     sessionLog(
                         sessionId,
-                        `lkg_over_context_limit estimated=${estimate.tokens} limit=${replayLimit}`,
+                        `${!estimate.trusted ? "lkg_fit_untrusted" : "lkg_over_context_limit"} estimated=${estimate.tokens} limit=${replayLimit}`,
                     );
                     return false;
                 }
@@ -3207,77 +3207,18 @@ export function createRustModeTransform(
             const nativeContentOmitted = !hasNativeResponseContent(response);
             if (needFullSync || nativeContentOmitted) {
                 if (needFullSync) {
+                    // A rejected tail delta says only that its base is unavailable; bounded
+                    // module caches can evict it without losing the durable session state.
+                    // Re-importing that state here would change the next pass's render identity.
                     resetOrdinalMemo(state);
-                    state.stateSyncInputSignature = null;
-                    state.memoryMirrorProjectionKey = null;
-                    state.compartmentMirrorProjectionKey = null;
-                    state.muralGeneration += 1;
-                    state.muralCache = null;
-                    clearCompartmentMirrorCursor(sessionId);
-                    // The module restarted and rejected the generation used by the state sync
-                    // above. Synchronize the new process before requesting the full response;
-                    // otherwise this pass may use incomplete restored state while the next pass
-                    // uses the complete state, producing inconsistent output.
-                    options.moduleClient.invalidateStateSyncCapabilities?.();
-                    const recoveryCachedCapabilities =
-                        options.moduleClient.getCachedStateSyncCapabilities;
-                    const recoveryStateSyncCapabilities =
-                        options.moduleClient.stateSyncCapabilities;
-                    const recoverySyncStartedAt = performance.now();
-                    try {
-                        const recoverySync = await syncModuleState({
-                            client: {
-                                call: callModule,
-                                getCachedStateSyncCapabilities: recoveryCachedCapabilities
-                                    ? () => recoveryCachedCapabilities.call(options.moduleClient)
-                                    : undefined,
-                                stateSyncCapabilities: recoveryStateSyncCapabilities
-                                    ? (capabilityArgs) =>
-                                          recoveryStateSyncCapabilities.call(
-                                              options.moduleClient,
-                                              capabilityArgs,
-                                          )
-                                    : undefined,
-                            },
-                            state,
-                            pass: syncPass,
-                            projectRoot,
-                            force: true,
-                            options: {
-                                authority: true,
-                                authorityState: state.memoryAuthorityReady ? "MODULE" : undefined,
-                                authoritySeqAdoption,
-                            },
-                        });
-                        stateSyncRetryBusy = recoverySync.status === "retry_busy";
-                    } catch (error) {
-                        // If a compatibility seed cannot be built, including when an older
-                        // module provides a seed that is too large, retain the recovery path that
-                        // sends the complete arrays. Retry state synchronization on a later pass.
-                        sessionLog(
-                            sessionId,
-                            "restart state reconciliation failed; continuing with full transform retry:",
-                            error,
-                        );
-                    } finally {
-                        logStage(
-                            sessionId,
-                            "stateSync",
-                            recoverySyncStartedAt,
-                            timings,
-                            "retry=full reason=need_full_sync",
-                        );
-                    }
                 } else {
                     sessionLog(
                         sessionId,
                         "native_delta_fallback_reason=adapter_response_omitted_native_content retry=full",
                     );
                 }
-                // Retry the transform with complete arrays. A restart-triggered miss was
-                // reconciled with durable state above, so reseeding is appropriate there. A
-                // malformed native response does not prove that the module restarted; retry it
-                // without reseeding state.
+                // Retry complete arrays after a missing delta base or malformed native response.
+                // Neither result proves that the module lost its durable session state.
                 state.forceFullWire = true;
                 if (!todoProbeRequired) {
                     const todoRetryStartedAt = performance.now();

@@ -30541,6 +30541,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn evicted_delta_base_requests_full_wire_without_resetting_durable_state() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let mut first = request(vec![ck("m1", 1, "cached history")]);
+        first["full_array_fingerprint"] = json!("fp-first");
+        first["native_messages"] = json!([]);
+        assert_eq!(
+            call_transform_request(&handler, first).await["status"],
+            "ok"
+        );
+        let before = store.load("ses").unwrap().row_version;
+        handler.transform_snapshots.lock().unwrap().remove("ses");
+        handler.projections.lock().unwrap().remove("ses");
+        let mut delta = request(vec![ck("m2", 2, "new tail")]);
+        delta["full_array_fingerprint"] = json!("fp-second");
+        delta["native_messages"] = json!([]);
+        delta["tail_delta"] = json!({
+            "after": "fp-first", "replace_from": 1, "native_replace_from": 0,
+        });
+        let missing = call_transform_request(&handler, delta).await;
+        assert_eq!(missing["status"], "need_full_sync");
+        assert_eq!(store.load("ses").unwrap().row_version, before);
+
+        let mut full = request(vec![ck("m1", 1, "cached history"), ck("m2", 2, "new tail")]);
+        full["full_array_fingerprint"] = json!("fp-second");
+        full["native_messages"] = json!([]);
+        let recovered = call_transform_request(&handler, full.clone()).await;
+        assert_eq!(recovered["status"], "ok");
+        let recovered_bytes = recovered["ck_messages"].clone();
+        for _ in 0..20 {
+            let pass = call_transform_request(&handler, full.clone()).await;
+            assert_ne!(pass["action"], "HARD");
+            assert_eq!(pass["ck_messages"], recovered_bytes);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn tail_delta_reconstructs_the_acknowledged_prefix() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
