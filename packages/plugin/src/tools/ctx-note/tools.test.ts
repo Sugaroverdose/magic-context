@@ -710,6 +710,37 @@ describe("createCtxNoteTools", () => {
         expect(readAllResult).toContain("When PR #108 is merged");
     });
 
+    it("lists parked smart notes in the default view and drops them under filter='active'", async () => {
+        tools = createCtxNoteTools({
+            db,
+            dreamerEnabled: true,
+            resolveProjectPath: () => "git:project-a",
+        });
+        await tools.ctx_note.execute(
+            {
+                action: "write",
+                content: "Parked smart note",
+                surface_condition: "When the release lands",
+            },
+            toolContext(),
+        );
+        await tools.ctx_note.execute(
+            { action: "write", content: "Plain session note" },
+            toolContext(),
+        );
+
+        const defaultView = await tools.ctx_note.execute({ action: "read" }, toolContext());
+        const activeOnly = await tools.ctx_note.execute(
+            { action: "read", filter: "active" },
+            toolContext(),
+        );
+
+        expect(defaultView).toContain("Parked smart note · pending");
+        expect(defaultView).toContain("Plain session note");
+        expect(activeOnly).toContain("Plain session note");
+        expect(activeOnly).not.toContain("Parked smart note");
+    });
+
     it("pages the glance with limit/offset and a continuation footer", async () => {
         for (let i = 1; i <= 30; i += 1) {
             await tools.ctx_note.execute(

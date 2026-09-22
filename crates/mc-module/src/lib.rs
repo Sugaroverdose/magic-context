@@ -13320,34 +13320,31 @@ impl McHandler {
                 }
                 let limit = usize_arg(args, "limit").unwrap_or(25).clamp(1, 100);
                 let offset = usize_arg(args, "offset").unwrap_or(0);
-                let statuses: Vec<&str> = match filter {
-                    None => vec!["active", "ready", "pending"],
-                    Some("active") => vec!["active"],
-                    Some("pending") => vec!["pending"],
-                    Some("ready") => vec!["ready"],
-                    Some("dismissed") => vec!["dismissed"],
-                    Some("all") => vec![
-                        "active",
-                        "pending",
-                        "ready",
-                        "surfacing",
-                        "surfaced",
-                        "dismissed",
-                    ],
+                // The default view is the tray: active session notes plus the
+                // smart notes that are ready or still parked. An explicit filter
+                // applies the same statuses to both types.
+                let (session_statuses, smart_statuses): (Vec<&str>, Vec<&str>) = match filter {
+                    None => (vec!["active"], vec!["ready", "pending"]),
+                    Some("active") => (vec!["active"], vec!["active"]),
+                    Some("pending") => (vec!["pending"], vec!["pending"]),
+                    Some("ready") => (vec!["ready"], vec!["ready"]),
+                    Some("dismissed") => (vec!["dismissed"], vec!["dismissed"]),
+                    Some("all") => {
+                        let all = vec![
+                            "active",
+                            "pending",
+                            "ready",
+                            "surfacing",
+                            "surfaced",
+                            "dismissed",
+                        ];
+                        (all.clone(), all)
+                    }
                     Some(_) => return tool_error_result(
                         "Error: filter must be one of all, active, pending, ready, or dismissed."
                             .to_string(),
                     ),
                 };
-                // The default view is the tray: active session notes plus every
-                // smart note, ready or still parked. An explicit filter applies
-                // the same statuses to both types.
-                let session_statuses = if filter.is_none() {
-                    vec!["active"]
-                } else {
-                    statuses.clone()
-                };
-                let smart_statuses = statuses;
                 let notes = match store.read_glance_notes(
                     project,
                     session,
