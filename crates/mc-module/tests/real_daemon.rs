@@ -37,7 +37,6 @@ struct LiveDaemon {
     child: Child,
     runtime_dir: PathBuf,
     config_dir: PathBuf,
-    data_home: PathBuf,
     connection_file: PathBuf,
 }
 
@@ -47,14 +46,19 @@ impl Drop for LiveDaemon {
         let _ = self.child.wait();
         let _ = fs::remove_dir_all(&self.runtime_dir);
         let _ = fs::remove_dir_all(&self.config_dir);
-        // The seeded store and the daemon's log live here. Keep them when the test is
-        // failing so the run can be diagnosed; otherwise remove them and the now-empty
-        // temp root, which previously leaked ~1.4 MB into the temp dir per run.
+    }
+}
+
+/// Owns the test's temp root. The daemon and every module process share the data home
+/// under it, so cleanup cannot belong to any one of them: bind this first so it drops
+/// last, after all of those processes have exited. A failing test keeps the root, since
+/// the seeded store and the daemon's log are what a failed run needs for diagnosis.
+struct TempRoot(PathBuf);
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
         if !std::thread::panicking() {
-            let _ = fs::remove_dir_all(&self.data_home);
-            if let Some(root) = self.runtime_dir.parent() {
-                let _ = fs::remove_dir(root);
-            }
+            let _ = fs::remove_dir_all(&self.0);
         }
     }
 }
@@ -99,7 +103,9 @@ async fn mc_transform_spine_through_real_daemon() {
         &["build", "-p", "mc-module"],
     );
 
-    let temp = unique_temp_dir("mc-module-real-daemon");
+    // Declared before the daemon and modules so it drops after them.
+    let temp_root = TempRoot(unique_temp_dir("mc-module-real-daemon"));
+    let temp = temp_root.0.clone();
     let runtime_dir = temp.join("runtime");
     let config_dir = temp.join("config");
     let data_home = temp.join("data"); // store lands here (dev_descriptor → XDG_DATA_HOME)
@@ -493,7 +499,6 @@ fn spawn_daemon(
         child,
         runtime_dir: runtime_dir.to_path_buf(),
         config_dir: config_dir.to_path_buf(),
-        data_home: data_home.to_path_buf(),
         connection_file: runtime_dir.join("subc-connection.json"),
     }
 }
