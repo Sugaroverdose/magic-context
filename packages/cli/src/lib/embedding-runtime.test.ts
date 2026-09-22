@@ -100,9 +100,9 @@ describe("checkLocalEmbeddingRuntimeAt", () => {
             if (status.state === "both-broken") {
                 expect(status.nativeFailure.state).toBe("package-missing");
                 expect(status.wasmReason).toContain("onnxruntime-web");
-                expect(formatLocalEmbeddingRuntimeDoctorWarning(status)).toContain(
-                    "native runtime and WASM fallback both unavailable",
-                );
+                const warning = formatLocalEmbeddingRuntimeDoctorWarning(status);
+                expect(warning).toContain("native runtime and WASM fallback both unavailable");
+                expect(warning).toContain("HF_ENDPOINT");
             }
         } finally {
             rmSync(root, { recursive: true, force: true });

@@ -15,8 +15,12 @@ import {
     resolveLocalEmbeddingRuntime,
 } from "./embedding-local";
 
+const originalHfEndpoint = process.env.HF_ENDPOINT;
+
 afterEach(() => {
     __resetLocalEmbeddingForTests();
+    if (originalHfEndpoint === undefined) delete process.env.HF_ENDPOINT;
+    else process.env.HF_ENDPOINT = originalHfEndpoint;
 });
 
 function nativeBindingLoadError(): Error & { code: string } {
@@ -49,6 +53,44 @@ function fakeTransformersModule(options?: {
         },
     };
 }
+
+describe("local embedding remote host", () => {
+    test("native runtime uses HF_ENDPOINT with one trailing slash", async () => {
+        const cacheDir = mkdtempSync(join(tmpdir(), "mc-native-hf-endpoint-"));
+        const transformersEnv = { remoteHost: "https://huggingface.co/" };
+        process.env.HF_ENDPOINT = "https://mirror.example///";
+        try {
+            __setLocalEmbeddingTestHooks({
+                host: () => ({ isElectron: false, isBun: false }),
+                importTransformers: async () => fakeTransformersModule({ env: transformersEnv }),
+                modelCacheDir: () => cacheDir,
+            });
+
+            expect(await new LocalEmbeddingProvider().initialize()).toBe(true);
+            expect(transformersEnv.remoteHost).toBe("https://mirror.example/");
+        } finally {
+            rmSync(cacheDir, { recursive: true, force: true });
+        }
+    });
+
+    test("native runtime uses the Transformers.js default without HF_ENDPOINT", async () => {
+        const cacheDir = mkdtempSync(join(tmpdir(), "mc-native-default-endpoint-"));
+        const transformersEnv = { remoteHost: "https://huggingface.co/" };
+        delete process.env.HF_ENDPOINT;
+        try {
+            __setLocalEmbeddingTestHooks({
+                host: () => ({ isElectron: false, isBun: false }),
+                importTransformers: async () => fakeTransformersModule({ env: transformersEnv }),
+                modelCacheDir: () => cacheDir,
+            });
+
+            expect(await new LocalEmbeddingProvider().initialize()).toBe(true);
+            expect(transformersEnv.remoteHost).toBe("https://huggingface.co/");
+        } finally {
+            rmSync(cacheDir, { recursive: true, force: true });
+        }
+    });
+});
 
 describe("WASM ONNX runtime module identity", () => {
     test("configures the injected WASM runtime single-threaded before pipeline construction", async () => {
