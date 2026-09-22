@@ -55,10 +55,10 @@ test("session_message_reader seq pages idle boundaries and checkpoint window", (
 	const path = join(root, "fixture.db");
 	const writer = new Database(path);
 	writer.exec(
-		"CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT)",
+		"CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER DEFAULT 0, data TEXT)",
 	);
 	const insert = writer.prepare(
-		"INSERT INTO session_message VALUES (?, ?, ?, ?, ?)",
+		"INSERT INTO session_message(id, session_id, type, seq, data) VALUES (?, ?, ?, ?, ?)",
 	);
 	for (const row of [...rows].reverse())
 		insert.run(
@@ -73,7 +73,9 @@ test("session_message_reader seq pages idle boundaries and checkpoint window", (
 	if (!firstRow) throw new Error("host row fixture is empty");
 	const id = firstRow.session_id;
 	try {
-		expect(JSON.stringify(reader.window(id))).toBe(JSON.stringify(rows));
+		expect(
+			JSON.stringify(reader.window(id).map(({ time_created: _, ...row }) => row)),
+		).toBe(JSON.stringify(rows));
 		expect(() =>
 			(reader as unknown as { db: Database }).db.exec(
 				"DELETE FROM session_message",
@@ -134,13 +136,13 @@ test("10,000-row raw read pages decode only the requested page and count decodes
 	const path = join(root, "bounded-reader.db");
 	const writer = new Database(path);
 	writer.exec(
-		"CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT)",
+		"CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER DEFAULT 0, data TEXT)",
 	);
 	const insert = writer.prepare(
-		"INSERT INTO session_message VALUES (?, 'ses-long', 'user', ?, ?)",
+		"INSERT INTO session_message(id, session_id, type, seq, data) VALUES (?, 'ses-long', 'user', ?, ?)",
 	);
 	const insertIdle = writer.prepare(
-		"INSERT INTO session_message VALUES (?, 'ses-long', 'idle', ?, ?)",
+		"INSERT INTO session_message(id, session_id, type, seq, data) VALUES (?, 'ses-long', 'idle', ?, ?)",
 	);
 	writer.transaction(() => {
 		for (let ordinal = 1; ordinal <= 10_000; ordinal++) {
@@ -295,9 +297,11 @@ test("latestAssistant selects the newest assistant row by seq and ignores other 
 	const path = join(root, "latest-assistant.db");
 	const writer = new Database(path);
 	writer.exec(
-		"CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT)",
+		"CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER DEFAULT 0, data TEXT)",
 	);
-	const insert = writer.prepare("INSERT INTO session_message VALUES (?, ?, ?, ?, ?)");
+	const insert = writer.prepare(
+		"INSERT INTO session_message(id, session_id, type, seq, data) VALUES (?, ?, ?, ?, ?)",
+	);
 	// Insertion order is shuffled so rowid cannot accidentally substitute for seq.
 	insert.run(
 		"m4",

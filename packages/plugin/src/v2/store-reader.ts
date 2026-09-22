@@ -44,6 +44,28 @@ export const RAW_MESSAGE_TYPES = [
     "shell",
     "system",
 ] as const satisfies readonly MessageType[];
+
+const RAW_MESSAGE_TYPE_PARAMETERS = RAW_MESSAGE_TYPES.map(() => "?").join(", ");
+
+export const V2_MESSAGE_PAGE_SQL = `WITH bounds AS (
+    SELECT
+        CASE WHEN ? = 0 THEN -1 ELSE COALESCE((
+            SELECT seq FROM session_message
+            WHERE session_id = ? AND type IN (${RAW_MESSAGE_TYPE_PARAMETERS})
+            ORDER BY seq ASC LIMIT 1 OFFSET ?
+        ), -1) END AS after_seq,
+        COALESCE((
+            SELECT seq FROM session_message
+            WHERE session_id = ? AND type IN (${RAW_MESSAGE_TYPE_PARAMETERS})
+            ORDER BY seq ASC LIMIT 1 OFFSET ?
+        ), ?) AS watermark_seq
+)
+SELECT id, session_id, type, seq, time_created, data FROM session_message, bounds
+WHERE session_id = ?
+  AND type IN (${RAW_MESSAGE_TYPE_PARAMETERS})
+  AND seq > bounds.after_seq
+  AND seq <= bounds.watermark_seq
+ORDER BY seq ASC LIMIT ?`;
 export interface MessageData {
     [key: string]: unknown;
     content?: Array<Record<string, unknown>>;
@@ -122,12 +144,7 @@ const debugGlobal = globalThis as typeof globalThis & {
 };
 
 const QUERY_STATEMENTS: Readonly<Record<string, string>> = {
-    messagePage: `WITH bounds AS (
-    SELECT the seq immediately before the requested raw ordinal and at the final watermark
-)
-SELECT id, session_id, type, seq, time_created, data FROM session_message, bounds
-WHERE session_id = ? AND type IN (?) AND seq > bounds.after_seq AND seq <= bounds.watermark_seq
-ORDER BY seq ASC LIMIT ?`,
+    messagePage: V2_MESSAGE_PAGE_SQL,
     messageCount:
         "SELECT COUNT(*) AS count FROM session_message WHERE session_id = ? AND type IN (?)",
     storedMessageCount: "SELECT COUNT(*) AS count FROM session_message WHERE session_id = ?",
@@ -333,31 +350,8 @@ export class V2StoreReader {
                 throw new Error("Invalid raw-message watermark");
             const pageSize = Math.min(limit, finalWatermark - afterOrdinal);
             if (pageSize <= 0) return [];
-            const rawTypes = RAW_MESSAGE_TYPES.map(() => "?").join(", ");
             const maximumSeq = Number.MAX_SAFE_INTEGER;
-            const rows = this.db
-                .prepare(
-                    `WITH bounds AS (
-                        SELECT
-                            CASE WHEN ? = 0 THEN -1 ELSE COALESCE((
-                                SELECT seq FROM session_message
-                                WHERE session_id = ? AND type IN (${rawTypes})
-                                ORDER BY seq ASC LIMIT 1 OFFSET ?
-                            ), -1) END AS after_seq,
-                            COALESCE((
-                                SELECT seq FROM session_message
-                                WHERE session_id = ? AND type IN (${rawTypes})
-                                ORDER BY seq ASC LIMIT 1 OFFSET ?
-                            ), ?) AS watermark_seq
-                    )
-                    SELECT id, session_id, type, seq, time_created, data FROM session_message, bounds
-                    WHERE session_id = ?
-                      AND type IN (${rawTypes})
-                      AND seq > bounds.after_seq
-                      AND seq <= bounds.watermark_seq
-                    ORDER BY seq ASC LIMIT ?`,
-                )
-                .all(
+            const rows = this.db.prepare(V2_MESSAGE_PAGE_SQL).all(
                     afterOrdinal,
                     sessionID,
                     ...RAW_MESSAGE_TYPES,

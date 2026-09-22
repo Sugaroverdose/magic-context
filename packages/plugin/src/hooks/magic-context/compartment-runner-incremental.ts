@@ -10,6 +10,7 @@ import { readCoordinateRebaseNotice } from "../../features/magic-context/store-g
 // unchanged. The implementation moved to ./historian-state-file.ts so Pi
 // can import it without pulling in the full incremental runner.
 import { producerSourceLocalBudget } from "./derive-budgets";
+import { finishHistorianPublishStage, startHistorianPublishStage } from './historian-publish-stage-logger';
 import { cleanupHistorianStateFile } from "./historian-state-file";
 
 export {
@@ -682,6 +683,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 sessionId,
                 `historian failure: source=no-progress reason="historian returned compartments that did not advance past raw message ${offset - 1}" newCompartmentCount=${newCompartments.length} lastNewEnd=${lastNewEnd} priorEnd=${offset - 1}`,
             );
+            sessionLog(sessionId, "historian output discarded: reason=no_forward_progress");
             const failCount = incrementHistorianFailure(
                 db,
                 sessionId,
@@ -788,29 +790,54 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         const holderId = deps.compartmentLeaseHolderId;
         if (!holderId) {
             sessionLog(sessionId, "historian publish skipped: missing compartment lease holder");
+            sessionLog(sessionId, "historian output discarded: reason=missing_compartment_lease_holder");
             rollbackDrainReservation();
             return;
         }
-        const compartmentTagKeys = await getRawSessionTagKeysThrough(
+        const boundaryCheckStarted = startHistorianPublishStage(
             sessionId,
-            lastCompartmentEnd,
-            { db, fromMessageIndex: offset },
+            "dangling-boundary-check",
+            `compartments=${newCompartments.length}`,
         );
         const danglingBoundary = findDanglingPublicationBoundary(sessionId, newCompartments);
         if (danglingBoundary) {
             const reason = `compartment boundary disappeared before publication (sequence=${danglingBoundary.sequence} side=${danglingBoundary.side} missing_id=${danglingBoundary.messageId})`;
             telemetry.failureReason = `publish-boundary: ${reason}`;
+            finishHistorianPublishStage(
+                sessionId,
+                "dangling-boundary-check",
+                boundaryCheckStarted,
+                "discarded",
+                `missing_id=${danglingBoundary.messageId}`,
+            );
             sessionLog(
                 sessionId,
                 `historian publish refused: sequence=${danglingBoundary.sequence} side=${danglingBoundary.side} missing_id=${danglingBoundary.messageId}; raw snapshot changed during the historian run`,
             );
+            sessionLog(sessionId, "historian output discarded: reason=dangling_boundary");
             const failCount = incrementHistorianFailure(db, sessionId, reason);
             await notifyHistorianIssue(buildHistorianFailureNotice(failCount, reason));
             rollbackDrainReservation();
             return;
         }
+        finishHistorianPublishStage(
+            sessionId,
+            "dangling-boundary-check",
+            boundaryCheckStarted,
+            "completed",
+        );
+        const dropsStarted = startHistorianPublishStage(
+            sessionId,
+            "post-publish-drops",
+            `range=${offset}-${lastCompartmentEnd}`,
+        );
+        const compartmentTagKeys = await getRawSessionTagKeysThrough(
+            sessionId,
+            lastCompartmentEnd,
+            { db, fromMessageIndex: offset },
+        );
         let published = false;
-        const transactionStartedAt = performance.now();
+        const transactionStartedAt = startHistorianPublishStage(sessionId, "publish-txn");
         db.exec("BEGIN IMMEDIATE");
         try {
             if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
@@ -819,6 +846,14 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 sessionLog(
                     sessionId,
                     "historian publish skipped: compartment lease no longer held",
+                );
+                sessionLog(sessionId, "historian output discarded: reason=compartment_lease_lost");
+                finishHistorianPublishStage(
+                    sessionId,
+                    "publish-txn",
+                    transactionStartedAt,
+                    "discarded",
+                    "reason=compartment_lease_lost",
                 );
                 return;
             }
@@ -889,6 +924,14 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 sessionId,
                 lastCompartmentEnd,
                 compartmentTagKeys,
+                offset,
+            );
+            finishHistorianPublishStage(
+                sessionId,
+                "post-publish-drops",
+                dropsStarted,
+                "completed",
+                `range=${offset}-${lastCompartmentEnd}`,
             );
 
             clearHistorianFailureState(db, sessionId);
@@ -914,7 +957,22 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             }
             db.exec("COMMIT");
             published = true;
+            finishHistorianPublishStage(
+                sessionId,
+                "publish-txn",
+                transactionStartedAt,
+                "completed",
+                `compartments=${persistedCompartments.length}`,
+            );
             logSlowWriteTransaction("historian-publish", transactionStartedAt);
+        } catch (error) {
+            finishHistorianPublishStage(
+                sessionId,
+                "publish-txn",
+                transactionStartedAt,
+                "failed",
+            );
+            throw error;
         } finally {
             if (!published) {
                 try {
@@ -987,6 +1045,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         // v2: compute + store raw chunk embeddings (the ctx_search semantic
         // substrate over session history). Fire-and-forget, best-effort, gated by
         // memory flags so a memory-off user never hits the embedding endpoint.
+        const embeddingsStarted = startHistorianPublishStage(sessionId, "embeddings");
         if (embeddingActive) {
             const chunksToEmbed = persistedCompartments
                 .map((c, i) => ({
@@ -997,9 +1056,11 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 }))
                 .filter((c) => typeof c.id === "number");
             void (async () => {
+                let failed = false;
                 try {
                     await deps.ensureProjectRegistered?.(promotionDirectory, db);
                 } catch (error) {
+                    failed = true;
                     sessionLog(sessionId, "project registration after publish failed:", error);
                 }
                 try {
@@ -1010,6 +1071,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                         promotedFactRefs,
                     );
                 } catch (error) {
+                    failed = true;
                     sessionLog(sessionId, "promoted fact embedding dispatch failed:", error);
                 }
                 try {
@@ -1020,9 +1082,26 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                         chunksToEmbed,
                     );
                 } catch (error) {
+                    failed = true;
                     sessionLog(sessionId, "compartment embedding dispatch failed:", error);
+                } finally {
+                    finishHistorianPublishStage(
+                        sessionId,
+                        "embeddings",
+                        embeddingsStarted,
+                        failed ? "failed" : "completed",
+                        `compartments=${chunksToEmbed.length}`,
+                    );
                 }
             })();
+        } else {
+            finishHistorianPublishStage(
+                sessionId,
+                "embeddings",
+                embeddingsStarted,
+                "completed",
+                "skipped=memory_disabled",
+            );
         }
 
         // Store user behavior observations as candidates ONLY when the user-memory
@@ -1113,6 +1192,10 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 sessionLog(sessionId, "failed to store primer candidates:", error);
             }
         }
+        sessionLog(
+            sessionId,
+            `historian publish completed: compartments=${persistedCompartments.length} range=${offset}-${lastCompartmentEnd}`,
+        );
     } catch (error: unknown) {
         // Historian runs are fail-closed because they update durable compartment state.
         const desc = describeError(error);

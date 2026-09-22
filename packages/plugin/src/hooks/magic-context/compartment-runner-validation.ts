@@ -6,6 +6,7 @@ import type {
     StoredCompartmentRange,
     ValidatedHistorianPassResult,
 } from "./compartment-runner-types";
+import { finishHistorianPublishStage, startHistorianPublishStage } from './historian-publish-stage-logger';
 import { completedToolArcCrossesBoundary } from "./read-session-true-raw-tokens";
 
 const MIN_RECOMP_CHUNK_TOKEN_BUDGET = 20;
@@ -119,17 +120,44 @@ export function shouldDiscardLastHistorianCompartment(
 
 export function validateHistorianOutput(
     text: string,
-    _sessionId: string,
+    sessionId: string,
     chunk: HistorianValidationChunk,
     _priorCompartments: StoredCompartmentRange[],
     sequenceOffset: number,
 ): ValidatedHistorianPassResult {
+    const parseStarted = startHistorianPublishStage(
+        sessionId,
+        "parse",
+        `response_chars=${text.length}`,
+    );
     const parsed = parseCompartmentOutput(text);
+    finishHistorianPublishStage(
+        sessionId,
+        "parse",
+        parseStarted,
+        "completed",
+        `compartments=${parsed.compartments.length}`,
+    );
+
+    const validationStarted = startHistorianPublishStage(sessionId, "validate");
+    const finish = (result: ValidatedHistorianPassResult): ValidatedHistorianPassResult => {
+        finishHistorianPublishStage(
+            sessionId,
+            "validate",
+            validationStarted,
+            result.ok ? "completed" : "failed",
+            result.ok
+                ? `compartments=${result.compartments.length}`
+                : `reason=${JSON.stringify(result.error)}`,
+        );
+        return result;
+    };
+
     if (parsed.compartments.length === 0) {
-        return {
+        return finish({
             ok: false,
             error: "Historian returned no usable compartments.",
-        };
+        });
     }
 
     // Heal only proven tool-only gaps. Narrative gaps reject before publication, so
@@ -144,10 +172,10 @@ export function validateHistorianOutput(
 
     const mapped = mapParsedCompartmentsToChunk(parsed.compartments, chunk, sequenceOffset);
     if (!mapped.ok) {
-        return {
+        return finish({
             ok: false,
             error: `Historian returned invalid compartment output: ${mapped.error}`,
-        };
+        });
     }
 
     const parsedValidationError = validateParsedCompartments(
@@ -157,21 +185,21 @@ export function validateHistorianOutput(
         parsed.unprocessedFrom,
     );
     if (parsedValidationError) {
-        return {
+        return finish({
             ok: false,
             error: `Historian returned invalid compartment output: ${parsedValidationError}`,
-        };
+        });
     }
 
     const last = parsed.compartments[parsed.compartments.length - 1];
     if (last && boundarySplitsCompletedToolArc(last.endMessage + 1, chunk.completedToolArcs)) {
-        return {
+        return finish({
             ok: false,
             error: "Historian terminal boundary splits a completed tool invocation/result arc",
-        };
+        });
     }
 
-    return {
+    return finish({
         ok: true,
         compartments: mapped.compartments,
         facts: parsed.facts,
@@ -180,7 +208,7 @@ export function validateHistorianOutput(
             parsed.primerCandidates.length > 0 ? parsed.primerCandidates.slice(0, 1) : undefined,
         // v2: surface events so the runner can persist them (stored, not rendered).
         events: parsed.events.length > 0 ? parsed.events : undefined,
-    };
+    });
 }
 
 /**

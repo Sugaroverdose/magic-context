@@ -91,7 +91,7 @@ function clearCompletedIncrementalKeys(sessionId: string): void {
     }
 }
 
-type ReadMessages = ((sessionId: string) => RawMessage[]) & {
+type FullReadMessages = ((sessionId: string) => RawMessage[]) & {
     readPage?: (
         sessionId: string,
         afterOrdinal: number,
@@ -100,6 +100,20 @@ type ReadMessages = ((sessionId: string) => RawMessage[]) & {
     ) => RawMessage[];
     getCount?: (sessionId: string) => number;
 };
+
+export interface BoundedMessageReconciliationSource {
+    readPage(
+        sessionId: string,
+        afterOrdinal: number,
+        limit: number,
+        finalWatermark: number,
+    ): RawMessage[];
+    getCount(sessionId: string): number;
+}
+
+export type MessageReconciliationSource =
+    | FullReadMessages
+    | BoundedMessageReconciliationSource;
 type ReadSingleMessage = (sessionId: string, messageId: string) => RawMessage | null;
 type IncrementalMessageSource = ReadSingleMessage | RawMessage;
 
@@ -165,16 +179,17 @@ function serializedMessageBytes(messages: readonly RawMessage[]): number {
 async function reconcileSessionIndex(
     db: Database,
     sessionId: string,
-    readMessages: ReadMessages,
+    readMessages: MessageReconciliationSource,
 ): Promise<void> {
     await runWithSessionLock(sessionId, async () => {
         if (heapHolder.reconciledSessions.has(sessionId)) return;
 
         let fallbackSnapshot: RawMessage[] | null = null;
         try {
+            const fullReader = typeof readMessages === "function" ? readMessages : null;
             const finalWatermark = readMessages.getCount
                 ? readMessages.getCount(sessionId)
-                : (fallbackSnapshot = readMessages(sessionId)).length;
+                : (fallbackSnapshot = fullReader?.(sessionId) ?? []).length;
             let cursor = getMessageIndexReconciliationStartOrdinal(db, sessionId);
 
             while (cursor < finalWatermark) {
@@ -217,7 +232,7 @@ async function reconcileSessionIndex(
 export function scheduleReconciliation(
     db: Database,
     sessionId: string,
-    readMessages: ReadMessages,
+    readMessages: MessageReconciliationSource,
 ): void {
     if (
         heapHolder.reconciledSessions.has(sessionId) ||
@@ -300,7 +315,7 @@ export function scheduleIncrementalIndex(
 export function scheduleClearAndReindex(
     db: Database,
     sessionId: string,
-    readMessages: ReadMessages,
+    readMessages: MessageReconciliationSource,
 ): void {
     heapHolder.reconciledSessions.delete(sessionId);
     heapHolder.reconciliationScheduledSessions.delete(sessionId);

@@ -68,7 +68,7 @@ describe("v2 draft-authoritative model tracking", () => {
             getCount: () => 0,
         });
         const draftModels = new Map<string, { providerID: string; modelID: string }>();
-        const seams = createHostSeams({} as V2Context, read, draftModels);
+        const seams = createHostSeams({} as V2Context, read, read, draftModels);
         expect(seams.hostModelFallback("ses-1")).toBeNull();
         draftModels.set("ses-1", { providerID: "openai", modelID: "mock-model" });
         expect(seams.hostModelFallback("ses-1")).toEqual({

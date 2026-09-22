@@ -77,7 +77,11 @@ import { adaptPayload, HEAD_IDS } from "./payload";
 import { refusesBeforeProvider } from "./provider-admission";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
-import { createV2RawMessageProvider, createV2RawMessageReader } from "./store";
+import {
+    createV2RawMessageProvider,
+    createV2RawMessageReader,
+    readAllV2RawMessagesForConversion,
+} from "./store";
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
 import { resolveUsageReading, usageReadingMatchesDraft } from "./usage-reading";
@@ -117,16 +121,22 @@ function refuseBeforeProvider(
 
 export function createHostSeams(
     context: V2Context,
-    read: TransformDeps["hostRawMessages"] & {},
+    readAllForConversion: TransformDeps["hostRawMessages"] & {},
+    reconciliationSource: NonNullable<TransformDeps["hostMessageReconciliationSource"]>,
     liveModels: NonNullable<TransformDeps["liveModelBySession"]>,
 ): Required<
     Pick<
         TransformDeps,
-        "hostRawMessages" | "hostProtectedTailBoundary" | "hostModelFallback" | "hostRefuse"
+        | "hostRawMessages"
+        | "hostMessageReconciliationSource"
+        | "hostProtectedTailBoundary"
+        | "hostModelFallback"
+        | "hostRefuse"
     >
 > {
     return {
-        hostRawMessages: read,
+        hostRawMessages: readAllForConversion,
+        hostMessageReconciliationSource: reconciliationSource,
         hostProtectedTailBoundary: (args) =>
             resolveOpenCodeProtectedTailBoundary({
                 ...args,
@@ -457,12 +467,13 @@ export async function registerContext(context: V2Context) {
             console.warn("[magic-context] v2 Channel 2 delivery deferred", error);
         }
     });
-    const pagedRead = createV2RawMessageReader(
-        () =>
-            new V2StoreReader(
-                gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
-            ),
-    );
+    const openStoreReader = () =>
+        new V2StoreReader(
+            gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
+        );
+    const pagedRead = createV2RawMessageReader(openStoreReader);
+    const readAllForConversion = (sessionID: string) =>
+        readAllV2RawMessagesForConversion(openStoreReader, sessionID);
     let transform: ReturnType<typeof createTransform> | undefined;
     let systemPrompt: ReturnType<typeof createSystemPromptHashHandler> | undefined;
     const systemPromptRefreshSessions = new Set<string>();
@@ -731,7 +742,7 @@ export async function registerContext(context: V2Context) {
                     db,
                     sessionId: draft.sessionID,
                     generation: "v2",
-                    readMessages: pagedRead,
+                    readMessages: readAllForConversion,
                 });
             } catch (error) {
                 sessionLog(
@@ -861,7 +872,7 @@ export async function registerContext(context: V2Context) {
                     injectionBudgetTokens: config.memory.injection_budget_tokens,
                     autoPromote: config.memory.auto_promote,
                 },
-                ...createHostSeams(context, pagedRead, liveModels),
+                ...createHostSeams(context, readAllForConversion, pagedRead, liveModels),
             });
             const admitted = new Set<string>();
             for (const message of draft.messages) {

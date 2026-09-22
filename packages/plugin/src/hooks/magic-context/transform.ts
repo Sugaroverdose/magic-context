@@ -13,7 +13,10 @@ import {
     resolveProjectIdentityForSession,
     takeDubiousOwnershipProjectIdentityWarning,
 } from "../../features/magic-context/memory/project-identity";
-import { scheduleReconciliation } from "../../features/magic-context/message-index-async";
+import {
+    type MessageReconciliationSource,
+    scheduleReconciliation,
+} from "../../features/magic-context/message-index-async";
 import { isFable51ThinkingBindingModel } from "../../features/magic-context/overflow-detection";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import type { Scheduler } from "../../features/magic-context/scheduler";
@@ -541,7 +544,8 @@ export interface TransformDeps {
         publish?: typeof import("./compaction-marker-manager").updateCompactionMarkerAfterPublication;
     };
     /** Host storage and cancellation adapters; omitted callbacks retain OpenCode 1 behavior. */
-    hostRawMessages?: typeof readRawSessionMessages;
+    hostRawMessages?: (sessionId: string) => ReturnType<typeof readRawSessionMessages>;
+    hostMessageReconciliationSource?: MessageReconciliationSource;
     hostProtectedTailBoundary?: typeof resolveOpenCodeProtectedTailBoundary;
     hostModelFallback?: typeof findLastAssistantModelFromOpenCodeDb;
     hostRefuse?: typeof abortSessionFailClosed;
@@ -750,11 +754,17 @@ export interface TransformDeps {
 export function resolveTransformHostSeams(
     deps: Pick<
         TransformDeps,
-        "hostRawMessages" | "hostProtectedTailBoundary" | "hostModelFallback" | "hostRefuse"
+        | "hostRawMessages"
+        | "hostMessageReconciliationSource"
+        | "hostProtectedTailBoundary"
+        | "hostModelFallback"
+        | "hostRefuse"
     >,
 ) {
     return {
         hostRawMessages: deps.hostRawMessages ?? readRawSessionMessages,
+        hostMessageReconciliationSource:
+            deps.hostMessageReconciliationSource ?? readRawSessionMessages,
         hostProtectedTailBoundary:
             deps.hostProtectedTailBoundary ?? resolveOpenCodeProtectedTailBoundary,
         hostModelFallback: deps.hostModelFallback ?? findLastAssistantModelFromOpenCodeDb,
@@ -842,7 +852,7 @@ export function createTransform(deps: TransformDeps) {
         }
 
         if (deps.client !== undefined) {
-            scheduleReconciliation(db, sessionId, host.hostRawMessages);
+            scheduleReconciliation(db, sessionId, host.hostMessageReconciliationSource);
         }
 
         const tUserMsg = performance.now();
