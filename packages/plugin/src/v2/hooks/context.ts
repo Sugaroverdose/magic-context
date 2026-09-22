@@ -375,7 +375,11 @@ export async function registerContext(context: V2Context) {
                 detection.reportedInputTokens,
             );
             if (detection.reportedInputTokens) {
-                const provenLimit = getOverflowState(db, draft.sessionID, modelKey).detectedContextLimit;
+                const provenLimit = getOverflowState(
+                    db,
+                    draft.sessionID,
+                    modelKey,
+                ).detectedContextLimit;
                 usage.set(draft.sessionID, {
                     usage: {
                         inputTokens: detection.reportedInputTokens,

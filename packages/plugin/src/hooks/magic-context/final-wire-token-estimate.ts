@@ -222,7 +222,8 @@ function hasCountableParts(message: MessageLike): boolean {
                     p.state !== null && typeof p.state === "object"
                         ? (p.state as Record<string, unknown>)
                         : undefined;
-                const hasInput = state?.input !== undefined || p.input !== undefined || p.args !== undefined;
+                const hasInput =
+                    state?.input !== undefined || p.input !== undefined || p.args !== undefined;
                 const hasResult =
                     state?.output !== undefined ||
                     state?.content !== undefined ||

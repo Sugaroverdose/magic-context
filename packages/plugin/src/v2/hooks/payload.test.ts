@@ -212,7 +212,9 @@ describe("adaptPayload", () => {
                             state: {
                                 status: "completed",
                                 input: { path: "large.log" },
-                                content: [{ type: "text", text: "converted output".repeat(20_000) }],
+                                content: [
+                                    { type: "text", text: "converted output".repeat(20_000) },
+                                ],
                             },
                         },
                     ],
