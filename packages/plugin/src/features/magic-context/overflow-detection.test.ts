@@ -106,6 +106,22 @@ describe("overflow-detection / detectOverflow", () => {
         expect(detection.reportedLimitProvenance).toBe("combined");
     });
 
+    test("extracts provider-reported input mass separately from the accepted limit", () => {
+        expect(detectOverflow("prompt is too long: 1091002").reportedInputTokens).toBe(1_091_002);
+        expect(
+            detectOverflow("prompt is too long: 1091002 tokens > 1048576 maximum"),
+        ).toMatchObject({
+            reportedInputTokens: 1_091_002,
+            reportedLimit: 1_048_576,
+        });
+        expect(
+            detectOverflow("input length 1091002 exceeds the context length of 1048576"),
+        ).toMatchObject({
+            reportedInputTokens: 1_091_002,
+            reportedLimit: 1_048_576,
+        });
+    });
+
     test("returns matchedPattern for diagnostics", () => {
         const detection = detectOverflow("prompt is too long: 210000 > 200000");
         expect(detection.isOverflow).toBe(true);

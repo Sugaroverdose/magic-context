@@ -108,7 +108,7 @@ interface RunCompartmentPhaseArgs {
     /** True when this pass is already safe for background compression to run. */
     safeForBackgroundCompression?: boolean;
     deferredHistoryRefreshSessions: Set<string>;
-    /** True when transform already triggered recovery/emergency historian work this pass. */
+    /** Compatibility-only input retained for older callers; urgent pressure always joins before refusal. */
     skipAwaitForThisPass?: boolean;
     /** When true, extract user behavior observations from historian output */
     experimentalUserMemories?: boolean;
@@ -185,8 +185,7 @@ export function runCompartmentPhase(
         args.canRunCompartments &&
         getActiveCompartmentRun(args.sessionId) === undefined &&
         (args.sessionMeta.compartmentInProgress ||
-            (!args.skipAwaitForThisPass &&
-                args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE));
+            args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE);
 
     if (!willReadRawHistory) {
         // No raw reads this pass — skip the prime and its cache scope entirely.
@@ -435,7 +434,6 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
     if (
         historianRunnable &&
         args.canRunCompartments &&
-        !args.skipAwaitForThisPass &&
         args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE
     ) {
         let activeRun = getActiveCompartmentRun(args.sessionId);

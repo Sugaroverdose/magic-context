@@ -76,6 +76,40 @@ describe("final outgoing-wire token estimate", () => {
         expect(unchanged.tokens).toBeGreaterThan(inputLimit);
     });
 
+    it("counts every OpenCode 2 tool-part representation", () => {
+        const convertedOutput = "converted-tool-output ".repeat(20_000);
+        const result = estimate([
+            {
+                info: { id: "v2-parts", role: "assistant" },
+                parts: [
+                    { type: "tool-call", input: { path: "converted.log" } },
+                    { type: "tool-result", result: { type: "text", value: convertedOutput } },
+                    {
+                        type: "tool-invocation",
+                        args: { path: "legacy.log" },
+                        result: convertedOutput,
+                    },
+                    { type: "tool_use", input: { path: "anthropic.log" } },
+                    { type: "tool_result", content: convertedOutput },
+                    {
+                        type: "tool",
+                        state: { input: { path: "native.log" }, output: convertedOutput },
+                    },
+                    {
+                        type: "tool",
+                        state: {
+                            input: { path: "converted.log" },
+                            content: [{ type: "text", text: convertedOutput }],
+                        },
+                    },
+                ],
+            } as unknown as MessageLike,
+        ]);
+
+        expect(result.trusted).toBe(true);
+        expect(result.messageTokens.toolCall).toBeGreaterThan(100_000);
+    });
+
     it("reports a compact completed recomp refresh", () => {
         const trimmed = estimate([
             {

@@ -536,6 +536,33 @@ export function scheduleTsAuthorityRecovery(args: {
         });
 }
 
+export const EMERGENCY_REFUSAL_NOTICE = "Context full — /ctx-flush or /clear to continue.";
+
+export type HostRefusalNotice = (
+    client: PluginContext["client"] | undefined,
+    sessionId: string,
+    message: string,
+    notificationParams: import("./send-session-notification").NotificationParams,
+) => Promise<void>;
+
+export async function sendEmergencyRefusalNotice(
+    client: PluginContext["client"] | undefined,
+    sessionId: string,
+    message: string,
+    notificationParams: import("./send-session-notification").NotificationParams,
+): Promise<void> {
+    if (!client) throw new Error("OpenCode client is unavailable");
+    const notification = await sendStatusNotification(
+        client,
+        sessionId,
+        message,
+        notificationParams,
+    );
+    if (notification !== "sent" && notification !== "queued") {
+        throw new Error(`Emergency recovery notification was ${notification}`);
+    }
+}
+
 export interface TransformDeps {
     hiddenCompletionExecutor?: import("./compartment-runner-types").HiddenCompletionExecutor;
     /** Host marker lifecycle; omission preserves OpenCode 1 marker writes and replay. */
@@ -548,6 +575,7 @@ export interface TransformDeps {
     hostMessageReconciliationSource?: MessageReconciliationSource;
     hostProtectedTailBoundary?: typeof resolveOpenCodeProtectedTailBoundary;
     hostModelFallback?: typeof findLastAssistantModelFromOpenCodeDb;
+    hostRefusalNotice?: HostRefusalNotice;
     hostRefuse?: typeof abortSessionFailClosed;
     tagger: Tagger;
     scheduler: Scheduler;
@@ -758,6 +786,7 @@ export function resolveTransformHostSeams(
         | "hostMessageReconciliationSource"
         | "hostProtectedTailBoundary"
         | "hostModelFallback"
+        | "hostRefusalNotice"
         | "hostRefuse"
     >,
 ) {
@@ -768,6 +797,7 @@ export function resolveTransformHostSeams(
         hostProtectedTailBoundary:
             deps.hostProtectedTailBoundary ?? resolveOpenCodeProtectedTailBoundary,
         hostModelFallback: deps.hostModelFallback ?? findLastAssistantModelFromOpenCodeDb,
+        hostRefusalNotice: deps.hostRefusalNotice ?? sendEmergencyRefusalNotice,
         hostRefuse: deps.hostRefuse ?? abortSessionFailClosed,
     };
 }
@@ -1435,6 +1465,18 @@ export function createTransform(deps: TransformDeps) {
               ? (contextUsageEarly.inputTokens / windowGeometry.usableHard) * 100
               : contextUsageEarly.percentage;
         const currentModelKeyForBoundary = deps.getModelKey?.(sessionId);
+        const providerProvenLimitForRecovery =
+            earlyStateSnapshot.overflow.needsEmergencyRecovery &&
+            earlyStateSnapshot.overflow.emergencyRecoveryOrigin === "provider_overflow" &&
+            typeof currentModelKeyForBoundary === "string" &&
+            currentModelKeyForBoundary.length > 0 &&
+            earlyStateSnapshot.overflow.detectedContextLimit > 0 &&
+            piModelRefToCanonical(
+                earlyStateSnapshot.overflow.detectedContextLimitModelKey ?? "",
+            ) === piModelRefToCanonical(currentModelKeyForBoundary)
+                ? earlyStateSnapshot.overflow.detectedContextLimit
+                : undefined;
+        const providerProvenInputForRecovery = persistedUsageBeforeResets?.usage.inputTokens;
         const thresholdContextLimit =
             resolvedContextLimit && resolvedContextLimit > 0
                 ? resolvedContextLimit
@@ -1582,8 +1624,6 @@ export function createTransform(deps: TransformDeps) {
             }
             return false;
         };
-        let skipCompartmentAwaitForThisPass = false;
-
         const startRecoveryRun = (): boolean => {
             const scale = emergencyUsagePercentageEarly >= 95 ? 0.25 : 0.5;
             let boundarySnapshot = getRunnableBoundaryForCompartment();
@@ -1653,7 +1693,6 @@ export function createTransform(deps: TransformDeps) {
                     deferredMaterializationSessions.add(sid);
                 },
             });
-            skipCompartmentAwaitForThisPass = true;
             return true;
         };
 
@@ -1664,7 +1703,6 @@ export function createTransform(deps: TransformDeps) {
             emergencyUsagePercentageEarly >= 95 &&
             !recoveryNoHeadEscapeActive
         ) {
-            skipCompartmentAwaitForThisPass = true;
             const emergencyPercentage = contextUsageEarly.percentage.toFixed(1);
             const recoveryStarted = startRecoveryRun();
             // If recovery can't start because there is no eligible pre-tail
@@ -2229,7 +2267,6 @@ export function createTransform(deps: TransformDeps) {
             safeForBackgroundCompression:
                 historianRunnable && (isCacheBusting || schedulerDecision === "execute"),
             deferredHistoryRefreshSessions,
-            skipAwaitForThisPass: skipCompartmentAwaitForThisPass,
             experimentalUserMemories: deps.experimentalUserMemories,
             experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
             historianTwoPass: deps.historianTwoPass,
@@ -2365,12 +2402,20 @@ export function createTransform(deps: TransformDeps) {
                     usage: contextUsage,
                     pricedPass: true,
                     wireEstimateTokens: pressureEstimate.tokens,
+                    wireEstimateTrusted: pressureEstimate.trusted,
+                    providerProvenInputTokens: providerProvenInputForRecovery,
+                    providerProvenLimitTokens: providerProvenLimitForRecovery,
                     usableHardLimit: windowGeometry?.usableHard,
                 });
                 if (contextUsage.inputTokens > 0) {
+                    const usedProviderInput =
+                        !pressureEstimate.trusted &&
+                        providerProvenLimitForRecovery !== undefined &&
+                        providerProvenInputForRecovery !== undefined &&
+                        contextUsage.inputTokens >= providerProvenInputForRecovery;
                     sessionLog(
                         sessionId,
-                        `transform: unknown provider usage; using wire estimate for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} trusted=${pressureEstimate.trusted}`,
+                        `transform: unknown provider usage; using ${usedProviderInput ? "provider-proven input" : "wire estimate"} for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} trusted=${pressureEstimate.trusted} wireTokens=${pressureEstimate.tokens}`,
                     );
                 }
             } catch (error) {
@@ -2621,18 +2666,12 @@ export function createTransform(deps: TransformDeps) {
                 );
             }
             if (emergencyFailClosed.shouldAbort) {
-                if (!deps.client) {
-                    throw new EmergencyFailClosedError(
-                        "Cannot fail closed: OpenCode client is unavailable",
-                    );
-                }
-                // The notice must finish before self-abort so recovery instructions survive interruption.
-                let notification: Awaited<ReturnType<typeof sendStatusNotification>>;
+                // The notice must finish before host refusal so recovery instructions survive interruption.
                 try {
-                    notification = await sendStatusNotification(
+                    await host.hostRefusalNotice(
                         deps.client,
                         sessionId,
-                        "Context full — /ctx-flush or /clear to continue.",
+                        EMERGENCY_REFUSAL_NOTICE,
                         notificationParams,
                     );
                 } catch (error) {
@@ -2640,12 +2679,8 @@ export function createTransform(deps: TransformDeps) {
                         cause: error,
                     });
                 }
-                if (notification !== "sent" && notification !== "queued") {
-                    throw new EmergencyFailClosedError(
-                        `Emergency recovery notification was ${notification}`,
-                    );
-                }
                 try {
+                    // OpenCode 2 supplies a refusal callback because it has no v1 client abort method.
                     await host.hostRefuse(deps.client, sessionId);
                 } catch (error) {
                     sessionLog(

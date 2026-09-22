@@ -14,8 +14,13 @@ import { findLastAssistantModelFromOpenCodeDb } from "../../../plugin/src/hooks/
 import {
 	createTransform,
 	resolveTransformHostSeams,
+	sendEmergencyRefusalNotice,
 } from "../../../plugin/src/hooks/magic-context/transform";
 import { abortSessionFailClosed } from "../../../plugin/src/hooks/magic-context/transform-postprocess-phase";
+import {
+	__resetNotificationStateForTests,
+	drainNotifications,
+} from "../../../plugin/src/shared/rpc-notifications";
 import {
 	deliverSynthetic,
 	isAdmittedSynthetic,
@@ -36,13 +41,14 @@ const sha = (value: unknown) =>
 	createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const root = resolve(import.meta.dir, "../../../..");
 
-test("I14 sdk_renames: v2 supplies all four host seams, v1 defaults retain function identity", () => {
+test("I14 sdk_renames: v2 supplies every host seam, v1 defaults retain function identity", () => {
 	const defaults = resolveTransformHostSeams({});
 	expect(defaults).toEqual({
 		hostRawMessages: readRawSessionMessages,
 		hostMessageReconciliationSource: readRawSessionMessages,
 		hostProtectedTailBoundary: resolveOpenCodeProtectedTailBoundary,
 		hostModelFallback: findLastAssistantModelFromOpenCodeDb,
+		hostRefusalNotice: sendEmergencyRefusalNotice,
 		hostRefuse: abortSessionFailClosed,
 	});
 	const read = Object.assign(() => [], {
@@ -57,6 +63,7 @@ test("I14 sdk_renames: v2 supplies all four host seams, v1 defaults retain funct
 	}
 	expect(supplied.hostRawMessages).toBe(read);
 	expect(supplied.hostRawMessages).not.toBe(defaults.hostRawMessages);
+	expect(supplied.hostRefusalNotice).not.toBe(defaults.hostRefusalNotice);
 	expect(supplied.hostRefuse).not.toBe(defaults.hostRefuse);
 	expect(supplied.hostProtectedTailBoundary).not.toBe(
 		defaults.hostProtectedTailBoundary,
@@ -77,6 +84,55 @@ test("I14 sdk_renames: v2 supplies all four host seams, v1 defaults retain funct
 		expect(source).not.toMatch(/import\s+(?!type\b).*from\s+["']@opencode\//);
 		expect(source).not.toMatch(/live-session-state/);
 	}
+});
+
+test("I9b v2 fail-closed notice is TUI-visible and synthetic-visible before interruption", async () => {
+	__resetNotificationStateForTests();
+	const records = new Map<string, unknown>();
+	const order: string[] = [];
+	const visible: Array<{ sessionID: string; text: string }> = [];
+	const context = {
+		storage: {
+			get: async (key: string) => records.get(key),
+			set: async (key: string, value: unknown) => {
+				records.set(key, value);
+			},
+		},
+		session: {
+			synthetic: async (input: { sessionID: string; text: string }) => {
+				order.push("notice");
+				visible.push(input);
+			},
+			interrupt: async () => {
+				order.push("interrupt");
+				return { interrupted: true };
+			},
+		},
+	} as unknown as V2Context;
+	const read = Object.assign(() => [], {
+		readPage: () => [],
+		getCount: () => 0,
+	});
+	const seams = createHostSeams(context, read, new Map());
+	const notice = "Context full — /ctx-flush or /clear to continue.";
+
+	await seams.hostRefusalNotice(undefined, "ses-emergency", notice, {});
+	await seams.hostRefuse(undefined, "ses-emergency");
+
+	expect(order).toEqual(["notice", "interrupt"]);
+	expect(visible).toHaveLength(1);
+	expect(visible[0]).toMatchObject({ sessionID: "ses-emergency", text: notice });
+	expect(drainNotifications(0, "ses-emergency", { sessionOnly: true })).toEqual([
+		expect.objectContaining({
+			type: "toast",
+			payload: { message: notice, variant: "error" },
+			sessionId: "ses-emergency",
+		}),
+	]);
+	expect(
+		[...records.keys()].some((key) => key.startsWith("synthetic/ses-emergency/msg_")),
+	).toBe(true);
+	__resetNotificationStateForTests();
 });
 
 test("I9b interrupt resolved confirmation returns normally", async () => {

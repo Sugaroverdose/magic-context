@@ -58,6 +58,20 @@ describe("resolveUnknownUsageFromWireEstimate", () => {
         ).toEqual({ percentage: (1_087_566 / 1_048_576) * 100, inputTokens: 1_087_566 });
     });
 
+    it("prefers provider-proven overflow mass when the local wire estimate is untrusted", () => {
+        expect(
+            resolveUnknownUsageFromWireEstimate({
+                usage: { percentage: 95, inputTokens: 0 },
+                pricedPass: true,
+                wireEstimateTokens: 285_478,
+                wireEstimateTrusted: false,
+                providerProvenInputTokens: 1_091_002,
+                providerProvenLimitTokens: 1_048_576,
+                usableHardLimit: 1_048_576,
+            }),
+        ).toEqual({ percentage: (1_091_002 / 1_048_576) * 100, inputTokens: 1_091_002 });
+    });
+
     it("does not replace a provider usage sample or estimate an unpriced pass", () => {
         expect(
             resolveUnknownUsageFromWireEstimate({

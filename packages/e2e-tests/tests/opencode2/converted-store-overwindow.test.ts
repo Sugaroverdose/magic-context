@@ -13,7 +13,7 @@ import {
 } from "../../src/opencode2-runner/conversion-lane";
 import { spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 
-const CONTEXT_LIMIT = 24_000;
+const CONTEXT_LIMIT = 1_048_576;
 const OUTPUT_LIMIT = 1_024;
 const OVERFLOW_MODEL_ID = "converted-overflow-model";
 
@@ -57,6 +57,51 @@ function convertedToolArcCount(path: string, sessionId: string, callIds: readonl
     } finally {
         db.close();
     }
+}
+
+function inflateConvertedToolOutputs(
+    path: string,
+    sessionId: string,
+    outputs: ReadonlyMap<string, string>,
+): number {
+    const db = new Database(path);
+    let changed = 0;
+    try {
+        const rows = db
+            .prepare("SELECT id, data FROM session_message WHERE session_id = ?")
+            .all(sessionId) as Array<{ id: string; data: string }>;
+        const update = db.prepare("UPDATE session_message SET data = ? WHERE id = ?");
+        db.transaction(() => {
+            for (const row of rows) {
+                const data = JSON.parse(row.data) as { content?: Array<Record<string, unknown>> };
+                let rowChanged = false;
+                for (const part of data.content ?? []) {
+                    const callId =
+                        typeof part.id === "string"
+                            ? part.id
+                            : typeof part.callID === "string"
+                              ? part.callID
+                              : undefined;
+                    const output = callId ? outputs.get(callId) : undefined;
+                    if (!output) continue;
+                    if (part.type === "tool" && part.state && typeof part.state === "object") {
+                        (part.state as Record<string, unknown>).content = [{ type: "text", text: output }];
+                        rowChanged = true;
+                    } else if (part.type === "tool-result") {
+                        part.result = { type: "text", value: output };
+                        rowChanged = true;
+                    }
+                }
+                if (rowChanged) {
+                    update.run(JSON.stringify(data), row.id);
+                    changed += 1;
+                }
+            }
+        })();
+    } finally {
+        db.close();
+    }
+    return changed;
 }
 
 function requestTokens(body: Record<string, unknown>): number {
@@ -184,11 +229,18 @@ test("the first priced pass reclaims an over-window converted-store tail", async
         );
         expect(taggedBefore).toHaveLength(callIds.length);
         expect(taggedBefore.every((row) => row.status === "active")).toBe(true);
-        const beforeTokens = Math.max(...mock.requests().map((request) => requestTokens(request.body)));
-        expect(beforeTokens).toBeGreaterThan(CONTEXT_LIMIT);
 
         await v1.stop();
         v1 = undefined;
+        const inflatedOutputs = new Map(
+            callIds.map((callId) => [callId, `${callId} ${"payload ".repeat(370_000)}`]),
+        );
+        const beforeTokens = [...inflatedOutputs.values()].reduce(
+            (total, output) => total + estimateTokens(output),
+            0,
+        );
+        expect(beforeTokens).toBeGreaterThan(CONTEXT_LIMIT);
+        expect(beforeTokens).toBeGreaterThan(1_090_000);
         fixture.env.MAGIC_CONTEXT_LOG_PATH = fixture.logPath("v2-overwindow");
         v2 = await spawnOpencode2({
             existingIsolation: fixture,
@@ -198,7 +250,25 @@ test("the first priced pass reclaims an over-window converted-store tail", async
             modelOutputLimit: OUTPUT_LIMIT,
             additionalModelIDs: [OVERFLOW_MODEL_ID],
         });
-        const client2 = OpenCode.make({
+        let client2 = OpenCode.make({
+            baseUrl: v2.url,
+            headers: { authorization: `Basic ${btoa(`opencode:${v2.password}`)}` },
+        });
+        await waitForPluginActive(client2, fixture.cwd);
+        await v2.stopHost();
+        v2 = undefined;
+        expect(inflateConvertedToolOutputs(fixture.openCodeDbPath, sessionId, inflatedOutputs)).toBe(
+            callIds.length,
+        );
+        v2 = await spawnOpencode2({
+            existingIsolation: fixture,
+            existingMock: { mock, baseURL: provider.baseURL },
+            magicContextConfig,
+            modelContextLimit: CONTEXT_LIMIT,
+            modelOutputLimit: OUTPUT_LIMIT,
+            additionalModelIDs: [OVERFLOW_MODEL_ID],
+        });
+        client2 = OpenCode.make({
             baseUrl: v2.url,
             headers: { authorization: `Basic ${btoa(`opencode:${v2.password}`)}` },
         });
@@ -237,20 +307,25 @@ test("the first priced pass reclaims an over-window converted-store tail", async
             ...callIds,
         );
         const dropped = taggedAfter.filter((row) => row.status === "dropped");
-        expect(dropped.length).toBeGreaterThan(0);
 
         await v2.stopHost();
         v2 = undefined;
         const logPath = fixture.logPath("v2-overwindow");
         expect(existsSync(logPath)).toBe(true);
         const log = readFileSync(logPath, "utf8");
+        expect(dropped.length).toBeGreaterThan(0);
         expect(log).toContain("pressure=stale-model-ignored");
         expect(log).toContain("using wire estimate for priced pass");
         expect(log).toContain("emergency tiered drop:");
         expect(log).not.toContain("emergency tiered drop skipped: unknown-usage");
+        expect(log).not.toContain("emergency tiered drop skipped: reclaim<=min");
+        const emergencyBatchSize = Number(
+            log.match(/emergency tiered drop: tiered drop: (\d+) tags/)?.[1] ?? 0,
+        );
+        expect(emergencyBatchSize).toBeGreaterThan(0);
 
         console.log(
-            `[converted-overwindow] before=${beforeTokens} after=${afterTokens} dropped=${dropped.length}/${callIds.length} provider_requests=${served.length}`,
+            `[converted-overwindow] before=${beforeTokens} after=${afterTokens} emergency_batch=${emergencyBatchSize} dropped=${dropped.length}/${callIds.length} provider_requests=${served.length}`,
         );
     } finally {
         if (v2) await v2.stopHost().catch(() => undefined);

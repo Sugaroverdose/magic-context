@@ -782,6 +782,22 @@
             ]
         },
         {
+            "path": "tests/opencode2/emergency-refusal-visible.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode 2 provider-proven >=95% refusal must reach the user: the v2 lane has no v1 client, so the notice routes through the TUI RPC toast before session.interrupt; it runs only in the dedicated v2 lane",
+            "contract_refs": [
+                "S2-MIGRATION",
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/overflow-recovery.test.ts",
             "tier": "both-modes",
             "invocation": {

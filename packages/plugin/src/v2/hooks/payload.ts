@@ -6,8 +6,26 @@ type Part = Record<string, unknown>;
 interface ToolBridge {
     call?: Part;
     result?: Part;
+    native?: Part;
     output: string;
     resultMessage?: V2Message;
+}
+
+function toolStateContent(state: Part): string {
+    if (typeof state.output === "string") return state.output;
+    if (typeof state.content === "string") return state.content;
+    if (!Array.isArray(state.content)) return "";
+    return state.content
+        .map((part) => {
+            if (typeof part === "string") return part;
+            if (!part || typeof part !== "object") return "";
+            const value = part as Part;
+            if (typeof value.text === "string") return value.text;
+            if (typeof value.value === "string") return value.value;
+            return "";
+        })
+        .filter(Boolean)
+        .join("\n");
 }
 
 /** Project the host's split call/result pair into the TS pipeline's native tool part.
@@ -65,13 +83,30 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
         if (result) paired.add(result.part);
         return part;
     };
+    const convertedTool = (source: Part): Part => {
+        const sourceState =
+            source.state && typeof source.state === "object" ? (source.state as Part) : {};
+        const output = toolStateContent(sourceState);
+        const { content: _content, ...projectedState } = structuredClone(sourceState);
+        const part = {
+            type: "tool",
+            callID: source.callID ?? source.id,
+            tool: source.tool ?? source.name,
+            state: { ...projectedState, output },
+        };
+        bridges.set(part, { native: source, output });
+        return part;
+    };
     // Pair calls before walking result carriers; the host omits IDs on those
     // carriers, while the assistant row ID remains the composite tag owner.
     const callParts = new Map<Part, Part>();
     for (const message of source) {
         for (const part of message.content) {
-            if (part.type === "tool-call")
+            if (part.type === "tool-call") {
                 callParts.set(part, nativeTool(part, results.get(String(part.id))?.shift()));
+            } else if (part.type === "tool") {
+                callParts.set(part, convertedTool(part));
+            }
         }
     }
     const messages: MessageLike[] = [];
@@ -142,6 +177,23 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                         continue;
                     }
                     const state = part.state as Part;
+                    if (bridge.native) {
+                        const sourceState =
+                            bridge.native.state && typeof bridge.native.state === "object"
+                                ? (bridge.native.state as Part)
+                                : {};
+                        const nextState: Part = { ...sourceState, input: state.input };
+                        if (sourceState.content !== undefined) {
+                            nextState.content =
+                                state.output === bridge.output
+                                    ? sourceState.content
+                                    : [{ type: "text", text: state.output }];
+                        } else {
+                            nextState.output = state.output;
+                        }
+                        content.push({ ...bridge.native, state: nextState });
+                        continue;
+                    }
                     if (bridge.call) content.push({ ...bridge.call, input: state.input });
                     if (bridge.result && bridge.resultMessage) {
                         const result = {

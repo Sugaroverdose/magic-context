@@ -10,6 +10,7 @@ import { createScheduler } from "../../features/magic-context/scheduler";
 import {
     clearSession,
     getOrCreateSessionMeta,
+    getOverflowState,
     isDatabasePersisted,
     markSessionCleanupPending,
     openDatabase,
@@ -66,7 +67,7 @@ import { restoreRow } from "../fold/restore";
 import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { type HostServiceOwner, removeHostSession } from "../host-service";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
-import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
+import { deliverPendingChannel2, deliverSynthetic, isAdmittedSynthetic } from "./channel2";
 import { registerV2Commands } from "./commands";
 import { DeletedSessionTombstones } from "./deleted-session-tombstones";
 import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
@@ -131,6 +132,7 @@ export function createHostSeams(
         | "hostMessageReconciliationSource"
         | "hostProtectedTailBoundary"
         | "hostModelFallback"
+        | "hostRefusalNotice"
         | "hostRefuse"
     >
 > {
@@ -144,6 +146,10 @@ export function createHostSeams(
             }),
         // Draft-backed: v2 never reconstructs the live model from message.updated.
         hostModelFallback: (sessionID) => liveModels.get(sessionID) ?? null,
+        hostRefusalNotice: async (_client, sessionID, message) => {
+            pushNotification("toast", { message, variant: "error" }, sessionID);
+            await deliverSynthetic(context, sessionID, message);
+        },
         hostRefuse: (_client, sessionID) =>
             refuseBeforeProvider(
                 context.session,
@@ -352,6 +358,7 @@ export async function registerContext(context: V2Context) {
     }
     const tools =
         db && isDatabasePersisted(db) ? await registerTools(context, db, config) : undefined;
+    const usage: TransformDeps["contextUsageMap"] = new Map();
     await context.session.hook("http.response", async (draft) => {
         if (!db || draft.kind !== "primary" || draft.response.ok) return;
         const detection = detectOverflow(await draft.response.clone().text());
@@ -374,7 +381,26 @@ export async function registerContext(context: V2Context) {
                 modelKey,
                 "provider_overflow",
                 detection.reportedLimitProvenance,
+                detection.reportedInputTokens,
             );
+            if (detection.reportedInputTokens) {
+                const provenLimit = getOverflowState(
+                    db,
+                    draft.sessionID,
+                    modelKey,
+                ).detectedContextLimit;
+                usage.set(draft.sessionID, {
+                    usage: {
+                        inputTokens: detection.reportedInputTokens,
+                        percentage:
+                            provenLimit > 0
+                                ? (detection.reportedInputTokens / provenLimit) * 100
+                                : 100,
+                    },
+                    hasUsageTokens: true,
+                    updatedAt: Date.now(),
+                });
+            }
         }
     });
     const hiddenChildHook = new HiddenChildHook();
@@ -436,7 +462,6 @@ export async function registerContext(context: V2Context) {
               })
             : undefined;
     const historianModels = resolveHistorianModel(config, "opencode");
-    const usage: TransformDeps["contextUsageMap"] = new Map();
     const channel1: NonNullable<TransformDeps["channel1StateBySession"]> = new Map();
     const variants = new Map<string, string | undefined>();
     const agents = new Map<string, string>();

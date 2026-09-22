@@ -62,10 +62,12 @@ export function estimateMessageTokens(message: MessageLike): MessageTokenEstimat
             signature?: string;
             data?: string;
             ignored?: boolean;
-            state?: { input?: unknown; output?: unknown; error?: unknown };
+            state?: { input?: unknown; output?: unknown; content?: unknown; error?: unknown };
             args?: unknown;
             input?: unknown;
             content?: unknown;
+            output?: unknown;
+            result?: unknown;
             mime?: string;
             url?: unknown;
             metadata?: { anthropic?: { signature?: string } };
@@ -97,18 +99,28 @@ export function estimateMessageTokens(message: MessageLike): MessageTokenEstimat
                 }
                 break;
             case "tool":
-                toolCall += serializedTokens(p.state?.input);
-                toolCall += serializedTokens(p.state?.output);
+                toolCall += serializedTokens(p.state?.input ?? p.input ?? p.args);
+                toolCall += serializedTokens(
+                    p.state?.output ?? p.state?.content ?? p.output ?? p.result ?? p.content,
+                );
                 toolCall += serializedTokens(p.state?.error);
                 break;
+            case "tool-call":
+                toolCall += serializedTokens(p.input ?? p.args);
+                break;
             case "tool-invocation":
-                toolCall += serializedTokens(p.args);
+                toolCall += serializedTokens(p.args ?? p.input);
+                toolCall += serializedTokens(p.result ?? p.output ?? p.state?.output);
+                toolCall += serializedTokens(p.state?.error);
+                break;
+            case "tool-result":
+                toolCall += serializedTokens(p.result ?? p.content ?? p.output);
                 break;
             case "tool_use":
-                toolCall += serializedTokens(p.input);
+                toolCall += serializedTokens(p.input ?? p.args);
                 break;
             case "tool_result":
-                toolCall += serializedTokens(p.content);
+                toolCall += serializedTokens(p.content ?? p.result ?? p.output);
                 break;
         }
     }
@@ -206,29 +218,36 @@ function hasCountableParts(message: MessageLike): boolean {
             case "redacted_thinking":
                 return typeof p.data === "string";
             case "tool": {
-                if (p.state === null || typeof p.state !== "object") return false;
-                const state = p.state as Record<string, unknown>;
-                return (
-                    state.input !== undefined &&
-                    (state.output !== undefined || state.error !== undefined)
-                );
+                const state =
+                    p.state !== null && typeof p.state === "object"
+                        ? (p.state as Record<string, unknown>)
+                        : undefined;
+                const hasInput =
+                    state?.input !== undefined || p.input !== undefined || p.args !== undefined;
+                const hasResult =
+                    state?.output !== undefined ||
+                    state?.content !== undefined ||
+                    state?.error !== undefined ||
+                    p.output !== undefined ||
+                    p.result !== undefined ||
+                    p.content !== undefined;
+                return hasInput && hasResult;
             }
+            case "tool-call":
+                return p.input !== undefined || p.args !== undefined;
             case "tool-invocation":
-                return p.args !== undefined;
-            case "tool_use":
-                return p.input !== undefined;
-            case "tool_result":
                 return (
-                    typeof p.content === "string" ||
-                    (Array.isArray(p.content) &&
-                        p.content.every(
-                            (c: unknown) =>
-                                typeof c === "string" ||
-                                (c !== null &&
-                                    typeof c === "object" &&
-                                    (c as { type?: unknown }).type === "text"),
-                        ))
+                    (p.args !== undefined || p.input !== undefined) &&
+                    (p.result !== undefined ||
+                        p.output !== undefined ||
+                        (p.state !== null && typeof p.state === "object"))
                 );
+            case "tool-result":
+                return p.result !== undefined || p.content !== undefined || p.output !== undefined;
+            case "tool_use":
+                return p.input !== undefined || p.args !== undefined;
+            case "tool_result":
+                return p.content !== undefined || p.result !== undefined || p.output !== undefined;
             case "step-start":
             case "step-finish":
                 return true;
