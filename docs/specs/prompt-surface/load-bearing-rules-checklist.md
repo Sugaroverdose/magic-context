@@ -421,9 +421,9 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Scope:** primary sessions
 - **Polarity:** prohibition
 - **Operative condition:** The agent considers recording a note.
-- **Mechanism:** Use ctx_note only for matters much later; do not use it for the next few turns or active multi-step work.
+- **Mechanism:** Use ctx_note only for matters that belong much later; do not use it for upcoming steps or active work.
 - **Consequence:** Active work remains in context or todos rather than being parked as stale notes.
-- **Source evidence:** `not work coming up in the next few turns`
+- **Source evidence:** `only matters that belong much later go there, not upcoming steps or active work`
 
 | Variant | Applicability status |
 | --- | --- |
@@ -487,15 +487,15 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 | `tool-all-active` | **not-present** |
 | `tool-memory-disabled` | **not-present** |
 
-### G-020 — Proactive memory capture
+### G-020 — Durable facts belong on the pinboard
 
 - **Source fragment:** `guidance-memory`
 - **Scope:** primary sessions with memory enabled
 - **Polarity:** mechanism
-- **Operative condition:** Several turns were spent discovering a path, command, pattern, or hard-won constraint.
-- **Mechanism:** Save the reusable fact to ctx_memory with its category and content.
-- **Consequence:** Future sessions do not repeat the same discovery work.
-- **Source evidence:** `Save to memory proactively`
+- **Operative condition:** A durable project fact should remain available across sessions.
+- **Mechanism:** Pin the standalone fact with ctx_memory; update and archive existing pins when they change.
+- **Consequence:** Future sessions can reuse current project knowledge.
+- **Source evidence:** `ctx_memory pins a new one, updates an existing one, and archives an obsolete one`
 
 | Variant | Applicability status |
 | --- | --- |

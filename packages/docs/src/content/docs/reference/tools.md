@@ -85,7 +85,7 @@ Tool: Smart note #7 saved (pending).
 
 | Param | Meaning |
 | --- | --- |
-| `action` | `write`, `update`, `archive`, `merge`, `get` (primary); `list` is dreamer-only. |
+| `action` | `write`, `update`, `archive`, `merge`, `get`. |
 | `content` | Text for `write`, `update`, `merge`. |
 | `category` | Category for `write`. |
 | `ids` | One id for `update`; one or more for `archive`; two or more for `merge`; 1–20 for `get`. |
@@ -98,7 +98,6 @@ Tool: Smart note #7 saved (pending).
 | `archive` | Yes | Yes |
 | `merge` | Yes | Yes |
 | `get` | Yes | Yes |
-| `list` | No | Yes |
 
 `get` reads memories by id (own project, any status, plus shared categories of workspace neighbors). Not-visible or missing ids are reported per-id without distinguishing "foreign hidden" from "doesn't exist".
 
@@ -109,6 +108,10 @@ Tool: Memory #42 written (CONSTRAINTS).
 ```
 
 Edit memories in the [dashboard](/reference/dashboard/) Mem tab; running sessions pick up changes automatically.
+
+### ctx_memory_list
+
+Dreamer Curate workers get a separate `ctx_memory_list` tool for bulk enumeration. It accepts the same optional `category` and `limit` filters as the former list action. Primary sessions never receive this tool in their provider-visible tool list.
 
 ## ctx_search
 
