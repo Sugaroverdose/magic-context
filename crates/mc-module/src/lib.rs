@@ -5743,9 +5743,14 @@ impl McHandler {
                 &boundary_messages,
                 &TriggerContext {
                     boundary: BoundaryContext {
-                        calibration: Some(decision_calibration::DecisionCalibration::for_model(
-                            parsed.model_key.as_deref(),
-                        )),
+                        calibration: Some(
+                            loaded
+                                .meta
+                                .decision_calibration
+                                .as_ref()
+                                .and_then(decision_calibration::DecisionCalibration::from_frozen)
+                                .unwrap_or_else(decision_calibration::DecisionCalibration::neutral),
+                        ),
                         context_limit,
                         // Historian preparation reloads module config independently, but a host-
                         // resolved request threshold is still authoritative for this pass.
@@ -12182,7 +12187,12 @@ impl McHandler {
         let window = protection_window::ProtectionWindow::from_persisted_rows_calibrated(
             &tags,
             floor,
-            decision_calibration::DecisionCalibration::for_model(Some(&loaded.meta.last_model_key))
+            loaded
+                .meta
+                .decision_calibration
+                .as_ref()
+                .and_then(decision_calibration::DecisionCalibration::from_frozen)
+                .unwrap_or_else(decision_calibration::DecisionCalibration::neutral)
                 .tools_ratio,
         );
         let (deferred, immediate): (Vec<_>, Vec<_>) =
@@ -30199,6 +30209,7 @@ mod tests {
             content_signature: String::new(),
             channel1_post_reduce_grace_baseline_u: None,
             channel1_post_reduce_grace_pre_level: String::new(),
+            ..Default::default()
         });
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)

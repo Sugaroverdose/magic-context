@@ -1,6 +1,10 @@
 //! Convert raw local token counts using fixed class ratios without changing the
 //! tokenizer or persisted counts. Session usage samples do not affect these helpers.
 
+use mc_store::FrozenDecisionCalibration;
+
+pub const CALIBRATION_TABLE_REVISION: &str = "2026-09-21-family-v1";
+
 /// Class ratios resolved for a model by the caller.
 #[derive(Debug, Clone, Copy)]
 pub struct DecisionCalibration {
@@ -22,6 +26,60 @@ pub struct LocalMass {
 }
 
 impl DecisionCalibration {
+    pub fn neutral() -> Self {
+        Self {
+            system_ratio: 1.0,
+            tools_ratio: 1.0,
+            prose_ratio: 1.0,
+            seeded: false,
+            unknown_fit_ratio: seeds()
+                .iter()
+                .flat_map(|seed| [seed.system_ratio, seed.tools_ratio, seed.prose_ratio])
+                .fold(2.0, f64::max),
+        }
+    }
+
+    pub fn from_frozen(frozen: &FrozenDecisionCalibration) -> Option<Self> {
+        let ratios = [frozen.system_ratio, frozen.tools_ratio, frozen.prose_ratio];
+        if frozen.revision.is_empty()
+            || frozen.provider_id.is_empty()
+            || frozen.model_id.is_empty()
+            || ratios
+                .into_iter()
+                .any(|ratio| !ratio.is_finite() || ratio <= 0.0)
+            || !matches!(frozen.source.as_str(), "seed" | "family-fallback")
+        {
+            return None;
+        }
+        Some(Self {
+            system_ratio: frozen.system_ratio,
+            tools_ratio: frozen.tools_ratio,
+            prose_ratio: frozen.prose_ratio,
+            seeded: frozen.source == "family-fallback" || ratios.into_iter().any(|ratio| ratio != 1.0),
+            unknown_fit_ratio: seeds()
+                .iter()
+                .flat_map(|seed| [seed.system_ratio, seed.tools_ratio, seed.prose_ratio])
+                .fold(2.0, f64::max),
+        })
+    }
+
+    pub fn freeze_for_model(model_key: Option<&str>) -> FrozenDecisionCalibration {
+        let key = model_key.unwrap_or("").to_lowercase();
+        let (provider_id, model_id) = key
+            .split_once('/')
+            .map_or(("unknown", "unknown"), |(provider, model)| (provider, model));
+        let calibration = Self::for_model(model_key);
+        FrozenDecisionCalibration {
+            revision: CALIBRATION_TABLE_REVISION.to_string(),
+            provider_id: provider_id.to_string(),
+            model_id: model_id.to_string(),
+            system_ratio: calibration.system_ratio,
+            tools_ratio: calibration.tools_ratio,
+            prose_ratio: calibration.prose_ratio,
+            source: seed_source(model_key).to_string(),
+        }
+    }
+
     /// Accumulate fractional provider mass, then ceil once at the decision boundary.
     /// Invalid inputs yield infinity, so a finite provider window cannot admit them.
     pub fn provider_mass(self, raw: LocalMass, fit: bool) -> f64 {
@@ -234,6 +292,36 @@ mod tests {
             local_budget(fixture.provider_budget, seed.prose_ratio),
             fixture.local_budget
         );
+    }
+
+    #[test]
+    fn frozen_revision_survives_restart_and_changes_only_at_the_next_bust() {
+        let frozen = FrozenDecisionCalibration {
+            revision: "frozen-family-v1".to_string(),
+            provider_id: "anthropic".to_string(),
+            model_id: "claude-fable-5-1".to_string(),
+            system_ratio: 1.511497,
+            tools_ratio: 1.551639,
+            prose_ratio: 1.571778,
+            source: "seed".to_string(),
+        };
+        let mut meta = mc_store::ModuleMeta {
+            decision_calibration: Some(frozen.clone()),
+            ..Default::default()
+        };
+        let restarted: mc_store::ModuleMeta =
+            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        let defer = DecisionCalibration::from_frozen(
+            restarted.decision_calibration.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(defer.tools_ratio, 1.551639);
+        assert_eq!(restarted.decision_calibration.unwrap().revision, "frozen-family-v1");
+
+        let adopted = DecisionCalibration::freeze_for_model(Some("unknown/new-model"));
+        meta.decision_calibration = Some(adopted.clone());
+        assert_eq!(adopted.revision, CALIBRATION_TABLE_REVISION);
+        assert_eq!(DecisionCalibration::from_frozen(&adopted).unwrap().tools_ratio, 1.0);
     }
 
     #[test]

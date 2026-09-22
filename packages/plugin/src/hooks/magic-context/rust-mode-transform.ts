@@ -56,7 +56,6 @@ import { sessionLog } from "../../shared/logger";
 import { promptSurfaceConfigIdentity, resolvePromptSurface } from "../../shared/prompt-surface";
 import { createPromptSurfaceGuidanceEpochCache } from "../../shared/prompt-surface-runtime";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
-import { capturePricedCalibration } from "./calibration-observation";
 import {
     cachedToolPermissionDenied,
     resolveCtxReduceAvailability,
@@ -2332,32 +2331,6 @@ export function createRustModeTransform(
                     timings,
                 }),
             );
-            if (
-                served &&
-                applied &&
-                !["defer", "error", "need_full_sync", "parked"].includes(decision.toLowerCase())
-            ) {
-                try {
-                    const observed = estimateFinalWireInputTokens({
-                        messages: output.messages as MessageLike[],
-                        systemPromptTokens: sessionMeta.systemPromptTokens,
-                        providerID: model?.providerID,
-                        modelID: model?.modelID,
-                        agentName: deps.getNotificationParams?.(sessionId)?.agent,
-                    });
-                    capturePricedCalibration(
-                        sessionId,
-                        modelKey ?? "unknown/unknown",
-                        output.messages as MessageLike[],
-                        observed,
-                    );
-                } catch {
-                    sessionLog(
-                        sessionId,
-                        "calibration: completeness=partial reason=unavailable-returned-array-count",
-                    );
-                }
-            }
             if (served) {
                 writeRustTransformDecision({
                     sessionId,

@@ -542,7 +542,7 @@ function maybeInjectChannel1Nudge(
 
     // The just-completed output is prospective input for the next pass and is
     // inside the recency reserve, so it grows T but not U.
-    state.turnDeltaT += toolOutputTokens(out.output);
+    state.turnDeltaT += toolOutputTokens(out.output) * (state.toolsRatio ?? 1);
 
     const nudgeState = getChannel1NudgeState(args.db, sessionId);
     const decision = decideChannel1({

@@ -1117,9 +1117,9 @@ assertion, and the same session ID through the OMP restart.
 
 Pi history rendering and the shared canonical protected-token walk use the same static seeds as OpenCode/Rust. Provider-reported SDK usage remains unscaled. The raw/replay fit helper recounts the supplied array and requires explicit system/tool observations; the storage-failure catch currently has no complete held observations and must refuse rather than admit on serialized byte size alone. Media and unsupported message shapes cannot establish fit. Historian fit uses assembled user/system text and independently resolves each selected model's window. Provider framing and subprocess-added prompt content remain outside MC's observed representation.
 
-Tail-hygiene calibration is deferred with TS and Rust rather than introducing a Pi-only policy. Persisted cadence/grace watermarks lack a unit revision; safely rebasing them alongside the active measurement after restart needs an explicit durable epoch/unit transition. Legacy T/U floors remain in effect; see root PARITY.
+Pi tail-hygiene uses the same session-frozen tools/prose ratios, provider-unit floors, cadence/grace arithmetic and reminder figures as OpenCode and Rust. The shared namespaced JSON stamps `hygieneUnitsVersion=2` on the first authorized bust, converts legacy U watermarks once and keeps defer/restart passes on the previously active unit epoch.
 
-On priced passes Pi now logs the raw count of its final returned message array plus the held system count, with static-seed provenance. Held tool definitions and a same-request completion identity are unavailable at this boundary, so completeness stays partial and no P/L sample increases N. There is no persistence, migration, new configuration knob or learned decision activation.
+Calibration is static-only (`seed` or `family-fallback`). Pi no longer logs returned-array learning observations and has no P/L sample, EMA, learned provenance, runtime adaptation or learned-state persistence.
 
 ## Static calibration gate follow-up
 
@@ -1129,4 +1129,4 @@ Historian fixtures explicitly supply primary/fallback window observations. The o
 
 The full Pi suite initially reported 1,193 pass / 3 skip / 31 fail. The affected 344-test groups subsequently reported 340 pass / 4 fail, and the four remaining nested-historian cases passed after their mock window observations were supplied. The environment-only OMP/home and smart-note checks passed without product changes. Pi typecheck passed. No second full suite was run, as requested. Exact commands and counts are committed under `docs/reports/tokenizer-calibration-gates/`.
 
-Tail-hygiene T/U and cadence/grace watermark calibration remains explicitly deferred: persisted raw masses have no unit/table epoch to distinguish them from provider-token values after restart. No persistence field, migration, sidecar or fence change was added. Candidate EMA remains inactive, and Pi's uncorrelated/partial measurements never increase N.
+Tail-hygiene parity is active. Persisted `last_nudge_undropped` and `last_nudge_level.postReduceGraceBaselineU` convert once at the stamped bust; `growthThreshold` is derived from calibrated T. No SQL column, migration, sidecar or fence change was added.

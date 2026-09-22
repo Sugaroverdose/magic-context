@@ -273,40 +273,9 @@ right: Firm
 
 The temporary test was restored; post-restore diff was empty. Pi shares the same nudge policy and its `PARITY.md` explicitly says tail-hygiene calibration and the legacy floors remain deferred.
 
-## 8. Learning instrument — PASS
+## 8. Runtime learning — removed by owner ruling
 
-Command:
-
-```sh
-bun test src/hooks/magic-context/calibration-candidate.test.ts \
-  --test-name-pattern 'candidate EMA remains inactive'
-```
-
-Captured output: `1 pass, 0 fail`.
-
-A correlated priced observation formatted as:
-
-```text
-calibration: model=anthropic/claude-fable-5-1 seed=1.511497/1.551639/1.571778 sample=1.6 ema=1.6 n=1 source=learned-candidate completeness=complete seed_source=seed local=1000 provider_input=1600 revision=2026-09-21-family-v1 ...
-```
-
-This contains L (`local`), P (`provider_input`), sample, EMA, N, seed provenance, source, completeness, revision, and matched prefix.
-
-### Consultation mutation
-
-Two staged files had empty unstaged diffs. `CalibrationCandidates.complete` was mutated to publish the learned EMA, and `calibrationForModelKey` was mutated to consult it for a prose decision; both changes carried `NON-VACUITY BREAK`.
-
-Captured red:
-
-```text
-2 files changed, 6 insertions(+), 1 deletion(-)
-(fail) candidate EMA remains inactive at N=2 and N=3 and deduplicates correlated completions
-Expected: 1.571778
-Received: 1.46875
-0 pass; 1 fail; 3 filtered out
-```
-
-Only the named decision assertion failed. Both files were restored and the unstaged diff returned empty.
+There is no Phase B. Calibration remains a periodically curated static seed table. The candidate EMA, per-priced-pass L/P capture and logging, `learned-candidate` provenance, and candidate-only tests were deleted. Static provenance is `seed` or `family-fallback`; the per-session freeze in sequence 2 is bust-boundary discipline rather than learning. Sequence 8 is therefore removed from the rerun list.
 
 ## 9. Pi parity — FAIL with the same blocking hygiene gap
 
@@ -372,8 +341,86 @@ Mutations: the temporary Rust hygiene test is recorded in sequence 7; no mutant 
 | Preliminary direct seed-entry upgrade | Protection decision must remain 20/cutoff 21 before bust | Decision changed to 16/cutoff 25 | seed JSON: empty → 1 file, `+1/-1` → empty |
 | Unknown fit envelope replaced by 1 | `unknown calibrated raw fallback refuses a locally fitting request and admits a safe request` | Sole test failed because rejection resolved | `decision-calibration.ts`: empty → 1 file, `+1/-1` → empty |
 | Fable hygiene absolute-floor requirement | `tail_hygiene::tests::fable_tool_only_hygiene_calibrates_absolute_floors_before_band` | Sole test failed `Quiet != Firm` | `tail_hygiene.rs`: empty → 1 file, `+8` → empty |
-| Learned EMA consulted by decision calibration | `candidate EMA remains inactive at N=2 and N=3 and deduplicates correlated completions` | Sole test failed `1.46875 != 1.571778` | two files: empty → `+6/-1` → empty |
 
 ## Gate conclusion
 
-The cache/replay, fit-envelope, protected-floor, emergency, historian, candidate-only learning, and Rust golden controls are useful and mostly pass. They do not override the two executed contract failures. Table drift currently changes an active decision before the next bust, and hygiene calibration is explicitly unimplemented across all three engines. Verdict remains **BLOCK**.
+The original verdict above records the pre-fix gate. Fix round 1 below closes both blocking findings with static-only calibration; runtime learning was removed by owner ruling.
+
+
+## Fix round 1
+
+### Scope and persistence
+
+- OpenCode/Pi store the active static calibration under `session_meta.deferred_execute_state.magicContextTokenizerCalibration.active`: `{ revision, providerId, modelId, systemRatio, toolsRatio, proseRatio, source }`. This existing JSON column was chosen because its retired execute-hold payload already belongs to pass/bust lifecycle state; `cached_m0_upgrade_state` remains a renderer-identity string and is not repurposed. Parsing is tolerant: malformed/absent state is unfrozen and remains neutral on defer until the next authorized bust. No column or migration was added.
+- Rust stores the same backward-defaulted snapshot in `mc_cache_state.meta.decision_calibration`.
+- A changed static table is read only with bust permission. The adoption log is `calibration revision <old> → <new> adopted (bust=<reason>)`; a table change does not originate a HARD.
+- Hygiene unit epoch 2 uses tools ratio for tool input/output and prose ratio for text/file content, accumulates fractional class mass, then ceilings once at the aggregate decision. Ratio bands remain unchanged.
+- The exact persisted U-watermark list is OpenCode/Pi `session_meta.last_nudge_undropped` and `session_meta.last_nudge_level.postReduceGraceBaselineU`; Rust twins are `ModuleMeta.channel1_last_nudge_undropped` and `TailHygieneBaseline.channel1_post_reduce_grace_baseline_u`. `growthThreshold` / Rust `channel1_refire_tokens(T)` is derived rather than persisted and therefore changes by consuming calibrated T. These values convert once on the first bust and are guarded by `hygieneUnitsVersion=2` / `hygiene_units_version=2`.
+- Runtime learning was deleted: no candidate EMA/state, priced-pass L/P logging, `learned-candidate` source, or candidate-only tests remain. Static provenance is only `seed` or `family-fallback`.
+
+### Sequence 1 — cache identity and priced replay: PASS
+
+Commands used isolated HOME/XDG roots:
+
+```sh
+bun packages/e2e-tests/scripts/pure-replay-differential.ts \
+  --ts-only --priced --neutral 3d049bf4a2 HEAD
+bun packages/e2e-tests/scripts/pure-replay-differential.ts \
+  --ts-only --priced 3d049bf4a2 HEAD
+```
+
+Candidate ref was `4b962d533370eb9b674b8e0a7af218b9b5a38718`. Neutral master/candidate HARD hashes were identical (`messages=1c3f62d9…`, `history=4ce19ae0…`), expected local budget was 60,000, and all four corresponding defer message/system/tool hashes matched. Fable adopted the independently expected 38,173-local history allowance and dropped `[56,59,62,65]` versus master `[56,59]`; its four later passes were all `defer`, including restart between defers two and three. Both runs ended `PRICED_GATE hard=true tail_m0_equal=true four_defers_each=true` and `RESULT PRICED_EXPECTATIONS_MET defer_passes=4`.
+
+### Sequence 2 — table drift freeze: PASS
+
+The TS upgrade probe staged clean calibration sources, changed the Fable tool ratio from `1.551639` to `1.9` and revision to `NON-VACUITY BREAK table-upgrade-v2`, then opened persisted frozen state through two defer-shaped reads. Both returned revision `2026-09-21-family-v1`, protected count 20 and cutoff 21. The next bust-permitted read returned the new revision, count 16 and cutoff 25 and emitted the required adoption log. The temporary gate test passed `1/1`; source restore returned an empty diff.
+
+The Rust twin serialized/deserialized `ModuleMeta` between the frozen read and the changed table, retained `1.551639` across the defer/restart read, and adopted `1.9` plus `table-upgrade-v2` only at the next bust. Its named test passed; the two-file mutant diff restored empty.
+
+Permanent controls also pass:
+
+```text
+session decision calibration freeze: 2 pass, 0 fail
+frozen_revision_survives_restart_and_changes_only_at_the_next_bust: passed
+```
+
+### Sequence 3 — fit guards: PASS
+
+The report commands were rerun unchanged. OpenCode/Rust-mode adapter controls: `5 pass, 0 fail`; Pi controls: `3 pass, 0 fail`. Removing runtime learning did not alter the conservative unknown-model envelope or completeness requirements.
+
+### Sequence 7 — calibrated hygiene and transition: PASS
+
+The Fable tool-only fixture now reports `T=62,066`, `U=31,033`, band/level `firm`, and reminder text containing `4 spent tool outputs (~31k tokens)` in OpenCode and Pi. Rust reports `(U,T)=(31,033,62,066)` and `Firm`.
+
+```text
+TS Fable hygiene: 1 pass, 0 fail
+Pi Fable hygiene: 1 pass, 0 fail
+Rust fable_tool_only_hygiene_calibrates_absolute_floors_before_band: passed
+TS transition/restart controls: 2 pass, 0 fail
+Rust hygiene_v1_watermarks_convert_once_on_first_bust: passed
+```
+
+The transition controls seed v1 watermarks, prove defer leaves them unchanged, convert on the priced pass, then prove a second priced pass does not convert again. Mutation control removed the Rust version stamp with `NON-VACUITY BREAK`: the sole named test `transform::tests::hygiene_v1_watermarks_convert_once_on_first_bust` failed on its second transition call; `1 failed, 0 passed, 1224 filtered out`. `transform.rs` changed from empty to `1 insertion(+), 1 deletion(-)` and restored to empty.
+
+### Sequences 8 and learning provenance
+
+Sequence 8 is moot under the owner ruling. The learning instrument and its mutation row were removed rather than rerun.
+
+### Full verification: PASS
+
+All host-facing runs used throwaway HOME/XDG roots.
+
+```text
+plugin full suite: 5254 pass, 1 skip, 0 fail
+Pi full suite:     1225 pass, 3 skip, 0 fail
+plugin typecheck:  passed
+Pi typecheck:      passed
+cargo test -p mc-module --locked: 1217 library pass, 8 ignored, 0 fail; all integration targets passed
+cargo clippy -p mc-module --locked -- -D warnings: passed
+```
+
+The first full Rust run exposed one cache-delivery test that directly seeded legacy aggregate fields; the test fixture now explicitly selects legacy unit arithmetic because calibrated floor behavior has its own Fable control. The impacted test and then the full locked suite passed. No SQL migration or schema-fence movement occurred.
+
+### Fix-round verdict
+
+Both original blocking findings are closed across OpenCode, Pi and Rust. Active static calibration survives defer/restart and changes only at a priced bust boundary; hygiene floors, cadence/grace and reminders use calibrated units with a one-time durable transition. Runtime learning is absent by design.

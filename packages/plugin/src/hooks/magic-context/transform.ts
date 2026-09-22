@@ -18,6 +18,7 @@ import { isFable51ThinkingBindingModel } from "../../features/magic-context/over
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
+import { sessionDecisionCalibration } from '../../features/magic-context/session-decision-calibration';
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     type ContextDatabase,
@@ -66,7 +67,6 @@ import { getSdkContextLimit } from "../../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
-import { capturePricedCalibration } from "./calibration-observation";
 import { replayCavemanCompression } from "./caveman-cleanup";
 import { commitCompactionModeRecord, reconcileCompactionMode } from "./compaction-off-transition";
 import { getActiveCompartmentRun, startCompartmentAgent } from "./compartment-runner";
@@ -2312,6 +2312,23 @@ export function createTransform(deps: TransformDeps) {
                 deps.pendingMaterializationSessions.has(sessionId) ||
                 (canConsumeDeferredLate && deferredMaterializationSessions.has(sessionId)) ||
                 protectionFoldWillBust);
+        const calibrationBustReason = protectionFoldWillBust
+            ? "fold"
+            : contextUsage.percentage >= forceMaterializationPercentage
+              ? "force"
+              : deps.pendingMaterializationSessions.has(sessionId)
+                ? "flush"
+                : consumingDeferredEarly || compartmentPhase.justAwaitedPublication
+                  ? "refresh"
+                  : schedulerDecision === "execute"
+                    ? "execute"
+                    : "unknown";
+        sessionDecisionCalibration(db, sessionId, {
+            bustPermitted: protectionCacheBustingPass,
+            modelKey: hardModelKey || currentModelKeyForBoundary,
+            bustReason: calibrationBustReason,
+            onAdopt: (message) => sessionLog(sessionId, message),
+        });
         const protectionUsableSoft = windowGeometry?.usableSoft ?? boundaryContextLimit;
         const protectionFloor = resolveEpochFloorForPass(db, sessionId, {
             configuredOverride: deps.protectedTokens,
@@ -2625,15 +2642,6 @@ export function createTransform(deps: TransformDeps) {
         }
 
         if (postTransformResult.bustedThisPass) {
-            if (finalWireEstimate)
-                capturePricedCalibration(
-                    sessionId,
-                    modelForBudget
-                        ? `${modelForBudget.providerID}/${modelForBudget.modelID}`
-                        : "unknown/unknown",
-                    messages,
-                    finalWireEstimate,
-                );
             recordPendingTransformDecision(sessionId, {
                 tsMs: Date.now(),
                 decision: schedulerDecision,

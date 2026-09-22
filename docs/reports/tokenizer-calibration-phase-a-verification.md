@@ -46,7 +46,7 @@ This initial comparison does not by itself prove a table-revision transition. Th
 - `cargo clippy -p mc-module --all-targets -- -D warnings`: passed.
 - Plugin and Pi `typecheck` scripts: passed.
 - Plugin and Pi `build` scripts: passed.
-- Targeted history, protection, producer, fallback/replay, emergency, system-hook, event-hook and candidate-EMA tests: passed. Full adapter suite gates are recorded separately when executed.
+- Targeted history, protection, producer, fallback/replay, emergency, table-freeze and calibrated-hygiene tests: passed. Runtime learning and its candidate-only tests were removed by owner ruling.
 - AFT diagnostics were incomplete because authoritative TypeScript/Biome producers were unavailable; compiler/typecheck gates are the authority.
 - Migration delta check against master covering `**/migrations.ts`, `**/storage-db.ts` and `crates/mc-store`: empty.
 
@@ -84,12 +84,12 @@ Fixture changes do not bypass fit predicates. They declare mock model identities
 
 ## Explicit limitations and remaining release work
 
-- Tail-hygiene T/U and persisted cadence/grace watermark conversion is deferred under the no-persistence constraint, as allowed by the owner. It requires a safe unit/epoch transition; the existing raw values are not reinterpreted.
+- Tail-hygiene T/U, absolute floors, cadence/grace and reminder figures now use the frozen static class ratios. Legacy U watermarks convert once at the first authorized bust and carry a durable v2 unit stamp in existing JSON state.
 - Legacy historian projected-reclaim attribution and the full docs/memory/profile/facts/m1 cap inventory remain unresolved. The runtime delivery is not a declaration that every original section-3 row is complete.
-- No mutation disabling defer freeze was executed against the strengthened host fixture. N=2→3 and table-revision changes were not driven inside that real-host sequence. Candidate-EMA unit controls do cover initialization, updates, rejected samples and no activation at N=3.
+- Table-revision upgrades were driven against persisted TS and Rust session state: both defer/restart reads retained the old revision, and the next priced pass adopted the changed revision. The missing hygiene-unit stamp mutation caused the second priced transition to re-run and reddened its sole named control.
 - The full scheduler-to-provider adversarial HTTP matrix on every harness is not claimed. Actual caller/unit controls prove refusal of locally fitting over-wall estimates and positive fitting controls; the producer capacity fixtures observe real executor/SDK submission callbacks, not paid provider completions.
-- Pi/main and hostless-Rust calibration observations remain partial where system/tools or response correlation are unavailable. Pi child tool schemas and later host/provider framing are not part of an exact full-provider tokenization proof.
-- No migration, schema fence movement, new knob, learned-state persistence or wire dump was introduced. The migration delta is empty for `**/migrations.ts`, `**/storage-db.ts` and `crates/mc-store`.
+- Calibration is static-only; there is no runtime observation, EMA or learned provenance. Pi child tool schemas and later host/provider framing remain outside the static decision representation.
+- No SQL migration, schema fence movement, new knob, learned-state persistence or wire dump was introduced. TS uses the existing `deferred_execute_state` JSON; Rust adds backward-defaulted keys inside existing `mc_cache_state.meta` JSON.
 
 ## Fable fixture units
 

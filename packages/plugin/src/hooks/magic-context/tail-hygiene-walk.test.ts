@@ -778,6 +778,50 @@ describe("tail hygiene image content memoization", () => {
         }
     });
 
+    it("calibrates the Fable tool-only hygiene floors and reminder figures", () => {
+        const tokenizer = spyOn(formattingModule, "estimateTokens").mockImplementation(
+            (content) => (content.startsWith("fable-output-") ? 10_000 : 0),
+        );
+        try {
+            const messages = [1, 2, 3, 4].map((number) =>
+                nativeTool(
+                    `fable-owner-${number}`,
+                    `fable-call-${number}`,
+                    {},
+                    `fable-output-${number}`,
+                ),
+            );
+            const tags = [1, 2, 3, 4].map((number) =>
+                tag(number, `fable-call-${number}`, "tool", {
+                    toolOwnerMessageId: `fable-owner-${number}`,
+                }),
+            );
+            const baseline = refreshTailHygieneBaseline({
+                messages,
+                tags,
+                protectedTagNumbers: new Set([3, 4]),
+                cacheBusting: true,
+                calibration: { toolsRatio: 1.551639, proseRatio: 1.571778 },
+                hygieneUnitsVersion: 2,
+            });
+            const effective = effectiveTailHygiene(baseline);
+            const decision = decideChannel1({
+                ...baseline,
+                lastNudgeUndropped: 0,
+                lastNudgeLevel: "",
+                hasRecentReduce: false,
+            });
+
+            expect(effective).toEqual({ u: 31_033, t: 62_066 });
+            expect(decision).toMatchObject({ fire: true, band: "firm", level: "firm" });
+            expect(buildChannel1Reminder("firm", effective.u, 4)).toContain(
+                "4 spent tool outputs (~31k tokens)",
+            );
+        } finally {
+            tokenizer.mockRestore();
+        }
+    });
+
     it("caches a genuine zero and keeps excluded content out of the tokenizer", () => {
         const zeroContent = "opencode-zero-token-fixture";
         const excludedContent = "opencode-excluded-fixture";
