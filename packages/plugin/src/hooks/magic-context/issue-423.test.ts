@@ -2,6 +2,7 @@ import { getProtectionWindowForSession } from "../../features/magic-context/prot
 import { createTagger } from "../../features/magic-context/tagger";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import { registerIssue423Tests } from "./issue-423-test-support.test";
+import { clearProducerModelObservations, prepareProducerFixture } from './producer-window-test-support';
 import { tagMessages } from "./tag-messages";
 
 // Deliberately cover the initial tool mass so the first pass has no candidates;
@@ -99,7 +100,7 @@ registerIssue423HistorianTest(
                 delete: mock(async () => ({})),
             },
         } as unknown as PluginContext["client"];
-        await runCompartmentAgent({
+        try { await runCompartmentAgent(await prepareProducerFixture({
             client,
             db,
             sessionId,
@@ -108,7 +109,7 @@ registerIssue423HistorianTest(
             boundarySnapshot: boundary,
             compartmentLeaseHolderId: holderId,
             memoryEnabled: false,
-        });
+        })); } finally { clearProducerModelObservations(); }
     },
     (fixture) => fixture.raw,
 );

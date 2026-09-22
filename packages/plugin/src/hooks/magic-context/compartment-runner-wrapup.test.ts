@@ -22,6 +22,7 @@ import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { runCompartmentAgent } from "./compartment-runner";
+import { clearProducerModelObservations, prepareProducerFixture } from './producer-window-test-support';
 import {
     type ProtectedTailBoundarySnapshot,
     resolveWrapupProtectedTailBoundary,
@@ -221,7 +222,7 @@ async function runWithLease(args: {
     const holderId = `holder-${Math.random()}`;
     expect(acquireCompartmentLease(args.db, args.sessionId, holderId)).not.toBeNull();
     try {
-        await runCompartmentAgent({
+        await runCompartmentAgent(await prepareProducerFixture({
             client: client(args.output, args.beforeHistorianCollect),
             db: args.db,
             sessionId: args.sessionId,
@@ -239,8 +240,9 @@ async function runWithLease(args: {
             forceDrainQuota: args.forceDrainQuota,
             preserveInjectionCacheUntilConsumed: true,
             refreshBoundarySnapshot: args.refreshBoundarySnapshot,
-        });
+        }));
     } finally {
+        clearProducerModelObservations();
         releaseCompartmentLease(args.db, args.sessionId, holderId);
     }
 }
