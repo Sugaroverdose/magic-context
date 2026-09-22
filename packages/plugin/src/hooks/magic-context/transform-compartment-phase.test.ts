@@ -15,8 +15,8 @@ import { getActiveCompartmentRun, registerActiveCompartmentRun } from "./compart
 import { createDefaultBoundarySnapshotForTests } from "./protected-tail-boundary";
 import { __ignoredNotificationTest } from "./send-session-notification";
 import {
-    historianJoinFailClosedMessage,
     HISTORIAN_INLINE_JOIN_BUDGET_MS,
+    historianJoinFailClosedMessage,
     resolveHistorianInlineJoinBudget,
     runCompartmentPhase,
 } from "./transform-compartment-phase";
@@ -304,9 +304,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
         };
 
         try {
-            expect(resolveHistorianInlineJoinBudget(600_000)).toBe(
-                HISTORIAN_INLINE_JOIN_BUDGET_MS,
-            );
+            expect(resolveHistorianInlineJoinBudget(600_000)).toBe(HISTORIAN_INLINE_JOIN_BUDGET_MS);
             const started = performance.now();
             const timedOut = await runCompartmentPhase(args);
             expect(performance.now() - started).toBeLessThan(250);
@@ -365,9 +363,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
                 finalWireEstimate: { tokens: 64_000, trusted: false },
                 contextLimitTokens: 100_000,
             }),
-        ).toBe(
-            "historian did not complete within 60 s: background historian is still running",
-        );
+        ).toBe("historian did not complete within 60 s: background historian is still running");
     });
 
     it("keeps an in-budget historian completion on the inline fold path", async () => {

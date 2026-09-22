@@ -555,7 +555,9 @@ describe("OpenCode 2 hidden child completion", () => {
             const failure = state.executor.attempt(handle, request());
             await expect(failure).rejects.toThrow("outcome=failed");
             await expect(failure).rejects.toThrow("ProviderModelNotFoundError");
-            await expect(failure).rejects.toThrow("ollama-cloud/deepseek-v4.1-flash is unavailable");
+            await expect(failure).rejects.toThrow(
+                "ollama-cloud/deepseek-v4.1-flash is unavailable",
+            );
             expect(state.rows.latestAssistantCalls - pollsBefore).toBe(1);
             await close(state.executor, handle, false);
         } finally {

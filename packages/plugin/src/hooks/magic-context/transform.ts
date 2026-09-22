@@ -133,10 +133,7 @@ import {
 } from "./strip-content";
 import { injectTemporalMarkers } from "./temporal-awareness";
 import { createPreAdoptionToolSweepResolver, useScopedToolSweep } from "./tool-sweep-policy";
-import {
-    historianJoinFailClosedMessage,
-    runCompartmentPhase,
-} from "./transform-compartment-phase";
+import { historianJoinFailClosedMessage, runCompartmentPhase } from "./transform-compartment-phase";
 import {
     contextUsagePassSnapshot,
     loadContextUsage,
@@ -2558,13 +2555,15 @@ export function createTransform(deps: TransformDeps) {
                     `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} conversation=${finalWireEstimate.messageTokens.conversation} tools=${finalWireEstimate.messageTokens.toolCall} system=${finalWireEstimate.systemTokens} toolDefinitions=${finalWireEstimate.toolDefinitionTokens ?? "unknown"} tail=${finalWireTail}`,
                 );
             }
-            const timedOutHistorianFailure = historianJoinFailClosedMessage({
-                timedOut: compartmentPhase.historianJoinTimedOut,
-                budgetMs: compartmentPhase.historianJoinBudgetMs,
-                finalWireEstimate,
-                contextLimitTokens: boundaryContextLimit,
-                lastHistorianError: getHistorianFailureState(db, sessionId).lastError,
-            });
+            const timedOutHistorianFailure = compartmentPhase.historianJoinTimedOut
+                ? historianJoinFailClosedMessage({
+                      timedOut: true,
+                      budgetMs: compartmentPhase.historianJoinBudgetMs,
+                      finalWireEstimate,
+                      contextLimitTokens: boundaryContextLimit,
+                      lastHistorianError: getHistorianFailureState(db, sessionId).lastError,
+                  })
+                : null;
             if (timedOutHistorianFailure) {
                 sessionLog(
                     sessionId,

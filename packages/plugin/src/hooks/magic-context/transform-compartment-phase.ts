@@ -332,10 +332,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         });
         let result: "done" | "timeout";
         try {
-            result = await Promise.race([
-                activeRun.promise.then(() => "done" as const),
-                timeout,
-            ]);
+            result = await Promise.race([activeRun.promise.then(() => "done" as const), timeout]);
         } finally {
             if (timer !== undefined) clearTimeout(timer);
         }
