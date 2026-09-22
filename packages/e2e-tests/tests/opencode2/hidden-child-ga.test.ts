@@ -211,7 +211,9 @@ test("OpenCode 2 hidden historian keeps one cheap-model child across provider er
         const failed = await command(3);
         expect(failed.ok).toBe(false);
         expect(failed.childID).toBe(first.childID);
-        expect(failed.error).toContain("forced hidden failure");
+        // GA 2.0.5 persists only the terminal outcome; the provider's reason remains in its host log.
+        expect(failed.error).toContain("outcome=failed");
+        expect(failed.error).toContain("session_error=unavailable");
 
         host.mock.setDefault({
             text: "fresh child completion",

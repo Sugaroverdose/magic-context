@@ -197,6 +197,7 @@ async function setup(
     let terminalOutcome: "succeeded" | "failed" | "interrupted" | undefined;
     let terminalRowType: "assistant" | "idle" = "assistant";
     let readableSessionError: unknown;
+    let eventSessionError: unknown;
     let removeError: Error | undefined;
     let delayRowMs = 0;
     let omitUsage = false;
@@ -216,6 +217,9 @@ async function setup(
                 model: { providerID: "mock", id: "user" },
                 ...(readableSessionError === undefined ? {} : { error: readableSessionError }),
             };
+        },
+        async terminalError() {
+            return eventSessionError;
         },
         async switchModel(input) {
             switches.push(structuredClone(input));
@@ -355,6 +359,9 @@ async function setup(
         },
         setReadableSessionError(value: unknown) {
             readableSessionError = value;
+        },
+        setEventSessionError(value: unknown) {
+            eventSessionError = value;
         },
         setRemoveError(value: Error | undefined) {
             removeError = value;
@@ -546,7 +553,7 @@ describe("OpenCode 2 hidden child completion", () => {
         const state = await setup();
         try {
             state.setTerminalOutcome("failed");
-            state.setReadableSessionError({
+            state.setEventSessionError({
                 type: "ProviderModelNotFoundError",
                 message: "ollama-cloud/deepseek-v4.1-flash is unavailable",
             });

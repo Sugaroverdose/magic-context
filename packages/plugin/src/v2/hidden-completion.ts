@@ -74,6 +74,8 @@ export interface HiddenChildHost {
         /** Returned only when the host exposes an error for the terminal session. */
         error?: unknown;
     }>;
+    /** Optional event-backed error lookup for hosts that do not retain the reason on session.get. */
+    terminalError?(input: { sessionID: string }): Promise<unknown>;
     switchModel(input: {
         sessionID: string;
         model: { providerID: string; id: string; variant?: string };
@@ -815,6 +817,10 @@ export async function createV2HiddenCompletionExecutor(
                         options.openReader,
                         async () => {
                             try {
+                                const eventError = await host.terminalError?.({
+                                    sessionID: run.child.id,
+                                });
+                                if (eventError !== undefined) return eventError;
                                 return (await host.get({ sessionID: run.child.id })).error;
                             } catch {
                                 return undefined;
