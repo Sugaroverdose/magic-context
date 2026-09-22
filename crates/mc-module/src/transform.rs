@@ -1868,20 +1868,22 @@ struct Channel1Decision {
     clear_post_reduce_grace: bool,
 }
 
+fn scale_hygiene_watermark(value: i64, tools_ratio: f64) -> i64 {
+    ((value.max(0) as f64) * tools_ratio)
+        .round()
+        .min(i64::MAX as f64) as i64
+}
+
 fn transition_hygiene_units(meta: &mut ModuleMeta, bust_permitted: bool, tools_ratio: f64) -> bool {
     if !bust_permitted || meta.hygiene_units_version >= 2 {
         return false;
     }
-    let scale = |value: i64| {
-        ((value.max(0) as f64) * tools_ratio)
-            .round()
-            .min(i64::MAX as f64) as i64
-    };
-    meta.channel1_last_nudge_undropped = scale(meta.channel1_last_nudge_undropped);
+    meta.channel1_last_nudge_undropped =
+        scale_hygiene_watermark(meta.channel1_last_nudge_undropped, tools_ratio);
     if let Some(baseline) = meta.tail_hygiene_baseline.as_mut() {
         baseline.channel1_post_reduce_grace_baseline_u = baseline
             .channel1_post_reduce_grace_baseline_u
-            .map(scale);
+            .map(|value| scale_hygiene_watermark(value, tools_ratio));
     }
     meta.hygiene_units_version = 2;
     true
@@ -31903,6 +31905,9 @@ pub(crate) mod tests {
             fn arm_gentle_crossing(s: &McStore, session_id: &str) {
                 let mut loaded = s.load(session_id).unwrap();
                 let baseline = loaded.meta.tail_hygiene_baseline.as_mut().unwrap();
+                // This cache-delivery control seeds legacy arithmetic directly; calibrated
+                // floor behavior is covered by the dedicated Fable hygiene test.
+                baseline.hygiene_units_version = 1;
                 baseline.baseline_u = CHANNEL1_FLOOR_TOKENS - 1;
                 baseline.baseline_t = 100_000;
                 baseline.turn_delta_u = 0;
