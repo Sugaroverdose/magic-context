@@ -68,7 +68,7 @@ describe("Pi ctx_note smart notes", () => {
 		// A second scalar id field is what made required-all tool surfaces fail
 		// every call with filler in both (issue 460).
 		expect(properties.note_id).toBeUndefined();
-		expect(properties.note_ids).toEqual({
+		expect(JSON.parse(JSON.stringify(properties.note_ids))).toEqual({
 			type: "array",
 			items: {
 				type: "integer",
@@ -78,7 +78,7 @@ describe("Pi ctx_note smart notes", () => {
 			minItems: 1,
 			maxItems: 50,
 			description:
-				"Note ids: exactly one for 'update', one to fifty for 'dismiss'. Ignored by 'write' and 'read'.",
+				"Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write.",
 		});
 	});
 
@@ -356,7 +356,7 @@ describe("Pi ctx_note smart notes", () => {
 		expect(result.text).toBe(
 			"Dismissed 1 of 4 notes.\n" +
 				"- Note #1: dismissed\n" +
-				"- Note #2: not_owned\n" +
+				"- Note #2: not_found\n" +
 				"- Note #3: already_dismissed\n" +
 				"- Note #999: not_found",
 		);
@@ -372,10 +372,10 @@ describe("Pi ctx_note smart notes", () => {
 		]);
 	});
 
-	it("ignores note_ids filler on write and read, and takes exactly one id for update", async () => {
+	it("ignores note_ids on write, reads owned ids, and hides foreign ids as missing", async () => {
 		// Required-all tool surfaces make the model fill every declared
-		// property (issue 460); ids on an action that does not use them must
-		// not fail the call.
+		// property on write; read uses IDs intentionally and must not disclose
+		// whether an inaccessible ID exists.
 		const db = createTestDb();
 		const writeWithFiller = await callNote({
 			db,
@@ -385,9 +385,13 @@ describe("Pi ctx_note smart notes", () => {
 				note_ids: [1],
 			},
 		});
-		const readWithFiller = await callNote({
+		addNote(db, "session", {
+			sessionId: "ses-foreign",
+			content: "Foreign note body",
+		});
+		const targetedRead = await callNote({
 			db,
-			params: { action: "read", note_ids: [1] },
+			params: { action: "read", note_ids: [1, 2, 999] },
 		});
 		const updateTwo = await callNote({
 			db,
@@ -401,8 +405,11 @@ describe("Pi ctx_note smart notes", () => {
 
 		expect(writeWithFiller.isError).toBe(false);
 		expect(writeWithFiller.text).toContain("Saved session note #1");
-		expect(readWithFiller.isError).toBe(false);
-		expect(readWithFiller.text).toContain("Filler-tolerant note");
+		expect(targetedRead.isError).toBe(false);
+		expect(targetedRead.text).toContain("Filler-tolerant note");
+		expect(targetedRead.text).toContain("- Note #2: not_found");
+		expect(targetedRead.text).toContain("- Note #999: not_found");
+		expect(targetedRead.text).not.toContain("Foreign note body");
 		expect(updateTwo.isError).toBe(true);
 		expect(updateTwo.text).toContain(
 			"exactly one positive integer id when action is 'update'",

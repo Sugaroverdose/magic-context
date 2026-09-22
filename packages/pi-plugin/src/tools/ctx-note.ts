@@ -35,8 +35,10 @@ import {
 	addNote,
 	dismissNote,
 	dismissNotes,
+	getNoteByIdInScope,
 	getNotes,
 	type Note,
+	type NoteMutationScope,
 	type NoteStatus,
 	setNoteLastReadAt,
 	updateNote,
@@ -66,19 +68,20 @@ const ParamsSchema = Type.Object(
 				],
 				{
 					description:
-						"Operation to perform. Defaults to 'write' when content is provided, otherwise 'read'.",
+						"write | read | update | dismiss. Defaults to write when content is given, else read.",
 				},
 			),
 		),
 		content: Type.Optional(
 			Type.String({
-				description: "Note text to store when action is 'write'.",
+				description:
+					"Note text for write/update: first line is the title (under 80 chars), then the detail.",
 			}),
 		),
 		surface_condition: Type.Optional(
 			Type.String({
 				description:
-					"Externally verifiable condition for smart notes. A background checker verifies it using ONLY outside signals (GitHub state via gh, files on disk, git history, web) — it cannot see this conversation. Use for PR/issue state, release tags, file contents, workflow runs. NOT for 'when the user mentions X' / 'when we revisit Y' — write a regular note instead.",
+					"Makes this a smart note: a condition an outside checker can verify on its own, periodically — repository state, releases, web pages, anything it can look up — never something only this conversation knows. The note is parked until the condition holds.",
 			}),
 		),
 		note_ids: Type.Optional(
@@ -88,7 +91,7 @@ const ParamsSchema = Type.Object(
 					minItems: 1,
 					maxItems: 50,
 					description:
-						"Note ids: exactly one for 'update', one to fifty for 'dismiss'. Ignored by 'write' and 'read'.",
+						"Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write.",
 				},
 			),
 		),
@@ -97,20 +100,18 @@ const ParamsSchema = Type.Object(
 				FILTER_VALUES.map((value) => Type.Literal(value)),
 				{
 					description:
-						"Optional read filter. Defaults to active session notes + ready smart notes. Use 'all' to inspect every status or 'pending' to inspect unsurfaced smart notes.",
+						"Read filter: active (default: active + ready), all, pending (unsurfaced smart notes), ready, dismissed.",
 				},
 			),
 		),
 		limit: Type.Optional(
 			Type.Number({
-				description:
-					"Max notes per section for read, newest first (default: 25)",
+				description: "Rows per read (default 25).",
 			}),
 		),
 		offset: Type.Optional(
 			Type.Number({
-				description:
-					"Skip this many newest notes for read — page older ones (default: 0)",
+				description: "Skip this many newest rows (default 0).",
 			}),
 		),
 	},
@@ -178,16 +179,30 @@ function formatDismissResults(
 		(result) => result.outcome === "dismissed",
 	).length;
 	return `Dismissed ${dismissedCount} of ${results.length} notes.\n${results
-		.map((result) => `- Note #${result.noteId}: ${result.outcome}`)
+		.map(
+			(result) =>
+				`- Note #${result.noteId}: ${result.outcome === "not_owned" ? "not_found" : result.outcome}`,
+		)
 		.join("\n")}`;
 }
 
+function formatNotesById(
+	db: ContextDatabase,
+	noteIds: readonly number[],
+	scope: NoteMutationScope,
+): string {
+	return `## Notes by ID\n\n${noteIds
+		.map((noteId) => {
+			const note = getNoteByIdInScope(db, noteId, scope);
+			return note ? formatNoteLine(note) : `- Note #${noteId}: not_found`;
+		})
+		.join("\n\n")}`;
+}
+
 /**
- * Read `note_ids` for the actions that use it. `write` and `read` never look
- * at it: tool surfaces that require every declared property make the model
- * send filler there (issue 460), and filler on an action that does not use
- * the field must not fail the call. `update` addresses exactly one note;
- * `dismiss` takes one to fifty.
+ * Read `note_ids` for targeted reads and mutations. `write` ignores the field
+ * because required-all tool surfaces send filler there. `read` and `dismiss`
+ * accept one to fifty IDs; `update` addresses exactly one note.
  */
 function parseNoteIds(action: string, value: unknown): number[] | string {
 	const max = action === "update" ? 1 : 50;
@@ -201,7 +216,7 @@ function parseNoteIds(action: string, value: unknown): number[] | string {
 	) {
 		return action === "update"
 			? "Error: 'note_ids' must contain exactly one positive integer id when action is 'update'."
-			: "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.";
+			: `Error: 'note_ids' must contain 1 to 50 positive integer ids when action is '${action}'.`;
 	}
 	return value;
 }
@@ -274,7 +289,9 @@ export function createCtxNoteTool(
 			const action =
 				params.action ?? (params.content?.trim() ? "write" : "read");
 			const noteIds =
-				action === "dismiss" || action === "update"
+				action === "dismiss" ||
+				action === "update" ||
+				(action === "read" && params.note_ids !== undefined)
 					? parseNoteIds(action, params.note_ids)
 					: undefined;
 			if (typeof noteIds === "string") return err(noteIds);
@@ -425,15 +442,28 @@ export function createCtxNoteTool(
 				typeof params.offset === "number" && params.offset > 0
 					? Math.floor(params.offset)
 					: 0;
-			const sections = readNotes({
-				db: deps.db,
-				sessionId,
-				cwd: ctx.cwd,
-				resolveProjectIdentity: resolveProject,
-				filter: params.filter,
-				limit,
-				offset,
-			});
+			const projectIdentity = Array.isArray(noteIds)
+				? resolveProject(ctx.cwd)
+				: undefined;
+			if (Array.isArray(noteIds) && !projectIdentity) {
+				return err("Error: Could not resolve project identity for note read.");
+			}
+			const sections = Array.isArray(noteIds)
+				? [
+						formatNotesById(deps.db, noteIds, {
+							projectPath: projectIdentity as string,
+							sessionId,
+						}),
+					]
+				: readNotes({
+						db: deps.db,
+						sessionId,
+						cwd: ctx.cwd,
+						resolveProjectIdentity: resolveProject,
+						filter: params.filter,
+						limit,
+						offset,
+					});
 
 			// Best-effort watermark write so any future note nudge logic
 			// can suppress reminders when the agent has already seen notes.

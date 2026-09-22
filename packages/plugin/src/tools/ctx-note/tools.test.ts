@@ -500,7 +500,7 @@ describe("createCtxNoteTools", () => {
         expect(result).toBe(
             "Dismissed 1 of 4 notes.\n" +
                 "- Note #1: dismissed\n" +
-                "- Note #2: not_owned\n" +
+                "- Note #2: not_found\n" +
                 "- Note #3: already_dismissed\n" +
                 "- Note #999: not_found",
         );
@@ -511,16 +511,20 @@ describe("createCtxNoteTools", () => {
         ]);
     });
 
-    it("ignores note_ids filler on write and read, and takes exactly one id for update", async () => {
+    it("ignores note_ids on write, reads owned ids, and hides foreign ids as missing", async () => {
         // Required-all tool surfaces make the model fill every declared
-        // property (issue 460); ids on an action that does not use them must
-        // not fail the call.
+        // property on write; read uses IDs intentionally and must not disclose
+        // whether an inaccessible ID exists.
         const writeWithFiller = await tools.ctx_note.execute(
             { action: "write", content: "Filler-tolerant note", note_ids: [1] },
             toolContext(),
         );
-        const readWithFiller = await tools.ctx_note.execute(
-            { action: "read", note_ids: [1] },
+        await tools.ctx_note.execute(
+            { action: "write", content: "Foreign note body" },
+            toolContext("ses-foreign"),
+        );
+        const targetedRead = await tools.ctx_note.execute(
+            { action: "read", note_ids: [1, 2, 999] },
             toolContext(),
         );
         const updateTwo = await tools.ctx_note.execute(
@@ -534,7 +538,10 @@ describe("createCtxNoteTools", () => {
         const dismissNone = await tools.ctx_note.execute({ action: "dismiss" }, toolContext());
 
         expect(writeWithFiller).toContain("Saved session note #1");
-        expect(readWithFiller).toContain("Filler-tolerant note");
+        expect(targetedRead).toContain("Filler-tolerant note");
+        expect(targetedRead).toContain("- Note #2: not_found");
+        expect(targetedRead).toContain("- Note #999: not_found");
+        expect(targetedRead).not.toContain("Foreign note body");
         expect(updateTwo).toContain("exactly one positive integer id when action is 'update'");
         expect(updateNone).toContain("exactly one positive integer id when action is 'update'");
         expect(dismissNone).toContain("1 to 50 positive integer ids when action is 'dismiss'");

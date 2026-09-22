@@ -45,6 +45,36 @@ describe("newestUserText", () => {
         ).toBe("mc:hidden:input");
     });
 
+    it("gives the Curate child only ctx_memory and ctx_memory_list", () => {
+        const hook = new HiddenChildHook();
+        hook.registerAttempt("mc:hidden:curate", {
+            childSessionId: "ses-child",
+            identity: {
+                parentSessionId: "ses-parent",
+                directory: "/tmp",
+                agent: "dreamer",
+                kind: "dreamer-task",
+                system: "sys",
+                timeoutMs: 1000,
+            },
+            request: { body: { parts: [{ type: "text", text: "calibrated" }] } },
+            shaped: false,
+        });
+        const candidate = draft({
+            role: "user",
+            content: [{ type: "text", text: "mc:hidden:curate" }],
+        });
+        candidate.sessionID = "ses-child";
+        candidate.tools = {
+            read: { description: "read", input: {} },
+            ctx_memory: { description: "memory", input: {} },
+            ctx_memory_list: { description: "list", input: {} },
+        };
+
+        expect(hook.apply(candidate)).toBe(true);
+        expect(Object.keys(candidate.tools).sort()).toEqual(["ctx_memory", "ctx_memory_list"]);
+    });
+
     it("matches an attempt after v2 ordinal prefixes", () => {
         const hook = new HiddenChildHook();
         hook.registerChild("ses-child");

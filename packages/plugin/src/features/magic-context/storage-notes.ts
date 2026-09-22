@@ -233,6 +233,15 @@ function getNoteById(db: Database, noteId: number): Note | null {
     return isNoteRow(row) ? toNote(row) : null;
 }
 
+export function getNoteByIdInScope(
+    db: Database,
+    noteId: number,
+    scope: NoteMutationScope,
+): Note | null {
+    const note = getNoteById(db, noteId);
+    return note && noteBelongsToScope(note, scope) ? note : null;
+}
+
 function noteBelongsToScope(note: Note, scope: NoteMutationScope): boolean {
     if (note.type === "session") {
         return note.sessionId === scope.sessionId;
@@ -366,8 +375,8 @@ export function updateNote(
     updates: UpdateNoteOptions,
     scope: NoteMutationScope,
 ): Note | null {
-    const existing = getNoteById(db, noteId);
-    if (!existing || !noteBelongsToScope(existing, scope)) {
+    const existing = getNoteByIdInScope(db, noteId, scope);
+    if (!existing) {
         return null;
     }
 

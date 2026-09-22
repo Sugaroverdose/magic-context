@@ -21,6 +21,8 @@ import {
     type UpdateNoteOptions,
     updateNote,
 } from "../../features/magic-context/storage";
+import type { NoteMutationScope } from "../../features/magic-context/storage-notes";
+import { getNoteByIdInScope } from "../../features/magic-context/storage-notes";
 import type { RustNoteToolRequest, RustToolBackends } from "../../plugin/rust-tool-backends";
 import {
     isRustAuthorityDrainingError,
@@ -233,36 +235,35 @@ const ctxNoteArgsShape = {
         .enum(["write", "read", "dismiss", "update"])
         .optional()
         .describe(
-            "Operation to perform. Defaults to 'write' when content is provided, otherwise 'read'.",
+            "write | read | update | dismiss. Defaults to write when content is given, else read.",
         ),
-    content: tool.schema.string().optional().describe("Note text to store when action is 'write'."),
+    content: tool.schema
+        .string()
+        .optional()
+        .describe(
+            "Note text for write/update: first line is the title (under 80 chars), then the detail.",
+        ),
     surface_condition: tool.schema
         .string()
         .optional()
         .describe(
-            "Externally verifiable condition for smart notes. A separate background agent (dreamer) checks this using gh CLI, web fetches, file reads, git, etc. — NOT your conversation history. Use only for things like GitHub PR/issue state, release tags, file contents, or workflow runs. DO NOT use for 'when the user mentions X' / 'when we revisit Y' / 'when relevant to current task' — dreamer has no access to session context. For session-relative reminders, omit this and write a regular note.",
+            "Makes this a smart note: a condition an outside checker can verify on its own, periodically — repository state, releases, web pages, anything it can look up — never something only this conversation knows. The note is parked until the condition holds.",
         ),
     filter: tool.schema
         .enum(["all", "active", "pending", "ready", "dismissed"])
         .optional()
         .describe(
-            "Optional read filter. Defaults to active session notes + ready smart notes. Use 'all' to inspect every status or 'pending' to inspect unsurfaced smart notes.",
+            "Read filter: active (default: active + ready), all, pending (unsurfaced smart notes), ready, dismissed.",
         ),
-    limit: tool.schema
-        .number()
-        .optional()
-        .describe("Max notes per section for read, newest first (default: 25)"),
-    offset: tool.schema
-        .number()
-        .optional()
-        .describe("Skip this many newest notes for read — page older ones (default: 0)"),
+    limit: tool.schema.number().optional().describe("Rows per read (default 25)."),
+    offset: tool.schema.number().optional().describe("Skip this many newest rows (default 0)."),
     note_ids: tool.schema
         .array(tool.schema.number().int().min(1))
         .min(1)
         .max(50)
         .optional()
         .describe(
-            "Note ids: exactly one for 'update', one to fifty for 'dismiss'. Ignored by 'write' and 'read'.",
+            "Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write.",
         ),
 };
 // The tool definition exposes only the documented argument shape to the model
@@ -273,16 +274,30 @@ const ctxNoteArgsSchema = tool.schema.object(ctxNoteArgsShape).passthrough();
 function formatDismissResults(results: Array<{ noteId: number; outcome: string }>): string {
     const dismissedCount = results.filter((result) => result.outcome === "dismissed").length;
     return `Dismissed ${dismissedCount} of ${results.length} notes.\n${results
-        .map((result) => `- Note #${result.noteId}: ${result.outcome}`)
+        .map(
+            (result) =>
+                `- Note #${result.noteId}: ${result.outcome === "not_owned" ? "not_found" : result.outcome}`,
+        )
         .join("\n")}`;
 }
 
+function formatNotesById(
+    db: Database,
+    noteIds: readonly number[],
+    scope: NoteMutationScope,
+): string {
+    return `## Notes by ID\n\n${noteIds
+        .map((noteId) => {
+            const note = getNoteByIdInScope(db, noteId, scope);
+            return note ? formatNoteLine(note) : `- Note #${noteId}: not_found`;
+        })
+        .join("\n\n")}`;
+}
+
 /**
- * Read `note_ids` for the actions that use it. `write` and `read` never look
- * at it: tool surfaces that require every declared property make the model
- * send filler there (issue 460), and filler on an action that does not use
- * the field must not fail the call. `update` addresses exactly one note;
- * `dismiss` takes one to fifty.
+ * Read `note_ids` for targeted reads and mutations. `write` ignores the field
+ * because required-all tool surfaces send filler there. `read` and `dismiss`
+ * accept one to fifty IDs; `update` addresses exactly one note.
  */
 function parseNoteIds(action: string, value: unknown): number[] | string {
     const max = action === "update" ? 1 : 50;
@@ -294,7 +309,7 @@ function parseNoteIds(action: string, value: unknown): number[] | string {
     ) {
         return action === "update"
             ? "Error: 'note_ids' must contain exactly one positive integer id when action is 'update'."
-            : "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.";
+            : `Error: 'note_ids' must contain 1 to 50 positive integer ids when action is '${action}'.`;
     }
     return value;
 }
@@ -324,7 +339,9 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             // check would mis-infer `write` and then reject the empty content.
             const action = args.action ?? (args.content?.trim() ? "write" : "read");
             const noteIds =
-                action === "dismiss" || action === "update"
+                action === "dismiss" ||
+                action === "update" ||
+                (action === "read" && args.note_ids !== undefined)
                     ? parseNoteIds(action, args.note_ids)
                     : undefined;
             if (typeof noteIds === "string") return noteIds;
@@ -524,14 +541,24 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                     : DEFAULT_READ_LIMIT;
             const offset =
                 typeof args.offset === "number" && args.offset > 0 ? Math.floor(args.offset) : 0;
-            const sections = buildReadSections({
-                db: deps.db,
-                filter: args.filter,
-                projectIdentity,
-                sessionId,
-                limit,
-                offset,
-            });
+            if (Array.isArray(noteIds) && !projectIdentity) {
+                return `Error: Could not resolve project identity for note read: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
+            }
+            const sections = Array.isArray(noteIds)
+                ? [
+                      formatNotesById(deps.db, noteIds, {
+                          projectPath: projectIdentity as string,
+                          sessionId,
+                      }),
+                  ]
+                : buildReadSections({
+                      db: deps.db,
+                      filter: args.filter,
+                      projectIdentity,
+                      sessionId,
+                      limit,
+                      offset,
+                  });
 
             // Record read watermark so note-nudger can suppress reminders
             // when the agent has already seen notes in recent context and no

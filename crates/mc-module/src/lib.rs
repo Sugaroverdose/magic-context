@@ -13140,17 +13140,17 @@ impl McHandler {
         let action = string_arg(args, "action")
             .or_else(|| non_empty_string_arg(args, "content").map(|_| "write"))
             .unwrap_or("read");
-        // `note_ids` is the only id field, on the model-facing schema and on
-        // the TS adapter's internal wire alike. `write` and `read` never read
-        // it: tool surfaces that require every declared property make the
-        // model send filler there (issue 460), and filler on an action that
-        // does not use the field must not fail the call. `update` addresses
-        // exactly one note; `dismiss` takes one to fifty.
+        // `note_ids` is the only id field on both the model-facing schema and
+        // the TS adapter's wire. `write` ignores required-surface filler;
+        // targeted `read` and `dismiss` accept one to fifty IDs, while `update`
+        // addresses exactly one note.
         let note_ids = match action {
-            "update" | "dismiss" => {
+            "update" | "dismiss" | "read" if action != "read" || args.get("note_ids").is_some() => {
                 let max = if action == "update" { 1 } else { 50 };
                 let error = if action == "update" {
                     "Error: 'note_ids' must contain exactly one positive integer id when action is 'update'."
+                } else if action == "read" {
+                    "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'read'."
                 } else {
                     "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'."
                 };
@@ -13304,6 +13304,17 @@ impl McHandler {
                 }
             }
             "read" => {
+                if let Some(ids) = note_ids.as_deref() {
+                    let mut notes = Vec::with_capacity(ids.len());
+                    for note_id in ids {
+                        let note = match store.get_note_by_id(project, session, *note_id) {
+                            Ok(note) => note,
+                            Err(error) => return tool_error_result(format!("Error: {error}")),
+                        };
+                        notes.push((*note_id, note));
+                    }
+                    return mcp_text_result(render_notes_by_id(notes), false);
+                }
                 let limit = usize_arg(args, "limit").unwrap_or(25).clamp(1, 100);
                 let offset = usize_arg(args, "offset").unwrap_or(0);
                 let statuses: Vec<&str> = match filter {
@@ -16449,6 +16460,62 @@ fn truncate_expand_preview(value: &str, max_units: usize) -> String {
     format!("{}…", String::from_utf16_lossy(&units[..max_units]))
 }
 
+fn format_note_line(note: &StoredNote) -> String {
+    let status_suffix = if note.status == "active" {
+        String::new()
+    } else {
+        format!(" ({})", note.status)
+    };
+    let anchor = note
+        .anchor_ordinal
+        .map(|ordinal| format!(" ↳ @msg {ordinal}"))
+        .unwrap_or_default();
+    if note.type_name == "smart" {
+        let condition = if note.status == "ready" {
+            note.ready_reason
+                .as_deref()
+                .or(note.surface_condition.as_deref())
+                .unwrap_or("Condition satisfied")
+        } else {
+            note.surface_condition
+                .as_deref()
+                .unwrap_or("No condition recorded")
+        };
+        format!(
+            "- **#{}**{}: {}{}\n  {}: {}",
+            note.id,
+            status_suffix,
+            note.content,
+            anchor,
+            if note.status == "ready" {
+                "Condition met"
+            } else {
+                "Condition"
+            },
+            condition
+        )
+    } else {
+        format!(
+            "- **#{}**{}: {}{}",
+            note.id, status_suffix, note.content, anchor
+        )
+    }
+}
+
+fn render_notes_by_id(notes: Vec<(i64, Option<StoredNote>)>) -> String {
+    format!(
+        "## Notes by ID\n\n{}",
+        notes
+            .into_iter()
+            .map(|(note_id, note)| note
+                .as_ref()
+                .map(format_note_line)
+                .unwrap_or_else(|| format!("- Note #{note_id}: not_found")))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    )
+}
+
 fn render_notes(
     session_notes: Vec<StoredNote>,
     smart_notes: Vec<StoredNote>,
@@ -16460,47 +16527,6 @@ fn render_notes(
     if session_notes.is_empty() && smart_notes.is_empty() {
         return "## Notes\n\nNo session notes or smart notes.".to_string();
     }
-    let format_note = |note: &StoredNote| {
-        let status_suffix = if note.status == "active" {
-            String::new()
-        } else {
-            format!(" ({})", note.status)
-        };
-        let anchor = note
-            .anchor_ordinal
-            .map(|ordinal| format!(" ↳ @msg {ordinal}"))
-            .unwrap_or_default();
-        if note.type_name == "smart" {
-            let condition = if note.status == "ready" {
-                note.ready_reason
-                    .as_deref()
-                    .or(note.surface_condition.as_deref())
-                    .unwrap_or("Condition satisfied")
-            } else {
-                note.surface_condition
-                    .as_deref()
-                    .unwrap_or("No condition recorded")
-            };
-            format!(
-                "- **#{}**{}: {}{}\n  {}: {}",
-                note.id,
-                status_suffix,
-                note.content,
-                anchor,
-                if note.status == "ready" {
-                    "Condition met"
-                } else {
-                    "Condition"
-                },
-                condition
-            )
-        } else {
-            format!(
-                "- **#{}**{}: {}{}",
-                note.id, status_suffix, note.content, anchor
-            )
-        }
-    };
     let footer = |total: usize, shown: usize| {
         let remaining = total.saturating_sub(offset.saturating_add(shown));
         (remaining > 0).then(|| {
@@ -16516,7 +16542,7 @@ fn render_notes(
             "## Session Notes\n\n{}",
             session_notes
                 .iter()
-                .map(&format_note)
+                .map(format_note_line)
                 .collect::<Vec<_>>()
                 .join("\n")
         );
@@ -16536,7 +16562,7 @@ fn render_notes(
             },
             smart_notes
                 .iter()
-                .map(&format_note)
+                .map(format_note_line)
                 .collect::<Vec<_>>()
                 .join("\n\n")
         );
@@ -17079,7 +17105,7 @@ fn note_dismiss_outcome_text(outcome: NoteDismissOutcome) -> &'static str {
     match outcome {
         NoteDismissOutcome::Dismissed => "dismissed",
         NoteDismissOutcome::NotFound => "not_found",
-        NoteDismissOutcome::NotOwned => "not_owned",
+        NoteDismissOutcome::NotOwned => "not_found",
         NoteDismissOutcome::AlreadyDismissed => "already_dismissed",
     }
 }
@@ -17477,19 +17503,67 @@ pub fn dev_descriptor_at(data_home: &str) -> StorageDescriptor {
 }
 
 fn ctx_memory_description() -> String {
-    "Save and maintain durable project memories for facts that should stay useful in later turns. Use write for a new standalone fact, update when an existing memory changed, archive when a memory is wrong or obsolete, and merge when several memories describe the same fact. Keep each memory concise and understandable without this chat's surrounding context.".to_string()
+    r#"Durable facts about this project, shared with every agent working on it and kept for the months this work lasts.
+
+Your active memories are already in <project-memory> as `#id: fact` lines. Write one when you learn something that must not have to be found again — a project rule, an architectural fact, a hard-won constraint, a config value, a naming convention — and especially when it cost you turns to find. One standalone fact per memory, phrased to make sense on its own. A pending intention with its evidence ("do X later, here is what we know") is ctx_note, not memory.
+
+Actions:
+- write: new memory (content + category).
+- update: rewrite one memory whose fact changed (ids: [one], content; category optional to recategorize).
+- archive: retire wrong or obsolete memories (ids: [one or more], optional reason).
+- merge: collapse duplicates into one (ids: [two or more], content).
+- get: fetch by id (ids: 1–20), readable in every status.
+Examples: category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode" · category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale""#.to_string()
 }
 
 fn ctx_search_description() -> String {
-    "Your long-term recall for this project — search everything that ever happened here, not just what's currently visible.\n\nRetrieval matches meaning as well as exact words and fuses them, so phrasing matters: phrase `query` as a natural-language question that still contains the exact terms you expect in the answer (paths, symbols, config keys, error strings); a bare keyword stack finds less than a question carrying the same words.\n- Good: \"where is the retry backoff for the upload client configured?\"\n- Bad: \"upload client retry backoff config\"\n\nReach for it when something feels familiar but isn't in view: \"did we solve this before?\", \"what did we decide about X?\", \"when did this break?\", \"where does Y live?\". Results only contain things you CANNOT currently see — memories already shown in <project-memory> and the live conversation tail are filtered out. A query that is just one or more memory ids (e.g. `#7234` or `12, 34`) bypasses text search and resolves those ids directly.\n\nSources (omit for a broad search across all):\n- memory: curated cross-session project knowledge — rules, constraints, conventions.\n- message: the raw conversation behind your compacted history. Hits include message ordinals — expand the surrounding exchange with ctx_expand(start=N-10, end=N+5).\n- git_commit: this repository's commit history.\n- note: parked decisions and follow-ups with their recorded text.\n\nPicking sources:\n- \"when did this change / was this working before\" → [\"git_commit\", \"message\"]\n- \"did we discuss this earlier\" → [\"message\"]\n- \"did we decide something about this / leave a follow-up\" → [\"note\"]\n- \"what's our convention / rule for X\" → [\"memory\"]".to_string()
+    r#"Search the archive — everything that ever happened in this project, not just what is on your desk.
+
+Retrieval matches meaning and exact words and fuses them, so phrase `query` as a natural-language question that still carries the exact terms you expect in the answer (paths, symbols, config keys, error strings); a bare keyword stack finds less.
+- "where is the opencode source code path?"  (a location you once knew)
+- "why did we choose SQLite over postgres?"  (a decision and its reasons)
+- "how does the dreamer lease work?"  (a mechanism discussed or implemented earlier)
+- Not: "upload client retry backoff config"
+
+Results only contain what you CANNOT currently see — memories already in <project-memory> and the live tail are filtered out. A query that is just memory ids (`#7234`, `12, 34`) resolves them directly.
+
+Sources (omit for all):
+- memory — rules, constraints, conventions; "what's our convention for X"
+- message — the raw conversation behind compacted history; "did we discuss this"; hits carry ordinals for ctx_expand(start=N-10, end=N+5)
+- git_commit — commit history; "when did this change" (pair with message for regression hunts)
+- note — parked follow-ups with their recorded text; "did we leave a follow-up"
+Use from/to to restrict every source to an inclusive UTC date range."#.to_string()
 }
 
 fn ctx_expand_description() -> String {
-    "Recover compacted conversation ranges. The default view serves persisted historian chunk transcripts; verbose=true separately previews each cached raw message part, including tool-output sizes, so an ordinal can be recovered in full while that bounded snapshot is available.".to_string()
+    r#"Recover the original conversation behind your compacted history.
+
+Earlier turns are summarized in <session-history> under `## start-end · date · title` headings; each heading stands for the raw messages in that ordinal range. When the summary isn't enough — exact wording, a value, an error message, the reasoning behind a decision — expand the range: ctx_expand(start=120, end=245). Also works around a ctx_search message hit: start=N-10, end=N+5. Ranges after the last compartment are your live tail — already visible, not expandable.
+
+Returns the raw transcript as [N] U:/A: lines, capped at ~15K tokens; an oversized range returns the head and says where to continue.
+
+Finer recovery:
+- verbose=true lists each message separately with its ordinal and a per-part preview (tool calls with output sizes) so you can pick one.
+- message=N returns that one message in full — every text part and every tool call's complete input and output — from stored history. This is the way back to a tool output you released with ctx_reduce; if the message was deleted from history it says so."#.to_string()
 }
 
 fn ctx_note_description() -> String {
-    "Save or inspect durable session notes for future follow-ups. update changes one note (note_ids=[N]); dismiss retires 1–50 (note_ids). surface_condition is accepted and recorded, but condition evaluation arrives later on this leg.".to_string()
+    r#"Session notes are pending intentions: work you intend to return to, with its findings attached.
+
+Use notes for:
+- A finding to revisit when you return to the intended work
+- A decision with its reasoning, when follow-up work remains
+- A backlog item with evidence already found
+- Something the user explicitly asks you to note
+
+Don't use notes for: the next few steps; a plan you are actively executing; restart/fold insurance; or a record of how things stand (world-state, a design at a point in time) with nothing you intend to do about it — that goes stale silently; a fact worth keeping is memory, the rest is nothing. Use todos for active work. If the detail already lives in a file, record the path and what to inspect — don't copy the file into a note. Durable project facts belong in ctx_memory, not notes.
+
+First line is the title (under 80 chars), followed by detail. Operations:
+- write: save a new note (content required)
+- read: one row per note — `#id · age · title` — ready smart notes first, then newest; rows untouched 30+ days are marked stale. Pass note_ids to read full bodies; limit/offset page; filter selects other statuses.
+- update: change one note (note_ids=[N])
+- dismiss: retire 1–50 notes (note_ids). Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read.
+- surface_condition: make it a smart note — an outside checker periodically tests the condition using only externally verifiable signals (GitHub state, files, git, releases, web), never this conversation or future actions; the note is parked until the condition holds."#.to_string()
 }
 
 fn ctx_memory_schema() -> Value {
@@ -17500,16 +17574,16 @@ fn ctx_memory_schema() -> Value {
             "action": {
                 "type": "string",
                 "enum": ["write", "update", "archive", "merge", "get"],
-                "description": "Operation to perform."
+                "description": "write | update | archive | merge | get"
             },
             "category": {
                 "type": "string",
-                "description": "Memory category: one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, or NAMING. Required for write; optional on update to recategorize, and omission keeps the current category."
+                "description": "Kind of fact (required for write; on update/merge optional, omitted keeps the current category)."
             },
             "content": {
                 "type": "string",
                 "maxLength": 65536,
-                "description": "Standalone memory text. Required for write, update, and merge."
+                "description": "The memory text — one standalone fact (write, update, merge)."
             },
             "id": {
                 "type": "integer",
@@ -17520,7 +17594,7 @@ fn ctx_memory_schema() -> Value {
                 "type": "array",
                 "maxItems": 100,
                 "items": { "type": "integer", "minimum": 1 },
-                "description": "Memory ids. For update provide exactly one. For archive provide one or more. For merge, the first id is kept and updated, and the remaining ids are superseded. For get provide one to twenty ids."
+                "description": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get."
             },
             "target_id": {
                 "type": "integer",
@@ -17536,7 +17610,7 @@ fn ctx_memory_schema() -> Value {
             "reason": {
                 "type": "string",
                 "maxLength": 4096,
-                "description": "Optional short reason for archive."
+                "description": "Why it is being archived (optional)."
             },
             "memory_project": {
                 "type": "string",
@@ -17554,22 +17628,22 @@ fn ctx_search_schema() -> Value {
             "query": {
                 "type": "string",
                 "maxLength": 1024,
-                "description": "Search query. Matches against memory content, Primers, git commit messages, and raw user/assistant message text."
+                "description": "A natural-language question carrying the exact terms you expect in the answer."
             },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 25,
                 "default": 8,
-                "description": "Maximum number of matches to return."
+                "description": "Maximum results (default 10)."
             },
             "from": {
                 "type": "string",
-                "description": "Earliest date, YYYY-MM-DD (inclusive)"
+                "description": "Earliest date, YYYY-MM-DD (inclusive)."
             },
             "to": {
                 "type": "string",
-                "description": "Latest date, YYYY-MM-DD (inclusive; default open)"
+                "description": "Latest date, YYYY-MM-DD (inclusive; default open)."
             },
         }
     })
@@ -17580,10 +17654,10 @@ fn ctx_expand_schema() -> Value {
         "type": "object",
         "additionalProperties": true,
         "properties": {
-            "start": { "type": "integer", "minimum": 0, "description": "First message ordinal to expand." },
-            "end": { "type": "integer", "minimum": 0, "description": "Last message ordinal to expand, inclusive." },
-            "verbose": { "type": "boolean", "description": "With start/end: list each message separately with its ordinal [N] and per-part preview, including each tool call's output size, so one message can be recovered by ordinal." },
-            "message": { "type": "integer", "minimum": 0, "description": "Recover one message by ordinal in full from the cached raw request when available, otherwise its persisted historian chunk transcript." },
+            "start": { "type": "integer", "minimum": 0, "description": "First ordinal of the range — a compartment's start, or an ordinal from a ctx_search hit." },
+            "end": { "type": "integer", "minimum": 0, "description": "Last ordinal of the range, inclusive — a compartment's end." },
+            "verbose": { "type": "boolean", "description": "With start/end: one entry per message with ordinal and per-part preview instead of the transcript." },
+            "message": { "type": "integer", "minimum": 0, "description": "Recover ONE message in full by ordinal (all text, all tool inputs and outputs). Use alone, without start/end." },
         }
     })
 }
@@ -17593,13 +17667,13 @@ fn ctx_note_schema() -> Value {
         "type": "object",
         "additionalProperties": true,
         "properties": {
-            "action": { "type": "string", "enum": ["write", "read", "update", "dismiss"], "description": "Operation to perform. Defaults to write when content is provided, otherwise read." },
-            "content": { "type": "string", "maxLength": 65536, "description": "Note text for write/update, or optional dismissal resolution when action is dismiss." },
-            "note_ids": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 }, "description": "Note ids: exactly one for 'update', one to fifty for 'dismiss'. Ignored by 'write' and 'read'." },
-            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25, "description": "Maximum active notes to return." },
-            "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest notes in each section." },
-            "filter": { "type": "string", "enum": ["all", "active", "pending", "ready", "dismissed"], "description": "Optional read filter. Defaults to active session notes plus ready smart notes." },
-            "surface_condition": { "type": "string", "maxLength": 4096, "description": "Optional externally checkable condition to record with the note. Evaluation arrives later." },
+            "action": { "type": "string", "enum": ["write", "read", "update", "dismiss"], "description": "write | read | update | dismiss. Defaults to write when content is given, else read." },
+            "content": { "type": "string", "maxLength": 65536, "description": "Note text for write/update: first line is the title (under 80 chars), then the detail." },
+            "note_ids": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 }, "description": "Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write." },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25, "description": "Rows per read (default 25)." },
+            "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest rows (default 0)." },
+            "filter": { "type": "string", "enum": ["all", "active", "pending", "ready", "dismissed"], "description": "Read filter: active (default: active + ready), all, pending (unsurfaced smart notes), ready, dismissed." },
+            "surface_condition": { "type": "string", "maxLength": 4096, "description": "Makes this a smart note: a condition an outside checker can verify on its own, periodically — repository state, releases, web pages, anything it can look up — never something only this conversation knows. The note is parked until the condition holds." },
             "memory_project": { "type": "string", "description": "Resolved MC project identity supplied by the host transport." },
         }
     })
@@ -25659,6 +25733,24 @@ mod tests {
             "Search override B."
         );
 
+        fn without_descriptions(mut value: Value) -> Value {
+            match &mut value {
+                Value::Object(fields) => {
+                    fields.remove("description");
+                    for child in fields.values_mut() {
+                        *child = without_descriptions(child.take());
+                    }
+                }
+                Value::Array(items) => {
+                    for child in items {
+                        *child = without_descriptions(child.take());
+                    }
+                }
+                _ => {}
+            }
+            value
+        }
+
         let expected_tools = prompt_surface::session_tools(&PromptSurfaceSelection::default());
         for response in [&first, &transitioned] {
             let response_tools = serde_json::from_value::<Vec<subc_protocol::manifest::Tool>>(
@@ -25668,7 +25760,10 @@ mod tests {
             assert_eq!(response_tools.len(), expected_tools.len());
             for (actual, expected) in response_tools.iter().zip(&expected_tools) {
                 assert_eq!(actual.name, expected.name);
-                assert_eq!(actual.schema, expected.schema);
+                assert_eq!(
+                    without_descriptions(actual.schema.clone()),
+                    without_descriptions(expected.schema.clone())
+                );
                 assert_eq!(actual.execution_mode, expected.execution_mode);
             }
         }
@@ -26057,7 +26152,7 @@ mod tests {
                 "minItems": 1,
                 "maxItems": 50,
                 "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 },
-                "description": "Note ids: exactly one for 'update', one to fifty for 'dismiss'. Ignored by 'write' and 'read'."
+                "description": "Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write."
             })
         );
     }
@@ -26328,6 +26423,30 @@ mod tests {
                 now_ms: 1,
             })
             .unwrap();
+        let foreign_update = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "update", "note_ids": [5], "content": "hijack"}),
+            )
+            .await,
+        );
+        assert_eq!(
+            foreign_update,
+            "Error: Note #5 not found in your session/project or has no compatible fields to update."
+        );
+        let targeted_read = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "read", "note_ids": [4, 5, 999]}),
+            )
+            .await,
+        );
+        assert_eq!(
+            targeted_read,
+            "## Notes by ID\n\n- **#4**: bulk two\n\n- Note #5: not_found\n\n- Note #999: not_found"
+        );
         let already = tool_text(
             call_facade(
                 &handler,
@@ -26347,7 +26466,7 @@ mod tests {
         );
         assert_eq!(
             bulk,
-            "Dismissed 1 of 4 notes.\n- Note #3: already_dismissed\n- Note #4: dismissed\n- Note #5: not_owned\n- Note #999: not_found"
+            "Dismissed 1 of 4 notes.\n- Note #3: already_dismissed\n- Note #4: dismissed\n- Note #5: not_found\n- Note #999: not_found"
         );
         assert_eq!(
             store
@@ -27740,7 +27859,12 @@ mod tests {
             by_name["ctx_reduce"].schema,
             json!({
                 "type": "object",
-                "properties": { "drop": { "type": "string" } },
+                "properties": {
+                    "drop": {
+                        "type": "string",
+                        "description": "Tag IDs to drop: \"3-5\", \"1,2,9\", \"1-5,8,12-15\"."
+                    }
+                },
                 "required": ["drop"],
                 "additionalProperties": false
             }),

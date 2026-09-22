@@ -1002,7 +1002,7 @@ describe("subagent-runner pure helpers", () => {
 		}
 	});
 
-	it("locks base dreamer (curate) to --tools ctx_memory, stripping all built-ins", () => {
+	it("locks base dreamer (curate) to the two memory tools, stripping all built-ins", () => {
 		const args = buildArgsForTest({
 			...baseOptions,
 			agent: "dreamer",
@@ -1010,9 +1010,9 @@ describe("subagent-runner pure helpers", () => {
 		});
 		const idx = args.indexOf("--tools");
 		expect(idx).toBeGreaterThan(-1);
-		expect(args[idx + 1]).toBe("ctx_memory");
+		expect(args[idx + 1]).toBe("ctx_memory,ctx_memory_list");
 		expect(args).not.toContain("--no-tools");
-		// No codebase/shell built-ins survive the allow-list. (ctx_memory itself is
+		// No codebase/shell built-ins survive the allow-list. (The memory tools are
 		// registered by the lean extension when a real bundle path is present; in
 		// this dev/test env SUBAGENT_ENTRY_PATH is undefined so --extension and the
 		// dreamer-actions flag are absent — the strict allow-list is independent.)
@@ -1030,7 +1030,7 @@ describe("subagent-runner pure helpers", () => {
 		}
 	});
 
-	it("locks magic-context-dreamer (Pi facade default) to --tools ctx_memory only", () => {
+	it("locks magic-context-dreamer (Pi facade default) to the two memory tools", () => {
 		const args = buildArgsForTest({
 			...baseOptions,
 			agent: "magic-context-dreamer",
@@ -1038,7 +1038,7 @@ describe("subagent-runner pure helpers", () => {
 		});
 		const idx = args.indexOf("--tools");
 		expect(idx).toBeGreaterThan(-1);
-		expect(args[idx + 1]).toBe("ctx_memory");
+		expect(args[idx + 1]).toBe("ctx_memory,ctx_memory_list");
 		expect(args).not.toContain("--no-tools");
 		const toolList = args[idx + 1];
 		for (const denied of [

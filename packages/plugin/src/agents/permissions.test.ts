@@ -125,10 +125,10 @@ describe("applyDisallowedTools", () => {
 });
 
 describe("DREAMER_CURATE_ALLOWED_TOOLS (base dreamer = curate only)", () => {
-    it("is ctx_memory ONLY — curate edits the memory store and reads no code", () => {
+    it("allows only the two memory tools — curate edits and enumerates the memory store", () => {
         // A separate verify task owns memory-vs-code correctness; curate is
         // pure pool hygiene, so it has no read/grep/bash/write/edit surface.
-        expect([...DREAMER_CURATE_ALLOWED_TOOLS]).toEqual(["ctx_memory"]);
+        expect([...DREAMER_CURATE_ALLOWED_TOOLS]).toEqual(["ctx_memory", "ctx_memory_list"]);
     });
 
     it("does NOT include any codebase / shell / file-write tool", () => {
@@ -185,11 +185,12 @@ describe("integration: full hidden-agent permission shape", () => {
         });
     });
 
-    it("base dreamer (curate) permission object: `*` denied + ctx_memory only", () => {
+    it("base dreamer permission object denies all except the two memory tools", () => {
         const perm = buildAllowOnlyPermission(DREAMER_CURATE_ALLOWED_TOOLS);
         expect(perm).toEqual({
             "*": "deny",
             ctx_memory: "allow",
+            ctx_memory_list: "allow",
         });
     });
 

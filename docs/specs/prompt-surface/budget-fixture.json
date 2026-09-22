@@ -37,34 +37,91 @@
   ],
   "fullMeasurements": {
     "guidance": {
-      "primary-full-reduce-memory-on": { "chars": 8697, "tokens": 1998 },
-      "primary-full-reduce-memory-off": { "chars": 7662, "tokens": 1739 },
-      "primary-full-no-reduce-memory-on": { "chars": 6484, "tokens": 1489 },
-      "primary-full-no-reduce-memory-off": { "chars": 5449, "tokens": 1230 },
-      "primary-full-reduce-dreamer-off": { "chars": 8368, "tokens": 1921 },
-      "primary-full-reduce-temporal-off": { "chars": 8262, "tokens": 1891 },
-      "primary-full-reduce-caveman-on": { "chars": 9312, "tokens": 2124 },
-      "primary-full-reduce-language-on": { "chars": 8897, "tokens": 2044 },
-      "subagent-reduce": { "chars": 693, "tokens": 187 }
+      "primary-full-reduce-memory-on": {
+        "chars": 4989,
+        "tokens": 1180
+      },
+      "primary-full-reduce-memory-off": {
+        "chars": 4652,
+        "tokens": 1100
+      },
+      "primary-full-no-reduce-memory-on": {
+        "chars": 4056,
+        "tokens": 950
+      },
+      "primary-full-no-reduce-memory-off": {
+        "chars": 3719,
+        "tokens": 870
+      },
+      "primary-full-reduce-dreamer-off": {
+        "chars": 4841,
+        "tokens": 1150
+      },
+      "primary-full-reduce-temporal-off": {
+        "chars": 4830,
+        "tokens": 1136
+      },
+      "primary-full-reduce-caveman-on": {
+        "chars": 5604,
+        "tokens": 1306
+      },
+      "primary-full-reduce-language-on": {
+        "chars": 5189,
+        "tokens": 1226
+      },
+      "subagent-reduce": {
+        "chars": 1360,
+        "tokens": 364
+      }
     },
     "toolDescriptions": {
-      "ctx_reduce": { "chars": 1269, "tokens": 304 },
-      "ctx_expand": { "chars": 1586, "tokens": 395 },
-      "ctx_note": { "chars": 1547, "tokens": 387 },
-      "ctx_memory": { "chars": 980, "tokens": 234 },
-      "ctx_search": { "chars": 1663, "tokens": 402 }
+      "ctx_reduce": {
+        "chars": 1290,
+        "tokens": 309
+      },
+      "ctx_expand": {
+        "chars": 1079,
+        "tokens": 257
+      },
+      "ctx_note": {
+        "chars": 1599,
+        "tokens": 376
+      },
+      "ctx_memory": {
+        "chars": 1121,
+        "tokens": 278
+      },
+      "ctx_search": {
+        "chars": 1304,
+        "tokens": 322
+      }
     },
     "serializedParameterSchemas": {
-      "ctx_reduce": { "chars": 91, "tokens": 31 },
-      "ctx_expand": { "chars": 791, "tokens": 177 },
-      "ctx_note": { "chars": 1499, "tokens": 359 },
-      "ctx_memory": { "chars": 912, "tokens": 216 },
-      "ctx_search": { "chars": 945, "tokens": 231 },
-      "totalTokens": 1014
+      "ctx_reduce": {
+        "chars": 96,
+        "tokens": 38
+      },
+      "ctx_expand": {
+        "chars": 530,
+        "tokens": 121
+      },
+      "ctx_note": {
+        "chars": 1204,
+        "tokens": 284
+      },
+      "ctx_memory": {
+        "chars": 794,
+        "tokens": 190
+      },
+      "ctx_search": {
+        "chars": 549,
+        "tokens": 132
+      },
+      "totalTokens": 765
     },
-    "builtInProviderVisibleTotal": 4734
+    "builtInProviderVisibleTotal": 3487
   },
-  "mutableProseBaseline": 3720,
+  "mutableProseBaseline": 2722,
   "integerLightCeiling": 1825,
   "includedSurfaces": [
     "The primary built-in full guidance section for the exact feature variant above.",

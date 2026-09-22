@@ -42,25 +42,25 @@ const ParamsSchema = Type.Object(
 		start: Type.Optional(
 			Type.Number({
 				description:
-					'First message ordinal to expand — a compartment\'s start="N" attribute, or an ordinal from a ctx_search message hit',
+					"First ordinal of the range — a compartment's start, or an ordinal from a ctx_search hit.",
 			}),
 		),
 		end: Type.Optional(
 			Type.Number({
 				description:
-					'Last message ordinal to expand (inclusive) — a compartment\'s end="M" attribute',
+					"Last ordinal of the range, inclusive — a compartment's end.",
 			}),
 		),
 		verbose: Type.Optional(
 			Type.Boolean({
 				description:
-					"With start/end: list each message separately with its ordinal [N] and per-part preview, so you can recover one in full by ordinal.",
+					"With start/end: one entry per message with ordinal and per-part preview instead of the transcript.",
 			}),
 		),
 		message: Type.Optional(
 			Type.Number({
 				description:
-					"Full untruncated recovery of ONE message by its ordinal (every text part + every tool call's complete input/output). Use an ordinal from a compartment, ctx_search hit, or verbose range. Recovers a tool output you dropped with ctx_reduce.",
+					"Recover ONE message in full by ordinal (all text, all tool inputs and outputs). Use alone, without start/end.",
 			}),
 		),
 	},

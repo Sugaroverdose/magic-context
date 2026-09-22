@@ -10,6 +10,10 @@ import {
 	LIGHT_TOOL_DESCRIPTIONS,
 } from "@magic-context/core/shared/prompt-surface-runtime";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import {
+	FULL_PARAMETER_DESCRIPTIONS,
+	LIGHT_PARAMETER_DESCRIPTIONS,
+} from "@magic-context/core/tools/parameter-descriptions";
 import { createTestDb } from "../test-utils.test";
 import { registerMagicContextTools, syncCtxMemoryToolEnabled } from "./index";
 
@@ -117,6 +121,7 @@ describe("registerMagicContextTools", () => {
 			} as never;
 
 			registerMagicContextTools(pi, { db });
+			expect(registered.has("ctx_memory_list")).toBe(false);
 
 			const expectedFields: Record<string, string[]> = {
 				ctx_search: ["query", "limit", "from", "to", "sources"],
@@ -143,6 +148,32 @@ describe("registerMagicContextTools", () => {
 				expect(definition?.parameters.properties).not.toHaveProperty("summary");
 				expect(definition?.parameters.additionalProperties).toBe(true);
 			}
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("registers ctx_memory_list only for dreamer child surfaces", () => {
+		const db = createTestDb();
+		try {
+			const registered = new Map<
+				string,
+				{ parameters: { properties?: Record<string, unknown> } }
+			>();
+			const pi = {
+				registerTool: (tool: {
+					name: string;
+					parameters: { properties?: Record<string, unknown> };
+				}) => registered.set(tool.name, tool),
+				registerCommand: () => undefined,
+			} as never;
+			registerMagicContextTools(pi, { db, allowDreamerActions: true });
+			expect(registered.has("ctx_memory_list")).toBe(true);
+			expect(
+				Object.keys(
+					registered.get("ctx_memory_list")?.parameters.properties ?? {},
+				).sort(),
+			).toEqual(["category", "limit"]);
 		} finally {
 			closeQuietly(db);
 		}
@@ -255,6 +286,16 @@ describe("registerMagicContextTools", () => {
 	});
 });
 
+function withoutDescriptions(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(withoutDescriptions);
+	if (!value || typeof value !== "object") return value;
+	return Object.fromEntries(
+		Object.entries(value)
+			.filter(([key]) => key !== "description")
+			.map(([key, child]) => [key, withoutDescriptions(child)]),
+	);
+}
+
 type RegisteredPromptTool = {
 	name: string;
 	description: string;
@@ -349,7 +390,7 @@ describe("registerMagicContextTools — prompt-surface registration", () => {
 		}
 	});
 
-	it("registers built-in light descriptions without changing parameter schemas", () => {
+	it("registers built-in light prose without changing non-description schema fields", () => {
 		const fullDb = createTestDb();
 		const lightDb = createTestDb();
 		try {
@@ -364,9 +405,35 @@ describe("registerMagicContextTools — prompt-surface registration", () => {
 						toolId as keyof typeof LIGHT_TOOL_DESCRIPTIONS
 					],
 				);
-				expect(light.get(toolId)?.parameters).toEqual(
+				expect(light.get(toolId)?.parameters).not.toEqual(
 					full.get(toolId)?.parameters,
 				);
+				const lightParameters = light.get(toolId)?.parameters;
+				const fullParameters = full.get(toolId)?.parameters;
+				expect(withoutDescriptions(lightParameters)).toEqual(
+					withoutDescriptions(fullParameters),
+				);
+				for (const [name, description] of Object.entries(
+					LIGHT_PARAMETER_DESCRIPTIONS[
+						toolId as keyof typeof LIGHT_PARAMETER_DESCRIPTIONS
+					],
+				)) {
+					expect(
+						(lightParameters?.properties?.[name] as { description?: string })
+							?.description,
+					).toBe(description);
+					expect(
+						(fullParameters?.properties?.[name] as { description?: string })
+							?.description,
+					).toBe(
+						(
+							FULL_PARAMETER_DESCRIPTIONS as Record<
+								string,
+								Record<string, string>
+							>
+						)[toolId]?.[name],
+					);
+				}
 			}
 		} finally {
 			closeQuietly(fullDb);

@@ -52,7 +52,13 @@ import {
 import { sessionLog } from "../../shared/logger";
 import { renderCapabilityRefusal, renderUserFacingFailure } from "../../shared/user-facing-codes";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
-import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";
+import {
+    CTX_MEMORY_DESCRIPTION,
+    CTX_MEMORY_LIST_DESCRIPTION,
+    CTX_MEMORY_LIST_TOOL_NAME,
+    CTX_MEMORY_TOOL_NAME,
+    DEFAULT_SEARCH_LIMIT,
+} from "./constants";
 import {
     CTX_MEMORY_ACTIONS,
     CTX_MEMORY_DREAMER_ACTIONS,
@@ -431,35 +437,42 @@ function updateMemoryContentInCurrentTransaction(
 }
 
 const ctxMemoryArgsShape = {
-    // Keep the complete action argument shape available to execute(); it can reject
-    // actions that are unsafe for the current agent once that agent is known. The
-    // passthrough parser also retains extra arguments sent by older callers.
+    // Advertise only primary actions. The separate ctx_memory_list tool reuses this
+    // handler with the internal list action, while passthrough parsing keeps older
+    // callers compatible without publishing that action here.
     action: tool.schema
-        .enum([...CTX_MEMORY_DREAMER_ACTIONS])
+        .enum([...CTX_MEMORY_ACTIONS])
         .optional()
-        .describe("What to do: write, update, archive, merge, get, or list"),
+        .describe("write | update | archive | merge | get"),
     content: tool.schema
         .string()
         .optional()
-        .describe("The memory text — one standalone fact (required for write, update, merge)"),
+        .describe("The memory text — one standalone fact (write, update, merge)."),
     category: tool.schema
         .enum([...V2_MEMORY_CATEGORIES])
         .optional()
         .describe(
-            "What kind of fact this is (required for write; optional on update to recategorize, omitted keeps the current category; optional merge override)",
+            "Kind of fact (required for write; on update/merge optional, omitted keeps the current category).",
         ),
     ids: tool.schema
         .array(tool.schema.number())
         .optional()
         .describe(
-            "Target memory id(s) from <project-memory>: update takes exactly one, archive one or more, merge two or more, get one to twenty",
+            "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
         ),
-    limit: tool.schema.number().optional().describe("Max results for list (default: 10)"),
-    reason: tool.schema
-        .string()
-        .optional()
-        .describe("Why the memory is being archived (optional, recommended)"),
+    limit: tool.schema.number().optional().describe("Max results for list (default 10)."),
+    reason: tool.schema.string().optional().describe("Why it is being archived (optional)."),
 };
+const ctxMemoryListArgsShape = {
+    category: tool.schema
+        .enum([...V2_MEMORY_CATEGORIES])
+        .optional()
+        .describe(
+            "Kind of fact (required for write; on update/merge optional, omitted keeps the current category).",
+        ),
+    limit: tool.schema.number().optional().describe("Max results for list (default 10)."),
+};
+
 const ctxMemoryArgsSchema = tool.schema
     .object({
         ...ctxMemoryArgsShape,
@@ -1140,8 +1153,31 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
     });
 }
 
+function createCtxMemoryListTool(deps: CtxMemoryToolDeps): ToolDefinition {
+    const memoryTool = createCtxMemoryTool({
+        ...deps,
+        allowedActions: [...CTX_MEMORY_DREAMER_ACTIONS],
+    });
+    return tool({
+        description: CTX_MEMORY_LIST_DESCRIPTION,
+        args: ctxMemoryListArgsShape,
+        async execute(args, toolContext) {
+            if (toolContext.agent !== DREAMER_AGENT) {
+                return "Error: ctx_memory_list is only available to the dreamer agent.";
+            }
+            return memoryTool.execute({ ...args, action: "list" }, toolContext);
+        },
+    });
+}
+
 export function createCtxMemoryTools(deps: CtxMemoryToolDeps): Record<string, ToolDefinition> {
     return {
         [CTX_MEMORY_TOOL_NAME]: createCtxMemoryTool(deps),
+    };
+}
+
+export function createCtxMemoryListTools(deps: CtxMemoryToolDeps): Record<string, ToolDefinition> {
+    return {
+        [CTX_MEMORY_LIST_TOOL_NAME]: createCtxMemoryListTool(deps),
     };
 }

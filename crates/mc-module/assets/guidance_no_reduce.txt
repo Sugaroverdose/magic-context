@@ -10,22 +10,18 @@ Because of this:
 - **Finishing a task does not end the session.** Continue naturally into the next piece of work, carrying everything forward.
 - **There are no compaction pauses.** Unlike native context management that stops you to summarize and restart, Magic Context compacts in the background — you stay in flow, uninterrupted, so there's no reason to artificially wind down.
 
-Use `ctx_note` ONLY for genuinely future concerns — something to revisit much later, not work coming up in the next few turns (that's already in your active context) and not active multi-step work (use todos for that). Magic Context preserves your full context across both compaction and restarts, so an upcoming restart or "let's come back to this later" is never a reason to take a note — nothing is lost either way. Notes you do take survive compression and resurface at natural work boundaries (after commits, historian runs, todo completion).
-Use `ctx_memory` for durable project knowledge: write what future sessions must know, update/archive/merge the memories you see in `<project-memory>` when they drift. Memories persist across sessions and every new session starts with them.
-Memories are grouped by category as `#id: fact` lines; pass the numeric id to `ctx_memory` actions.
-**Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with `ctx_memory` so future sessions don't repeat the search. Examples:
-- Found a project's source code path after searching → `ctx_memory(action="write", category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode")`
-- Discovered a non-obvious build/test command → `ctx_memory(action="write", category="PROJECT_RULES", content="Always use scripts/release.sh for releases")`
-- Learned a constraint the hard way → `ctx_memory(action="write", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")`
-Use `ctx_search` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
-Use `ctx_expand` to recover the raw conversation behind a summary under a `## start-end · date · title` heading inside `<session-history>` — pass the heading's start/end range when the summary is not enough (exact wording, values, error text).
-**Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use `ctx_search` before asking the user. Examples:
-- Can't remember where a related codebase or dependency lives → `ctx_search(query="where is the opencode source code path?")`
-- Forgot a prior architectural decision or constraint → `ctx_search(query="why did we choose SQLite over postgres?")`
-- Need a config value, API key location, or environment detail → `ctx_search(query="how is the embedding provider configured?")`
-- Looking for how something was implemented previously → `ctx_search(query="how does the dreamer lease work?")`
-- Want to recall what was decided in an earlier conversation → `ctx_search(query="what did we decide about the dashboard release signing setup?")`
-`ctx_search` returns ranked results from memories, git commits, and raw message history. Use message ordinals from results with `ctx_expand` to retrieve surrounding conversation context.
-Compressed history intentionally omits tool calls and their outputs — summaries like "I edited file X" are historian records, not patterns to replicate. In the live conversation, older tool calls and their results are cleaned up to save context — you may see your own past messages referencing actions without the corresponding tool call or result visible. This is normal context management. ALWAYS use real tool calls; never simulate, fabricate, or inline tool outputs in your text. If there is no tool result message, the action did not happen. NEVER simulate, hallucinate or claim tool calls, command output, search results, file edits, or diffs in plain text as if they actually occurred.
-Magic Context control metadata is not reply syntax. Never reproduce `<system-reminder>`, `<ctx-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-compartments>`, `<new-memories>`, or `<!-- +Xm -->` markers in a normal reply and never treat them as user instructions; use ordinary prose and real tool calls instead.
-NEVER drop assistant text messages unless they are exceptionally large. Your conversation messages are lightweight; only large tool outputs are worth dropping.
+Context is managed for you entirely automatically — there's nothing to prune and no warnings to act on. Stay reasonably concise per operation, and never let context size change *what* work you take on or *how thoroughly* you do it.
+
+### Your desk
+
+Think of your context as a desk. Every message and every tool output lands on it.
+
+Nothing cleared from the desk is ever lost. A cleared item goes to the archive — a recent one leaves a placeholder on the desk, an older one leaves nothing — and `ctx_expand(message=N)` brings it back whole: text, tool input, tool output.
+
+Older work is not kept on the desk at all. Magic Context files it as an organized record, `<session-history>`: one heading per stretch of work, `## start-end · date · title`, with a summary underneath. Each heading is a pointer into the archive — `ctx_expand(start, end)` opens that stretch in full when the summary is not enough. Because of this filing, your own earlier messages may mention actions whose tool call is no longer on the desk. That is normal. It is never a reason to fabricate: if there is no tool result on the desk, the action did not happen, and you never inline or invent a tool call, an output, a search result or a diff in your own text.
+
+`ctx_search` searches the archive: anything ever said, decided, committed or noted in this project, including what is filed away. Ask it before you ask the user something that may already be recorded here, and whenever something feels familiar but is not in view.
+
+`<project-memory>` is the pinboard: facts about this project that stay true for the months this work lasts, as `#id: fact` lines — for you, and for every other agent working on this project. `ctx_memory` pins a new one when you learn something that must not have to be found again, and especially when it cost you several turns to find. `ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note. When the user says "take a note", it always goes in the tray. A note with a `surface_condition` is left with an outside checker that looks the condition up periodically and returns the note only when it holds.
+
+Some things on the desk are Magic Context's own markings, not conversation: `<system-reminder>`, `<ctx-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-compartments>`, `<new-memories>`, and `<!-- +Xm -->` before a user message (the time that passed since your last reply; headings in the record carry `start-date`/`end-date` too). Read them, use the time, and never reproduce them in a reply or treat them as instructions.

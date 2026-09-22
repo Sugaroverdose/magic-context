@@ -17,8 +17,9 @@ import type { ContextDatabase } from "@magic-context/core/features/magic-context
 import type { PromptSurfaceConfig } from "@magic-context/core/shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "@magic-context/core/shared/prompt-surface-runtime";
 import { createPromptSurfaceRuntime } from "@magic-context/core/shared/prompt-surface-runtime";
+import { applyJsonSchemaParameterDescriptions } from "@magic-context/core/tools/parameter-descriptions";
 import { createCtxExpandTool } from "./ctx-expand";
-import { createCtxMemoryTool } from "./ctx-memory";
+import { createCtxMemoryListTool, createCtxMemoryTool } from "./ctx-memory";
 import { createCtxNoteTool } from "./ctx-note";
 import { createCtxReduceTool } from "./ctx-reduce";
 import { createCtxSearchTool } from "./ctx-search";
@@ -58,10 +59,8 @@ export interface RegisterToolsOptions {
 	gitCommitsEnabled?: boolean;
 	/** Resolve the current directory's project identity using the user-level home-project setting. */
 	resolveProjectIdentity?: (ctx: { cwd: string }) => string | undefined;
-	/** When true, ctx_memory exposes dreamer-only actions (update, merge, archive).
-	 *  Set by the subagent extension entry when the parent passes
-	 *  `--magic-context-dreamer-actions`. The main extension entry
-	 *  (./index.ts) leaves this false to match OpenCode's primary-agent surface. */
+	/** When true, register the separate ctx_memory_list tool and enable Curate-only
+	 *  execution fields. Set only by the lean dreamer subagent extension. */
 	allowDreamerActions?: boolean;
 	/** Number of recent tags that ctx_reduce should treat as protected
 	 *  (deferred drops instead of immediate). Should match `magic_context.protected_tags`. */
@@ -112,15 +111,26 @@ export function registerMagicContextTools(
 	const registration = promptSurfaceRuntime.resolveRegistration(
 		opts.promptSurface,
 	);
-	const surfaceTool = <T extends { name: string; description: string }>(
+	const surfaceTool = <
+		T extends { name: string; description: string; parameters: unknown },
+	>(
 		definition: T,
-	): T => ({
-		...definition,
-		description: registration.descriptionFor(
+	): T => {
+		const parameters = structuredClone(definition.parameters);
+		applyJsonSchemaParameterDescriptions(
 			definition.name,
-			definition.description,
-		),
-	});
+			parameters,
+			registration.preset,
+		);
+		return {
+			...definition,
+			parameters,
+			description: registration.descriptionFor(
+				definition.name,
+				definition.description,
+			),
+		};
+	};
 
 	pi.registerTool(
 		surfaceTool(
@@ -136,18 +146,18 @@ export function registerMagicContextTools(
 	);
 
 	if (opts.memoryToolEnabled !== false) {
-		pi.registerTool(
-			surfaceTool(
-				createCtxMemoryTool({
-					db: opts.db,
-					ensureProjectRegistered: opts.ensureProjectRegistered,
-					memoryEnabled: opts.memoryEnabled,
-					embeddingEnabled: opts.embeddingEnabled,
-					allowDreamerActions: opts.allowDreamerActions ?? false,
-					resolveProjectIdentity,
-				}),
-			),
-		);
+		const memoryDeps = {
+			db: opts.db,
+			ensureProjectRegistered: opts.ensureProjectRegistered,
+			memoryEnabled: opts.memoryEnabled,
+			embeddingEnabled: opts.embeddingEnabled,
+			allowDreamerActions: opts.allowDreamerActions ?? false,
+			resolveProjectIdentity,
+		};
+		pi.registerTool(surfaceTool(createCtxMemoryTool(memoryDeps)));
+		if (opts.allowDreamerActions === true) {
+			pi.registerTool(createCtxMemoryListTool(memoryDeps));
+		}
 	}
 
 	// ctx_note and ctx_expand are session-scoped: they resolve the CURRENT

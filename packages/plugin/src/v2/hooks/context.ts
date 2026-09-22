@@ -58,6 +58,7 @@ import {
 import { pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
+import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-descriptions";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
@@ -202,6 +203,10 @@ export function catalogModels(
     return models;
 }
 
+export function removeDreamerOnlyTools(draft: SessionContext): void {
+    if (draft.tools) delete draft.tools.ctx_memory_list;
+}
+
 /** Rewrite Magic Context ctx_* tool descriptions for this draft's model. */
 export function applyV2PromptSurfaceTools(
     draft: SessionContext,
@@ -215,6 +220,7 @@ export function applyV2PromptSurfaceTools(
         const tool = draft.tools[id];
         if (!tool) continue;
         tool.description = registration.descriptionFor(id, tool.description);
+        applyJsonSchemaParameterDescriptions(id, tool.input, registration.preset);
     }
 }
 
@@ -622,6 +628,7 @@ export async function registerContext(context: V2Context) {
         });
     await context.session.hook("context", async (draft) => {
         if (hiddenChildHook.apply(draft)) return;
+        removeDreamerOnlyTools(draft);
         // A deletion that races an in-flight pass must not let that pass rebuild
         // the state just cleared by the one deletion event.
         if (deletedSessions.has(draft.sessionID)) return;

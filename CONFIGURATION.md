@@ -125,7 +125,9 @@ Both setup wizards add this automatically.
 
 Model keys use the same progressive, case-sensitive lookup walk as `cache_ttl`: exact `provider/model` keys, less-specific model variants, then the literal `provider/*` wildcard and `default`. The first slash separates the provider; additional slashes remain part of the model ID. Missing provider/model components fall back to `default`.
 
-> **OpenCode 1.x, Pi, and OMP limitation:** per-model routing in `models` applies to the guidance block only. Tool descriptions are registered once per process by those hosts, so they always follow `prompt_surface.default`. OpenCode 2 rewrites the five `ctx_*` tool descriptions on every `context` pass from the same resolver, keyed on the draft model.
+> **OpenCode 1.x, Pi, and OMP limitation:** per-model routing in `models` applies to the guidance block only. Tool descriptions and parameter descriptions are registered once per process by those hosts, so they always follow `prompt_surface.default`. OpenCode 2 rewrites both kinds of tool prose on every `context` pass from the same resolver, keyed on the draft model.
+
+The built-in guidance treats context as a desk: tagged items stay on the desk while useful, `ctx_reduce` stamps spent items for later clearing, cleared work remains recoverable from the archive, memory is the pinboard, and notes are the tray for matters that belong later.
 
 `guidance_override_path` and `tool_descriptions` are user-level only. A project may select `default` and `models`, but repository-supplied guidance files and tool-description text are stripped with a warning.
 

@@ -34,7 +34,7 @@ import { resolveProjectIdentityForSession } from "../../features/magic-context/m
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 
-const { createCtxMemoryTools } = await import("./tools");
+const { createCtxMemoryListTools, createCtxMemoryTools } = await import("./tools");
 
 function createTestDb(dbPath = ":memory:"): Database {
     const db = new Database(dbPath);
@@ -323,17 +323,20 @@ function registerMemoryEmbeddingsForProject(
 describe("createCtxMemoryTools", () => {
     let db: Database;
     let tools: ReturnType<typeof createCtxMemoryTools>;
+    let listTools: ReturnType<typeof createCtxMemoryListTools>;
 
     beforeEach(() => {
         _resetProjectEmbeddingRegistryForTests();
         _setTestProviderFactoryForProject(null);
         db = createTestDb();
-        tools = createCtxMemoryTools({
+        const deps = {
             db,
             resolveProjectPath: () => "/repo/project",
             memoryEnabled: true,
             embeddingEnabled: false,
-        });
+        };
+        tools = createCtxMemoryTools(deps);
+        listTools = createCtxMemoryListTools(deps);
     });
 
     afterEach(() => {
@@ -2742,9 +2745,7 @@ describe("createCtxMemoryTools", () => {
                 safeParse: (value: unknown) => { success: boolean };
             };
 
-            // The shared schema must still accept `list` (the runtime gate, not
-            // the schema, blocks it for primary agents).
-            expect(actionSchema.safeParse("list").success).toBe(true);
+            expect(actionSchema.safeParse("list").success).toBe(false);
             expect(actionSchema.safeParse("merge").success).toBe(true);
             // verified/classify are no longer tool actions (host-applied tasks).
             expect(actionSchema.safeParse("classify").success).toBe(false);
@@ -3222,12 +3223,14 @@ describe("createCtxMemoryTools", () => {
                         "curate",
                         JSON.stringify({ curate: { cursor: 0, activeCategory: "ARCHITECTURE" } }),
                     );
-                    const isolatedTools = createCtxMemoryTools({
+                    const isolatedDeps = {
                         db: isolated,
                         resolveProjectPath: () => "/repo/project",
                         memoryEnabled: true,
                         embeddingEnabled: false,
-                    });
+                    };
+                    const isolatedTools = createCtxMemoryTools(isolatedDeps);
+                    const isolatedListTools = createCtxMemoryListTools(isolatedDeps);
                     const args =
                         action === "write"
                             ? {
@@ -3263,10 +3266,10 @@ describe("createCtxMemoryTools", () => {
                                           }
                                         : {}),
                                 };
-                    return await isolatedTools.ctx_memory.execute(
-                        args,
-                        toolContext("ses-dreamer", DREAMER_AGENT),
-                    );
+                    const context = toolContext("ses-dreamer", DREAMER_AGENT);
+                    return action === "list"
+                        ? await isolatedListTools.ctx_memory_list.execute(args as never, context)
+                        : await isolatedTools.ctx_memory.execute(args, context);
                 } finally {
                     closeQuietly(isolated);
                 }
@@ -3298,32 +3301,32 @@ describe("createCtxMemoryTools", () => {
                 });
             }
             const dreamer = toolContext("ses-dreamer", DREAMER_AGENT);
-            const clean = await tools.ctx_memory.execute({ action: "list" }, dreamer);
-            const filler = await tools.ctx_memory.execute(
+            const clean = await listTools.ctx_memory_list.execute({}, dreamer);
+            const filler = await listTools.ctx_memory_list.execute(
                 {
-                    action: "list",
                     ids: [1],
                     content: "",
                     category: "PROJECT_RULES",
                     limit: 0,
                     reason: "",
-                },
+                } as never,
                 dreamer,
             );
-            const primaryFiller = await tools.ctx_memory.execute(
+            const primaryFiller = await listTools.ctx_memory_list.execute(
                 {
-                    action: "list",
                     ids: [1],
                     content: "",
                     category: "PROJECT_RULES",
                     limit: 0,
                     reason: "",
-                },
+                } as never,
                 toolContext(),
             );
             expect(filler).toBe(clean);
             expect(clean).toContain("Found 3 active memories");
-            expect(primaryFiller).toBe("Error: Action 'list' is not allowed in this context.");
+            expect(primaryFiller).toBe(
+                "Error: ctx_memory_list is only available to the dreamer agent.",
+            );
         });
     });
 });

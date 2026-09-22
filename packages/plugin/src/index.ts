@@ -91,6 +91,7 @@ import { MagicContextRpcServer } from "./shared/rpc-server";
 import { closeQuietly } from "./shared/sqlite-helpers";
 import { setStoragePrivatePermissionEnforcement } from "./shared/storage-permissions";
 import { reloadWindowOverlay } from "./shared/window-geometry";
+import { CTX_MEMORY_LIST_TOOL_NAME } from "./tools/ctx-memory";
 import { setup } from "./v2/server";
 
 const BOOT_SERVER_DEADLINE_MS = 15_000;
@@ -406,6 +407,7 @@ const server: Plugin = async (ctx) => {
         rustToolBackends: magicContextRuntime.rustToolBackends,
         promptSurfaceRuntime,
         registrationPromptSurface: loadedPluginConfig.registrationPromptSurface,
+        includeDreamerOnlyTools: true,
     });
 
     // v22 deferred legacy-memory identity backfill. createSessionHooks() opens
@@ -905,6 +907,10 @@ const server: Plugin = async (ctx) => {
                 if (pluginConfig.enabled !== true) {
                     return;
                 }
+                config.permission = {
+                    ...(config.permission ?? {}),
+                    [CTX_MEMORY_LIST_TOOL_NAME]: "deny",
+                } as typeof config.permission;
                 // See buildHiddenAgentConfig (agents/hidden-agent-registrations.ts)
                 // for permission precedence and hard `steps`/`maxSteps` cap semantics.
                 const commandConfig = {

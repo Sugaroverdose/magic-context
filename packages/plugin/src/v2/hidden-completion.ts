@@ -12,6 +12,7 @@ import type { PromptArgs } from "../shared/model-suggestion-retry";
 import { parseProviderModel, toModelEntry } from "../shared/resolve-fallbacks";
 import type { Database } from "../shared/sqlite";
 import {
+    HIDDEN_CURATE_AGENT,
     HIDDEN_DREAMER_AGENT,
     HIDDEN_HISTORIAN_AGENT,
     type HiddenChildAttempt,
@@ -26,7 +27,7 @@ interface Model {
     variant?: string;
 }
 
-type HiddenChildRole = "historian" | "dreamer";
+type HiddenChildRole = "historian" | "dreamer" | "dreamer-curate";
 
 interface PersistedHiddenChild {
     id: string;
@@ -151,7 +152,7 @@ function isModel(value: unknown): value is Model {
 }
 
 function isRole(value: unknown): value is HiddenChildRole {
-    return value === "historian" || value === "dreamer";
+    return value === "historian" || value === "dreamer" || value === "dreamer-curate";
 }
 
 function isOwner(value: unknown): value is HostServiceOwner {
@@ -317,7 +318,8 @@ function configuredHead(identity: HiddenRunIdentity): Model | undefined {
 }
 
 function roleFor(identity: HiddenRunIdentity): HiddenChildRole {
-    return identity.kind === "dreamer-task" ? "dreamer" : "historian";
+    if (identity.kind !== "dreamer-task") return "historian";
+    return identity.agent === HIDDEN_CURATE_AGENT ? "dreamer-curate" : "dreamer";
 }
 
 function roleTitle(role: HiddenChildRole): string {
@@ -325,7 +327,8 @@ function roleTitle(role: HiddenChildRole): string {
 }
 
 function roleAgent(role: HiddenChildRole): string {
-    return role === "historian" ? HIDDEN_HISTORIAN_AGENT : HIDDEN_DREAMER_AGENT;
+    if (role === "historian") return HIDDEN_HISTORIAN_AGENT;
+    return role === "dreamer-curate" ? HIDDEN_CURATE_AGENT : HIDDEN_DREAMER_AGENT;
 }
 
 function promptText(request: PromptArgs): string {
