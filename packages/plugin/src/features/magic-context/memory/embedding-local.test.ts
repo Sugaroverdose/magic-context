@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { classifyLocalEmbeddingFailure } from "./embedding-failure";
-import { getEmbeddingProviderIdentity } from "./embedding-identity";
+import {
+    getEmbeddingProviderIdentity,
+    LOCAL_EMBEDDING_RUNTIME_FINGERPRINT,
+} from "./embedding-identity";
 import {
     __resetLocalEmbeddingForTests,
     __setLocalEmbeddingTestHooks,
@@ -261,7 +264,16 @@ describe("isNativeRuntimeMissingError", () => {
 // dtype re-embeds rather than mixing vector spaces. The default (no dtype) must
 // produce the byte-identical identity as before this field existed.
 describe("LocalEmbeddingProvider dtype threading (#259)", () => {
-    test("default constructor (no dtype) keeps the golden identity", () => {
+    test("runtime upgrades change the local vector-space identity", () => {
+        expect(LOCAL_EMBEDDING_RUNTIME_FINGERPRINT).toBe(
+            "transformers@4.3.0;onnxruntime-node@1.30.0;onnxruntime-web@1.26.0-dev.20260416-b7804b056c",
+        );
+        const provider = new LocalEmbeddingProvider();
+        expect(provider.modelId).toBe("embedding-provider:ac1a4f8f0674f430a6c85a0e1a43a86a");
+        expect(provider.modelId).not.toBe("embedding-provider:c447205ebd551e83d18c4fd5fd8fc357");
+    });
+
+    test("default constructor (no dtype) keeps the current identity", () => {
         const provider = new LocalEmbeddingProvider();
         const expected = getEmbeddingProviderIdentity({
             provider: "local",
