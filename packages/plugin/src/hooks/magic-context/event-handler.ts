@@ -47,7 +47,6 @@ import {
     refreshModelLimitsFromApi,
 } from "../../shared/models-dev-cache";
 import { hasTrustedAbsoluteWall } from "../../shared/window-geometry";
-import { calibrationCandidates, formatCalibrationObservation } from "./calibration-candidate";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import {
@@ -647,26 +646,6 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         (info.tokens?.input ?? 0) +
                         (info.tokens?.cache?.read ?? 0) +
                         (info.tokens?.cache?.write ?? 0);
-                    if (info.completedAt !== undefined && info.providerID && info.modelID) {
-                        sessionLog(
-                            info.sessionID,
-                            formatCalibrationObservation(
-                                calibrationCandidates.complete({
-                                    harness: "opencode",
-                                    sessionId: info.sessionID,
-                                    modelKey: `${info.providerID}/${info.modelID}`,
-                                    requestId: info.parentID,
-                                    responseId: info.messageID,
-                                    providerInput: totalInputTokens,
-                                    completedAt: info.completedAt,
-                                    failed:
-                                        info.error !== undefined ||
-                                        info.finish === "error" ||
-                                        info.finish === "abort",
-                                }),
-                            ),
-                        );
-                    }
                     const baseGeometry = resolveContextWindowGeometry(
                         info.providerID,
                         info.modelID,
