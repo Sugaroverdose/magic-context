@@ -27714,7 +27714,7 @@ mod tests {
                     "memory_project",
                 ],
             ),
-            ("ctx_search", vec!["query", "limit"]),
+            ("ctx_search", vec!["query", "limit", "from", "to"]),
             ("ctx_expand", vec!["start", "end", "verbose", "message"]),
             (
                 "ctx_note",
