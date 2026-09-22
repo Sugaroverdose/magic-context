@@ -64,8 +64,12 @@ import { renderUserStatusSummary } from "@magic-context/core/shared/status-summa
 import {
 	buildStatusView,
 	distributeBarWidths,
+	STATUS_COLUMN_GAP,
+	statusColumnsFor,
 	type StatusBarSegment,
+	type StatusColumnLayout,
 	type StatusRow,
+	type StatusSection,
 	type StatusTone,
 	type StatusViewSource,
 } from "@magic-context/core/shared/status-view";
@@ -425,6 +429,60 @@ function renderSplitRow(left: string, right: string, width: number): string {
 	return `${left}${" ".repeat(gap)}${right}`;
 }
 
+/** Pads one already-coloured cell to a fixed column width, ANSI-aware. */
+function padCell(text: string, width: number): string {
+	const pad = Math.max(0, width - visibleWidth(text));
+	return `${text}${" ".repeat(pad)}`;
+}
+
+/**
+ * Draws the sections as a two-column grid: sections pair up left/right in model
+ * order, each pair sharing one title line and then one line per row, with the
+ * taller column deciding how many lines the pair takes. A trailing odd section
+ * sits alone in the left column. The shared model decides whether two columns
+ * fit and how wide each has to be, so a value is never squeezed into a wrap and
+ * this overlay and the OpenCode dialog lay the sections out the same way.
+ */
+function renderSectionGrid(
+	sections: readonly StatusSection[],
+	layout: StatusColumnLayout,
+	theme: Theme,
+): string[] {
+	const gap = " ".repeat(STATUS_COLUMN_GAP);
+	const lines: string[] = [];
+	for (let i = 0; i < sections.length; i += 2) {
+		const left = sections[i];
+		if (!left) break;
+		const right = sections[i + 1];
+		lines.push("");
+		const leftTitle = theme.fg("text", theme.bold(left.title));
+		lines.push(
+			right
+				? `${padCell(leftTitle, layout.leftWidth)}${gap}${theme.fg("text", theme.bold(right.title))}`
+				: leftTitle,
+		);
+		const rowCount = Math.max(left.rows.length, right?.rows.length ?? 0);
+		for (let r = 0; r < rowCount; r++) {
+			const leftRow = left.rows[r];
+			const leftCell = leftRow
+				? padCell(
+						renderStatusRow(leftRow, left.labelWidth, layout.leftWidth, theme),
+						layout.leftWidth,
+					)
+				: " ".repeat(layout.leftWidth);
+			const rightRow = right?.rows[r];
+			if (!right || !rightRow) {
+				lines.push(leftCell);
+				continue;
+			}
+			lines.push(
+				`${leftCell}${gap}${renderStatusRow(rightRow, right.labelWidth, layout.rightWidth, theme)}`,
+			);
+		}
+	}
+	return lines;
+}
+
 /** The overlay's content lines, before the border is drawn around them. */
 export function renderPiStatusOverlay(
 	s: StatusDialogDetail,
@@ -494,11 +552,20 @@ export function renderPiStatusOverlay(
 			: null;
 	if (upgrade) lines.push(renderStatusRow(upgrade, 9, innerWidth, theme));
 
-	for (const section of view.sections) {
-		lines.push("");
-		lines.push(theme.fg("text", theme.bold(section.title)));
-		for (const row of section.rows) {
-			lines.push(renderStatusRow(row, section.labelWidth, innerWidth, theme));
+	// The shared model decides whether the sections fit in two columns at this
+	// width, and how wide each column has to be; below that the same sections
+	// are drawn in one column, in the same order, instead of being squeezed
+	// into mid-word wraps.
+	const layout = statusColumnsFor(view.sections, innerWidth);
+	if (layout.twoColumn) {
+		lines.push(...renderSectionGrid(view.sections, layout, theme));
+	} else {
+		for (const section of view.sections) {
+			lines.push("");
+			lines.push(theme.fg("text", theme.bold(section.title)));
+			for (const row of section.rows) {
+				lines.push(renderStatusRow(row, section.labelWidth, innerWidth, theme));
+			}
 		}
 	}
 

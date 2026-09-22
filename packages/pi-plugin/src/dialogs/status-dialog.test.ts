@@ -39,6 +39,31 @@ function plainTheme() {
 	} as never;
 }
 
+/**
+ * A detail whose shared model carries every section, so a layout test can assert
+ * on the whole grid instead of on whichever sections a sparse fixture happens to
+ * produce. The caller owns the returned database and must close it.
+ */
+function fullStatusDetail(sessionId: string) {
+	const db = createTestDb();
+	insertTag(db, sessionId, "m1", "tool", 4_000, 1);
+	const detail = buildPiStatusDetail(
+		{ getAllTools: () => [] } as never,
+		{
+			...fakeContext(sessionId),
+			getContextUsage: () => ({
+				tokens: 40_000,
+				percent: 20,
+				contextWindow: 200_000,
+			}),
+			getSystemPrompt: () => "system prompt",
+		} as never,
+		{ db, projectIdentity: resolveProjectIdentity(process.cwd()) },
+		sessionId,
+	);
+	return { db, detail };
+}
+
 describe("Pi status dialog", () => {
 	it("displays usage against the output-reserved safe window", () => {
 		const db = createTestDb();
@@ -884,6 +909,108 @@ Warning: History compression could not finish this turn. It will retry automatic
 				"Press D",
 			]) {
 				expect(text).not.toContain(gone);
+			}
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("pairs sections into two columns when the overlay is wide enough", () => {
+		const { db, detail } = fullStatusDetail("ses-status-two-column");
+		try {
+			const innerWidth = 96;
+			const lines = renderPiStatusOverlay(detail, plainTheme(), innerWidth);
+			const view = buildStatusView(statusViewSourceFromPiDetail(detail), {
+				version: "0.0.0",
+			});
+			// Two columns of floor((96 - 4) / 2) = 46 with a four-column gap.
+			const columnWidth = Math.floor((innerWidth - 4) / 2);
+			const gap = 4;
+
+			expect(view.sections.length).toBe(7);
+			for (let i = 0; i < view.sections.length; i += 2) {
+				const left = view.sections[i];
+				if (!left) throw new Error("left section missing");
+				const right = view.sections[i + 1];
+				// The pair shares one title line: the left title at the start, the
+				// right title exactly after the left column and the gap.
+				const titleIndex = lines.findIndex((line) =>
+					right
+						? line.startsWith(left.title) && line.includes(right.title)
+						: line.trimEnd() === left.title,
+				);
+				expect(titleIndex).toBeGreaterThanOrEqual(0);
+				const titleLine = lines[titleIndex] ?? "";
+				expect(titleLine.startsWith(left.title)).toBe(true);
+				if (right) {
+					expect(titleLine.slice(columnWidth + gap)).toBe(right.title);
+				}
+
+				const rowCount = Math.max(left.rows.length, right?.rows.length ?? 0);
+				for (let r = 0; r < rowCount; r++) {
+					const line = lines[titleIndex + 1 + r] ?? "";
+					const leftRow = left.rows[r];
+					// A value wider than its column overflows it, exactly as
+					// renderStatusRow does in one-column mode, so the cell is as wide
+					// as the wider of the column and the rendered row.
+					const leftCellWidth = leftRow
+						? Math.max(
+								columnWidth,
+								Math.max(left.labelWidth, leftRow.label.length) +
+									leftRow.value.length,
+							)
+						: columnWidth;
+					if (leftRow) {
+						expect(line.startsWith(leftRow.label)).toBe(true);
+						// The value is right-aligned within the column: it ends at the
+						// column's right edge, or runs past it when it is too long.
+						expect(
+							line.slice(leftCellWidth - leftRow.value.length, leftCellWidth),
+						).toBe(leftRow.value);
+					}
+					const rightRow = right?.rows[r];
+					if (rightRow && right) {
+						const rightStart = leftCellWidth + gap;
+						const rightEnd =
+							rightStart +
+							Math.max(
+								columnWidth,
+								Math.max(right.labelWidth, rightRow.label.length) +
+									rightRow.value.length,
+							);
+						expect(line.slice(rightEnd - rightRow.value.length, rightEnd)).toBe(
+							rightRow.value,
+						);
+					}
+				}
+			}
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("keeps the one-column shape below the two-column minimum", () => {
+		const { db, detail } = fullStatusDetail("ses-status-one-column");
+		try {
+			const innerWidth = 60;
+			const lines = renderPiStatusOverlay(detail, plainTheme(), innerWidth);
+			const view = buildStatusView(statusViewSourceFromPiDetail(detail), {
+				version: "0.0.0",
+			});
+
+			// Walk the sections in model order: each title is alone on its own
+			// line, followed by its rows, each padded to the full inner width.
+			let cursor = 0;
+			for (const section of view.sections) {
+				const titleIndex = lines.indexOf(section.title, cursor);
+				expect(titleIndex).toBeGreaterThanOrEqual(cursor);
+				cursor = titleIndex + 1;
+				for (const row of section.rows) {
+					const line = lines[cursor] ?? "";
+					expect(line.startsWith(row.label)).toBe(true);
+					expect(visibleWidth(line)).toBe(innerWidth);
+					cursor += 1;
+				}
 			}
 		} finally {
 			closeQuietly(db);
