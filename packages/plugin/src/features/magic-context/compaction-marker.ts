@@ -576,7 +576,9 @@ export function replaceCompactionMarker(
                 }
                 const replacement = injectCompactionMarker(args);
                 if (!replacement) {
-                    throw new Error(`failed to inject replacement marker at ordinal ${args.endOrdinal}`);
+                    throw new Error(
+                        `failed to inject replacement marker at ordinal ${args.endOrdinal}`,
+                    );
                 }
                 return replacement;
             })

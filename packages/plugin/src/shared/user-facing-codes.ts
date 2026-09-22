@@ -190,7 +190,8 @@ export const USER_FACING_FAILURES = {
     },
     compaction_marker_missing: {
         code: "MC-C11",
-        sentence: "The history boundary marker is missing from the OpenCode store, so requests carry the full session.",
+        sentence:
+            "The history boundary marker is missing from the OpenCode store, so requests carry the full session.",
         action: "It is retried on every message; if this persists, run `/ctx-flush`.",
     },
     memory_mirror_stalled: {

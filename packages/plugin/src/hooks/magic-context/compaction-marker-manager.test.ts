@@ -537,12 +537,7 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
         locker.exec("BEGIN IMMEDIATE");
         try {
             const startedAt = Date.now();
-            const outcome = applyDeferredCompactionMarker(
-                db,
-                "ses-lock",
-                makePending(),
-                dataHome,
-            );
+            const outcome = applyDeferredCompactionMarker(db, "ses-lock", makePending(), dataHome);
             expect(outcome.kind).toBe("retryable-failure");
             expect(Date.now() - startedAt).toBeGreaterThanOrEqual(4_500);
         } finally {
@@ -551,8 +546,16 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
         }
 
         const inspect = new Database(join(dataHome, "opencode", "opencode.db"));
-        expect(inspect.prepare("SELECT COUNT(*) AS n FROM message WHERE id = ?").get(oldState.summaryMessageId)).toEqual({ n: 1 });
-        expect(inspect.prepare("SELECT COUNT(*) AS n FROM part WHERE id IN (?, ?)").get(oldState.compactionPartId, oldState.summaryPartId)).toEqual({ n: 2 });
+        expect(
+            inspect
+                .prepare("SELECT COUNT(*) AS n FROM message WHERE id = ?")
+                .get(oldState.summaryMessageId),
+        ).toEqual({ n: 1 });
+        expect(
+            inspect
+                .prepare("SELECT COUNT(*) AS n FROM part WHERE id IN (?, ?)")
+                .get(oldState.compactionPartId, oldState.summaryPartId),
+        ).toEqual({ n: 2 });
         closeQuietly(inspect);
         expect(getPersistedCompactionMarkerState(db, "ses-lock")).toEqual(oldState);
     }, 10_000);
@@ -583,8 +586,16 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
 
         expect(updateCompactionMarkerAfterPublication(db, "ses-direct", 10, dataHome)).toBe(false);
         const inspect = new Database(join(dataHome, "opencode", "opencode.db"));
-        expect(inspect.prepare("SELECT COUNT(*) AS n FROM message WHERE id = ?").get(oldState.summaryMessageId)).toEqual({ n: 1 });
-        expect(inspect.prepare("SELECT COUNT(*) AS n FROM part WHERE id IN (?, ?)").get(oldState.compactionPartId, oldState.summaryPartId)).toEqual({ n: 2 });
+        expect(
+            inspect
+                .prepare("SELECT COUNT(*) AS n FROM message WHERE id = ?")
+                .get(oldState.summaryMessageId),
+        ).toEqual({ n: 1 });
+        expect(
+            inspect
+                .prepare("SELECT COUNT(*) AS n FROM part WHERE id IN (?, ?)")
+                .get(oldState.compactionPartId, oldState.summaryPartId),
+        ).toEqual({ n: 2 });
         closeQuietly(inspect);
         expect(getPersistedCompactionMarkerState(db, "ses-direct")).toEqual(oldState);
     });

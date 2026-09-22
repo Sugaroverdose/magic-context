@@ -19,8 +19,8 @@ import {
     getOpenCodeMessageById,
     listSessionCompactionMarkers,
     removeCompactionMarker,
-    replaceCompactionMarker,
     removeForeignCompactionMarker,
+    replaceCompactionMarker,
 } from "../../features/magic-context/compaction-marker";
 import {
     getCompartments,

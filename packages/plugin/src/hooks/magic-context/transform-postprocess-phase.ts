@@ -463,7 +463,10 @@ export function applyRustModeDeferredCompactionMarker(args: {
             boundary.ordinal < 0 ||
             boundary.endMessageId.length === 0
         ) {
-            sessionLog(args.sessionId, "rust compaction-marker: invalid materialized boundary ignored");
+            sessionLog(
+                args.sessionId,
+                "rust compaction-marker: invalid materialized boundary ignored",
+            );
             return;
         }
 
@@ -487,7 +490,8 @@ export function applyRustModeDeferredCompactionMarker(args: {
                 target = pending;
                 return;
             }
-            if (persisted && persisted.boundaryOrdinal >= target.ordinal && pending === null) return;
+            if (persisted && persisted.boundaryOrdinal >= target.ordinal && pending === null)
+                return;
             setPendingCompactionMarkerState(args.db, args.sessionId, target);
         })();
     }
@@ -530,12 +534,7 @@ export function applyRustModeDeferredCompactionMarker(args: {
                 lastInjectError: outcome.error.message,
                 firstInjectFailedAt: pending.firstInjectFailedAt ?? now,
             };
-            replacePendingCompactionMarkerStateIf(
-                args.db,
-                args.sessionId,
-                pending,
-                failedPending,
-            );
+            replacePendingCompactionMarkerStateIf(args.db, args.sessionId, pending, failedPending);
             sessionLog(
                 args.sessionId,
                 `rust compaction-marker drain: retryable failure${boundary ? ` after module row ${boundary.rowVersion}` : ""}; pending target retained`,
