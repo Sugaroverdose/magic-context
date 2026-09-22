@@ -264,15 +264,17 @@ describe("note-nudger", () => {
         onNoteTrigger(db, "ses-cooldown", "historian_complete");
         resetNoteNudgeCooldownOnly("ses-cooldown");
         expect(peekNoteNudgeText(db, "ses-cooldown", "u-5")).toBeNull();
-        expect(peekNoteNudgeText(db, "ses-cooldown", "u-6")).toContain(
-            "0 notes ready, 1 active",
-        );
+        expect(peekNoteNudgeText(db, "ses-cooldown", "u-6")).toContain("0 notes ready, 1 active");
     });
 
     it("shows a different note on each delivery and replays a delivery byte-identically", () => {
         const db = makeDb();
         const sessionId = "ses-pick";
-        for (const content of ["First deferred item", "Second deferred item", "Third deferred item"]) {
+        for (const content of [
+            "First deferred item",
+            "Second deferred item",
+            "Third deferred item",
+        ]) {
             addNote(db, "session", { sessionId, content });
         }
 

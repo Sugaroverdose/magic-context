@@ -57,26 +57,20 @@ describe("ctx_note glance rendering", () => {
 
     it("marks non-active statuses and notes untouched for 30 days", () => {
         expect(
-            formatGlanceRow(
-                note({ id: 2, status: "ready", updatedAt: NOW - 2 * DAY }),
-                NOW,
-            ),
+            formatGlanceRow(note({ id: 2, status: "ready", updatedAt: NOW - 2 * DAY }), NOW),
         ).toBe("#2 · 2d · A note · ready");
+        expect(formatGlanceRow(note({ id: 3, updatedAt: NOW - 31 * DAY }), NOW)).toBe(
+            "#3 · 4w · A note · stale",
+        );
         expect(
-            formatGlanceRow(note({ id: 3, updatedAt: NOW - 31 * DAY }), NOW),
-        ).toBe("#3 · 4w · A note · stale");
-        expect(
-            formatGlanceRow(
-                note({ id: 4, status: "pending", updatedAt: NOW - 40 * DAY }),
-                NOW,
-            ),
+            formatGlanceRow(note({ id: 4, status: "pending", updatedAt: NOW - 40 * DAY }), NOW),
         ).toBe("#4 · 5w · A note · pending · stale");
     });
 
     it("measures age from created_at when the note was never updated", () => {
-        expect(
-            formatGlanceRow(note({ id: 5, createdAt: NOW - 3 * HOUR, updatedAt: 0 }), NOW),
-        ).toBe("#5 · 3h · A note");
+        expect(formatGlanceRow(note({ id: 5, createdAt: NOW - 3 * HOUR, updatedAt: 0 }), NOW)).toBe(
+            "#5 · 3h · A note",
+        );
     });
 
     it("orders ready smart notes, then pending, then the rest, newest first", () => {
@@ -102,9 +96,7 @@ describe("ctx_note glance rendering", () => {
         expect(page.startsWith("## Notes\n\n#30 · 0m · note 30\n")).toBe(true);
         expect(page).toContain("#6 · 24m · note 6");
         expect(page).not.toContain("note 5\n");
-        expect(page).toContain(
-            'Showing 25 of 30 — 5 older: ctx_note(action="read", offset=25)',
-        );
+        expect(page).toContain('Showing 25 of 30 — 5 older: ctx_note(action="read", offset=25)');
 
         const lastPage = renderGlance(notes, { limit: 25, offset: 25, nowMs: NOW });
         expect(lastPage).toContain("note 5");
@@ -152,14 +144,16 @@ describe("ctx_note glance rendering", () => {
         expect(formatWriteReply(1, { activeCount: 0, oldestTouchedAt: null }, NOW)).toBe(
             "Saved session note #1.",
         );
-        expect(
-            formatWriteReply(2, { activeCount: 3, oldestTouchedAt: NOW - 2 * DAY }, NOW),
-        ).toBe("Saved session note #2. 3 active, oldest 2d.");
+        expect(formatWriteReply(2, { activeCount: 3, oldestTouchedAt: NOW - 2 * DAY }, NOW)).toBe(
+            "Saved session note #2. 3 active, oldest 2d.",
+        );
     });
 
     it("picks deterministically and walks the pool as the counter advances", () => {
         const picks = [0, 1, 2, 3].map((counter) => noteNudgePickIndex("ses-a", counter, 3));
-        expect(picks).toEqual([0, 1, 2, 3].map((counter) => noteNudgePickIndex("ses-a", counter, 3)));
+        expect(picks).toEqual(
+            [0, 1, 2, 3].map((counter) => noteNudgePickIndex("ses-a", counter, 3)),
+        );
         expect(new Set(picks).size).toBeGreaterThan(1);
         expect(noteNudgePickIndex("ses-a", 0, 0)).toBe(0);
     });
