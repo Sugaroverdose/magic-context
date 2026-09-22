@@ -1112,10 +1112,10 @@ export interface ConfirmedAbortClient {
 }
 
 export async function abortSessionFailClosed(
-    client: ConfirmedAbortClient,
+    client: ConfirmedAbortClient | undefined,
     sessionId: string,
 ): Promise<void> {
-    if (typeof client.session?.abort !== "function") {
+    if (typeof client?.session?.abort !== "function") {
         throw new Error("OpenCode session.abort is unavailable");
     }
     const result = await client.session.abort({

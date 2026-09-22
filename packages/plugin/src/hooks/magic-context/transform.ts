@@ -533,6 +533,33 @@ export function scheduleTsAuthorityRecovery(args: {
         });
 }
 
+export const EMERGENCY_REFUSAL_NOTICE = "Context full — /ctx-flush or /clear to continue.";
+
+export type HostRefusalNotice = (
+    client: PluginContext["client"] | undefined,
+    sessionId: string,
+    message: string,
+    notificationParams: import("./send-session-notification").NotificationParams,
+) => Promise<void>;
+
+export async function sendEmergencyRefusalNotice(
+    client: PluginContext["client"] | undefined,
+    sessionId: string,
+    message: string,
+    notificationParams: import("./send-session-notification").NotificationParams,
+): Promise<void> {
+    if (!client) throw new Error("OpenCode client is unavailable");
+    const notification = await sendStatusNotification(
+        client,
+        sessionId,
+        message,
+        notificationParams,
+    );
+    if (notification !== "sent" && notification !== "queued") {
+        throw new Error(`Emergency recovery notification was ${notification}`);
+    }
+}
+
 export interface TransformDeps {
     hiddenCompletionExecutor?: import("./compartment-runner-types").HiddenCompletionExecutor;
     /** Host marker lifecycle; omission preserves OpenCode 1 marker writes and replay. */
@@ -544,6 +571,7 @@ export interface TransformDeps {
     hostRawMessages?: typeof readRawSessionMessages;
     hostProtectedTailBoundary?: typeof resolveOpenCodeProtectedTailBoundary;
     hostModelFallback?: typeof findLastAssistantModelFromOpenCodeDb;
+    hostRefusalNotice?: HostRefusalNotice;
     hostRefuse?: typeof abortSessionFailClosed;
     tagger: Tagger;
     scheduler: Scheduler;
@@ -750,7 +778,11 @@ export interface TransformDeps {
 export function resolveTransformHostSeams(
     deps: Pick<
         TransformDeps,
-        "hostRawMessages" | "hostProtectedTailBoundary" | "hostModelFallback" | "hostRefuse"
+        | "hostRawMessages"
+        | "hostProtectedTailBoundary"
+        | "hostModelFallback"
+        | "hostRefusalNotice"
+        | "hostRefuse"
     >,
 ) {
     return {
@@ -758,6 +790,7 @@ export function resolveTransformHostSeams(
         hostProtectedTailBoundary:
             deps.hostProtectedTailBoundary ?? resolveOpenCodeProtectedTailBoundary,
         hostModelFallback: deps.hostModelFallback ?? findLastAssistantModelFromOpenCodeDb,
+        hostRefusalNotice: deps.hostRefusalNotice ?? sendEmergencyRefusalNotice,
         hostRefuse: deps.hostRefuse ?? abortSessionFailClosed,
     };
 }
@@ -2611,18 +2644,12 @@ export function createTransform(deps: TransformDeps) {
                 );
             }
             if (emergencyFailClosed.shouldAbort) {
-                if (!deps.client) {
-                    throw new EmergencyFailClosedError(
-                        "Cannot fail closed: OpenCode client is unavailable",
-                    );
-                }
-                // The notice must finish before self-abort so recovery instructions survive interruption.
-                let notification: Awaited<ReturnType<typeof sendStatusNotification>>;
+                // The notice must finish before host refusal so recovery instructions survive interruption.
                 try {
-                    notification = await sendStatusNotification(
+                    await host.hostRefusalNotice(
                         deps.client,
                         sessionId,
-                        "Context full — /ctx-flush or /clear to continue.",
+                        EMERGENCY_REFUSAL_NOTICE,
                         notificationParams,
                     );
                 } catch (error) {
@@ -2630,12 +2657,8 @@ export function createTransform(deps: TransformDeps) {
                         cause: error,
                     });
                 }
-                if (notification !== "sent" && notification !== "queued") {
-                    throw new EmergencyFailClosedError(
-                        `Emergency recovery notification was ${notification}`,
-                    );
-                }
                 try {
+                    // OpenCode 2 supplies a refusal callback because it has no v1 client abort method.
                     await host.hostRefuse(deps.client, sessionId);
                 } catch (error) {
                     sessionLog(

@@ -66,7 +66,7 @@ import { restoreRow } from "../fold/restore";
 import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { type HostServiceOwner, removeHostSession } from "../host-service";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
-import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
+import { deliverPendingChannel2, deliverSynthetic, isAdmittedSynthetic } from "./channel2";
 import { registerV2Commands } from "./commands";
 import { DeletedSessionTombstones } from "./deleted-session-tombstones";
 import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
@@ -122,7 +122,11 @@ export function createHostSeams(
 ): Required<
     Pick<
         TransformDeps,
-        "hostRawMessages" | "hostProtectedTailBoundary" | "hostModelFallback" | "hostRefuse"
+        | "hostRawMessages"
+        | "hostProtectedTailBoundary"
+        | "hostModelFallback"
+        | "hostRefusalNotice"
+        | "hostRefuse"
     >
 > {
     return {
@@ -134,6 +138,8 @@ export function createHostSeams(
             }),
         // Draft-backed: v2 never reconstructs the live model from message.updated.
         hostModelFallback: (sessionID) => liveModels.get(sessionID) ?? null,
+        hostRefusalNotice: (_client, sessionID, message) =>
+            deliverSynthetic(context, sessionID, message).then(() => undefined),
         hostRefuse: (_client, sessionID) =>
             refuseBeforeProvider(
                 context.session,
