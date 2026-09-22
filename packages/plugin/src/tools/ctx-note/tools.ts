@@ -130,7 +130,10 @@ function readGlanceNotes(args: {
 
 /** The tray line appended to a write reply: how many active session notes the
  *  writer now holds and how old the oldest one is. */
-function writeTray(db: Database, sessionId: string): {
+function writeTray(
+    db: Database,
+    sessionId: string,
+): {
     activeCount: number;
     oldestTouchedAt: number | null;
 } {
