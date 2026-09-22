@@ -16,6 +16,7 @@
 import {
     deliverNoteNudgeAtomic,
     getNoteLastReadAt,
+    getNoteNudgeAnchors,
     getPersistedNoteNudge,
     type NoteNudgeDeliveryOutcome,
     setPersistedNoteNudgeTrigger,
@@ -29,6 +30,7 @@ import {
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
+import { formatNoteNudge, noteNudgePickIndex, noteTouchedAt } from "../../tools/ctx-note/render";
 
 export type NoteNudgeTrigger = "historian_complete" | "commit_detected" | "todos_complete";
 
@@ -183,7 +185,50 @@ export function peekNoteNudgeText(
         );
     }
     sessionLog(sessionId, `note-nudge: delivering nudge for ${parts.join(" and ")}`);
-    return `You have ${parts.join(" and ")}. Review with ctx_note read — some may be actionable now.`;
+    return formatNoteNudge({
+        readyCount: readySmartNotes.length,
+        activeCount: notes.length,
+        oldestActiveTouchedAt: oldestTouchedAt(notes),
+        shown: pickNudgeNote({ db, sessionId, activeNotes: notes, readySmartNotes }),
+        nowMs: Date.now(),
+    });
+}
+
+/** The oldest `updated_at` (or `created_at` when never updated) across a batch
+ *  of notes, or null when the batch is empty. */
+function oldestTouchedAt(notes: Note[]): number | null {
+    return notes.reduce<number | null>((min, note) => {
+        const touchedAt = noteTouchedAt(note);
+        return min === null || touchedAt < min ? touchedAt : min;
+    }, null);
+}
+
+/**
+ * The note the nudge shows a title for. Ready smart notes are the pool when any
+ * exist — they are the ones the agent can act on now. Otherwise the pool is the
+ * active session notes ordered by id, and the stateless pick walks that pool so
+ * successive nudges surface different notes.
+ *
+ * The pick is a pure function of the session id and the delivery counter, so a
+ * delivery that is replayed later renders the same bytes: the text is stored
+ * with its anchor and never recomputed on replay.
+ */
+function pickNudgeNote(args: {
+    db: Database;
+    sessionId: string;
+    activeNotes: Note[];
+    readySmartNotes: Note[];
+}): Note | null {
+    const pool =
+        args.readySmartNotes.length > 0
+            ? [...args.readySmartNotes].sort((left, right) => left.id - right.id)
+            : [...args.activeNotes].sort((left, right) => left.id - right.id);
+    if (pool.length === 0) return null;
+    // The persisted delivery record is the counter: one anchor per delivered
+    // nudge, so the first delivery picks with 0 and the next with 1. No new
+    // column, and the value is stable across the peeks that precede delivery.
+    const counter = getNoteNudgeAnchors(args.db, args.sessionId).length;
+    return pool[noteNudgePickIndex(args.sessionId, counter, pool.length)] ?? null;
 }
 
 /**

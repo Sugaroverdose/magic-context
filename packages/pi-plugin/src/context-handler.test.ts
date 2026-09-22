@@ -2208,7 +2208,9 @@ describe("registerPiContextHandler", () => {
 			expect(textOf(result.messages[0] as never)).toContain(
 				'<instruction name="deferred_notes">',
 			);
-			expect(textOf(result.messages[0] as never)).toContain("1 deferred note");
+			expect(textOf(result.messages[0] as never)).toContain(
+				"0 notes ready, 1 active",
+			);
 		} finally {
 			closeQuietly(db);
 		}
