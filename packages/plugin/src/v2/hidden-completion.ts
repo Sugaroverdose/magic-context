@@ -26,6 +26,8 @@ interface Model {
     variant?: string;
 }
 
+type AssistantOutcome = "succeeded" | "failed" | "interrupted";
+
 type HiddenChildRole = "historian" | "dreamer";
 
 interface PersistedHiddenChild {
@@ -69,6 +71,8 @@ export interface HiddenChildHost {
     }): Promise<{ id: string }>;
     get(input: { sessionID: string }): Promise<{
         model?: { providerID: string; id: string; variant?: string };
+        /** Returned only when the host exposes an error for the terminal session. */
+        error?: unknown;
     }>;
     switchModel(input: {
         sessionID: string;
@@ -353,27 +357,32 @@ function meter(system: string, prompt: string, text: string) {
     };
 }
 
+function assistantOutcome(row: StoreRow<"assistant"> | undefined): AssistantOutcome | undefined {
+    const outcome = row?.data.outcome;
+    return outcome === "succeeded" || outcome === "failed" || outcome === "interrupted"
+        ? outcome
+        : undefined;
+}
+
 /**
- * The provider answered with an error (quota, rate limit, refused request) and the host persisted it
- * as a settled assistant row. The child is safe to reuse: every hidden prompt replaces the child's
- * whole context in the hidden-child hook, so the error row is never sent again.
- *
- * `finish` is what makes the row settled, and it is required for the same reason the success
- * predicate below requires it: a row that only carries `error` tells us a failure was recorded, not
- * that the message it belongs to is over, so reusing on `error` alone can hand a caller a child that
- * is still being written. Measured against OpenCode 2.0.5: a failed hidden prompt persists one
- * assistant row carrying `finish: "error"`, `time.completed` and the provider error together, and no
- * tokens, so requiring `finish` costs nothing in practice while keeping the two reuse paths at the
- * same bar.
+ * OpenCode 2.0.5 settled provider failures with `finish: "error"`; 2.0.12 can instead persist only
+ * the terminal session outcome on the assistant row. Either shape proves the child is idle and safe
+ * to reuse because the hidden-child hook replaces its complete context before the next prompt.
  */
 function settledProviderError(row: StoreRow<"assistant"> | undefined): boolean {
-    return row !== undefined && row.data.error !== undefined && typeof row.data.finish === "string";
+    const outcome = assistantOutcome(row);
+    return (
+        row !== undefined &&
+        ((row.data.error !== undefined && typeof row.data.finish === "string") ||
+            outcome === "failed" ||
+            outcome === "interrupted")
+    );
 }
 
 function successfulReusableAssistant(row: StoreRow<"assistant"> | undefined): boolean {
     return (
         row !== undefined &&
-        typeof row.data.finish === "string" &&
+        (typeof row.data.finish === "string" || assistantOutcome(row) === "succeeded") &&
         row.data.error === undefined &&
         row.data.tokens !== undefined
     );
@@ -460,6 +469,7 @@ async function sleepUntilPoll(signal: AbortSignal | undefined, deadline: number)
 
 async function awaitAssistantRow(
     openReader: () => HiddenChildRows & { close?: () => void },
+    readSessionError: () => Promise<unknown>,
     childID: string,
     afterSeq: number,
     deadline: number,
@@ -468,10 +478,20 @@ async function awaitAssistantRow(
     for (;;) {
         const row = withReader(openReader, (reader) => reader.latestAssistant(childID));
         if (row && row.seq > afterSeq) {
+            const outcome = assistantOutcome(row);
+            if (outcome === "failed" || outcome === "interrupted") {
+                const sessionError = await readSessionError();
+                const details = [
+                    `outcome=${outcome}`,
+                    `assistant_row=${errorText(row.data)}`,
+                    `session_error=${sessionError === undefined ? "unavailable" : errorText(sessionError)}`,
+                ];
+                throw new HiddenProviderError(details.join("; "));
+            }
             if (row.data.error !== undefined) {
                 throw new HiddenProviderError(errorText(row.data.error));
             }
-            if (typeof row.data.finish === "string") return row;
+            if (typeof row.data.finish === "string" || outcome === "succeeded") return row;
         }
         if (Date.now() >= deadline) {
             throw new Error("Hidden completion timed out waiting for a persisted assistant row");
@@ -762,6 +782,13 @@ export async function createV2HiddenCompletionExecutor(
                 const row = await Promise.race([
                     awaitAssistantRow(
                         options.openReader,
+                        async () => {
+                            try {
+                                return (await host.get({ sessionID: run.child.id })).error;
+                            } catch {
+                                return undefined;
+                            }
+                        },
                         run.child.id,
                         baseline,
                         deadline,

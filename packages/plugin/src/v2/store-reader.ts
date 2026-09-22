@@ -49,6 +49,7 @@ export interface MessageData {
     content?: Array<Record<string, unknown>>;
     text?: string;
     finish?: string;
+    outcome?: "succeeded" | "failed" | "interrupted";
     error?: unknown;
     model?: { id: string; providerID: string; variant?: string };
     tokens?: {
