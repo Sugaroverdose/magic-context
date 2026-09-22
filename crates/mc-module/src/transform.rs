@@ -98,6 +98,9 @@ const M0_MURAL_KEY: &str = "m0-mural";
 /// Frozen-unit key prefix for a tail reduction (a reduced tool output / superseded edit).
 /// `red:<target_id>` — the target is the real tail item whose bytes are replaced.
 const RED_KEY_PREFIX: &str = "red:";
+/// Frozen Channel-1 reminders. The key encodes `(tool_call_id, owner_mid)`; `reset_rule`
+/// stores the target tool-result block id and `frozen_payload` stores the exact append bytes.
+const CHANNEL1_KEY_PREFIX: &str = "channel1:";
 /// Durable sentinel proving this session has adopted the renderer transition. It is stored in the
 /// existing cache-state row and never emitted; preserving it avoids a schema migration or hot-path
 /// state read while keeping the pass commit under the normal row-version CAS.
@@ -1912,10 +1915,17 @@ struct Channel1NudgeInputs<'a, 'ctx> {
     tag_rows: &'a [McTagRow],
     baseline: Option<&'a TailHygieneBaseline>,
     channel1_appends: &'a [Channel1AppendRow],
+    served_output_fingerprint: &'a [ServedBlockFingerprint],
+    may_reprice_served_target: bool,
     mutation_exempt_mid: Option<&'a str>,
     protection_cutoff: &'a TagNumberCutoffProjection,
     pending_drop_target_ids: &'a HashSet<String>,
     agent_drops_applied_this_pass: bool,
+}
+
+struct Channel1Target {
+    block_id: String,
+    unit_key: String,
 }
 
 /// Transform errors. Each leaves the durable frozen-set UNCHANGED (the CAS simply does
@@ -3587,11 +3597,12 @@ fn apply_once(
     let tag_overlay_started_at = Instant::now();
     let mut tag_numbers = tag_number_by_message(&tag_rows);
     timings.tag_overlay += elapsed_ms(tag_overlay_started_at);
-    let mut channel1_appends = if tagging_active {
+    let legacy_channel1_appends = if tagging_active {
         transform_snapshot.channel1_appends
     } else {
         Vec::new()
     };
+    let channel1_appends = channel1_append_rows(&loaded.core, &legacy_channel1_appends);
     let auto_search_active = !req.is_subagent && req.auto_search_enabled;
     let mut user_hints = if tagging_active || auto_search_active {
         transform_snapshot.user_hints
@@ -4975,6 +4986,8 @@ fn apply_once(
                     suppress_bootstrap_reduction_tag_overlay,
                 );
                 let survivors = surviving_red_units(&effective, &live, comp.coverage_ordinal);
+                let channel1_survivors =
+                    surviving_channel1_units(&core, &effective, &live, comp.coverage_ordinal);
                 let mut strip_survivors = surviving_strip_units(&core, req);
                 strip_survivors.extend(new_strip_units.clone());
                 let caveman_survivors = surviving_caveman_units(
@@ -5018,6 +5031,7 @@ fn apply_once(
                 rendered.extend(survivors);
                 rendered.extend(strip_survivors);
                 rendered.extend(caveman_survivors);
+                rendered.extend(channel1_survivors);
 
                 // A HARD re-composes m0 fully from the store, so the boundary ALWAYS reflects
                 // the current coverage — set it unconditionally (empty when no compartments,
@@ -5212,6 +5226,8 @@ fn apply_once(
                         suppress_bootstrap_reduction_tag_overlay,
                     );
                     let survivors = surviving_red_units(&effective, &live, comp.coverage_ordinal);
+                    let channel1_survivors =
+                        surviving_channel1_units(&core, &effective, &live, comp.coverage_ordinal);
                     let mut strip_survivors = surviving_strip_units(&core, req);
                     strip_survivors.extend(new_strip_units.clone());
                     let caveman_survivors = surviving_caveman_units(
@@ -5250,6 +5266,7 @@ fn apply_once(
                     rendered.extend(survivors);
                     rendered.extend(strip_survivors);
                     rendered.extend(caveman_survivors);
+                    rendered.extend(channel1_survivors);
                     core.step(PassInput {
                         proposed: Some(mc_core::Action::Hard),
                         boundary_present: boundary_token,
@@ -5519,6 +5536,8 @@ fn apply_once(
     }
     timings.todo = todo_ms;
 
+    prune_channel1_units(&mut core, &projection, meta.coverage_ordinal);
+    let mut channel1_appends = channel1_append_rows(&core, &legacy_channel1_appends);
     let result_action = action_str(&plan, &core);
 
     let mut tag_overlay = if tagging_active {
@@ -5630,7 +5649,7 @@ fn apply_once(
     }
 
     if tagging_active {
-        if let Some(row) = maybe_append_channel1_nudge(
+        if let Some((row, unit)) = maybe_append_channel1_nudge(
             Channel1NudgeInputs {
                 ctx,
                 core: &core,
@@ -5638,6 +5657,8 @@ fn apply_once(
                 tag_rows: &hygiene_tag_rows,
                 baseline: current_hygiene_baseline.as_ref(),
                 channel1_appends: &channel1_appends,
+                served_output_fingerprint: &loaded.meta.served_output_fingerprint,
+                may_reprice_served_target: is_bust_pass,
                 mutation_exempt_mid,
                 protection_cutoff: &protection_window.cutoff,
                 pending_drop_target_ids: &pending_drop_target_ids,
@@ -5648,8 +5669,8 @@ fn apply_once(
             tag_overlay
                 .channel1_by_block_id
                 .insert(row.block_id.clone(), row.reminder_text.clone());
-            pending_overlays.channel1_append = Some(row.clone());
             channel1_appends.push(row);
+            core.frozen_units.push(unit);
         }
     }
 
@@ -6395,7 +6416,9 @@ fn frozen_unit_targets_mid(core: &CoreState, mid: &str) -> bool {
             .or_else(|| unit.key.strip_prefix(CAV_KEY_PREFIX));
         if target.is_some_and(|target| {
             split_block_id(target).is_some_and(|(unit_mid, _)| unit_mid == mid)
-        }) {
+        }) || (unit.key.starts_with(CHANNEL1_KEY_PREFIX)
+            && split_block_id(&unit.reset_rule).is_some_and(|(unit_mid, _)| unit_mid == mid))
+        {
             return true;
         }
         unit.key
@@ -6881,7 +6904,7 @@ fn is_legacy_baseline(core: &CoreState) -> bool {
 }
 
 /// A valid current shape: EXACTLY one `m0`, EXACTLY one `m1`, and zero-or-more
-/// reduction, strip, caveman, or migration-marker replay units. An initialized state missing
+/// reduction, strip, caveman, Channel-1, or migration-marker replay units. An initialized state missing
 /// `m0`/`m1`, or carrying any other key, is an unknown shape (rejected, never cleared).
 fn cached_m1_missing(core: &CoreState) -> bool {
     let m0 = core.frozen_units.iter().filter(|u| u.key == "m0").count();
@@ -6897,6 +6920,7 @@ fn cached_m1_missing(core: &CoreState) -> bool {
             || u.key.starts_with(RED_KEY_PREFIX)
             || u.key.starts_with("strip:")
             || u.key.starts_with(CAV_KEY_PREFIX)
+            || u.key.starts_with(CHANNEL1_KEY_PREFIX)
             || matches!(
                 u.key.as_str(),
                 LEGACY_TRANSITION_CONSUMED_KEY | TRANSITION_CONSUMED_KEY
@@ -6920,6 +6944,7 @@ fn valid_m0m1_shape(core: &CoreState) -> bool {
             || u.key.starts_with(RED_KEY_PREFIX)
             || u.key.starts_with("strip:")
             || u.key.starts_with(CAV_KEY_PREFIX)
+            || u.key.starts_with(CHANNEL1_KEY_PREFIX)
             || matches!(
                 u.key.as_str(),
                 LEGACY_TRANSITION_CONSUMED_KEY | TRANSITION_CONSUMED_KEY
@@ -7769,6 +7794,29 @@ fn surviving_red_units(
                 _ => None,
             },
         )
+        .collect()
+}
+
+fn surviving_channel1_units(
+    core: &CoreState,
+    effective_reductions: &BTreeMap<String, (String, String, String)>,
+    live: &[&FlatBlock],
+    new_coverage: Option<u64>,
+) -> Vec<FrozenUnit> {
+    let live_ord = live
+        .iter()
+        .map(|block| (block.id(), block.ordinal()))
+        .collect::<HashMap<_, _>>();
+    core.frozen_units
+        .iter()
+        .filter(|unit| unit.key.starts_with(CHANNEL1_KEY_PREFIX))
+        .filter(|unit| !effective_reductions.contains_key(&unit.reset_rule))
+        .filter(|unit| {
+            live_ord
+                .get(unit.reset_rule.as_str())
+                .is_some_and(|ordinal| is_tail(*ordinal, new_coverage))
+        })
+        .cloned()
         .collect()
 }
 
@@ -10174,7 +10222,7 @@ fn one_line_fragment(text: &str, limit: usize) -> String {
 fn maybe_append_channel1_nudge(
     input: Channel1NudgeInputs<'_, '_>,
     meta: &mut ModuleMeta,
-) -> Option<Channel1AppendRow> {
+) -> Option<(Channel1AppendRow, FrozenUnit)> {
     let active_tags = active_tags_for_nudge(
         input.core,
         meta,
@@ -10188,29 +10236,31 @@ fn maybe_append_channel1_nudge(
     }
     let current_real_user_turn_count = real_user_turn_count(input.projection);
     let decision = decide_channel1(input.baseline, meta, current_real_user_turn_count);
-    meta.channel1_last_nudge_undropped = decision.next_last_nudge;
-    meta.channel1_last_nudge_level = decision.next_last_level;
-    if decision.clear_post_reduce_grace {
-        if let Some(baseline) = meta.tail_hygiene_baseline.as_mut() {
-            baseline.channel1_post_reduce_grace_baseline_u = None;
-            baseline.channel1_post_reduce_grace_pre_level.clear();
-        }
-    }
     if !decision.fire {
+        apply_channel1_decision_state(meta, &decision);
         return None;
     }
+
     let existing_blocks = input
         .channel1_appends
         .iter()
         .map(|row| row.block_id.as_str())
         .collect::<HashSet<_>>();
-    let block_id = newest_tool_result_for_channel1(
+    let target = newest_tool_result_for_channel1(
         input.core,
         meta,
         input.projection,
         &existing_blocks,
         input.mutation_exempt_mid,
     )?;
+    if !input.may_reprice_served_target
+        && overlay_target_was_served(input.served_output_fingerprint, &target.block_id)
+    {
+        // A firing decision remains pending until a fresh result can carry it on first serve or
+        // an independently priced pass can change bytes that the provider has already cached.
+        return None;
+    }
+
     let hint = oldest_reclaimable_hint(&active_tags, input.protection_cutoff, &queued_tag_numbers);
     let reminder = build_channel1_reminder(
         decision.level,
@@ -10219,13 +10269,82 @@ fn maybe_append_channel1_nudge(
         &hint,
         decision.sticky,
     );
+    apply_channel1_decision_state(meta, &decision);
     meta.channel1_last_fire_level = decision.level.as_str().to_string();
     meta.channel1_last_fire_ordinal = current_real_user_turn_count;
-    Some(Channel1AppendRow {
-        block_id,
-        reminder_text: reminder,
+    let row = Channel1AppendRow {
+        block_id: target.block_id.clone(),
+        reminder_text: reminder.clone(),
         fired_at_ms: input.ctx.now_ms,
-    })
+    };
+    let unit = FrozenUnit {
+        key: target.unit_key,
+        kind: "channel1_append".to_string(),
+        frozen_payload: reminder,
+        durability_class: mc_core::DurabilityClass::Lineage,
+        reset_rule: target.block_id,
+    };
+    Some((row, unit))
+}
+
+fn apply_channel1_decision_state(meta: &mut ModuleMeta, decision: &Channel1Decision) {
+    meta.channel1_last_nudge_undropped = decision.next_last_nudge;
+    meta.channel1_last_nudge_level = decision.next_last_level.clone();
+    if decision.clear_post_reduce_grace {
+        if let Some(baseline) = meta.tail_hygiene_baseline.as_mut() {
+            baseline.channel1_post_reduce_grace_baseline_u = None;
+            baseline.channel1_post_reduce_grace_pre_level.clear();
+        }
+    }
+}
+
+fn channel1_append_rows(
+    core: &CoreState,
+    legacy_rows: &[Channel1AppendRow],
+) -> Vec<Channel1AppendRow> {
+    let mut by_block = legacy_rows
+        .iter()
+        .cloned()
+        .map(|row| (row.block_id.clone(), row))
+        .collect::<BTreeMap<_, _>>();
+    for unit in core
+        .frozen_units
+        .iter()
+        .filter(|unit| unit.key.starts_with(CHANNEL1_KEY_PREFIX))
+        .filter(|unit| !unit.reset_rule.is_empty())
+    {
+        by_block.insert(
+            unit.reset_rule.clone(),
+            Channel1AppendRow {
+                block_id: unit.reset_rule.clone(),
+                reminder_text: unit.frozen_payload.clone(),
+                fired_at_ms: 0,
+            },
+        );
+    }
+    by_block.into_values().collect()
+}
+
+fn prune_channel1_units(
+    core: &mut CoreState,
+    projection: &FlatProjection,
+    coverage_ordinal: Option<u64>,
+) {
+    let live_ord = projection
+        .blocks
+        .iter()
+        .map(|block| (block.id.as_str(), block.ordinal))
+        .collect::<HashMap<_, _>>();
+    let reduced = frozen_red_targets(core);
+    core.frozen_units.retain(|unit| {
+        if !unit.key.starts_with(CHANNEL1_KEY_PREFIX) {
+            return true;
+        }
+        !reduced.contains(&unit.reset_rule)
+            && live_ord
+                .get(unit.reset_rule.as_str())
+                .is_some_and(|ordinal| is_tail(*ordinal, coverage_ordinal))
+    });
 }
 
 fn tag_rows_for_hygiene(
@@ -11196,9 +11315,9 @@ fn newest_tool_result_for_channel1(
     projection: &FlatProjection,
     existing_blocks: &HashSet<&str>,
     mutation_exempt_mid: Option<&str>,
-) -> Option<String> {
+) -> Option<Channel1Target> {
     let frozen_targets = frozen_red_targets(core);
-    projection
+    let block = projection
         .blocks
         .iter()
         .filter(|block| {
@@ -11206,12 +11325,21 @@ fn newest_tool_result_for_channel1(
                 && taggable_kind(block).is_some()
                 && is_tail(block.ordinal, meta.coverage_ordinal)
                 && !frozen_targets.contains(block.id())
-                && !existing_blocks.contains(block.id.as_str())
                 && mutation_exempt_mid != Some(block.mid.as_str())
                 && tool_result_can_carry_channel1(&block.wire)
         })
-        .max_by_key(|block| (block.ordinal, block.block_index))
-        .map(|block| block.id.clone())
+        .max_by_key(|block| (block.ordinal, block.block_index))?;
+    if existing_blocks.contains(block.id.as_str()) {
+        return None;
+    }
+    let tool_call_id = block.tool_call_id.as_deref()?;
+    let owner_mid = block.arc_id.as_deref()?.split_once('#')?.0;
+    let pair = serde_json::to_string(&(tool_call_id, owner_mid))
+        .expect("Channel-1 target identity must serialize");
+    Some(Channel1Target {
+        block_id: block.id.clone(),
+        unit_key: format!("{CHANNEL1_KEY_PREFIX}{pair}"),
+    })
 }
 
 fn tool_result_can_carry_channel1(block: &CkWireBlock) -> bool {
@@ -12448,6 +12576,12 @@ impl<'a> FrozenUnitIndex<'a> {
                 .map(|(mid, _)| mid)
                 .or_else(|| {
                     unit.key
+                        .starts_with(CHANNEL1_KEY_PREFIX)
+                        .then(|| split_block_id(&unit.reset_rule).map(|(mid, _)| mid))
+                        .flatten()
+                })
+                .or_else(|| {
+                    unit.key
                         .strip_prefix("strip:")
                         .and_then(|rest| rest.split_once(':'))
                         .map(|(_, target)| split_block_id(target).map_or(target, |(mid, _)| mid))
@@ -12503,12 +12637,17 @@ impl<'a> FrozenUnitLookup<'a> {
                             .and_then(split_block_id)
                             .map(|(unit_mid, _)| unit_mid == mid)
                             .unwrap_or_else(|| {
-                                unit.key
-                                    .strip_prefix("strip:")
-                                    .and_then(|key| key.split_once(':'))
-                                    .is_some_and(|(_, target)| {
-                                        split_block_id(target).map_or(target, |(mid, _)| mid) == mid
-                                    })
+                                (unit.key.starts_with(CHANNEL1_KEY_PREFIX)
+                                    && split_block_id(&unit.reset_rule)
+                                        .is_some_and(|(unit_mid, _)| unit_mid == mid))
+                                    || unit
+                                        .key
+                                        .strip_prefix("strip:")
+                                        .and_then(|key| key.split_once(':'))
+                                        .is_some_and(|(_, target)| {
+                                            split_block_id(target).map_or(target, |(mid, _)| mid)
+                                                == mid
+                                        })
                             })
                     })
                     .collect(),
@@ -28875,6 +29014,16 @@ pub(crate) mod tests {
         first_block_text(msg.content.first().unwrap()).unwrap()
     }
 
+    fn frozen_channel1_units(s: &McStore, session_id: &str) -> Vec<FrozenUnit> {
+        s.load(session_id)
+            .unwrap()
+            .core
+            .frozen_units
+            .into_iter()
+            .filter(|unit| unit.key.starts_with(CHANNEL1_KEY_PREFIX))
+            .collect()
+    }
+
     /// Bootstrap a session whose m0 covers ordinal 1 (compartment ends at id "a"), so the
     /// boundary "a" is present and tail items (ordinal ≥ 2) are reducible.
     fn bootstrap_covering_a(s: &McStore) {
@@ -31599,6 +31748,189 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn channel1_waits_for_first_serve_or_priced_pass_then_replays_frozen_bytes() {
+        run_active_surface_test(|| {
+            fn assistant_text(mid: &str, ordinal: u64, text: &str) -> CkIngressMessage {
+                CkIngressMessage {
+                    mid: mid.to_string(),
+                    ordinal,
+                    ck: CkWireMessage::from_parts(
+                        "assistant",
+                        vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                            text: text.to_string(),
+                        })],
+                        None,
+                        ck_wire::ProviderExtras::new(),
+                        ck_wire::HarnessMeta {
+                            harness_id: Some(mid.to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                }
+            }
+
+            fn keep_next_channel1_quiet(s: &McStore, session_id: &str) {
+                let mut loaded = s.load(session_id).unwrap();
+                loaded.meta.channel1_last_nudge_level = "urgent".to_string();
+                loaded.meta.channel1_last_nudge_undropped = i64::MAX;
+                s.commit(session_id, loaded.row_version, &loaded.core, &loaded.meta)
+                    .unwrap();
+            }
+
+            fn arm_gentle_crossing(s: &McStore, session_id: &str) {
+                let mut loaded = s.load(session_id).unwrap();
+                let baseline = loaded.meta.tail_hygiene_baseline.as_mut().unwrap();
+                baseline.baseline_u = CHANNEL1_FLOOR_TOKENS - 1;
+                baseline.baseline_t = 100_000;
+                baseline.turn_delta_u = 0;
+                baseline.turn_delta_t = 0;
+                baseline.channel1_post_reduce_grace_baseline_u = None;
+                baseline.channel1_post_reduce_grace_pre_level.clear();
+                loaded.meta.channel1_last_nudge_undropped = 0;
+                loaded.meta.channel1_last_nudge_level.clear();
+                loaded.meta.channel1_last_fire_level.clear();
+                loaded.meta.channel1_last_fire_ordinal = 0;
+                s.commit(session_id, loaded.row_version, &loaded.core, &loaded.meta)
+                    .unwrap();
+            }
+
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let messages = vec![
+                assistant_tool_call("call1", 1, "c1"),
+                tool_result("result1", 2, "c1", "board output"),
+            ];
+            let request = with_usage(
+                active_cc_req("channel1-defer-hold", "cfg0", messages.clone()),
+                100,
+                1024,
+            );
+            run(&s, &request, &spine());
+            keep_next_channel1_quiet(&s, "channel1-defer-hold");
+            let first_serve = run(&s, &request, &spine());
+            let bare_result = tail_bytes(&first_serve, "result1").to_string();
+            assert!(!bare_result.contains("<system-reminder>"));
+            arm_gentle_crossing(&s, "channel1-defer-hold");
+
+            let mut crossed_messages = messages.clone();
+            crossed_messages.push(assistant_text("assistant-text", 3, &"word ".repeat(100)));
+            crossed_messages.push(item("next-user", 4, "continue"));
+            let crossed_request = with_usage(
+                active_cc_req("channel1-defer-hold", "cfg0", crossed_messages.clone()),
+                100,
+                1024,
+            );
+            let deferred_crossing = run(&s, &crossed_request, &spine());
+            assert_eq!(deferred_crossing.action, "SOFT+");
+            assert_eq!(
+                tail_bytes(&deferred_crossing, "result1"),
+                bare_result,
+                "a band crossing on defer cannot rewrite an already-served result"
+            );
+            assert!(!s
+                .load("channel1-defer-hold")
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key.starts_with("channel1:")));
+
+            crossed_messages.push(assistant_tool_call("call2", 5, "c2"));
+            crossed_messages.push(tool_result("result2", 6, "c2", "fresh output"));
+            let fresh_request = with_usage(
+                active_cc_req("channel1-defer-hold", "cfg0", crossed_messages),
+                100,
+                1024,
+            );
+            let fresh = run(&s, &fresh_request, &spine());
+            assert_eq!(fresh.action, "SOFT+");
+            assert!(tail_bytes(&fresh, "result2").contains("<system-reminder>"));
+            let fresh_units = s
+                .load("channel1-defer-hold")
+                .unwrap()
+                .core
+                .frozen_units
+                .into_iter()
+                .filter(|unit| unit.key.starts_with("channel1:"))
+                .collect::<Vec<_>>();
+            assert_eq!(fresh_units.len(), 1);
+            assert!(s
+                .load_channel1_appends("channel1-defer-hold")
+                .unwrap()
+                .is_empty());
+            assert_eq!(fresh_units[0].key, "channel1:[\"c2\",\"call2\"]");
+            assert_eq!(fresh_units[0].reset_rule, "result2#0");
+            let fresh_result = tail_bytes(&fresh, "result2");
+            let reminder_offset = fresh_result.find("\n\n<system-reminder>").unwrap();
+            assert_eq!(
+                fresh_units[0].frozen_payload,
+                fresh_result[reminder_offset..]
+            );
+
+            let priced_messages = vec![
+                assistant_tool_call("priced-call", 1, "priced-c1"),
+                tool_result("priced-result", 2, "priced-c1", "priced output"),
+            ];
+            let priced_request = with_usage(
+                active_cc_req("channel1-priced", "cfg0", priced_messages.clone()),
+                100,
+                1024,
+            );
+            let priced_first_serve = run(&s, &priced_request, &spine());
+            assert!(!tail_bytes(&priced_first_serve, "priced-result").contains("<system-reminder>"));
+            let mut priced_bust_messages = priced_messages;
+            priced_bust_messages.push(assistant_text(
+                "priced-assistant-text",
+                3,
+                &"word ".repeat(80_000),
+            ));
+            priced_bust_messages.push(item("priced-next-user", 4, "continue"));
+            let priced_bust_request = with_usage(
+                active_cc_req("channel1-priced", "cfg1", priced_bust_messages),
+                100,
+                1024,
+            );
+
+            let priced = run(&s, &priced_bust_request, &spine());
+            assert_eq!(priced.action, "HARD");
+            assert!(tail_bytes(&priced, "priced-result").contains("<system-reminder>"));
+            let priced_hash = canonical_response_hash(&priced);
+            let reminder_bytes = s
+                .load("channel1-priced")
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .find(|unit| unit.key.starts_with("channel1:"))
+                .map(|unit| unit.frozen_payload.clone())
+                .expect("priced pass must freeze exact reminder bytes");
+            assert!(tail_bytes(&priced, "priced-result").ends_with(&reminder_bytes));
+
+            for _ in 0..4 {
+                let replay = run(&s, &priced_bust_request, &spine());
+                assert_eq!(replay.action, "SOFT+");
+                assert_eq!(canonical_response_hash(&replay), priced_hash);
+                assert!(tail_bytes(&replay, "priced-result").ends_with(&reminder_bytes));
+            }
+
+            let mut loaded = s.load("channel1-priced").unwrap();
+            loaded
+                .core
+                .frozen_units
+                .push(red_unit("priced-result#0", "drop", "[dropped]"));
+            s.commit(
+                "channel1-priced",
+                loaded.row_version,
+                &loaded.core,
+                &loaded.meta,
+            )
+            .unwrap();
+            run(&s, &priced_bust_request, &spine());
+            assert!(frozen_channel1_units(&s, "channel1-priced").is_empty());
+        });
+    }
+
+    #[test]
     fn channel1_hygiene_ratio_nudge_replays_then_refires_after_the_protection_drop() {
         run_active_surface_test(|| {
             let dir = tempfile::tempdir().unwrap();
@@ -31625,11 +31957,11 @@ pub(crate) mod tests {
             let first = run(&s, &request, &spine());
             let first_result = tail_bytes(&first, "result5").to_string();
             assert!(first_result.contains("<system-reminder>"));
-            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 1);
+            assert_eq!(frozen_channel1_units(&s, "nudge").len(), 1);
 
             let replay = run(&s, &request, &spine());
             assert_eq!(tail_bytes(&replay, "result5"), first_result);
-            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 1);
+            assert_eq!(frozen_channel1_units(&s, "nudge").len(), 1);
             // The protection window always keeps the newest three tool arcs, and it
             // covers them from the pass after their tags are minted. That takes
             // reclaimable mass out of U on blocks the first pass already froze, so the
@@ -31675,7 +32007,7 @@ pub(crate) mod tests {
                     .map(|message| message.canonical_bytes())
                     .collect::<Vec<_>>()
             );
-            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 1);
+            assert_eq!(frozen_channel1_units(&s, "nudge").len(), 1);
 
             let mut refire_meta = s.load("nudge").unwrap();
             let refire_baseline = refire_meta.meta.tail_hygiene_baseline.as_mut().unwrap();
@@ -31712,16 +32044,15 @@ pub(crate) mod tests {
             assert!(refired_result.contains("Housekeeping backlog:"));
             assert!(!refired_result.contains("Reminder: "));
             assert_eq!(
-                s.load_channel1_appends("nudge")
-                    .unwrap()
+                frozen_channel1_units(&s, "nudge")
                     .iter()
-                    .map(|row| row.block_id.clone())
+                    .map(|unit| unit.reset_rule.clone())
                     .collect::<Vec<_>>(),
                 vec!["result5#0".to_string(), "result6#0".to_string()]
             );
             let refired_replay = run(&s, &refire_request, &spine());
             assert_eq!(tail_bytes(&refired_replay, "result6"), refired_result);
-            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 2);
+            assert_eq!(frozen_channel1_units(&s, "nudge").len(), 2);
 
             let mut loaded = s.load("nudge").unwrap();
             loaded.meta.channel1_reduce_suppressed = true;
@@ -31740,7 +32071,7 @@ pub(crate) mod tests {
                 !tail_bytes(&suppressed, "result7").contains("<system-reminder>"),
                 "a reduce-suppressed pass adds no new span"
             );
-            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 2);
+            assert_eq!(frozen_channel1_units(&s, "nudge").len(), 2);
         });
     }
 
@@ -31770,7 +32101,7 @@ pub(crate) mod tests {
             run(&s, &initial_request, &spine());
             let first = run(&s, &initial_request, &spine());
             assert!(tail_bytes(&first, "result4").contains("<system-reminder>"));
-            assert_eq!(s.load_channel1_appends("drop-grace").unwrap().len(), 1);
+            assert_eq!(frozen_channel1_units(&s, "drop-grace").len(), 1);
 
             s.append_pending_agent_drops_with_command(
                 "drop-grace",
@@ -31794,7 +32125,7 @@ pub(crate) mod tests {
                 s.load_pending_agent_drops("drop-grace").unwrap(),
             );
             assert!(!tail_bytes(&applying, "result5").contains("<system-reminder>"));
-            assert_eq!(s.load_channel1_appends("drop-grace").unwrap().len(), 1);
+            assert_eq!(frozen_channel1_units(&s, "drop-grace").len(), 1);
             assert!(after_applying
                 .meta
                 .tail_hygiene_baseline
@@ -31805,7 +32136,7 @@ pub(crate) mod tests {
             let resumed = run(&s, &applying_request, &spine());
             let resumed_result = tail_bytes(&resumed, "result5");
             assert!(!resumed_result.contains("<system-reminder>"));
-            assert_eq!(s.load_channel1_appends("drop-grace").unwrap().len(), 1);
+            assert_eq!(frozen_channel1_units(&s, "drop-grace").len(), 1);
         });
     }
 
