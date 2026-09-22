@@ -27,6 +27,7 @@ import {
     type PendingCompactionMarker,
     pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
+    replacePendingCompactionMarkerStateIf,
     setPendingCompactionMarkerState,
     setPersistedTodoPermissionDenied,
     setPersistedTodoSyntheticAnchor,
@@ -450,57 +451,65 @@ export interface RustMaterializedCompactionBoundary {
 export function applyRustModeDeferredCompactionMarker(args: {
     db: ContextDatabase;
     sessionId: string;
-    boundary: RustMaterializedCompactionBoundary;
+    boundary?: RustMaterializedCompactionBoundary;
     sessionDirectory?: string;
 }): void {
     const { boundary } = args;
-    if (
-        !Number.isSafeInteger(boundary.rowVersion) ||
-        boundary.rowVersion <= 0 ||
-        !Number.isSafeInteger(boundary.ordinal) ||
-        boundary.ordinal < 0 ||
-        boundary.endMessageId.length === 0
-    ) {
-        sessionLog(args.sessionId, "rust compaction-marker: invalid materialized boundary ignored");
-        return;
+    if (boundary) {
+        if (
+            !Number.isSafeInteger(boundary.rowVersion) ||
+            boundary.rowVersion <= 0 ||
+            !Number.isSafeInteger(boundary.ordinal) ||
+            boundary.ordinal < 0 ||
+            boundary.endMessageId.length === 0
+        ) {
+            sessionLog(args.sessionId, "rust compaction-marker: invalid materialized boundary ignored");
+            return;
+        }
+
+        let target: PendingCompactionMarker = {
+            ordinal: boundary.ordinal,
+            endMessageId: boundary.endMessageId,
+            publishedAt: Date.now(),
+        };
+        args.db.transaction(() => {
+            const persisted = getPersistedCompactionMarkerState(args.db, args.sessionId);
+            const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
+            if (pending && pending.ordinal > target.ordinal) {
+                target = pending;
+                return;
+            }
+            if (
+                pending &&
+                pending.ordinal === target.ordinal &&
+                pending.endMessageId === target.endMessageId
+            ) {
+                target = pending;
+                return;
+            }
+            if (persisted && persisted.boundaryOrdinal >= target.ordinal && pending === null) return;
+            setPendingCompactionMarkerState(args.db, args.sessionId, target);
+        })();
     }
 
-    let target: PendingCompactionMarker = {
-        ordinal: boundary.ordinal,
-        endMessageId: boundary.endMessageId,
-        publishedAt: Date.now(),
-    };
-    args.db.transaction(() => {
-        const persisted = getPersistedCompactionMarkerState(args.db, args.sessionId);
-        const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
-        if (pending && pending.ordinal > target.ordinal) {
-            target = pending;
-            return;
-        }
-        if (
-            pending &&
-            pending.ordinal === target.ordinal &&
-            pending.endMessageId === target.endMessageId
-        ) {
-            target = pending;
-            return;
-        }
-        if (persisted && persisted.boundaryOrdinal >= target.ordinal && pending === null) return;
-        setPendingCompactionMarkerState(args.db, args.sessionId, target);
-    })();
-
     const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
-    if (!pending || pending.ordinal > boundary.ordinal) return;
+    if (!pending) return;
+    const trustedBoundary =
+        boundary &&
+        pending.ordinal === boundary.ordinal &&
+        pending.endMessageId === boundary.endMessageId
+            ? {
+                  rowVersion: boundary.rowVersion,
+                  ordinal: boundary.ordinal,
+                  endMessageId: boundary.endMessageId,
+              }
+            : undefined;
     const outcome = applyDeferredCompactionMarker(
         args.db,
         args.sessionId,
         pending,
         args.sessionDirectory,
-        {
-            rowVersion: boundary.rowVersion,
-            ordinal: boundary.ordinal,
-            endMessageId: boundary.endMessageId,
-        },
+        trustedBoundary,
     );
     switch (outcome.kind) {
         case "applied":
@@ -509,17 +518,31 @@ export function applyRustModeDeferredCompactionMarker(args: {
             if (!clearPendingCompactionMarkerStateIf(args.db, args.sessionId, pending)) {
                 sessionLog(
                     args.sessionId,
-                    `rust compaction-marker drain: CAS lost after module row ${boundary.rowVersion}; newer pending target retained`,
+                    `rust compaction-marker drain: CAS lost${boundary ? ` after module row ${boundary.rowVersion}` : ""}; newer pending target retained`,
                 );
             }
             break;
-        case "retryable-failure":
+        case "retryable-failure": {
+            const now = Date.now();
+            const failedPending: PendingCompactionMarker = {
+                ...pending,
+                injectAttempts: (pending.injectAttempts ?? 0) + 1,
+                lastInjectError: outcome.error.message,
+                firstInjectFailedAt: pending.firstInjectFailedAt ?? now,
+            };
+            replacePendingCompactionMarkerStateIf(
+                args.db,
+                args.sessionId,
+                pending,
+                failedPending,
+            );
             sessionLog(
                 args.sessionId,
-                `rust compaction-marker drain: retryable failure after module row ${boundary.rowVersion}; pending target retained`,
+                `rust compaction-marker drain: retryable failure${boundary ? ` after module row ${boundary.rowVersion}` : ""}; pending target retained`,
                 outcome.error,
             );
             break;
+        }
     }
 }
 
@@ -558,14 +581,12 @@ export function runRustModePostprocess(args: {
     ) {
         return { thinkingBindingRecovery: null, markerAt: null };
     }
-    if (args.materializedBoundary) {
-        applyRustModeDeferredCompactionMarker({
-            db: args.db,
-            sessionId: args.sessionId,
-            boundary: args.materializedBoundary,
-            sessionDirectory: args.sessionDirectory,
-        });
-    }
+    applyRustModeDeferredCompactionMarker({
+        db: args.db,
+        sessionId: args.sessionId,
+        boundary: args.materializedBoundary,
+        sessionDirectory: args.sessionDirectory,
+    });
     reconcileMarkerRepresentation(
         args.messages,
         getPersistedCompactionMarkerState(args.db, args.sessionId),

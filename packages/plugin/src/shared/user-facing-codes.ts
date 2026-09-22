@@ -188,6 +188,11 @@ export const USER_FACING_FAILURES = {
         sentence: "Magic Context is temporarily unavailable.",
         action: "Retry in a moment.",
     },
+    compaction_marker_missing: {
+        code: "MC-C11",
+        sentence: "The history boundary marker is missing from the OpenCode store, so requests carry the full session.",
+        action: "It is retried on every message; if this persists, run `/ctx-flush`.",
+    },
     memory_mirror_stalled: {
         code: "MC-M01",
         sentence: "Memory synchronization stopped before the host mirror caught up.",

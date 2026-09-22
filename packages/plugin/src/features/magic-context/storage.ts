@@ -204,6 +204,7 @@ export {
     protectedTailWindowBudget,
     pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
+    replacePendingCompactionMarkerStateIf,
     recordDetectedContextLimit,
     recordHistorianDrainFailure,
     recordOverflowDetected,

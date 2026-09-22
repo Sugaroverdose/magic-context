@@ -2833,6 +2833,12 @@ export interface PendingCompactionMarker {
     endMessageId: string;
     /** Unix ms of publication. Diagnostic only; used by doctor stale-pending checks. */
     publishedAt: number;
+    /** Consecutive host-store injection failures for this target. */
+    injectAttempts?: number;
+    /** Most recent host-store injection error. */
+    lastInjectError?: string | null;
+    /** Unix ms of the first injection failure for this target. */
+    firstInjectFailedAt?: number | null;
 }
 
 /** Type guard for a parsed PendingCompactionMarker payload. */
@@ -2842,7 +2848,17 @@ function isPendingCompactionMarker(value: unknown): value is PendingCompactionMa
         value !== null &&
         typeof (value as { ordinal?: unknown }).ordinal === "number" &&
         typeof (value as { endMessageId?: unknown }).endMessageId === "string" &&
-        typeof (value as { publishedAt?: unknown }).publishedAt === "number"
+        typeof (value as { publishedAt?: unknown }).publishedAt === "number" &&
+        ((value as { injectAttempts?: unknown }).injectAttempts === undefined ||
+            (typeof (value as { injectAttempts?: unknown }).injectAttempts === "number" &&
+                Number.isSafeInteger((value as { injectAttempts: number }).injectAttempts) &&
+                (value as { injectAttempts: number }).injectAttempts >= 0)) &&
+        ((value as { lastInjectError?: unknown }).lastInjectError === undefined ||
+            (value as { lastInjectError?: unknown }).lastInjectError === null ||
+            typeof (value as { lastInjectError?: unknown }).lastInjectError === "string") &&
+        ((value as { firstInjectFailedAt?: unknown }).firstInjectFailedAt === undefined ||
+            (value as { firstInjectFailedAt?: unknown }).firstInjectFailedAt === null ||
+            typeof (value as { firstInjectFailedAt?: unknown }).firstInjectFailedAt === "number")
     );
 }
 
@@ -2868,6 +2884,35 @@ export function getPendingCompactionMarkerState(
         .prepare("SELECT pending_compaction_marker_state FROM session_meta WHERE session_id = ?")
         .get(sessionId) as { pending_compaction_marker_state?: string | null } | null;
     return parsePendingCompactionMarkerState(row?.pending_compaction_marker_state);
+}
+
+export interface CompactionMarkerHealth {
+    code: "MC-C11" | null;
+    attempts: number;
+    lastError: string | null;
+    pendingSinceMs: number | null;
+}
+
+const COMPACTION_MARKER_ATTEMPT_BUDGET = 3;
+const COMPACTION_MARKER_PENDING_BUDGET_MS = 5 * 60_000;
+
+export function getCompactionMarkerHealth(
+    db: Database,
+    sessionId: string,
+    now = Date.now(),
+): CompactionMarkerHealth {
+    const pending = getPendingCompactionMarkerState(db, sessionId);
+    const attempts = pending?.injectAttempts ?? 0;
+    const firstFailedAt = pending?.firstInjectFailedAt ?? null;
+    const exhausted =
+        attempts >= COMPACTION_MARKER_ATTEMPT_BUDGET ||
+        (firstFailedAt !== null && now - firstFailedAt >= COMPACTION_MARKER_PENDING_BUDGET_MS);
+    return {
+        code: exhausted ? "MC-C11" : null,
+        attempts,
+        lastError: pending?.lastInjectError ?? null,
+        pendingSinceMs: firstFailedAt,
+    };
 }
 
 /** Frozen rendering decisions consumed by one postprocess pass. */
@@ -2990,6 +3035,21 @@ export function setPendingCompactionMarkerState(
  * B overwrites with blob_Y before A's CAS runs, A's CAS fails and B's
  * pending stays intact for B's own next consuming pass.
  */
+export function replacePendingCompactionMarkerStateIf(
+    db: Database,
+    sessionId: string,
+    expected: PendingCompactionMarker,
+    replacement: PendingCompactionMarker,
+): boolean {
+    const result = db
+        .prepare(
+            `UPDATE session_meta SET pending_compaction_marker_state = ?
+             WHERE session_id = ? AND pending_compaction_marker_state = ?`,
+        )
+        .run(stableStringify(replacement), sessionId, stableStringify(expected));
+    return result.changes > 0;
+}
+
 export function clearPendingCompactionMarkerStateIf(
     db: Database,
     sessionId: string,

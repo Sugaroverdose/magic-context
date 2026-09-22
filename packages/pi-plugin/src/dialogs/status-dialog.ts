@@ -40,6 +40,7 @@ import { parseCacheTtl } from "@magic-context/core/features/magic-context/schedu
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import {
+	getCompactionMarkerHealth,
 	getOverflowState,
 	getSessionWorkMetrics,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
@@ -119,6 +120,12 @@ export interface StatusDialogDetail {
 	sessionNoteCount: number;
 	readySmartNoteCount: number;
 	pendingOpsCount: number;
+	compactionMarker: {
+		code: "MC-C11" | null;
+		attempts: number;
+		lastError: string | null;
+		pendingSinceMs: number | null;
+	};
 	historianRunning: boolean;
 	timesExecuteThresholdReached: number;
 	historianFailureCount: number;
@@ -320,6 +327,7 @@ function piStatusWarnings(s: StatusDialogDetail): UserFacingFailureKey[] {
 		warnings.push("configuration_warning");
 	}
 	if (s.embedding.state === "stopped") warnings.push("embedding_unavailable");
+	if (s.compactionMarker.code) warnings.push("compaction_marker_missing");
 	return warnings;
 }
 
@@ -771,6 +779,7 @@ export function buildPiStatusDetail(
 			0,
 		),
 		pendingOpsCount: pendingOps,
+		compactionMarker: getCompactionMarkerHealth(deps.db, sessionId),
 		historianRunning: meta.compartmentInProgress,
 		timesExecuteThresholdReached: meta.timesExecuteThresholdReached,
 		historianFailureCount: Number(metaRow?.historian_failure_count ?? 0),

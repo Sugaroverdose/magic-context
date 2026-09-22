@@ -207,6 +207,13 @@ export interface StatusDetail extends SidebarSnapshot {
         stalled: boolean;
         code: "MC-M01" | null;
     };
+    /** Health of the pending OpenCode history-boundary marker repair. */
+    compactionMarker?: {
+        code: "MC-C11" | null;
+        attempts: number;
+        lastError: string | null;
+        pendingSinceMs: number | null;
+    };
     /** A durable host marker whose live module status no longer reports module ownership. */
     memoryAuthorityMismatch?: boolean;
     /** User-owned model profile selected for this project, or null for the base config. */

@@ -49,7 +49,10 @@ import {
     getPersistedSchemaVersion,
     LATEST_SUPPORTED_VERSION,
 } from "../features/magic-context/storage-db";
-import { getObservedEpochFloor } from "../features/magic-context/storage-meta-persisted";
+import {
+    getCompactionMarkerHealth,
+    getObservedEpochFloor,
+} from "../features/magic-context/storage-meta-persisted";
 import { getMeasuredToolDefinitionTokens } from "../features/magic-context/tool-definition-tokens";
 import {
     computeOpenCodeWorkMetricsIncremental,
@@ -765,6 +768,7 @@ export function buildStatusDetail(
         dreamerTickFailure: safeTickFailure(db),
         hostBackendsModuleSide: rustMode,
         memoryMirror: rustMode ? getMemoryMirrorStatus(db, moduleFeedHead) : undefined,
+        compactionMarker: getCompactionMarkerHealth(db, sessionId),
         memoryAuthorityMismatch:
             rustMode &&
             moduleStatus?.authority !== undefined &&

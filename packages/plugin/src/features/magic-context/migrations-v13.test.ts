@@ -79,6 +79,27 @@ describe("migration v13 — pending_compaction_marker_state schema", () => {
         expect(got).toEqual(payload);
     });
 
+    test("round-trips retry health while accepting the legacy blob shape", () => {
+        useTempDataHome("v13-retry-health-");
+        const db = openDatabase();
+        const legacy: PendingCompactionMarker = {
+            ordinal: 12,
+            endMessageId: "legacy-boundary",
+            publishedAt: 100,
+        };
+        setPendingCompactionMarkerState(db, "ses-legacy", legacy);
+        expect(getPendingCompactionMarkerState(db, "ses-legacy")).toEqual(legacy);
+
+        const extended: PendingCompactionMarker = {
+            ...legacy,
+            injectAttempts: 3,
+            lastInjectError: "database is locked",
+            firstInjectFailedAt: 200,
+        };
+        setPendingCompactionMarkerState(db, "ses-extended", extended);
+        expect(getPendingCompactionMarkerState(db, "ses-extended")).toEqual(extended);
+    });
+
     test("setPendingCompactionMarkerState(null) writes SQL NULL not empty string", () => {
         useTempDataHome("v13-clear-null-");
         const db = openDatabase();
