@@ -122,7 +122,7 @@ describe("prompt-surface CI gates", () => {
         const assets = builtInLightMappingAssets();
         const mappedLine = assets["guidance:primary"]
             .split("\n")
-            .find((line) => line.startsWith("In primary sessions with ctx_reduce"));
+            .find((line) => line.startsWith("Your context is a desk."));
         if (!mappedLine) throw new Error("mapped primary tag line is missing from the test fixture");
         assets["guidance:primary"] = assets["guidance:primary"]
             .split("\n")

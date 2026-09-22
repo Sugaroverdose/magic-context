@@ -24,9 +24,7 @@ const ctxExpandArgsShape = {
     end: tool.schema
         .number()
         .optional()
-        .describe(
-            "Last ordinal of the range, inclusive — a compartment's end.",
-        ),
+        .describe("Last ordinal of the range, inclusive — a compartment's end."),
     verbose: tool.schema
         .boolean()
         .optional()

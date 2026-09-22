@@ -69,9 +69,7 @@ const ctxSearchArgsShape = {
     query: tool.schema
         .string()
         .optional()
-        .describe(
-            "A natural-language question carrying the exact terms you expect in the answer.",
-        ),
+        .describe("A natural-language question carrying the exact terms you expect in the answer."),
     limit: tool.schema.number().optional().describe("Maximum results (default 10)."),
     from: tool.schema.string().optional().describe("Earliest date, YYYY-MM-DD (inclusive)."),
     to: tool.schema
@@ -81,9 +79,7 @@ const ctxSearchArgsShape = {
     sources: tool.schema
         .array(tool.schema.enum(["memory", "message", "git_commit", "primer", "note"]))
         .optional()
-        .describe(
-            "Restrict to these sources; omit for all. [] searches none.",
-        ),
+        .describe("Restrict to these sources; omit for all. [] searches none."),
 };
 // The tool definition exposes only the documented argument shape to the model
 // provider, but older callers may still send extra arguments. Parse with

@@ -62,7 +62,6 @@ import { isDisposedInstanceDirectory } from "./plugin/instance-disposal";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
 import { isDebugRpcEnabled, registerRpcHandlers } from "./plugin/rpc-handlers";
 import { createToolRegistry } from "./plugin/tool-registry";
-import { CTX_MEMORY_LIST_TOOL_NAME } from "./tools/ctx-memory";
 import { claimConfigParseFailuresOnce } from "./shared/config-diagnostics";
 import { buildOpenCodeConfigWarningBanner } from "./shared/config-warning-surface";
 import {
@@ -92,6 +91,7 @@ import { MagicContextRpcServer } from "./shared/rpc-server";
 import { closeQuietly } from "./shared/sqlite-helpers";
 import { setStoragePrivatePermissionEnforcement } from "./shared/storage-permissions";
 import { reloadWindowOverlay } from "./shared/window-geometry";
+import { CTX_MEMORY_LIST_TOOL_NAME } from "./tools/ctx-memory";
 import { setup } from "./v2/server";
 
 const BOOT_SERVER_DEADLINE_MS = 15_000;

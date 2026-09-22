@@ -17,7 +17,6 @@ test("recognizes typed shared-transform fail-closed errors", () => {
     expect(isBlockingV2TransformError(new Error("ordinary transform failure"))).toBe(false);
 });
 
-
 test("removes ctx_memory_list from provider-visible primary tools", () => {
     const draft = {
         tools: {

@@ -20,11 +20,11 @@ import {
     createPromptSurfaceRuntime,
     LIGHT_TOOL_DESCRIPTIONS,
 } from "../shared/prompt-surface-runtime";
-import type { RustToolBackends } from "./rust-tool-backends";
 import {
     FULL_PARAMETER_DESCRIPTIONS,
     LIGHT_PARAMETER_DESCRIPTIONS,
 } from "../tools/parameter-descriptions";
+import type { RustToolBackends } from "./rust-tool-backends";
 import { createToolRegistry, getCompactionOffRemovedToolIds } from "./tool-registry";
 import type { PluginContext } from "./types";
 
@@ -392,9 +392,7 @@ describe("createToolRegistry — prompt-surface registration", () => {
                 withoutDescriptions(fullParameters),
             );
             for (const [name, description] of Object.entries(
-                LIGHT_PARAMETER_DESCRIPTIONS[
-                    toolId as keyof typeof LIGHT_PARAMETER_DESCRIPTIONS
-                ],
+                LIGHT_PARAMETER_DESCRIPTIONS[toolId as keyof typeof LIGHT_PARAMETER_DESCRIPTIONS],
             )) {
                 expect((lightParameters[name] as { description?: string }).description).toBe(
                     description,

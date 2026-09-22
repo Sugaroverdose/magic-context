@@ -60,7 +60,8 @@ export const LIGHT_PARAMETER_DESCRIPTIONS = {
         filter: "Read filter: active (default), all, pending, ready, dismissed.",
         limit: "Rows per read (default 25).",
         offset: "Skip newest rows (default 0).",
-        note_ids: "One id for update, 1–50 for dismiss, any for read (full bodies). Ignored by write.",
+        note_ids:
+            "One id for update, 1–50 for dismiss, any for read (full bodies). Ignored by write.",
     },
     ctx_memory: {
         action: "write | update | archive | merge | get",
@@ -85,7 +86,8 @@ export function parameterDescriptionsFor(
     toolId: string,
     preset: PromptSurfacePreset,
 ): Readonly<Record<string, string>> | undefined {
-    const descriptions = preset === "light" ? LIGHT_PARAMETER_DESCRIPTIONS : FULL_PARAMETER_DESCRIPTIONS;
+    const descriptions =
+        preset === "light" ? LIGHT_PARAMETER_DESCRIPTIONS : FULL_PARAMETER_DESCRIPTIONS;
     return descriptions[toolId as PromptSurfaceParameterToolId];
 }
 

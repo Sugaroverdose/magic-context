@@ -58,6 +58,7 @@ import {
 import { pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
+import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-descriptions";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
@@ -77,7 +78,6 @@ import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { createV2RawMessageReader } from "./store";
 import { registerTools } from "./tools";
-import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-descriptions";
 import type { SessionContext, V2Context } from "./types";
 import { resolveUsageReading } from "./usage-reading";
 

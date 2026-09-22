@@ -1,9 +1,9 @@
+import { DREAMER_AGENT } from "../../agents/dreamer";
 import {
     HiddenCompletionRefusal,
     type HiddenRunIdentity,
 } from "../../hooks/magic-context/compartment-runner-types";
 import { stripWellFormedLeadingTagPrefix } from "../../hooks/magic-context/tag-content-primitives";
-import { DREAMER_AGENT } from "../../agents/dreamer";
 import type { PromptArgs } from "../../shared/model-suggestion-retry";
 import type { SessionContext, V2AgentDomain } from "./types";
 

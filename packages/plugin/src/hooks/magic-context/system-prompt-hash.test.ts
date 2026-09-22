@@ -716,7 +716,7 @@ describe("system-prompt-hash subagent self-management (Unit B)", () => {
         const joined = system.join("\n");
         // Minimal block: marker + §N§ + ctx_reduce mechanics …
         expect(joined).toContain("## Magic Context");
-        expect(joined).toContain("§N§ identifiers");
+        expect(joined).toContain("§N§ tag");
         expect(joined).toContain("ctx_reduce");
         // … but NONE of the primary's role/guidance.
         expect(joined).not.toContain("long-term partner");

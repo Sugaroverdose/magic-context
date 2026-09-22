@@ -238,7 +238,9 @@ const ctxNoteArgsShape = {
     content: tool.schema
         .string()
         .optional()
-        .describe("Note text for write/update: first line is the title (under 80 chars), then the detail."),
+        .describe(
+            "Note text for write/update: first line is the title (under 80 chars), then the detail.",
+        ),
     surface_condition: tool.schema
         .string()
         .optional()
@@ -251,14 +253,8 @@ const ctxNoteArgsShape = {
         .describe(
             "Read filter: active (default: active + ready), all, pending (unsurfaced smart notes), ready, dismissed.",
         ),
-    limit: tool.schema
-        .number()
-        .optional()
-        .describe("Rows per read (default 25)."),
-    offset: tool.schema
-        .number()
-        .optional()
-        .describe("Skip this many newest rows (default 0)."),
+    limit: tool.schema.number().optional().describe("Rows per read (default 25)."),
+    offset: tool.schema.number().optional().describe("Skip this many newest rows (default 0)."),
     note_ids: tool.schema
         .array(tool.schema.number().int().min(1))
         .min(1)
