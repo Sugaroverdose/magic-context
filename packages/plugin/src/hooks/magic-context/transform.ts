@@ -2177,44 +2177,7 @@ export function createTransform(deps: TransformDeps) {
         // instead of the full-array scan we used to do here.
         const watermark = getMaxDroppedTagNumber(db, sessionId);
 
-        // A priced pass may have no provider usage for the outgoing model after a
-        // switch or overflow. The current transformed payload still gives the
-        // emergency selector a conservative pressure sample instead of zero.
         let contextUsage = contextUsageEarly;
-        const pressureSamplePricedPass =
-            schedulerDecision === "execute" ||
-            isCacheBusting ||
-            contextUsage.percentage >= forceMaterializationPercentage ||
-            deps.pendingMaterializationSessions.has(sessionId) ||
-            (canConsumeDeferredEarly && deferredMaterializationSessions.has(sessionId));
-        if (!compactionOff && contextUsage.inputTokens <= 0 && pressureSamplePricedPass) {
-            try {
-                const pressureEstimate = estimateFinalWireInputTokens({
-                    messages,
-                    systemPromptTokens: sessionMeta.systemPromptTokens,
-                    providerID: modelForBudget?.providerID,
-                    modelID: modelForBudget?.modelID,
-                    agentName: notificationParams.agent,
-                });
-                contextUsage = resolveUnknownUsageFromWireEstimate({
-                    usage: contextUsage,
-                    pricedPass: true,
-                    wireEstimateTokens: pressureEstimate.tokens,
-                    usableHardLimit: windowGeometry?.usableHard,
-                });
-                if (contextUsage.inputTokens > 0) {
-                    sessionLog(
-                        sessionId,
-                        `transform: unknown provider usage; using wire estimate for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} trusted=${pressureEstimate.trusted}`,
-                    );
-                }
-            } catch (error) {
-                sessionLog(
-                    sessionId,
-                    `transform: wire-estimate pressure fallback unavailable: ${getErrorMessage(error)}`,
-                );
-            }
-        }
         const rawGetNotifParams = deps.getNotificationParams;
         const tCompartmentPhase = performance.now();
         const compartmentPhase = await runCompartmentPhase({
@@ -2377,6 +2340,37 @@ export function createTransform(deps: TransformDeps) {
             bustReason: calibrationBustReason,
             onAdopt: (message) => sessionLog(sessionId, message),
         });
+        // A cache-busting pass can lack input-token usage for the selected model
+        // after a switch or overflow. Estimate from the transformed payload so
+        // emergency tool-output reclaim does not skip the pass as unknown usage.
+        if (contextUsage.inputTokens <= 0 && protectionCacheBustingPass) {
+            try {
+                const pressureEstimate = estimateFinalWireInputTokens({
+                    messages,
+                    systemPromptTokens: sessionMeta.systemPromptTokens,
+                    providerID: modelForBudget?.providerID,
+                    modelID: modelForBudget?.modelID,
+                    agentName: notificationParams.agent,
+                });
+                contextUsage = resolveUnknownUsageFromWireEstimate({
+                    usage: contextUsage,
+                    pricedPass: true,
+                    wireEstimateTokens: pressureEstimate.tokens,
+                    usableHardLimit: windowGeometry?.usableHard,
+                });
+                if (contextUsage.inputTokens > 0) {
+                    sessionLog(
+                        sessionId,
+                        `transform: unknown provider usage; using wire estimate for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} trusted=${pressureEstimate.trusted}`,
+                    );
+                }
+            } catch (error) {
+                sessionLog(
+                    sessionId,
+                    `transform: wire-estimate pressure fallback unavailable: ${getErrorMessage(error)}`,
+                );
+            }
+        }
         const protectionUsableSoft = windowGeometry?.usableSoft ?? boundaryContextLimit;
         const protectionFloor = resolveEpochFloorForPass(db, sessionId, {
             configuredOverride: deps.protectedTokens,
