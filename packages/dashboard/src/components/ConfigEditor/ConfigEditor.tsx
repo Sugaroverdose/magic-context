@@ -2218,6 +2218,9 @@ function ProjectConfigDetail(props: {
 export default function ConfigEditor(props: {
   modelCatalogs: ModelCatalogs;
   opencodeInstallState: OpencodeInstallState;
+  catalogLoading: boolean;
+  catalogError: string | null;
+  onRetryCatalogs: () => void;
 }) {
   const [configTarget, setConfigTarget] = createSignal<ConfigTarget>(loadConfigTarget());
   const [userConfig, { refetch: refetchUser }] = createResource(() => getConfig("user"));
@@ -2279,6 +2282,17 @@ export default function ConfigEditor(props: {
           </button>
         </div>
       </div>
+
+      <Show when={props.catalogLoading || props.catalogError}>
+        <div class="empty-state" role="status">
+          <span>{props.catalogLoading ? "Loading OpenCode models..." : props.catalogError}</span>
+          <Show when={!props.catalogLoading && props.catalogError}>
+            <button type="button" class="btn sm" onClick={props.onRetryCatalogs}>
+              Retry model discovery
+            </button>
+          </Show>
+        </div>
+      </Show>
 
       <div class="tab-pills">
         <button
