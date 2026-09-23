@@ -22,7 +22,7 @@ describe("mode manifest validator", () => {
         // removed. Adding an OpenCode 2 lane file moves this number and the excluded
         // list below and nothing else, because those files carry tier "excluded" and
         // so never enter a TS or Rust invocation list.
-        expect(validation.files.length).toBe(87);
+        expect(validation.files.length).toBe(92);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -34,7 +34,7 @@ describe("mode manifest validator", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
         expect(ts).toHaveLength(27);
-        expect(rust).toHaveLength(47);
+        expect(rust).toHaveLength(48);
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(1);
         expect(filesForMode(validation, "ts", "opencode")).toHaveLength(25);
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(22);
@@ -49,11 +49,14 @@ describe("mode manifest validator", () => {
             "tests/opencode2/adapters-s2-contracts.test.ts",
             "tests/opencode2/adapters-s3-marker-policy.test.ts",
             "tests/opencode2/automatic-s3-paths.test.ts",
+            "tests/opencode2/bounded-raw-reads.test.ts",
             "tests/opencode2/commands-s2-flush.test.ts",
             "tests/opencode2/commands-s2-host-registration.test.ts",
             "tests/opencode2/commands-s2-keymap.test.ts",
             "tests/opencode2/context-s2-lanes.test.ts",
+            "tests/opencode2/converted-store-overwindow.test.ts",
             "tests/opencode2/dreamer-s2-carrier.test.ts",
+            "tests/opencode2/emergency-refusal-visible.test.ts",
             "tests/opencode2/entry-s2-context.test.ts",
             "tests/opencode2/fold-s3-owner.test.ts",
             "tests/opencode2/harness-s3-identity.test.ts",
@@ -68,6 +71,7 @@ describe("mode manifest validator", () => {
             "tests/opencode2/rust-mode-limitation.test.ts",
             "tests/opencode2/sidebar-component.test.ts",
             "tests/opencode2/status-dialog.test.ts",
+            "tests/opencode2/store-directories.test.ts",
             "tests/opencode2/store-generation-conversion.test.ts",
             "tests/opencode2/store-reader.test.ts",
             "tests/opencode2/tool-definition-telemetry.test.ts",

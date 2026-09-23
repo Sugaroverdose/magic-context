@@ -621,7 +621,7 @@
                 "ts": false,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: pins the captured GA host evidence (sha256) \u2014 unit-shaped, needs no host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: pins the captured GA host evidence (sha256) — unit-shaped, needs no host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -683,6 +683,21 @@
                 "rust": false
             },
             "rationale": "OpenCode v2 lane: hermetic runner guards and handoff against the real GA host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/store-directories.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: a replayed store's session directories are moved under the run root (or the run refuses), and the post-run write fence and live-store snapshot each catch what the other cannot; runs from the v2 lane's own invocation (bun test tests/opencode2), not the v1 mode-selected spawn seam",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1442,6 +1457,22 @@
                 "rust": true
             },
             "rationale": "a timed-out transform is not silently duplicated; after raw fallback the stale tag-feature epoch is folded once and the following pass is soft",
+            "contract_refs": [
+                "RUST-E2E",
+                "TIMEOUT-EPOCH-RECOVERY"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-timeout-double-hard.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "a timed-out pass followed by twenty steady passes renders at most one HARD, and need_full_sync recovers without rebuilding the ordinal map from the whole session",
             "contract_refs": [
                 "RUST-E2E",
                 "TIMEOUT-EPOCH-RECOVERY"
