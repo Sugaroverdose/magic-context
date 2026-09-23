@@ -28,7 +28,8 @@ import {
 import type { SmartNoteCheckNote } from "../smart-notes/types";
 import { wakePlaneStatus } from "../smart-notes/wake-plane";
 import { getPendingSmartNotes, markNoteChecked, markNoteReady } from "../storage-notes";
-import { recordChildInvocation } from "../subagent-token-capture";
+import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
+import type { SubagentInvocationStatus } from "../storage-subagent-invocations";
 import { runHiddenSingleShotPrompt } from "./hidden-single-shot";
 import { type LeaseAcquisition, peekLeaseHolderAndExpiry, startLeaseHeartbeat } from "./lease";
 
@@ -486,7 +487,7 @@ async function confirmReadOnly(
     const startedAt = Date.now();
     let invocationRecorded = false;
     const recordInvocation = (params: {
-        status: "completed" | "failed" | "aborted";
+        status: SubagentInvocationStatus;
         messages?: unknown[];
         error?: unknown;
     }) => {
@@ -608,7 +609,7 @@ async function confirmReadOnly(
         recordInvocation({ status: "completed", messages: run.output });
         return run.validated;
     } catch (error) {
-        recordInvocation({ status: "failed", error });
+        recordInvocation({ status: failedInvocationStatus(error), error });
         log(`[dreamer] smart note #${noteId}: read-only confirmation failed — ${error}`);
         return false;
     } finally {

@@ -225,6 +225,43 @@ describe("promptSyncWithModelSuggestionRetry", () => {
         expect((abort.mock.calls[0]?.[0] as { path: { id: string } }).path.id).toBe("ses-test");
     });
 
+    test("timeout with a resolving transport still aborts the child", async () => {
+        const abort = mock(async () => ({}));
+        const client = createClient(mock(async () => ({})), abort);
+        const transport = Object.assign(
+            ({ signal }: { signal?: AbortSignal }) =>
+                new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve())),
+            { childSessionId: "child-test" },
+        );
+        await expect(
+            promptSyncWithModelSuggestionRetry(client, createArgs(), {
+                timeoutMs: 10,
+                transport,
+            }),
+        ).rejects.toThrow("prompt timed out after 10ms");
+        expect(abort).toHaveBeenCalledTimes(1);
+        expect((abort.mock.calls[0]?.[0] as { path: { id: string } }).path.id).toBe("child-test");
+    });
+
+    test("external abort with a resolving transport still aborts the child", async () => {
+        const controller = new AbortController();
+        const abort = mock(async () => ({}));
+        const client = createClient(mock(async () => ({})), abort);
+        const transport = Object.assign(
+            ({ signal }: { signal?: AbortSignal }) =>
+                new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve())),
+            { childSessionId: "child-test" },
+        );
+        setTimeout(() => controller.abort(), 10);
+        await expect(
+            promptSyncWithModelSuggestionRetry(client, createArgs(), {
+                signal: controller.signal,
+                transport,
+            }),
+        ).rejects.toThrow("prompt aborted by external signal");
+        expect(abort).toHaveBeenCalledTimes(1);
+    });
+
     // External abort (e.g. dreamer lease loss) mid-flight must also stop the
     // server-side loop, not just our fetch.
     test("external abort fires session.abort on the child session", async () => {

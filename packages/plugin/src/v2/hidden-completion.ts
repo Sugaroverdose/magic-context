@@ -814,7 +814,6 @@ export async function createV2HiddenCompletionExecutor(
                     aborted,
                 ]);
                 await Promise.race([host.wait({ sessionID: run.child.id }), aborted]);
-                clearTimeout(deadlineTimer);
                 const row = await Promise.race([
                     awaitAssistantRow(
                         options.openReader,
@@ -857,6 +856,16 @@ export async function createV2HiddenCompletionExecutor(
                     typeof value === "number" && Number.isFinite(value) ? value : undefined;
                 const reportedInput = tokenNumber(tokens?.input);
                 const reportedOutput = tokenNumber(tokens?.output);
+                // A host promise may resolve at the same instant as cancellation.
+                // Never publish a completion after the child has been retired.
+                if (request.signal?.aborted || run.retired || Date.now() >= deadline) {
+                    await interruptAndRetire(run, "prompt-aborted-or-timeout");
+                    throw new Error(
+                        request.signal?.aborted
+                            ? "Hidden completion prompt aborted"
+                            : "Hidden completion prompt timed out",
+                    );
+                }
                 run.completion = {
                     text,
                     reasoning: null,

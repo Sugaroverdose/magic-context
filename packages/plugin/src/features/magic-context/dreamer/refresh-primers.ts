@@ -22,7 +22,8 @@ import {
     type Primer,
     updatePrimerAnswer,
 } from "../storage-primers";
-import { recordChildInvocation } from "../subagent-token-capture";
+import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
+import type { SubagentInvocationStatus } from "../storage-subagent-invocations";
 import { type LeaseAcquisition, runLeaseGuardedWrite, startLeaseHeartbeat } from "./lease";
 import { buildPrimerSeed } from "./primer-seed";
 import { PRIMER_INVESTIGATOR_SYSTEM_PROMPT } from "./task-prompts";
@@ -313,7 +314,7 @@ async function refreshOnePrimer(
             `[dreamer] refresh-primers failed (primer #${primer.id}): ${desc.brief}`,
             desc.stackHead ? { stackHead: desc.stackHead } : undefined,
         );
-        recordInvocation(args, startedAt, { status: "failed", error });
+        recordInvocation(args, startedAt, { status: failedInvocationStatus(error), error });
         throw error;
     } finally {
         await teardownChildSession({
@@ -340,7 +341,7 @@ function originSessionIdForPrimer(args: RefreshPrimersArgs, primer: Primer): str
 function recordInvocation(
     args: RefreshPrimersArgs,
     startedAt: number,
-    params: { status: "completed" | "failed"; messages?: unknown[]; error?: unknown },
+    params: { status: SubagentInvocationStatus; messages?: unknown[]; error?: unknown },
 ): void {
     if (!args.parentSessionId) return;
     recordChildInvocation({

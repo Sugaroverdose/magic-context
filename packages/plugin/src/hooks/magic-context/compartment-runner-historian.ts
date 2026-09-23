@@ -4,8 +4,12 @@ import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "../../agents/historian"
 import { withContentLanguageDirective } from "../../agents/language-directive";
 import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
 import { openDatabase } from "../../features/magic-context/storage";
-import type { SubagentKind } from "../../features/magic-context/storage-subagent-invocations";
+import type {
+    SubagentInvocationStatus,
+    SubagentKind,
+} from "../../features/magic-context/storage-subagent-invocations";
 import {
+    failedInvocationStatus,
     recordChildInvocation,
     sumTokensFromChildMessages,
 } from "../../features/magic-context/subagent-token-capture";
@@ -462,7 +466,7 @@ async function runHistorianPrompt(args: {
     let invocationRecorded = false;
 
     const recordInvocation = (params: {
-        status: "completed" | "failed" | "aborted";
+        status: SubagentInvocationStatus;
         messages?: unknown[];
         error?: unknown;
     }): number | null => {
@@ -638,31 +642,29 @@ async function runHistorianPrompt(args: {
         }
 
         completion = await executor.collect(handle, 50);
-        const invocationId = recordInvocation({
-            status: "completed",
-            messages: completion.messages,
-        });
         const lengthCapped = completion.lengthCapped;
         const textResult = completion.text;
         const reasoningResult = textResult ? null : completion.reasoning;
-        if (!textResult && reasoningResult && lengthCapped) {
-            const outputTokens = completion.usage.output;
-            return {
-                ok: false,
-                error: `historian output length-capped at ${outputTokens} tokens (all reasoning, no text) — set historian.maxTokens or route historian.model to a low-reasoning lane/variant`,
-                invocationId: invocationId ?? undefined,
-            };
+        const emptyError =
+            !textResult && reasoningResult && lengthCapped
+                ? `historian output length-capped at ${completion.usage.output} tokens (all reasoning, no text) — set historian.maxTokens or route historian.model to a low-reasoning lane/variant`
+                : !textResult && !reasoningResult
+                  ? "Historian returned no assistant output."
+                  : !textResult
+                    ? "Historian returned reasoning but no assistant text."
+                    : lengthCapped
+                      ? "Historian returned length-capped output."
+                      : null;
+        const invocationId = recordInvocation({
+            status: emptyError ? "empty" : "completed",
+            messages: completion.messages,
+            error: emptyError,
+        });
+        if (emptyError && (!reasoningResult || lengthCapped)) {
+            return { ok: false, error: emptyError, invocationId: invocationId ?? undefined };
         }
 
-        const result = textResult ?? reasoningResult;
-        if (!result) {
-            return {
-                ok: false,
-                error: "Historian returned no assistant output.",
-                invocationId: invocationId ?? undefined,
-            };
-        }
-
+        const result = textResult ?? reasoningResult!;
         const dumpPath = dumpHistorianResponse(
             parentSessionId,
             sessionDirectory,
@@ -676,7 +678,10 @@ async function runHistorianPrompt(args: {
             parentSessionId,
             `historian prompt failed: ${desc.brief} promptLength=${prompt.length}${desc.stackHead ? ` stackHead="${desc.stackHead}"` : ""}`,
         );
-        recordInvocation({ status: "failed", error: modelError });
+        recordInvocation({
+            status: failedInvocationStatus(modelError),
+            error: modelError,
+        });
         return {
             ok: false,
             error: `Historian failed while processing this session: ${desc.brief}`,

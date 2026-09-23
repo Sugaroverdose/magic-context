@@ -254,6 +254,18 @@ async function promptWithTimeout(
         clearTimeout(timeout);
         signal?.removeEventListener("abort", onExternalAbort);
     }
+    // Some transports resolve with an error result when their fetch is aborted.
+    // A resolved fetch does not mean the server-side child run has stopped.
+    if (signal?.aborted || controller.signal.aborted) {
+        if (!transport || transport.childSessionId) {
+            await abortChildRun(client, transport?.childSessionId ?? args.path.id);
+        }
+        throw new Error(
+            signal?.aborted
+                ? "prompt aborted by external signal"
+                : `prompt timed out after ${timeoutMs}ms`,
+        );
+    }
 }
 
 /**
