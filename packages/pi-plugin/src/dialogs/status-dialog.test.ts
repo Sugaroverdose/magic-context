@@ -9,7 +9,11 @@ import {
 	updateTagTokenCount,
 } from "@magic-context/core/features/magic-context/storage-tags";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
-import { buildStatusView } from "@magic-context/core/shared/status-view";
+import {
+	buildStatusView,
+	STATUS_COLUMN_GAP,
+	statusColumnsFor,
+} from "@magic-context/core/shared/status-view";
 import {
 	clearPiChannel1State,
 	setPiChannel1Baseline,
@@ -42,7 +46,10 @@ function plainTheme() {
 /**
  * A detail whose shared model carries every section, so a layout test can assert
  * on the whole grid instead of on whichever sections a sparse fixture happens to
- * produce. The caller owns the returned database and must close it.
+ * produce. The cache TTL is pinned to a session value so the Configured row is
+ * short: the default spelling carries the model key and is long enough that the
+ * shared column rule would keep the sections in one column at any width. The
+ * caller owns the returned database and must close it.
  */
 function fullStatusDetail(sessionId: string) {
 	const db = createTestDb();
@@ -61,7 +68,10 @@ function fullStatusDetail(sessionId: string) {
 		{ db, projectIdentity: resolveProjectIdentity(process.cwd()) },
 		sessionId,
 	);
-	return { db, detail };
+	return {
+		db,
+		detail: { ...detail, cacheTtl: "5m", cacheTtlSource: "session" as const },
+	};
 }
 
 describe("Pi status dialog", () => {
@@ -923,9 +933,11 @@ Warning: History compression could not finish this turn. It will retry automatic
 			const view = buildStatusView(statusViewSourceFromPiDetail(detail), {
 				version: "0.0.0",
 			});
-			// Two columns of floor((96 - 4) / 2) = 46 with a four-column gap.
-			const columnWidth = Math.floor((innerWidth - 4) / 2);
-			const gap = 4;
+			// The shared model decides the layout and sizes each column from its own
+			// widest section, so a value never wraps inside its column.
+			const layout = statusColumnsFor(view.sections, innerWidth);
+			expect(layout.twoColumn).toBe(true);
+			const gap = STATUS_COLUMN_GAP;
 
 			expect(view.sections.length).toBe(7);
 			for (let i = 0; i < view.sections.length; i += 2) {
@@ -943,41 +955,25 @@ Warning: History compression could not finish this turn. It will retry automatic
 				const titleLine = lines[titleIndex] ?? "";
 				expect(titleLine.startsWith(left.title)).toBe(true);
 				if (right) {
-					expect(titleLine.slice(columnWidth + gap)).toBe(right.title);
+					expect(titleLine.slice(layout.leftWidth + gap)).toBe(right.title);
 				}
 
 				const rowCount = Math.max(left.rows.length, right?.rows.length ?? 0);
 				for (let r = 0; r < rowCount; r++) {
 					const line = lines[titleIndex + 1 + r] ?? "";
 					const leftRow = left.rows[r];
-					// A value wider than its column overflows it, exactly as
-					// renderStatusRow does in one-column mode, so the cell is as wide
-					// as the wider of the column and the rendered row.
-					const leftCellWidth = leftRow
-						? Math.max(
-								columnWidth,
-								Math.max(left.labelWidth, leftRow.label.length) +
-									leftRow.value.length,
-							)
-						: columnWidth;
 					if (leftRow) {
 						expect(line.startsWith(leftRow.label)).toBe(true);
-						// The value is right-aligned within the column: it ends at the
-						// column's right edge, or runs past it when it is too long.
+						// The value is right-aligned within the left column: it ends at
+						// the column's right edge.
 						expect(
-							line.slice(leftCellWidth - leftRow.value.length, leftCellWidth),
+							line.slice(layout.leftWidth - leftRow.value.length, layout.leftWidth),
 						).toBe(leftRow.value);
 					}
 					const rightRow = right?.rows[r];
 					if (rightRow && right) {
-						const rightStart = leftCellWidth + gap;
-						const rightEnd =
-							rightStart +
-							Math.max(
-								columnWidth,
-								Math.max(right.labelWidth, rightRow.label.length) +
-									rightRow.value.length,
-							);
+						const rightStart = layout.leftWidth + gap;
+						const rightEnd = rightStart + layout.rightWidth;
 						expect(line.slice(rightEnd - rightRow.value.length, rightEnd)).toBe(
 							rightRow.value,
 						);

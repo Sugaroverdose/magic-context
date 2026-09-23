@@ -65,13 +65,13 @@ import {
 	buildStatusView,
 	distributeBarWidths,
 	STATUS_COLUMN_GAP,
-	statusColumnsFor,
 	type StatusBarSegment,
 	type StatusColumnLayout,
 	type StatusRow,
 	type StatusSection,
 	type StatusTone,
 	type StatusViewSource,
+	statusColumnsFor,
 } from "@magic-context/core/shared/status-view";
 import { resolveTailHygieneStatus } from "@magic-context/core/shared/tail-hygiene-status";
 import type { UserFacingFailureKey } from "@magic-context/core/shared/user-facing-codes";
