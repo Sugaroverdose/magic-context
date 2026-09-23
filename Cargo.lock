@@ -183,6 +183,17 @@ dependencies = [
 [[package]]
 name = "cortexkit-log"
 version = "0.3.1"
+dependencies = [
+ "chrono",
+ "cortexkit-store-types 0.2.2",
+ "regex",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "cortexkit-log"
+version = "0.3.1"
 source = "git+https://github.com/cortexkit/commons.git?rev=b13e7fcee60b42accc256e9c05284ad044b9f8f6#b13e7fcee60b42accc256e9c05284ad044b9f8f6"
 dependencies = [
  "chrono",
@@ -620,6 +631,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "cortexkit-lease",
+ "cortexkit-log 0.3.1",
  "cortexkit-store",
  "cortexkit-store-types 0.2.2",
  "filetime",
@@ -639,6 +651,7 @@ dependencies = [
  "subc-transport",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1036,10 +1049,10 @@ dependencies = [
 
 [[package]]
 name = "subc-core"
-version = "0.20.10"
+version = "0.20.11"
 dependencies = [
  "base64",
- "cortexkit-log",
+ "cortexkit-log 0.3.1 (git+https://github.com/cortexkit/commons.git?rev=b13e7fcee60b42accc256e9c05284ad044b9f8f6)",
  "cortexkit-paths",
  "ed25519-dalek",
  "hex-literal",
@@ -1061,12 +1074,13 @@ dependencies = [
 
 [[package]]
 name = "subc-daemon"
-version = "0.20.10"
+version = "0.20.12"
 dependencies = [
- "cortexkit-log",
+ "cortexkit-log 0.3.1 (git+https://github.com/cortexkit/commons.git?rev=b13e7fcee60b42accc256e9c05284ad044b9f8f6)",
  "cortexkit-paths",
  "fs4",
  "getrandom 0.2.17",
+ "memchr",
  "rlimit",
  "rustix",
  "serde",
