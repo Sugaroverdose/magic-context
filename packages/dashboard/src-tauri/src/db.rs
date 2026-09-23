@@ -765,6 +765,21 @@ impl Harness {
         )
     }
 
+    /// OpenCode 1.x and 2.x are two store generations of the same product: a
+    /// converted session keeps its id, so the plugin's context.db may record a
+    /// row under `opencode` while the dashboard lists the same session under
+    /// `opencode2` (or vice versa). The other harnesses use disjoint id
+    /// shapes, so their ids never alias an OpenCode id.
+    fn shares_session_ids_with(self, other: Harness) -> bool {
+        matches!(
+            (self, other),
+            (
+                Harness::Opencode | Harness::Opencode2,
+                Harness::Opencode | Harness::Opencode2
+            )
+        )
+    }
+
     fn uses_codex_no_write_cache_model(self) -> bool {
         matches!(self, Self::Codex)
     }
@@ -1748,16 +1763,26 @@ const DROP_MARKER_MIN_TOKENS: i64 = 15_000;
 fn resolve_session_context_limits(
     keys: &HashSet<(Harness, String)>,
 ) -> HashMap<(Harness, String), i64> {
+    if keys.is_empty() {
+        return HashMap::new();
+    }
+    let Some(db_path) = resolve_db_path() else {
+        return HashMap::new();
+    };
+    let Ok(conn) = open_readonly(&db_path) else {
+        return HashMap::new();
+    };
+    resolve_session_context_limits_from_conn(&conn, keys)
+}
+
+fn resolve_session_context_limits_from_conn(
+    conn: &Connection,
+    keys: &HashSet<(Harness, String)>,
+) -> HashMap<(Harness, String), i64> {
     let mut out: HashMap<(Harness, String), i64> = HashMap::new();
     if keys.is_empty() {
         return out;
     }
-    let Some(db_path) = resolve_db_path() else {
-        return out;
-    };
-    let Ok(conn) = open_readonly(&db_path) else {
-        return out;
-    };
     let Ok(mut stmt) = conn.prepare(
         "SELECT session_id, harness, COALESCE(last_usage_context_limit, 0)
          FROM session_meta
@@ -1771,15 +1796,38 @@ fn resolve_session_context_limits(
         let limit: i64 = row.get(2)?;
         Ok((sid, harness_str, limit))
     });
+    // Index by session id: a strict (harness, id) match misses converted
+    // OpenCode sessions whose timeline label (`opencode2`) differs from the
+    // label the plugin recorded (`opencode`), which is what drops those
+    // sessions onto the auto-scale fallback.
+    let mut by_session_id: HashMap<String, Vec<(Harness, i64)>> = HashMap::new();
     if let Ok(rows) = rows {
         for r in rows.flatten() {
             let Ok(harness) = r.1.parse::<Harness>() else {
                 continue;
             };
-            let key = (harness, r.0);
-            if keys.contains(&key) {
-                out.insert(key, r.2);
-            }
+            by_session_id.entry(r.0).or_default().push((harness, r.2));
+        }
+    }
+    for (harness, session_id) in keys {
+        let Some(candidates) = by_session_id.get(session_id) else {
+            continue;
+        };
+        // An exact harness label wins when two rows ever share the id;
+        // otherwise a row from the same session-id family (OpenCode 1/2)
+        // applies. Ids from other families have different shapes and are
+        // never aliased.
+        let limit = candidates
+            .iter()
+            .find(|(h, _)| h == harness)
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .find(|(h, _)| harness.shares_session_ids_with(*h))
+            })
+            .map(|(_, limit)| *limit);
+        if let Some(limit) = limit {
+            out.insert((*harness, session_id.clone()), limit);
         }
     }
     out
@@ -1840,14 +1888,39 @@ fn load_transform_decision_causes_from_conn(
             },
         ))
     });
+    // Index by session id so a converted OpenCode session whose timeline
+    // label (`opencode2`) differs from the recorded label (`opencode`) still
+    // sees its decisions; see resolve_session_context_limits_from_conn.
+    let mut by_session_id: HashMap<String, Vec<(Harness, String, TransformDecisionCause)>> =
+        HashMap::new();
     if let Ok(rows) = rows {
         for row in rows.flatten() {
             let Ok(harness) = row.1.parse::<Harness>() else {
                 continue;
             };
-            let session_key = (harness, row.0.clone());
-            if keys.contains(&session_key) {
-                out.insert((harness, row.0, row.2), row.3);
+            by_session_id
+                .entry(row.0)
+                .or_default()
+                .push((harness, row.2, row.3));
+        }
+    }
+    for (req_harness, session_id) in keys {
+        let Some(rows) = by_session_id.get(session_id) else {
+            continue;
+        };
+        // Exact-label rows win when the id was recorded under both labels.
+        let has_exact = rows.iter().any(|(h, _, _)| h == req_harness);
+        for (harness, message_id, cause) in rows {
+            let applies = if has_exact {
+                harness == req_harness
+            } else {
+                req_harness.shares_session_ids_with(*harness)
+            };
+            if applies {
+                out.insert(
+                    (*req_harness, session_id.clone(), message_id.clone()),
+                    cause.clone(),
+                );
             }
         }
     }
@@ -1892,15 +1965,30 @@ fn load_transform_failure_sessions_from_conn(
     let rows = stmt.query_map(params_from_iter(session_ids.iter()), |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     });
+    // Index by session id so a converted OpenCode session whose timeline
+    // label (`opencode2`) differs from the recorded label (`opencode`) still
+    // sees its failure flag; see resolve_session_context_limits_from_conn.
+    let mut by_session_id: HashMap<String, Vec<Harness>> = HashMap::new();
     if let Ok(rows) = rows {
         for row in rows.flatten() {
             let Ok(harness) = row.1.parse::<Harness>() else {
                 continue;
             };
-            let key = (harness, row.0);
-            if keys.contains(&key) {
-                out.insert(key);
-            }
+            by_session_id.entry(row.0).or_default().push(harness);
+        }
+    }
+    for (req_harness, session_id) in keys {
+        let Some(labels) = by_session_id.get(session_id) else {
+            continue;
+        };
+        // An exact harness label wins; otherwise a label from the same
+        // session-id family (OpenCode 1/2) applies.
+        let applies = labels.iter().any(|h| h == req_harness)
+            || labels
+                .iter()
+                .any(|h| req_harness.shares_session_ids_with(*h));
+        if applies {
+            out.insert((*req_harness, session_id.clone()));
         }
     }
     out
@@ -9166,6 +9254,161 @@ mod cache_turn_tests {
         let keys = HashSet::from([(Harness::Opencode, "s1".to_string())]);
         let decisions = load_transform_decision_causes_from_conn(&conn, &keys);
         assert!(decisions.is_empty());
+    }
+
+    fn context_limit_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_meta (
+                session_id TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                last_usage_context_limit INTEGER
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn context_limit_resolver_matches_same_harness_row() {
+        let conn = context_limit_conn();
+        conn.execute(
+            "INSERT INTO session_meta (session_id, harness, last_usage_context_limit)
+             VALUES ('s-pi', 'pi', 200000)",
+            [],
+        )
+        .unwrap();
+        let keys = HashSet::from([(Harness::Pi, "s-pi".to_string())]);
+
+        let limits = resolve_session_context_limits_from_conn(&conn, &keys);
+
+        assert_eq!(
+            limits,
+            HashMap::from([((Harness::Pi, "s-pi".to_string()), 200_000)])
+        );
+    }
+
+    #[test]
+    fn context_limit_resolver_matches_opencode_row_for_opencode2_session() {
+        // OpenCode 2 conversion keeps the session id, so the timeline can list
+        // the session under `opencode2` while the plugin recorded its limit
+        // under `opencode`. The resolver must still find it, otherwise the
+        // chart auto-scales to the session's own max prompt.
+        let conn = context_limit_conn();
+        conn.execute(
+            "INSERT INTO session_meta (session_id, harness, last_usage_context_limit)
+             VALUES ('ses_1', 'opencode', 917504)",
+            [],
+        )
+        .unwrap();
+        let keys = HashSet::from([(Harness::Opencode2, "ses_1".to_string())]);
+
+        let limits = resolve_session_context_limits_from_conn(&conn, &keys);
+
+        assert_eq!(
+            limits,
+            HashMap::from([((Harness::Opencode2, "ses_1".to_string()), 917_504)]),
+            "opencode2 timeline session must inherit the limit recorded under opencode"
+        );
+    }
+
+    #[test]
+    fn context_limit_resolver_prefers_exact_harness_on_shared_id() {
+        let conn = context_limit_conn();
+        conn.execute_batch(
+            "INSERT INTO session_meta (session_id, harness, last_usage_context_limit) VALUES
+                ('ses_1', 'opencode', 917504),
+                ('ses_1', 'opencode2', 786432);",
+        )
+        .unwrap();
+        let keys = HashSet::from([(Harness::Opencode2, "ses_1".to_string())]);
+
+        let limits = resolve_session_context_limits_from_conn(&conn, &keys);
+
+        assert_eq!(
+            limits,
+            HashMap::from([((Harness::Opencode2, "ses_1".to_string()), 786_432)]),
+            "an exact opencode2 row wins over the opencode row for the same id"
+        );
+    }
+
+    #[test]
+    fn context_limit_resolver_does_not_alias_across_harness_families() {
+        // OpenCode ids and Pi ids have different shapes, so a Pi timeline
+        // session must never inherit a limit recorded for an OpenCode row
+        // that happens to share the id string.
+        let conn = context_limit_conn();
+        conn.execute(
+            "INSERT INTO session_meta (session_id, harness, last_usage_context_limit)
+             VALUES ('shared', 'opencode', 917504)",
+            [],
+        )
+        .unwrap();
+        let keys = HashSet::from([(Harness::Pi, "shared".to_string())]);
+
+        let limits = resolve_session_context_limits_from_conn(&conn, &keys);
+
+        assert!(limits.is_empty());
+    }
+
+    fn transform_decision_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE transform_decisions (
+                session_id TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                materialize_reason TEXT,
+                emergency INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn transform_decision_loader_matches_opencode_row_for_opencode2_session() {
+        let conn = transform_decision_conn();
+        conn.execute(
+            "INSERT INTO transform_decisions
+             (session_id, harness, message_id, decision, materialize_reason, emergency)
+             VALUES ('ses_1', 'opencode', 'm1', 'compact', 'budget', 0)",
+            [],
+        )
+        .unwrap();
+        let keys = HashSet::from([(Harness::Opencode2, "ses_1".to_string())]);
+
+        let decisions = load_transform_decision_causes_from_conn(&conn, &keys);
+
+        let cause = decisions
+            .get(&(Harness::Opencode2, "ses_1".to_string(), "m1".to_string()))
+            .expect("opencode2 session must see the decision recorded under opencode");
+        assert_eq!(cause.decision, "compact");
+    }
+
+    #[test]
+    fn transform_failure_loader_matches_opencode_row_for_opencode2_session() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_meta (
+                session_id TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                last_transform_error TEXT
+            );
+            INSERT INTO session_meta (session_id, harness, last_transform_error)
+            VALUES ('ses_1', 'opencode', 'transform failed');",
+        )
+        .unwrap();
+        let keys = HashSet::from([(Harness::Opencode2, "ses_1".to_string())]);
+
+        let failures = load_transform_failure_sessions_from_conn(&conn, &keys);
+
+        assert_eq!(
+            failures,
+            HashSet::from([(Harness::Opencode2, "ses_1".to_string())]),
+            "opencode2 session must see the failure recorded under opencode"
+        );
     }
 
     #[test]
