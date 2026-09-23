@@ -22,7 +22,7 @@ describe("mode manifest validator", () => {
         // removed. Adding an OpenCode 2 lane file moves this number and the excluded
         // list below and nothing else, because those files carry tier "excluded" and
         // so never enter a TS or Rust invocation list.
-        expect(validation.files.length).toBe(95);
+        expect(validation.files.length).toBe(96);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -54,6 +54,7 @@ describe("mode manifest validator", () => {
             "tests/opencode2/commands-s2-host-registration.test.ts",
             "tests/opencode2/commands-s2-keymap.test.ts",
             "tests/opencode2/commands-s2-wrapup.test.ts",
+            "tests/opencode2/compartment-boundary-host-row.test.ts",
             "tests/opencode2/context-s2-lanes.test.ts",
             "tests/opencode2/converted-store-overwindow.test.ts",
             "tests/opencode2/dreamer-s2-carrier.test.ts",

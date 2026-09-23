@@ -12,6 +12,7 @@ import { escalationBands } from "../../shared/escalation-bands";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { deriveTriggerBudget } from "./derive-budgets";
+import { retreatPastHostUnservedRows } from "./host-served-rows";
 import {
     getCachedAbsoluteMessageCount,
     getLegacyProtectedTailStartOrdinal,
@@ -728,6 +729,10 @@ export function resolveProtectedTailBoundary(
         protectedTailStart = offset;
     }
     protectedTailStart = clampOrdinal(protectedTailStart, rawMessageCount);
+    // A user-turn snap lands the eligible end on whatever row precedes the user
+    // message. On OpenCode 2 that is often an instruction-update row, which the
+    // host never serves by id; keep such rows in the protected tail.
+    protectedTailStart = retreatPastHostUnservedRows(messages, protectedTailStart, offset);
     const perRunCap = selectPerRunCap({
         usagePercentage,
         N: scaledN,
@@ -747,11 +752,12 @@ export function resolveProtectedTailBoundary(
         capTokens: perRunCap,
         recentOpenArcCutoff,
     });
-    const rawRangeFingerprint = computeRawRangeFingerprint(
+    const eligibleEndOrdinal = retreatPastHostUnservedRows(
         messages,
-        offset,
         head.eligibleEndOrdinal,
+        offset,
     );
+    const rawRangeFingerprint = computeRawRangeFingerprint(messages, offset, eligibleEndOrdinal);
     return {
         sessionId: ctx.sessionId,
         mode: ctx.mode,
@@ -760,8 +766,8 @@ export function resolveProtectedTailBoundary(
         offsetMessageId: boundaryMessageId(index, offset),
         protectedTailStart,
         protectedTailStartMessageId: boundaryMessageId(index, protectedTailStart),
-        eligibleEndOrdinal: head.eligibleEndOrdinal,
-        eligibleEndMessageId: boundaryMessageId(index, head.eligibleEndOrdinal - 1),
+        eligibleEndOrdinal,
+        eligibleEndMessageId: boundaryMessageId(index, eligibleEndOrdinal - 1),
         rawMessageCountAtTrigger: rawMessageCount,
         rawLastMessageIdAtTrigger: boundaryMessageId(index, rawMessageCount),
         N: scaledN,
@@ -1002,6 +1008,14 @@ export function resolveWrapupProtectedTailBoundary(
     }
 
     targetProtectedTailStart = clampOrdinal(targetProtectedTailStart, rawMessageCount);
+    // The user snap above makes the wrapup end on the row before a user turn,
+    // which on OpenCode 2 is often an instruction-update row the host never
+    // serves by id. Keep such rows in the kept tail so the boundary is servable.
+    targetProtectedTailStart = retreatPastHostUnservedRows(
+        messages,
+        targetProtectedTailStart,
+        offset,
+    );
     const target = deriveProtectedTailTokenTarget({
         contextLimit: ctx.contextLimit,
         executeThresholdPercentage: ctx.executeThresholdPercentage,
@@ -1027,7 +1041,11 @@ export function resolveWrapupProtectedTailBoundary(
         capTokens: perRunCap,
         recentOpenArcCutoff: targetProtectedTailStart,
     });
-    const eligibleEndOrdinal = Math.min(head.eligibleEndOrdinal, targetProtectedTailStart);
+    const eligibleEndOrdinal = retreatPastHostUnservedRows(
+        messages,
+        Math.min(head.eligibleEndOrdinal, targetProtectedTailStart),
+        offset,
+    );
     const rawRangeFingerprint = computeRawRangeFingerprint(messages, offset, eligibleEndOrdinal);
     const snapshot: ProtectedTailBoundarySnapshot = {
         sessionId: ctx.sessionId,

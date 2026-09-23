@@ -1,3 +1,4 @@
+import { markHostUnservedRow } from "../../hooks/magic-context/host-served-rows";
 import type { BoundedRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import type {
     RawMessage,
@@ -5,6 +6,7 @@ import type {
     RawMessageOrdinalEntry,
     RawMessageParts,
 } from "../../hooks/magic-context/read-session-raw";
+import { restoreRow } from "../fold/restore";
 import {
     type MessageType,
     RAW_MESSAGE_TYPES,
@@ -14,6 +16,22 @@ import {
 
 const rawMessageTypes = new Set<MessageType>(RAW_MESSAGE_TYPES);
 const isRawRow = (row: StoreRow) => rawMessageTypes.has(row.type);
+
+// No live model matches this one, so provider-state-only reasoning is left out and a
+// borderline assistant row counts as unserved. Erring that way only moves a boundary
+// one row earlier; the opposite error would put a boundary on a row the host drops.
+const NO_MODEL = { providerID: "", id: "" };
+
+/**
+ * Whether the host puts this row into the request draft under its own id. The
+ * decision reuses restoreRow, the local mirror of the host's row-to-message
+ * rendering, so the two cannot drift: an instruction-update `system` row, a
+ * background shell row or an empty user turn renders without the row id (or not
+ * at all) and can never be found again by a boundary lookup.
+ */
+export function hostServesRowById(row: StoreRow): boolean {
+    return isRawRow(row) && restoreRow(row, NO_MODEL).some((message) => message.id === row.id);
+}
 
 function projectRawMessages(
     rows: readonly StoreRow[],
@@ -52,6 +70,7 @@ function projectRawMessages(
         // Keep host provenance available to coordinate repair without changing the
         // enumerable RawMessage shape shared with the v1 differential fixtures.
         Object.defineProperty(message, "storeType", { value: row.type, enumerable: false });
+        if (!hostServesRowById(row)) markHostUnservedRow(message);
         return message;
     });
 }
@@ -99,6 +118,35 @@ export interface V2RawMessageReader {
     ): RawMessageOrdinalEntry[];
     getCount(sessionID: string): number;
     getStoredCount(sessionID: string): number;
+    /** Id of the row the host serves in place of `messageID`; see servedBoundaryRow. */
+    servedBoundaryIdOf?(sessionID: string, messageID: string): string | null;
+}
+
+const SERVED_BOUNDARY_PAGE = 50;
+
+/**
+ * The row a stored compartment boundary stands for in a request: the boundary
+ * row itself when the host serves it by id, otherwise the nearest earlier row
+ * that it does serve. Returns null when the id is not a conversational row in
+ * the store or no earlier served row exists; callers then keep the stored id.
+ */
+export function servedBoundaryRow(
+    reader: Pick<V2StoreReader, "messageById" | "rawRowsThrough">,
+    sessionID: string,
+    messageID: string,
+): StoreRow | null {
+    const boundary = reader.messageById(sessionID, messageID);
+    if (!boundary) return null;
+    if (hostServesRowById(boundary)) return boundary;
+    let through = boundary.seq - 1;
+    for (;;) {
+        const rows = reader.rawRowsThrough(sessionID, through, SERVED_BOUNDARY_PAGE);
+        const served = rows.find(hostServesRowById);
+        if (served) return served;
+        const oldest = rows.at(-1);
+        if (rows.length < SERVED_BOUNDARY_PAGE || !oldest) return null;
+        through = oldest.seq - 1;
+    }
 }
 
 /** The only V2 full-history reader: store-generation conversion must inspect every part. */
@@ -116,6 +164,7 @@ export function readAllV2RawMessagesForConversion(
 
 /** Build the SQL-bounded reader used by context, indexing, and historian passes. */
 export function createV2RawMessageReader(openReader: () => V2StoreReader): V2RawMessageReader {
+    const servedBoundaryCache = new Map<string, string | null>();
     return {
         readPage: (
             sessionID: string,
@@ -205,6 +254,22 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
                 reader.close();
             }
         },
+        servedBoundaryIdOf: (sessionID: string, messageID: string) => {
+            // Stored rows before a boundary never change kind, so one answer per
+            // boundary id holds for the life of the session. The cap only bounds
+            // memory for very long-lived processes.
+            const key = `${sessionID}\u0000${messageID}`;
+            if (servedBoundaryCache.has(key)) return servedBoundaryCache.get(key) ?? null;
+            const reader = openReader();
+            try {
+                const served = servedBoundaryRow(reader, sessionID, messageID)?.id ?? null;
+                if (servedBoundaryCache.size >= 1000) servedBoundaryCache.clear();
+                if (served !== null) servedBoundaryCache.set(key, served);
+                return served;
+            } finally {
+                reader.close();
+            }
+        },
     };
 }
 
@@ -224,5 +289,11 @@ export function createV2RawMessageProvider(
         readMessageOrdinalPage: (after, limit) => reader.readOrdinalPage(sessionID, after, limit),
         getMessageCount: () => reader.getCount(sessionID),
         getStoredMessageCount: () => reader.getStoredCount(sessionID),
+        ...(reader.servedBoundaryIdOf
+            ? {
+                  readServedBoundaryId: (messageID: string) =>
+                      reader.servedBoundaryIdOf?.(sessionID, messageID) ?? null,
+              }
+            : {}),
     };
 }

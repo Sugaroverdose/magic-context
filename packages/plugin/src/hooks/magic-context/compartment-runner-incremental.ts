@@ -80,6 +80,7 @@ import {
     validateChunkCoverage,
     validateStoredCompartments,
 } from "./compartment-runner-validation";
+import { snapTerminalCompartmentToServedRow } from "./host-served-rows";
 import { clearInjectionCache, renderHistorianMemoryBlock } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
 import { persistFilteredNoise } from "./persist-filtered-noise";
@@ -727,6 +728,24 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 sessionId,
                 `historian discard-last: dropped provisional compartment ${lastEmitted.startMessage}-${lastEmitted.endMessage} (lookaheadMargin=${lookaheadMargin} <= ${HISTORIAN_BOUNDARY_HEALING_SLACK}); will re-derive from raw next run`,
             );
+        }
+
+        // The historian may end its last compartment on a row the host never
+        // serves by id (an OpenCode 2 instruction update). A request can never
+        // be trimmed at such a boundary, so end on the nearest served row and
+        // leave the unserved rows for the next run.
+        const servedBoundary = snapTerminalCompartmentToServedRow(
+            persistedCompartments,
+            chunk.lines,
+        );
+        if (servedBoundary.snapped) {
+            const before = persistedCompartments[persistedCompartments.length - 1];
+            const after = servedBoundary.compartments[servedBoundary.compartments.length - 1];
+            sessionLog(
+                sessionId,
+                `historian boundary moved off a row the host does not serve: ${before?.startMessage}-${before?.endMessage} -> ${after ? `${after.startMessage}-${after.endMessage}` : "(dropped)"}`,
+            );
+            persistedCompartments = servedBoundary.compartments;
         }
 
         const newCompartments = persistedCompartments;

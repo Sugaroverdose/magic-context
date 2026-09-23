@@ -424,6 +424,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 		return {
 			...ready,
 			...fixture,
+			pid: child.pid,
 			snapshotReason,
 			mock,
 			mockBaseURL: provider.baseURL,

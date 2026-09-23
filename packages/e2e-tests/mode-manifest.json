@@ -448,6 +448,21 @@
             ]
         },
         {
+            "path": "tests/opencode2/compartment-boundary-host-row.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: the host writes an instruction update (changed AGENTS.md) as a session_message system row it never serves by id; a /ctx-wrapup cut and a compartment stored by an older build both end on that row, and the HARD pass plus two defers after it must serve a byte-stable prefix with no degraded injection and no covered row served raw; the v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/commands-s2-keymap.test.ts",
             "tier": "excluded",
             "invocation": {
