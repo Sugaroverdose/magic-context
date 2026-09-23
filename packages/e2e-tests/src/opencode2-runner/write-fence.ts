@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 export interface WriteFence {
     roots: string[];
@@ -12,6 +12,9 @@ function scan(path: string, snapshot: Map<string, string>, descend: boolean): vo
     const stat = lstatSync(path, { bigint: true });
     snapshot.set(path, `${stat.ino}:${stat.mtimeNs}:${stat.size}:${stat.mode}`);
     if (stat.isDirectory()) {
+        // Vendored dependencies and build outputs can contain hundreds of thousands of files.
+        // Their directory metadata is still captured, but their descendants are not walked.
+        if (descend && ["node_modules", "target", ".git"].includes(basename(path))) return;
         for (const name of readdirSync(path)) {
             const child = join(path, name);
             if (descend) scan(child, snapshot, true);

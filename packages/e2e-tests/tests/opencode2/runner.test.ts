@@ -9,7 +9,7 @@ import {
 } from "../../../plugin/src/v2/store-reader";
 import { awaitPluginActivation } from "../../src/opencode2-runner/plugin-activation";
 import { assertWriteFenceUnchanged, snapshotWriteFence } from "../../src/opencode2-runner/write-fence";
-import { ROOT_KEYS, assertIsolation, assertOpenPaths, handoff, isolation, spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
+import { ROOT_KEYS, assertIsolation, assertLiveUnchanged, assertOpenPaths, handoff, isolation, snapshotLive, spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
 
 test("hermetic_v2_runner environment refuses unsafe roots before boot", () => {
 	const fixture = isolation();
@@ -38,6 +38,21 @@ test("fd guard refuses operator paths and permits isolated database", () => {
 		),
 	).toThrow("forbidden");
 });
+test("live snapshot detects changed database and logs that the top-level HOME fence misses", () => {
+	const { root } = isolation();
+	const home = join(root, "operator-home");
+	const dir = join(home, ".local/share/opencode");
+	mkdirSync(join(dir, "log"), { recursive: true });
+	writeFileSync(join(dir, "opencode.db"), "original");
+	const before = snapshotLive(home);
+	const fence = snapshotWriteFence([], home);
+	expect(() => assertLiveUnchanged(before, home)).not.toThrow();
+	writeFileSync(join(dir, "opencode.db"), "mutated!");
+	expect(() => assertLiveUnchanged(before, home)).toThrow("changed");
+	expect(() => assertWriteFenceUnchanged(fence, home)).not.toThrow();
+	writeFileSync(join(dir, "log", "host.log"), "new log");
+	expect(() => assertLiveUnchanged(before, home)).toThrow("changed");
+});
 test("post-run fence rejects the old observer plugin's marker.log under a replayed repo", () => {
 	const { root } = isolation();
 	const repo = join(root, "operator-repo");
@@ -46,11 +61,21 @@ test("post-run fence rejects the old observer plugin's marker.log under a replay
 	mkdirSync(home);
 	const existing = join(repo, "existing.txt");
 	writeFileSync(existing, "original");
+	for (const ignored of ["node_modules", "target", ".git"]) {
+		mkdirSync(join(repo, ignored));
+		writeFileSync(join(repo, ignored, "large-artifact"), "fixture");
+	}
 	const before = snapshotWriteFence([repo], home);
+	for (const ignored of ["node_modules", "target", ".git"]) {
+		expect(before.before.has(join(repo, ignored))).toBe(true);
+		expect(before.before.has(join(repo, ignored, "large-artifact"))).toBe(false);
+	}
+	const live = snapshotLive(home);
 	expect(() => assertWriteFenceUnchanged(before, home)).not.toThrow();
 	const context = { directory: repo };
 	writeFileSync(join(context.directory, "marker.log"), "old observer plugin output");
 	expect(() => assertWriteFenceUnchanged(before, home)).toThrow("E2E_HOST_WRITE_FENCE");
+	expect(() => assertLiveUnchanged(live, home)).not.toThrow();
 	const afterMarker = snapshotWriteFence([repo], home);
 	writeFileSync(existing, "modified content");
 	expect(() => assertWriteFenceUnchanged(afterMarker, home)).toThrow("E2E_HOST_WRITE_FENCE");

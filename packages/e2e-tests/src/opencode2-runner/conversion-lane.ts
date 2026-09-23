@@ -31,10 +31,12 @@ import { isolateStoreDirectories } from "./store-directories";
 import { assertWriteFenceUnchanged, snapshotWriteFence } from "./write-fence";
 import {
 	assertIsolation,
+	assertLiveUnchanged,
 	assertOpenPaths,
 	type OpenCode2Isolation,
 	PLUGIN,
 	ROOT_KEYS,
+	snapshotLive,
 } from "./spawn";
 
 /** The 1.x host needs a separate config home because the host generations use different config shapes. */
@@ -130,6 +132,19 @@ export function resolveOpenCode1CLI(): string {
 		);
 	}
 	return path;
+}
+
+/** Whether some other OpenCode host is already serving, which would make a live-store snapshot ambiguous. */
+function foreignServeRunning(ownPid?: number): boolean {
+	const result = spawnSync("pgrep", ["-alf", "opencode"], { encoding: "utf8" });
+	if (result.error || (result.status !== 0 && result.status !== 1)) {
+		throw new Error("Cannot determine whether a live OpenCode host owns the store");
+	}
+	if (result.status !== 0) return false;
+	return result.stdout
+		.split("\n")
+		.filter((line) => /\bserve\b/.test(line))
+		.some((line) => Number(line.trim().split(/\s+/)[0]) !== ownPid);
 }
 
 /** Every strict ancestor directory of `path`, from its parent up to the filesystem root. */
@@ -349,6 +364,7 @@ export async function spawnOpencode1(
 	prepareContextDatabase(fixture.env.XDG_DATA_HOME!);
 
 	const fence = snapshotWriteFence(fixture.referencedDirectories ?? []);
+	const before = foreignServeRunning() ? undefined : snapshotLive();
 	const child: ChildProcess = spawn(
 		cli,
 		["serve", "--port", "0", "--hostname", "127.0.0.1"],
@@ -376,6 +392,7 @@ export async function spawnOpencode1(
 		if (child.pid) killGroup(child.pid);
 		await exited;
 		if (child.pid) liveGroups.delete(child.pid);
+		if (before) assertLiveUnchanged(before);
 		assertWriteFenceUnchanged(fence);
 		if (safetyError) throw safetyError;
 	};

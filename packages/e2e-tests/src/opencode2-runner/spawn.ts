@@ -1,9 +1,14 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
+	closeSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	openSync,
+	readdirSync,
 	readFileSync,
+	readSync,
 	realpathSync,
 	statSync,
 	writeFileSync,
@@ -122,6 +127,49 @@ export function assertIsolation(root: string, env: NodeJS.ProcessEnv): void {
 	if (env.OPENCODE_DISABLE_DEFAULT_PLUGINS !== "true")
 		throw new Error("Default plugins must be disabled");
 }
+const sha = (bytes: Uint8Array) =>
+	createHash("sha256").update(bytes).digest("hex");
+export function snapshotFile(path: string) {
+	if (!existsSync(path)) return null;
+	const stat = statSync(path);
+	const fd = openSync(path, "r");
+	const edge = (position: number) => {
+		const buffer = Buffer.alloc(Math.min(stat.size, 1024 * 1024));
+		const count = readSync(fd, buffer, 0, buffer.length, position);
+		if (count !== buffer.length)
+			throw new Error(`Short live-store snapshot read: ${path}`);
+		return sha(buffer);
+	};
+	try {
+		return {
+			size: stat.size,
+			mtime: stat.mtimeMs,
+			first: edge(0),
+			last: edge(Math.max(0, stat.size - 1024 * 1024)),
+		};
+	} finally {
+		closeSync(fd);
+	}
+}
+export function snapshotLive(home = homedir()) {
+	const root = join(home, ".local/share/opencode");
+	const log = join(root, "log");
+	return {
+		db: snapshotFile(join(root, "opencode.db")),
+		logs: existsSync(log)
+			? readdirSync(log)
+					.sort()
+					.map((name) => ({ name, ...snapshotFile(join(log, name)) }))
+			: null,
+	};
+}
+export function assertLiveUnchanged(
+	before: ReturnType<typeof snapshotLive>,
+	home = homedir(),
+): void {
+	if (JSON.stringify(before) !== JSON.stringify(snapshotLive(home)))
+		throw new Error("Operator live store/log changed during v2 boot");
+}
 export function handoff(
 	stdout: string,
 ): { url: string; password: string } | undefined {
@@ -198,6 +246,10 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 	const references = isolateStoreDirectories(fixture.root, join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR ?? join(fixture.env.XDG_DATA_HOME!, "cortexkit", "magic-context"), "context.db"));
 	fixture.referencedDirectories = [...new Set([...(fixture.referencedDirectories ?? []), ...references])];
 	const fence = snapshotWriteFence(fixture.referencedDirectories);
+	const snapshotReason = activeV1Host()
+		? "live snapshot skipped: active v1 opencode serve writes operator store"
+		: undefined;
+	const before = snapshotReason ? undefined : snapshotLive();
 	prepareContextDatabase(fixture.env.XDG_DATA_HOME!);
 	if (
 		options.includeMagicContext !== false &&
@@ -318,6 +370,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 		if (child.pid) killGroup(child.pid);
 		await exited;
 		if (child.pid) groups.delete(child.pid);
+		if (before) assertLiveUnchanged(before);
 		assertWriteFenceUnchanged(fence);
 		if (safetyError) throw safetyError;
 	};
@@ -371,7 +424,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 		return {
 			...ready,
 			...fixture,
-			snapshotReason: undefined,
+			snapshotReason,
 			mock,
 			mockBaseURL: provider.baseURL,
 			stopHost,
@@ -383,6 +436,15 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 		await stop();
 		throw error;
 	}
+}
+
+function activeV1Host(): boolean {
+	const result = spawnSync("pgrep", ["-alf", "opencode"], {
+		encoding: "utf8",
+	});
+	if (result.error || (result.status !== 0 && result.status !== 1))
+		throw new Error("Cannot determine whether a live OpenCode host owns the store");
+	return result.status === 0 && result.stdout.split("\n").some((line) => /\bserve\b/.test(line));
 }
 
 export function assertOpenPaths(
