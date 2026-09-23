@@ -16438,10 +16438,21 @@ fn render_verbose_expand_result(start: i64, end: i64, result: VerboseRangeExpand
 }
 
 fn render_verbose_expand_message(message: &ck_wire::CkIngressMessage) -> String {
-    let role = match message.ck.role.as_str() {
-        "assistant" => "A (assistant)",
-        "user" => "U (user)",
-        role => role,
+    let role = if matches!(message.ck.role.as_str(), "user" | "tool")
+        && !message.ck.content.is_empty()
+        && message
+            .ck
+            .content
+            .iter()
+            .all(|part| matches!(part.kind, ck_wire::CkKind::ToolResult { .. }))
+    {
+        "tool results"
+    } else {
+        match message.ck.role.as_str() {
+            "assistant" => "A (assistant)",
+            "user" => "U (user)",
+            role => role,
+        }
     };
     let mut previews = Vec::new();
     let mut index = 0;
@@ -27003,7 +27014,7 @@ mod tests {
         );
         assert!(verbose.contains("[10] U (user)"));
         assert!(verbose.contains("[11] A (assistant)"));
-        assert!(verbose.contains("[12] U (user)"));
+        assert!(verbose.contains("[12] tool results"));
         assert!(verbose.contains("• tool read(src/lib.rs)"));
         assert!(verbose.contains(&format!(
             "• tool read → output ~{} tok",
@@ -28843,7 +28854,7 @@ mod tests {
 
         let rendered = render_verbose_range_expand(&messages, 10, 11);
         assert!(rendered.text.contains("[10] A (assistant)"));
-        assert!(rendered.text.contains("[11] U (user)"));
+        assert!(rendered.text.contains("[11] tool results"));
         assert!(rendered
             .text
             .contains(&format!("    • {}…", "x".repeat(200))));
@@ -38711,6 +38722,48 @@ mod tests {
         let after_snapshot_loss =
             tool_text(call_facade(&handler, "ctx_expand", json!({"message": 7})).await);
         assert_eq!(after_snapshot_loss, expected);
+    }
+
+    #[test]
+    fn ctx_expand_verbose_distinguishes_tool_results_from_user_text() {
+        let mut result = tool_result("result-1", 4, "file contents");
+        result.ck.role = "user".to_string();
+        let mut mixed = tool_result("result-2", 5, "more contents");
+        mixed.ck.role = "user".to_string();
+        mixed.ck.content.push(CkWireBlock::bare(CkKind::Text {
+            text: "Continue".to_string(),
+        }));
+        let mut assistant_result = tool_result("result-3", 6, "assistant output");
+        assistant_result.ck.role = "assistant".to_string();
+        let messages = [
+            ck_with_role("prompt", 2, "user", "Read PLAN.md"),
+            ck_with_role("call", 3, "assistant", "Reading"),
+            result,
+            mixed,
+            assistant_result,
+            tool_result("result-4", 7, "Pi output"),
+        ];
+        assert_eq!(
+            render_verbose_range_expand(&messages[..2], 2, 3).text,
+            "[2] U (user)\n    • Read PLAN.md\n\n[3] A (assistant)\n    • Reading"
+        );
+        let rendered = render_verbose_range_expand(&messages, 2, 7);
+        assert!(rendered.text.contains("[2] U (user)\n    • Read PLAN.md"));
+        assert!(rendered.text.contains("[3] A (assistant)\n    • Reading"));
+        assert!(rendered
+            .text
+            .contains("[4] tool results\n    • tool bash → output ~"));
+        assert!(rendered
+            .text
+            .contains("[5] U (user)\n    • tool bash → output ~"));
+        assert!(rendered.text.contains("    • Continue"));
+        assert!(rendered
+            .text
+            .contains("[6] A (assistant)\n    • tool bash → output ~"));
+        assert!(rendered
+            .text
+            .contains("[7] tool results\n    • tool bash → output ~"));
+        assert_eq!(rendered.last_ordinal, 7);
     }
 
     #[test]

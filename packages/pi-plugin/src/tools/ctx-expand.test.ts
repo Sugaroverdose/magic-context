@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
 
-import { createTestDb, fakeContext } from "../test-utils.test";
+import {
+	assistantToolCall,
+	createTestDb,
+	fakeContext,
+	toolResultMessage,
+	userMessage,
+} from "../test-utils.test";
 import { createCtxExpandTool } from "./ctx-expand";
 
 async function execute(params: {
@@ -26,6 +32,48 @@ async function execute(params: {
 function textOf(result: Awaited<ReturnType<typeof execute>>): string {
 	return (result.content[0] as { text: string }).text;
 }
+
+describe("Pi ctx_expand verbose range", () => {
+	it("labels consecutive toolResult entries separately from real user text", async () => {
+		const messages = [
+			userMessage("Read PLAN.md", 1),
+			assistantToolCall("call-1", "Read", { path: "PLAN.md" }),
+			toolResultMessage("call-1", "file contents"),
+			toolResultMessage("call-2", "more contents"),
+			assistantToolCall("call-3", "Read", { path: "next.md" }),
+			toolResultMessage("call-3", "next contents"),
+			userMessage("Continue", 7),
+		];
+		const db = createTestDb();
+		try {
+			const ctx = fakeContext(
+				"ses-pi-verbose-results",
+				process.cwd(),
+				messages.map((_, i) => `entry-${i}`),
+				messages,
+			);
+			const result = await createCtxExpandTool({ db }).execute(
+				"call-expand",
+				{ start: 1, end: 5, verbose: true },
+				new AbortController().signal,
+				undefined,
+				ctx as never,
+			);
+			const text = textOf(result);
+			expect(text).toMatch(/^\[1\] U \(user\)\n    • Read PLAN.md/m);
+			expect(text).toMatch(/^\[2\] A \(assistant\)/m);
+			expect(text).toMatch(
+				/^\[3\] tool results\n    • tool Read → output ~\d+ tok\n    • tool Read → output ~\d+ tok/m,
+			);
+			expect(text).toMatch(/^\[4\] A \(assistant\)/m);
+			expect(text).toMatch(
+				/^\[5\] U \(user\)\n    • tool Read → output ~\d+ tok\n    • Continue/m,
+			);
+		} finally {
+			db.close();
+		}
+	});
+});
 
 describe("Pi ctx_expand ordinal validation", () => {
 	it("rejects fractional message and range ordinals", async () => {

@@ -35,6 +35,20 @@ function roleLabel(role: string): string {
     return role;
 }
 
+function verboseRoleLabel(msg: RawMessage): string {
+    if (
+        msg.role === "user" &&
+        msg.parts.length > 0 &&
+        msg.parts.every((part) => {
+            if (!isRecord(part)) return false;
+            if (part.type === "tool_result") return true;
+            return part.type === "tool" && asToolPart(part)?.output != null;
+        })
+    )
+        return "tool results";
+    return roleLabel(msg.role);
+}
+
 function truncate(value: string, max: number): string {
     const t = value.trim();
     return t.length <= max ? t : `${t.slice(0, max)}…`;
@@ -254,7 +268,7 @@ export function renderVerboseRange(
     let truncated = false;
 
     for (const msg of messages) {
-        const header = `[${msg.ordinal}] ${roleLabel(msg.role)}`;
+        const header = `[${msg.ordinal}] ${verboseRoleLabel(msg)}`;
         const partLines = msg.parts.map(renderPartPreview).filter((l): l is string => l !== null);
         const block = partLines.length > 0 ? `${header}\n${partLines.join("\n")}` : header;
 
