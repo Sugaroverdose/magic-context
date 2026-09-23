@@ -25,6 +25,7 @@ import {
     getUserNpmrcPath,
     isPinnedOpenCodePluginSpecifier,
     migrateLegacyAgentEnabledConfigForDoctor,
+    parseOpenCodeModelCatalog,
 } from "./doctor-opencode";
 import { clearPluginCache } from "./doctor-opencode-cache";
 
@@ -36,6 +37,16 @@ function migrate(input: Record<string, unknown>) {
     });
     return { config: input, logs, result };
 }
+
+describe("OpenCode model catalog parsing", () => {
+    it("reads model variants from verbose CLI output", () => {
+        expect(
+            parseOpenCodeModelCatalog(
+                `provider/model\n{\n  "id": "model",\n  "providerID": "provider",\n  "variants": {\n    "medium": {}\n  }\n}`,
+            ),
+        ).toEqual([{ providerID: "provider", id: "model", variants: { medium: {} } }]);
+    });
+});
 
 describe("OpenCode database doctor surface", () => {
     it("reports the resolved path on success and the explicit candidate on failure", () => {
