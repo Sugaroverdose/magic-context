@@ -13174,6 +13174,10 @@ impl McHandler {
             }
             _ => None,
         };
+        let ids = match NoteIdSpace::from_args(args) {
+            Ok(ids) => ids,
+            Err(error) => return tool_error_result(format!("Error: {error}.")),
+        };
         let is_mutation = matches!(action, "write" | "update" | "dismiss");
         let facade_scope = match self
             .resolve_facade_scope(channel, Some(args), "notes", is_mutation)
@@ -13261,12 +13265,14 @@ impl McHandler {
                                         now_ms: now,
                                     })
                                     .map_err(|error| error.to_string())?;
-                                facade_text_response(
+                                note_write_response(
                                     format!(
-                                        "Created smart note #{}. Dreamer will evaluate the condition during nightly runs:\n- Content: {}\n- Condition: {}",
-                                        note.id, note.content, condition
+                                        "Created smart note {}. Dreamer will evaluate the condition during nightly runs:\n- Content: {}\n- Condition: {}",
+                                        rendered_note_id(ids.visible_id(note.id)),
+                                        note.content,
+                                        condition
                                     ),
-                                    false,
+                                    note.id,
                                 )
                             },
                         ),
@@ -13299,7 +13305,10 @@ impl McHandler {
                                 let tray = tx
                                     .active_session_note_tray(project, session)
                                     .map_err(|error| error.to_string())?;
-                                facade_text_response(format_write_reply(note.id, tray, now), false)
+                                note_write_response(
+                                    format_write_reply(ids.visible_id(note.id), tray, now),
+                                    note.id,
+                                )
                             },
                         ),
                         "notes",
@@ -13307,14 +13316,28 @@ impl McHandler {
                 }
             }
             "read" => {
-                if let Some(ids) = note_ids.as_deref() {
-                    let mut notes = Vec::with_capacity(ids.len());
-                    for note_id in ids {
-                        let note = match store.get_note_by_id(project, session, *note_id) {
-                            Ok(note) => note,
-                            Err(error) => return tool_error_result(format!("Error: {error}")),
+                if let Some(requested) = note_ids.as_deref() {
+                    let mut notes = Vec::with_capacity(requested.len());
+                    for note_id in requested {
+                        let row = match ids.route(*note_id) {
+                            NoteIdRoute::Module(module_id) => {
+                                match store.get_note_by_id(project, session, module_id) {
+                                    Ok(Some(note)) => {
+                                        // Render the id the caller asked with.
+                                        let mut note = present_note_status(note);
+                                        note.id = *note_id;
+                                        NoteByIdRow::Found(note)
+                                    }
+                                    Ok(None) => NoteByIdRow::Missing,
+                                    Err(error) => {
+                                        return tool_error_result(format!("Error: {error}"))
+                                    }
+                                }
+                            }
+                            NoteIdRoute::Pending => NoteByIdRow::Pending,
+                            NoteIdRoute::Unknown => NoteByIdRow::Missing,
                         };
-                        notes.push((*note_id, note));
+                        notes.push((*note_id, row));
                     }
                     return mcp_text_result(
                         finish_read_reply(render_notes_by_id(notes, now)),
@@ -13327,10 +13350,15 @@ impl McHandler {
                 // smart notes that are ready or still parked. An explicit filter
                 // applies the same statuses to both types.
                 let (session_statuses, smart_statuses): (Vec<&str>, Vec<&str>) = match filter {
-                    None => (vec!["active"], vec!["ready", "pending"]),
+                    // `surfacing`/`surfaced` are legacy delivery states the agent
+                    // sees as `ready` (see `present_note_status`).
+                    None => (
+                        vec!["active"],
+                        vec!["ready", "surfacing", "surfaced", "pending"],
+                    ),
                     Some("active") => (vec!["active"], vec!["active"]),
                     Some("pending") => (vec!["pending"], vec!["pending"]),
-                    Some("ready") => (vec!["ready"], vec!["ready"]),
+                    Some("ready") => (vec!["ready"], vec!["ready", "surfacing", "surfaced"]),
                     Some("dismissed") => (vec!["dismissed"], vec!["dismissed"]),
                     Some("all") => {
                         let all = vec![
@@ -13354,7 +13382,7 @@ impl McHandler {
                     &session_statuses,
                     &smart_statuses,
                 ) {
-                    Ok(notes) => notes,
+                    Ok(notes) => notes.into_iter().map(|note| ids.present(note)).collect(),
                     Err(error) => return tool_error_result(format!("Error: {error}")),
                 };
                 mcp_text_result(
@@ -13367,6 +13395,15 @@ impl McHandler {
                     .as_deref()
                     .and_then(|ids| ids.first().copied())
                     .unwrap_or(0);
+                let module_note_id = match ids.route(note_id) {
+                    NoteIdRoute::Module(module_id) => module_id,
+                    NoteIdRoute::Pending => {
+                        return tool_error_result(format!(
+                            "Error: Note #{note_id} {NOTE_ID_PENDING_ADVICE}"
+                        ))
+                    }
+                    NoteIdRoute::Unknown => 0,
+                };
                 let content = string_arg(args, "content");
                 let condition = string_arg(args, "surface_condition")
                     .map(str::trim)
@@ -13377,7 +13414,7 @@ impl McHandler {
                             .to_string(),
                     );
                 }
-                let current = match store.get_note_by_id(project, session, note_id) {
+                let current = match store.get_note_by_id(project, session, module_note_id) {
                     Ok(note) => note.filter(|note| {
                         matches!(
                             note.status.as_str(),
@@ -13404,7 +13441,7 @@ impl McHandler {
                             match tx
                                 .update_note_cas(
                                     project,
-                                    note_id,
+                                    module_note_id,
                                     &current.status,
                                     current.status_version,
                                     content,
@@ -13418,7 +13455,7 @@ impl McHandler {
                                 .map_err(|error| error.to_string())?
                             {
                                 NoteCasOutcome::Applied(note) => facade_text_response(
-                                    format!("Updated note #{}: {}", note.id, note.content),
+                                    format!("Updated note #{note_id}: {}", note.content),
                                     false,
                                 ),
                                 NoteCasOutcome::Conflict { .. } => Ok(facade_text_response(
@@ -13435,9 +13472,19 @@ impl McHandler {
             }
             "dismiss" => {
                 let resolution = string_arg(args, "content");
-                let ids = note_ids.as_deref().unwrap_or(&[]);
-                if ids.len() > 1 {
-                    let note_ids = ids;
+                let requested = note_ids.as_deref().unwrap_or(&[]);
+                let routes = requested
+                    .iter()
+                    .map(|note_id| (*note_id, ids.route(*note_id)))
+                    .collect::<Vec<_>>();
+                if requested.len() > 1 {
+                    let module_note_ids = routes
+                        .iter()
+                        .filter_map(|(_, route)| match route {
+                            NoteIdRoute::Module(module_id) => Some(*module_id),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
                     return facade_command_outcome(
                         store.with_facade_command(
                             facade_scope.route_project_root.as_str(),
@@ -13448,29 +13495,42 @@ impl McHandler {
                             action,
                             command_id.as_deref(),
                             |tx| {
-                                let outcomes = tx
-                                    .dismiss_notes(project, session, note_ids, resolution, now)
-                                    .map_err(|error| error.to_string())?;
-                                let dismissed_count = outcomes
-                                    .iter()
-                                    .filter(|(_, outcome)| {
-                                        *outcome == NoteDismissOutcome::Dismissed
-                                    })
-                                    .count();
-                                let details = outcomes
-                                    .iter()
-                                    .map(|(note_id, outcome)| {
-                                        format!(
-                                            "- Note #{note_id}: {}",
-                                            note_dismiss_outcome_text(*outcome)
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
+                                // Outcomes come back in the order the module ids were
+                                // sent, which is request order with unaddressable ids
+                                // left out; re-thread them into request order.
+                                let mut module_outcomes = tx
+                                    .dismiss_notes(
+                                        project,
+                                        session,
+                                        &module_note_ids,
+                                        resolution,
+                                        now,
+                                    )
+                                    .map_err(|error| error.to_string())?
+                                    .into_iter();
+                                let mut dismissed_count = 0usize;
+                                let mut details = Vec::with_capacity(routes.len());
+                                for (note_id, route) in &routes {
+                                    let text = match route {
+                                        NoteIdRoute::Module(_) => {
+                                            let (_, outcome) = module_outcomes
+                                                .next()
+                                                .ok_or("dismiss outcome missing")?;
+                                            if outcome == NoteDismissOutcome::Dismissed {
+                                                dismissed_count += 1;
+                                            }
+                                            note_dismiss_outcome_text(outcome)
+                                        }
+                                        NoteIdRoute::Pending => NOTE_ID_PENDING_ADVICE,
+                                        NoteIdRoute::Unknown => "not_found",
+                                    };
+                                    details.push(format!("- Note #{note_id}: {text}"));
+                                }
                                 facade_text_response(
                                     format!(
-                                        "Dismissed {dismissed_count} of {} notes.\n{details}",
-                                        outcomes.len()
+                                        "Dismissed {dismissed_count} of {} notes.\n{}",
+                                        routes.len(),
+                                        details.join("\n")
                                     ),
                                     false,
                                 )
@@ -13479,7 +13539,16 @@ impl McHandler {
                         "notes",
                     );
                 }
-                let note_id = ids[0];
+                let (note_id, route) = routes[0];
+                let module_note_id = match route {
+                    NoteIdRoute::Module(module_id) => module_id,
+                    NoteIdRoute::Pending => {
+                        return tool_error_result(format!(
+                            "Error: Note #{note_id} {NOTE_ID_PENDING_ADVICE}"
+                        ))
+                    }
+                    NoteIdRoute::Unknown => 0,
+                };
                 facade_command_outcome(
                     store.with_facade_command(
                         facade_scope.route_project_root.as_str(),
@@ -13491,7 +13560,7 @@ impl McHandler {
                         command_id.as_deref(),
                         |tx| {
                             let dismissed = tx
-                                .dismiss_note(project, session, note_id, resolution, now)
+                                .dismiss_note(project, session, module_note_id, resolution, now)
                                 .map_err(|error| error.to_string())?;
                             match dismissed {
                                 Some(_) => facade_text_response(
@@ -16623,6 +16692,163 @@ fn clip_note_title(content: &str, max: usize) -> String {
     format!("{}…", characters[..max].iter().collect::<String>())
 }
 
+/// Placeholder for a note id the caller cannot use yet. On a host-backed harness the
+/// agent addresses notes by host (context.db) ids; a note the module created is
+/// rendered with this text until the host mirror has assigned it one. It can never
+/// be mistaken for an id.
+const NOTE_ID_PENDING: &str = "(id pending)";
+
+/// Shown for a requested host id that names the caller's own note while its mirror
+/// identity is still in flight: retrying is the one action that helps.
+const NOTE_ID_PENDING_ADVICE: &str =
+    "not mirrored yet — it was written seconds ago or the mirror is behind; retry.";
+
+/// `#<id>` for an addressable note, or the pending placeholder. Callers mark a note
+/// with no caller-visible id by setting its id to 0 (module row ids start at 1).
+fn rendered_note_id(note_id: i64) -> String {
+    if note_id > 0 {
+        format!("#{note_id}")
+    } else {
+        NOTE_ID_PENDING.to_string()
+    }
+}
+
+/// The status vocabulary the agent sees. `surfacing`/`surfaced` are module
+/// delivery states from an earlier design; the host read model already shows them
+/// as `ready`, and so must every ctx_note reply, or the reminder and the reply
+/// would disagree about the same note.
+fn present_note_status(mut note: StoredNote) -> StoredNote {
+    if matches!(note.status.as_str(), "surfacing" | "surfaced") {
+        note.status = "ready".to_string();
+    }
+    note
+}
+
+/// How one requested note id resolves to a module row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoteIdRoute {
+    Module(i64),
+    Pending,
+    Unknown,
+}
+
+/// The id space of one ctx_note call.
+///
+/// Claude Code talks to the module directly and addresses module row ids. A
+/// host-backed harness (OpenCode) shows its agent context.db ids, so its host
+/// translates at the tool boundary: it sends the agent's ids in `note_ids`, the
+/// project-scoped host↔module pairs it knows in `note_id_map`, and the agent's own
+/// not-yet-mirrored ids in `pending_note_ids`. Every id this module renders back is
+/// then a host id, or the pending placeholder when it has none yet.
+struct NoteIdSpace {
+    host_lane: bool,
+    module_by_host: HashMap<i64, i64>,
+    host_by_module: HashMap<i64, i64>,
+    pending_hosts: HashSet<i64>,
+}
+
+impl NoteIdSpace {
+    fn from_args(args: &Map<String, Value>) -> Result<Self, String> {
+        let host_lane = match string_arg(args, "note_id_lane") {
+            None | Some("module") => false,
+            Some("host") => true,
+            Some(_) => return Err("note_id_lane must be 'host' or 'module'".to_string()),
+        };
+        let mut space = NoteIdSpace {
+            host_lane,
+            module_by_host: HashMap::new(),
+            host_by_module: HashMap::new(),
+            pending_hosts: HashSet::new(),
+        };
+        if !host_lane {
+            if args.get("note_id_map").is_some() || args.get("pending_note_ids").is_some() {
+                return Err(
+                    "note_id_map and pending_note_ids require note_id_lane 'host'".to_string(),
+                );
+            }
+            return Ok(space);
+        }
+        let pair_error = || {
+            "note_id_map entries must be [host_id, module_id] pairs of positive integers"
+                .to_string()
+        };
+        for entry in args
+            .get("note_id_map")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            let pair = entry
+                .as_array()
+                .filter(|pair| pair.len() == 2)
+                .ok_or_else(pair_error)?;
+            let host = pair[0]
+                .as_i64()
+                .filter(|id| *id > 0)
+                .ok_or_else(pair_error)?;
+            let module = pair[1]
+                .as_i64()
+                .filter(|id| *id > 0)
+                .ok_or_else(pair_error)?;
+            // One mirror identity per row on each side; a conflicting pair would
+            // let one agent id address two notes.
+            if space
+                .module_by_host
+                .insert(host, module)
+                .is_some_and(|previous| previous != module)
+                || space
+                    .host_by_module
+                    .insert(module, host)
+                    .is_some_and(|previous| previous != host)
+            {
+                return Err("note_id_map maps one note to two ids".to_string());
+            }
+        }
+        for value in args
+            .get("pending_note_ids")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            let host = value
+                .as_i64()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| "pending_note_ids must be positive integers".to_string())?;
+            space.pending_hosts.insert(host);
+        }
+        Ok(space)
+    }
+
+    fn route(&self, requested: i64) -> NoteIdRoute {
+        if !self.host_lane {
+            return NoteIdRoute::Module(requested);
+        }
+        if let Some(module) = self.module_by_host.get(&requested) {
+            NoteIdRoute::Module(*module)
+        } else if self.pending_hosts.contains(&requested) {
+            NoteIdRoute::Pending
+        } else {
+            NoteIdRoute::Unknown
+        }
+    }
+
+    /// The caller-visible id of a module row; 0 when it has none yet.
+    fn visible_id(&self, module_id: i64) -> i64 {
+        if self.host_lane {
+            self.host_by_module.get(&module_id).copied().unwrap_or(0)
+        } else {
+            module_id
+        }
+    }
+
+    /// A stored note ready to render for this caller: agent-visible status and id.
+    fn present(&self, note: StoredNote) -> StoredNote {
+        let mut note = present_note_status(note);
+        note.id = self.visible_id(note.id);
+        note
+    }
+}
+
 /// One glance row: `#id · age · title`, plus `· <status>` for anything that is
 /// not active and `· stale` when the note has not been touched for 30 days.
 fn format_glance_row(note: &StoredNote, now_ms: i64) -> String {
@@ -16640,8 +16866,8 @@ fn format_glance_row(note: &StoredNote, now_ms: i64) -> String {
         format!(" · {}", markers.join(" · "))
     };
     format!(
-        "#{} · {} · {}{}",
-        note.id,
+        "{} · {} · {}{}",
+        rendered_note_id(note.id),
         format_note_age(touched_at, now_ms),
         clip_note_title(&note.content, GLANCE_TITLE_MAX),
         suffix
@@ -16712,8 +16938,8 @@ fn format_note_body(note: &StoredNote, now_ms: i64) -> String {
         .map(|ordinal| format!(" ↳ @msg {ordinal}"))
         .unwrap_or_default();
     let head = format!(
-        "- **#{}** · {} · {}: {}{}",
-        note.id,
+        "- **{}** · {} · {}: {}{}",
+        rendered_note_id(note.id),
         format_note_age(touched_at, now_ms),
         note.status,
         note.content,
@@ -16742,18 +16968,28 @@ fn format_note_body(note: &StoredNote, now_ms: i64) -> String {
     )
 }
 
+/// One requested id in the bodies-by-id view.
+enum NoteByIdRow {
+    Found(StoredNote),
+    /// Unknown, or owned by someone else: one text for both.
+    Missing,
+    /// The caller's own note whose host mirror identity has not arrived yet.
+    Pending,
+}
+
 /// Bodies-by-id view. Ids that are unknown or owned by someone else render the
 /// same `not_found` line, so the reply never discloses whether an inaccessible
-/// note exists.
-fn render_notes_by_id(notes: Vec<(i64, Option<StoredNote>)>, now_ms: i64) -> String {
+/// note exists. `note_id` is the id the caller asked for, in the caller's id space.
+fn render_notes_by_id(notes: Vec<(i64, NoteByIdRow)>, now_ms: i64) -> String {
     format!(
         "## Notes by ID\n\n{}",
         notes
             .into_iter()
-            .map(|(note_id, note)| note
-                .as_ref()
-                .map(|note| format_note_body(note, now_ms))
-                .unwrap_or_else(|| format!("- Note #{note_id}: not_found")))
+            .map(|(note_id, row)| match row {
+                NoteByIdRow::Found(note) => format_note_body(&note, now_ms),
+                NoteByIdRow::Missing => format!("- Note #{note_id}: not_found"),
+                NoteByIdRow::Pending => format!("- Note #{note_id}: {NOTE_ID_PENDING_ADVICE}"),
+            })
             .collect::<Vec<_>>()
             .join("\n\n")
     )
@@ -16780,7 +17016,7 @@ fn finish_read_reply(body: String) -> String {
 /// The write reply: the saved-note line plus the tray line, so the writer sees
 /// the backlog at the moment they add to it.
 fn format_write_reply(note_id: i64, tray: (usize, Option<i64>), now_ms: i64) -> String {
-    let base = format!("Saved session note #{note_id}.");
+    let base = format!("Saved session note {}.", rendered_note_id(note_id));
     match tray {
         (count, Some(oldest)) if count > 0 => {
             format!(
@@ -17073,6 +17309,17 @@ fn command_id_from_facade_request(
         ));
     }
     Ok(Some(command_id.to_string()))
+}
+
+/// A ctx_note write reply plus the module row it created, so a host that shows
+/// its agent host ids can fill in the id once its mirror has assigned one.
+fn note_write_response(text: String, module_id: i64) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": false,
+        "note_operation": { "action": "write", "module_id": module_id },
+    }))
+    .map_err(|error| error.to_string())
 }
 
 fn facade_text_response(text: impl Into<String>, is_error: bool) -> Result<Vec<u8>, String> {
@@ -27742,6 +27989,323 @@ mod tests {
         );
 
         assert_eq!(reply, "Saved session note #2. 2 active, oldest 2d.");
+    }
+
+    /// The id collision a host-backed session hit: the agent was shown host note #2,
+    /// whose module row is #3, while module row #2 is a different note. On the host
+    /// id lane every request must reach module row #3 and never touch row #2.
+    async fn assert_host_lane_collision_is_harmless(colliding_project: &str) {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+
+        let now = now_ms();
+        insert_session_note_at(&store, "filler", now);
+        let colliding = store
+            .insert_note(NoteInput {
+                project_path: colliding_project,
+                route_project_root: None,
+                session_id: "session",
+                content: "colliding note that must never be touched",
+                surface_condition: None,
+                anchor_block_id: None,
+                now_ms: now,
+            })
+            .unwrap()
+            .id;
+        let announced = insert_session_note_at(&store, "announced note", now);
+        assert_eq!((colliding, announced), (2, 3));
+        // The host only knows mirror identities of its own project.
+        let map = if colliding_project == "/repo" {
+            json!([[2, 3], [7, 2]])
+        } else {
+            json!([[2, 3]])
+        };
+
+        let read = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "read", "note_ids": [2], "note_id_lane": "host", "note_id_map": map}),
+            )
+            .await,
+        );
+        assert!(
+            read.contains("- **#2** · 0m · active: announced note"),
+            "{read}"
+        );
+        assert!(!read.contains("colliding"), "{read}");
+
+        let dismissed = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "dismiss", "note_ids": [2], "note_id_lane": "host", "note_id_map": map}),
+            )
+            .await,
+        );
+        assert_eq!(dismissed, "Note #2 dismissed.");
+        let status = |id: i64, project: &str| {
+            store
+                .get_note_by_id(project, "session", id)
+                .unwrap()
+                .unwrap()
+                .status
+        };
+        assert_eq!(status(3, "/repo"), "dismissed");
+        assert_eq!(status(2, colliding_project), "active");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_host_lane_never_touches_a_foreign_project_row_at_the_host_id() {
+        assert_host_lane_collision_is_harmless("/elsewhere").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_host_lane_never_touches_a_same_project_row_at_the_host_id() {
+        assert_host_lane_collision_is_harmless("/repo").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_host_lane_renders_host_ids_and_pending_placeholders() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+        let now = now_ms();
+        insert_session_note_at(&store, "mirrored note", now);
+        insert_session_note_at(&store, "unmirrored note", now);
+        let host = |extra: Value| {
+            let mut args =
+                json!({"note_id_lane": "host", "note_id_map": [[40, 1]], "pending_note_ids": [41]});
+            for (key, value) in extra.as_object().unwrap() {
+                args[key] = value.clone();
+            }
+            args
+        };
+
+        let glance =
+            tool_text(call_facade(&handler, "ctx_note", host(json!({"action": "read"}))).await);
+        assert!(glance.contains("#40 · 0m · mirrored note"), "{glance}");
+        assert!(
+            glance.contains("(id pending) · 0m · unmirrored note"),
+            "{glance}"
+        );
+        assert!(
+            !glance.contains("#1 ") && !glance.contains("#2 "),
+            "{glance}"
+        );
+
+        let bodies = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                host(json!({"action": "read", "note_ids": [41, 40, 1]})),
+            )
+            .await,
+        );
+        assert_eq!(
+            bodies,
+            "## Notes by ID\n\n\
+             - Note #41: not mirrored yet — it was written seconds ago or the mirror is behind; retry.\n\n\
+             - **#40** · 0m · active: mirrored note\n\n\
+             - Note #1: not_found\n\n\
+             To dismiss a stale note: ctx_note(action=\"dismiss\", note_ids=[N])"
+        );
+
+        let pending_update = call_facade(
+            &handler,
+            "ctx_note",
+            host(json!({"action": "update", "note_ids": [41], "content": "edit"})),
+        )
+        .await;
+        assert_eq!(
+            tool_text(pending_update),
+            "Error: Note #41 not mirrored yet — it was written seconds ago or the mirror is behind; retry."
+        );
+        let unknown_update = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                host(json!({"action": "update", "note_ids": [1], "content": "edit"})),
+            )
+            .await,
+        );
+        assert_eq!(
+            unknown_update,
+            "Error: Note #1 not found in your session/project or has no compatible fields to update."
+        );
+        let updated = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                host(json!({"action": "update", "note_ids": [40], "content": "mirrored note, edited"})),
+            )
+            .await,
+        );
+        assert_eq!(updated, "Updated note #40: mirrored note, edited");
+
+        let batch = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                host(json!({"action": "dismiss", "note_ids": [41, 40, 1]})),
+            )
+            .await,
+        );
+        assert_eq!(
+            batch,
+            "Dismissed 1 of 3 notes.\n\
+             - Note #41: not mirrored yet — it was written seconds ago or the mirror is behind; retry.\n\
+             - Note #40: dismissed\n\
+             - Note #1: not_found"
+        );
+        assert_eq!(
+            store
+                .get_note_by_id("/repo", "session", 2)
+                .unwrap()
+                .unwrap()
+                .status,
+            "active",
+            "module row 2 was only ever named by a module id the host lane does not accept"
+        );
+
+        let write = tool_body(
+            call_facade(
+                &handler,
+                "ctx_note",
+                host(json!({"action": "write", "content": "fresh note"})),
+            )
+            .await,
+        );
+        assert_eq!(
+            write["content"][0]["text"],
+            "Saved session note (id pending). 2 active, oldest 0m."
+        );
+        assert_eq!(
+            write["note_operation"],
+            json!({"action": "write", "module_id": 3})
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_module_lane_keeps_module_ids_and_rejects_host_lane_fields() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+        insert_session_note_at(&store, "module lane note", now_ms());
+        let write = tool_body(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "write", "content": "second"}),
+            )
+            .await,
+        );
+        assert_eq!(
+            write["content"][0]["text"],
+            "Saved session note #2. 2 active, oldest 0m."
+        );
+        let refused = call_facade(
+            &handler,
+            "ctx_note",
+            json!({"action": "read", "note_ids": [1], "note_id_map": [[1, 1]]}),
+        )
+        .await;
+        assert_eq!(
+            tool_text(refused),
+            "Error: note_id_map and pending_note_ids require note_id_lane 'host'."
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_shows_legacy_surfaced_smart_notes_as_ready() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+        let note = store
+            .insert_project_note(NoteWriteInput {
+                project_path: "/repo",
+                route_project_root: None,
+                session_id: Some("session"),
+                content: "delivered by an older binary",
+                surface_condition: Some("condition true"),
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
+                anchor_block_id: None,
+                anchor_ordinal: None,
+                now_ms: 1,
+            })
+            .unwrap();
+        assert!(matches!(
+            store
+                .write_note_evaluation(NoteEvaluationInput {
+                    project_path: "/repo",
+                    note_id: note.id,
+                    source_revision: note.status_version,
+                    verdict: true,
+                    compiled_check: None,
+                    manifest_json: None,
+                    check_hash: None,
+                    next_due_at: None,
+                    now_ms: 2,
+                })
+                .unwrap(),
+            NoteCasOutcome::Applied(_)
+        ));
+        // Reproduce the delivery state an older binary left behind.
+        store
+            .claim_note_delivery("/repo", "session", "fp", "pass", 3)
+            .unwrap();
+        store
+            .ack_note_delivery("/repo", "session", "pass", 4)
+            .unwrap();
+        assert_eq!(
+            store
+                .get_note_by_id("/repo", "session", note.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "surfaced"
+        );
+
+        for args in [
+            json!({"action": "read"}),
+            json!({"action": "read", "filter": "ready"}),
+        ] {
+            let glance = tool_text(call_facade(&handler, "ctx_note", args).await);
+            assert!(
+                glance.contains(&format!("#{} ", note.id)) && glance.contains("· ready"),
+                "{glance}"
+            );
+            assert!(!glance.contains("· surfaced"), "{glance}");
+        }
+        let body = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "read", "note_ids": [note.id]}),
+            )
+            .await,
+        );
+        assert!(
+            body.contains("· ready: delivered by an older binary"),
+            "{body}"
+        );
+        assert!(body.contains("Condition met:"), "{body}");
     }
 
     #[tokio::test(flavor = "current_thread")]
