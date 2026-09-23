@@ -86,6 +86,8 @@ export interface SdkClient {
                 model: { providerID: string; modelID: string };
                 parts: Array<{ type: "text"; text: string; synthetic?: boolean }>;
                 agent?: string;
+                messageID?: string;
+                variant?: string;
             };
         }) => Promise<{ data?: unknown; error?: unknown }>;
         revert: (opts: {
@@ -662,6 +664,12 @@ export class RustTestHarness {
             modelID?: string;
             messageID?: string;
             /**
+             * OpenCode reasoning variant for this turn. OpenCode hands it to the
+             * plugin's chat.message hook, and the adapter folds it into the render
+             * identity it sends the module.
+             */
+            variant?: string;
+            /**
              * Send the prompt the way OpenCode's own notice deliveries do: a text part
              * flagged `synthetic`. The flag keeps the message out of the terminal's
              * human-turn rendering; OpenCode still persists it as an ordinary user row
@@ -681,6 +689,7 @@ export class RustTestHarness {
                 parts: [{ type: "text", text, ...(options.synthetic ? { synthetic: true } : {}) }],
                 ...(options.agent ? { agent: options.agent } : {}),
                 ...(options.messageID ? { messageID: options.messageID } : {}),
+                ...(options.variant ? { variant: options.variant } : {}),
             },
         });
         const timeout = new Promise<null>((r) => setTimeout(() => r(null), timeoutMs));
