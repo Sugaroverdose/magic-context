@@ -1,5 +1,6 @@
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
+import { historianRunConfig, pluginConfigReader } from '../../config/live-run-config';
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
 import { formatUnsupportedDreamTasks } from "../../features/magic-context/dreamer/task-registry";
@@ -24,6 +25,7 @@ import {
     getCurrentToolSetHash,
     recordToolDefinition,
 } from "../../features/magic-context/tool-definition-tokens";
+import { deriveHistorianChunkTokens, resolveHistorianContextLimit, resolveKnownHistorianContextLimit } from '../../hooks/magic-context/derive-budgets';
 import { assertExecutableToolInput } from "../../hooks/magic-context/dropped-input-guard";
 import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
 import { getSessionErrorInfo } from "../../hooks/magic-context/event-payloads";
@@ -326,6 +328,7 @@ export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
     const config = resolveV2TransformMode(loadPluginConfigDetailed(directory).config);
     if (!config.enabled) return;
+    const liveConfigReader = pluginConfigReader(directory, config);
     const compactionOff = !isCompactionEnabled(config);
     const conflicts = detectConflicts(directory, {
         compactionEnabled: !compactionOff,
@@ -461,6 +464,19 @@ export async function registerContext(context: V2Context) {
                   mural: config.mural,
               })
             : undefined;
+    const sampleHistorian = () => {
+        const fresh = historianRunConfig(config, liveConfigReader.poll().effective);
+        const models = resolveHistorianModel(fresh, "opencode");
+        return {
+            model: models.primary,
+            fallbackModels: models.fallbacks,
+            contextLimit: resolveKnownHistorianContextLimit(models.primary?.model),
+            maxOutputTokens: fresh.historian?.maxTokens,
+            timeoutMs: fresh.historian_timeout_ms,
+            twoPass: fresh.historian?.two_pass === true,
+            chunkTokens: deriveHistorianChunkTokens(resolveHistorianContextLimit(models.primary?.model)),
+        };
+    };
     const historianModels = resolveHistorianModel(config, "opencode");
     const channel1: NonNullable<TransformDeps["channel1StateBySession"]> = new Map();
     const variants = new Map<string, string | undefined>();
@@ -882,6 +898,7 @@ export async function registerContext(context: V2Context) {
                     config.historian?.disable !== true,
                 historianModel: historianModels.primary,
                 fallbackModels: historianModels.fallbacks,
+                resolveHistorianRun: sampleHistorian,
                 historianTimeoutMs: config.historian_timeout_ms,
                 // Raw config on purpose: absent means the user configured no
                 // output cap, and the hidden carrier only puts a cap on the wire

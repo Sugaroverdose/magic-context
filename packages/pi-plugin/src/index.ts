@@ -20,6 +20,8 @@
  *   Falls back to schema defaults when neither file exists.
  */
 
+import { historianRunConfig } from '@magic-context/core/config/live-run-config';
+import { LiveConfigReader } from '@magic-context/core/config/live-snapshot';
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -127,7 +129,7 @@ import {
 	resolveSessionId,
 	sendCtxStatusMessage,
 } from "./commands/pi-command-utils";
-import { loadPiConfig } from "./config";
+import { loadPiConfig, loadPiConfigDetailed } from "./config";
 import {
 	awaitInFlightHistorians,
 	clearContextHandlerSession,
@@ -1237,6 +1239,22 @@ async function startPiMagicContextRuntime(
 	// Resolve all project-sensitive config through this memoized accessor so
 	// every invocation reads the active cwd's config instead of the launch cwd's.
 	const projectDepsByDir = new Map<string, ResolvedPiProjectDeps>();
+	const liveReaders = new Map<string, LiveConfigReader<MagicContextConfig>>();
+	function liveReaderFor(dir: string, boot: MagicContextConfig) {
+		let reader = liveReaders.get(dir);
+		if (!reader) {
+			reader = new LiveConfigReader(dir, boot, () => {
+				const loaded = loadPiConfigDetailed({ cwd: dir }, false);
+				if (["project-file-parse-error", "project-file-io-error", "schema-recovery"].includes(loaded.loadOutcome)) {
+					throw new Error(`invalid configuration: ${loaded.warnings.join("; ")}`);
+				}
+				return loaded.config;
+			}, warn);
+			reader.poll();
+			liveReaders.set(dir, reader);
+		}
+		return reader;
+	}
 
 	const buildContextOptions = (
 		cfg: MagicContextConfig,
@@ -1307,6 +1325,7 @@ async function startPiMagicContextRuntime(
 		},
 	): ResolvedPiProjectDeps {
 		const hist = resolveHistorianFromConfig(cfg);
+		liveReaderFor(dir, cfg);
 		if (hist) {
 			hist.onStatusChange = (ctx) => {
 				updateStatusLine(ctx, {
@@ -1374,7 +1393,10 @@ async function startPiMagicContextRuntime(
 	function resolveContextOptionsForProject(
 		dir: string,
 	): PiContextHandlerOptions {
-		return resolveProjectDepsForDir(dir).contextOptions;
+		const project = resolveProjectDepsForDir(dir);
+		const sampled = historianRunConfig(project.config, liveReaderFor(dir, project.config).poll().effective);
+		const historian = resolveHistorianFromConfig(sampled);
+		return { ...project.contextOptions, historian };
 	}
 
 	const bootProjectDeps = buildProjectDeps(

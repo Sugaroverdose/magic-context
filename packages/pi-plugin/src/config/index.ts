@@ -515,6 +515,7 @@ function combinedOutcome(args: {
 
 export function loadPiConfigDetailed(
 	opts: LoadPiConfigOptions = {},
+	applyRuntimeGlobals = true,
 ): LoadPiConfigResultDetailed {
 	const cwd = opts.cwd ?? process.cwd();
 	const loadedFiles: LoadedConfigFile[] = [];
@@ -640,8 +641,10 @@ export function loadPiConfigDetailed(
 	});
 	if (profileResolution.activeProfile)
 		parsed.config.profile = profileResolution.activeProfile;
-	setOutputReserveConfig(parsed.config.output_reserve);
-	setWindowOverlayPath(parsed.config.models?.window_overlay_path);
+	if (applyRuntimeGlobals) {
+		setOutputReserveConfig(parsed.config.output_reserve);
+		setWindowOverlayPath(parsed.config.models?.window_overlay_path);
+	}
 	warnings.push(
 		...parsed.warnings.map((warning) => `[merged config] ${warning}`),
 	);

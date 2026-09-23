@@ -146,6 +146,7 @@ export interface MagicContextDeps {
     onSessionCacheInvalidated?: (sessionId: string) => void;
     compactionHandler: ReturnType<typeof createCompactionHandler>;
     liveSessionState?: LiveSessionState;
+    sampleHistorianConfig?: () => MagicContextDeps["config"];
     config: {
         protected_tokens?: number;
         protectedTokenTierOverrides?: ProtectedTokensTierOverrides;
@@ -378,15 +379,21 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     // context, not the main session model's. Re-derived per historian invocation
     // (matching RPC/TUI paths) so config/model changes take effect without
     // restart, and so all trigger sources produce consistent chunk sizes.
-    const resolveHistorianAttempts = () => resolveHistorianModel(deps.config, "opencode");
-    const getHistorianChunkTokens = (): number =>
-        deriveHistorianChunkTokens(
-            resolveHistorianContextLimit(resolveHistorianAttempts().primary?.model),
-        );
-    const historianModel = resolveHistorianAttempts().primary;
-    const historianContextLimit = resolveKnownHistorianContextLimit(historianModel?.model);
-    const historianMaxOutputTokens = deps.config.historian?.maxTokens ?? 32_000;
-    const historianFallbackModels = resolveHistorianAttempts().fallbacks;
+    const sampleHistorian = () => {
+        const config = deps.sampleHistorianConfig?.() ?? deps.config;
+        const attempts = resolveHistorianModel(config, "opencode");
+        return {
+            model: attempts.primary,
+            fallbackModels: attempts.fallbacks,
+            contextLimit: resolveKnownHistorianContextLimit(attempts.primary?.model),
+            maxOutputTokens: config.historian?.maxTokens ?? 32_000,
+            timeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+            twoPass: config.historian?.two_pass === true,
+            chunkTokens: deriveHistorianChunkTokens(resolveHistorianContextLimit(attempts.primary?.model)),
+        };
+    };
+    const bootHistorian = sampleHistorian();
+    const getHistorianChunkTokens = (): number => sampleHistorian().chunkTokens;
 
     // Three independent cache-busting signal sets, sourced from the
     // process-scoped LiveSessionState so RPC handlers (TUI recomp) can
@@ -511,7 +518,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     // resolved here with the OpenCode-DB recovery (resolveLiveModel) so the
     // last-resort fallback model is known even when a command is invoked before
     // the first transform pass populates the map.
-    const buildManagedRecompCtx = (sessionId: string): ManagedRecompContext => ({
+    const buildManagedRecompCtx = (sessionId: string): ManagedRecompContext => {
+        const historianRun = sampleHistorian();
+        return {
         client: deps.client,
         db,
         // Pass the SAME map/set instances the hook uses so the orchestrator's
@@ -534,20 +543,20 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             internalChildSessions,
         },
         directory: deps.directory,
-        historianChunkTokens: getHistorianChunkTokens(),
-        historianTimeoutMs: deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+        historianChunkTokens: historianRun.chunkTokens,
+        historianTimeoutMs: historianRun.timeoutMs,
         memoryEnabled: deps.config.memory?.enabled ?? true,
         autoPromote: deps.config.memory?.auto_promote ?? true,
-        historianModel,
-        historianContextLimit,
-        historianMaxOutputTokens,
-        fallbackModels: historianFallbackModels,
+        historianModel: historianRun.model,
+        historianContextLimit: historianRun.contextLimit,
+        historianMaxOutputTokens: historianRun.maxOutputTokens,
+        fallbackModels: historianRun.fallbackModels,
         language: deps.config.language,
         fallbackModelId: (() => {
             const model = resolveLiveModel(sessionId);
             return model ? `${model.providerID}/${model.modelID}` : undefined;
         })(),
-        historianTwoPass: deps.config.historian?.two_pass === true,
+        historianTwoPass: historianRun.twoPass,
         // Option C privacy gate: behavioral observation candidates are collected
         // during historian runs only when the user has SCHEDULED the
         // review-user-memories task (schedule != ""). Replaces the v1
@@ -562,7 +571,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 agentBySession,
                 deps.config.toast_duration_ms,
             ),
-    });
+        };
+    };
     const buildManagedWrapupCtx = (sessionId: string): ManagedWrapupContext => ({
         ...buildManagedRecompCtx(sessionId),
         contextLimit: (() => {
@@ -1130,11 +1140,12 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         historyBudgetPercentage: deps.config.history_budget_percentage,
         executeThresholdPercentage: deps.config.execute_threshold_percentage,
         executeThresholdTokens: deps.config.execute_threshold_tokens,
-        historianTimeoutMs: deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
-        historianModel,
-        historianContextLimit,
-        historianMaxOutputTokens,
-        fallbackModels: historianFallbackModels,
+        historianTimeoutMs: bootHistorian.timeoutMs,
+        historianModel: bootHistorian.model,
+        historianContextLimit: bootHistorian.contextLimit,
+        historianMaxOutputTokens: bootHistorian.maxOutputTokens,
+        fallbackModels: bootHistorian.fallbackModels,
+        resolveHistorianRun: sampleHistorian,
         getNotificationParams: (sessionId) =>
             getLiveNotificationParams(
                 sessionId,

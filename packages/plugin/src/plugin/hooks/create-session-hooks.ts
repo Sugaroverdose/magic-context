@@ -1,4 +1,6 @@
 import type { MagicContextPluginConfig } from "../../config";
+import { historianRunConfig } from "../../config/live-run-config";
+import type { LiveConfigReader } from "../../config/live-snapshot";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "../../config/schema/magic-context";
 import { createCompactionHandler } from "../../features/magic-context/compaction";
@@ -42,6 +44,7 @@ export function buildMagicContextHookConfig(pluginConfig: MagicContextPluginConf
 export function createSessionHooks(args: {
     ctx: PluginContext;
     pluginConfig: MagicContextPluginConfig;
+    liveConfigReader?: LiveConfigReader<MagicContextPluginConfig>;
     liveSessionState: LiveSessionState;
     rustModeModuleClient?: RustModeModuleClient;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
@@ -69,6 +72,9 @@ export function createSessionHooks(args: {
         rustModeModuleClient: args.rustModeModuleClient,
         promptSurfaceRuntime: args.promptSurfaceRuntime,
         config: buildMagicContextHookConfig(pluginConfig),
+        sampleHistorianConfig: args.liveConfigReader
+            ? () => buildMagicContextHookConfig(historianRunConfig(pluginConfig, args.liveConfigReader!.poll().effective))
+            : undefined,
     });
 
     return {
@@ -80,6 +86,7 @@ export function createSessionHooks(args: {
 export async function createSessionHooksAsync(args: {
     ctx: PluginContext;
     pluginConfig: MagicContextPluginConfig;
+    liveConfigReader?: LiveConfigReader<MagicContextPluginConfig>;
     liveSessionState: LiveSessionState;
     rustModeModuleClient?: RustModeModuleClient;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
@@ -109,6 +116,9 @@ export async function createSessionHooksAsync(args: {
         promptSurfaceRuntime: args.promptSurfaceRuntime,
         onStorageBootTimings: args.onStorageBootTimings,
         config: buildMagicContextHookConfig(pluginConfig),
+        sampleHistorianConfig: args.liveConfigReader
+            ? () => buildMagicContextHookConfig(historianRunConfig(pluginConfig, args.liveConfigReader!.poll().effective))
+            : undefined,
     });
 
     return {

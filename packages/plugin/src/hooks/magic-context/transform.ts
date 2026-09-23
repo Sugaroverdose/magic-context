@@ -679,6 +679,15 @@ export interface TransformDeps {
     historianMaxOutputTokens?: number;
     /** Resolved fallback chain for historian-family calls. */
     fallbackModels?: readonly ModelInput[];
+    resolveHistorianRun?: () => {
+        model?: ModelInput;
+        fallbackModels: readonly ModelInput[];
+        contextLimit?: number;
+        maxOutputTokens?: number;
+        timeoutMs: number;
+        twoPass: boolean;
+        chunkTokens: number;
+    };
     /** False when historian.disable=true, blocking historian-backed child agents. */
     historianRunnable?: boolean;
     /**
@@ -1667,6 +1676,7 @@ export function createTransform(deps: TransformDeps) {
                 return false;
             }
 
+            const historianRun = deps.resolveHistorianRun?.();
             updateSessionMeta(db, sessionId, { compartmentInProgress: true });
             startCompartmentAgent({
                 client: deps.client,
@@ -1674,19 +1684,19 @@ export function createTransform(deps: TransformDeps) {
                 compactionMarkerStrategy: deps.compactionMarkerStrategy,
                 db,
                 sessionId,
-                historianChunkTokens: deps.getHistorianChunkTokens?.() ?? 20_000,
+                historianChunkTokens: historianRun?.chunkTokens ?? deps.getHistorianChunkTokens?.() ?? 20_000,
                 boundarySnapshot,
                 currentContextLimit: boundaryContextLimit,
                 historyBudgetTokens,
-                historianTimeoutMs: deps.historianTimeoutMs,
-                model: deps.historianModel,
-                fallbackModels: deps.fallbackModels,
+                historianTimeoutMs: historianRun?.timeoutMs ?? deps.historianTimeoutMs,
+                model: historianRun?.model ?? deps.historianModel,
+                fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
                 directory: compartmentDirectory,
                 fallbackModelId,
                 getNotificationParams: () => notificationParams,
                 experimentalUserMemories: deps.experimentalUserMemories,
                 experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
-                historianTwoPass: deps.historianTwoPass,
+                historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
                 // Issue #44: gate historian-driven memory promotion so users
                 // who disable the feature actually see no memories created.
                 memoryEnabled: deps.memoryConfig?.enabled,
@@ -2242,6 +2252,7 @@ export function createTransform(deps: TransformDeps) {
         let contextUsage = contextUsageEarly;
         const rawGetNotifParams = deps.getNotificationParams;
         const tCompartmentPhase = performance.now();
+        const historianRun = deps.resolveHistorianRun?.();
         const compartmentPhase = await runCompartmentPhase({
             hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
             compactionMarkerStrategy: deps.compactionMarkerStrategy,
@@ -2260,13 +2271,13 @@ export function createTransform(deps: TransformDeps) {
             db,
             sessionId,
             resolvedSessionId,
-            historianChunkTokens: deps.getHistorianChunkTokens?.() ?? 20_000,
+            historianChunkTokens: historianRun?.chunkTokens ?? deps.getHistorianChunkTokens?.() ?? 20_000,
             historyBudgetTokens,
-            historianTimeoutMs: deps.historianTimeoutMs,
-            historianModel: deps.historianModel,
-            historianContextLimit: deps.historianContextLimit,
-            historianMaxOutputTokens: deps.historianMaxOutputTokens,
-            fallbackModels: deps.fallbackModels,
+            historianTimeoutMs: historianRun?.timeoutMs ?? deps.historianTimeoutMs,
+            historianModel: historianRun?.model ?? deps.historianModel,
+            historianContextLimit: historianRun?.contextLimit ?? deps.historianContextLimit,
+            historianMaxOutputTokens: historianRun?.maxOutputTokens ?? deps.historianMaxOutputTokens,
+            fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
             compartmentDirectory,
             messages,
             pendingCompartmentInjection,
@@ -2284,7 +2295,7 @@ export function createTransform(deps: TransformDeps) {
             deferredHistoryRefreshSessions,
             experimentalUserMemories: deps.experimentalUserMemories,
             experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
-            historianTwoPass: deps.historianTwoPass,
+            historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
             // Issue #44: forward memory gating so the normal historian path
             // (not just the recovery path above) honors memory.enabled and
             // memory.auto_promote.
