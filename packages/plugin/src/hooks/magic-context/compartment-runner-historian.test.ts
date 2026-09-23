@@ -232,3 +232,72 @@ test("32k historian reaches the provider without a configured output cap and sur
     expect(result.error).toContain("finish=error");
     expect(result.error).not.toContain("Historian returned no assistant output");
 });
+
+// Reporter shape from a Regolo setup: opencode.json sets limit.context to
+// 120,000 while the provider catalog advertises 262,144. A live OpenCode 1.18
+// host returns the configured 120,000 from config.providers() (the catalog value
+// never reaches the plugin), so the historian must refuse a prompt that only
+// fits the advertised window. The advertised payload is run first as a control:
+// the same prompt reaches the provider there, which proves the refusal comes
+// from the window value and not from something else in the prompt.
+test("historian refuses a prompt sized for an advertised window larger than the configured limit.context", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "mc-historian-configured-window-"));
+    tempDirs.push(directory);
+    process.env.XDG_DATA_HOME = directory;
+    const db = openDatabase();
+    // About 175K calibrated provider tokens: over the 120K window's admission
+    // limit (~100K after the output reserve and margin), under the 262K one's (~238K).
+    const prompt = `Messages 1-1:\n1: U: ${"alpha beta gamma delta ".repeat(20_000)}`;
+    const runWithWindow = async (context: number, parentSessionId: string) => {
+        clearModelsDevCache();
+        await refreshModelLimitsFromApi({
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            {
+                                id: "regolo-ai",
+                                models: {
+                                    "qwen3.5-122b": { limit: { context, output: 16_384 } },
+                                },
+                            },
+                        ],
+                    },
+                }),
+            },
+        });
+        const prompted = mock(async () => ({ data: { info: { role: "assistant" }, parts: [] } }));
+        const client = {
+            session: {
+                create: async () => ({ data: { id: `child-${parentSessionId}` } }),
+                prompt: prompted,
+                messages: async () => ({ data: [] }),
+                delete: async () => ({}),
+            },
+        } as unknown as PluginContext["client"];
+        const result = await runValidatedHistorianPass({
+            model: "regolo-ai/qwen3.5-122b",
+            client,
+            db,
+            parentSessionId,
+            sessionDirectory: directory,
+            prompt,
+            // The control run only needs to reach the provider; its empty reply
+            // should not wait out the default historian timeout.
+            timeoutMs: 500,
+            chunk: { startIndex: 1, endIndex: 1, lines: [{ ordinal: 1, messageId: "message-1" }] },
+            priorCompartments: [],
+            sequenceOffset: 0,
+            dumpLabelBase: parentSessionId,
+        });
+        return { result, promptCalls: prompted.mock.calls.length };
+    };
+
+    const advertised = await runWithWindow(262_144, "parent-advertised-window");
+    expect(advertised.promptCalls).toBeGreaterThan(0);
+
+    const configured = await runWithWindow(120_000, "parent-configured-window");
+    expect(configured.promptCalls).toBe(0);
+    expect(configured.result.ok).toBe(false);
+    expect(configured.result.error).toContain("producer_prompt_exceeds_window");
+}, 60_000);
