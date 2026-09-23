@@ -67,6 +67,28 @@ describe("computeM0BlockTokens", () => {
         expect(b.compartmentTokens).toBeGreaterThan(0);
     });
 
+    test("counts compartments published since the last m[0] fold from m[1]", () => {
+        // Between m[0] folds, newly published compartments are served in m[1]'s
+        // <new-compartments> block while m[0] keeps its older (here: empty)
+        // <session-history>. The bucket must count both or it stays pinned at
+        // the empty wrapper's size however many compartments are published.
+        const db = makeDb();
+        const m0History = "<session-history>\n</session-history>";
+        const newCompartments =
+            "<new-compartments>\n## 11-14 · Continued runtime inspection\nRead production, gear and ABI record code before implementing the plan.\n</new-compartments>";
+        const b = computeM0BlockTokens(db, SESSION_ID, {
+            m0Text: m0History,
+            m1Text: `<session-history-since>\n${newCompartments}\n</session-history-since>`,
+            projectIdentity: undefined,
+            injectionBudgetTokens: undefined,
+            memoryBlockCount: 0,
+        });
+        expect(b.compartmentTokens).toBe(
+            estimateTokens(m0History) + estimateTokens(newCompartments),
+        );
+        db.close();
+    });
+
     test("uses module history cost when Rust owns the materialized m[0]", () => {
         const db = makeDb();
         db.prepare(

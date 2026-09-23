@@ -450,6 +450,39 @@ describe("buildSidebarSnapshot — persisted tail hygiene", () => {
     });
 });
 
+describe("buildSidebarSnapshot — compartments served in m[1]", () => {
+    test("counts compartments published since the last m[0] fold", () => {
+        const db = createTestDb();
+        try {
+            const sessionId = "ses-sidebar-m1-compartments";
+            const m0History = "<session-history>\n</session-history>";
+            const newCompartments =
+                "<new-compartments>\n## 11-14 · Continued runtime inspection\nRead production, gear and ABI record code before implementing the plan.\n</new-compartments>";
+            db.prepare(
+                `INSERT INTO session_meta (
+                    session_id, last_input_tokens, last_context_percentage,
+                    system_prompt_tokens, memory_block_cache, memory_block_count,
+                    cached_m0_bytes, cached_m1_bytes
+                ) VALUES (?, 50000, 25, 5000, '', 0, ?, ?)`,
+            ).run(
+                sessionId,
+                Buffer.from(m0History, "utf8"),
+                Buffer.from(
+                    `<session-history-since>\n${newCompartments}\n</session-history-since>`,
+                    "utf8",
+                ),
+            );
+
+            const snapshot = buildSidebarSnapshot(db, sessionId, process.cwd(), undefined, 4000);
+            expect(snapshot.compartmentTokens).toBe(
+                estimateTokens(m0History) + estimateTokens(newCompartments),
+            );
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
 describe("buildSidebarSnapshot — memory tokens fallback (bug #1)", () => {
     test("computes memoryTokens on-demand when memory_block_cache is empty but memory_block_count > 0", () => {
         const db = createTestDb();

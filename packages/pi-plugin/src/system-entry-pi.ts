@@ -204,6 +204,16 @@ export function adoptPiCompactionSystemSnapshot(
 			"systemMessage" in entry && isPiSystemEntry(entry.systemMessage)
 				? entry.systemMessage
 				: null;
+		// Pi 0.87+ withholds system messages from `context` handlers and restores
+		// the prompt and tools itself after they run (runner.js emitContext). A
+		// folding input with no system message at all therefore never exposed
+		// system state that Magic Context could have changed, and the host's
+		// checkpoint is its own journal state. Adopt it without inserting system
+		// messages the host would restore a second time. Older transcripts with no
+		// system entries reach the same result through the equality check below.
+		if (systemMessage && !messages.some(isPiSystemEntry)) {
+			return { kind: "adopted" };
+		}
 		const postBoundaryDeltas = entries
 			.slice(compactionIndex + 1)
 			.filter(isPiSystemMessageEntry)

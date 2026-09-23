@@ -439,15 +439,15 @@ export function buildSidebarSnapshot(
         // session-history) is computed by the SHARED helper so the OpenCode
         // sidebar and the Pi /ctx-status dialog can never diverge on what the
         // categories are or how they're measured.
-        const m0Bytes = meta?.cached_m0_bytes;
-        const m0Text =
-            m0Bytes instanceof Uint8Array
-                ? Buffer.from(m0Bytes).toString("utf8")
-                : typeof m0Bytes === "string"
-                  ? (m0Bytes as string)
+        const decodeCachedBytes = (bytes: unknown): string =>
+            bytes instanceof Uint8Array
+                ? Buffer.from(bytes).toString("utf8")
+                : typeof bytes === "string"
+                  ? bytes
                   : "";
         const m0Blocks = computeM0BlockTokens(db, sessionId, {
-            m0Text,
+            m0Text: decodeCachedBytes(meta?.cached_m0_bytes),
+            m1Text: decodeCachedBytes(meta?.cached_m1_bytes),
             projectIdentity,
             injectionBudgetTokens,
             memoryBlockCount,

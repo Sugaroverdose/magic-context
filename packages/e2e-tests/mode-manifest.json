@@ -907,6 +907,39 @@
             ]
         },
         {
+            "path": "tests/pi-compartments-bucket.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "pins the Pi host lane's Pi release and reads the TypeScript m[0]/m[1] cache that the Pi /ctx-status Compartments bucket measures",
+            "contract_refs": [
+                "PI-HARNESS"
+            ],
+            "hosts": [
+                "pi"
+            ],
+            "behavior": true,
+            "divergences": [
+                {
+                    "host": "opencode",
+                    "reason": "the OpenCode sidebar reads the same shared bucket helper, covered by the rpc-handlers unit test",
+                    "contract_ref": "PI-HARNESS"
+                },
+                {
+                    "host": "opencode2",
+                    "reason": "the OpenCode sidebar reads the same shared bucket helper, covered by the rpc-handlers unit test",
+                    "contract_ref": "PARITY.md#identical-effective-behavior"
+                },
+                {
+                    "host": "omp",
+                    "reason": "the scenario pins the Pi release that reported the stuck bucket",
+                    "contract_ref": "PI-HARNESS"
+                }
+            ]
+        },
+        {
             "path": "tests/pi-rust-degradation-arc-1.test.ts",
             "tier": "rust-only",
             "invocation": {

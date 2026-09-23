@@ -658,17 +658,20 @@ export function buildPiStatusDetail(
 
 	// v2 m[0] per-block attribution via the SHARED core helper so the Pi dialog
 	// renders byte-identical categories to OpenCode's sidebar (Docs / User
-	// Profile / Memories / Compartments measured from the real cached_m0 slice;
+	// Profile / Memories / Compartments measured from the real cached_m0 slice,
+	// with Compartments also counting those still served in cached_m1;
 	// Facts retired → 0). Falls back to Σp1 / on-demand v2 memory render cold.
-	const m0Bytes = metaRow?.cached_m0_bytes;
-	const m0Text =
-		m0Bytes instanceof Uint8Array
-			? Buffer.from(m0Bytes).toString("utf8")
-			: typeof m0Bytes === "string"
-				? m0Bytes
+	const decodeCachedBytes = (
+		bytes: Buffer | Uint8Array | string | null | undefined,
+	): string =>
+		bytes instanceof Uint8Array
+			? Buffer.from(bytes).toString("utf8")
+			: typeof bytes === "string"
+				? bytes
 				: "";
 	const m0Blocks = computeM0BlockTokens(deps.db, sessionId, {
-		m0Text,
+		m0Text: decodeCachedBytes(metaRow?.cached_m0_bytes),
+		m1Text: decodeCachedBytes(metaRow?.cached_m1_bytes),
 		projectIdentity: deps.projectIdentity,
 		injectionBudgetTokens: deps.injectionBudgetTokens,
 		memoryBlockCount,
@@ -999,12 +1002,13 @@ function readSessionMetaRow(db: ContextDatabase, sessionId: string) {
 				memory_block_cache: string | null;
 				memory_block_count: number | null;
 				cached_m0_bytes: Buffer | Uint8Array | string | null;
+				cached_m1_bytes: Buffer | Uint8Array | string | null;
 				historian_failure_count: number | null;
 				historian_last_failure_at: number | null;
 				historian_last_error: string | null;
 			}
 		>(
-			"SELECT memory_block_cache, memory_block_count, cached_m0_bytes, historian_failure_count, historian_last_failure_at, historian_last_error FROM session_meta WHERE session_id = ?",
+			"SELECT memory_block_cache, memory_block_count, cached_m0_bytes, cached_m1_bytes, historian_failure_count, historian_last_failure_at, historian_last_error FROM session_meta WHERE session_id = ?",
 		)
 		.get(sessionId);
 }
