@@ -55,6 +55,12 @@ describe("tool input preservation", () => {
                     },
                 ],
             },
+            // A later prompt, so this call does not end the conversation (drop()
+            // keeps that one as a skeleton instead of removing it).
+            {
+                info: { id: "m-next", role: "user", sessionID: "ses-1" },
+                parts: [{ type: "text", text: "next prompt" }],
+            },
         ];
 
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
@@ -64,6 +70,6 @@ describe("tool input preservation", () => {
         const dropResult = targets.get(toolTagId!)?.drop?.();
         expect(dropResult).toBe("removed");
         batch.finalize();
-        expect(messages).toHaveLength(0);
+        expect(messages.map((message) => message.info.id)).toEqual(["m-next"]);
     });
 });

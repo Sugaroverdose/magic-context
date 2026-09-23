@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     closeDatabase,
+    getMaxTagNumberBySession,
     getPendingOps,
     getTagById,
     insertTag,
@@ -53,8 +54,10 @@ function padSkeletonWindow(
     db: ReturnType<typeof openDatabase> & object,
     realTagNumber: number,
 ): void {
+    // Start above every existing tag: fixtures may tag messages after the tool.
+    const base = Math.max(realTagNumber, getMaxTagNumberBySession(db, "ses-1"));
     for (let i = 1; i <= 20; i += 1) {
-        insertTag(db, "ses-1", `call-pad-${i}`, "tool", 10, realTagNumber + i);
+        insertTag(db, "ses-1", `call-pad-${i}`, "tool", 10, base + i);
     }
 }
 
@@ -94,6 +97,12 @@ describe("apply operations for tool drops", () => {
             {
                 info: { id: "m-tool", role: "tool", sessionID: "ses-1" },
                 parts: [{ type: "tool", callID: "call-1", state: { output: "result" } }],
+            },
+            // A later prompt, so this call does not end the conversation (drop()
+            // keeps that one as a skeleton instead of removing it).
+            {
+                info: { id: "m-next", role: "user", sessionID: "ses-1" },
+                parts: [{ type: "text", text: "next prompt" }],
             },
         ];
 
@@ -529,6 +538,12 @@ describe("apply operations for tool drops", () => {
                     },
                 ],
             },
+            // A later prompt, so this call does not end the conversation (drop()
+            // keeps that one as a skeleton instead of removing it).
+            {
+                info: { id: "m-next", role: "user", sessionID: "ses-1" },
+                parts: [{ type: "text", text: "next prompt" }],
+            },
         ];
 
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
@@ -562,6 +577,12 @@ describe("apply operations for tool drops", () => {
                     { type: "step-finish", reason: "tool-calls" },
                 ],
             },
+            // A later prompt, so this call does not end the conversation (drop()
+            // keeps that one as a skeleton instead of removing it).
+            {
+                info: { id: "m-next", role: "user", sessionID: "ses-1" },
+                parts: [{ type: "text", text: "next prompt" }],
+            },
         ];
 
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
@@ -575,7 +596,7 @@ describe("apply operations for tool drops", () => {
 
         expect(didMutate).toBe(true);
         expect(hasCall(messages, "call-3")).toBe(false);
-        expect(messages).toHaveLength(2);
+        expect(messages).toHaveLength(3);
         expect(messages[1]?.parts.map((part) => (part as { type?: string }).type)).toEqual([
             "step-start",
             "text",
@@ -600,6 +621,12 @@ describe("apply operations for tool drops", () => {
                     { type: "step-finish", reason: "tool-calls" },
                 ],
             },
+            // A later prompt, so this call does not end the conversation (drop()
+            // keeps that one as a skeleton instead of removing it).
+            {
+                info: { id: "m-next", role: "user", sessionID: "ses-1" },
+                parts: [{ type: "text", text: "next prompt" }],
+            },
         ];
 
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
@@ -613,8 +640,7 @@ describe("apply operations for tool drops", () => {
 
         expect(didMutate).toBe(true);
         expect(hasCall(messages, "call-4")).toBe(false);
-        expect(messages).toHaveLength(1);
-        expect(messages[0]?.info.id).toBe("m-user");
+        expect(messages.map((message) => message.info.id)).toEqual(["m-user", "m-next"]);
     });
 
     it("clears stale drop ops for compacted tags", () => {

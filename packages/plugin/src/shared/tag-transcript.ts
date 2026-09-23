@@ -66,7 +66,7 @@ import {
     stripWellFormedLeadingTagPrefix,
 } from "../hooks/magic-context/tag-content-primitives";
 import type { TagTarget } from "../hooks/magic-context/tag-messages";
-import type { Transcript, TranscriptPart } from "./transcript";
+import type { Transcript, TranscriptMessage, TranscriptPart } from "./transcript";
 
 export const TEXT_TAG_IDENTITY_MARKER = ":mc-text-v1:";
 
@@ -236,6 +236,8 @@ export function tagTranscript(
     // atomicity we need. Removing the wrapper matches OpenCode's
     // tag-messages.ts design — see the long comment there for the
     // rationale (cache-bust amplifier story).
+    const conversationEnd = new ConversationEndGuard(transcript.messages);
+
     for (let msgIndex = 0; msgIndex < transcript.messages.length; msgIndex += 1) {
         const message = transcript.messages[msgIndex];
         if (message === undefined) continue;
@@ -436,6 +438,7 @@ export function tagTranscript(
                         aggregate: existing,
                         targets,
                         timing,
+                        conversationEnd,
                     });
                     if (part.kind === "tool_result") {
                         markToolAggregateResolved(
@@ -566,6 +569,7 @@ export function tagTranscript(
                     aggregate,
                     targets,
                     timing,
+                    conversationEnd,
                 });
                 if (part.kind === "tool_result") {
                     markToolAggregateResolved(callId, aggregateKey, openToolAggregateKeysByCallId);
@@ -678,6 +682,56 @@ interface ApplyToolPrefixAndTargetArgs {
     aggregate: ToolAggregate;
     targets: Map<number, TagTarget>;
     timing: TagTranscriptTiming | undefined;
+    conversationEnd: ConversationEndGuard;
+}
+
+function partHasContent(part: TranscriptPart): boolean {
+    return part.kind !== "text" || (part.getText() ?? "").trim().length > 0;
+}
+
+/**
+ * Keeps structural tool removal from ending the provider request on an
+ * assistant turn, which models without assistant prefill support reject.
+ *
+ * The request ends with the newest message that has any content. Tool results
+ * there are what close the conversation with a user turn, so removal may take
+ * one only while that message keeps other content. Shared by every target one
+ * tagging pass builds, so drops earlier in the same pass count as removed.
+ */
+class ConversationEndGuard {
+    private readonly end: TranscriptMessage | undefined;
+    private readonly removed = new Set<unknown>();
+
+    constructor(messages: readonly TranscriptMessage[]) {
+        for (let index = messages.length - 1; index >= 0 && !this.end; index -= 1) {
+            const message = messages[index];
+            if (message?.parts.some(partHasContent)) this.end = message;
+        }
+    }
+
+    wouldStrand(occurrences: readonly ToolOccurrence[]): boolean {
+        const end = this.end;
+        if (!end || !occurrences.some((occ) => occ.message === end)) return false;
+        const leaving = new Set(occurrences.map((occ) => partKey(occ.part)));
+        const survives = (part: TranscriptPart) =>
+            !leaving.has(partKey(part)) && !this.removed.has(partKey(part));
+        return end.info.role === "assistant"
+            ? !end.parts.some((part) => part.kind === "tool_result" && survives(part))
+            : !end.parts.some((part) => partHasContent(part) && survives(part));
+    }
+
+    noteRemoved(occurrences: readonly ToolOccurrence[]): void {
+        for (const occ of occurrences) this.removed.add(partKey(occ.part));
+    }
+}
+
+/**
+ * Adapters may hand out a fresh proxy object per read of `message.parts`, so
+ * tool parts are matched by kind and tool-call id; parts without an id fall
+ * back to object identity.
+ */
+function partKey(part: TranscriptPart): unknown {
+    return part.id === undefined ? part : `${part.kind}\u0000${part.id}`;
 }
 
 function applyToolPrefixAndTarget(args: ApplyToolPrefixAndTargetArgs): void {
@@ -693,6 +747,7 @@ function applyToolPrefixAndTarget(args: ApplyToolPrefixAndTargetArgs): void {
             args.tagId,
             args.aggregate.occurrences,
             args.aggregate.requiresToolArcSkeleton,
+            args.conversationEnd,
         ),
     );
     if (args.timing) args.timing.targets += performance.now() - targetStart;
@@ -1030,9 +1085,25 @@ function buildAggregateTarget(
     tagId: number,
     occurrences: ToolOccurrence[],
     requiresToolArcSkeleton: boolean,
+    conversationEnd?: ConversationEndGuard,
 ): TagTarget {
     const role = occurrences[0]?.message.info.role ?? "user";
     const messageId = occurrences[0]?.message.info.id;
+
+    const truncate = (): "truncated" | "absent" => {
+        // Keep the tool call and its result, but replace the call arguments with
+        // a non-executable marker and the result content with the dropped marker.
+        const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
+        let any = false;
+        for (const occ of occurrences) {
+            if (occ.kind === "tool_use" && occ.part.setToolInput) {
+                if (occ.part.setToolInput(droppedInputMarker(tagId))) any = true;
+            } else if (setToolContentOrText(occ.part, sentinel)) {
+                any = true;
+            }
+        }
+        return any ? "truncated" : "absent";
+    };
 
     return {
         measureReclaim(skeleton) {
@@ -1091,7 +1162,7 @@ function buildAggregateTarget(
             }
             return occurrences[0]?.part.getText() ?? null;
         },
-        drop(): "removed" | "absent" | "incomplete" {
+        drop(): "removed" | "truncated" | "absent" | "incomplete" {
             const complete =
                 occurrences.some((occ) => occ.kind === "tool_use") &&
                 occurrences.some((occ) => occ.kind === "tool_result");
@@ -1106,8 +1177,16 @@ function buildAggregateTarget(
                         (occ, index) => occ.part.remove && authorization[index] !== false,
                     )
                 ) {
+                    // If removing this call's result would leave the provider
+                    // request ending on an assistant turn, keep a call skeleton
+                    // plus placeholder result instead. "truncated" tells callers
+                    // to persist that mode, so later passes serve the same bytes.
+                    // (The sentinel fallback below keeps call and result in place,
+                    // so it needs no exception.)
+                    if (conversationEnd?.wouldStrand(occurrences)) return truncate();
                     let removed = false;
                     for (const occ of occurrences) removed = occ.part.remove?.() || removed;
+                    if (removed) conversationEnd?.noteRemoved(occurrences);
                     return removed ? "removed" : "absent";
                 }
             }
@@ -1119,20 +1198,7 @@ function buildAggregateTarget(
             }
             return any ? "removed" : "absent";
         },
-        truncate(): "truncated" | "absent" {
-            // Keep the paired call shell, but replace its arguments with one
-            // non-executable marker; result halves carry the matching sentinel.
-            const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
-            let any = false;
-            for (const occ of occurrences) {
-                if (occ.kind === "tool_use" && occ.part.setToolInput) {
-                    if (occ.part.setToolInput(droppedInputMarker(tagId))) any = true;
-                } else if (setToolContentOrText(occ.part, sentinel)) {
-                    any = true;
-                }
-            }
-            return any ? "truncated" : "absent";
-        },
+        truncate,
         editMarker(): "truncated" | "absent" {
             // Edit-marker: preserve the tool_use input's filePath + a region
             // hint of the diff, sentinelize the result half. Separate from

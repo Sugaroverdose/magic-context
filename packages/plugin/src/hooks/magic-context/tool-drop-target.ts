@@ -300,6 +300,31 @@ export class ToolMutationBatch {
         this.affectedMessages.add(occurrence.message);
     }
 
+    /**
+     * Would removing `occurrences` (on top of everything already marked in this
+     * batch) leave the provider request ending on an assistant turn?
+     *
+     * The request ends with the newest message that has any content (a blank
+     * pending assistant shell after it does not count). When that message is an
+     * assistant, its tool results are what the provider sees as the closing user
+     * turn, so at least one must survive. Any other role must keep some content,
+     * or the sweep removes it and an earlier assistant becomes the end. Models
+     * without assistant prefill support reject an assistant-terminated request.
+     */
+    wouldStrandConversationEnd(occurrences: readonly IndexedOccurrence[]): boolean {
+        const served = this.servedMessages ?? this.messages;
+        let end: MessageLike | undefined;
+        for (let i = served.length - 1; i >= 0 && end === undefined; i -= 1) {
+            if (served[i].parts.some(hasMeaningfulPart)) end = served[i];
+        }
+        if (!end || !occurrences.some((occurrence) => occurrence.message === end)) return false;
+        const leaving = new Set(occurrences.map((occurrence) => occurrence.part));
+        const survives = (part: unknown) => !leaving.has(part) && !this.partsToRemove.has(part);
+        return end.info.role === "assistant"
+            ? !end.parts.some((part) => partHasCompletedResult(part) && survives(part))
+            : !end.parts.some((part) => hasMeaningfulPart(part) && survives(part));
+    }
+
     finalize(): void {
         if (this.partsToRemove.size === 0) return;
 
@@ -409,6 +434,11 @@ export function createToolDropTarget(
         const entry = index.get(compositeKey);
         if (!entry || entry.occurrences.length === 0) return "absent";
         if (!entry.hasResult) return "incomplete";
+        // If removing this call's result would leave the provider request ending
+        // on an assistant turn, keep a call skeleton plus placeholder result
+        // instead. "truncated" tells callers to persist that mode, so later
+        // passes serve the same bytes once newer turns follow.
+        if (batch.wouldStrandConversationEnd(entry.occurrences)) return truncate();
 
         for (const occurrence of entry.occurrences) {
             batch.markForRemoval(occurrence);

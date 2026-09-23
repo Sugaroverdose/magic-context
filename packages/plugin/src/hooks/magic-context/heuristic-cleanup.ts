@@ -180,11 +180,14 @@ export function applyHeuristicCleanup(
                           : (target?.drop?.() ?? "absent");
                     if (result === "removed" || result === "truncated") {
                         updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
+                        // drop() keeps a skeleton instead of removing the last tool
+                        // result the request ends with (removing it would end the
+                        // request on an assistant turn), so persist the mode applied.
                         updateTagDropMode(
                             db,
                             sessionId,
                             tag.tagNumber,
-                            skeleton ? "truncated" : "full",
+                            skeleton || result === "truncated" ? "truncated" : "full",
                         );
                         droppedTools++;
                         emergencyDroppedTools++;
@@ -316,7 +319,12 @@ export function applyHeuristicCleanup(
                     // arm preserves skeleton bytes.
                     const result = target?.drop?.() ?? "absent";
                     if (result === "incomplete") continue;
-                    updateTagDropMode(db, sessionId, tag.tagNumber, "full");
+                    updateTagDropMode(
+                        db,
+                        sessionId,
+                        tag.tagNumber,
+                        result === "truncated" ? "truncated" : "full",
+                    );
                     updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
                     if (result === "removed" || result === "truncated") {
                         deduplicatedTools++;

@@ -204,19 +204,26 @@ export function applyPendingOperations(
                         const dropResult = target?.drop?.() ?? "absent";
                         if (
                             dropResult === "incomplete" ||
-                            (synthetic && dropResult !== "removed")
+                            (synthetic &&
+                                dropResult !== "removed" &&
+                                dropResult !== "truncated")
                         ) {
                             reject(`drop_${dropResult}`);
                             continue;
                         }
-                        if (dropResult === "removed") {
+                        // drop() keeps a skeleton instead of removing the last tool
+                        // result the request ends with (removing it would end the
+                        // request on an assistant turn); persist the mode applied so
+                        // replays match this pass.
+                        const appliedMode = dropResult === "truncated" ? "truncated" : "full";
+                        if (dropResult === "removed" || dropResult === "truncated") {
                             didMutateMessage = true;
                             operationMutated = true;
-                            onTagReduced?.({ tagNumber: pendingOp.tagId, mode: "full" });
+                            onTagReduced?.({ tagNumber: pendingOp.tagId, mode: appliedMode });
                         } else {
                             reject(`drop_${dropResult}`);
                         }
-                        updateTagDropMode(db, sessionId, pendingOp.tagId, "full");
+                        updateTagDropMode(db, sessionId, pendingOp.tagId, appliedMode);
                         shouldPersistDrop = true;
                     }
                 } else if (target) {
@@ -314,7 +321,7 @@ export function applyFlushedStatuses(
                     }
                 } else {
                     const dropResult = target?.drop?.() ?? "absent";
-                    if (dropResult === "removed") {
+                    if (dropResult === "removed" || dropResult === "truncated") {
                         didMutateMessage = true;
                     }
                 }

@@ -113,6 +113,47 @@ function enforcePersistedUserTerminatedTail(messages: MessageWithParts[]): void 
     moveUserToTail(messages, messages[userIndex], userIndex);
 }
 
+/**
+ * Role the provider request will end with once OpenCode serializes `messages`:
+ * an assistant's tool parts become a trailing tool-result (user) turn, so only
+ * an assistant carrying none of them ends the request as an assistant.
+ */
+function wireTailRole(messages: readonly MessageWithParts[]): "user" | "assistant" | "none" {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message.info.role === "user") return "user";
+        if (!assistantHasCompletedContent(message)) continue;
+        return message.parts.some((part) => (part as { type?: unknown }).type === "tool")
+            ? "user"
+            : "assistant";
+    }
+    return "none";
+}
+
+/**
+ * Diagnostic backstop: models without assistant prefill support reject a request
+ * that ends with an assistant turn, and the provider error does not say which
+ * transform produced it. Log when this pass turned a user-terminated array into
+ * an assistant-terminated one so a report carries the evidence.
+ */
+function reportAssistantTerminatedTail(
+    messages: readonly MessageWithParts[],
+    inputTailRole: ReturnType<typeof wireTailRole>,
+    sessionId: string | null,
+): void {
+    if (inputTailRole !== "user" || wireTailRole(messages) !== "assistant") return;
+    const tail = messages
+        .slice(-3)
+        .map(
+            (message) =>
+                `${message.info.role}:${message.parts.map((part) => (part as { type?: unknown }).type).join("+")}`,
+        )
+        .join(", ");
+    const line = `transform produced an assistant-terminated request (input was user-terminated); providers without prefill support will reject it. tail=[${tail}]`;
+    if (sessionId) sessionLog(sessionId, line);
+    else log(`[magic-context] ${line}`);
+}
+
 function preserveUserTerminatedTail(
     messages: MessageWithParts[],
     inputMessages: readonly MessageWithParts[],
@@ -413,11 +454,18 @@ export function createMessagesTransformHandler(args: {
 
     return async (input, output): Promise<MessageWithParts[]> => {
         const inputMessages = [...output.messages];
+        // Read before the transform runs: it mutates the shared message objects.
+        const inputTailRole = wireTailRole(output.messages);
         enforcePersistedUserTerminatedTail(output.messages);
         try {
             return await run(input, output);
         } finally {
             preserveUserTerminatedTail(output.messages, inputMessages);
+            reportAssistantTerminatedTail(
+                output.messages,
+                inputTailRole,
+                resolveSessionId(output),
+            );
         }
     };
 }

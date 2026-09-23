@@ -267,6 +267,9 @@ describe("tool-drop-target", () => {
                         message("m-inv", "assistant", [{ type: "tool_use", id: "call-2" }]),
                         message("m-res", "tool", [toolPart]),
                         message("m-res-2", "assistant", [toolResultPart]),
+                        // A later prompt, so this call does not end the conversation
+                        // (drop() keeps that one as a skeleton instead of removing it).
+                        message("m-next", "user", [{ type: "text", text: "next prompt" }]),
                     ];
                     const thinkingParts: ThinkingLikePart[] = [
                         { type: "thinking", thinking: "to clear" },
@@ -300,6 +303,8 @@ describe("tool-drop-target", () => {
                         message("m-tool", "tool", [
                             { type: "tool", callID: "call-1", state: { output: "out" } },
                         ]),
+                        // A later prompt, so this call does not end the conversation.
+                        message("m-next", "user", [{ type: "text", text: "next prompt" }]),
                     ];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
@@ -307,6 +312,52 @@ describe("tool-drop-target", () => {
 
                     expect(target.drop()).toBe("removed");
                     expect(target.drop()).toBe("absent");
+                });
+            });
+        });
+
+        describe("#given the call whose result ends the conversation", () => {
+            describe("#when dropping it", () => {
+                it("#then it keeps a skeleton so the request still ends with a tool result", () => {
+                    const toolPart = {
+                        type: "tool",
+                        tool: "bash",
+                        callID: "call-last",
+                        state: { status: "completed", input: { command: "cat f" }, output: "big" },
+                    };
+                    const messages: MessageLike[] = [
+                        message("m-user", "user", [{ type: "text", text: "go" }]),
+                        message("m-last", "assistant", [
+                            { type: "step-start" },
+                            { type: "text", text: "Reading." },
+                            toolPart,
+                            { type: "step-finish", reason: "tool-calls" },
+                        ]),
+                        // A blank pending assistant shell is not what the request ends with.
+                        message("m-shell", "assistant", [{ type: "step-start" }]),
+                    ];
+                    const index: ToolCallIndex = new Map([
+                        [
+                            "call-last",
+                            {
+                                occurrences: [
+                                    { message: messages[1]!, part: toolPart, kind: "result" },
+                                ],
+                                hasResult: true,
+                            },
+                        ],
+                    ]);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-last", [], index, batch, 9);
+
+                    expect(target.drop()).toBe("truncated");
+                    batch.finalize();
+
+                    const kept = messages[1]?.parts.find(
+                        (part) => (part as { type?: string }).type === "tool",
+                    ) as { callID: string; state: { output: string } } | undefined;
+                    expect(kept?.callID).toBe("call-last");
+                    expect(kept?.state.output).toBe("[dropped \u00a79\u00a7]");
                 });
             });
         });

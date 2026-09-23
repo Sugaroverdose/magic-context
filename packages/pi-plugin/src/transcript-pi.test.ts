@@ -487,12 +487,25 @@ describe("createPiTranscript", () => {
 					isError: false,
 					timestamp: 12,
 				},
+				// A later completed call, so the image call does not end the
+				// conversation (drop() keeps that one as a skeleton instead).
+				assistantToolCall("call-next", "Read", { path: "next.txt" }, 13),
+				{
+					role: "toolResult",
+					toolCallId: "call-next",
+					toolName: "Read",
+					content: [{ type: "text", text: "next" }],
+					isError: false,
+					timestamp: 14,
+				},
 			];
 			const tagger = createTagger();
 			tagger.initFromDb(sessionId, db);
 			const transcript = createPiTranscript(messages, sessionId, [
 				"entry-assistant",
 				"entry-tool-result",
+				"entry-next-assistant",
+				"entry-next-tool-result",
 			]);
 
 			expect(transcript.messages[1]?.info.id).toBe(
@@ -505,7 +518,7 @@ describe("createPiTranscript", () => {
 			]);
 
 			const { targets } = tagTranscript(sessionId, transcript, tagger, db);
-			expect(targets.size).toBe(1);
+			expect(targets.size).toBe(2);
 
 			const target = Array.from(targets.values())[0];
 			expect(target?.drop()).toBe("removed");
@@ -517,7 +530,7 @@ describe("createPiTranscript", () => {
 			expect(output[0]?.content).toEqual([]);
 			expect(output[1]?.content).toEqual([]);
 			transcript.finalizeToolRemovals();
-			expect(output).toHaveLength(0);
+			expect(output).toHaveLength(2);
 		} finally {
 			closeQuietly(db);
 		}
