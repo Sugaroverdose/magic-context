@@ -5068,7 +5068,8 @@ fn apply_once(
                 );
                 core.frozen_units.clear();
                 core.pending_changes.clear();
-                // Ready smart notes never ride m1 (see the ordinary HARD arm).
+                // Ready smart notes are delivered by the host reminder and `ctx_note read`,
+                // not through m1, so this rebuild leaves m1 empty.
                 let m1_unit = render_m1_placeholder();
                 let mural_unit = comp.mural.as_ref().map(render_mural_block);
                 committed_mural_hash = comp

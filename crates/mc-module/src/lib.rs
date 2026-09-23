@@ -16698,8 +16698,9 @@ fn clip_note_title(content: &str, max: usize) -> String {
 /// be mistaken for an id.
 const NOTE_ID_PENDING: &str = "(id pending)";
 
-/// Shown for a requested host id that names the caller's own note while its mirror
-/// identity is still in flight: retrying is the one action that helps.
+/// Shown when the caller names its own note by a host id the host has not yet paired
+/// with a module row (the host mirror has not pulled the note's latest change yet).
+/// Retrying after the next mirror pull is the one action that helps.
 const NOTE_ID_PENDING_ADVICE: &str =
     "not mirrored yet — it was written seconds ago or the mirror is behind; retry.";
 
@@ -28018,7 +28019,8 @@ mod tests {
             .id;
         let announced = insert_session_note_at(&store, "announced note", now);
         assert_eq!((colliding, announced), (2, 3));
-        // The host only knows mirror identities of its own project.
+        // The host sends only host↔module pairs mirrored for this project, so a row of
+        // another project can never be resolved through the map.
         let map = if colliding_project == "/repo" {
             json!([[2, 3], [7, 2]])
         } else {
