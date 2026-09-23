@@ -3,7 +3,7 @@
 
 use mc_store::FrozenDecisionCalibration;
 
-pub const CALIBRATION_TABLE_REVISION: &str = "2026-09-21-family-v1";
+pub const CALIBRATION_TABLE_REVISION: &str = "2026-09-23-model-id-generation-v2";
 
 /// Class ratios resolved for a model by the caller.
 #[derive(Debug, Clone, Copy)]
@@ -47,7 +47,10 @@ impl DecisionCalibration {
             || ratios
                 .into_iter()
                 .any(|ratio| !ratio.is_finite() || ratio <= 0.0)
-            || !matches!(frozen.source.as_str(), "seed" | "family-fallback")
+            || !matches!(
+                frozen.source.as_str(),
+                "seed" | "family-fallback" | "model-id"
+            )
         {
             return None;
         }
@@ -55,7 +58,7 @@ impl DecisionCalibration {
             system_ratio: frozen.system_ratio,
             tools_ratio: frozen.tools_ratio,
             prose_ratio: frozen.prose_ratio,
-            seeded: frozen.source == "family-fallback"
+            seeded: matches!(frozen.source.as_str(), "family-fallback" | "model-id")
                 || ratios.into_iter().any(|ratio| ratio != 1.0),
             unknown_fit_ratio: seeds()
                 .iter()
@@ -177,64 +180,160 @@ fn version_order(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
-/// Identify a table seed versus same-family inheritance; session usage samples never affect this lookup.
-pub fn seed_source(model_key: Option<&str>) -> &'static str {
-    let key = model_key.unwrap_or("").to_lowercase();
-    if DecisionCalibration::for_model(model_key).seeded
-        && !seeds().iter().any(|s| key.starts_with(&s.prefix))
-    {
-        "family-fallback"
+fn canonical_provider(model: &str) -> &'static str {
+    if model.starts_with("claude-") {
+        "anthropic"
+    } else if model.starts_with("gpt-") {
+        "openai"
+    } else if model.starts_with("gemini-") {
+        "google"
     } else {
-        "seed"
+        ""
     }
 }
 
+fn family_seed(provider: &str, model: &str) -> Option<&'static SeedEntry> {
+    let (family, version, variant) = lineage(model)?;
+    let mut below: Option<(&SeedEntry, Vec<u64>)> = None;
+    let mut above: Option<(&SeedEntry, Vec<u64>)> = None;
+    for entry in seeds() {
+        let Some(seed_model) = entry.prefix.strip_prefix(&format!("{provider}/")) else {
+            continue;
+        };
+        let Some((f, v, kind)) = lineage(seed_model) else {
+            continue;
+        };
+        if f != family || kind != variant {
+            continue;
+        }
+        match version_order(&v, &version) {
+            std::cmp::Ordering::Less
+                if below
+                    .as_ref()
+                    .is_none_or(|(_, old)| version_order(&v, old).is_gt()) =>
+            {
+                below = Some((entry, v))
+            }
+            std::cmp::Ordering::Greater
+                if above
+                    .as_ref()
+                    .is_none_or(|(_, old)| version_order(&v, old).is_lt()) =>
+            {
+                above = Some((entry, v))
+            }
+            _ => {}
+        }
+    }
+    let original = below.or(above);
+    if original.as_ref().is_some_and(|(_, v)| v[0] != version[0])
+        && !canonical_provider(model).is_empty()
+    {
+        // Same-generation measurements avoid inheriting a previous tokenizer generation.
+        let mut sibling: Option<(&SeedEntry, Vec<u64>)> = None;
+        for entry in seeds() {
+            let Some(seed_model) = entry.prefix.strip_prefix(&format!("{provider}/")) else {
+                continue;
+            };
+            let Some((f, v, kind)) = lineage(seed_model) else {
+                continue;
+            };
+            if v[0] != version[0]
+                || kind != variant
+                || f.split('-').next() != family.split('-').next()
+            {
+                continue;
+            }
+            let replace = sibling.as_ref().is_none_or(|(_, old)| {
+                (version_order(&v, &version).is_le() && version_order(old, &version).is_gt())
+                    || (version_order(&v, &version).is_le() && version_order(&v, old).is_gt())
+                    || (version_order(old, &version).is_gt() && version_order(&v, old).is_lt())
+            });
+            if replace {
+                sibling = Some((entry, v));
+            }
+        }
+        return sibling.or(original).map(|(entry, _)| entry);
+    }
+    original.map(|(entry, _)| entry)
+}
+
+fn selected_seed(key: &str) -> (Option<&'static SeedEntry>, &'static str) {
+    let table = seeds();
+    let direct = table
+        .iter()
+        .filter(|entry| key.starts_with(&entry.prefix))
+        .max_by_key(|entry| entry.prefix.len());
+    if let Some(seed) = direct {
+        return (Some(seed), "seed");
+    }
+    let Some((provider, model)) = key.split_once('/') else {
+        return (None, "seed");
+    };
+    if table
+        .iter()
+        .any(|entry| entry.prefix.starts_with(&format!("{provider}/")))
+    {
+        let inherited = family_seed(provider, model);
+        return (
+            inherited,
+            if inherited.is_some() {
+                "family-fallback"
+            } else {
+                "seed"
+            },
+        );
+    }
+    // Providers without measurements can reuse a model measurement; prefer its
+    // canonical provider over a relay when model prefixes have equal length.
+    let canonical = canonical_provider(model);
+    let mut direct_model: Option<&SeedEntry> = None;
+    for entry in table {
+        let Some((_, seed_model)) = entry.prefix.split_once('/') else {
+            continue;
+        };
+        if !model.starts_with(seed_model) {
+            continue;
+        }
+        let previous_len =
+            direct_model.map_or(0, |seed| seed.prefix.split_once('/').unwrap().1.len());
+        if seed_model.len() > previous_len
+            || (seed_model.len() == previous_len
+                && entry.prefix.starts_with(&format!("{canonical}/"))
+                && !direct_model
+                    .is_some_and(|seed| seed.prefix.starts_with(&format!("{canonical}/"))))
+        {
+            direct_model = Some(entry);
+        }
+    }
+    let selected = direct_model.or_else(|| {
+        if canonical.is_empty() {
+            None
+        } else {
+            family_seed(canonical, model)
+        }
+    });
+    (
+        selected,
+        if selected.is_some() {
+            "model-id"
+        } else {
+            "seed"
+        },
+    )
+}
+
+/// Report whether the measurement was direct, inherited, or matched by model id.
+pub fn seed_source(model_key: Option<&str>) -> &'static str {
+    selected_seed(&model_key.unwrap_or("").to_lowercase()).1
+}
+
 impl DecisionCalibration {
-    /// Match the longest measured prefix, then the nearest version in the same
-    /// provider/family/variant, preferring an older version. Shares the TS table.
+    /// Match provider prefixes first, then inherited family or same-generation
+    /// sibling seeds. Providers without seeds can match the model id alone.
     pub fn for_model(model_key: Option<&str>) -> Self {
         let key = model_key.unwrap_or("").to_lowercase();
         let table = seeds();
-        let direct = table
-            .iter()
-            .filter(|entry| key.starts_with(&entry.prefix))
-            .max_by_key(|entry| entry.prefix.len());
-        let inherited = || {
-            let (provider, model) = key.split_once('/')?;
-            let (family, version, variant) = lineage(model)?;
-            let mut below: Option<(&SeedEntry, Vec<u64>)> = None;
-            let mut above: Option<(&SeedEntry, Vec<u64>)> = None;
-            for entry in table {
-                let Some(model) = entry.prefix.strip_prefix(&format!("{provider}/")) else {
-                    continue;
-                };
-                let Some((f, v, kind)) = lineage(model) else {
-                    continue;
-                };
-                if f != family || kind != variant {
-                    continue;
-                }
-                match version_order(&v, &version) {
-                    std::cmp::Ordering::Less
-                        if below
-                            .as_ref()
-                            .is_none_or(|(_, old)| version_order(&v, old).is_gt()) =>
-                    {
-                        below = Some((entry, v))
-                    }
-                    std::cmp::Ordering::Greater
-                        if above
-                            .as_ref()
-                            .is_none_or(|(_, old)| version_order(&v, old).is_lt()) =>
-                    {
-                        above = Some((entry, v))
-                    }
-                    _ => {}
-                }
-            }
-            below.or(above).map(|(entry, _)| entry)
-        };
-        let selected = direct.or_else(inherited);
+        let selected = selected_seed(&key).0;
         Self {
             system_ratio: selected.map_or(1.0, |s| s.system_ratio),
             tools_ratio: selected.map_or(1.0, |s| s.tools_ratio),
@@ -288,11 +387,28 @@ mod tests {
                 .prefix
                 .as_ref()
                 .map(|prefix| seeds().iter().find(|seed| &seed.prefix == prefix).unwrap());
-            assert_eq!(result.system_ratio, expected.map_or(1.0, |s| s.system_ratio), "{key}");
-            assert_eq!(result.tools_ratio, expected.map_or(1.0, |s| s.tools_ratio), "{key}");
-            assert_eq!(result.prose_ratio, expected.map_or(1.0, |s| s.prose_ratio), "{key}");
+            assert_eq!(
+                result.system_ratio,
+                expected.map_or(1.0, |s| s.system_ratio),
+                "{key}"
+            );
+            assert_eq!(
+                result.tools_ratio,
+                expected.map_or(1.0, |s| s.tools_ratio),
+                "{key}"
+            );
+            assert_eq!(
+                result.prose_ratio,
+                expected.map_or(1.0, |s| s.prose_ratio),
+                "{key}"
+            );
             assert_eq!(result.seeded, expected.is_some(), "{key}");
             assert_eq!(seed_source(Some(&key)), case.source, "{key}");
+            let frozen = DecisionCalibration::freeze_for_model(Some(&key));
+            assert_eq!(frozen.source, case.source, "{key}");
+            let thawed = DecisionCalibration::from_frozen(&frozen).unwrap();
+            assert_eq!(thawed.system_ratio, result.system_ratio, "{key}");
+            assert_eq!(thawed.seeded, result.seeded, "{key}");
         }
     }
 

@@ -25,6 +25,8 @@ export interface ModelCalibration {
     toolsRatio: number;
     /** Table prefix the ratios were inherited from when the model itself is unmeasured. */
     derivedFrom?: string;
+    /** A provider without measurements matched the model id against another provider's seeds. */
+    matchedByModelId?: boolean;
     proseRatio: number;
 }
 
@@ -40,7 +42,7 @@ const CALIBRATION_TABLE: CalibrationEntry[] = calibrationSeeds;
 const NEUTRAL: ModelCalibration = { systemRatio: 1.0, toolsRatio: 1.0, proseRatio: 1.0 };
 
 /** Version of the static measurements and family-inheritance rules, independent of session usage samples. */
-export const CALIBRATION_TABLE_REVISION = "2026-09-21-family-v1";
+export const CALIBRATION_TABLE_REVISION = "2026-09-23-model-id-generation-v2";
 
 export const UNKNOWN_FIT_RATIO = Math.max(
     2,
@@ -79,7 +81,36 @@ export function resolveModelCalibration(
         }
     }
     if (best) return { ...best, proseRatio: best.proseRatio ?? 1.0 };
-    return resolveFamilyFallback(providerId.toLowerCase(), modelId.toLowerCase()) ?? NEUTRAL;
+    const provider = providerId.toLowerCase();
+    const model = modelId.toLowerCase();
+    if (CALIBRATION_TABLE.some((entry) => entry.prefix.toLowerCase().startsWith(`${provider}/`))) {
+        return resolveFamilyFallback(provider, model) ?? NEUTRAL;
+    }
+    // No provider measurements exist: match the model portion, with canonical seeds
+    // winning ties over relays that happen to advertise the same model.
+    const canonical = canonicalProvider(model);
+    let modelMatch: CalibrationEntry | null = null;
+    for (const entry of CALIBRATION_TABLE) {
+        const seedModel = entry.prefix.toLowerCase().split("/").slice(1).join("/");
+        if (!model.startsWith(seedModel)) continue;
+        const oldModel = modelMatch?.prefix.toLowerCase().split("/").slice(1).join("/") ?? "";
+        if (
+            seedModel.length > oldModel.length ||
+            (seedModel.length === oldModel.length &&
+                entry.prefix.toLowerCase().startsWith(`${canonical}/`) &&
+                !modelMatch?.prefix.toLowerCase().startsWith(`${canonical}/`))
+        )
+            modelMatch = entry;
+    }
+    if (modelMatch)
+        return {
+            ...modelMatch,
+            proseRatio: modelMatch.proseRatio ?? 1.0,
+            derivedFrom: modelMatch.prefix,
+            matchedByModelId: true,
+        };
+    const inherited = canonical ? resolveFamilyFallback(canonical, model) : null;
+    return inherited ? { ...inherited, matchedByModelId: true } : NEUTRAL;
 }
 
 /**
@@ -113,6 +144,13 @@ function parseModelLineage(modelId: string): ModelLineage | null {
     };
 }
 
+function canonicalProvider(model: string): string {
+    if (model.startsWith("claude-")) return "anthropic";
+    if (model.startsWith("gpt-")) return "openai";
+    if (model.startsWith("gemini-")) return "google";
+    return "";
+}
+
 function compareVersions(a: number[], b: number[]): number {
     const length = Math.max(a.length, b.length);
     for (let i = 0; i < length; i++) {
@@ -125,8 +163,9 @@ function compareVersions(a: number[], b: number[]): number {
 /**
  * A model the table has never measured inherits the ratios of its nearest
  * measured relative: same provider, same family, same variant, preferring the
- * newest version below the requested one, else the oldest above it. A new
- * release (Fable 5.2 the week it ships) is far more likely to keep its
+ * newest version below the requested one, else the oldest above it. If that
+ * relative crosses a clear major generation, a measured sibling in the same
+ * generation wins. A new release (Fable 5.2 the week it ships) is more likely to keep its
  * predecessor's tokenizer than to match NEUTRAL, which is not a tokenizer at
  * all but the absence of one; the learned session scalar corrects any drift
  * once it exists. The chosen source is reported in `derivedFrom` so logs can
@@ -153,7 +192,36 @@ function resolveFamilyFallback(providerId: string, modelId: string): ModelCalibr
             above = { entry, version: lineage.version };
         }
     }
-    const source = below ?? above;
+    let source = below ?? above;
+    // A new major tokenizer generation is closer to a measured sibling of that
+    // generation than to the previous generation of the same family.
+    if (source?.version[0] !== wanted.version[0] && canonicalProvider(modelId) !== "") {
+        let sibling: { entry: CalibrationEntry; version: number[] } | null = null;
+        for (const entry of CALIBRATION_TABLE) {
+            const prefix = entry.prefix.toLowerCase();
+            if (!prefix.startsWith(`${providerId}/`)) continue;
+            const lineage = parseModelLineage(prefix.slice(providerId.length + 1));
+            if (
+                !lineage ||
+                lineage.version[0] !== wanted.version[0] ||
+                lineage.variant !== wanted.variant ||
+                lineage.family.split("-")[0] !== wanted.family.split("-")[0]
+            )
+                continue;
+            const candidate = { entry, version: lineage.version };
+            if (
+                !sibling ||
+                (compareVersions(candidate.version, wanted.version) <= 0 &&
+                    compareVersions(sibling.version, wanted.version) > 0) ||
+                (compareVersions(candidate.version, wanted.version) <= 0 &&
+                    compareVersions(candidate.version, sibling.version) > 0) ||
+                (compareVersions(sibling.version, wanted.version) > 0 &&
+                    compareVersions(candidate.version, sibling.version) < 0)
+            )
+                sibling = candidate;
+        }
+        source = sibling ?? source;
+    }
     if (!source) return null;
     return {
         systemRatio: source.entry.systemRatio,

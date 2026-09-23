@@ -12,7 +12,7 @@ export interface DecisionCalibration extends Readonly<ModelCalibration> {
     readonly revision: string;
     readonly matchedPrefix?: string;
     readonly seeded: boolean;
-    readonly source: "seed" | "family-fallback";
+    readonly source: "seed" | "family-fallback" | "model-id";
 }
 
 export function resolveDecisionCalibration(
@@ -27,7 +27,11 @@ export function resolveDecisionCalibration(
         matchedPrefix:
             ratios.derivedFrom ?? (ratios as ModelCalibration & { prefix?: string }).prefix,
         seeded: hasModelCalibration(providerId, modelId),
-        source: ratios.derivedFrom ? "family-fallback" : "seed",
+        source: ratios.matchedByModelId
+            ? "model-id"
+            : ratios.derivedFrom
+              ? "family-fallback"
+              : "seed",
     });
 }
 

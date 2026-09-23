@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import fixture from "../../../../../tests/fixtures/decision-calibration.json";
 import resolverCases from "../../../../../tests/fixtures/calibration-resolver.json";
-import seeds from "./tokenizer-calibration-seeds.json";
+import fixture from "../../../../../tests/fixtures/decision-calibration.json";
 import { localBudget, providerMass, resolveDecisionCalibration } from "./decision-calibration";
+import seeds from "./tokenizer-calibration-seeds.json";
 
 describe("static decision calibration", () => {
     it("resolves the shared model and provider cases", () => {
