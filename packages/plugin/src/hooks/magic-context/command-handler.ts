@@ -341,6 +341,7 @@ async function executeDreaming(
             params: NotificationParams,
         ) => Promise<void>;
         toastDurationMs?: number;
+        sampleToastDurationMs?: () => number | undefined;
         dreamer?: {
             config: DreamerConfig;
             projectPath: string;
@@ -353,7 +354,7 @@ async function executeDreaming(
     argText?: string,
 ): Promise<never> {
     const dreamNotificationParams: NotificationParams = {
-        toastDurationMs: deps.toastDurationMs ?? 5000,
+        toastDurationMs: deps.sampleToastDurationMs?.() ?? deps.toastDurationMs ?? 5000,
     };
 
     if (!deps.dreamer) {
@@ -429,6 +430,7 @@ export function createMagicContextCommandHandler(deps: {
     executeThresholdTokens?: { default?: number; [modelKey: string]: number | undefined };
     historyBudgetPercentage?: number;
     commitClusterTrigger?: { enabled: boolean; min_clusters: number };
+    sampleCommitClusterTrigger?: () => { enabled: boolean; min_clusters: number } | undefined;
     getLiveModelKey?: (sessionId: string) => string | undefined;
     cacheTtlConfig?: MagicContextConfig["cache_ttl"];
     cacheTtlConfigured?: boolean;
@@ -466,6 +468,7 @@ export function createMagicContextCommandHandler(deps: {
     ) => Promise<void>;
     /** Configured toast lifetime (ms) forwarded into diagnostics logs. */
     toastDurationMs?: number;
+    sampleToastDurationMs?: () => number | undefined;
     transformMode?: ResolvedTransformMode;
     rustModeModuleClient?: RustModeModuleClient;
     projectRoot?: string;
@@ -703,7 +706,7 @@ export function createMagicContextCommandHandler(deps: {
                             deps.executeThresholdPercentage,
                             liveModelKey,
                             deps.historyBudgetPercentage,
-                            deps.commitClusterTrigger,
+                            deps.sampleCommitClusterTrigger?.() ?? deps.commitClusterTrigger,
                             deps.executeThresholdTokens,
                             liveContextLimit,
                             deps.dreamer

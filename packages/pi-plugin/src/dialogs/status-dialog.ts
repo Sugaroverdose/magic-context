@@ -94,6 +94,9 @@ export interface StatusDialogDeps {
 	injectionBudgetTokens?: number;
 	/** User-owned profile selected for the project, after config resolution. */
 	activeProfile?: string;
+	configGeneration?: number;
+	configAdoptedAt?: number;
+	configReloadFailure?: { path: string; message: string };
 	dreamer?: { runnable?: boolean; scheduleSummary?: string };
 	executeThresholdTokens?: {
 		default?: number;
@@ -109,6 +112,9 @@ export interface StatusDialogDeps {
 export interface StatusDialogDetail {
 	sessionId: string;
 	activeProfile: string | null;
+	configGeneration?: number;
+	configAdoptedAt?: number;
+	configReloadFailure?: { path: string; message: string };
 	usagePercentage: number;
 	inputTokens: number;
 	systemPromptTokens: number;
@@ -333,7 +339,7 @@ function piStatusWarnings(s: StatusDialogDetail): UserFacingFailureKey[] {
 
 /** Chat-text status for a Pi host without an interactive UI to draw a dialog on. */
 export function formatPiStatusSummary(s: StatusDialogDetail): string {
-	return renderUserStatusSummary(
+	const summary = renderUserStatusSummary(
 		{
 			inputTokens: s.inputTokens,
 			usableContextTokens: s.contextLimit,
@@ -365,6 +371,7 @@ export function formatPiStatusSummary(s: StatusDialogDetail): string {
 		},
 		"plain",
 	);
+	return s.configGeneration === undefined ? summary : `${summary}\nConfig generation: ${s.configGeneration} (adopted ${s.configAdoptedAt ? new Date(s.configAdoptedAt).toLocaleString() : "unknown"})${s.configReloadFailure ? `\nConfig reload failed ${s.configReloadFailure.path}: ${s.configReloadFailure.message}` : ""}`;
 }
 
 /**
@@ -749,6 +756,9 @@ export function buildPiStatusDetail(
 	return {
 		sessionId,
 		activeProfile: deps.activeProfile ?? null,
+		configGeneration: deps.configGeneration,
+		configAdoptedAt: deps.configAdoptedAt,
+		configReloadFailure: deps.configReloadFailure,
 		usagePercentage,
 		inputTokens,
 		systemPromptTokens,

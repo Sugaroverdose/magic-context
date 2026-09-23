@@ -39,6 +39,9 @@ export interface RegisterCtxStatusDeps {
 	dreamer?: { runnable?: boolean; scheduleSummary?: string };
 	/** User-owned profile selected for the project, after config resolution. */
 	activeProfile?: string;
+	configGeneration?: number;
+	configAdoptedAt?: number;
+	configReloadFailure?: { path: string; message: string };
 	cacheTtlConfig?: MagicContextConfig["cache_ttl"];
 	cacheTtlConfigured?: boolean;
 	configParseFailures?: ConfigParseFailure[];

@@ -695,6 +695,7 @@ const tui: TuiPlugin = async (api, _options, meta) => {
         }
         if (n.type === "toast") {
             const p = n.payload
+            await refreshToastDurationMs()
             showToast(api, {
                 message: String(p.message ?? ""),
                 variant: (p.variant as "info" | "warning" | "error" | "success") ?? "info",

@@ -55,3 +55,16 @@ test("status dialog prefixes the compaction-off notice", () => {
         "Compaction: disabled",
     );
 });
+
+test("OpenCode 2 status reports the live config generation and parse failure", () => {
+    const detail = {
+        ...snapshot({}),
+        configGeneration: 4,
+        configAdoptedAt: 1730000000000,
+        configReloadFailure: { path: "/tmp/magic-context.jsonc", message: "malformed" },
+    } as StatusDetail;
+    expect(statusText(detail)).toContain("Config generation: 4 (adopted ");
+    expect(statusText(detail)).toContain(
+        "Config reload failed /tmp/magic-context.jsonc: malformed",
+    );
+});

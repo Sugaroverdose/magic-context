@@ -146,6 +146,8 @@ export interface MagicContextDeps {
     onSessionCacheInvalidated?: (sessionId: string) => void;
     compactionHandler: ReturnType<typeof createCompactionHandler>;
     liveSessionState?: LiveSessionState;
+    sampleHistorianConfig?: () => MagicContextDeps["config"];
+    sampleDreamConfig?: () => MagicContextDeps["config"];
     config: {
         protected_tokens?: number;
         protectedTokenTierOverrides?: ProtectedTokensTierOverrides;
@@ -378,15 +380,29 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     // context, not the main session model's. Re-derived per historian invocation
     // (matching RPC/TUI paths) so config/model changes take effect without
     // restart, and so all trigger sources produce consistent chunk sizes.
-    const resolveHistorianAttempts = () => resolveHistorianModel(deps.config, "opencode");
-    const getHistorianChunkTokens = (): number =>
-        deriveHistorianChunkTokens(
-            resolveHistorianContextLimit(resolveHistorianAttempts().primary?.model),
-        );
-    const historianModel = resolveHistorianAttempts().primary;
-    const historianContextLimit = resolveKnownHistorianContextLimit(historianModel?.model);
-    const historianMaxOutputTokens = deps.config.historian?.maxTokens;
-    const historianFallbackModels = resolveHistorianAttempts().fallbacks;
+    const sampleHistorian = () => {
+        const config = deps.sampleHistorianConfig?.() ?? deps.config;
+        const attempts = resolveHistorianModel(config, "opencode");
+        return {
+            model: attempts.primary,
+            fallbackModels: attempts.fallbacks,
+            contextLimit: resolveKnownHistorianContextLimit(attempts.primary?.model),
+            // Unset stays unset: the producer guard derives its reserve from the
+            // model's declared output when no cap is configured.
+            maxOutputTokens: config.historian?.maxTokens,
+            timeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+            toastDurationMs: config.toast_duration_ms,
+            twoPass: config.historian?.two_pass === true,
+            autoPromote: config.memory?.auto_promote ?? true,
+            userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
+            commitClusterTrigger: config.commit_cluster_trigger,
+            chunkTokens: deriveHistorianChunkTokens(
+                resolveHistorianContextLimit(attempts.primary?.model),
+            ),
+        };
+    };
+    const bootHistorian = sampleHistorian();
+    const getHistorianChunkTokens = (): number => sampleHistorian().chunkTokens;
 
     // Three independent cache-busting signal sets, sourced from the
     // process-scoped LiveSessionState so RPC handlers (TUI recomp) can
@@ -487,7 +503,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             liveModelBySession,
             variantBySession,
             agentBySession,
-            deps.config.toast_duration_ms,
+            (deps.sampleDreamConfig?.() ?? deps.config).toast_duration_ms,
         );
         void sendStatusNotification(deps.client, sessionId, warning, notificationParams).catch(
             (error) => {
@@ -511,58 +527,61 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     // resolved here with the OpenCode-DB recovery (resolveLiveModel) so the
     // last-resort fallback model is known even when a command is invoked before
     // the first transform pass populates the map.
-    const buildManagedRecompCtx = (sessionId: string): ManagedRecompContext => ({
-        client: deps.client,
-        db,
-        // Pass the SAME map/set instances the hook uses so the orchestrator's
-        // writes (progress, session-dir cache, refresh signals) propagate to the
-        // shared live state — and the next transform pass + RPC sidebar see them.
-        liveSessionState: {
-            liveModelBySession,
-            latestAssistantMessageIdBySession,
-            channel1StateBySession,
-            variantBySession,
-            agentBySession,
-            historyRefreshSessions,
-            deferredHistoryRefreshSessions,
-            systemPromptRefreshSessions,
-            pendingMaterializationSessions,
-            deferredMaterializationSessions,
-            sessionDirectoryBySession,
-            recompProgressBySession,
-            dreamerProgressByProject,
-            internalChildSessions,
-        },
-        directory: deps.directory,
-        historianChunkTokens: getHistorianChunkTokens(),
-        historianTimeoutMs: deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
-        memoryEnabled: deps.config.memory?.enabled ?? true,
-        autoPromote: deps.config.memory?.auto_promote ?? true,
-        historianModel,
-        historianContextLimit,
-        historianMaxOutputTokens,
-        fallbackModels: historianFallbackModels,
-        language: deps.config.language,
-        fallbackModelId: (() => {
-            const model = resolveLiveModel(sessionId);
-            return model ? `${model.providerID}/${model.modelID}` : undefined;
-        })(),
-        historianTwoPass: deps.config.historian?.two_pass === true,
-        // Option C privacy gate: behavioral observation candidates are collected
-        // during historian runs only when the user has SCHEDULED the
-        // review-user-memories task (schedule != ""). Replaces the v1
-        // user_memories.enabled flag that gated both collection and review.
-        userMemoriesEnabled: userMemoryCollectionEnabled(dreamerConfig),
-        ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
-        getNotificationParams: (sid) =>
-            getLiveNotificationParams(
-                sid,
+    const buildManagedRecompCtx = (sessionId: string): ManagedRecompContext => {
+        const historianRun = sampleHistorian();
+        return {
+            client: deps.client,
+            db,
+            // Pass the SAME map/set instances the hook uses so the orchestrator's
+            // writes (progress, session-dir cache, refresh signals) propagate to the
+            // shared live state — and the next transform pass + RPC sidebar see them.
+            liveSessionState: {
                 liveModelBySession,
+                latestAssistantMessageIdBySession,
+                channel1StateBySession,
                 variantBySession,
                 agentBySession,
-                deps.config.toast_duration_ms,
-            ),
-    });
+                historyRefreshSessions,
+                deferredHistoryRefreshSessions,
+                systemPromptRefreshSessions,
+                pendingMaterializationSessions,
+                deferredMaterializationSessions,
+                sessionDirectoryBySession,
+                recompProgressBySession,
+                dreamerProgressByProject,
+                internalChildSessions,
+            },
+            directory: deps.directory,
+            historianChunkTokens: historianRun.chunkTokens,
+            historianTimeoutMs: historianRun.timeoutMs,
+            memoryEnabled: deps.config.memory?.enabled ?? true,
+            autoPromote: historianRun.autoPromote,
+            historianModel: historianRun.model,
+            historianContextLimit: historianRun.contextLimit,
+            historianMaxOutputTokens: historianRun.maxOutputTokens,
+            fallbackModels: historianRun.fallbackModels,
+            language: deps.config.language,
+            fallbackModelId: (() => {
+                const model = resolveLiveModel(sessionId);
+                return model ? `${model.providerID}/${model.modelID}` : undefined;
+            })(),
+            historianTwoPass: historianRun.twoPass,
+            // Option C privacy gate: behavioral observation candidates are collected
+            // during historian runs only when the user has SCHEDULED the
+            // review-user-memories task (schedule != ""). Replaces the v1
+            // user_memories.enabled flag that gated both collection and review.
+            userMemoriesEnabled: historianRun.userMemoriesEnabled,
+            ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
+            getNotificationParams: (sid) =>
+                getLiveNotificationParams(
+                    sid,
+                    liveModelBySession,
+                    variantBySession,
+                    agentBySession,
+                    historianRun.toastDurationMs,
+                ),
+        };
+    };
     const buildManagedWrapupCtx = (sessionId: string): ManagedWrapupContext => ({
         ...buildManagedRecompCtx(sessionId),
         contextLimit: (() => {
@@ -1103,7 +1122,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         protectedTokenTierOverrides: deps.config.protectedTokenTierOverrides,
         smartDrops: deps.config.smart_drops === true,
         clearReasoningAge: deps.config.clear_reasoning_age ?? 50,
-        commitClusterTrigger: deps.config.commit_cluster_trigger,
+        commitClusterTrigger: bootHistorian.commitClusterTrigger,
         historyRefreshSessions,
         deferredHistoryRefreshSessions,
         pendingMaterializationSessions,
@@ -1130,11 +1149,12 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         historyBudgetPercentage: deps.config.history_budget_percentage,
         executeThresholdPercentage: deps.config.execute_threshold_percentage,
         executeThresholdTokens: deps.config.execute_threshold_tokens,
-        historianTimeoutMs: deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
-        historianModel,
-        historianContextLimit,
-        historianMaxOutputTokens,
-        fallbackModels: historianFallbackModels,
+        historianTimeoutMs: bootHistorian.timeoutMs,
+        historianModel: bootHistorian.model,
+        historianContextLimit: bootHistorian.contextLimit,
+        historianMaxOutputTokens: bootHistorian.maxOutputTokens,
+        fallbackModels: bootHistorian.fallbackModels,
+        resolveHistorianRun: sampleHistorian,
         getNotificationParams: (sessionId) =>
             getLiveNotificationParams(
                 sessionId,
@@ -1219,7 +1239,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 liveModelBySession,
                 variantBySession,
                 agentBySession,
-                deps.config.toast_duration_ms,
+                (deps.sampleDreamConfig?.() ?? deps.config).toast_duration_ms,
             ),
         onSessionCacheInvalidated: (sessionId: string) => {
             dropSlot(sessionId, "session-cache-invalidated");
@@ -1269,7 +1289,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             }
             return;
         }
-        const dreaming = deps.config.dreamer;
+        const sampledDream = deps.sampleDreamConfig?.() ?? deps.config;
+        const dreaming = sampledDream.dreamer;
         if (!dreaming || dreaming.disable === true) {
             return;
         }
@@ -1287,7 +1308,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             dreaming,
             "opencode",
             deps.config.language,
-            deps.config.mural?.model,
+            sampledDream.mural?.model,
         );
         const executor = createDreamTaskExecutor({
             client: deps.client,
@@ -1332,6 +1353,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         db,
         compactionOff,
         toastDurationMs: deps.config.toast_duration_ms,
+        sampleToastDurationMs: () => (deps.sampleDreamConfig?.() ?? deps.config).toast_duration_ms,
         executeThresholdPercentage: deps.config.execute_threshold_percentage ?? 65,
         executeThresholdTokens: deps.config.execute_threshold_tokens,
         historyBudgetPercentage: deps.config.history_budget_percentage,
@@ -1339,6 +1361,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         rustModeModuleClient,
         projectRoot: deps.directory,
         commitClusterTrigger: deps.config.commit_cluster_trigger,
+        sampleCommitClusterTrigger: () =>
+            (deps.sampleHistorianConfig?.() ?? deps.config).commit_cluster_trigger,
         cacheTtlConfig: deps.config.cache_ttl,
         cacheTtlConfigured: deps.config.cacheTtlConfigured === true,
         configParseFailures: deps.config.configParseFailures ?? [],
@@ -1404,7 +1428,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                     liveModelBySession,
                     variantBySession,
                     agentBySession,
-                    deps.config.toast_duration_ms,
+                    (deps.sampleDreamConfig?.() ?? deps.config).toast_duration_ms,
                 ),
                 ...params,
             });
@@ -1416,15 +1440,17 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                   // Manual /ctx-dream → Dreamer v2 per-task scheduler. Runs in this
                   // hook's own checkout (not a stale sibling worktree from the
                   // shared git:<sha> identity map).
-                  runManual: (task) =>
-                      runManualDream({
+                  runManual: (task) => {
+                      const sampledDream = deps.sampleDreamConfig?.() ?? deps.config;
+                      const currentDreamer = sampledDream.dreamer ?? dreamerConfig;
+                      return runManualDream({
                           db,
                           projectIdentity: projectPath,
                           tasks: buildDreamTaskRuntimeConfigs(
-                              dreamerConfig,
+                              currentDreamer,
                               "opencode",
                               deps.config.language,
-                              deps.config.mural?.model,
+                              sampledDream.mural?.model,
                           ),
                           executor: createDreamTaskExecutor({
                               client: deps.client,
@@ -1436,9 +1462,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                                       openOpenCodeDb,
                                   }),
                               userMemoryCollectionEnabled:
-                                  userMemoryCollectionEnabled(dreamerConfig),
+                                  userMemoryCollectionEnabled(currentDreamer),
                               language: deps.config.language,
-                              mural: deps.config.mural,
+                              mural: sampledDream.mural,
                               memoryInjectionBudgetTokens:
                                   deps.config.memory?.injection_budget_tokens,
                               retinaHandoff: deps.config.smart_notes?.retina_handoff === true,
@@ -1459,7 +1485,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                               },
                           }),
                           task,
-                      }),
+                      });
+                  },
               }
             : undefined,
     });

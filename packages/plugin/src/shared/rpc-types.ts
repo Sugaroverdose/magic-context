@@ -220,6 +220,9 @@ export interface StatusDetail extends SidebarSnapshot {
     memoryAuthorityMismatch?: boolean;
     /** User-owned model profile selected for this project, or null for the base config. */
     activeProfile: string | null;
+    configGeneration?: number;
+    configAdoptedAt?: number;
+    configReloadFailure?: { path: string; message: string };
     tagCounter: number;
     activeTags: number;
     droppedTags: number;

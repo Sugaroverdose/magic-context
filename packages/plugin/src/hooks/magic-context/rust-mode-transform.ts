@@ -2696,6 +2696,7 @@ export function createRustModeTransform(
                 );
             }
             const effectiveFloor = protectionFloorResolution.floor;
+            const historianRun = deps.resolveHistorianRun?.();
             const passInputs: Record<string, unknown> = {
                 now_ms: requestObservedAtMs,
                 model_key: modelKey,
@@ -2707,8 +2708,14 @@ export function createRustModeTransform(
                 auto_search_score_threshold: deps.autoSearch?.scoreThreshold ?? 0.6,
                 auto_search_min_prompt_chars: deps.autoSearch?.minPromptChars ?? 20,
                 history_budget_tokens: historyBudgetTokens,
-                historian_model_chain: resolvedHistorianModelChain(deps),
-                historian_timeout_ms: deps.historianTimeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+                historian_model_chain: resolvedHistorianModelChain({
+                    historianModel: historianRun?.model ?? deps.historianModel,
+                    fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
+                }),
+                historian_timeout_ms:
+                    historianRun?.timeoutMs ??
+                    deps.historianTimeoutMs ??
+                    DEFAULT_HISTORIAN_TIMEOUT_MS,
                 clear_reasoning_age: deps.clearReasoningAge,
                 caveman_enabled:
                     !sessionMeta.isSubagent && deps.cavemanTextCompression?.enabled === true,

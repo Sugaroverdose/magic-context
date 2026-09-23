@@ -217,9 +217,10 @@ export function registerIssue424CapacityTests(
             });
             // Source was clipped against unscaled local counts. The unknown-model fit margin plus historian system/instruction text still exceed this fixture's window.
             expect(firstPrompts).toHaveLength(0);
-            expect(getHistorianFailureState(db, sessionId).lastError).toContain(
-                "producer_prompt_exceeds_window",
-            );
+            // An admission refusal is a geometry outcome, not a historian failure: it
+            // must not stamp the failure backoff that would keep the force-band drain
+            // shut for a session whose next chunk may fit.
+            expect(getHistorianFailureState(db, sessionId).lastError ?? null).toBeNull();
             expect(
                 getCompartments(db, sessionId).map((compartment) => [
                     compartment.startMessage,

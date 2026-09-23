@@ -868,3 +868,26 @@ describe("Pi status overlay: blocked background maintenance", () => {
 		}
 	});
 });
+
+it("Pi status includes config generation and last reload warning", () => {
+    const db = createTestDb();
+    try {
+        const detail = buildPiStatusDetail(
+            { getAllTools: () => [] } as never,
+            fakeContext("ses-status-live-config") as never,
+            {
+                db,
+                projectIdentity: resolveProjectIdentity(process.cwd()),
+                configGeneration: 6,
+                configAdoptedAt: 1730000000000,
+                configReloadFailure: { path: "/tmp/magic-context.jsonc", message: "malformed" },
+            },
+            "ses-status-live-config",
+        );
+        expect(formatPiStatusSummary(detail)).toContain("Config generation: 6 (adopted ");
+        expect(formatPiStatusSummary(detail)).toContain("Config reload failed /tmp/magic-context.jsonc: malformed");
+        expect(buildStatusView(statusViewSourceFromPiDetail(detail), { version: "test" }).sections.some((section) => section.title === "Config")).toBe(true);
+    } finally {
+        closeQuietly(db);
+    }
+});

@@ -618,7 +618,10 @@ function combinedOutcome(args: {
     return "ok";
 }
 
-export function loadPluginConfigDetailed(directory: string): LoadResultDetailed {
+export function loadPluginConfigDetailed(
+    directory: string,
+    applyRuntimeGlobals = true,
+): LoadResultDetailed {
     const userDetected = detectConfigFile(getUserConfigBasePath());
     const projectDetected = detectConfigFile(getProjectConfigBasePath(directory));
     // Both-harness sources drive the GC-suppression signal; this-harness sources
@@ -750,8 +753,10 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         project: projectLoaded ? profileResolution.projectBase.protected_tokens : undefined,
     });
     if (profileResolution.activeProfile) config.profile = profileResolution.activeProfile;
-    setOutputReserveConfig(config.output_reserve);
-    setWindowOverlayPath(config.models?.window_overlay_path);
+    if (applyRuntimeGlobals) {
+        setOutputReserveConfig(config.output_reserve);
+        setWindowOverlayPath(config.models?.window_overlay_path);
+    }
     const leafValidationWarnings = [...(config.configWarnings ?? [])];
     if (config.configWarnings?.length) {
         allWarnings.push(

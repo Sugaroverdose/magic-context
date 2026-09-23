@@ -8,6 +8,7 @@ import { chmodSync, createWriteStream, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { COMPACTION_ENABLED_PATH, isCompactionEnabled } from "../config/agent-disable";
+import { currentPluginConfigReader, historianRunConfig } from "../config/live-run-config";
 import type { MagicContextConfig } from "../config/schema/magic-context";
 import {
     getAuthorityManagedMarker,
@@ -760,8 +761,15 @@ export function buildStatusDetail(
                   detail: historianRefusalDetail,
               }
             : undefined;
+    const liveConfig = currentPluginConfigReader(directory);
+    const liveFailure = liveConfig?.lastFailure();
     const detail: StatusDetail = {
         ...base,
+        configGeneration: liveConfig?.current().generation,
+        configAdoptedAt: liveConfig?.current().adoptedAt,
+        configReloadFailure: liveFailure
+            ? { path: liveFailure.path, message: liveFailure.message }
+            : undefined,
         memoryImportanceHistogram: emptyMemoryImportanceHistogram(),
         // Not project-scoped: the maintenance timer is one per process, and a
         // pass that ends early costs every project its work, so this is read
@@ -1392,7 +1400,8 @@ export function registerRpcHandlers(
             liveSessionState.liveModelBySession,
             liveSessionState.variantBySession,
             liveSessionState.agentBySession,
-            config.toast_duration_ms,
+            currentPluginConfigReader(directory)?.poll().effective.toast_duration_ms ??
+                config.toast_duration_ms,
         );
 
     const injectionBudgetTokens = config.memory?.injection_budget_tokens;
@@ -1518,7 +1527,11 @@ export function registerRpcHandlers(
             "../features/magic-context/dreamer/task-config"
         );
         const DEFAULT_HISTORIAN_TIMEOUT_MS = 10 * 60 * 1000;
-        const historianModel = resolveHistorianModel(config, "opencode");
+        const runConfig = historianRunConfig(
+            config,
+            currentPluginConfigReader(directory)?.poll().effective ?? config,
+        );
+        const historianModel = resolveHistorianModel(runConfig, "opencode");
         return {
             client: args.client as ManagedRecompContext["client"],
             hiddenCompletionExecutor: args.hiddenCompletionExecutor,
@@ -1528,14 +1541,21 @@ export function registerRpcHandlers(
             historianChunkTokens: deriveHistorianChunkTokens(
                 resolveHistorianContextLimit(historianModel.primary?.model),
             ),
-            historianTimeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+            historianTimeoutMs: runConfig.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
             memoryEnabled: config.memory?.enabled ?? true,
-            autoPromote: config.memory?.auto_promote ?? true,
+            autoPromote: runConfig.memory?.auto_promote ?? true,
             historianModel: historianModel.primary,
             fallbackModels: historianModel.fallbacks,
-            userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
-            historianTwoPass: config.historian?.two_pass === true,
-            getNotificationParams,
+            userMemoriesEnabled: userMemoryCollectionEnabled(runConfig.dreamer),
+            historianTwoPass: runConfig.historian?.two_pass === true,
+            getNotificationParams: (sessionId) =>
+                getLiveNotificationParams(
+                    sessionId,
+                    liveSessionState.liveModelBySession,
+                    liveSessionState.variantBySession,
+                    liveSessionState.agentBySession,
+                    runConfig.toast_duration_ms,
+                ),
         };
     };
 
@@ -1709,11 +1729,11 @@ export function registerRpcHandlers(
     });
 
     rpcServer.handle("toast-duration", async () => {
+        const duration =
+            currentPluginConfigReader(directory)?.poll().effective.toast_duration_ms ??
+            config.toast_duration_ms;
         const resolved =
-            typeof config.toast_duration_ms === "number" &&
-            Number.isFinite(config.toast_duration_ms)
-                ? config.toast_duration_ms
-                : 5000;
+            typeof duration === "number" && Number.isFinite(duration) ? duration : 5000;
         return { toastDurationMs: resolved };
     });
 

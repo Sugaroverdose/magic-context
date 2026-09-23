@@ -20,6 +20,8 @@
  *   Falls back to schema defaults when neither file exists.
  */
 
+import { changedLiveKeys, dreamerRunConfig, historianRunConfig } from '@magic-context/core/config/live-run-config';
+import { LiveConfigReader } from '@magic-context/core/config/live-snapshot';
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -127,7 +129,7 @@ import {
 	resolveSessionId,
 	sendCtxStatusMessage,
 } from "./commands/pi-command-utils";
-import { loadPiConfig } from "./config";
+import { loadPiConfig, loadPiConfigDetailed } from "./config";
 import {
 	awaitInFlightHistorians,
 	clearContextHandlerSession,
@@ -1237,6 +1239,22 @@ async function startPiMagicContextRuntime(
 	// Resolve all project-sensitive config through this memoized accessor so
 	// every invocation reads the active cwd's config instead of the launch cwd's.
 	const projectDepsByDir = new Map<string, ResolvedPiProjectDeps>();
+	const liveReaders = new Map<string, LiveConfigReader<MagicContextConfig>>();
+	function liveReaderFor(dir: string, boot: MagicContextConfig) {
+		let reader = liveReaders.get(dir);
+		if (!reader) {
+			reader = new LiveConfigReader(dir, boot, () => {
+				const loaded = loadPiConfigDetailed({ cwd: dir }, false);
+				if (["project-file-parse-error", "project-file-io-error", "schema-recovery"].includes(loaded.loadOutcome)) {
+					throw new Error(`invalid configuration: ${loaded.warnings.join("; ")}`);
+				}
+				return loaded.config;
+			}, warn, changedLiveKeys);
+			reader.poll();
+			liveReaders.set(dir, reader);
+		}
+		return reader;
+	}
 
 	const buildContextOptions = (
 		cfg: MagicContextConfig,
@@ -1307,6 +1325,7 @@ async function startPiMagicContextRuntime(
 		},
 	): ResolvedPiProjectDeps {
 		const hist = resolveHistorianFromConfig(cfg);
+		liveReaderFor(dir, cfg);
 		if (hist) {
 			hist.onStatusChange = (ctx) => {
 				updateStatusLine(ctx, {
@@ -1374,7 +1393,10 @@ async function startPiMagicContextRuntime(
 	function resolveContextOptionsForProject(
 		dir: string,
 	): PiContextHandlerOptions {
-		return resolveProjectDepsForDir(dir).contextOptions;
+		const project = resolveProjectDepsForDir(dir);
+		const sampled = historianRunConfig(project.config, liveReaderFor(dir, project.config).poll().effective);
+		const historian = resolveHistorianFromConfig(sampled);
+		return { ...project.contextOptions, historian };
 	}
 
 	const bootProjectDeps = buildProjectDeps(
@@ -1407,6 +1429,11 @@ async function startPiMagicContextRuntime(
 			projectIdentity: current.projectIdentity,
 			registrationOwner: dreamerRegistrationOwner,
 			config: current.dreamerConfig,
+			sampleDreamRun: () => {
+				const fresh = liveReaderFor(current.projectDir, current.config).poll().effective;
+				const sampled = dreamerRunConfig(current.config, fresh);
+				return { dreamerConfig: sampled.dreamer, mural: sampled.mural, gitCommitIndexing: sampled.memory.git_commit_indexing };
+			},
 			harness: PI_HARNESS_KIND,
 			// Council finding #7: thread real embedding + memory config so
 			// dreamer can do semantic dedup AND can write memory updates.
@@ -1584,7 +1611,12 @@ async function startPiMagicContextRuntime(
 		compactionEnabled: isCompactionEnabled(bootProjectDeps.config),
 		resolveStatusDeps: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
+			const live = liveReaderFor(current.projectDir, current.config);
+			const failure = live.lastFailure();
 			return {
+				configGeneration: live.current().generation,
+				configAdoptedAt: live.current().adoptedAt,
+				configReloadFailure: failure ? { path: failure.path, message: failure.message } : undefined,
 				db,
 				projectIdentity: current.projectIdentity,
 				protectedTags: current.config.protected_tags,
@@ -1632,19 +1664,19 @@ async function startPiMagicContextRuntime(
 		compactionOff,
 		resolveRuntimeDeps: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
+			const fresh = historianRunConfig(current.config, liveReaderFor(current.projectDir, current.config).poll().effective);
+			const historian = resolveHistorianFromConfig(fresh) ?? current.historianConfig;
 			return {
 				db,
 				runner: recompRunner,
-				historianModel: current.historianConfig?.model,
-				historianChunkTokens: deriveHistorianChunkTokens(
-					resolveHistorianContextLimit(current.historianConfig?.model),
-				),
-				historianFallbacks: current.historianConfig?.fallbackModels,
-				historianTimeoutMs: current.config.historian_timeout_ms,
-				historianThinkingLevel: current.historianConfig?.thinkingLevel,
+				historianModel: historian?.model,
+				historianChunkTokens: historian?.historianChunkTokens ?? deriveHistorianChunkTokens(resolveHistorianContextLimit(historian?.model)),
+				historianFallbacks: historian?.fallbackModels,
+				historianTimeoutMs: historian?.timeoutMs ?? current.config.historian_timeout_ms,
+				historianThinkingLevel: historian?.thinkingLevel,
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,
-				autoPromote: current.config.memory.auto_promote,
+				autoPromote: fresh.memory.auto_promote,
 				compactionOff,
 			};
 		},
@@ -1673,19 +1705,19 @@ async function startPiMagicContextRuntime(
 		executeThresholdTokens: bootProjectDeps.config.execute_threshold_tokens,
 		resolveRuntimeDeps: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
+			const fresh = historianRunConfig(current.config, liveReaderFor(current.projectDir, current.config).poll().effective);
+			const historian = resolveHistorianFromConfig(fresh) ?? current.historianConfig;
 			return {
 				db,
 				runner: wrapupRunner,
-				historianModel: current.historianConfig?.model,
-				historianChunkTokens: deriveHistorianChunkTokens(
-					resolveHistorianContextLimit(current.historianConfig?.model),
-				),
-				historianFallbacks: current.historianConfig?.fallbackModels,
-				historianTimeoutMs: current.config.historian_timeout_ms,
-				historianThinkingLevel: current.historianConfig?.thinkingLevel,
+				historianModel: historian?.model,
+				historianChunkTokens: historian?.historianChunkTokens ?? deriveHistorianChunkTokens(resolveHistorianContextLimit(historian?.model)),
+				historianFallbacks: historian?.fallbackModels,
+				historianTimeoutMs: historian?.timeoutMs ?? current.config.historian_timeout_ms,
+				historianThinkingLevel: historian?.thinkingLevel,
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,
-				autoPromote: current.config.memory.auto_promote,
+				autoPromote: fresh.memory.auto_promote,
 				compactionOff,
 				userMemoriesEnabled: userMemoryCollectionEnabled(
 					current.config.dreamer,

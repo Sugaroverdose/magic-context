@@ -679,6 +679,19 @@ export interface TransformDeps {
     historianMaxOutputTokens?: number;
     /** Resolved fallback chain for historian-family calls. */
     fallbackModels?: readonly ModelInput[];
+    resolveHistorianRun?: () => {
+        model?: ModelInput;
+        fallbackModels: readonly ModelInput[];
+        contextLimit?: number;
+        maxOutputTokens?: number;
+        timeoutMs: number;
+        twoPass: boolean;
+        autoPromote: boolean;
+        userMemoriesEnabled: boolean;
+        commitClusterTrigger?: { enabled: boolean; min_clusters: number };
+        toastDurationMs?: number;
+        chunkTokens: number;
+    };
     /** False when historian.disable=true, blocking historian-backed child agents. */
     historianRunnable?: boolean;
     /**
@@ -858,6 +871,7 @@ export function createTransform(deps: TransformDeps) {
         output: { messages: unknown[] },
     ): Promise<void> => {
         const startTime = performance.now();
+        const historianRun = deps.resolveHistorianRun?.();
         const messages = output.messages as MessageLike[];
         const passOutcome = createPassOutcome();
         const lkgInput = projectLkgEntry(messages);
@@ -866,6 +880,12 @@ export function createTransform(deps: TransformDeps) {
             return;
         }
         const resolvedSessionId = sessionId;
+        const runNotificationParams = (sid: string) => {
+            const params = deps.getNotificationParams?.(sid) ?? {};
+            return historianRun?.toastDurationMs === undefined
+                ? params
+                : { ...params, toastDurationMs: historianRun.toastDurationMs };
+        };
         beginLkgPass(sessionId);
         clearOpenCodePendingTransformDecision(sessionId);
         logTransformTiming(sessionId, "findSessionId", startTime, `messages=${messages.length}`);
@@ -994,7 +1014,7 @@ export function createTransform(deps: TransformDeps) {
                             deps.client,
                             sessionId,
                             notice,
-                            deps.getNotificationParams?.(sessionId) ?? {},
+                            runNotificationParams(sessionId) ?? {},
                         )) === "sent";
                 }
                 if (noticeDelivered && transition.recordToWrite !== null) {
@@ -1415,7 +1435,7 @@ export function createTransform(deps: TransformDeps) {
                         deps.client,
                         sessionId,
                         "Magic Context can't compact yet — the recent history is a single in-progress block. Continuing; it will compact once the block completes. Run `/ctx-recomp` if this persists.",
-                        deps.getNotificationParams?.(sessionId) ?? {},
+                        runNotificationParams(sessionId) ?? {},
                     );
                 }
             } catch (error) {
@@ -1587,7 +1607,7 @@ export function createTransform(deps: TransformDeps) {
         const consumingDeferredEarly =
             canConsumeDeferredEarly && deferredHistoryWasPendingAtPassStart;
         const isCacheBusting = historyRefreshExplicitBeforePrepare || consumingDeferredEarly;
-        const notificationParams = deps.getNotificationParams?.(sessionId) ?? {};
+        const notificationParams = runNotificationParams(sessionId) ?? {};
         const boundaryContextLimit =
             resolvedContextLimit && resolvedContextLimit > 0
                 ? resolvedContextLimit
@@ -1674,23 +1694,25 @@ export function createTransform(deps: TransformDeps) {
                 compactionMarkerStrategy: deps.compactionMarkerStrategy,
                 db,
                 sessionId,
-                historianChunkTokens: deps.getHistorianChunkTokens?.() ?? 20_000,
+                historianChunkTokens:
+                    historianRun?.chunkTokens ?? deps.getHistorianChunkTokens?.() ?? 20_000,
                 boundarySnapshot,
                 currentContextLimit: boundaryContextLimit,
                 historyBudgetTokens,
-                historianTimeoutMs: deps.historianTimeoutMs,
-                model: deps.historianModel,
-                fallbackModels: deps.fallbackModels,
+                historianTimeoutMs: historianRun?.timeoutMs ?? deps.historianTimeoutMs,
+                model: historianRun?.model ?? deps.historianModel,
+                fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
                 directory: compartmentDirectory,
                 fallbackModelId,
                 getNotificationParams: () => notificationParams,
-                experimentalUserMemories: deps.experimentalUserMemories,
+                experimentalUserMemories:
+                    historianRun?.userMemoriesEnabled ?? deps.experimentalUserMemories,
                 experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
-                historianTwoPass: deps.historianTwoPass,
+                historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
                 // Issue #44: gate historian-driven memory promotion so users
                 // who disable the feature actually see no memories created.
                 memoryEnabled: deps.memoryConfig?.enabled,
-                autoPromote: deps.memoryConfig?.autoPromote,
+                autoPromote: historianRun?.autoPromote ?? deps.memoryConfig?.autoPromote,
                 ensureProjectRegistered: deps.ensureProjectRegistered,
                 // Historian publication invalidates the injection cache AND
                 // changes compartments/facts that render into message[0]. We
@@ -1893,7 +1915,7 @@ export function createTransform(deps: TransformDeps) {
                     boundaryExecuteThreshold,
                     deriveTriggerBudget(boundaryContextLimit, boundaryExecuteThreshold),
                     deps.clearReasoningAge,
-                    deps.commitClusterTrigger,
+                    historianRun?.commitClusterTrigger ?? deps.commitClusterTrigger,
                     undefined,
                     boundaryContextLimit,
                     inMemoryTail,
@@ -2240,7 +2262,7 @@ export function createTransform(deps: TransformDeps) {
         const watermark = getMaxDroppedTagNumber(db, sessionId);
 
         let contextUsage = contextUsageEarly;
-        const rawGetNotifParams = deps.getNotificationParams;
+        const rawGetNotifParams = runNotificationParams;
         const tCompartmentPhase = performance.now();
         const compartmentPhase = await runCompartmentPhase({
             hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
@@ -2260,13 +2282,15 @@ export function createTransform(deps: TransformDeps) {
             db,
             sessionId,
             resolvedSessionId,
-            historianChunkTokens: deps.getHistorianChunkTokens?.() ?? 20_000,
+            historianChunkTokens:
+                historianRun?.chunkTokens ?? deps.getHistorianChunkTokens?.() ?? 20_000,
             historyBudgetTokens,
-            historianTimeoutMs: deps.historianTimeoutMs,
-            historianModel: deps.historianModel,
-            historianContextLimit: deps.historianContextLimit,
-            historianMaxOutputTokens: deps.historianMaxOutputTokens,
-            fallbackModels: deps.fallbackModels,
+            historianTimeoutMs: historianRun?.timeoutMs ?? deps.historianTimeoutMs,
+            historianModel: historianRun?.model ?? deps.historianModel,
+            historianContextLimit: historianRun?.contextLimit ?? deps.historianContextLimit,
+            historianMaxOutputTokens:
+                historianRun?.maxOutputTokens ?? deps.historianMaxOutputTokens,
+            fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
             compartmentDirectory,
             messages,
             pendingCompartmentInjection,
@@ -2282,14 +2306,15 @@ export function createTransform(deps: TransformDeps) {
             safeForBackgroundCompression:
                 historianRunnable && (isCacheBusting || schedulerDecision === "execute"),
             deferredHistoryRefreshSessions,
-            experimentalUserMemories: deps.experimentalUserMemories,
+            experimentalUserMemories:
+                historianRun?.userMemoriesEnabled ?? deps.experimentalUserMemories,
             experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
-            historianTwoPass: deps.historianTwoPass,
+            historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
             // Issue #44: forward memory gating so the normal historian path
             // (not just the recovery path above) honors memory.enabled and
             // memory.auto_promote.
             memoryEnabled: deps.memoryConfig?.enabled,
-            autoPromote: deps.memoryConfig?.autoPromote,
+            autoPromote: historianRun?.autoPromote ?? deps.memoryConfig?.autoPromote,
             ensureProjectRegistered: deps.ensureProjectRegistered,
             // See startRecoveryRun above for the full rationale —
             // historian/recomp publication signals history rebuild +

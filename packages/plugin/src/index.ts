@@ -8,6 +8,7 @@ import { withContentLanguageDirective } from "./agents/language-directive";
 import { denyTaskRoutingToCallerAgents } from "./agents/permissions";
 import { loadPluginConfigDetailed } from "./config";
 import { isCompactionEnabled, isDreamerRunnable } from "./config/agent-disable";
+import { dreamerRunConfig, historianRunConfig, pluginConfigReader } from "./config/live-run-config";
 import { migrateMagicContextConfigLocations } from "./config/migrate-config-location";
 import { getMagicContextBuiltinCommands } from "./features/builtin-commands/commands";
 import { openOpenCodeDb } from "./features/magic-context/dreamer/open-opencode-db";
@@ -131,6 +132,7 @@ const server: Plugin = async (ctx) => {
     });
     const loadedPluginConfig = loadPluginConfigDetailed(ctx.directory);
     const pluginConfig = loadedPluginConfig.config;
+    const liveConfigReader = pluginConfigReader(ctx.directory, pluginConfig);
     reloadWindowOverlay(pluginConfig.models?.window_overlay_path);
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
         harness: "opencode",
@@ -311,6 +313,7 @@ const server: Plugin = async (ctx) => {
             createSessionHooksAsync({
                 ctx,
                 pluginConfig,
+                liveConfigReader,
                 liveSessionState,
                 rustModeModuleClient,
                 promptSurfaceRuntime,
@@ -385,6 +388,7 @@ const server: Plugin = async (ctx) => {
             const reopened = await createSessionHooksAsync({
                 ctx,
                 pluginConfig,
+                liveConfigReader,
                 liveSessionState,
                 rustModeModuleClient,
                 promptSurfaceRuntime,
@@ -511,16 +515,38 @@ const server: Plugin = async (ctx) => {
                 harness: "opencode" as const,
                 client: ctx.client,
                 dreamerConfig: dreamerRunnable ? pluginConfig.dreamer : undefined,
+                sampleDreamRun: () => {
+                    const fresh = liveConfigReader.poll().effective;
+                    const dreaming = dreamerRunConfig(pluginConfig, fresh);
+                    const historian = historianRunConfig(pluginConfig, fresh);
+                    return {
+                        dreamerConfig: dreamerRunnable ? dreaming.dreamer : undefined,
+                        mural: dreaming.mural,
+                        historianChildSweep: {
+                            timeoutMs: historian.historian_timeout_ms,
+                            fallbackModelCount: resolveHistorianModel(historian, "opencode")
+                                .fallbacks.length,
+                            keepSubagents: pluginConfig.keep_subagents === true,
+                        },
+                        gitCommitIndexing: dreaming.memory.git_commit_indexing,
+                    };
+                },
                 language: pluginConfig.language,
                 transformMode: pluginConfig.transform_mode,
                 embeddingConfig: pluginConfig.embedding,
                 memoryEnabled: pluginConfig.memory?.enabled === true,
                 memoryInjectionBudgetTokens: pluginConfig.memory?.injection_budget_tokens,
-                historianChildSweep: {
-                    timeoutMs: pluginConfig.historian_timeout_ms,
-                    fallbackModelCount: resolveHistorianModel(pluginConfig, "opencode").fallbacks
-                        .length,
-                    keepSubagents: pluginConfig.keep_subagents === true,
+                get historianChildSweep() {
+                    const historian = historianRunConfig(
+                        pluginConfig,
+                        liveConfigReader.poll().effective,
+                    );
+                    return {
+                        timeoutMs: historian.historian_timeout_ms,
+                        fallbackModelCount: resolveHistorianModel(historian, "opencode").fallbacks
+                            .length,
+                        keepSubagents: pluginConfig.keep_subagents === true,
+                    };
                 },
                 mural: pluginConfig.mural,
                 retinaHandoff: pluginConfig.smart_notes.retina_handoff,

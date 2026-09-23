@@ -1,7 +1,13 @@
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
+import {
+    dreamerRunConfig,
+    historianRunConfig,
+    pluginConfigReader,
+} from "../../config/live-run-config";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
+import { userMemoryCollectionEnabled } from "../../features/magic-context/dreamer/task-config";
 import { formatUnsupportedDreamTasks } from "../../features/magic-context/dreamer/task-registry";
 import { isFailClosedBlockingError } from "../../features/magic-context/fail-closed-block";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
@@ -24,6 +30,11 @@ import {
     getCurrentToolSetHash,
     recordToolDefinition,
 } from "../../features/magic-context/tool-definition-tokens";
+import {
+    deriveHistorianChunkTokens,
+    resolveHistorianContextLimit,
+    resolveKnownHistorianContextLimit,
+} from "../../hooks/magic-context/derive-budgets";
 import { assertExecutableToolInput } from "../../hooks/magic-context/dropped-input-guard";
 import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
 import { getSessionErrorInfo } from "../../hooks/magic-context/event-payloads";
@@ -326,6 +337,7 @@ export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
     const config = resolveV2TransformMode(loadPluginConfigDetailed(directory).config);
     if (!config.enabled) return;
+    const liveConfigReader = pluginConfigReader(directory, config);
     const compactionOff = !isCompactionEnabled(config);
     const conflicts = detectConflicts(directory, {
         compactionEnabled: !compactionOff,
@@ -452,16 +464,39 @@ export async function registerContext(context: V2Context) {
                   },
               )
             : undefined;
+    const dreamerAtBoot = config.dreamer;
     const dreamTrigger =
-        hiddenCompletionExecutor && config.dreamer && !config.dreamer.disable
+        hiddenCompletionExecutor && dreamerAtBoot && !dreamerAtBoot.disable
             ? startDreamTrigger(context, {
-                  config: config.dreamer,
+                  config: dreamerAtBoot,
+                  sample: () => {
+                      const current = dreamerRunConfig(config, liveConfigReader.poll().effective);
+                      return { config: current.dreamer ?? dreamerAtBoot, mural: current.mural };
+                  },
                   executor: hiddenCompletionExecutor,
                   projectIdentity: () => resolveProjectIdentity(directory) ?? directory,
                   language: config.language,
                   mural: config.mural,
               })
             : undefined;
+    const sampleHistorian = () => {
+        const fresh = historianRunConfig(config, liveConfigReader.poll().effective);
+        const models = resolveHistorianModel(fresh, "opencode");
+        return {
+            model: models.primary,
+            fallbackModels: models.fallbacks,
+            contextLimit: resolveKnownHistorianContextLimit(models.primary?.model),
+            maxOutputTokens: fresh.historian?.maxTokens,
+            timeoutMs: fresh.historian_timeout_ms,
+            twoPass: fresh.historian?.two_pass === true,
+            autoPromote: fresh.memory?.auto_promote ?? true,
+            userMemoriesEnabled: userMemoryCollectionEnabled(fresh.dreamer),
+            commitClusterTrigger: fresh.commit_cluster_trigger,
+            chunkTokens: deriveHistorianChunkTokens(
+                resolveHistorianContextLimit(models.primary?.model),
+            ),
+        };
+    };
     const historianModels = resolveHistorianModel(config, "opencode");
     const channel1: NonNullable<TransformDeps["channel1StateBySession"]> = new Map();
     const variants = new Map<string, string | undefined>();
@@ -883,6 +918,7 @@ export async function registerContext(context: V2Context) {
                     config.historian?.disable !== true,
                 historianModel: historianModels.primary,
                 fallbackModels: historianModels.fallbacks,
+                resolveHistorianRun: sampleHistorian,
                 historianTimeoutMs: config.historian_timeout_ms,
                 // Raw config on purpose: absent means the user configured no
                 // output cap, and the hidden carrier only puts a cap on the wire

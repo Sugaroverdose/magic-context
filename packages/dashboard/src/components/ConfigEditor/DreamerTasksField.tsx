@@ -8,6 +8,7 @@ import {
   modelId,
   thinkingLevelsForHarness,
 } from "./HarnessModelFields";
+import LiveBadge from "./LiveBadge";
 import ModelSelect from "./ModelSelect";
 
 export interface DreamTaskConfig {
@@ -225,6 +226,7 @@ export default function DreamerTasksField(props: DreamerTasksFieldProps) {
             <div class="dreamer-task-row">
               <div class="dreamer-task-head">
                 <span class="config-field-label">{meta().label}</span>
+                <LiveBadge path={`dreamer.tasks.${meta().name}.schedule`} />
                 <span class="config-field-desc">
                   <code>{meta().name}</code> — {meta().description}
                 </span>
@@ -329,6 +331,7 @@ export default function DreamerTasksField(props: DreamerTasksFieldProps) {
                   <span class="config-field-desc">
                     {promotionThresholdDescription(meta().name)}
                   </span>
+                  <LiveBadge path={`dreamer.tasks.${meta().name}.promotion_threshold`} />
                   <input
                     class="config-input"
                     type="number"

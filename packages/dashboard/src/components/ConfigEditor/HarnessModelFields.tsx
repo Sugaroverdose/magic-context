@@ -1,5 +1,6 @@
 import { For, Show } from "solid-js";
 import { ompModelIdToCanonical, piModelIdToCanonical } from "../../lib/model-ids";
+import LiveBadge from "./LiveBadge";
 import ModelSelect from "./ModelSelect";
 
 export type Harness = "opencode" | "pi" | "omp";
@@ -74,6 +75,7 @@ function QualifierControl(props: {
   harness: Harness;
   label: string;
   description: string;
+  path: string;
   value: string | undefined;
   onChange: (value: string | undefined) => void;
 }) {
@@ -83,6 +85,7 @@ function QualifierControl(props: {
     <div class="config-field">
       <div class="config-field-header">
         <span class="config-field-label">{props.label}</span>
+        <LiveBadge path={props.path} />
         <span class="config-field-key">{qualifier()}</span>
       </div>
       <span class="config-field-desc">{props.description}</span>
@@ -146,6 +149,7 @@ export default function HarnessModelFields(props: HarnessModelFieldsProps) {
       <div class="config-field">
         <div class="config-field-header">
           <span class="config-field-label">Model</span>
+          <LiveBadge path={`${props.agent}.${props.harness}.model`} />
           <span class="config-field-key">
             {props.agent}.{props.harness}.model
           </span>
@@ -169,6 +173,7 @@ export default function HarnessModelFields(props: HarnessModelFieldsProps) {
         harness={props.harness}
         label={`Primary ${label().toLowerCase()}`}
         description="Stored on this model entry and used only by this harness."
+        path={`${props.agent}.${props.harness}.model`}
         value={modelQualifier(block().model, props.harness)}
         onChange={(next) =>
           updateBlock({ model: modelEntryWithQualifier(block().model, props.harness, next) })
@@ -179,6 +184,7 @@ export default function HarnessModelFields(props: HarnessModelFieldsProps) {
         harness={props.harness}
         label={`Default ${label().toLowerCase()}`}
         description="Used when the primary entry does not specify its own qualifier."
+        path={`${props.agent}.${props.harness}.${qualifierKey()}`}
         value={
           typeof block()[qualifierKey()] === "string"
             ? (block()[qualifierKey()] as string)
@@ -190,6 +196,7 @@ export default function HarnessModelFields(props: HarnessModelFieldsProps) {
       <div class="config-field">
         <div class="config-field-header">
           <span class="config-field-label">Fallback Models</span>
+          <LiveBadge path={`${props.agent}.${props.harness}.fallback_models`} />
           <span class="config-field-key">
             {props.agent}.{props.harness}.fallback_models
           </span>
@@ -222,6 +229,7 @@ export default function HarnessModelFields(props: HarnessModelFieldsProps) {
                       harness={props.harness}
                       label={`Fallback ${label().toLowerCase()}`}
                       description="Optional qualifier for this fallback entry."
+                      path={`${props.agent}.${props.harness}.fallback_models`}
                       value={modelQualifier(entry, props.harness)}
                       onChange={(next) =>
                         updateFallback(index(), modelEntryWithQualifier(entry, props.harness, next))

@@ -15,6 +15,7 @@ import { configSaveBlocker } from "./config-save-guard";
 import type { DreamTaskConfig, DreamTaskModelConfig } from "./DreamerTasksField";
 import DreamerTasksField from "./DreamerTasksField";
 import HarnessModelFields, { type Harness, modelCatalogForHarness } from "./HarnessModelFields";
+import LiveBadge from "./LiveBadge";
 import PerModelField from "./PerModelField";
 
 // ── JSONC helpers ───────────────────────────────────────────
@@ -528,6 +529,7 @@ function ConfigForm(props: {
       <div class="config-field">
         <div class="config-field-header">
           <span class="config-field-label">{field.label}</span>
+          <LiveBadge path={field.key} />
           <span class="config-field-key">{field.key}</span>
         </div>
         <span class="config-field-desc">{field.description}</span>
@@ -1437,6 +1439,7 @@ function ConfigForm(props: {
             <div class="config-field">
               <div class="config-field-header">
                 <span class="config-field-label">Task schedules and model overrides</span>
+                <LiveBadge path={`dreamer.${dreamerHarness()}.tasks`} />
                 <span class="config-field-key">dreamer.tasks / dreamer.{"<harness>"}.tasks</span>
               </div>
               <span class="config-field-desc">

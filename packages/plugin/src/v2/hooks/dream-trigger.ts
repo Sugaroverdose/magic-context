@@ -14,6 +14,7 @@ export function startDreamTrigger(
     context: V2Context,
     args: {
         config: DreamerConfig;
+        sample?: () => { config: DreamerConfig; mural?: { enabled: boolean; model?: string } };
         executor: HiddenCompletionExecutor;
         projectIdentity: () => string;
         language?: string;
@@ -33,12 +34,13 @@ export function startDreamTrigger(
                 try {
                     // Scheduled and manual runs share one capability filter so a
                     // host without a tool loop never records unsupported tasks as failed.
+                    const sampled = args.sample?.();
                     const { runnable } = selectRunnableDreamTasks({
                         tasks: buildDreamTaskRuntimeConfigs(
-                            args.config,
+                            sampled?.config ?? args.config,
                             "opencode",
                             args.language,
-                            args.mural?.model,
+                            (sampled?.mural ?? args.mural)?.model,
                         ),
                         toolsSupported: args.executor.capabilities.tools === true,
                     });
@@ -52,7 +54,7 @@ export function startDreamTrigger(
                             sessionDirectory: context.location.directory,
                             openOpenCodeDb: () => null,
                             language: args.language,
-                            mural: args.mural,
+                            mural: sampled?.mural ?? args.mural,
                         }),
                     });
                 } catch (error) {

@@ -90,6 +90,12 @@ interface ProjectRegistration {
     harness: ModelHarness;
     client: PluginContext["client"];
     dreamerConfig?: DreamerConfig;
+    sampleDreamRun?: () => Partial<
+        Pick<
+            ProjectRegistration,
+            "dreamerConfig" | "mural" | "historianChildSweep" | "gitCommitIndexing"
+        >
+    >;
     language?: string;
     gitCommitIndexing?: {
         enabled: boolean;
@@ -471,7 +477,8 @@ async function runProjectMaintenance(
         // Compartment-chunk backfill remains demand-driven to avoid bursty
         // requests to local embedding endpoints.
     }
-    await sweepProject(reg, origin, db);
+    const sampled = reg.sampleDreamRun?.();
+    await sweepProject(sampled ? { ...reg, ...sampled } : reg, origin, db);
 }
 
 /**

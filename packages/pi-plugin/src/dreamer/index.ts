@@ -30,6 +30,7 @@ export interface PiDreamerOptions {
 	registrationOwner: object;
 	/** Resolved runnable DreamerConfig from loadPiConfig(). When disable=true, the caller does not register. */
 	config: DreamerConfig;
+	sampleDreamRun?: () => { dreamerConfig?: DreamerConfig; mural?: { enabled: boolean; model?: string }; gitCommitIndexing?: PiDreamerOptions["gitCommitIndexing"] };
 	/** Active Pi-compatible host used to select per-harness model configuration. */
 	harness: Extract<ModelHarness, "pi" | "omp">;
 	/**
@@ -209,6 +210,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		harness: opts.harness,
 		client,
 		dreamerConfig: opts.config,
+		sampleDreamRun: opts.sampleDreamRun,
 		language: opts.language,
 		gitCommitIndexing: opts.gitCommitIndexing,
 		memoryEnabled: opts.memoryEnabled,
@@ -258,6 +260,9 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 				`Pi dreamer registration owner is no longer active for project ${opts.projectIdentity}`,
 			);
 		}
+		const sampled = manualOpts.sampleDreamRun?.();
+		const dreamerConfig = sampled?.dreamerConfig ?? manualOpts.config;
+		const mural = sampled?.mural ?? manualOpts.mural;
 		const manualClient = createPiDreamerClient(
 			manualOpts,
 			notifyOwnersOfAdjunctRefresh,
@@ -269,10 +274,10 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 			db: manualOpts.db,
 			projectIdentity: manualOpts.projectIdentity,
 			tasks: buildDreamTaskRuntimeConfigs(
-				manualOpts.config,
+				dreamerConfig,
 				manualOpts.harness,
 				manualOpts.language,
-				manualOpts.mural?.model,
+				mural?.model,
 			),
 			executor: createDreamTaskExecutor({
 				client: manualClient as never,
@@ -283,12 +288,12 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 				}),
 				primerRawProviderFactory: createPiPrimerRawProviderFactory(),
 				userMemoryCollectionEnabled: userMemoryCollectionEnabled(
-					manualOpts.config,
+					dreamerConfig,
 				),
 				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 				language: manualOpts.language,
 				retinaHandoff: manualOpts.retinaHandoff,
-				mural: manualOpts.mural,
+				mural,
 			}),
 			task,
 		});
