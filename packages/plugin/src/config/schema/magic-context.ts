@@ -1499,6 +1499,43 @@ export const MagicContextConfigSchema = z
         };
     });
 
+/** Settings whose fresh values can be used by later agent runs without changing rendered prompt bytes. */
+export const LIVE_RELOAD_CONFIG_PATHS = [
+    "mural.model",
+    "historian.opencode.model", "historian.opencode.fallback_models", "historian.opencode.variant",
+    "historian.pi.model", "historian.pi.fallback_models", "historian.pi.thinking_level",
+    "historian.omp.model", "historian.omp.fallback_models", "historian.omp.thinking_level",
+    "historian.two_pass", "historian_timeout_ms",
+    "dreamer.opencode.model", "dreamer.opencode.fallback_models", "dreamer.opencode.variant", "dreamer.opencode.tasks",
+    "dreamer.pi.model", "dreamer.pi.fallback_models", "dreamer.pi.thinking_level", "dreamer.pi.tasks",
+    "dreamer.omp.model", "dreamer.omp.fallback_models", "dreamer.omp.thinking_level", "dreamer.omp.tasks",
+    "dreamer.tasks.map-memories.schedule", "dreamer.tasks.verify.schedule",
+    "dreamer.tasks.verify-broad.schedule", "dreamer.tasks.curate.schedule",
+    "dreamer.tasks.compress-cues.schedule", "dreamer.tasks.classify-memories.schedule",
+    "dreamer.tasks.retrospective.schedule", "dreamer.tasks.retrospective.recency_days",
+    "dreamer.tasks.maintain-docs.schedule", "dreamer.tasks.evaluate-smart-notes.schedule",
+    "dreamer.tasks.review-user-memories.schedule", "dreamer.tasks.review-user-memories.promotion_threshold",
+    "dreamer.tasks.promote-primers.schedule", "dreamer.tasks.promote-primers.promotion_threshold",
+    "dreamer.tasks.refresh-primers.schedule",
+    "memory.git_commit_indexing.enabled", "memory.git_commit_indexing.since_days", "memory.git_commit_indexing.max_commits",
+] as const;
+
+// Mark the input schema nodes, not their parsed defaults, so the JSON schema,
+// runtime projection, docs and dashboard all share one policy source.
+for (const path of LIVE_RELOAD_CONFIG_PATHS) {
+    let node: z.ZodType = MagicContextConfigSchema._def.in as z.ZodType;
+    for (const part of path.split(".")) {
+        while (node instanceof z.ZodOptional || node instanceof z.ZodDefault || node instanceof z.ZodNullable) {
+            node = node.unwrap() as z.ZodType;
+        }
+        if (!(node instanceof z.ZodObject) || !(part in node.shape)) {
+            throw new Error(`Unknown live config path: ${path}`);
+        }
+        node = node.shape[part] as z.ZodType;
+    }
+    z.globalRegistry.add(node, { ...node.meta(), "x-mc-live-reload": true });
+}
+
 /**
  * Derived default protected_tokens formula:
  * clamp(round(0.05 × usableSoft), min(16000, round(0.08 × usableSoft)), 64000)

@@ -28,6 +28,7 @@
         },
         "model": {
           "description": "Model for the compress-cues task that compresses each memory into a mural cue. The mural image itself is rendered deterministically (no author model).",
+          "x-mc-live-reload": true,
           "type": "string",
           "minLength": 1
         }
@@ -715,6 +716,7 @@
           "properties": {
             "model": {
               "description": "Primary OpenCode model entry.",
+              "x-mc-live-reload": true,
               "anyOf": [
                 {
                   "type": "string"
@@ -740,6 +742,7 @@
             },
             "fallback_models": {
               "description": "Ordered fallback OpenCode entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array.",
+              "x-mc-live-reload": true,
               "type": "array",
               "items": {
                 "anyOf": [
@@ -768,6 +771,7 @@
             },
             "variant": {
               "description": "OpenCode reasoning variant for the primary entry when it declares none. Fallback entries declare variants per-entry.",
+              "x-mc-live-reload": true,
               "type": "string"
             }
           },
@@ -779,6 +783,7 @@
           "properties": {
             "model": {
               "description": "Primary Pi model entry.",
+              "x-mc-live-reload": true,
               "anyOf": [
                 {
                   "type": "string"
@@ -813,6 +818,7 @@
             },
             "fallback_models": {
               "description": "Ordered fallback Pi entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array.",
+              "x-mc-live-reload": true,
               "type": "array",
               "items": {
                 "anyOf": [
@@ -850,6 +856,7 @@
             },
             "thinking_level": {
               "description": "Pi thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+              "x-mc-live-reload": true,
               "type": "string",
               "enum": [
                 "off",
@@ -870,6 +877,7 @@
           "properties": {
             "model": {
               "description": "Primary OMP model entry.",
+              "x-mc-live-reload": true,
               "anyOf": [
                 {
                   "type": "string"
@@ -906,6 +914,7 @@
             },
             "fallback_models": {
               "description": "Ordered fallback OMP entries.",
+              "x-mc-live-reload": true,
               "type": "array",
               "items": {
                 "anyOf": [
@@ -945,6 +954,7 @@
             },
             "thinking_level": {
               "description": "OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+              "x-mc-live-reload": true,
               "type": "string",
               "enum": [
                 "off",
@@ -965,6 +975,7 @@
         "two_pass": {
           "default": false,
           "description": "Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false)",
+          "x-mc-live-reload": true,
           "type": "boolean"
         },
         "disallowed_tools": {
@@ -1113,6 +1124,7 @@
           "properties": {
             "model": {
               "description": "Primary OpenCode model entry.",
+              "x-mc-live-reload": true,
               "anyOf": [
                 {
                   "type": "string"
@@ -1138,6 +1150,7 @@
             },
             "fallback_models": {
               "description": "Ordered fallback OpenCode entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array.",
+              "x-mc-live-reload": true,
               "type": "array",
               "items": {
                 "anyOf": [
@@ -1166,10 +1179,12 @@
             },
             "variant": {
               "description": "OpenCode reasoning variant for the primary entry when it declares none. Fallback entries declare variants per-entry.",
+              "x-mc-live-reload": true,
               "type": "string"
             },
             "tasks": {
               "description": "OpenCode task execution overrides. Each named task accepts only model, fallback_models, variant, and timeout_minutes.",
+              "x-mc-live-reload": true,
               "type": "object",
               "propertyNames": {
                 "type": "string"
@@ -1252,6 +1267,7 @@
           "properties": {
             "model": {
               "description": "Primary Pi model entry.",
+              "x-mc-live-reload": true,
               "anyOf": [
                 {
                   "type": "string"
@@ -1286,6 +1302,7 @@
             },
             "fallback_models": {
               "description": "Ordered fallback Pi entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array.",
+              "x-mc-live-reload": true,
               "type": "array",
               "items": {
                 "anyOf": [
@@ -1323,6 +1340,7 @@
             },
             "thinking_level": {
               "description": "Pi thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+              "x-mc-live-reload": true,
               "type": "string",
               "enum": [
                 "off",
@@ -1336,6 +1354,7 @@
             },
             "tasks": {
               "description": "Pi task execution overrides. Each named task accepts only model, fallback_models, thinking_level, and timeout_minutes.",
+              "x-mc-live-reload": true,
               "type": "object",
               "propertyNames": {
                 "type": "string"
@@ -1445,6 +1464,7 @@
           "properties": {
             "model": {
               "description": "Primary OMP model entry.",
+              "x-mc-live-reload": true,
               "anyOf": [
                 {
                   "type": "string"
@@ -1481,6 +1501,7 @@
             },
             "fallback_models": {
               "description": "Ordered fallback OMP entries.",
+              "x-mc-live-reload": true,
               "type": "array",
               "items": {
                 "anyOf": [
@@ -1520,6 +1541,7 @@
             },
             "thinking_level": {
               "description": "OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+              "x-mc-live-reload": true,
               "type": "string",
               "enum": [
                 "off",
@@ -1535,6 +1557,7 @@
             },
             "tasks": {
               "description": "OMP task execution overrides. Each named task accepts only model, fallback_models, thinking_level, and timeout_minutes.",
+              "x-mc-live-reload": true,
               "type": "object",
               "propertyNames": {
                 "type": "string"
@@ -1697,6 +1720,7 @@
               "properties": {
                 "schedule": {
                   "default": "",
+                  "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 }
@@ -1711,6 +1735,7 @@
               "properties": {
                 "schedule": {
                   "default": "",
+                  "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 }
@@ -1725,6 +1750,7 @@
               "properties": {
                 "schedule": {
                   "default": "",
+                  "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 }
@@ -1739,6 +1765,7 @@
               "properties": {
                 "schedule": {
                   "default": "",
+                  "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 }
@@ -1753,6 +1780,7 @@
               "properties": {
                 "schedule": {
                   "default": "",
+                  "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 }
@@ -1767,6 +1795,7 @@
               "properties": {
                 "schedule": {
                   "default": "",
+                  "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 }
@@ -1782,12 +1811,14 @@
               "properties": {
                 "schedule": {
                   "default": "",
+                  "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "recency_days": {
                   "default": 30,
                   "description": "retrospective: collect source messages from only the most recent N days",
+                  "x-mc-live-reload": true,
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 3650
@@ -1803,6 +1834,7 @@
               "properties": {
                 "schedule": {
                   "default": "",
+                  "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 }
@@ -1817,6 +1849,7 @@
               "properties": {
                 "schedule": {
                   "default": "",
+                  "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 }
@@ -1832,11 +1865,13 @@
               "properties": {
                 "schedule": {
                   "default": "",
+                  "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "promotion_threshold": {
                   "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
+                  "x-mc-live-reload": true,
                   "type": "number",
                   "minimum": 2,
                   "maximum": 20
@@ -1853,11 +1888,13 @@
               "properties": {
                 "schedule": {
                   "default": "",
+                  "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "promotion_threshold": {
                   "description": "promote-primers: min recurring source days before promotion is considered (default: 2)",
+                  "x-mc-live-reload": true,
                   "type": "number",
                   "minimum": 2,
                   "maximum": 20
@@ -1873,6 +1910,7 @@
               "properties": {
                 "schedule": {
                   "default": "",
+                  "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 }
@@ -2085,6 +2123,7 @@
     "historian_timeout_ms": {
       "default": 600000,
       "description": "Timeout for each historian prompt call in milliseconds (default: 600000)",
+      "x-mc-live-reload": true,
       "type": "number",
       "minimum": 60000
     },
@@ -2483,11 +2522,13 @@
             "enabled": {
               "default": false,
               "description": "Index HEAD git commits for ctx_search (git_commit source). Graduated from experimental.git_commit_indexing; opt-in, default off. Independent of memory.enabled.",
+              "x-mc-live-reload": true,
               "type": "boolean"
             },
             "since_days": {
               "default": 365,
               "description": "Days of HEAD history to index (min: 7, max: 3650, default: 365)",
+              "x-mc-live-reload": true,
               "type": "number",
               "minimum": 7,
               "maximum": 3650
@@ -2495,6 +2536,7 @@
             "max_commits": {
               "default": 2000,
               "description": "Max commits kept per project; oldest evicted (min: 100, max: 20000, default: 2000)",
+              "x-mc-live-reload": true,
               "type": "number",
               "minimum": 100,
               "maximum": 20000
