@@ -3,11 +3,13 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { recordDreamerTickFailure } from "@magic-context/core/features/magic-context/dreamer/tick-failure";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import { setSessionWorkMetrics } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import {
 	insertTag,
 	updateTagTokenCount,
 } from "@magic-context/core/features/magic-context/storage-tags";
+import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
 	buildStatusView,
@@ -141,6 +143,40 @@ describe("Pi status dialog", () => {
 
 			expect(detail.cacheTtl).toBe("1h");
 			expect(detail.cacheTtlSource).toBe("config");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("counts compartments served in m[1] in the Compartments bucket", () => {
+		// Compartments published after the last m[0] fold ride in m[1]'s
+		// <new-compartments> block; m[0]'s <session-history> may still be empty.
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-status-m1-compartments";
+			const m0History = "<session-history>\n</session-history>";
+			const newCompartments =
+				"<new-compartments>\n## 11-14 · Continued runtime inspection\nRead production, gear and ABI record code before implementing the plan.\n</new-compartments>";
+			getOrCreateSessionMeta(db, sessionId);
+			db.prepare(
+				"UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = ? WHERE session_id = ?",
+			).run(
+				Buffer.from(m0History, "utf8"),
+				Buffer.from(
+					`<session-history-since>\n${newCompartments}\n</session-history-since>`,
+					"utf8",
+				),
+				sessionId,
+			);
+			const detail = buildPiStatusDetail(
+				{ getAllTools: () => [] } as never,
+				fakeContext(sessionId) as never,
+				{ db, projectIdentity: resolveProjectIdentity(process.cwd()) },
+				sessionId,
+			);
+			expect(detail.compartmentTokens).toBe(
+				estimateTokens(m0History) + estimateTokens(newCompartments),
+			);
 		} finally {
 			closeQuietly(db);
 		}
