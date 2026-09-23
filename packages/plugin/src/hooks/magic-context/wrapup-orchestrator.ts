@@ -219,6 +219,7 @@ async function runOneWrapupIteration(args: {
     const runCompartmentAgentForWrapup = ctx.runCompartmentAgentForWrapup ?? runCompartmentAgent;
     const runnerPromise = runCompartmentAgentForWrapup({
         client: ctx.client,
+        hiddenCompletionExecutor: ctx.hiddenCompletionExecutor,
         db: ctx.db,
         sessionId,
         historianChunkTokens: ctx.historianChunkTokens,
