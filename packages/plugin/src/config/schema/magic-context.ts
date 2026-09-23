@@ -1322,7 +1322,7 @@ export const MagicContextConfigSchema = z
             .boolean()
             .default(false)
             .describe(
-                "Debug: keep every settled Magic Context child session instead of deleting it after success: historian, all Dreamer tasks, smart-note evaluation and compilation, user-memory review, and memory migration. Kept Dreamer children can contain memory-pool text and user messages from other sessions of the same operator; their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect.",
+                "Debug: keep every settled Magic Context child session instead of deleting it after success: historian, all Dreamer tasks, smart-note evaluation and compilation, user-memory review, and memory migration. Kept Dreamer children can contain memory-pool text and user messages from other sessions of the same operator; their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect. On OpenCode 2, one hidden session holds many runs; it is kept once any of its runs settled, and only a Dreamer session none of whose runs settled is still deleted.",
             ),
         debug_rpc: z
             .boolean()
