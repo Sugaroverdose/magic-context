@@ -461,11 +461,7 @@ export function createMessagesTransformHandler(args: {
             return await run(input, output);
         } finally {
             preserveUserTerminatedTail(output.messages, inputMessages);
-            reportAssistantTerminatedTail(
-                output.messages,
-                inputTailRole,
-                resolveSessionId(output),
-            );
+            reportAssistantTerminatedTail(output.messages, inputTailRole, resolveSessionId(output));
         }
     };
 }

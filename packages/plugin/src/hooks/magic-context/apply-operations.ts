@@ -204,9 +204,7 @@ export function applyPendingOperations(
                         const dropResult = target?.drop?.() ?? "absent";
                         if (
                             dropResult === "incomplete" ||
-                            (synthetic &&
-                                dropResult !== "removed" &&
-                                dropResult !== "truncated")
+                            (synthetic && dropResult !== "removed" && dropResult !== "truncated")
                         ) {
                             reject(`drop_${dropResult}`);
                             continue;

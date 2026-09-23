@@ -34,7 +34,8 @@ registerTerminalToolArcTests("opencode", {
     terminalShape(fixture) {
         const last = fixture.opencode.at(-1);
         if (!last) return { wireTailRole: "none", wireTailCallId: null };
-        if (last.info.role !== "assistant") return { wireTailRole: last.info.role, wireTailCallId: null };
+        if (last.info.role !== "assistant")
+            return { wireTailRole: last.info.role, wireTailCallId: null };
         const tools = last.parts.filter(
             (part) =>
                 (part as { type?: string }).type === "tool" &&
