@@ -4,7 +4,6 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { $ } from "bun";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
@@ -162,18 +161,57 @@ describe("compartment state lease", () => {
                 const sqlite = await import(${JSON.stringify(`file://${pluginRoot}/src/shared/sqlite.ts`)});
                 const storageDb = await import(${JSON.stringify(`file://${pluginRoot}/src/features/magic-context/storage-db.ts`)});
                 const lease = await import(${JSON.stringify(`file://${pluginRoot}/src/features/magic-context/compartment-lease.ts`)});
-                const db = new sqlite.Database(${JSON.stringify(path)});
-                storageDb.initializeDatabase(db);
-                const ok = lease.acquireCompartmentLease(db, "ses", process.argv.at(-1) ?? "missing-holder") !== null;
-                db.close();
-                console.log(JSON.stringify({ ok }));
+                let db;
+                try {
+                    db = new sqlite.Database(${JSON.stringify(path)});
+                    storageDb.initializeDatabase(db);
+                    const won = lease.acquireCompartmentLease(db, "ses", process.argv.at(-1) ?? "missing-holder") !== null;
+                    console.log(JSON.stringify({ outcome: won ? "won" : "lost" }));
+                    // Keep the winning PID alive until both contenders have reported their outcomes.
+                    if (won) await Bun.stdin.stream().getReader().read();
+                } catch (error) {
+                    console.log(JSON.stringify({ outcome: "error", error: String(error) }));
+                } finally {
+                    db?.close();
+                }
             `;
 
-            const [a, b] = await Promise.all([
-                $`bun -e ${script} holder-a`.json() as Promise<{ ok: boolean }>,
-                $`bun -e ${script} holder-b`.json() as Promise<{ ok: boolean }>,
-            ]);
-            expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
+            const children = ["holder-a", "holder-b"].map((holder) =>
+                Bun.spawn([process.execPath, "-e", script, holder], {
+                    stdin: "pipe",
+                    stdout: "pipe",
+                    stderr: "pipe",
+                }),
+            );
+            type Outcome = { outcome: "won" | "lost" | "error"; error?: string };
+            const reports = await Promise.all(children.map(async (child) => {
+                const reader = child.stdout.getReader();
+                const { value } = await reader.read();
+                if (!value) {
+                    const stderr = await new Response(child.stderr).text();
+                    return { outcome: "error", error: `exit ${await child.exited}: ${stderr}` } as Outcome;
+                }
+                try {
+                    return JSON.parse(new TextDecoder().decode(value)) as Outcome;
+                } catch (error) {
+                    return { outcome: "error", error: `invalid child output: ${String(error)}` } as Outcome;
+                } finally {
+                    reader.releaseLock();
+                }
+            }));
+            for (const child of children) child.stdin.end();
+            const exits = await Promise.all(children.map(async (child) => ({
+                code: await child.exited,
+                stderr: await new Response(child.stderr).text(),
+            })));
+            expect({ reports, exits }).toEqual({
+                reports: expect.arrayContaining([
+                    { outcome: "won" },
+                    { outcome: "lost" },
+                ]),
+                exits: [{ code: 0, stderr: "" }, { code: 0, stderr: "" }],
+            });
+            expect(reports).toHaveLength(2);
         } finally {
             try {
                 rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
