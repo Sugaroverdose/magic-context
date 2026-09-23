@@ -18,7 +18,6 @@ import {
     getMostRecentTaskRunAt,
 } from "../features/magic-context/dreamer/storage-task-schedule";
 import { getDreamTaskBacklogs } from "../features/magic-context/dreamer/task-gates";
-import { listHiddenVariantWarnings } from "../shared/hidden-variant-warnings";
 import {
     CANONICAL_DREAM_TASKS,
     type DreamTaskBacklogMap,
@@ -102,6 +101,7 @@ import {
 import { resolveCacheTtlDisplay } from "../shared/cache-ttl-display";
 import type { ConfigParseFailure } from "../shared/config-diagnostics";
 import { getMagicContextStorageDir } from "../shared/data-path";
+import { listHiddenVariantWarnings } from "../shared/hidden-variant-warnings";
 import { activeHostLimitations } from "../shared/host-limitations";
 import { getLoggerDiagnostics, log } from "../shared/logger";
 import { pushNotification } from "../shared/rpc-notifications";

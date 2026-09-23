@@ -6,9 +6,9 @@ import type {
 } from "../hooks/magic-context/compartment-runner-types";
 import { HiddenCompletionRefusal } from "../hooks/magic-context/compartment-runner-types";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
+import { recordHiddenVariantWarning } from "../shared/hidden-variant-warnings";
 import { declareHostLimitation } from "../shared/host-limitations";
 import { log } from "../shared/logger";
-import { recordHiddenVariantWarning } from "../shared/hidden-variant-warnings";
 import type { PromptArgs } from "../shared/model-suggestion-retry";
 import { parseProviderModel, toModelEntry } from "../shared/resolve-fallbacks";
 import type { Database } from "../shared/sqlite";
@@ -639,21 +639,31 @@ export async function createV2HiddenCompletionExecutor(
             const listed = await options.modelCatalog();
             const rows = Array.isArray(listed)
                 ? listed
-                : listed && typeof listed === "object" && Array.isArray((listed as { data?: unknown }).data)
+                : listed &&
+                    typeof listed === "object" &&
+                    Array.isArray((listed as { data?: unknown }).data)
                   ? (listed as { data: unknown[] }).data
                   : [];
-            const entry = rows.find((row) =>
-                row && typeof row === "object" &&
-                (row as { providerID?: unknown }).providerID === model.providerID &&
-                (row as { id?: unknown }).id === model.modelID,
+            const entry = rows.find(
+                (row) =>
+                    row &&
+                    typeof row === "object" &&
+                    (row as { providerID?: unknown }).providerID === model.providerID &&
+                    (row as { id?: unknown }).id === model.modelID,
             ) as { variants?: unknown } | undefined;
             if (!entry) return model;
-            if (entry.variants && typeof entry.variants === "object" &&
-                Object.prototype.hasOwnProperty.call(entry.variants, model.variant)) return model;
+            if (
+                entry.variants &&
+                typeof entry.variants === "object" &&
+                Object.hasOwn(entry.variants, model.variant)
+            )
+                return model;
             const key = `${model.providerID}/${model.modelID}:${model.variant}`;
             if (!warnedVariants.has(key)) {
                 warnedVariants.add(key);
-                note(`[magic-context] ${recordHiddenVariantWarning(model.providerID, model.modelID, model.variant)}`);
+                note(
+                    `[magic-context] ${recordHiddenVariantWarning(model.providerID, model.modelID, model.variant)}`,
+                );
             }
             return { providerID: model.providerID, modelID: model.modelID };
         } catch {

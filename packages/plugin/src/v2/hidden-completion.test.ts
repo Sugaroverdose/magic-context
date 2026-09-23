@@ -307,9 +307,9 @@ async function setup(
             openReader: () => rows,
             generation: hostGeneration,
             removalSpacingMs: 0,
-             resolveOwner: () => capabilities.owner,
-             log: (message) => capabilities.logs?.push(message),
-             ...(capabilities.modelCatalog ? { modelCatalog: capabilities.modelCatalog } : {}),
+            resolveOwner: () => capabilities.owner,
+            log: (message) => capabilities.logs?.push(message),
+            ...(capabilities.modelCatalog ? { modelCatalog: capabilities.modelCatalog } : {}),
         });
     const executor = await create();
     return {
@@ -1126,13 +1126,17 @@ describe("OpenCode 2 hidden child completion", () => {
 
     test("passes a declared hidden-run variant through unchanged", async () => {
         const state = await setup("host-generation-1", {
-            modelCatalog: async () => [{ id: "cheap", providerID: "mock", variants: { medium: {} } }],
+            modelCatalog: async () => [
+                { id: "cheap", providerID: "mock", variants: { medium: {} } },
+            ],
         });
         const identity = { ...run, model: { model: "mock/cheap", qualifier: "medium" } };
         try {
             const handle = await state.executor.open(identity);
             expect(state.creates[0]?.model).toEqual({
-                providerID: "mock", id: "cheap", variant: "medium",
+                providerID: "mock",
+                id: "cheap",
+                variant: "medium",
             });
             await close(state.executor, handle, true);
         } finally {
