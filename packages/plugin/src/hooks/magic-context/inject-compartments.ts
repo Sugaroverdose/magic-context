@@ -9,7 +9,10 @@ import {
     getLastCompartmentEndMessageId,
     type SessionFact,
 } from "../../features/magic-context/compartment-storage";
-import { V2_MEMORY_CATEGORIES } from "../../features/magic-context/memory/constants";
+import {
+    CATEGORY_PRIORITY,
+    V2_MEMORY_CATEGORIES,
+} from "../../features/magic-context/memory/constants";
 import { compareMemorySelectionPriority } from "../../features/magic-context/memory/memory-selection";
 import {
     getMaxMemoryIdForProjects,
@@ -235,6 +238,55 @@ export interface CompartmentInjectionResult {
 
 export function renderMemoryBlock(memories: Memory[]): string | null {
     return renderMemoryBlockV2(memories) || null;
+}
+
+/**
+ * The historian's `<project-memory>` block. Canonical form: category-grouped
+ * `- <fact>` lines WITHOUT memory ids, ordered by CATEGORY_PRIORITY (v2
+ * taxonomy first, then the legacy categories so pre-v2 rows remain visible);
+ * categories outside the priority list are not rendered.
+ *
+ * Why this differs from the agent-facing wire (`renderMemoryBlockV2`, which
+ * emits `#id: fact`): the historian system prompt uses this block only for
+ * content-based fact dedup ("scan <project_memory> and silently skip any fact
+ * that overlaps") and contradiction reporting — it never addresses a memory by
+ * id. Ids exist on the m0/m1 wire so the `<memory-updates>` corrections block
+ * can point at baseline lines (`<updated id="N">`, `<removed id="N">`); the
+ * historian has no such corrections mechanism, so ids would be noise. Both
+ * lanes must emit this exact form: the Rust port
+ * (crates/mc-module/src/historian_prompt.rs `render_historian_memory_block`)
+ * renders the same bytes, and the historian prompt golden
+ * (crates/mc-module/testdata/historian-prompt-golden.json) pins byte parity.
+ */
+export function renderHistorianMemoryBlock(memories: Memory[]): string | null {
+    const byCategory = new Map<string, Memory[]>();
+    for (const m of memories) {
+        const existing = byCategory.get(m.category);
+        if (existing) {
+            existing.push(m);
+        } else {
+            byCategory.set(m.category, [m]);
+        }
+    }
+
+    const sections: string[] = [];
+    for (const category of CATEGORY_PRIORITY) {
+        const categoryMemories = byCategory.get(category);
+        if (!categoryMemories || categoryMemories.length === 0) {
+            continue;
+        }
+        sections.push(
+            `<${category}>`,
+            ...categoryMemories.map((m) => `- ${escapeXmlContent(m.content)}`),
+            `</${category}>`,
+        );
+    }
+
+    if (sections.length === 0) {
+        return null;
+    }
+
+    return `<project-memory>\n${sections.join("\n")}\n</project-memory>`;
 }
 
 /** Constraint keywords that signal a memory encodes a rule rather than a description. */

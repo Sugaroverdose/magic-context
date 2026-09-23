@@ -38,8 +38,8 @@ const { buildReferenceBlocks, selectSeeds, renderSeedExamplesBlock } = reference
     ) => Array<{ importance: number; block: string }>;
     renderSeedExamplesBlock: (seeds: Array<{ importance: number; block: string }>) => string;
 };
-const { renderMemoryBlock } = injectMod as {
-    renderMemoryBlock: (memories: TsMemory[]) => string | null;
+const { renderHistorianMemoryBlock } = injectMod as {
+    renderHistorianMemoryBlock: (memories: TsMemory[]) => string | null;
 };
 const { REFERENCE_SEEDS } = seedsMod as {
     REFERENCE_SEEDS: ReadonlyArray<{ importance: number; block: string }>;
@@ -356,7 +356,7 @@ const promptCases: PromptCase[] = promptCaseSpecs.map((spec) => {
         chunkStart: spec.chunk_start,
         sessionCompartments,
     });
-    const projectMemory = renderMemoryBlock(spec.memories.map(toTsMemory)) ?? "";
+    const projectMemory = renderHistorianMemoryBlock(spec.memories.map(toTsMemory)) ?? "";
     const prompt = buildCompartmentAgentPrompt({
         seedExamples: refs.seedExamples,
         sessionReferences: refs.sessionReferences,

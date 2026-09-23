@@ -97,7 +97,7 @@ import {
 	producerSourceLocalBudget,
 	resolveKnownHistorianContextLimit,
 } from "@magic-context/core/hooks/magic-context/derive-budgets";
-import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
+import { renderHistorianMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import { persistFilteredNoise } from "@magic-context/core/hooks/magic-context/persist-filtered-noise";
 import {
@@ -808,7 +808,12 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				"active",
 				"permanent",
 			]);
-			const memoryBlock = renderMemoryBlock(memories) ?? undefined;
+			// The historian dedups facts by content and never addresses a memory
+			// by id, so its block uses the id-free historian renderer (not the
+			// m0/m1 `#id` wire that <memory-updates> corrections address).
+			// Byte-parity with the Rust port is pinned by the historian prompt
+			// golden. Mirrors the OpenCode incremental runner.
+			const memoryBlock = renderHistorianMemoryBlock(memories) ?? undefined;
 
 			// v2 (E6 parity): bounded reference blocks replace the unbounded
 			// existing-state dump. The historian no longer sees ALL prior

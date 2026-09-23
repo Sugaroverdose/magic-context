@@ -416,8 +416,13 @@ pub fn build_reference_blocks_from_stored(
 
 /// Render the historian's category-grouped project-memory block from already-loaded rows.
 ///
-/// This differs from the m0/m1 memory render: the historian needs compact category groups
-/// for fact deduplication, not per-memory ids or update metadata.
+/// Canonical form: category-grouped `- <fact>` lines WITHOUT memory ids. This differs
+/// from the m0/m1 memory render (`#id: fact`) by design: the historian system prompt
+/// uses this block only for content-based fact deduplication and contradiction
+/// reporting — it never addresses a memory by id, while the agent-facing wire needs
+/// ids so `<memory-updates>` corrections can point at baseline lines. The TypeScript
+/// renderer (`renderHistorianMemoryBlock` in inject-compartments.ts) emits the same
+/// bytes; the historian prompt golden pins both lanes to this form.
 pub fn render_historian_memory_block(memories: &[StoredMemory]) -> String {
     let mut by_category: HashMap<&str, Vec<&StoredMemory>> = HashMap::new();
     for memory in memories {

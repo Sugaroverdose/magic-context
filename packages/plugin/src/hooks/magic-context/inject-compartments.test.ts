@@ -52,6 +52,7 @@ import {
     prepareCompartmentInjection,
     readCurrentM0SnapshotMarkers,
     renderCompartmentInjection,
+    renderHistorianMemoryBlock,
     renderM1,
     renderMemoryBlockV2,
     renderMemoryLineV2,
@@ -270,6 +271,48 @@ describe("compact project-memory wire", () => {
 
         expect(after).toBe(before);
         expect(after).not.toContain("importance");
+    });
+});
+
+describe("historian project-memory block", () => {
+    // The historian's <project-memory> block is dedup context, not an addressable
+    // wire: the system prompt tells the historian to skip facts that overlap what
+    // it sees here, and it never references a memory by id. The id-prefixed form
+    // (renderMemoryBlockV2) exists so the agent-facing <memory-updates> block can
+    // point at baseline lines by id; the historian has no such mechanism, so its
+    // canonical form is the category-grouped `- fact` line. The Rust port
+    // (crates/mc-module historian_prompt.rs) renders the same bytes and the
+    // historian prompt golden pins both lanes to it.
+    it("renders id-free fact lines grouped by the 12-category historian priority", () => {
+        const memories = [
+            renderMemory(1, "NAMING", "Use Foo & Bar <Baz> in examples"),
+            renderMemory(2, "PROJECT_RULES", "Never rewrite generated files > their source"),
+            renderMemory(3, "ARCHITECTURE", "Core path is crates/mc-module"),
+            renderMemory(4, "USER_DIRECTIVES", "Legacy user directive survives"),
+            renderMemory(5, "UNKNOWN", "unknown category is not rendered"),
+        ];
+
+        const block = renderHistorianMemoryBlock(memories);
+
+        expect(block).toBe(`<project-memory>
+<PROJECT_RULES>
+- Never rewrite generated files &gt; their source
+</PROJECT_RULES>
+<ARCHITECTURE>
+- Core path is crates/mc-module
+</ARCHITECTURE>
+<NAMING>
+- Use Foo &amp; Bar &lt;Baz&gt; in examples
+</NAMING>
+<USER_DIRECTIVES>
+- Legacy user directive survives
+</USER_DIRECTIVES>
+</project-memory>`);
+    });
+
+    it("returns null when no memory survives the category filter", () => {
+        expect(renderHistorianMemoryBlock([])).toBeNull();
+        expect(renderHistorianMemoryBlock([renderMemory(1, "UNKNOWN", "not rendered")])).toBeNull();
     });
 });
 
