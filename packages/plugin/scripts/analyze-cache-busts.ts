@@ -656,6 +656,9 @@ export function analyzeOpenCodeCacheBustSession(
                         ? "(first request)"
                         : (segment?.id ?? "(identical normalized prefix)"),
                 analyzerCmd: openCodeAnalyzerCommand(row, options),
+                ...(row.decision?.identityDelta
+                    ? { identityDelta: row.decision.identityDelta }
+                    : {}),
             },
         ];
     });
@@ -733,8 +736,35 @@ function bustsReusablePrefix(
 
 export function analyzeSnapshots(
     snaps: readonly Snapshot[],
-    decisions: readonly CacheBustDecisionAttribution[] = [],
+    decisionsAndMarkers: readonly CacheBustDecisionAttribution[] = [],
 ): AnalysisRow[] {
+    // Disruption markers explain a following epoch HARD but never serve a request, so
+    // they stay out of every request join.
+    const decisions = decisionsAndMarkers.filter((record) => record.disruption === undefined);
+    const disruptions = decisionsAndMarkers.filter(
+        (record) =>
+            record.disruption !== undefined ||
+            ["error", "need_full_sync", "parked"].includes(record.decision.toLowerCase()),
+    );
+    // Only an adapter log that recorded this session's passes can show that nothing
+    // disrupted it; without one the disruption question stays unanswered.
+    const disruptionEvidence = decisionsAndMarkers.some(
+        (record) => record.source === "rust pass log",
+    );
+    const precedingDisruption = (
+        pass: CacheBustDecisionAttribution | undefined,
+    ): string | null | undefined => {
+        if (!pass || !disruptionEvidence) return undefined;
+        const latest = disruptions
+            .filter(
+                (record) =>
+                    record.timestampMs <= pass.timestampMs &&
+                    pass.timestampMs - record.timestampMs <= 60_000,
+            )
+            .sort((left, right) => left.timestampMs - right.timestampMs)
+            .at(-1);
+        return latest ? (latest.disruption ?? latest.decision.toLowerCase()) : null;
+    };
     let previousShortRead = false;
     let previousBustDivergenceIndex: number | undefined;
     let previousMetered: Snapshot | undefined;
@@ -871,6 +901,7 @@ export function analyzeSnapshots(
                                 )
                                 .at(-1)
                           : undefined,
+                      precedingDisruption: precedingDisruption(attributionDecision),
                   })
                 : undefined;
         previousBustDivergenceIndex = verdict === "BUST" ? divergenceIndex : undefined;

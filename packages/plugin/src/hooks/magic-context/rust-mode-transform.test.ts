@@ -70,7 +70,7 @@ import {
 import { getVisibleMemoryIds } from "./inject-compartments";
 import { createDbLkgPersistence } from "./lkg-persist";
 import { getSlot, registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
-import { MODULE_PAGE_MAX_BYTES } from "./module-wire";
+import { MODULE_ORDINAL_PAGE_SIZE, MODULE_PAGE_MAX_BYTES } from "./module-wire";
 import { clearNoteNudgeTriggerOnly } from "./note-nudger";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { setRawMessageProvider } from "./read-session-chunk";
@@ -1201,7 +1201,7 @@ describe("Rust mode authority adapter", () => {
                 moduleElapsedMs: 8.765,
             }),
         ).toBe(
-            "rust pass: decision=HARD reason=first_render identity_delta=mur served_from=transform in=4 out=3 applied=true row_version=0 elapsed=12.3 ms module=8.8 ms stages=identity_resolve:0.0 prompt_surface:0.0 mural_resolve:0.0 prefix_guard:0.0 ordinal_resolve:0.0 state_sync:0.0 clone:0.0 wire_build:0.0 wire_messages:0 transport:0.0 transport_pages:0 transport_bytes:0 apply:0.0 lkg_snapshot:0.0 mirror_pull:0.0 compartment_mirror:0.0 other:12.3 transport_lane:0.0 transport_route:0.0 transport_encode:0.0 transport_issue:0.0 transport_response_wait_decode:0.0 transport_settle:0.0 transport_wrapper:0.0 preflight:0.0 todo_verdict:0.0 todo_probe:0.0 todo_persist:0.0 todo_probe_required:0 todo_probe_reason:none todo_unprobed_bust:0 session_directory:0.0 paging:0.0 output_clone:0.0 delivery:0.0 bookkeeping:0.0",
+            "rust pass: decision=HARD reason=first_render identity_delta=mur served_from=transform in=4 out=3 applied=true row_version=0 elapsed=12.3 ms module=8.8 ms stages=identity_resolve:0.0 prompt_surface:0.0 mural_resolve:0.0 prefix_guard:0.0 ordinal_resolve:0.0 ordinal_rebuild:0.0 ordinal_rows:0 ordinal_mode:memo state_sync:0.0 clone:0.0 wire_build:0.0 wire_messages:0 transport:0.0 transport_pages:0 transport_bytes:0 apply:0.0 lkg_snapshot:0.0 mirror_pull:0.0 compartment_mirror:0.0 other:12.3 transport_lane:0.0 transport_route:0.0 transport_encode:0.0 transport_issue:0.0 transport_response_wait_decode:0.0 transport_settle:0.0 transport_wrapper:0.0 preflight:0.0 todo_verdict:0.0 todo_probe:0.0 todo_persist:0.0 todo_probe_required:0 todo_probe_reason:none todo_unprobed_bust:0 session_directory:0.0 paging:0.0 output_clone:0.0 delivery:0.0 bookkeeping:0.0",
         );
     });
 
@@ -3142,6 +3142,129 @@ describe("Rust mode authority adapter", () => {
         expect(calls.filter((method) => method === "state_sync")).toHaveLength(1);
         expect(calls.filter((method) => method === "transform")).toHaveLength(23);
         expect(transforms).toBe(23);
+    });
+
+    it("keeps ordinal resolution bounded on a 10k-row session after failed passes and a removal", async () => {
+        const sessionId = `rust-bounded-ordinal-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installAvailabilityDb(sessionId, {});
+        const ROWS = 10_000;
+        const rows = Array.from({ length: ROWS }, (_, index) => ({
+            id: `m-${String(index + 1).padStart(6, "0")}`,
+            timeCreated: index + 1,
+            contributesOrdinal: true,
+            hasValidInfo: true,
+        }));
+        const store = { ordinalRows: 0, fullReads: 0 };
+        unregisters.push(
+            setRawMessageProvider(sessionId, {
+                readMessages: () => {
+                    store.fullReads += 1;
+                    return [];
+                },
+                readMessageOrdinalPage: (after, limit) => {
+                    const page = rows
+                        .filter(
+                            (row) =>
+                                !after ||
+                                row.timeCreated > after.timeCreated ||
+                                (row.timeCreated === after.timeCreated && row.id > after.id),
+                        )
+                        .slice(0, limit);
+                    store.ordinalRows += page.length;
+                    return page;
+                },
+                getStoredMessageCount: () => rows.length,
+            }),
+        );
+        // OpenCode hands the adapter only the post-compaction tail while the host store
+        // keeps every row, which is the shape of the session that stalled.
+        const wire = (): MessageLike[] =>
+            rows.slice(-3).map((row) => ({
+                info: {
+                    id: row.id,
+                    role: "user",
+                    sessionID: sessionId,
+                    model: { providerID: "test-provider", modelID: "test-model" },
+                },
+                parts: [{ type: "text", text: row.id }],
+            }));
+        const native = [{ role: "assistant", parts: [{ type: "text", text: "stable" }] }];
+        let transforms = 0;
+        const moduleClient: RustModeModuleClient = {
+            invalidateStateSyncCapabilities: () => undefined,
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                transforms += 1;
+                // Second pass: the module lost the delta base. Third pass: the module
+                // times out and the adapter serves its last good array.
+                if (transforms === 2) return { status: "need_full_sync" };
+                if (transforms === 4) throw new Error("rust module transform timed out");
+                return { decision: "SOFT+", native_messages: native };
+            },
+        };
+        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+                moduleClient,
+            });
+            const runPass = async () => {
+                const messages = wire();
+                await transform.run(
+                    sessionId,
+                    messages,
+                    { messages: messages as unknown[] },
+                    makeMeta(db, sessionId),
+                );
+            };
+            await runPass();
+            expect(store.ordinalRows).toBe(ROWS);
+            store.ordinalRows = 0;
+            store.fullReads = 0;
+            logSpy.mockClear();
+
+            await runPass(); // need_full_sync, then the full-array retry
+            await runPass(); // module timeout, served from the last good array
+            rows.push({
+                id: `m-${String(ROWS + 1).padStart(6, "0")}`,
+                timeCreated: ROWS + 1,
+                contributesOrdinal: true,
+                hasValidInfo: true,
+            });
+            await runPass(); // the resumed turn with one new message
+
+            expect(transforms).toBe(5);
+            expect(store.ordinalRows).toBeLessThanOrEqual(MODULE_ORDINAL_PAGE_SIZE);
+            expect(store.fullReads).toBe(0);
+            const ordinalLines = logSpy.mock.calls
+                .map((call) => String(call[1]))
+                .filter((line) => line.includes("stage=rust.ordinal_resolve"));
+            expect(ordinalLines.length).toBeGreaterThanOrEqual(3);
+            expect(ordinalLines.some((line) => line.includes("mode=prime"))).toBe(false);
+            const elapsedMs = ordinalLines.map((line) =>
+                Number(/elapsed=([\d.]+)ms/.exec(line)?.[1] ?? Number.NaN),
+            );
+            expect(elapsedMs.every((ms) => ms < 250)).toBe(true);
+
+            // A reverted message near the tail: the removal event must not send the next
+            // pass back to the first row of the session.
+            rows.splice(rows.length - 2, 1);
+            transform.invalidateWireState(sessionId);
+            store.ordinalRows = 0;
+            logSpy.mockClear();
+            await runPass();
+            expect(transforms).toBe(6);
+            expect(store.ordinalRows).toBeLessThanOrEqual(2 * MODULE_ORDINAL_PAGE_SIZE);
+            expect(store.fullReads).toBe(0);
+            const removalLines = logSpy.mock.calls
+                .map((call) => String(call[1]))
+                .filter((line) => line.includes("stage=rust.ordinal_resolve"));
+            expect(removalLines.some((line) => line.includes("mode=rewind"))).toBe(true);
+            expect(removalLines.some((line) => line.includes("mode=prime"))).toBe(false);
+        } finally {
+            logSpy.mockRestore();
+        }
     });
 
     it("restarts a paged transform series after an attempt mismatch", async () => {

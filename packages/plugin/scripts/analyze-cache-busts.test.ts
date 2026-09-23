@@ -219,6 +219,56 @@ describe("analyze-cache-bust dump discovery", () => {
         expect(rows[2]?.divergenceClass).toBe("self_inflicted_epoch");
     });
 
+    test("an epoch HARD explained by a preceding full retry stays accounted; one with nothing before it is unfaulted", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-unfaulted-epoch-"));
+        tempDirs.push(dir);
+        const session = "ses_unfaultedEpoch";
+        const start = Date.parse("2026-09-20T16:00:00.000Z");
+        // Two epoch HARDs five minutes apart, so neither counts as a repeat of the other.
+        const offsets = [0, 60_000, 360_000];
+        for (const [index, text] of ["initial", "after retry", "spontaneous"].entries()) {
+            const at = new Date(start + offsets[index]!).toISOString();
+            writeDump(
+                dir,
+                `${at.replaceAll(":", "-").replace(".", "-")}-00000${index + 1}-${session}`,
+                at,
+                session,
+                bodyWithBreakpointMessage(text),
+                responseUsage({ input_tokens: 100, cache_read_input_tokens: index === 0 ? 20_000 : 100, cache_creation_input_tokens: index === 0 ? 0 : 19_900 }),
+            );
+        }
+        const pass = (offset: number, source: string) => ({
+            timestampMs: start + offset,
+            decision: "HARD",
+            materialized: true,
+            materializeReason: "epoch_change",
+            identityDelta: ["other"],
+            emergency: false,
+            droppedTokens: 0,
+            droppedCount: 0,
+            inputTokens: 100,
+            flush: false,
+            source,
+        });
+        const decisions = [
+            pass(60_000, "rust pass log"),
+            pass(360_000, "rust pass log"),
+            {
+                ...pass(55_000, "rust adapter log"),
+                decision: "disruption",
+                materialized: false,
+                materializeReason: null,
+                disruption: "full_retry",
+            },
+        ];
+        const rows = __test.analyzeSnapshots(snapshotsFor(dir, session), decisions);
+        expect(rows[1]?.divergenceClass).toBe("accounted_hard_epoch");
+        expect(rows[2]?.divergenceClass).toBe("unfaulted_epoch");
+        expect(rows[2]?.decision?.identityDelta).toEqual(["other"]);
+        // The disruption marker is never joined to a request as its pass.
+        expect(rows.every((row) => row.decision?.disruption === undefined)).toBe(true);
+    });
+
     test("skips an unmetered pass as a baseline for the next real short-read bust", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-usage-missing-baseline-"));
         tempDirs.push(dir);

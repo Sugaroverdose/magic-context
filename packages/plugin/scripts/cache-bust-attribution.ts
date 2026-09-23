@@ -18,6 +18,7 @@ export type CacheBustDivergenceClass =
     | "provider_full_miss"
     | "provider_short_read_identical_bytes"
     | "self_inflicted_epoch"
+    | "unfaulted_epoch"
     | "unaccounted_defer_pass"
     | "unaccounted_double_bust"
     | "unaccounted_tail_rewrite"
@@ -32,6 +33,8 @@ export interface AnalyzedCacheRequest {
     divergenceClass?: CacheBustDivergenceClass;
     firstDivergence: string;
     analyzerCmd: string;
+    /** Render-identity components the matched pass reported as changed, when it logged them. */
+    identityDelta?: string[];
 }
 
 export interface CacheBustSessionAnalysis {
@@ -68,6 +71,12 @@ export interface CacheBustDecisionAttribution {
     identityDelta?: string[];
     flush: boolean;
     source: string;
+    /**
+     * Set on log markers that are not passes: a module fault, a full-array retry, a
+     * fallback serve, or an adapter restart. Names the kind. Such records never
+     * join a request; they only explain an epoch HARD that follows them.
+     */
+    disruption?: string;
 }
 
 export interface CacheBustAttributionInput {
@@ -99,6 +108,12 @@ export interface CacheBustAttributionInput {
     decision?: CacheBustDecisionAttribution;
     /** The last session pass that rebuilt the cached prefix after its rendering identity changed. */
     previousEpochHard?: CacheBustDecisionAttribution;
+    /**
+     * The newest disruption in the 60 s before the matched pass. `undefined` means the
+     * disruption markers were not available (no adapter log for the session); `null`
+     * means the log was read and nothing disrupted the session in that window.
+     */
+    precedingDisruption?: string | null;
 }
 
 export interface CacheBustRule {
@@ -197,6 +212,11 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
         divergenceClass: "self_inflicted_epoch",
         accounted: false,
         rule: "epoch_change has no restart/deploy/config epoch and either only mur: changed or raw OpenCode input stepped by at least 4×",
+    },
+    {
+        divergenceClass: "unfaulted_epoch",
+        accounted: false,
+        rule: "epoch_change has no restart/deploy/config epoch and the adapter log shows no module fault, full-array retry, fallback serve, or adapter restart in the preceding 60 s; the wake names identity_delta",
     },
     {
         divergenceClass: "unaccounted_defer_pass",
@@ -366,6 +386,16 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
             (repeatedEpochHard || muralOnlyIdentityDelta || (input.ocInputStepRatio ?? 0) >= 4)
         ) {
             return "self_inflicted_epoch";
+        }
+        // A render identity that changes with nothing around it to explain the change
+        // (no fault, retry, fallback, or restart) is the spontaneous case; the wake
+        // carries identity_delta so it names the component that moved.
+        if (
+            materializeReason === "epoch_change" &&
+            !decision.externalEpoch &&
+            input.precedingDisruption === null
+        ) {
+            return "unfaulted_epoch";
         }
         if (materializeReason && EPOCH_REASONS.has(materializeReason)) {
             return "accounted_hard_epoch";

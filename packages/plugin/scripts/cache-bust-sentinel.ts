@@ -107,6 +107,8 @@ export interface CacheBustEvent {
         divergence_class: string;
         first_divergence: string;
         analyzer_cmd: string;
+        /** Render-identity components the matched pass changed, when it logged them. */
+        identity_delta?: string[];
     };
 }
 
@@ -834,6 +836,9 @@ export function eventForWindow(
             divergence_class: divergenceClass,
             first_divergence: representative.firstDivergence,
             analyzer_cmd: representative.analyzerCmd,
+            ...(representative.identityDelta?.length
+                ? { identity_delta: representative.identityDelta }
+                : {}),
         },
     };
     state.windows[key] = {
@@ -857,7 +862,7 @@ export function agentDeliverRequest(
             from_agent: fromAgent,
             from_session_id: SENTINEL_FROM_SESSION_ID,
             from_harness: SENTINEL_FROM_HARNESS,
-            content: `${event.session_id}: cache bust detected in directory ${event.directory} at ${event.payload.at}; rewritten_tokens=${event.payload.rewritten_tokens}; divergence_class=${event.payload.divergence_class}; first_divergence=${event.payload.first_divergence}; analyzer_cmd=${event.payload.analyzer_cmd}`,
+            content: `${event.session_id}: cache bust detected in directory ${event.directory} at ${event.payload.at}; rewritten_tokens=${event.payload.rewritten_tokens}; divergence_class=${event.payload.divergence_class}; first_divergence=${event.payload.first_divergence}${event.payload.identity_delta ? `; identity_delta=${event.payload.identity_delta.join(",")}` : ""}; analyzer_cmd=${event.payload.analyzer_cmd}`,
         },
         urgency: "high",
     };

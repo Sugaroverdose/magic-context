@@ -123,6 +123,8 @@ import {
     buildPagedModuleTransformPayloads,
     cloneModuleNativeOutput,
     encodeOpenCodeMessagesToCk,
+    type OrdinalMemoCheckpoint,
+    type OrdinalResolveStats,
     resolveOrdinalsForModule,
 } from "./module-wire";
 import { onNoteTrigger } from "./note-nudger";
@@ -393,6 +395,15 @@ interface RustSessionState extends ModuleStateSyncState {
     ordinalMemoAnchor: RawMessageOrdinalAnchor | null;
     ordinalMemoStoredCount: number | null;
     ordinalMemoCanonicalCount: number;
+    /** Page checkpoints of the host-store ordinal walk; lets a drift resume from the
+     * newest intact page instead of re-reading the whole session. */
+    ordinalMemoCheckpoints: OrdinalMemoCheckpoint[];
+    /** A lifecycle event (message removal) may have shifted ordinals the memo still
+     * holds, so the next resolution must probe the store before trusting it. */
+    ordinalMemoVerifyPending: boolean;
+    /** Why the ordinal memo is empty, reported when the next resolution re-reads the
+     * whole session: `cold` until the first prime, otherwise the reset reason. */
+    ordinalMemoResetCause: string;
     /** Durable prior-lineage tail returned by the module after descent. Fresh arrays
      * continue after this base instead of regenerating index+1 ordinals. */
     ordinalContinuationBase: number | null;
@@ -644,6 +655,13 @@ interface RustPassTimings {
     muralResolve: number;
     prefixGuard: number;
     ordinalResolve: number;
+    /** Part of `ordinalResolve` spent re-reading the host store from the first row or
+     * from a rewound checkpoint. Not added to the measured total a second time. */
+    ordinalRebuild: number;
+    /** Host-store rows the ordinal resolver read on this pass. */
+    ordinalRows: number;
+    /** The most expensive ordinal resolution mode used on this pass. */
+    ordinalMode: OrdinalResolveStats["mode"];
     stateSync: number;
     clone: number;
     wireBuild: number;
@@ -677,6 +695,9 @@ function emptyRustPassTimings(): RustPassTimings {
         muralResolve: 0,
         prefixGuard: 0,
         ordinalResolve: 0,
+        ordinalRebuild: 0,
+        ordinalRows: 0,
+        ordinalMode: "memo",
         stateSync: 0,
         clone: 0,
         wireBuild: 0,
@@ -832,7 +853,7 @@ function formatRustPassLog(args: {
     const identityFields = args.identityDelta?.length
         ? ` identity_delta=${args.identityDelta.join(",")}`
         : "";
-    return `rust pass: decision=${args.decision} reason=${args.reason}${schedulerFields}${historianFields}${identityFields} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=identity_resolve:${timings.identityResolve.toFixed(1)} prompt_surface:${timings.promptSurface.toFixed(1)} mural_resolve:${timings.muralResolve.toFixed(1)} prefix_guard:${timings.prefixGuard.toFixed(1)} ordinal_resolve:${timings.ordinalResolve.toFixed(1)} state_sync:${timings.stateSync.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} lkg_snapshot:${timings.lkgSnapshot.toFixed(1)} mirror_pull:${timings.mirrorPull.toFixed(1)} compartment_mirror:${timings.compartmentMirror.toFixed(1)} other:${unattributed.toFixed(1)} transport_lane:${timings.transportDetail.lane.toFixed(1)} transport_route:${timings.transportDetail.route.toFixed(1)} transport_encode:${timings.transportDetail.encode.toFixed(1)} transport_issue:${timings.transportDetail.issue.toFixed(1)} transport_response_wait_decode:${timings.transportDetail.responseWait.toFixed(1)} transport_settle:${timings.transportDetail.settle.toFixed(1)} transport_wrapper:${Math.max(0, timings.transport - Object.values(timings.transportDetail).reduce((sum, ms) => sum + ms, 0)).toFixed(1)} preflight:${timings.preflight.toFixed(1)} todo_verdict:${timings.todoVerdict.toFixed(1)} todo_probe:${timings.todoProbe.toFixed(1)} todo_persist:${timings.todoPersist.toFixed(1)} todo_probe_required:${timings.todoProbeRequired} todo_probe_reason:${timings.todoProbeReason} todo_unprobed_bust:${timings.todoUnprobedBust} session_directory:${timings.sessionDirectory.toFixed(1)} paging:${timings.paging.toFixed(1)} output_clone:${timings.outputClone.toFixed(1)} delivery:${timings.delivery.toFixed(1)} bookkeeping:${timings.bookkeeping.toFixed(1)}`;
+    return `rust pass: decision=${args.decision} reason=${args.reason}${schedulerFields}${historianFields}${identityFields} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=identity_resolve:${timings.identityResolve.toFixed(1)} prompt_surface:${timings.promptSurface.toFixed(1)} mural_resolve:${timings.muralResolve.toFixed(1)} prefix_guard:${timings.prefixGuard.toFixed(1)} ordinal_resolve:${timings.ordinalResolve.toFixed(1)} ordinal_rebuild:${timings.ordinalRebuild.toFixed(1)} ordinal_rows:${timings.ordinalRows} ordinal_mode:${timings.ordinalMode} state_sync:${timings.stateSync.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} lkg_snapshot:${timings.lkgSnapshot.toFixed(1)} mirror_pull:${timings.mirrorPull.toFixed(1)} compartment_mirror:${timings.compartmentMirror.toFixed(1)} other:${unattributed.toFixed(1)} transport_lane:${timings.transportDetail.lane.toFixed(1)} transport_route:${timings.transportDetail.route.toFixed(1)} transport_encode:${timings.transportDetail.encode.toFixed(1)} transport_issue:${timings.transportDetail.issue.toFixed(1)} transport_response_wait_decode:${timings.transportDetail.responseWait.toFixed(1)} transport_settle:${timings.transportDetail.settle.toFixed(1)} transport_wrapper:${Math.max(0, timings.transport - Object.values(timings.transportDetail).reduce((sum, ms) => sum + ms, 0)).toFixed(1)} preflight:${timings.preflight.toFixed(1)} todo_verdict:${timings.todoVerdict.toFixed(1)} todo_probe:${timings.todoProbe.toFixed(1)} todo_persist:${timings.todoPersist.toFixed(1)} todo_probe_required:${timings.todoProbeRequired} todo_probe_reason:${timings.todoProbeReason} todo_unprobed_bust:${timings.todoUnprobedBust} session_directory:${timings.sessionDirectory.toFixed(1)} paging:${timings.paging.toFixed(1)} output_clone:${timings.outputClone.toFixed(1)} delivery:${timings.delivery.toFixed(1)} bookkeeping:${timings.bookkeeping.toFixed(1)}`;
 }
 
 function isSyntheticUserMessage(message: MessageLike | undefined): boolean {
@@ -1034,6 +1055,9 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             ordinalMemoAnchor: null,
             ordinalMemoStoredCount: null,
             ordinalMemoCanonicalCount: 0,
+            ordinalMemoCheckpoints: [],
+            ordinalMemoVerifyPending: false,
+            ordinalMemoResetCause: "cold",
             ordinalContinuationBase: null,
             seedPassPending: true,
             failureCount: 0,
@@ -1787,7 +1811,10 @@ export function createRustModeTransform(
 
     const logStage = (
         sessionId: string,
-        stage: Exclude<keyof RustPassTimings, "transportDetail" | "todoProbeReason">,
+        stage: Exclude<
+            keyof RustPassTimings,
+            "transportDetail" | "todoProbeReason" | "ordinalMode"
+        >,
         startedAt: number,
         timings: RustPassTimings,
         extra?: string,
@@ -1918,20 +1945,58 @@ export function createRustModeTransform(
         options.notifyParked?.(sessionId, warning);
     };
 
-    const resetOrdinalMemo = (state: RustSessionState): void => {
+    // Clearing the memo makes the next resolution read every stored row of the
+    // session, which took close to a minute on a 124k-row session. Reserve it for a
+    // drift that an incremental rewind could not repair.
+    const resetOrdinalMemo = (state: RustSessionState, cause: string): void => {
         state.idOrdinalMemo.clear();
         state.ordinalMemoAnchor = null;
         state.ordinalMemoStoredCount = null;
         state.ordinalMemoCanonicalCount = 0;
+        state.ordinalMemoCheckpoints.length = 0;
+        state.ordinalMemoVerifyPending = false;
+        state.ordinalMemoResetCause = cause;
     };
 
     const invalidateWireState = (sessionId: string): void => {
         heapHolder.wireCaches.delete(sessionId);
         const state = states.get(sessionId);
         if (!state) return;
-        resetOrdinalMemo(state);
+        // A removal can shift the ordinals of messages the memo still maps, but the
+        // rows before the removed one are unchanged. Keep the memo and make the next
+        // resolution probe the store; its count check rewinds to the newest intact
+        // page checkpoint instead of re-reading the session from the first row.
+        state.ordinalMemoVerifyPending = true;
         state.stateSyncInputSignature = null;
         state.forceFullWire = true;
+    };
+
+    /** Record one ordinal resolution: timing, rows read, and a named rebuild stage. */
+    const recordOrdinalResolve = (
+        sessionId: string,
+        state: RustSessionState,
+        startedAt: number,
+        timings: RustPassTimings,
+        stats: OrdinalResolveStats,
+        extra?: string,
+    ): void => {
+        const rank = { memo: 0, incremental: 1, rewind: 2, prime: 3 } as const;
+        if (rank[stats.mode] > rank[timings.ordinalMode]) timings.ordinalMode = stats.mode;
+        timings.ordinalRows += stats.rowsRead;
+        const cause =
+            stats.mode === "prime"
+                ? state.ordinalMemoResetCause
+                : stats.mode === "rewind"
+                  ? "store_drift"
+                  : "none";
+        const detail = `mode=${stats.mode} rows=${stats.rowsRead} pages=${stats.pages} rewinds=${stats.rewinds} cause=${cause}${extra ? ` ${extra}` : ""}`;
+        logStage(sessionId, "ordinalResolve", startedAt, timings, detail);
+        if (stats.mode === "prime" || stats.mode === "rewind") {
+            // Named separately so a slow whole-session or rewound read is visible in the
+            // pass summary instead of hiding inside ordinal_resolve or request latency.
+            timings.ordinalRebuild += Math.max(0, performance.now() - startedAt);
+            logTransformTiming(sessionId, "rust.ordinal_rebuild", startedAt, detail);
+        }
     };
 
     const replayLastGood = (
@@ -2769,15 +2834,18 @@ export function createRustModeTransform(
                 memoAnchor: state.ordinalMemoAnchor,
                 memoStoredCount: state.ordinalMemoStoredCount,
                 memoCanonicalCount: state.ordinalMemoCanonicalCount,
+                memoCheckpoints: state.ordinalMemoCheckpoints,
+                verifyStore: state.ordinalMemoVerifyPending,
                 provisionalBase,
                 forceProbeForTests: options.disableHotPathIoCachesForTests,
             });
-            logStage(sessionId, "ordinalResolve", ordinalStartedAt, timings);
+            recordOrdinalResolve(sessionId, state, ordinalStartedAt, timings, resolved.stats);
             if (!resolved.ok) {
-                // A removal or persistence race can invalidate every durable memo field.
-                // Retry once from a clean full-array prime on both delta and full attempts.
+                // A drift the checkpoint rewind could not repair (or an id that no
+                // stored row explains) invalidates every durable memo field. Retry once
+                // from a clean full-array prime on both delta and full attempts.
                 wireDelta = undefined;
-                resetOrdinalMemo(state);
+                resetOrdinalMemo(state, `mismatch_${resolved.reason}`);
                 const fullOrdinalStartedAt = performance.now();
                 resolved = await resolveOrdinalsForModule({
                     sessionId,
@@ -2788,14 +2856,16 @@ export function createRustModeTransform(
                     memoAnchor: state.ordinalMemoAnchor,
                     memoStoredCount: state.ordinalMemoStoredCount,
                     memoCanonicalCount: state.ordinalMemoCanonicalCount,
+                    memoCheckpoints: state.ordinalMemoCheckpoints,
                     provisionalBase: state.ordinalContinuationBase ?? undefined,
                     forceProbeForTests: options.disableHotPathIoCachesForTests,
                 });
-                logStage(
+                recordOrdinalResolve(
                     sessionId,
-                    "ordinalResolve",
+                    state,
                     fullOrdinalStartedAt,
                     timings,
+                    resolved.stats,
                     "fallback=clean_full",
                 );
             }
@@ -2809,6 +2879,7 @@ export function createRustModeTransform(
             state.ordinalMemoAnchor = resolved.memoAnchor;
             state.ordinalMemoStoredCount = resolved.memoStoredCount;
             state.ordinalMemoCanonicalCount = resolved.memoCanonicalCount;
+            state.ordinalMemoVerifyPending = false;
 
             const syncPass = {
                 db: deps.db,
@@ -3214,7 +3285,11 @@ export function createRustModeTransform(
                     // A rejected tail delta says only that its base is unavailable; bounded
                     // module caches can evict it without losing the durable session state.
                     // Re-importing that state here would change the next pass's render identity.
-                    resetOrdinalMemo(state);
+                    // The ordinal memo is left intact for the same reason: it maps host-store
+                    // rows, which the module's missing delta base says nothing about. Clearing
+                    // it here made the retry (or the next pass) re-read every stored row of
+                    // the session before dispatch, 57 s on a 124k-row session.
+                    sessionLog(sessionId, "need_full_sync retry=full ordinal_memo=kept");
                 } else {
                     sessionLog(
                         sessionId,
@@ -3254,18 +3329,21 @@ export function createRustModeTransform(
                         memoAnchor: state.ordinalMemoAnchor,
                         memoStoredCount: state.ordinalMemoStoredCount,
                         memoCanonicalCount: state.ordinalMemoCanonicalCount,
+                        memoCheckpoints: state.ordinalMemoCheckpoints,
                         provisionalBase: state.ordinalContinuationBase ?? undefined,
                         forceProbeForTests: options.disableHotPathIoCachesForTests,
                     });
-                    logStage(
+                    recordOrdinalResolve(
                         sessionId,
-                        "ordinalResolve",
+                        state,
                         retryOrdinalStartedAt,
                         timings,
+                        retryResolved.stats,
                         "retry=full",
                     );
                     if (!retryResolved.ok) {
-                        resetOrdinalMemo(state);
+                        resetOrdinalMemo(state, `retry_mismatch_${retryResolved.reason}`);
+                        const retryPrimeStartedAt = performance.now();
                         retryResolved = await resolveOrdinalsForModule({
                             sessionId,
                             messages,
@@ -3275,8 +3353,17 @@ export function createRustModeTransform(
                             memoAnchor: state.ordinalMemoAnchor,
                             memoStoredCount: state.ordinalMemoStoredCount,
                             memoCanonicalCount: state.ordinalMemoCanonicalCount,
+                            memoCheckpoints: state.ordinalMemoCheckpoints,
                             forceProbeForTests: options.disableHotPathIoCachesForTests,
                         });
+                        recordOrdinalResolve(
+                            sessionId,
+                            state,
+                            retryPrimeStartedAt,
+                            timings,
+                            retryResolved.stats,
+                            "retry=full fallback=clean_full",
+                        );
                     }
                     if (!retryResolved.ok) {
                         throw new Error(`rust ordinal ${retryResolved.reason} during full retry`);
@@ -3705,6 +3792,11 @@ export function createRustModeTransform(
                         state.idOrdinalMemo.set(messageId, ordinal + ordinalContinuationBase);
                     }
                     state.ordinalMemoCanonicalCount += ordinalContinuationBase;
+                    // Checkpoints must stay in the memo's numbering, or a later rewind
+                    // would resume from an unshifted count.
+                    for (const checkpoint of state.ordinalMemoCheckpoints) {
+                        checkpoint.canonicalCount += ordinalContinuationBase;
+                    }
                 }
                 state.ordinalContinuationBase = ordinalContinuationBase;
             }

@@ -117,6 +117,15 @@
         "input": {}
     },
     {
+        "class": "unfaulted_epoch",
+        "decision": {
+            "materialized": true,
+            "materializeReason": "epoch_change",
+            "identityDelta": ["other"]
+        },
+        "input": { "precedingDisruption": null }
+    },
+    {
         "class": "unaccounted_defer_pass",
         "decision": { "decision": "defer", "canonicalDecision": "defer" },
         "input": {}

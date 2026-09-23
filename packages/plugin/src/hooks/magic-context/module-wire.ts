@@ -70,6 +70,42 @@ function isSyntheticWireMessage(message: MessageLike): boolean {
 }
 
 /**
+ * A point in the host store's ordinal walk: everything up to and including `anchor`
+ * has been read, `storedCount` rows in total and `canonicalCount` of them ordinal-bearing.
+ * The resolver records one per page it reads so that a later drift (a removed message,
+ * a count that no longer adds up) can resume from the newest point that still holds
+ * instead of re-reading the whole session.
+ */
+export interface OrdinalMemoCheckpoint {
+    anchor: RawMessageOrdinalAnchor;
+    storedCount: number;
+    canonicalCount: number;
+}
+
+/** How an ordinal resolution was satisfied, for the adapter's stage log. */
+export interface OrdinalResolveStats {
+    /**
+     * memo: every wire id was already mapped, no store read.
+     * incremental: read only rows after the last anchor.
+     * prime: read the whole session from the first row (cold or cleared mapping).
+     * rewind: the incremental count did not add up, so the walk resumed from an earlier
+     * checkpoint and re-read only the rows after it.
+     */
+    mode: "memo" | "incremental" | "prime" | "rewind";
+    /** Host store rows returned by ordinal-page reads during this call. */
+    rowsRead: number;
+    pages: number;
+    /** Checkpoints tried after the first read failed its count check. */
+    rewinds: number;
+}
+
+function dropMemoEntriesAbove(memo: Map<string, number>, ordinal: number): void {
+    for (const [messageId, value] of memo) {
+        if (value > ordinal) memo.delete(messageId);
+    }
+}
+
+/**
  * Resolve OpenCode message ids to the absolute ordinals used by the module.
  * The module and shadow lanes must see the same provisional suffix behavior, so
  * this is shared rather than reimplemented by the authority adapter.
@@ -83,6 +119,18 @@ export async function resolveOrdinalsForModule(args: {
     memoAnchor?: RawMessageOrdinalAnchor | null;
     memoStoredCount?: number | null;
     memoCanonicalCount?: number;
+    /**
+     * Caller-owned page checkpoints, mutated in place like `memo`. When supplied, a
+     * store count that no longer matches the memo is repaired by resuming from an
+     * earlier checkpoint; without it such a drift is reported as a mismatch.
+     */
+    memoCheckpoints?: OrdinalMemoCheckpoint[];
+    /**
+     * Probe the store even when the memo already maps every wire id. Set after a
+     * lifecycle event (such as a message removal) that can shift ordinals of ids the
+     * memo still holds.
+     */
+    verifyStore?: boolean;
     /** Absolute ordinal immediately before a sliced unresolved tail. */
     provisionalBase?: number;
     /** Test-only seam that bypasses the memo to force an ordinal-page probe on every request. */
@@ -96,6 +144,7 @@ export async function resolveOrdinalsForModule(args: {
           memoStoredCount: number;
           memoCanonicalCount: number;
           normalizations: ModuleNormalizationRecord[];
+          stats: OrdinalResolveStats;
       }
     | {
           ok: false;
@@ -103,15 +152,21 @@ export async function resolveOrdinalsForModule(args: {
           messageId?: string;
           messageIndex?: number;
           messageRole?: string;
+          stats: OrdinalResolveStats;
       }
 > {
     const memo = args.memo;
+    const checkpoints = args.memoCheckpoints;
     const generationChanged = args.memoGeneration !== args.generation;
-    if (generationChanged) memo.clear();
+    if (generationChanged) {
+        memo.clear();
+        if (checkpoints) checkpoints.length = 0;
+    }
 
     let anchor = generationChanged ? null : (args.memoAnchor ?? null);
     let storedCount = generationChanged ? null : (args.memoStoredCount ?? null);
     let canonicalCount = generationChanged ? 0 : (args.memoCanonicalCount ?? 0);
+    const stats: OrdinalResolveStats = { mode: "memo", rowsRead: 0, pages: 0, rewinds: 0 };
 
     const normalizations: ModuleNormalizationRecord[] = [];
     const visibleIndexes: number[] = [];
@@ -134,6 +189,7 @@ export async function resolveOrdinalsForModule(args: {
     // Stable requests therefore avoid both the OpenCode ordinal-page probe and COUNT.
     const memoCoversWire =
         args.forceProbeForTests !== true &&
+        args.verifyStore !== true &&
         storedCount !== null &&
         visibleMessages.every((message) => {
             const messageId = getMessageId(message);
@@ -143,44 +199,118 @@ export async function resolveOrdinalsForModule(args: {
         const priming = storedCount === null;
         if (priming) {
             memo.clear();
+            if (checkpoints) checkpoints.length = 0;
             anchor = null;
             canonicalCount = 0;
         }
+        stats.mode = priming ? "prime" : "incremental";
 
-        const newEntries: Array<ReturnType<typeof readRawSessionMessageOrdinalPage>[number]> = [];
-        let pageAnchor = anchor;
-        while (true) {
-            const page = readRawSessionMessageOrdinalPage(
-                args.sessionId,
-                pageAnchor,
-                MODULE_ORDINAL_PAGE_SIZE,
-            );
-            if (page.length === 0) break;
-            newEntries.push(...page);
-            const last = page[page.length - 1];
-            pageAnchor = { timeCreated: last.timeCreated, id: last.id };
-            if (page.length < MODULE_ORDINAL_PAGE_SIZE) break;
-            await yieldToEventLoop();
-        }
-
-        const currentStoredCount = getRawSessionStoredMessageCount(args.sessionId);
-        const expectedStoredCount = (storedCount ?? 0) + newEntries.length;
-        if (currentStoredCount !== expectedStoredCount) {
-            memo.clear();
-            return { ok: false, reason: "mismatch" };
-        }
-
-        for (const entry of newEntries) {
-            if (!entry.contributesOrdinal) continue;
-            canonicalCount += 1;
-            const prior = memo.get(entry.id);
-            if (prior !== undefined && prior !== canonicalCount) {
-                memo.clear();
-                return { ok: false, reason: "mismatch", messageId: entry.id };
+        type OrdinalEntry = ReturnType<typeof readRawSessionMessageOrdinalPage>[number];
+        const readAfter = async (
+            from: RawMessageOrdinalAnchor | null,
+        ): Promise<{
+            entries: OrdinalEntry[];
+            end: RawMessageOrdinalAnchor | null;
+            pageEnds: Array<{ anchor: RawMessageOrdinalAnchor; entryCount: number }>;
+        }> => {
+            const entries: OrdinalEntry[] = [];
+            const pageEnds: Array<{ anchor: RawMessageOrdinalAnchor; entryCount: number }> = [];
+            let pageAnchor = from;
+            while (true) {
+                const page = readRawSessionMessageOrdinalPage(
+                    args.sessionId,
+                    pageAnchor,
+                    MODULE_ORDINAL_PAGE_SIZE,
+                );
+                stats.pages += 1;
+                stats.rowsRead += page.length;
+                if (page.length === 0) break;
+                entries.push(...page);
+                const last = page[page.length - 1];
+                pageAnchor = { timeCreated: last.timeCreated, id: last.id };
+                pageEnds.push({ anchor: pageAnchor, entryCount: entries.length });
+                if (page.length < MODULE_ORDINAL_PAGE_SIZE) break;
+                await yieldToEventLoop();
             }
-            memo.set(entry.id, canonicalCount);
+            return { entries, end: pageAnchor, pageEnds };
+        };
+
+        const baseStoredCount = storedCount ?? 0;
+        let read = await readAfter(anchor);
+        const currentStoredCount = getRawSessionStoredMessageCount(args.sessionId);
+        if (currentStoredCount !== baseStoredCount + read.entries.length) {
+            // The rows up to the memo anchor no longer add up, so something before the
+            // anchor was removed or inserted. Resume from progressively older page
+            // checkpoints (1, 2, 4, ... back) until the count matches again; a removal
+            // near the tail therefore re-reads a page or two rather than the session.
+            const candidates = (checkpoints ?? []).filter(
+                (checkpoint) => checkpoint.storedCount < baseStoredCount,
+            );
+            let repaired: OrdinalMemoCheckpoint | null = null;
+            let index = candidates.length - 1;
+            let step = 1;
+            while (!priming && index >= 0) {
+                const candidate = candidates[index];
+                stats.rewinds += 1;
+                const retry = await readAfter(candidate.anchor);
+                if (currentStoredCount === candidate.storedCount + retry.entries.length) {
+                    repaired = candidate;
+                    read = retry;
+                    break;
+                }
+                index -= step;
+                step *= 2;
+            }
+            if (!repaired) {
+                memo.clear();
+                if (checkpoints) checkpoints.length = 0;
+                return { ok: false, reason: "mismatch", stats };
+            }
+            stats.mode = "rewind";
+            dropMemoEntriesAbove(memo, repaired.canonicalCount);
+            if (checkpoints) {
+                const keep = checkpoints.indexOf(repaired) + 1;
+                checkpoints.length = keep;
+            }
+            anchor = repaired.anchor;
+            storedCount = repaired.storedCount;
+            canonicalCount = repaired.canonicalCount;
         }
-        anchor = pageAnchor;
+
+        const readBase = { storedCount: storedCount ?? 0, canonicalCount };
+        const applyEntries = (): string | null => {
+            let count = readBase.canonicalCount;
+            let pageEndIndex = 0;
+            for (let entryIndex = 0; entryIndex < read.entries.length; entryIndex += 1) {
+                const entry = read.entries[entryIndex];
+                if (entry.contributesOrdinal) {
+                    count += 1;
+                    const prior = memo.get(entry.id);
+                    if (prior !== undefined && prior !== count) return entry.id;
+                    memo.set(entry.id, count);
+                }
+                const pageEnd = read.pageEnds[pageEndIndex];
+                if (pageEnd !== undefined && pageEnd.entryCount === entryIndex + 1) {
+                    checkpoints?.push({
+                        anchor: pageEnd.anchor,
+                        storedCount: readBase.storedCount + pageEnd.entryCount,
+                        canonicalCount: count,
+                    });
+                    pageEndIndex += 1;
+                }
+            }
+            canonicalCount = count;
+            return null;
+        };
+        // A memo value that disagrees with the store's numbering stays fail-loud: it can
+        // come from a canonical lookup elsewhere, so it is not safe to overwrite here.
+        const conflictId = applyEntries();
+        if (conflictId !== null) {
+            memo.clear();
+            if (checkpoints) checkpoints.length = 0;
+            return { ok: false, reason: "mismatch", messageId: conflictId, stats };
+        }
+        anchor = read.end ?? anchor;
         storedCount = currentStoredCount;
     }
 
@@ -204,6 +334,7 @@ export async function resolveOrdinalsForModule(args: {
                 reason: "unresolved",
                 messageIndex: visibleIndexes[index],
                 messageRole: visibleMessages[index].info.role ?? "unknown",
+                stats,
             };
         }
         const ordinal = memo.get(messageId);
@@ -242,7 +373,7 @@ export async function resolveOrdinalsForModule(args: {
     while (suffixStart > 0 && resolved[suffixStart - 1] === undefined) suffixStart -= 1;
     for (let index = 0; index < suffixStart; index += 1) {
         if (resolved[index] === undefined) {
-            return { ok: false, reason: "unresolved", ...firstUnresolved };
+            return { ok: false, reason: "unresolved", ...firstUnresolved, stats };
         }
     }
     if (suffixStart < annotated.length) {
@@ -266,6 +397,7 @@ export async function resolveOrdinalsForModule(args: {
                 messageId,
                 messageIndex: visibleIndexes[index],
                 messageRole: visibleMessages[index].info.role ?? "unknown",
+                stats,
             };
         }
         memo.set(messageId, ordinal);
@@ -280,6 +412,7 @@ export async function resolveOrdinalsForModule(args: {
         memoStoredCount: storedCount ?? 0,
         memoCanonicalCount: canonicalCount,
         normalizations,
+        stats,
     };
 }
 

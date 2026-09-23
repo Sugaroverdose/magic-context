@@ -71,6 +71,49 @@ function rustPassLogDecisions(
     });
 }
 
+const LOG_PREFIX = /^\[([^\]]+)\] \[magic-context\]\[([^\]]+)\] (.*)$/;
+
+/**
+ * Name the disruption a Rust adapter log line records, if any. These explain an
+ * epoch HARD that follows within a minute: the module failed or asked for full
+ * arrays, the adapter served a fallback, or the adapter process started fresh
+ * (its first ordinal read of a session is a cold whole-session prime).
+ */
+function disruptionKind(body: string): string | undefined {
+    if (/\bretry=full\b/.test(body)) return "full_retry";
+    if (/^rust pass: decision=(error|need_full_sync|parked)\b/.test(body)) return "module_fault";
+    if (/^rust pass: .*\bserved_from=(raw|lkg)\b/.test(body)) return "fallback_serve";
+    if (/\bstage=rust\.ordinal_rebuild\b.*\bcause=cold\b/.test(body)) return "adapter_restart";
+    return undefined;
+}
+
+export function disruptionLogMarkers(
+    text: string,
+    sessionId: string,
+): CacheBustDecisionAttribution[] {
+    return text.split("\n").flatMap((line) => {
+        const match = LOG_PREFIX.exec(line);
+        if (!match || match[2] !== sessionId) return [];
+        const kind = disruptionKind(match[3]);
+        if (!kind) return [];
+        const timestampMs = Date.parse(match[1]);
+        if (!Number.isFinite(timestampMs)) return [];
+        return [{
+            timestampMs,
+            decision: "disruption",
+            materialized: false,
+            materializeReason: null,
+            emergency: false,
+            droppedTokens: 0,
+            droppedCount: 0,
+            inputTokens: 0,
+            flush: false,
+            source: "rust adapter log",
+            disruption: kind,
+        }];
+    });
+}
+
 export function withSchedulerLogFallback(
     decisions: readonly CacheBustDecisionAttribution[],
     sessionId: string,
@@ -88,5 +131,5 @@ export function withSchedulerLogFallback(
         const next = logged[index + 1]?.timestampMs ?? Number.POSITIVE_INFINITY;
         return !decisions.some(row => row.timestampMs >= pass.timestampMs && row.timestampMs < next && row.timestampMs - pass.timestampMs <= 30_000);
     });
-    return [...decisions, ...fallback, ...rustPasses];
+    return [...decisions, ...fallback, ...rustPasses, ...disruptionLogMarkers(text, sessionId)];
 }
