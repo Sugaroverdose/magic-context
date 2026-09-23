@@ -41,6 +41,12 @@ test("fd guard refuses operator paths and permits isolated database", () => {
 	expect(() => assertOpenPaths(["/private/tmp/outside.db"], fixture.root)).toThrow("forbidden");
 	expect(() => assertOpenPaths(["/private/tmp/outside.db-wal"], fixture.root)).toThrow("forbidden");
 	expect(() => assertOpenPaths([join(homedir(), ".config/opencode/opencode.json")], fixture.root)).toThrow("forbidden");
+	expect(() => assertOpenPaths([join(homedir(), ".config/other-app/settings.json")], fixture.root)).toThrow("forbidden");
+	expect(() => assertOpenPaths([join(homedir(), ".local/state/other-app/state.json")], fixture.root)).toThrow("forbidden");
+	// A source file in a directory named `config` is read by the TUI loader, not operator configuration.
+	expect(() =>
+		assertOpenPaths(["/work/magic-context/packages/plugin/src/config/index.ts"], fixture.root),
+	).not.toThrow();
 	expect(() => assertOpenPaths(["/tmp/unexpected.txt"], fixture.root, [], ["/tmp/unexpected.txt"])).toThrow("forbidden");
 });
 test("live snapshot detects changed database and logs that the top-level HOME fence misses", () => {

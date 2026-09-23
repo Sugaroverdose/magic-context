@@ -455,7 +455,12 @@ export function assertOpenPaths(
 		if (!path.startsWith("/")) continue; // lsof socket/pipe labels are not filesystem paths.
 		if (protectedRoots.some((base) => under(path, base)) ||
 			(/\.(?:db|sqlite)(?:-(?:wal|shm))?$/.test(path) && !under(path, root)) ||
-			(/\/(?:config|state)\/[^/]+$/.test(path) && !under(path, root)))
+			// Config and state live under the home XDG roots; a source file that merely sits
+			// in a directory named `config` (the plugin's own src/config/index.ts, which the
+			// TUI loads) is not operator configuration.
+			((under(path, join(home, ".config")) ||
+				under(path, join(home, ".local/state"))) &&
+				!under(path, root)))
 			throw new Error(`v2 process holds a forbidden open path: ${path}`);
 	}
 	for (const path of writable) {
