@@ -1482,6 +1482,22 @@
             ]
         },
         {
+            "path": "tests/rust-restart-variant-double-hard.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "a session whose render identity keeps the variant pays no extra HARD after a module restart: the need_full_sync retry sends the same identity fields as the ordinary request",
+            "contract_refs": [
+                "RUST-E2E",
+                "TIMEOUT-EPOCH-RECOVERY"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/session-isolation.test.ts",
             "tier": "ts-only",
             "invocation": {
