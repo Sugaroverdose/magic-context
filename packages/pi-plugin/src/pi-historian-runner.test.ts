@@ -245,6 +245,7 @@ async function runHistorianWith(args: {
 	historianContextLimit?: number;
 	producerContextLimits?: ReadonlyMap<string, number>;
 	resolveHostContextLimit?: (model: string) => number | undefined;
+	resolveHostOutputLimit?: (model: string) => number | undefined;
 	maxOutputTokens?: number;
 	beforeRun?: (db: ReturnType<typeof createTestDb>) => void;
 	ensureProjectRegistered?: Parameters<
@@ -266,9 +267,7 @@ async function runHistorianWith(args: {
 		fallbackModels: args.fallbackModels,
 		fallbackModelId: args.fallbackModelId,
 		historianChunkTokens: args.historianChunkTokens ?? 20_000,
-		historianContextLimit: args.resolveHostContextLimit
-			? undefined
-			: (args.historianContextLimit ?? 200_000),
+		historianContextLimit: args.historianContextLimit ?? (args.resolveHostContextLimit ? undefined : 200_000),
 		producerContextLimits:
 			args.producerContextLimits ??
 			new Map([
@@ -285,6 +284,7 @@ async function runHistorianWith(args: {
 					: []),
 			]),
 		resolveHostContextLimit: args.resolveHostContextLimit,
+		resolveHostOutputLimit: args.resolveHostOutputLimit,
 		maxOutputTokens: args.maxOutputTokens,
 		signal: args.signal,
 		retryBackoffMs: args.retryBackoffMs,
@@ -334,14 +334,26 @@ describe("runPiHistorian", () => {
 		}
 	});
 
+	it("uses the host catalog output ceiling when no cap is configured", async () => {
+		const { db, runner } = await runHistorianWith({ historianContextLimit: 200_000, resolveHostContextLimit: () => 64_000, resolveHostOutputLimit: () => 1_024, outputs: [successXml()] });
+		try {
+			expect(getHistorianFailureState(db, "ses-historian").lastError).toBeNull();
+			expect(runner.run).toHaveBeenCalledTimes(1);
+			expect(runner.run.mock.calls[0]?.[0].maxOutputTokens).toBe(1_024);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("releases reserved drain tokens when the producer refuses before dispatch", async () => {
 		const { db, runner } = await runHistorianWith({
 			outputs: [successXml()],
 			historianContextLimit: 32_001,
-			maxOutputTokens: 32_000,
+			maxOutputTokens: 30_000,
 		});
 		try {
 			expect(runner.run).not.toHaveBeenCalled();
+			expect(getHistorianFailureState(db, "ses-historian").lastError).toBeNull();
 			expect(
 				loadProtectedTailMeta(db, "ses-historian").protectedTailDrainTokens,
 			).toBe(0);
@@ -356,7 +368,7 @@ describe("runPiHistorian", () => {
 			throw new Error("producer-window fixture requires a source message");
 		messages[0] = {
 			...firstMessage,
-			parts: [{ type: "text", text: "producer source token ".repeat(2_000) }],
+			parts: [{ type: "text", text: "producer source token ".repeat(20_000) }],
 		};
 		const refusedRunner = runnerReturning([successXml()]);
 		const refused = await runHistorianWith({
@@ -364,13 +376,11 @@ describe("runPiHistorian", () => {
 			providerMessages: messages,
 			historianChunkTokens: 100_000,
 			historianContextLimit: 32_001,
-			maxOutputTokens: 32_000,
+			maxOutputTokens: 8_000,
 		});
 		try {
 			expect(refusedRunner.run).toHaveBeenCalledTimes(0);
-			expect(
-				getHistorianFailureState(refused.db, "ses-historian").lastError,
-			).toContain("producer_source_exceeds_window");
+			expect(getHistorianFailureState(refused.db, "ses-historian").lastError).toBeNull();
 		} finally {
 			closeQuietly(refused.db);
 		}

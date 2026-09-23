@@ -60,6 +60,8 @@ import { insertUserMemoryCandidates } from "../../features/magic-context/user-me
 import { normalizeSDKResponse } from "../../shared";
 import { describeError } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
+import { getSdkOutputLimit } from "../../shared/models-dev-cache";
+import { toModelEntry } from "../../shared/resolve-fallbacks";
 import {
     claimOpenCodeDbDiagnosticOnce,
     openCodeDbPathExists,
@@ -83,6 +85,8 @@ import { onNoteTrigger } from "./note-nudger";
 import { persistFilteredNoise } from "./persist-filtered-noise";
 import {
     fitAtomicHistorianSourceToProducerWindow,
+    historianProducerReserve,
+    producerInputTokenLimit,
     producerWindowFailureReason,
 } from "./producer-window-guard";
 import {
@@ -106,6 +110,13 @@ import { estimateTokens } from "./read-session-formatting";
 import { isStrictGapHealingMessage } from "./read-session-raw";
 import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendStatusNotification } from "./send-session-notification";
+
+const inconsistentProducerWindows = new Set<string>();
+function logInconsistentProducerWindowOnce(sessionId: string, model: string, window: number, reserve: number): void {
+    if (inconsistentProducerWindows.has(model)) return;
+    inconsistentProducerWindows.add(model);
+    sessionLog(sessionId, `producer window inconsistent for ${model}: window=${window} reserve=${reserve}; sending unguarded`);
+}
 
 /** Suppress repeated historian failure notifications — at most once per 60 seconds per session */
 const HISTORIAN_ALERT_COOLDOWN_MS = 60 * 1000;
@@ -489,12 +500,21 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             rollbackDrainReservation();
             return;
         }
+        const producerModel = toModelEntry(deps.model)?.model ?? deps.fallbackModelId;
+        const modelParts = producerModel?.split("/");
+        const producerReserve = historianProducerReserve(
+            deps.historianContextLimit,
+            deps.historianMaxOutputTokens,
+            modelParts && modelParts.length > 1
+                ? getSdkOutputLimit(modelParts[0], modelParts.slice(1).join("/"))
+                : undefined,
+        );
         const fittedAtomicSource = chunk.oversizeAtomicUnit
             ? fitAtomicHistorianSourceToProducerWindow({
                   text: chunk.text,
                   resultBoundaries: chunk.toolResultBoundaries,
                   contextLimitTokens: deps.historianContextLimit,
-                  maxOutputTokens: deps.historianMaxOutputTokens ?? 32_000,
+                  maxOutputTokens: producerReserve,
               })
             : null;
         const chunkText = chunk.oversizeAtomicUnit
@@ -516,12 +536,14 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         const producerWindowFailure = producerWindowFailureReason({
             producerSourceTokens,
             contextLimitTokens: deps.historianContextLimit,
-            maxOutputTokens: deps.historianMaxOutputTokens ?? 32_000,
+            maxOutputTokens: producerReserve,
         });
+        if (deps.historianContextLimit !== undefined && producerInputTokenLimit(deps.historianContextLimit, producerReserve) === undefined) {
+            logInconsistentProducerWindowOnce(sessionId, producerModel ?? "unknown", deps.historianContextLimit, producerReserve);
+        }
         if (producerWindowFailure) {
             telemetry.failureReason = producerWindowFailure;
-            retainDrainReservationForRetryThrottle = true;
-            incrementHistorianFailure(db, sessionId, producerWindowFailure);
+            rollbackDrainReservation();
             sessionLog(
                 sessionId,
                 `historian oversize admission refused before spawn: ${producerWindowFailure}`,
@@ -628,6 +650,13 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             twoPass: deps.historianTwoPass,
             language: deps.language,
         });
+        if (!validatedPass.ok && /producer_prompt_(?:exceeds_window|fit_unavailable)/.test(validatedPass.error)) {
+            telemetry.failureReason = validatedPass.error;
+            retainDrainReservationForRetryThrottle = false;
+            rollbackDrainReservation();
+            sessionLog(sessionId, `historian producer admission refused: ${validatedPass.error}`);
+            return;
+        }
         if (!validatedPass.ok) {
             // Always track historian failures regardless of usage percentage.
             // The emergency abort path at 95% checks failureCount > 0, so failures

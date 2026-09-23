@@ -601,6 +601,11 @@ export function modelSupportsVision(providerID: string, modelID: string): boolea
         : false;
 }
 
+export function getSdkOutputLimit(providerID: string, modelID: string): number | undefined {
+    loadPersistedApiCacheOnce();
+    return lookupMetadataWithTagFallback(apiCache, providerID, modelID)?.outputLimit;
+}
+
 export function getSdkInputLimit(providerID: string, modelID: string): number | undefined {
     loadPersistedApiCacheOnce();
     if (!apiCache) return undefined;

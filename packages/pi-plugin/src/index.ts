@@ -848,7 +848,7 @@ export function resolveHistorianFromConfig(
 		historianContextLimit: resolveKnownHistorianContextLimit(model),
 		timeoutMs: config.historian_timeout_ms,
 		temperature: historian?.temperature,
-		maxOutputTokens: historian?.maxTokens ?? 32_000,
+		maxOutputTokens: historian?.maxTokens,
 		// `historian.two_pass` runs an editor pass after a successful
 		// first pass to clean low-signal U: lines and cross-compartment
 		// duplicates. Mirrors OpenCode's config flag — defaults to false

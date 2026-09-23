@@ -102,6 +102,8 @@ import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudg
 import { persistFilteredNoise } from "@magic-context/core/hooks/magic-context/persist-filtered-noise";
 import {
 	fitAtomicHistorianSourceToProducerWindow,
+	historianProducerReserve,
+	producerInputTokenLimit,
 	producerPromptFailureReason,
 	producerWindowFailureReason,
 } from "@magic-context/core/hooks/magic-context/producer-window-guard";
@@ -232,9 +234,11 @@ async function sleepWithAbort(
 }
 
 const loggedProducerWindows = new Set<string>();
+const loggedInconsistentWindows = new Set<string>();
 
 async function runHistorianSubagentWithTransientRetriesGuarded(args: {
 	resolveContextLimit?: (model: string) => number | undefined;
+	resolveOutputLimit?: (model: string) => number | undefined;
 	onDispatch?: () => void;
 	runner: SubagentRunner;
 	options: SubagentRunOptions;
@@ -257,13 +261,18 @@ async function runHistorianSubagentWithTransientRetriesGuarded(args: {
 			const window =
 				args.resolveContextLimit?.(key) ??
 				resolveKnownHistorianContextLimit(key);
+			const reserve = historianProducerReserve(window, args.options.maxOutputTokens, args.resolveOutputLimit?.(key));
+			if (window !== undefined && producerInputTokenLimit(window, reserve) === undefined && !loggedInconsistentWindows.has(key)) {
+				loggedInconsistentWindows.add(key);
+				sessionLog(args.sessionId, `producer window inconsistent for ${key}: window=${window} reserve=${reserve}; sending unguarded`);
+			}
 			const failure = producerPromptFailureReason({
 				sourceLocal: estimateTokens(args.options.userMessage),
 				systemLocal: estimateTokens(args.options.systemPrompt),
 				toolsLocal: 0,
 				modelKey: key,
 				contextLimitTokens: window,
-				maxOutputTokens: args.options.maxOutputTokens ?? 32000,
+				maxOutputTokens: reserve,
 			});
 			if (failure) throw new Error(failure);
 			args.onDispatch?.();
@@ -404,6 +413,7 @@ export interface PiHistorianDeps {
 	producerContextLimits?: ReadonlyMap<string, number>;
 	/** Live Pi/OMP registry lookup; its models include host snapshot and custom overrides. */
 	resolveHostContextLimit?: (model: string) => number | undefined;
+	resolveHostOutputLimit?: (model: string) => number | undefined;
 	/** Boundary resolved by the Pi trigger/recovery decision with the real model context. */
 	boundarySnapshot?: ProtectedTailBoundarySnapshot;
 	/**
@@ -486,7 +496,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		currentContextLimit,
 		historianTimeoutMs = DEFAULT_HISTORIAN_TIMEOUT_MS,
 		temperature,
-		maxOutputTokens = 32_000,
+		maxOutputTokens: configuredMaxOutputTokens,
 		signal,
 		retryBackoffMs,
 		twoPass,
@@ -503,6 +513,15 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		forceDrainQuota,
 		forceKeepLastCompartment,
 	} = deps;
+	const primaryModelKey = piModelRefToCanonical(historianModel ?? fallbackModelId ?? "");
+	const primaryWindow = deps.resolveHostContextLimit?.(primaryModelKey) ?? historianContextLimit;
+	const maxOutputTokens = configuredMaxOutputTokens ?? (primaryWindow === undefined
+		? 32_000
+		: historianProducerReserve(
+				primaryWindow,
+				undefined,
+				deps.resolveHostOutputLimit?.(primaryModelKey) ?? 32_000,
+			));
 	const historianChunkTokens = producerSourceLocalBudget(
 		providerHistorianChunkTokens,
 		piModelRefToCanonical(historianModel ?? fallbackModelId ?? ""),
@@ -515,6 +534,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			onDispatch: () => {
 				producerDispatched = true;
 			},
+			resolveOutputLimit: deps.resolveHostOutputLimit,
 			resolveContextLimit: (model) => {
 				const hostWindow = deps.resolveHostContextLimit?.(model);
 				const primaryWindow =
@@ -836,7 +856,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			if (producerWindowFailure) {
 				telemetry.failureReason = producerWindowFailure;
 				rollbackDrainReservation();
-				incrementHistorianFailure(db, sessionId, producerWindowFailure);
 				sessionLog(
 					sessionId,
 					`historian oversize admission refused before spawn: ${producerWindowFailure}`,
@@ -1114,6 +1133,12 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						: validatedPass.kind === "spawn-failed"
 							? `subagent run failed (${validatedPass.reason}): ${validatedPass.error}`
 							: "historian returned no usable text";
+				if (!producerDispatched && /producer_prompt_(?:exceeds_window|fit_unavailable)/.test(errorMsg)) {
+					retainDrainReservationForRetryThrottle = false;
+					rollbackDrainReservation();
+					sessionLog(sessionId, `historian producer admission refused: ${errorMsg}`);
+					return;
+				}
 				sessionLog(sessionId, `historian failure: ${errorMsg}`);
 				{
 					const failCount = incrementHistorianFailure(db, sessionId, errorMsg);

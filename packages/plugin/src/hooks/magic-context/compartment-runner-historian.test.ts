@@ -19,7 +19,7 @@ afterEach(() => {
     tempDirs.length = 0;
 });
 
-test("surfaces a settled assistant error instead of reporting empty historian output", async () => {
+test("32k historian reaches the provider without a configured output cap and surfaces its assistant error", async () => {
     const directory = mkdtempSync(join(tmpdir(), "mc-historian-assistant-error-"));
     tempDirs.push(directory);
     process.env.XDG_DATA_HOME = directory;
@@ -56,7 +56,7 @@ test("surfaces a settled assistant error instead of reporting empty historian ou
                         {
                             id: "google",
                             models: {
-                                "fixture-model": { limit: { context: 200_000, output: 32000 } },
+                                "fixture-model": { limit: { context: 32_000, output: 1_024 } },
                             },
                         },
                     ],
