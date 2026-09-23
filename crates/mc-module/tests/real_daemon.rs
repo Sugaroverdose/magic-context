@@ -337,6 +337,11 @@ async fn mc_transform_spine_through_real_daemon() {
     drop(module);
     tokio::time::sleep(Duration::from_millis(200)).await; // OS releases the single-writer lease
     let _module2 = spawn_module(&module_bin, &daemon.connection_file, &data_home);
+    // This module is started by hand, not supervised by the daemon, so between the
+    // kill and the new registration the daemon has no module of this id and answers
+    // `unknown_module`, which is terminal for route.open. Wait for the restarted
+    // module to register, exactly as for the first spawn.
+    wait_for_module_registration(&consumer, START_TIMEOUT).await;
 
     // replay the spine at the frozen baseline (boundary "m10" present) → pure defer, no write,
     // m0 reproduces byte-identical across the restart (the lineage baseline is durable).
