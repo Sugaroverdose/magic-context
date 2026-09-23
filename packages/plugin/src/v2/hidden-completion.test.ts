@@ -168,6 +168,8 @@ async function setup(
     generation = "host-generation-1",
     capabilities: {
         remove?: boolean;
+        modelCatalog?: () => Promise<unknown>;
+        logs?: string[];
         /**
          * Which registration, if any, the fake host would report as its own. Undefined stands for
          * a host that registered no service at all (`--standalone`, or a plain `serve`).
@@ -305,8 +307,9 @@ async function setup(
             openReader: () => rows,
             generation: hostGeneration,
             removalSpacingMs: 0,
-            resolveOwner: () => capabilities.owner,
-            log: () => {},
+             resolveOwner: () => capabilities.owner,
+             log: (message) => capabilities.logs?.push(message),
+             ...(capabilities.modelCatalog ? { modelCatalog: capabilities.modelCatalog } : {}),
         });
     const executor = await create();
     return {
@@ -1096,6 +1099,42 @@ describe("OpenCode 2 hidden child completion", () => {
             const unregistered = { ...ordinary, sessionID: handle.id };
             expect(() => state.hook.apply(unregistered)).toThrow(HiddenCompletionRefusal);
             await close(state.executor, handle, false);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("drops and warns once for an undeclared hidden-run variant", async () => {
+        const logs: string[] = [];
+        const state = await setup("host-generation-1", {
+            logs,
+            modelCatalog: async () => [{ id: "cheap", providerID: "mock", variants: { high: {} } }],
+        });
+        const identity = { ...run, model: { model: "mock/cheap", qualifier: "medium" } };
+        try {
+            const handle = await state.executor.open(identity);
+            expect(state.creates[0]?.model).toEqual({ providerID: "mock", id: "cheap" });
+            await state.executor.attempt(handle, request("cheap"));
+            await state.executor.attempt(handle, request("cheap"));
+            expect(state.creates[0]?.model).toEqual({ providerID: "mock", id: "cheap" });
+            expect(logs.filter((line) => line.includes("variant 'medium'")).length).toBe(1);
+            await close(state.executor, handle, true);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("passes a declared hidden-run variant through unchanged", async () => {
+        const state = await setup("host-generation-1", {
+            modelCatalog: async () => [{ id: "cheap", providerID: "mock", variants: { medium: {} } }],
+        });
+        const identity = { ...run, model: { model: "mock/cheap", qualifier: "medium" } };
+        try {
+            const handle = await state.executor.open(identity);
+            expect(state.creates[0]?.model).toEqual({
+                providerID: "mock", id: "cheap", variant: "medium",
+            });
+            await close(state.executor, handle, true);
         } finally {
             state.db.close();
         }
