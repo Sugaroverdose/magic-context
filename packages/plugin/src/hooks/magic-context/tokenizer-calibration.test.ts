@@ -79,10 +79,13 @@ describe("resolveModelCalibration", () => {
         expect(resolveModelCalibration("anthropic", "claude-opus-4-4").derivedFrom).toBe(
             "anthropic/claude-opus-4-5",
         );
-        // Provider-scoped, family-scoped, version-bearing only.
+        // Known providers stay provider-scoped; an unknown provider can use
+        // canonical model-family inheritance rather than remaining neutral.
         expect(resolveModelCalibration("anthropic", "claude-muse-9")).toEqual(NEUTRAL);
         expect(resolveModelCalibration("moonshot", "kimi-k3")).toEqual(NEUTRAL);
-        expect(resolveModelCalibration("brand-new", "claude-fable-5-2")).toEqual(NEUTRAL);
+        expect(resolveModelCalibration("brand-new", "claude-fable-5-2").derivedFrom).toBe(
+            "anthropic/claude-fable-5-1",
+        );
     });
 
     it("matches Claude 4.5/4.6 family within range", () => {

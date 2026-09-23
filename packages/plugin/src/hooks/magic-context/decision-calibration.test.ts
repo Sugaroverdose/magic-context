@@ -1,8 +1,22 @@
 import { describe, expect, it } from "bun:test";
+import resolverCases from "../../../../../tests/fixtures/calibration-resolver.json";
 import fixture from "../../../../../tests/fixtures/decision-calibration.json";
 import { localBudget, providerMass, resolveDecisionCalibration } from "./decision-calibration";
+import seeds from "./tokenizer-calibration-seeds.json";
 
 describe("static decision calibration", () => {
+    it("resolves the shared model and provider cases", () => {
+        for (const testCase of resolverCases) {
+            const result = resolveDecisionCalibration(testCase.provider, testCase.model);
+            expect(result.matchedPrefix).toBe(testCase.prefix ?? undefined);
+            expect(result.source).toBe(testCase.source);
+            const row = seeds.find((seed) => seed.prefix === testCase.prefix);
+            expect([result.systemRatio, result.toolsRatio, result.proseRatio]).toEqual(
+                row ? [row.systemRatio, row.toolsRatio, row.proseRatio ?? 1] : [1, 1, 1],
+            );
+            expect(result.seeded).toBe(row !== undefined);
+        }
+    });
     it("calibrates the supplied Fable section fixture independently with one final ceil", () => {
         const seed = resolveDecisionCalibration("anthropic", "claude-fable-5-1");
         expect(
