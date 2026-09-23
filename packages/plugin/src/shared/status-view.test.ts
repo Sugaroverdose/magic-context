@@ -83,7 +83,8 @@ function rowLabels(sectionTitle: string, overrides: Partial<StatusViewSource> = 
 describe("status view model", () => {
     test("shows dropped hidden-run variants as warnings", () => {
         expect(
-            view({ hiddenVariantWarnings: ["variant 'medium' not offered by example/model"] }).warnings,
+            view({ hiddenVariantWarnings: ["variant 'medium' not offered by example/model"] })
+                .warnings,
         ).toContainEqual({
             text: "variant 'medium' not offered by example/model",
             tone: "warning",
