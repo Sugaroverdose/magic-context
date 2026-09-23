@@ -195,9 +195,9 @@ export function parseOpenCodeModelCatalog(output: string): Array<{
     const lines = output.split(/\r?\n/);
     for (let index = 0; index < lines.length; index++) {
         if (lines[index]?.trim() !== "{") continue;
-        const jsonLines = [lines[index]!];
+        const jsonLines = [lines[index] ?? "{"];
         while (++index < lines.length) {
-            jsonLines.push(lines[index]!);
+            jsonLines.push(lines[index] ?? "");
             if (lines[index] === "}") break;
         }
         try {

@@ -22,10 +22,10 @@ import {
     collectNpmReleaseAgeWarnings,
     describeAutoUpdateStall,
     describeOpenCodeDatabaseDoctorCheck,
+    findUndeclaredConfiguredVariants,
     getUserNpmrcPath,
     isPinnedOpenCodePluginSpecifier,
     migrateLegacyAgentEnabledConfigForDoctor,
-    findUndeclaredConfiguredVariants,
     parseOpenCodeModelCatalog,
 } from "./doctor-opencode";
 import { clearPluginCache } from "./doctor-opencode-cache";
