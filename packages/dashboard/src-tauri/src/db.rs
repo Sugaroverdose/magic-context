@@ -1337,12 +1337,15 @@ pub fn get_context_token_breakdown(
             // No materialized m[0] yet (brand-new / pre-first-materialization).
             // Fall back to the Σp1 estimate so the bucket isn't blank on a cold
             // session; it self-corrects to the decayed size on first render.
-            estimate_tokens(conn.query_row(
-                "SELECT COALESCE(SUM(LENGTH(title) + LENGTH(content) + ?2), 0)
+            estimate_tokens(
+                conn.query_row(
+                    "SELECT COALESCE(SUM(LENGTH(title) + LENGTH(content) + ?2), 0)
                  FROM compartments WHERE session_id = ?1",
-                rusqlite::params![session_id, COMPARTMENT_HEADING_OVERHEAD],
-                |r| r.get(0),
-            ).unwrap_or(0))
+                    rusqlite::params![session_id, COMPARTMENT_HEADING_OVERHEAD],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0),
+            )
         }
     };
 
@@ -7544,9 +7547,32 @@ mod session_history_slice_tests {
         let m1 = "<session-history-since>\n<new-compartments>\n## 11-14 · Continued\nnew material\n</new-compartments>\n</session-history-since>";
         let m0_chars = extract_session_history_slice(m0).unwrap().len() as i64;
         let m1_chars = extract_new_compartments_slice(m1).unwrap().len() as i64;
-        let compartment_tokens = super::estimate_tokens(m0_chars) + super::estimate_tokens(m1_chars);
-        assert_eq!(compartment_tokens, super::estimate_tokens(m0_chars) + super::estimate_tokens(m1_chars));
-        assert!(compartment_tokens > super::estimate_tokens(m0_chars));
+
+        // Through the real breakdown: a session whose m[0] was built before any
+        // compartment existed serves every compartment from m[1], and the bucket
+        // must count them there (issue 515's miscount showed a constant ~9 tokens).
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_meta (session_id TEXT, last_input_tokens INTEGER,
+                 system_prompt_tokens INTEGER, cached_m0_bytes BLOB, cached_m1_bytes BLOB,
+                 memory_block_cache TEXT, memory_block_count INTEGER);
+             CREATE TABLE compartments (session_id TEXT, title TEXT, content TEXT);
+             CREATE TABLE session_facts (session_id TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_meta VALUES ('s', 50000, 1000, ?1, ?2, NULL, 0)",
+            rusqlite::params![m0.as_bytes(), m1.as_bytes()],
+        )
+        .unwrap();
+        let breakdown = super::get_context_token_breakdown(&conn, "s")
+            .unwrap()
+            .expect("breakdown for a session with recorded input");
+        assert_eq!(
+            breakdown.compartment_tokens,
+            super::estimate_tokens(m0_chars) + super::estimate_tokens(m1_chars)
+        );
+        assert!(breakdown.compartment_tokens > super::estimate_tokens(m0_chars));
     }
 
     #[test]
