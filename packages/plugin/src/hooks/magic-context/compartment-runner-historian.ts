@@ -147,6 +147,18 @@ function describeAssistantFailure(error: unknown): string {
     }
 }
 
+export function resolveHiddenCompletionExecutor(
+    executor: HiddenCompletionExecutor | undefined,
+    client: PluginContext["client"] | undefined,
+    db: Database,
+    directory: string,
+    entryPoint: string,
+): HiddenCompletionExecutor {
+    if (executor) return executor;
+    if (!client) throw new Error(`${entryPoint}: v2 hidden completion executor is missing`);
+    return createV1HiddenCompletionExecutor(client, db, directory);
+}
+
 export function createV1HiddenCompletionExecutor(
     client: PluginContext["client"] | undefined,
     db: Database,
@@ -461,9 +473,13 @@ async function runHistorianPrompt(args: {
     let agentSessionId: string | null = null;
     let handle: HiddenRunHandle | null = null;
     let completion: HiddenCompletion | undefined;
-    const executor =
-        args.hiddenCompletionExecutor ??
-        createV1HiddenCompletionExecutor(client, db, sessionDirectory);
+    const executor = resolveHiddenCompletionExecutor(
+        args.hiddenCompletionExecutor,
+        client,
+        db,
+        sessionDirectory,
+        "historian",
+    );
     let promptSettled = false;
     let hadUnsettledPrompt = false;
     const startedAt = Date.now();

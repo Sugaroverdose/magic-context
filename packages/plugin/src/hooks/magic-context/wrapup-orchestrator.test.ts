@@ -142,13 +142,22 @@ describe("runManagedWrapup", () => {
                     parentSessionId: sessionId,
                     sessionDirectory: deps.directory,
                     prompt: `Messages ${start}-${start}:\n${start}: U: preserve this`,
-                    chunk: { startIndex: start, endIndex: start, lines: [{ ordinal: start, messageId: `m-${start}` }] },
+                    chunk: {
+                        startIndex: start,
+                        endIndex: start,
+                        lines: [{ ordinal: start, messageId: `m-${start}` }],
+                    },
                     priorCompartments: [],
                     sequenceOffset: 0,
                     dumpLabelBase: "wrapup-v2",
                 });
                 expect(pass.ok, pass.error).toBe(true);
-                appendRange(db, sessionId, start, Math.min(start + 2, deps.boundarySnapshot.eligibleEndOrdinal - 1));
+                appendRange(
+                    db,
+                    sessionId,
+                    start,
+                    Math.min(start + 2, deps.boundarySnapshot.eligibleEndOrdinal - 1),
+                );
                 deps.onCompartmentStatePublished?.(sessionId);
             });
             const result = await withProvider(sessionId, 8, () =>

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { DREAMER_CLASSIFIER_AGENT } from "../../../agents/dreamer";
 import { withContentLanguageDirective } from "../../../agents/language-directive";
-import { createV1HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-historian";
+import { resolveHiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-historian";
 import {
     type HiddenCompletion,
     type HiddenCompletionExecutor,
@@ -336,9 +336,7 @@ async function classifyOneChunk(
 ): Promise<{ classified: number; changed: number }> {
     let agentSessionId: string | null = null;
     let handle: HiddenRunHandle | null = null;
-    const executor =
-        args.hiddenCompletionExecutor ??
-        createV1HiddenCompletionExecutor(args.client, args.db, args.sessionDirectory);
+    let closeExecutor: HiddenCompletionExecutor | undefined;
     let promptSettled = false;
     const startedAt = Date.now();
     const moduleRoute = isModuleRoute(args);
@@ -354,6 +352,14 @@ async function classifyOneChunk(
             return run;
         }
 
+        const executor = resolveHiddenCompletionExecutor(
+            args.hiddenCompletionExecutor,
+            args.client,
+            args.db,
+            args.sessionDirectory,
+            "classify-memories",
+        );
+        closeExecutor = executor;
         handle = await executor.open({
             parentSessionId: args.parentSessionId,
             agent: DREAMER_CLASSIFIER_AGENT,
@@ -456,7 +462,7 @@ async function classifyOneChunk(
             throw failure;
         return { classified: 0, changed: 0 };
     } finally {
-        await executor.close(handle, {
+        await closeExecutor?.close(handle, {
             promptSettled,
             privacySensitive: true,
             context: "[dreamer] classify",

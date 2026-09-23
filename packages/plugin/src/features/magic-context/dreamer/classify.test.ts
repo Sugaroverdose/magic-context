@@ -2,6 +2,7 @@
 
 import { describe, expect, test } from "bun:test";
 
+import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-types";
 import { Database, withPrivilegedWriter } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { installAuthorityManagedMarker } from "../context-authority";
@@ -70,6 +71,38 @@ function classifyArgs(db: Database, projectIdentity: string): ClassifyArgs {
 }
 
 describe("runClassify disposition", () => {
+    test("classifies through the v2 executor without a v1 client", async () => {
+        const db = freshDb();
+        try {
+            const projectIdentity = "git:classify-v2";
+            addMemoriesForDisposition(db, projectIdentity, 10);
+            const args = classifyArgs(db, projectIdentity);
+            args.client = undefined;
+            let opened = 0;
+            let manifest = "";
+            args.hiddenCompletionExecutor = {
+                capabilities: { tools: false, harness: "opencode2" },
+                open: async () => {
+                    opened++;
+                    return { id: "v2-classify" };
+                },
+                attempt: async (_handle, request) => {
+                    const prompt = request.body?.parts?.[0]?.text ?? "";
+                    const ids = [...prompt.matchAll(/^\[(\d+)\]/gm)].map((match) =>
+                        Number(match[1]),
+                    );
+                    manifest = `<classify>${ids.map((id) => `<memory id="${id}" importance="80" scope="project" shareable="true"/>`).join("")}</classify>`;
+                },
+                collect: async () => ({ text: manifest, reasoning: null, lengthCapped: false }),
+                close: async () => {},
+            } satisfies HiddenCompletionExecutor;
+            const result = await runClassify(args);
+            expect(opened).toBe(1);
+            expect(result.classified).toBe(10);
+        } finally {
+            closeQuietly(db);
+        }
+    });
     test("localizes the TypeScript classifier system prompt", async () => {
         const db = freshDb();
         try {

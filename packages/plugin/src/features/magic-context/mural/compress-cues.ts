@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { DREAMER_CLASSIFIER_AGENT } from "../../../agents/dreamer";
-import { createV1HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-historian";
+import { resolveHiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-historian";
 import {
     type HiddenCompletionExecutor,
     HiddenCompletionRefusal,
@@ -349,9 +349,13 @@ async function compressOneChunk(
 ): Promise<ChunkOutcome> {
     let agentSessionId: string | null = null;
     let handle: HiddenRunHandle | null = null;
-    const executor =
-        args.hiddenCompletionExecutor ??
-        createV1HiddenCompletionExecutor(args.client, args.db, args.sessionDirectory);
+    const executor = resolveHiddenCompletionExecutor(
+        args.hiddenCompletionExecutor,
+        args.client,
+        args.db,
+        args.sessionDirectory,
+        "compress-cues",
+    );
     let promptSettled = false;
     const startedAt = Date.now();
     try {
