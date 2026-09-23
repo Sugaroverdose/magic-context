@@ -13971,6 +13971,78 @@ fn native_sidecar(
     Arc::new(codec::decode_opencode(native_messages).sidecar)
 }
 
+/// Re-decode the raw OpenCode trees a degraded cache snapshot dropped, for exactly the messages
+/// this pass is about to re-encode.
+///
+/// A degraded snapshot keeps message order and mid pins but not the raw per-message trees, so
+/// the sidecar says which native message a served slot came from without holding its bytes.
+/// The encoder replays unmodelled host fields (tool-part provider metadata, message info,
+/// step parts, tool titles and times) only from that raw tree; without it the message is
+/// rendered fresh from canonical blocks and already-served bytes change. The request always
+/// carries the full native ingress array (a tail delta is expanded from the retained ingress
+/// core before this runs), so each missing tree is decoded again from the same bytes it was
+/// first decoded from. Returns the sidecar slots that were restored.
+fn restore_degraded_sidecar_raw(
+    sidecar: &mut Arc<codec::DecodeSidecar>,
+    native_messages: &[Value],
+    served_suffix: &[crate::ck_wire::CkWireMessage],
+    suffix_start: usize,
+    sidecar_positions: &HashMap<String, usize>,
+) -> Vec<String> {
+    // Mirror `meta_for_ck`: a served message binds to its sidecar slot by harness id, and a
+    // non-synthetic message without a known id falls back to the slot at its served position.
+    let mut needed = BTreeSet::new();
+    for (offset, served) in served_suffix.iter().enumerate() {
+        let position = suffix_start.saturating_add(offset);
+        match served
+            .meta
+            .harness_id
+            .as_deref()
+            .and_then(|mid| sidecar_positions.get(mid))
+        {
+            Some(index) => {
+                needed.insert(*index);
+            }
+            None if !served.meta.synthetic => {
+                needed.insert(position);
+            }
+            None => {}
+        }
+    }
+    let mut restored = Vec::new();
+    for index in needed {
+        let Some(slot) = sidecar.order.get(index) else {
+            continue;
+        };
+        if sidecar.messages.contains_key(slot) {
+            continue;
+        }
+        let Some(raw) = native_messages.get(index) else {
+            continue;
+        };
+        // Decoding one message at its absolute index with the retained pins reproduces the
+        // tree a whole-array decode assigns to that slot: ordinals derive from the index and
+        // mids from the pins, and nothing else crosses message boundaries.
+        let decoded = codec::opencode::decode_opencode_with_sidecar_and_base(
+            std::slice::from_ref(raw),
+            Some(sidecar.as_ref()),
+            index as u64,
+        )
+        .sidecar;
+        let Some(meta) = decoded.messages.get(slot) else {
+            // The native message at this index no longer maps to the slot's mid, so it is not
+            // the message the slot described; leave the slot unresolved rather than guess.
+            continue;
+        };
+        let slot = slot.clone();
+        Arc::make_mut(sidecar)
+            .messages
+            .insert(slot.clone(), Arc::clone(meta));
+        restored.push(slot);
+    }
+    restored
+}
+
 fn native_sidecar_hash_and_size(meta: &codec::sidecar::HarnessMessageMeta) -> ([u8; 32], usize) {
     let bytes = serde_json::to_vec(meta).expect("OpenCode sidecar metadata must serialize");
     let retained_bytes = std::mem::size_of_val(meta).saturating_add(bytes.len().saturating_mul(2));
@@ -14198,12 +14270,12 @@ fn attach_native_messages_incremental(
         .as_ref()
         .map(|snapshot| validated_native_prefix(request, snapshot, native_delta_frontier))
         .unwrap_or(0);
-    let sidecar = native_sidecar(request, cached.as_ref(), trusted_prefix);
+    let mut sidecar = native_sidecar(request, cached.as_ref(), trusted_prefix);
     let sidecar_positions = sidecar
         .order
         .iter()
         .enumerate()
-        .map(|(index, mid)| (mid.as_str(), index))
+        .map(|(index, mid)| (mid.clone(), index))
         .collect::<HashMap<_, _>>();
     let context = native_attachment_context(request, transition_consumed);
     let delta_fallback_reason = native_delta_frontier.and_then(|frontier| {
@@ -14372,6 +14444,20 @@ fn attach_native_messages_incremental(
         .iter()
         .map(|message| message.deref().clone())
         .collect::<Vec<_>>();
+    let restored_raw_slots = restore_degraded_sidecar_raw(
+        &mut sidecar,
+        request.native_messages.as_deref().unwrap_or_default(),
+        &served_suffix,
+        suffix_start,
+        &sidecar_positions,
+    );
+    for slot in restored_raw_slots {
+        if let Some(meta) = sidecar.messages.get(&slot) {
+            let (hash, retained_bytes) = native_sidecar_hash_and_size(meta);
+            sidecar_hashes.entry(slot.clone()).or_insert(hash);
+            sidecar_sizes.insert(slot, retained_bytes);
+        }
+    }
     let encoded_suffix = codec::opencode::encode_opencode_chunks_with_transition_state(
         &served_suffix,
         &sidecar,
@@ -22279,6 +22365,123 @@ mod tests {
         assert_eq!(entry.snapshot.sidecar.order.len(), GIANT_MESSAGE_COUNT + 1);
         assert!(entry.snapshot.sidecar.messages.is_empty());
         assert!(entry.snapshot.sidecar_sizes.is_empty());
+    }
+
+    /// An assistant turn as OpenCode stores it: the tool part carries provider metadata the
+    /// codec does not model (Anthropic's `caller` on a served `tool_use`). Only the retained raw
+    /// sidecar tree can replay it, so it is the field that disappears when that tree is missing.
+    fn native_assistant_tool_turn_with_provider_metadata(mid: &str, call_id: &str) -> Value {
+        json!({
+            "info": {
+                "id": mid,
+                "role": "assistant",
+                "providerID": "anthropic",
+                "modelID": "claude-opus",
+            },
+            "parts": [
+                { "type": "step-start" },
+                {
+                    "type": "tool",
+                    "callID": call_id,
+                    "tool": "read",
+                    "state": {
+                        "status": "completed",
+                        "input": { "path": "src/lib.rs" },
+                        "output": "file body",
+                        "title": "src/lib.rs",
+                        "metadata": {},
+                        "time": { "start": 10, "end": 20 },
+                    },
+                    "metadata": { "anthropic": { "caller": { "type": "direct" } } },
+                },
+                { "type": "step-finish", "reason": "tool-calls" },
+            ],
+        })
+    }
+
+    /// A cache-degraded session (raw sidecar trees dropped to fit the memory budget) must
+    /// re-encode an already-served message to the same bytes it was first served with. Before
+    /// the fix, re-encoding fell back to rendering fresh parts from the canonical blocks alone,
+    /// silently dropping host provider metadata from every re-encoded message while newly
+    /// appended messages kept it.
+    #[test]
+    fn degraded_native_cache_reencodes_served_prefix_byte_identically() {
+        const SESSION_ID: &str = "native-degraded-provider-metadata";
+        let native_a = vec![
+            native_text_message("meta-u1", "user", "first prompt"),
+            native_assistant_tool_turn_with_provider_metadata("meta-a1", "toolu_meta_1"),
+            native_text_message("meta-u2", "user", "second prompt"),
+            native_assistant_tool_turn_with_provider_metadata("meta-a2", "toolu_meta_2"),
+        ];
+        let decoded_a = codec::decode_opencode(&native_a).messages;
+        let served_a = decoded_a
+            .iter()
+            .map(|message| message.ck.clone())
+            .collect::<Vec<_>>();
+        let request_a = native_cache_request(SESSION_ID, decoded_a, native_a.clone(), "meta-fp-a");
+        // A one-byte budget forces every store to keep only the delta core, exactly the
+        // degraded shape a large session reaches under the shared native cache budget.
+        let cache = Mutex::new(NativeAttachmentCache::with_limits(1, 1));
+        let (pass_a, stats_a) = run_native_cache_pass(
+            &cache,
+            &request_a,
+            served_a,
+            &BTreeMap::new(),
+            false,
+            0,
+            NativeCacheKeyMode::Normal,
+        );
+        assert_eq!(stats_a.degraded_store, 1, "{stats_a:?}");
+        assert!(cache.lock().unwrap().sessions[SESSION_ID]
+            .snapshot
+            .sidecar
+            .messages
+            .is_empty());
+        let served_bytes_a = serde_json::to_vec(&pass_a.native_messages.unwrap()).unwrap();
+        assert!(
+            String::from_utf8_lossy(&served_bytes_a).contains("caller"),
+            "the first serve must carry the host provider metadata"
+        );
+
+        // Append one user message (a defer pass) and hand the first message a durable tag
+        // number. The tag changes that message's cache key but none of its bytes, so the pass
+        // re-encodes the whole served prefix from the degraded snapshot.
+        let mut native_b = native_a.clone();
+        native_b.push(native_text_message("meta-u3", "user", "third prompt"));
+        let decoded_b = codec::decode_opencode(&native_b).messages;
+        let served_b = decoded_b
+            .iter()
+            .map(|message| message.ck.clone())
+            .collect::<Vec<_>>();
+        let mut request_b = native_cache_request(SESSION_ID, decoded_b, native_b, "meta-fp-b");
+        request_b.tail_delta = Some(json!({
+            "after": "meta-fp-a",
+            "replace_from": native_a.len(),
+            "native_replace_from": native_a.len(),
+        }));
+        let tags = BTreeMap::from([("meta-u1".to_string(), 41)]);
+        let (pass_b, stats_b) = run_native_cache_pass(
+            &cache,
+            &request_b,
+            served_b,
+            &tags,
+            false,
+            0,
+            NativeCacheKeyMode::Normal,
+        );
+        assert_eq!(
+            stats_b.reused_messages, 0,
+            "the fixture must re-encode the served prefix: {stats_b:?}"
+        );
+        let native_messages_b = pass_b.native_messages.unwrap();
+        let prefix_bytes_b = serde_json::to_vec(&native_messages_b[..native_a.len()]).unwrap();
+        assert_eq!(
+            sha256_hex(&prefix_bytes_b),
+            sha256_hex(&served_bytes_a),
+            "re-encoding a degraded prefix changed already-served bytes:\nA={}\nB={}",
+            String::from_utf8_lossy(&served_bytes_a),
+            String::from_utf8_lossy(&prefix_bytes_b),
+        );
     }
 
     #[test]
