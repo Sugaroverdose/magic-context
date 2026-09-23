@@ -33,6 +33,7 @@ import {
     saveSentinelState,
     SubcWakeEventTransport,
 } from "./cache-bust-sentinel";
+import { disruptionLogMarkers } from "./cache-bust-scheduler-log";
 
 const temporaryDirectories: string[] = [];
 
@@ -181,6 +182,76 @@ describe("cache-bust attribution contract", () => {
         expect(classify(first, { ...second, externalEpoch: true })).toBe("accounted_hard_epoch");
         expect(classify({ ...first, timestampMs: -50_000 }, second)).toBe("accounted_hard_epoch");
         expect(classify(first, { ...second, materializeReason: "model_change" })).toBe("accounted_hard_model_change");
+    });
+
+    test("an epoch HARD with no disruption in the preceding minute wakes as unfaulted", () => {
+        const hard = decision({
+            timestampMs: 100_000,
+            materialized: true,
+            materializeReason: "epoch_change",
+            identityDelta: ["other"],
+        });
+        const classify = (
+            precedingDisruption: string | null | undefined,
+            current: CacheBustDecisionAttribution = hard,
+        ) =>
+            classifyCacheBust({
+                divergenceIndex: 2,
+                previousMessageCount: 10,
+                decision: current,
+                precedingDisruption,
+            });
+        expect(classify(null)).toBe("unfaulted_epoch");
+        expect(isUnaccountedCacheBustClass("unfaulted_epoch")).toBe(true);
+        expect(classify("full_retry")).toBe("accounted_hard_epoch");
+        expect(classify("module_fault")).toBe("accounted_hard_epoch");
+        // No adapter log: the disruption question is unanswered, so it stays accounted.
+        expect(classify(undefined)).toBe("accounted_hard_epoch");
+        expect(classify(null, { ...hard, externalEpoch: true })).toBe("accounted_hard_epoch");
+    });
+
+    test("reads fault, retry, fallback, and restart markers from the adapter log", () => {
+        const session = "ses_313660571ffeZTsf4koSJwk50Q";
+        const line = (at: string, body: string, id = session) =>
+            `[${at}] [magic-context][${id}] ${body}`;
+        const text = [
+            line("2026-09-22T23:36:30.883Z", "transform stage: stage=rust.state_sync elapsed=5390.5ms retry=full reason=need_full_sync"),
+            line("2026-09-22T23:36:31.000Z", "need_full_sync retry=full ordinal_memo=kept"),
+            line("2026-09-23T00:11:14.902Z", "rust pass: decision=error reason=none served_from=raw in=929 out=929 applied=false"),
+            line("2026-09-23T00:12:00.000Z", "rust pass: decision=SOFT+ reason=none served_from=lkg in=929 out=900 applied=false"),
+            line("2026-09-23T00:13:00.000Z", "transform stage: stage=rust.ordinal_rebuild elapsed=900.0ms mode=prime rows=124219 pages=249 rewinds=0 cause=cold"),
+            line("2026-09-23T00:14:00.000Z", "rust pass: decision=SOFT+ reason=none served_from=transform in=929 out=900 applied=true"),
+            line("2026-09-23T00:15:00.000Z", "transform stage: stage=rust.ordinal_rebuild elapsed=90.0ms mode=rewind rows=499 pages=1 rewinds=1 cause=store_drift"),
+            line("2026-09-23T00:16:00.000Z", "rust pass: decision=error reason=none served_from=raw", "ses_other"),
+        ].join("\n");
+        expect(
+            disruptionLogMarkers(text, session).map((marker) => ({
+                at: new Date(marker.timestampMs).toISOString(),
+                kind: marker.disruption,
+            })),
+        ).toEqual([
+            { at: "2026-09-22T23:36:30.883Z", kind: "full_retry" },
+            { at: "2026-09-22T23:36:31.000Z", kind: "full_retry" },
+            { at: "2026-09-23T00:11:14.902Z", kind: "module_fault" },
+            { at: "2026-09-23T00:12:00.000Z", kind: "fallback_serve" },
+            { at: "2026-09-23T00:13:00.000Z", kind: "adapter_restart" },
+        ]);
+    });
+
+    test("the wake for an unfaulted epoch names the identity_delta components", () => {
+        const row = {
+            ...request(1_000, "BUST", "unfaulted_epoch"),
+            identityDelta: ["other", "tfe"],
+        };
+        const [window] = groupBustWindows([row]);
+        const event = eventForWindow(window!, "/tmp/sentinel-project", __test.defaultState());
+        expect(event?.payload).toMatchObject({
+            divergence_class: "unfaulted_epoch",
+            identity_delta: ["other", "tfe"],
+        });
+        const wake = agentDeliverRequest(event!, "agent", "from");
+        expect(wake.body.content).toContain("divergence_class=unfaulted_epoch");
+        expect(wake.body.content).toContain("identity_delta=other,tfe");
     });
 
     test("a zero provider read with no MC pass row is still a provider full miss, not no_mc_pass_row", () => {
