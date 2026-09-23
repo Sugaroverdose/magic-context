@@ -103,6 +103,67 @@ test("a resolving timed-out historian prompt is archived and recorded as timed_o
     expect(remove).not.toHaveBeenCalled();
 });
 
+// Both historian lanes share one rule: a timed-out attempt moves on to the next model in
+// the chain (the Rust module's firing loop mirrors this). This pins the TypeScript side.
+test("a timed-out primary historian falls back to the next model and publishes its output", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "mc-historian-timeout-fallback-"));
+    tempDirs.push(directory);
+    process.env.XDG_DATA_HOME = directory;
+    const db = openDatabase();
+    const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    const attempted: string[] = [];
+    const executor: HiddenCompletionExecutor = {
+        capabilities: { tools: false, harness: "opencode" },
+        open: async (request) => {
+            const id = `child-${request.model?.model ?? "agent"}`;
+            return { id, childSessionId: id };
+        },
+        attempt: (_handle, request) => {
+            const model = request.body?.model;
+            const key = model ? `${model.providerID}/${model.modelID}` : "agent";
+            attempted.push(key);
+            if (key !== "prov/primary") return Promise.resolve();
+            // The primary never answers: it rejects only once the prompt timeout aborts it,
+            // which the prompt helper turns into a thrown "prompt timed out" error.
+            return new Promise<void>((_resolve, reject) => {
+                request.signal?.addEventListener("abort", () =>
+                    reject(new Error("request aborted")),
+                );
+            });
+        },
+        collect: async () => ({
+            text: '<output><compartment start="1" end="1" title="History"><p1>Fallback kept this.</p1></compartment></output>',
+            reasoning: null,
+            lengthCapped: false,
+            usage,
+        }),
+        close: async () => {},
+    };
+
+    const result = await runValidatedHistorianPass({
+        client: undefined,
+        hiddenCompletionExecutor: executor,
+        db,
+        parentSessionId: "parent-timeout-fallback",
+        sessionDirectory: directory,
+        prompt: "Messages 1-1:\n1: U: preserve this",
+        timeoutMs: 20,
+        model: { model: "prov/primary" },
+        fallbackModels: [{ model: "prov/fallback" }],
+        chunk: { startIndex: 1, endIndex: 1, lines: [{ ordinal: 1, messageId: "message-1" }] },
+        priorCompartments: [],
+        sequenceOffset: 0,
+        dumpLabelBase: "timeout-fallback",
+    });
+
+    expect(attempted).toEqual(["prov/primary", "prov/fallback"]);
+    expect(result.ok).toBe(true);
+    expect(result.compartments?.[0]?.content).toContain("Fallback kept this.");
+    const statuses = getSubagentInvocations(db, "parent-timeout-fallback").map((row) => row.status);
+    expect(statuses).toContain("timed_out");
+    expect(statuses).toContain("completed");
+});
+
 test("32k historian reaches the provider without a configured output cap and surfaces its assistant error", async () => {
     const directory = mkdtempSync(join(tmpdir(), "mc-historian-assistant-error-"));
     tempDirs.push(directory);

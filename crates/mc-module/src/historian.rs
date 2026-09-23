@@ -1283,9 +1283,20 @@ pub fn historian_await_timeout(timeout_ms: Option<u64>) -> Duration {
     Duration::from_millis(timeout_ms.unwrap_or(600_000).clamp(60_000, 3_600_000))
 }
 
-/// Wait budget for a full historian run plus its one short timeout recovery re-drain.
+/// Wait budget for ONE historian attempt: a full run plus its one short timeout
+/// recovery re-drain.
 pub fn completion_wait_budget(timeout: Duration) -> Duration {
     timeout + Duration::from_secs(60)
+}
+
+/// Wait budget for a whole firing that may walk its model chain. A timed-out attempt
+/// moves on to the next model, and every attempt gets its own full per-attempt budget,
+/// so anything that joins a firing and means to see it finish must allow one
+/// [`completion_wait_budget`] per model it may try. A budget sized for one attempt
+/// would give up on a firing that is still legitimately working through fallbacks.
+pub fn firing_completion_wait_budget(timeout: Duration, chain_len: usize) -> Duration {
+    let attempts = u32::try_from(chain_len.max(1)).unwrap_or(u32::MAX);
+    completion_wait_budget(timeout).saturating_mul(attempts)
 }
 
 /// The per-attempt deadline a consumer sets, VERBATIM, for `session.wrapup` calls —
@@ -1294,7 +1305,8 @@ pub fn completion_wait_budget(timeout: Duration) -> Duration {
 /// cap: it drains chunks until the keep watermark is reached or this budget expires,
 /// so the budget itself — not a chunk count — is the ceiling (the TypeScript wrapup
 /// drain has the same uncapped-until-target shape). Derivation: one busy-join at
-/// entry (bounded by [`completion_wait_budget`], 660s) plus producer rounds each
+/// entry (bounded by [`firing_completion_wait_budget`] — 660s per model the joined
+/// firing may try — and always clamped to the remaining request budget) plus producer rounds each
 /// bounded by [`wrapup_round_wait_budget`] (600s); the loop re-checks the remaining
 /// budget before every round, so the wall time is one join plus as many rounds as
 /// fit under the budget. Sized for a large multi-chunk drain with margin. Bump this
@@ -1398,6 +1410,19 @@ fn decide_producer_failure(
     now_ms: i64,
     default_failure_backoff_at_ms: i64,
 ) -> ProducerFailureDecision {
+    if matches!(err, HistorianProducerError::TimedOut) {
+        // A timed-out attempt says the model did not answer within its per-attempt
+        // budget, not that the chunk is unusable, so another model may still fold it.
+        // This matches the TypeScript historian, whose outer model loop treats a
+        // timed-out prompt as a failed attempt and moves on to the next fallback model.
+        *all_failures_permanent = false;
+        return ProducerFailureDecision {
+            try_next_model: has_eligible_model(remaining_models, auth_blocked_providers),
+            failure_backoff_at_ms: default_failure_backoff_at_ms,
+            detail_prefix: None,
+        };
+    }
+
     if let Some(classification) = err.classification() {
         // The producer owns classification. Once a class tag is present, the consumer
         // branches only on that field and its structured retry-after sibling; provider
@@ -1472,6 +1497,14 @@ fn decide_producer_failure(
         failure_backoff_at_ms: default_failure_backoff_at_ms,
         detail_prefix: None,
     }
+}
+
+/// Whether a failed recovery re-drain after a timeout carries the run's own terminal
+/// outcome rather than just another missed deadline or transport hiccup. A classified
+/// error, an abort, or a context overflow reported by the re-drain decides the model
+/// chain on its own terms; anything else is treated as the original timeout.
+fn recovery_reports_run_outcome(err: &HistorianProducerError) -> bool {
+    err.classification().is_some() || err.has_class_field() || err.is_abort_or_overflow()
 }
 
 pub(crate) fn completion_failure_backoff_at_ms(
@@ -1999,30 +2032,77 @@ where
         {
             Ok(output) => output,
             Err(HistorianProducerError::TimedOut) => {
-                // Like the TypeScript model-suggestion-retry loop, timeout stops the model
-                // chain; only re-drain this run to salvage an already-finished result.
+                // A timed-out attempt moves on to the next model in the chain, the same
+                // rule as the TypeScript historian's outer model loop (a timed-out prompt
+                // is a failed attempt there and the fallback pass tries the next model).
+                // First re-drain this run once to salvage a result that finished just as
+                // the await gave up. If the re-drain reports the run's own terminal
+                // failure (a classified error, an abort, or a context overflow), that
+                // outcome decides the chain instead, so abort and overflow still stop it.
                 match producer.redrain_output(&handle.run_id).await {
                     Ok(output) => output,
                     Err(recovery_err) => {
                         let _ = producer.cancel(&handle.run_id).await;
-                        let detail = detail_with_runner_refusals(
-                            &runner_refusal_failures,
-                            None,
-                            format!(
-                                "producer output ({model}): timed out; recovery re-drain also failed: {recovery_err}"
-                            ),
-                        );
+                        let completed_at_ms = (request.completion_now_ms)();
                         let failure_backoff_at_ms = completion_failure_backoff_at_ms(
                             request.now_ms,
                             request.failure_backoff_at_ms,
-                            (request.completion_now_ms)(),
+                            completed_at_ms,
                         );
+                        let remaining = remaining_available_models(
+                            &request.model_chain[index + 1..],
+                            runner_refusal_cache,
+                            model_chain_generation,
+                            completed_at_ms,
+                        );
+                        let timed_out = HistorianProducerError::TimedOut;
+                        let deciding_err = if recovery_reports_run_outcome(&recovery_err) {
+                            &recovery_err
+                        } else {
+                            &timed_out
+                        };
+                        let mut decision = decide_producer_failure(
+                            deciding_err,
+                            model,
+                            &remaining,
+                            &mut auth_blocked_providers,
+                            &mut all_failures_permanent,
+                            completed_at_ms,
+                            failure_backoff_at_ms,
+                        );
+                        if let Some(reset) = deciding_err.provider_retry_at_ms(completed_at_ms) {
+                            earliest_provider_reset_ms = Some(
+                                earliest_provider_reset_ms.map_or(reset, |prior| prior.min(reset)),
+                            );
+                        }
+                        if !decision.try_next_model {
+                            if let Some(reset) =
+                                earliest_provider_reset_ms.filter(|reset| *reset > completed_at_ms)
+                            {
+                                decision.failure_backoff_at_ms = reset;
+                            }
+                        }
                         persist_historian_state(
                             request.store,
                             request.session_id,
-                            abandon_with_detail(&awaiting, failure_backoff_at_ms, Some(detail)),
+                            abandon_chain_failure(
+                                &awaiting,
+                                deciding_err,
+                                decision,
+                                earliest_provider_reset_ms,
+                                Some(detail_with_runner_refusals(
+                                    &runner_refusal_failures,
+                                    decision.detail_prefix,
+                                    format!(
+                                        "producer output ({model}): timed out; recovery re-drain also failed: {recovery_err}"
+                                    ),
+                                )),
+                            ),
                         )?;
                         producer.close().await;
+                        if decision.try_next_model {
+                            continue;
+                        }
                         return Err(HistorianDriveError::Producer(recovery_err));
                     }
                 }
@@ -4660,6 +4740,185 @@ mod tests {
                 && detail.contains("run-1 received terminal control unit"),
             "a replay terminal for another run id must not publish this firing: {detail}"
         );
+    }
+
+    #[tokio::test]
+    async fn producer_timeout_advances_to_next_model_and_publishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_compartment(&store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model-a".to_string(), "prov/model-b".to_string()];
+        let timeout = historian_await_timeout(Some(120_000));
+        let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+        request.await_timeout = timeout;
+        let mut producer = ScriptedProducer::default()
+            .with_start(Ok(run_handle("run-1")))
+            .with_output(Err(HistorianProducerError::TimedOut))
+            .with_output(Err(HistorianProducerError::TimedOut))
+            .with_start(Ok(run_handle("run-2")))
+            .with_output(Ok(producer_output(historian_xml("fallback after timeout"))));
+
+        let outcome = run_historian_firing(&mut producer, request).await.unwrap();
+        let HistorianDriveOutcome::Completed(success) = outcome else {
+            panic!("a timed-out primary must fall back and complete");
+        };
+        assert_eq!(success.model, "prov/model-b");
+        assert_eq!(
+            producer
+                .observed_starts
+                .iter()
+                .map(|(_, model)| model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["prov/model-a", "prov/model-b"]
+        );
+        assert_eq!(producer.await_run_ids, vec!["run-1", "run-1", "run-2"]);
+        assert_eq!(
+            producer.cancels,
+            vec!["run-1"],
+            "the timed-out run is cancelled"
+        );
+        // Each attempt keeps its own full per-attempt await budget.
+        assert_eq!(producer.observed_await_timeouts, vec![timeout, timeout]);
+        let state = store.load("ses").unwrap().meta.historian;
+        assert_eq!(state.state, HistorianPhase::Idle);
+        assert_eq!(state.failure_backoff_at_ms, None);
+        let published = store.load_compartments("ses").unwrap().pop().unwrap();
+        assert_eq!(published.p1.as_deref(), Some("fallback after timeout"));
+    }
+
+    #[tokio::test]
+    async fn producer_timeout_on_last_model_fails_with_timeout_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_compartment(&store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model-a".to_string(), "prov/model-b".to_string()];
+        let mut producer = ScriptedProducer::default()
+            .with_start(Ok(run_handle("run-1")))
+            .with_output(Err(HistorianProducerError::TimedOut))
+            .with_output(Err(HistorianProducerError::TimedOut))
+            .with_start(Ok(run_handle("run-2")))
+            .with_output(Err(HistorianProducerError::TimedOut))
+            .with_output(Err(HistorianProducerError::TimedOut));
+
+        let err = run_historian_firing(
+            &mut producer,
+            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            HistorianDriveError::Producer(HistorianProducerError::TimedOut)
+        ));
+        assert_eq!(producer.observed_starts.len(), 2);
+        assert_eq!(producer.cancels, vec!["run-1", "run-2"]);
+        let state = store.load("ses").unwrap().meta.historian;
+        assert_eq!(state.state, HistorianPhase::Idle);
+        assert_eq!(state.failure_backoff_at_ms, Some(999));
+        let detail = state.last_failure.expect("failure detail recorded");
+        assert!(
+            detail.contains(
+                "producer output (prov/model-b): timed out; recovery re-drain also failed"
+            ),
+            "the exhausted chain records the last model's timeout: {detail}"
+        );
+        assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn producer_timeout_abort_or_overflow_outcome_still_stops_chain() {
+        let cases: Vec<(&str, HistorianProducerError)> = vec![
+            (
+                "aborted re-drain",
+                HistorianProducerError::aborted("run aborted by host"),
+            ),
+            (
+                "untagged overflow re-drain",
+                HistorianProducerError::context_overflow("context window exceeded"),
+            ),
+            (
+                "tagged overflow re-drain",
+                HistorianProducerError::tagged_subc(
+                    "provider_error",
+                    "context window exceeded",
+                    ErrorClass::ContextOverflow,
+                    None,
+                ),
+            ),
+        ];
+        for (label, recovery_err) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_prior_compartment(&store);
+            let chunk = historian_chunk();
+            let prior = prior_ranges();
+            let models = vec!["prov/model-a".to_string(), "prov/model-b".to_string()];
+            let mut producer = ScriptedProducer::default()
+                .with_start(Ok(run_handle("run-1")))
+                .with_output(Err(HistorianProducerError::TimedOut))
+                .with_output(Err(recovery_err));
+
+            let err = run_historian_firing(
+                &mut producer,
+                fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, HistorianDriveError::Producer(_)), "{label}");
+            assert_eq!(producer.observed_starts.len(), 1, "{label} stops the chain");
+            assert_eq!(producer.cancels, vec!["run-1"], "{label}");
+        }
+
+        // An abort or overflow that ends the await directly (no timeout) also stops it.
+        for (label, output_err) in [
+            (
+                "aborted output",
+                HistorianProducerError::aborted("run aborted by host"),
+            ),
+            (
+                "overflow output",
+                HistorianProducerError::context_overflow("context window exceeded"),
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_prior_compartment(&store);
+            let chunk = historian_chunk();
+            let prior = prior_ranges();
+            let models = vec!["prov/model-a".to_string(), "prov/model-b".to_string()];
+            let mut producer = ScriptedProducer::default()
+                .with_start(Ok(run_handle("run-1")))
+                .with_output(Err(output_err));
+            let err = run_historian_firing(
+                &mut producer,
+                fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, HistorianDriveError::Producer(_)), "{label}");
+            assert_eq!(producer.observed_starts.len(), 1, "{label} stops the chain");
+        }
+    }
+
+    #[test]
+    fn firing_completion_budget_covers_every_attempt_in_the_chain() {
+        let timeout = historian_await_timeout(Some(720_000));
+        let one_attempt = completion_wait_budget(timeout);
+        // A two-model walk whose first attempt times out spends up to one full attempt
+        // budget on each model; the firing budget must cover both.
+        assert_eq!(
+            firing_completion_wait_budget(timeout, 2),
+            one_attempt * 2,
+            "a walk of two attempts must not be sized for one"
+        );
+        assert!(firing_completion_wait_budget(timeout, 2) > one_attempt);
+        assert_eq!(firing_completion_wait_budget(timeout, 1), one_attempt);
+        // An empty chain still gets one attempt's budget rather than zero.
+        assert_eq!(firing_completion_wait_budget(timeout, 0), one_attempt);
     }
 
     #[tokio::test]
