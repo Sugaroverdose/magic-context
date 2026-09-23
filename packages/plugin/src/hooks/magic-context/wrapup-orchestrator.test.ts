@@ -22,6 +22,8 @@ import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { executeContextRecompWithResult, registerActiveCompartmentRun } from "./compartment-runner";
+import { runValidatedHistorianPass } from "./compartment-runner-historian";
+import type { HiddenCompletionExecutor } from "./compartment-runner-types";
 import { createLiveSessionState, type LiveSessionState } from "./live-session-state";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { type ManagedWrapupContext, runManagedWrapup } from "./wrapup-orchestrator";
@@ -108,6 +110,65 @@ function baseCtx(db: Database, state = liveState()): ManagedWrapupContext {
 }
 
 describe("runManagedWrapup", () => {
+    it("runs v2 wrapup historian chunks through the supplied executor without a v1 client", async () => {
+        const db = createDb();
+        const sessionId = "ses-wrapup-v2-executor";
+        const opens: string[] = [];
+        const executor: HiddenCompletionExecutor = {
+            capabilities: { tools: false, harness: "opencode" },
+            open: async (run) => {
+                opens.push(run.kind);
+                return { id: `child-${opens.length}`, childSessionId: `child-${opens.length}` };
+            },
+            attempt: async () => {},
+            collect: async () => ({
+                text: `<output><compartment start="${1 + (opens.length - 1) * 3}" end="${1 + (opens.length - 1) * 3}" title="History"><p1>Preserved.</p1></compartment></output>`,
+                reasoning: null,
+                lengthCapped: false,
+                usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            }),
+            close: async () => {},
+        };
+        try {
+            const ctx = baseCtx(db);
+            ctx.client = undefined as never;
+            ctx.hiddenCompletionExecutor = executor;
+            ctx.runCompartmentAgentForWrapup = mock(async (deps) => {
+                const start = Math.max(1, getLastCompartmentEndMessage(db, sessionId) + 1);
+                const pass = await runValidatedHistorianPass({
+                    client: deps.client,
+                    hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
+                    db,
+                    parentSessionId: sessionId,
+                    sessionDirectory: deps.directory,
+                    prompt: `Messages ${start}-${start}:\n${start}: U: preserve this`,
+                    chunk: {
+                        startIndex: start,
+                        endIndex: start,
+                        lines: [{ ordinal: start, messageId: `m-${start}` }],
+                    },
+                    priorCompartments: [],
+                    sequenceOffset: 0,
+                    dumpLabelBase: "wrapup-v2",
+                });
+                expect(pass.ok, pass.error).toBe(true);
+                appendRange(
+                    db,
+                    sessionId,
+                    start,
+                    Math.min(start + 2, deps.boundarySnapshot.eligibleEndOrdinal - 1),
+                );
+                deps.onCompartmentStatePublished?.(sessionId);
+            });
+            const result = await withProvider(sessionId, 8, () =>
+                runManagedWrapup(ctx, sessionId, { messagesToKeep: 2 }),
+            );
+            expect(result).toContain("Wrapped up 6 messages into 2 compartments");
+            expect(opens).toHaveLength(2);
+        } finally {
+            closeQuietly(db);
+        }
+    });
     it("promotes facts from every non-final wrapup window and skips only the final window", async () => {
         const db = createDb();
         try {

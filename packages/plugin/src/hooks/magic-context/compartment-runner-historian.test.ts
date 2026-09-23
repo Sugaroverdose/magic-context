@@ -6,7 +6,10 @@ import { closeDatabase, openDatabase } from "../../features/magic-context/storag
 import { getSubagentInvocations } from "../../features/magic-context/storage-subagent-invocations";
 import type { PluginContext } from "../../plugin/types";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
-import { runValidatedHistorianPass } from "./compartment-runner-historian";
+import {
+    resolveHiddenCompletionExecutor,
+    runValidatedHistorianPass,
+} from "./compartment-runner-historian";
 import type { HiddenCompletionExecutor } from "./compartment-runner-types";
 
 const tempDirs: string[] = [];
@@ -19,6 +22,21 @@ afterEach(() => {
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
     for (const directory of tempDirs) rmSync(directory, { recursive: true, force: true });
     tempDirs.length = 0;
+});
+
+test("missing v2 hidden executor names the historian or dream entry point", () => {
+    const db = openDatabase();
+    for (const entryPoint of ["historian", "classify-memories", "compress-cues"]) {
+        expect(() =>
+            resolveHiddenCompletionExecutor(undefined, undefined, db, "/tmp", entryPoint),
+        ).toThrow(`${entryPoint}: v2 hidden completion executor is missing`);
+    }
+    const executor = {
+        capabilities: { tools: false, harness: "opencode2" },
+    } as HiddenCompletionExecutor;
+    expect(resolveHiddenCompletionExecutor(executor, undefined, db, "/tmp", "historian")).toBe(
+        executor,
+    );
 });
 
 test("historian ledger distinguishes empty, reasoning-only, length-capped and valid output", async () => {
