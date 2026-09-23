@@ -33,6 +33,7 @@ import { clearNativeReasoning } from "./native-replay-pi";
 import { createPiLkgCoordinator } from "./pi-lkg";
 import { convertEntriesToRawMessages } from "./read-session-pi";
 import {
+	adoptPiCompactionSystemSnapshot,
 	isPiSystemEntry,
 	piToolIdentity,
 	resolvePiEffectiveSystemState,
@@ -441,6 +442,63 @@ describe("Pi 0.86 provider contract", () => {
 			db.close();
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("Pi 0.87 context contract", () => {
+	// Pi 0.87 withholds system messages from `context` handlers and restores the
+	// prompt and tools itself afterwards (runner.js emitContext). The folding
+	// input then carries no system state for Magic Context to compare, while the
+	// persisted compaction still records the host's complete system checkpoint.
+	it("adopts a host checkpoint when the folding input carries no system messages", () => {
+		const messages: unknown[] = [
+			userMessage("history", 1),
+			userMessage("live prompt", 2),
+		];
+		const before = structuredClone(messages);
+		const entries = [
+			{
+				type: "compaction",
+				id: "cmp-1",
+				summary: "Magic Context compacted",
+				firstKeptEntryId: "entry-2",
+				tokensBefore: 10,
+				systemMessage: initial,
+			},
+		];
+		const adoption = adoptPiCompactionSystemSnapshot(
+			messages,
+			entries,
+			"cmp-1",
+			resolvePiEffectiveSystemState(messages),
+		);
+		expect(adoption).toEqual({ kind: "adopted" });
+		// The host restores system state after the handler; injecting it here
+		// would hand Pi a second copy.
+		expect(messages).toEqual(before);
+	});
+
+	it("still refuses a checkpoint that differs from exposed system state", () => {
+		const messages: unknown[] = [
+			{ ...initial, toolsAdded: initial.toolsAdded.slice(0, 5) },
+			userMessage("live prompt", 2),
+		];
+		const adoption = adoptPiCompactionSystemSnapshot(
+			messages,
+			[
+				{
+					type: "compaction",
+					id: "cmp-1",
+					summary: "Magic Context compacted",
+					firstKeptEntryId: "entry-2",
+					tokensBefore: 10,
+					systemMessage: initial,
+				},
+			],
+			"cmp-1",
+			resolvePiEffectiveSystemState(messages),
+		);
+		expect(adoption.kind).toBe("divergent");
 	});
 });
 
