@@ -20,12 +20,6 @@
  *   Falls back to schema defaults when neither file exists.
  */
 
-import {
-	changedLiveKeys,
-	dreamerRunConfig,
-	historianRunConfig,
-} from "@magic-context/core/config/live-run-config";
-import { LiveConfigReader } from "@magic-context/core/config/live-snapshot";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -34,6 +28,12 @@ import {
 	isCompactionEnabled,
 	isDreamerRunnable,
 } from "@magic-context/core/config/agent-disable";
+import {
+	changedLiveKeys,
+	dreamerRunConfig,
+	historianRunConfig,
+} from "@magic-context/core/config/live-run-config";
+import { LiveConfigReader } from "@magic-context/core/config/live-snapshot";
 import { migrateMagicContextConfigLocations } from "@magic-context/core/config/migrate-config-location";
 import { getProtectedTokensTierOverrides } from "@magic-context/core/config/project-security";
 import type {

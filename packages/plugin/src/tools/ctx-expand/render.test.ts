@@ -129,7 +129,7 @@ describe("renderVerboseRange", () => {
         ]);
         try {
             expect(renderVerboseRange(SESSION, 2, 3, 15_000).text).toBe(
-                "[2] U (user)\n {4}• Read PLAN.md\n\n[3] A (assistant)\n {4}• Reading",
+                "[2] U (user)\n    • Read PLAN.md\n\n[3] A (assistant)\n    • Reading",
             );
         } finally {
             cleanup();
