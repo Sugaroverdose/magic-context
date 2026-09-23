@@ -22,6 +22,7 @@ import {
     clearPendingOps,
     closeDatabase,
     getChannel1NudgeState,
+    getDroppedTagsByNumbers,
     getHistorianFailureState,
     getLastNudgeUndropped,
     getOrCreateSessionMeta,
@@ -896,7 +897,7 @@ describe("createTransform", () => {
         }
     });
 
-    it("hydrates only dropped rows for visible-target replay with 98% active tags", async () => {
+    it("hydrates only dropped rows for visible-target replay with 98% active tags", () => {
         useTempDataHome("context-transform-replay-rows-");
         const realDb = openDatabase();
         const replayRows: Array<{ status: string }> = [];
@@ -934,42 +935,27 @@ describe("createTransform", () => {
             },
         }) as typeof realDb;
         const sessionId = "ses-replay-row-count";
-        const transform = createTransform({
-            tagger: createTagger(),
-            scheduler: { shouldExecute: () => "defer" },
-            contextUsageMap: new Map(),
-            db,
-            historyRefreshSessions: new Set(),
-            pendingMaterializationSessions: new Set(),
-            lastHeuristicsTurnId: new Map(),
-            clearReasoningAge: 50,
-            protectedTokens: 0,
-            historianRunnable: false,
-        });
-        const input: TestMessage[] = Array.from({ length: 2000 }, (_, i) => ({
-            info: {
-                id: `replay-${i}`,
-                role: i % 2 === 0 ? "user" : "assistant",
-                sessionID: sessionId,
-            },
-            parts: [{ type: "text", text: `Stable result ${i}.` }],
-        }));
-        await transform({}, { messages: structuredClone(input) });
+        // Only the visible-target lookup needs 2,000 tags; two full transforms add unrelated work.
+        realDb.transaction(() => {
+            for (let number = 1; number <= 2000; number++) {
+                insertTag(realDb, sessionId, `replay-${number}`, "message", 20, number);
+                if (number % 50 === 0) updateTagStatus(realDb, sessionId, number, "dropped");
+            }
+        })();
         const tags = getTagsBySession(realDb, sessionId);
         expect(tags).toHaveLength(2000);
-        for (let i = 49; i < tags.length; i += 50) {
-            updateTagStatus(realDb, sessionId, tags[i].tagNumber, "dropped");
-        }
         expect(
-            getTagsBySession(realDb, sessionId).filter(
-                (tag) => tag.status === "active" && tag.cavemanDepth === 0,
-            ),
+            tags.filter((tag) => tag.status === "active" && tag.cavemanDepth === 0),
         ).toHaveLength(1960);
-        replayRows.length = 0;
-        replayChunkSizes.length = 0;
-        await transform({}, { messages: structuredClone(input) });
+
+        const hydrated = getDroppedTagsByNumbers(
+            db,
+            sessionId,
+            tags.map((tag) => tag.tagNumber),
+        );
         expect(replayChunkSizes).toEqual([900, 900, 200]);
         expect(replayRows).toHaveLength(40);
+        expect(hydrated).toHaveLength(40);
         expect(replayRows.every((row) => row.status === "dropped")).toBe(true);
     });
 
