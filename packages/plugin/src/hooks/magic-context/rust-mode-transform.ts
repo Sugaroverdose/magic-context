@@ -3111,6 +3111,19 @@ export function createRustModeTransform(
                           agentName: deps.getNotificationParams?.(sessionId)?.agent,
                       })
                     : undefined;
+            // The module folds these fields into the session's render identity and
+            // HARD-renders whenever that identity changes. Both the tail-delta body and
+            // the full-array retry after need_full_sync must therefore send the same
+            // values: when the retry dropped `variant`, a module restart cost two HARDs
+            // (the retry recorded an identity without the variant, and the next ordinary
+            // pass put it back).
+            const renderIdentityFields = {
+                modelKey: modelKey ?? null,
+                providerId: model?.providerID ?? null,
+                variant: deps.variantBySession?.get(sessionId),
+                systemPromptHash: sessionMeta.systemPromptHash ?? "",
+                upgradeState: String(passInputs.upgrade_state ?? ""),
+            };
             let body = buildTransformBody({
                 sessionId,
                 input: encodedInput,
@@ -3131,11 +3144,7 @@ export function createRustModeTransform(
                     final_wire_trusted: finalWireEstimate?.trusted === true,
                 },
                 geometry: transformGeometry,
-                modelKey: modelKey ?? null,
-                providerId: model?.providerID ?? null,
-                variant: deps.variantBySession?.get(sessionId),
-                systemPromptHash: sessionMeta.systemPromptHash ?? "",
-                upgradeState: String(passInputs.upgrade_state ?? ""),
+                ...renderIdentityFields,
                 prevResponseCompletedAtMs:
                     sessionMeta.lastResponseTime > 0 ? sessionMeta.lastResponseTime : undefined,
                 requestObservedAtMs,
@@ -3419,10 +3428,7 @@ export function createRustModeTransform(
                             final_wire_trusted: finalWireEstimate?.trusted === true,
                         },
                         geometry: transformGeometry,
-                        modelKey: modelKey ?? null,
-                        providerId: model?.providerID ?? null,
-                        systemPromptHash: sessionMeta.systemPromptHash ?? "",
-                        upgradeState: String(passInputs.upgrade_state ?? ""),
+                        ...renderIdentityFields,
                         prevResponseCompletedAtMs:
                             sessionMeta.lastResponseTime > 0
                                 ? sessionMeta.lastResponseTime

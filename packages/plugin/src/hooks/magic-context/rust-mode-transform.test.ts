@@ -3111,6 +3111,61 @@ describe("Rust mode authority adapter", () => {
         expect(output.messages).toEqual(native);
     });
 
+    it("sends the same render identity on the need_full_sync full-array retry", async () => {
+        // The module HARD-renders whenever the render identity changes. A retry that
+        // drops a field (the reasoning variant) records a different identity, and the
+        // next ordinary pass changes it back: two HARDs for one module restart.
+        const sessionId = `rust-retry-identity-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installAvailabilityDb(sessionId, {});
+        installRawProvider(sessionId);
+        const transformBodies: Array<Record<string, unknown>> = [];
+        let transforms = 0;
+        const native = [{ role: "assistant", parts: [{ type: "text", text: "stable" }] }];
+        const moduleClient: RustModeModuleClient = {
+            invalidateStateSyncCapabilities: () => undefined,
+            call: async ({ method, body }) => {
+                if (method !== "transform") return { ok: true };
+                transformBodies.push(body as Record<string, unknown>);
+                transforms += 1;
+                // Pass two sends a tail delta that the restarted module cannot apply.
+                if (transforms === 2) return { status: "need_full_sync" };
+                return { decision: "SOFT+", native_messages: native };
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.variantBySession = new Map([[sessionId, "high"]]);
+        const transform = createRustModeTransform(deps, { moduleClient });
+        for (let pass = 0; pass < 3; pass += 1) {
+            const messages = makeMessages(sessionId);
+            await transform.run(
+                sessionId,
+                messages,
+                { messages: messages as unknown[] },
+                makeMeta(db, sessionId),
+            );
+        }
+
+        // steady full send, rejected tail delta, full-array retry, next ordinary pass
+        expect(transformBodies.length).toBe(4);
+        const [steady, rejectedDelta, retry, next] = transformBodies;
+        expect("tail_delta" in (rejectedDelta ?? {})).toBe(true);
+        expect("tail_delta" in (retry ?? {})).toBe(false);
+        expect(steady?.render_config).toContain("variant:high");
+        for (const body of [rejectedDelta, retry, next]) {
+            expect(body?.render_config).toBe(steady?.render_config);
+            for (const field of [
+                "model_key",
+                "provider_id",
+                "system_prompt_hash",
+                "upgrade_state",
+            ]) {
+                expect(body?.[field]).toEqual(steady?.[field]);
+            }
+        }
+    });
+
     it("does not reseed after a healthy pass loses its delta base", async () => {
         const sessionId = `rust-restart-resync-${Date.now()}`;
         sessions.push(sessionId);
