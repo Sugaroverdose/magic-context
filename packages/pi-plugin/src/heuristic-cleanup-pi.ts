@@ -425,18 +425,18 @@ export function applyPiHeuristicCleanup(
 							? (target?.truncate?.() ?? target?.drop?.() ?? "absent")
 							: (target?.drop?.() ?? "absent");
 					if (result === "removed" || result === "truncated") {
+						// drop() keeps a skeleton instead of removing the last tool
+						// result the request ends with (removing it would end the
+						// request on an assistant turn), so persist the mode applied.
+						const appliedMode =
+							skeleton || result === "truncated" ? "truncated" : "full";
 						updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
-						updateTagDropMode(
-							db,
-							sessionId,
-							tag.tagNumber,
-							skeleton ? "truncated" : "full",
-						);
+						updateTagDropMode(db, sessionId, tag.tagNumber, appliedMode);
 						droppedTools++;
 						emergencyDroppedTools++;
 						droppedTokenReductions.push({
 							tagNumber: tag.tagNumber,
-							mode: skeleton ? "truncated" : "full",
+							mode: appliedMode,
 						});
 					}
 				}
@@ -481,7 +481,12 @@ export function applyPiHeuristicCleanup(
 				const target = targets.get(tag.tagNumber);
 				const result = target?.drop?.() ?? "absent";
 				if (result === "incomplete") continue;
-				updateTagDropMode(db, sessionId, tag.tagNumber, "full");
+				updateTagDropMode(
+					db,
+					sessionId,
+					tag.tagNumber,
+					result === "truncated" ? "truncated" : "full",
+				);
 				updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
 				if (result === "removed" || result === "truncated") {
 					droppedStaleReduceCalls++;
@@ -585,13 +590,14 @@ export function applyPiHeuristicCleanup(
 					// Deduplication stays full-drop; only emergency recent arcs keep skeletons.
 					const result = target?.drop?.() ?? "absent";
 					if (result === "incomplete") continue;
-					updateTagDropMode(db, sessionId, tag.tagNumber, "full");
+					const appliedMode = result === "truncated" ? "truncated" : "full";
+					updateTagDropMode(db, sessionId, tag.tagNumber, appliedMode);
 					updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
 					if (result === "removed" || result === "truncated") {
 						deduplicatedTools++;
 						droppedTokenReductions.push({
 							tagNumber: tag.tagNumber,
-							mode: "full",
+							mode: appliedMode,
 						});
 					}
 				}

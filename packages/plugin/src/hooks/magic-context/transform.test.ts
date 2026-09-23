@@ -1868,6 +1868,12 @@ describe("createTransform", () => {
                 info: { id: "m-assistant", role: "assistant" },
                 parts: [{ type: "tool", callID: "call-1", state: { output: bigOutput } }],
             },
+            // A later prompt, so this call does not end the conversation (drop()
+            // keeps that one as a skeleton instead of removing it).
+            {
+                info: { id: "m-next", role: "user", sessionID: "ses-force-materialize" },
+                parts: [{ type: "text", text: "next prompt" }],
+            },
         ];
 
         //#when
@@ -1875,8 +1881,7 @@ describe("createTransform", () => {
 
         //#then — absolute emergency pressure yields the token window, so the
         // tool-only assistant shell is removed by the full-drop path.
-        expect(messages).toHaveLength(1);
-        expect(messages[0]?.info.id).toBe("m-user");
+        expect(messages.map((message) => message.info.id)).toEqual(["m-user", "m-next"]);
         const tags = getTagsBySession(db, "ses-force-materialize");
         expect(tags.find((tag) => tag.type === "tool")?.status).toBe("dropped");
         expect(tags.find((tag) => tag.type === "tool")?.dropMode).toBe("full");
@@ -2195,6 +2200,12 @@ describe("createTransform", () => {
                 info: { id: "m-assistant", role: "assistant" },
                 parts: [{ type: "tool", callID: "call-1", state: { output: "very long output" } }],
             },
+            // A later prompt, so the tool call does not end the conversation (drop()
+            // keeps that one as a skeleton instead of removing it).
+            {
+                info: { id: "m-next", role: "user", sessionID: "ses-1" },
+                parts: [{ type: "text", text: "next prompt" }],
+            },
         ];
         await transform({}, { messages: firstPass });
 
@@ -2206,7 +2217,7 @@ describe("createTransform", () => {
         // apply-operations.tool-drop.test.ts — upstream updated that file's
         // tests for the new behavior but missed this one.
         for (let i = 1; i <= 20; i += 1) {
-            insertTag(db, "ses-1", `call-pad-${i}`, "tool", 10, 2 + i, 0, null, 0, null, null, {
+            insertTag(db, "ses-1", `call-pad-${i}`, "tool", 10, 3 + i, 0, null, 0, null, null, {
                 tokenCount: 1_000,
                 inputTokenCount: 0,
                 reasoningTokenCount: 0,
@@ -2227,6 +2238,12 @@ describe("createTransform", () => {
                 info: { id: "m-assistant", role: "assistant" },
                 parts: [{ type: "tool", callID: "call-1", state: { output: "very long output" } }],
             },
+            // A later prompt, so the tool call does not end the conversation (drop()
+            // keeps that one as a skeleton instead of removing it).
+            {
+                info: { id: "m-next", role: "user", sessionID: "ses-1" },
+                parts: [{ type: "text", text: "next prompt" }],
+            },
         ];
 
         //#when
@@ -2237,7 +2254,7 @@ describe("createTransform", () => {
         // skeleton window above, so the tool-only assistant takes the legacy
         // FULL-removal path and its shell is stripped. (The in-window skeleton path
         // is covered in apply-operations.tool-drop.test.ts.)
-        expect(secondPass).toHaveLength(1);
+        expect(secondPass.map((message) => message.info.id)).toEqual(["m-user", "m-next"]);
         expect(secondPass[0]?.info.role).toBe("user");
         const userShellText = (secondPass[0]?.parts[0] as { text: string }).text;
         expect(userShellText).toBe("[dropped \u00a71\u00a7]");
@@ -3380,8 +3397,11 @@ describe("createTransform", () => {
 
         await transform({}, { messages });
 
-        //#then — dropped tag's content is replaced even without usage data
-        expect(toolOutput(messages[1], 1)).toBe("");
+        //#then — dropped tag's content is replaced even without usage data. The
+        // tool ends the conversation, so the drop keeps its skeleton: removing it
+        // would leave a text-only assistant as the last message, which providers
+        // without assistant prefill support reject.
+        expect(toolOutput(messages[1], 1)).toBe(`[dropped \u00a7${toolTag?.tagNumber}\u00a7]`);
     });
 });
 
