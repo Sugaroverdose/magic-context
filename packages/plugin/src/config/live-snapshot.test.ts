@@ -45,3 +45,35 @@ test("one snapshot per run survives a malformed tier and adopts both tiers atomi
         rmSync(root, { recursive: true, force: true });
     }
 });
+
+test("a write crossing the tier load boundary is not published as a mixed snapshot", () => {
+    const root = mkdtempSync(join(tmpdir(), "mc-live-crossing-"));
+    const previous = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = join(root, "config");
+    const project = join(root, "project");
+    const file = join(project, ".cortexkit", "magic-context.jsonc");
+    mkdirSync(join(project, ".cortexkit"), { recursive: true });
+    try {
+        writeFileSync(file, '{"model":"old"}');
+        let crossWrite = false;
+        const load = () => {
+            if (crossWrite) {
+                crossWrite = false;
+                writeFileSync(file, '{"model":"newest-longer"}');
+            }
+            return { model: JSON.parse(readFileSync(file, "utf8")).model as string };
+        };
+        const reader = new LiveConfigReader(project, load(), load, () => {});
+        reader.poll();
+        writeFileSync(file, '{"model":"intermediate"}');
+        crossWrite = true;
+        expect(reader.poll().effective.model).toBe("old");
+        expect(reader.current().generation).toBe(1);
+        expect(reader.poll().effective.model).toBe("newest-longer");
+        expect(reader.current().generation).toBe(2);
+    } finally {
+        if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = previous;
+        rmSync(root, { recursive: true, force: true });
+    }
+});

@@ -104,6 +104,21 @@ export class LiveConfigReader<T> {
             this.reportFailure(paths[0] ?? this.directory, "load", error);
             return this.snapshot;
         }
+        // The loader reads both tiers again. A concurrent writer must not let it
+        // publish a mixed user/project pair under the metadata staged above.
+        for (const path of paths) {
+            let metadata = "absent";
+            try {
+                const stat = statSync(path);
+                metadata = `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                    this.reportFailure(path, String(error), error);
+                    return this.snapshot;
+                }
+            }
+            if (metadata !== next.get(path)?.metadata) return this.snapshot;
+        }
         const digest = createHash("sha256")
             .update(paths.map((path) => `${path}:${next.get(path)?.digest}`).join("\n"))
             .digest("hex");
