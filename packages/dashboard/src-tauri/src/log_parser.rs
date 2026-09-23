@@ -250,6 +250,13 @@ fn decode_escapes(value: &str) -> Option<String> {
             'n' => decoded.push('\n'),
             '"' => decoded.push('"'),
             '\\' => decoded.push('\\'),
+            'u' => {
+                let mut codepoint = 0u32;
+                for _ in 0..4 {
+                    codepoint = codepoint * 16 + chars.next()?.to_digit(16)?;
+                }
+                decoded.push(char::from_u32(codepoint)?);
+            }
             _ => return None,
         }
     }
