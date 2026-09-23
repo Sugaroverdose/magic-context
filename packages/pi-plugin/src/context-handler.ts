@@ -4170,6 +4170,11 @@ function spawnPiHistorianRun(args: {
 				fallbackModelId,
 				historianChunkTokens: historian.historianChunkTokens,
 				historianContextLimit: historian.historianContextLimit,
+				resolveHostOutputLimit: (model) => {
+					const slash = model.indexOf("/");
+					if (slash < 1) return undefined;
+					return ctx.modelRegistry?.find(model.slice(0, slash), model.slice(slash + 1))?.maxTokens;
+				},
 				resolveHostContextLimit: (model) => {
 					const slash = model.indexOf("/");
 					if (slash < 1) return undefined;

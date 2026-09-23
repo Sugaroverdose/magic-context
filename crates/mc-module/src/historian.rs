@@ -1694,12 +1694,23 @@ fn persist_idle_runner_refusal_detail(
 /// request missed the provider wall by one token, so keep a 3% admission reserve.
 pub(crate) const PRODUCER_WINDOW_ESTIMATOR_MARGIN_PERCENT: usize = 3;
 
+fn producer_output_reserve(window: usize, max_output_tokens: u32) -> usize {
+    (max_output_tokens as usize).min(window / 4)
+}
+
 pub(crate) fn producer_input_token_limit(
     context_limit_tokens: Option<usize>,
     max_output_tokens: u32,
 ) -> Option<usize> {
-    let usable_input_tokens = context_limit_tokens?.saturating_sub(max_output_tokens as usize);
-    Some(usable_input_tokens.saturating_mul(100 - PRODUCER_WINDOW_ESTIMATOR_MARGIN_PERCENT) / 100)
+    let window = context_limit_tokens?;
+    // The runner clamps the generous output request to the model's allowed output.
+    // A catalog ceiling cannot reserve more than a quarter of the input window.
+    let reserve = producer_output_reserve(window, max_output_tokens);
+    let limit = window
+        .saturating_sub(reserve)
+        .saturating_mul(100 - PRODUCER_WINDOW_ESTIMATOR_MARGIN_PERCENT)
+        / 100;
+    (limit > 0).then_some(limit)
 }
 
 pub(crate) fn producer_window_failure_reason(
@@ -1711,7 +1722,10 @@ pub(crate) fn producer_window_failure_reason(
     if producer_source_tokens == 0 {
         return None;
     }
-    let usable_input_tokens = context_limit_tokens.saturating_sub(max_output_tokens as usize);
+    let usable_input_tokens = context_limit_tokens.saturating_sub(producer_output_reserve(
+        context_limit_tokens,
+        max_output_tokens,
+    ));
     let producer_input_limit_tokens =
         producer_input_token_limit(Some(context_limit_tokens), max_output_tokens)?;
     if producer_source_tokens <= producer_input_limit_tokens {
@@ -1749,13 +1763,6 @@ where
         request.historian_context_limit_tokens,
         request.max_output_tokens,
     ) {
-        let loaded = request.store.load(request.session_id)?;
-        let mut meta = loaded.meta.clone();
-        meta.historian.last_failure = Some(reason.clone());
-        meta.historian.failure_backoff_at_ms = Some(request.failure_backoff_at_ms);
-        request
-            .store
-            .commit(request.session_id, loaded.row_version, &loaded.core, &meta)?;
         eprintln!(
             "[mc-module][{}] historian oversize admission refused before spawn: {reason}",
             request.session_id
@@ -1805,7 +1812,7 @@ where
             request.fallback_context_limits.get(model).copied()
         };
         let fit_limit = producer_input_token_limit(current_window, request.max_output_tokens);
-        if current_window.is_none() {
+        if fit_limit.is_none() {
             static UNKNOWN_WINDOWS: std::sync::OnceLock<
                 std::sync::Mutex<std::collections::HashSet<String>>,
             > = std::sync::OnceLock::new();
@@ -1815,19 +1822,12 @@ where
                 .expect("unknown window log mutex")
                 .insert(model.clone())
             {
-                eprintln!("[mc-module] producer window unknown for {model}: sending unguarded");
+                eprintln!("[mc-module] producer window unknown or inconsistent for {model}: sending unguarded");
             }
         }
         if fit_limit.is_some_and(|limit| {
             !full_tokens.is_finite() || full_tokens <= 0.0 || full_tokens > limit as f64
         }) {
-            let loaded = request.store.load(request.session_id)?;
-            let mut meta = loaded.meta.clone();
-            meta.historian.last_failure = Some(format!("producer_prompt_fit_refused model={model} calibrated_tokens={full_tokens} limit={fit_limit:?}"));
-            meta.historian.failure_backoff_at_ms = Some(request.failure_backoff_at_ms);
-            request
-                .store
-                .commit(request.session_id, loaded.row_version, &loaded.core, &meta)?;
             return Err(HistorianDriveError::Producer(HistorianProducerError::context_overflow(
                 format!("producer_prompt_fit_refused model={model} calibrated_tokens={full_tokens} limit={fit_limit:?}"),
             )));
@@ -3143,11 +3143,8 @@ mod tests {
             .is_err());
         assert!(refused_producer.observed_starts.is_empty());
         let refused_state = refused_store.load("ses").unwrap().meta.historian;
-        assert_eq!(refused_state.failure_backoff_at_ms, Some(999));
-        assert_eq!(
-            refused_state.last_failure.as_deref(),
-            Some("producer_source_exceeds_window producer_source_tokens=20000 usable_input_tokens=10000 producer_input_limit_tokens=9700 context_limit_tokens=11000 max_output_tokens=1000 estimator_margin=0.03")
-        );
+        assert_eq!(refused_state.failure_backoff_at_ms, None);
+        assert_eq!(refused_state.last_failure, None);
 
         let admitted_dir = tempfile::tempdir().unwrap();
         let admitted_store = store(admitted_dir.path());
@@ -3177,6 +3174,19 @@ mod tests {
             producer_window_failure_reason(10_000, Some(11_000), 1_000).as_deref(),
             Some("producer_source_exceeds_window producer_source_tokens=10000 usable_input_tokens=10000 producer_input_limit_tokens=9700 context_limit_tokens=11000 max_output_tokens=1000 estimator_margin=0.03")
         );
+    }
+
+    #[test]
+    fn small_producer_window_reserves_only_allowed_output_and_still_refuses_oversize() {
+        assert_eq!(
+            producer_input_token_limit(Some(32_000), 32_000),
+            Some(23_280)
+        );
+        assert!(producer_window_failure_reason(1_000, Some(32_000), 32_000).is_none());
+        assert!(producer_window_failure_reason(25_000, Some(32_000), 32_000)
+            .unwrap()
+            .contains("producer_input_limit_tokens=23280"));
+        assert_eq!(producer_input_token_limit(Some(0), 32_000), None);
     }
 
     #[tokio::test]

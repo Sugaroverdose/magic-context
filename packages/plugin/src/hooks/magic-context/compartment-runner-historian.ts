@@ -27,7 +27,7 @@ import {
 } from "../../shared/data-path";
 import { describeError, getErrorMessage } from "../../shared/error-message";
 import type { ModelInput, ResolvedModelEntry } from "../../shared/model-resolution";
-import { getSdkContextLimit } from "../../shared/models-dev-cache";
+import { getSdkContextLimit, getSdkOutputLimit } from "../../shared/models-dev-cache";
 import { isRecord } from "../../shared/record-type-guard";
 import { modelBodyField, toModelEntry } from "../../shared/resolve-fallbacks";
 import type { Database } from "../../shared/sqlite";
@@ -52,7 +52,11 @@ import {
     type HistorianValidationChunk,
     validateHistorianOutput,
 } from "./compartment-runner-validation";
-import { producerPromptFailureReason } from "./producer-window-guard";
+import {
+    historianProducerReserve,
+    producerInputTokenLimit,
+    producerPromptFailureReason,
+} from "./producer-window-guard";
 import { estimateTokens } from "./read-session-formatting";
 
 // Intentionally kept: historian validation failure dumps are preserved for
@@ -580,13 +584,33 @@ async function runHistorianPrompt(args: {
                                           { reservation: "none" },
                                       )
                                     : undefined;
+                                const reserve = historianProducerReserve(
+                                    contextLimitTokens,
+                                    args.maxOutputTokens,
+                                    selected
+                                        ? getSdkOutputLimit(selected.providerID, selected.modelID)
+                                        : undefined,
+                                );
+                                if (
+                                    contextLimitTokens !== undefined &&
+                                    producerInputTokenLimit(contextLimitTokens, reserve) ===
+                                        undefined &&
+                                    modelKey &&
+                                    !unknownProducerWindows.has(modelKey)
+                                ) {
+                                    unknownProducerWindows.add(modelKey);
+                                    shared.sessionLog(
+                                        parentSessionId,
+                                        `producer window inconsistent for ${modelKey}: window=${contextLimitTokens} reserve=${reserve}; sending unguarded`,
+                                    );
+                                }
                                 const failure = producerPromptFailureReason({
                                     sourceLocal: estimateTokens(prompt),
                                     systemLocal: estimateTokens(system),
                                     toolsLocal: 0,
                                     modelKey,
                                     contextLimitTokens,
-                                    maxOutputTokens: args.maxOutputTokens ?? 32000,
+                                    maxOutputTokens: reserve,
                                 });
                                 if (failure) throw new Error(failure);
                                 if (

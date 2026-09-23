@@ -438,6 +438,16 @@ jobs:
       - name: Install workspace deps
         run: bun install --frozen-lockfile
 
+      # The conversion regression boots both generations and doctor probes the
+      # v1 CLI on PATH; the v2 binary comes from the pinned workspace dependency.
+      # The installer one-liner resolves "latest" through the rate-limited GitHub API
+      # and can exit 0 without installing; the repo's installer pins, retries and
+      # asserts the binary runs.
+      - name: Install OpenCode 1 for conversion coverage
+        run: |
+          OPENCODE_VERSION=1.18.31 bash tests/docker/install-opencode.sh
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
       - name: Verify the GA host binary
         run: bun -e "const { CLI } = await import('./packages/e2e-tests/src/opencode2-runner/spawn.ts'); console.log(CLI); const { execFileSync } = await import('node:child_process'); console.log(execFileSync(CLI, ['--version']).toString())"
 
@@ -457,6 +467,18 @@ jobs:
           echo "Running OpenCode 2 host tests from mode manifest: $files"
           # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
           bun test --timeout 600000 $files
+
+      # These long-lived dual-host fixtures manipulate separate throwaway stores,
+      # but run sequentially to avoid contending with one another's live hosts.
+      - name: Run OC2 conversion and marker regressions
+        env:
+          NODE_ENV: ""
+          MC_E2E_MODE: ts
+          MC_E2E_HOST: opencode2
+        run: |
+          cd packages/e2e-tests
+          bun test --timeout 600000 tests/opencode2/store-generation-conversion.test.ts
+          bun test --timeout 600000 tests/opencode2/marker-s3-runtime.test.ts
 
   e2e-host-omp:
     name: E2E (Oh My Pi, host behavior)

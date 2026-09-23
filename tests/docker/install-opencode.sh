@@ -61,7 +61,9 @@ echo "install-opencode: installing opencode v${version}"
 run_installer() { bash "$installer" --version "$version"; }
 retry "installer run" run_installer
 
-export PATH="/root/.opencode/bin:$PATH"
+# The installer writes to $HOME/.opencode/bin (/root inside the images, the runner's
+# home on a CI host).
+export PATH="$HOME/.opencode/bin:$PATH"
 if ! command -v opencode >/dev/null 2>&1; then
     echo "install-opencode: installer completed but no opencode binary on PATH" >&2
     exit 1

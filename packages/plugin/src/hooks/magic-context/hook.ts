@@ -385,7 +385,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         );
     const historianModel = resolveHistorianAttempts().primary;
     const historianContextLimit = resolveKnownHistorianContextLimit(historianModel?.model);
-    const historianMaxOutputTokens = deps.config.historian?.maxTokens ?? 32_000;
+    const historianMaxOutputTokens = deps.config.historian?.maxTokens;
     const historianFallbackModels = resolveHistorianAttempts().fallbacks;
 
     // Three independent cache-busting signal sets, sourced from the

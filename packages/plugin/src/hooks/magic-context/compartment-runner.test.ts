@@ -1712,7 +1712,7 @@ describe("runCompartmentAgent", () => {
             db,
             sessionId: "ses-window-refuse",
             historianChunkTokens: 100_000,
-            historianContextLimit: 32_001,
+            historianContextLimit: 33_000,
             historianMaxOutputTokens: 32_000,
             model: "test/model",
             directory: "/tmp",
@@ -1720,9 +1720,8 @@ describe("runCompartmentAgent", () => {
 
         expect(createSession).toHaveBeenCalledTimes(0);
         expect(promptSession).toHaveBeenCalledTimes(0);
-        expect(getHistorianFailureState(db, "ses-window-refuse").lastError).toContain(
-            "producer_source_exceeds_window",
-        );
+        expect(getHistorianFailureState(db, "ses-window-refuse").lastError).toBeNull();
+        expect(loadProtectedTailMeta(db, "ses-window-refuse").protectedTailDrainTokens).toBe(0);
 
         await runCompartmentAgentWithLease({
             client,
@@ -1739,13 +1738,9 @@ describe("runCompartmentAgent", () => {
         expect(promptSession).toHaveBeenCalledTimes(1);
     });
 
-    it("reserves the default output budget for the producer window when no cap is configured", async () => {
-        // The hidden carrier stopped sending a default output cap on the wire
-        // (some backends reject the parameter). The chunk sizing that reserves
-        // room for the producer's own output is separate arithmetic and must
-        // keep reserving the same 32k: this source fits a 32001-token window
-        // only if nothing is reserved, so admitting it would mean the
-        // reservation was lost along with the wire parameter.
+    it("does not reserve an unsent default output cap for a 32k producer", async () => {
+        // With no configured output cap and no catalog output metadata, the
+        // hidden carrier sends no cap; reserving 32k would reject every run.
         useTempDataHome("compartment-runner-producer-window-default-");
         createOpenCodeDb("ses-window-default", [
             { id: "default-1", role: "user", text: "producer source token ".repeat(2_000) },
@@ -1779,12 +1774,8 @@ describe("runCompartmentAgent", () => {
             directory: "/tmp",
         });
 
-        expect(createSession).toHaveBeenCalledTimes(0);
-        expect(promptSession).toHaveBeenCalledTimes(0);
-        const lastError = getHistorianFailureState(db, "ses-window-default").lastError;
-        expect(lastError).toContain("producer_source_exceeds_window");
-        expect(lastError).toContain("max_output_tokens=32000");
-        expect(lastError).toContain("usable_input_tokens=1");
+        expect(createSession).toHaveBeenCalledTimes(1);
+        expect(getHistorianFailureState(db, "ses-window-default").lastError).toBeNull();
     });
 
     it("records length-capped reasoning-only output with the actionable error and drain backoff", async () => {

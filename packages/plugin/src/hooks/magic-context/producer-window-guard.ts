@@ -1,3 +1,4 @@
+import { catalogOutputReserve } from "../../shared/window-geometry";
 import { calibrationForModelKey, providerMass } from "./decision-calibration";
 import { estimateTokens } from "./read-session-formatting";
 
@@ -58,8 +59,19 @@ export function producerInputTokenLimit(
     ) {
         return undefined;
     }
-    const usableInputTokens = Math.max(0, Math.floor(contextLimitTokens - maxOutputTokens));
-    return Math.max(0, Math.floor(usableInputTokens * (1 - PRODUCER_WINDOW_REFUSAL_MARGIN)));
+    const usableInputTokens = Math.floor(contextLimitTokens - maxOutputTokens);
+    if (usableInputTokens <= 0) return undefined;
+    const limit = Math.floor(usableInputTokens * (1 - PRODUCER_WINDOW_REFUSAL_MARGIN));
+    return limit > 0 ? limit : undefined;
+}
+
+export function historianProducerReserve(
+    window: number | undefined,
+    configuredOutput: number | undefined,
+    catalogOutput: number | undefined,
+): number {
+    if (configuredOutput !== undefined) return configuredOutput;
+    return window === undefined ? 0 : catalogOutputReserve(window, catalogOutput);
 }
 
 export function producerWindowFailureReason(input: ProducerWindowFailureInput): string | null {

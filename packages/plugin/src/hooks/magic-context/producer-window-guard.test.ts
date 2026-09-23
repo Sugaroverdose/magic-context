@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { producerWindowFailureReason } from "./producer-window-guard";
+import {
+    historianProducerReserve,
+    producerInputTokenLimit,
+    producerPromptFailureReason,
+    producerWindowFailureReason,
+} from "./producer-window-guard";
 
 const maxOutputTokens = 1_000;
 const usableInputTokens = 10_000;
@@ -62,4 +67,37 @@ test("complete producer prompt uses producer calibration and refuses previously 
     expect(producerPromptFailureReason(input)).not.toBeNull();
     expect(producerPromptFailureReason({ ...input, contextLimitTokens: 20000 })).toBeNull();
     expect(producerPromptFailureReason({ ...input, contextLimitTokens: undefined })).toBeNull();
+});
+
+test("32k historian with unconfigured output admits a real prompt and refuses an oversized one", () => {
+    const reserve = historianProducerReserve(32_000, undefined, 32_000);
+    expect(reserve).toBe(8_000);
+    expect(producerInputTokenLimit(32_000, reserve)).toBe(23_280);
+    const prompt = {
+        sourceLocal: 1_000,
+        systemLocal: 1_000,
+        toolsLocal: 0,
+        modelKey: undefined,
+        contextLimitTokens: 32_000,
+        maxOutputTokens: reserve,
+    };
+    expect(producerPromptFailureReason(prompt)).toBeNull();
+    expect(producerPromptFailureReason({ ...prompt, sourceLocal: 50_000 })).toContain(
+        "limit=23280",
+    );
+});
+
+test("inconsistent configured output cannot turn every producer prompt into a refusal", () => {
+    const reserve = historianProducerReserve(32_000, 40_000, 8_192);
+    expect(producerInputTokenLimit(32_000, reserve)).toBeUndefined();
+    expect(
+        producerPromptFailureReason({
+            sourceLocal: 50_000,
+            systemLocal: 1_000,
+            toolsLocal: 0,
+            modelKey: undefined,
+            contextLimitTokens: 32_000,
+            maxOutputTokens: reserve,
+        }),
+    ).toBeNull();
 });

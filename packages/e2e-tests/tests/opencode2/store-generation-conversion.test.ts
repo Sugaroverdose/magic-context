@@ -364,7 +364,7 @@ async function until<T>(
  * operator asks between the two boots: how much would the next open re-anchor.
  */
 function runDoctor(fixture: ConversionFixture): string {
-    const result = spawnSync(
+    const probe = () => spawnSync(
         process.execPath,
         [CLI_ENTRY, "doctor", "--harness", "opencode"],
         {
@@ -385,7 +385,14 @@ function runDoctor(fixture: ConversionFixture): string {
             },
         },
     );
-    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    // A busy host can exceed doctor's short CLI version probe timeout. Re-probe
+    // once so a transient unknown version cannot hide the rebase diagnosis.
+    let result = probe();
+    let output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    if (output.includes("OpenCode reported no version")) {
+        result = probe();
+        output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    }
     if (result.error) throw new Error(`doctor failed to run: ${String(result.error)}\n${output}`);
     return output;
 }
@@ -418,9 +425,9 @@ beforeAll(async () => {
         };
     });
     const quiet = { text: "ok", usage: { input_tokens: 1_000, output_tokens: 20 } };
-    // High enough to cross the force band of a 24k window, low enough that the 2.x
+    // High enough to cross the force band of a 64k window, low enough that the 2.x
     // host's own auto-compaction (context − output − buffer) never triggers.
-    const pressure = { text: "pressure", usage: { input_tokens: 20_000, output_tokens: 20 } };
+    const pressure = { text: "pressure", usage: { input_tokens: 54_000, output_tokens: 20 } };
     mock.setDefault(quiet);
 
     // The window has to be small enough that a session of a few dozen turns leaves
@@ -428,7 +435,7 @@ beforeAll(async () => {
     // (20k) or the plugin discards the host-reported limit as a placeholder and
     // falls back to its 200k default — which would protect the whole session and
     // the historian could never start.
-    const CONTEXT_LIMIT = 24_000;
+    const CONTEXT_LIMIT = 64_000;
     const OUTPUT_LIMIT = 1_024;
     const magicContextConfig = {
         execute_threshold_percentage: 40,
@@ -820,6 +827,7 @@ beforeAll(async () => {
     // tail cache's lower bound, and it sits above the synthetic row in this arm.
     const gapDb = new Database(fixture.contextDbPath);
     try {
+        gapDb.exec("PRAGMA busy_timeout = 30000");
         const update = gapDb
             .prepare(
                 "UPDATE compartments SET end_message = ? WHERE session_id = ? AND sequence = ? AND end_message = ?",
