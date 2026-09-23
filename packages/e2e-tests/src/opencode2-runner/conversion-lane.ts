@@ -27,18 +27,18 @@ import { pinMockAgents } from "../mock-routing";
 import type { MockProvider } from "../mock-provider/server";
 import { waitForReady } from "../opencode-runner/spawn";
 import { prepareContextDatabase } from "../prepare-context-db";
+import { isolateStoreDirectories } from "./store-directories";
+import { assertWriteFenceUnchanged, snapshotWriteFence } from "./write-fence";
 import {
 	assertIsolation,
-	assertLiveUnchanged,
 	assertOpenPaths,
 	type OpenCode2Isolation,
 	PLUGIN,
 	ROOT_KEYS,
-	snapshotLive,
 } from "./spawn";
 
-/** Directories the 1.x child gets on top of the five the v2 runner already isolates. */
-const EXTRA_ROOT_KEYS = ["XDG_RUNTIME_DIR", "OPENCODE1_CONFIG_HOME"] as const;
+/** The 1.x host needs a separate config home because the host generations use different config shapes. */
+const EXTRA_ROOT_KEYS = ["OPENCODE1_CONFIG_HOME"] as const;
 
 /**
  * Both generations must name the SAME provider and model.
@@ -130,19 +130,6 @@ export function resolveOpenCode1CLI(): string {
 		);
 	}
 	return path;
-}
-
-/** Whether some other OpenCode host is already serving, which would make a live-store snapshot ambiguous. */
-function foreignServeRunning(ownPid?: number): boolean {
-	const result = spawnSync("pgrep", ["-alf", "opencode"], { encoding: "utf8" });
-	if (result.error || (result.status !== 0 && result.status !== 1)) {
-		throw new Error("Cannot determine whether a live OpenCode host owns the store");
-	}
-	if (result.status !== 0) return false;
-	return result.stdout
-		.split("\n")
-		.filter((line) => /\bserve\b/.test(line))
-		.some((line) => Number(line.trim().split(/\s+/)[0]) !== ownPid);
 }
 
 /** Every strict ancestor directory of `path`, from its parent up to the filesystem root. */
@@ -284,6 +271,8 @@ export async function spawnOpencode1(
 		XDG_STATE_HOME: fixture.env.XDG_STATE_HOME,
 		XDG_CACHE_HOME: fixture.env.XDG_CACHE_HOME,
 		XDG_RUNTIME_DIR: fixture.env.XDG_RUNTIME_DIR,
+		CARGO_HOME: fixture.env.CARGO_HOME,
+		RUSTUP_HOME: fixture.env.RUSTUP_HOME,
 		OPENCODE_DB: "opencode2.db",
 		OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
 		OPENCODE_DISABLE_PROJECT_CONFIG: "true",
@@ -294,6 +283,8 @@ export async function spawnOpencode1(
 	};
 	// Same environment guard the v2 runner applies, against the same root.
 	assertIsolation(fixture.root, env);
+	const references = isolateStoreDirectories(fixture.root, fixture.openCodeDbPath, fixture.contextDbPath);
+	fixture.referencedDirectories = [...new Set([...(fixture.referencedDirectories ?? []), ...references])];
 
 	const pluginEntry = join(PLUGIN, "dist/index.js");
 	if (!existsSync(pluginEntry)) {
@@ -357,7 +348,7 @@ export async function spawnOpencode1(
 	);
 	prepareContextDatabase(fixture.env.XDG_DATA_HOME!);
 
-	const before = foreignServeRunning() ? undefined : snapshotLive();
+	const fence = snapshotWriteFence(fixture.referencedDirectories ?? []);
 	const child: ChildProcess = spawn(
 		cli,
 		["serve", "--port", "0", "--hostname", "127.0.0.1"],
@@ -385,7 +376,7 @@ export async function spawnOpencode1(
 		if (child.pid) killGroup(child.pid);
 		await exited;
 		if (child.pid) liveGroups.delete(child.pid);
-		if (before) assertLiveUnchanged(before);
+		assertWriteFenceUnchanged(fence);
 		if (safetyError) throw safetyError;
 	};
 

@@ -8,7 +8,8 @@ import {
 	V2StoreReader,
 } from "../../../plugin/src/v2/store-reader";
 import { awaitPluginActivation } from "../../src/opencode2-runner/plugin-activation";
-import { ROOT_KEYS, assertIsolation, assertLiveUnchanged, assertOpenPaths, handoff, isolation, snapshotLive, spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
+import { assertWriteFenceUnchanged, snapshotWriteFence } from "../../src/opencode2-runner/write-fence";
+import { ROOT_KEYS, assertIsolation, assertOpenPaths, handoff, isolation, spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
 
 test("hermetic_v2_runner environment refuses unsafe roots before boot", () => {
 	const fixture = isolation();
@@ -37,15 +38,25 @@ test("fd guard refuses operator paths and permits isolated database", () => {
 		),
 	).toThrow("forbidden");
 });
-test("live snapshot detects changed database and logs", () => {
+test("post-run fence rejects the old observer plugin's marker.log under a replayed repo", () => {
 	const { root } = isolation();
-	const dir = join(root, ".local/share/opencode");
-	mkdirSync(join(dir, "log"), { recursive: true });
-	writeFileSync(join(dir, "opencode.db"), "original");
-	const before = snapshotLive(root);
-	expect(() => assertLiveUnchanged(before, root)).not.toThrow();
-	writeFileSync(join(dir, "opencode.db"), "mutated!");
-	expect(() => assertLiveUnchanged(before, root)).toThrow("changed");
+	const repo = join(root, "operator-repo");
+	const home = join(root, "operator-home");
+	mkdirSync(repo);
+	mkdirSync(home);
+	const existing = join(repo, "existing.txt");
+	writeFileSync(existing, "original");
+	const before = snapshotWriteFence([repo], home);
+	expect(() => assertWriteFenceUnchanged(before, home)).not.toThrow();
+	const context = { directory: repo };
+	writeFileSync(join(context.directory, "marker.log"), "old observer plugin output");
+	expect(() => assertWriteFenceUnchanged(before, home)).toThrow("E2E_HOST_WRITE_FENCE");
+	const afterMarker = snapshotWriteFence([repo], home);
+	writeFileSync(existing, "modified content");
+	expect(() => assertWriteFenceUnchanged(afterMarker, home)).toThrow("E2E_HOST_WRITE_FENCE");
+	const beforeHome = snapshotWriteFence([repo], home);
+	writeFileSync(join(home, "unexpected"), "host output");
+	expect(() => assertWriteFenceUnchanged(beforeHome, home)).toThrow("E2E_HOST_WRITE_FENCE");
 });
 test("handoff requires ordered URL and password", () => {
 	expect(handoff("server listening on http://127.0.0.1:123\n")).toBeUndefined();

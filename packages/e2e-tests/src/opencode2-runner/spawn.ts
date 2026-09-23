@@ -1,14 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
-	closeSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
-	openSync,
-	readdirSync,
 	readFileSync,
-	readSync,
 	realpathSync,
 	statSync,
 	writeFileSync,
@@ -17,6 +12,8 @@ import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pinMockAgents } from "../mock-routing";
 import { prepareContextDatabase } from "../prepare-context-db";
+import { isolateStoreDirectories } from "./store-directories";
+import { assertWriteFenceUnchanged, snapshotWriteFence } from "./write-fence";
 import { MockProvider, type MockResponse } from "../mock-provider/server";
 import {
 	awaitPluginActivation,
@@ -30,6 +27,9 @@ export const ROOT_KEYS = [
 	"XDG_DATA_HOME",
 	"XDG_STATE_HOME",
 	"XDG_CACHE_HOME",
+	"XDG_RUNTIME_DIR",
+	"CARGO_HOME",
+	"RUSTUP_HOME",
 ] as const;
 // The GA CLI is a devDependency of packages/plugin. Bun's isolated linker puts its
 // bin under the package's own node_modules; the hoisted linker (the release e2e
@@ -79,6 +79,8 @@ export interface OpenCode2Isolation {
 	root: string;
 	env: NodeJS.ProcessEnv;
 	cwd: string;
+	/** Original project directories from the store, retained to detect writes outside the test root after host shutdown. */
+	referencedDirectories?: string[];
 }
 
 export function isolation(): OpenCode2Isolation {
@@ -94,6 +96,7 @@ export function isolation(): OpenCode2Isolation {
 	}
 	const cwd = join(root, "work");
 	mkdirSync(cwd);
+	env.MAGIC_CONTEXT_STORAGE_DIR = join(env.XDG_DATA_HOME!, "cortexkit", "magic-context");
 	return { root, env, cwd };
 }
 export function assertIsolation(root: string, env: NodeJS.ProcessEnv): void {
@@ -103,7 +106,7 @@ export function assertIsolation(root: string, env: NodeJS.ProcessEnv): void {
 		);
 	if (env.OPENCODE_DB !== "opencode2.db")
 		throw new Error("OPENCODE_DB must be opencode2.db before boot");
-	// The five private roots are the safety boundary (AFT playbook:46-48,62).
+	// Private roots isolate host state, cache, runtime files, and native toolchain state.
 	// GA CLI 2.0.5 also honours OPENCODE_DB as observed by the placement probe.
 	const base = realpathSync(root);
 	for (const key of ROOT_KEYS) {
@@ -114,51 +117,10 @@ export function assertIsolation(root: string, env: NodeJS.ProcessEnv): void {
 		if (!suffix || suffix.startsWith("..") || resolve(value) === homedir())
 			throw new Error(`${key} is not a throwaway directory before boot`);
 	}
+	if (!env.MAGIC_CONTEXT_STORAGE_DIR || relative(base, resolve(env.MAGIC_CONTEXT_STORAGE_DIR)).startsWith(".."))
+		throw new Error("MAGIC_CONTEXT_STORAGE_DIR must be under the throwaway root");
 	if (env.OPENCODE_DISABLE_DEFAULT_PLUGINS !== "true")
 		throw new Error("Default plugins must be disabled");
-}
-const sha = (bytes: Uint8Array) =>
-	createHash("sha256").update(bytes).digest("hex");
-export function snapshotFile(path: string) {
-	if (!existsSync(path)) return null;
-	const stat = statSync(path);
-	const fd = openSync(path, "r");
-	const edge = (position: number) => {
-		const buffer = Buffer.alloc(Math.min(stat.size, 1024 * 1024));
-		const count = readSync(fd, buffer, 0, buffer.length, position);
-		if (count !== buffer.length)
-			throw new Error(`Short live-store snapshot read: ${path}`);
-		return sha(buffer);
-	};
-	try {
-		return {
-			size: stat.size,
-			mtime: stat.mtimeMs,
-			first: edge(0),
-			last: edge(Math.max(0, stat.size - 1024 * 1024)),
-		};
-	} finally {
-		closeSync(fd);
-	}
-}
-export function snapshotLive(home = homedir()) {
-	const root = join(home, ".local/share/opencode");
-	const log = join(root, "log");
-	return {
-		db: snapshotFile(join(root, "opencode.db")),
-		logs: existsSync(log)
-			? readdirSync(log)
-					.sort()
-					.map((name) => ({ name, ...snapshotFile(join(log, name)) }))
-			: null,
-	};
-}
-export function assertLiveUnchanged(
-	before: ReturnType<typeof snapshotLive>,
-	home = homedir(),
-): void {
-	if (JSON.stringify(before) !== JSON.stringify(snapshotLive(home)))
-		throw new Error("Operator live store/log changed during v2 boot");
 }
 export function handoff(
 	stdout: string,
@@ -232,11 +194,10 @@ export interface OpenCode2SpawnOptions {
 export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 	const providerID = options.providerID ?? "openai";
 	const fixture = options.existingIsolation ?? isolation();
-	const snapshotReason = activeV1Host()
-		? "live snapshot skipped: active v1 opencode serve writes operator store"
-		: undefined;
-	const before = snapshotReason ? undefined : snapshotLive();
 	assertIsolation(fixture.root, fixture.env);
+	const references = isolateStoreDirectories(fixture.root, join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR ?? join(fixture.env.XDG_DATA_HOME!, "cortexkit", "magic-context"), "context.db"));
+	fixture.referencedDirectories = [...new Set([...(fixture.referencedDirectories ?? []), ...references])];
+	const fence = snapshotWriteFence(fixture.referencedDirectories);
 	prepareContextDatabase(fixture.env.XDG_DATA_HOME!);
 	if (
 		options.includeMagicContext !== false &&
@@ -357,7 +318,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 		if (child.pid) killGroup(child.pid);
 		await exited;
 		if (child.pid) groups.delete(child.pid);
-		if (before) assertLiveUnchanged(before);
+		assertWriteFenceUnchanged(fence);
 		if (safetyError) throw safetyError;
 	};
 	const stop = async () => {
@@ -410,7 +371,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 		return {
 			...ready,
 			...fixture,
-			snapshotReason,
+			snapshotReason: undefined,
 			mock,
 			mockBaseURL: provider.baseURL,
 			stopHost,
@@ -422,15 +383,6 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 		await stop();
 		throw error;
 	}
-}
-
-function activeV1Host(): boolean {
-	const result = spawnSync("pgrep", ["-alf", "opencode"], {
-		encoding: "utf8",
-	});
-	if (result.error || (result.status !== 0 && result.status !== 1))
-		throw new Error("Cannot determine whether a live OpenCode host owns the store");
-	return result.status === 0 && result.stdout.split("\n").some((line) => /\bserve\b/.test(line));
 }
 
 export function assertOpenPaths(
