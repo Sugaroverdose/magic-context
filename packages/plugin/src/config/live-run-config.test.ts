@@ -88,3 +88,44 @@ for (const host of ["OC1", "OC2", "Pi"] as const) {
         }
     });
 }
+
+test("malformed project config retains last good values and deduplicates the warning; project overrides remain tier-safe", () => {
+    const root = mkdtempSync(join(tmpdir(), "mc-live-tiers-"));
+    const previous = { home: process.env.HOME, config: process.env.XDG_CONFIG_HOME };
+    process.env.HOME = root;
+    process.env.XDG_CONFIG_HOME = join(root, "config");
+    const directory = join(root, "project");
+    const userFile = join(root, "config", "cortexkit", "magic-context.jsonc");
+    const projectFile = join(directory, ".cortexkit", "magic-context.jsonc");
+    mkdirSync(join(root, "config", "cortexkit"), { recursive: true });
+    mkdirSync(join(directory, ".cortexkit"), { recursive: true });
+    const warnings: string[] = [];
+    try {
+        writeFileSync(userFile, JSON.stringify({ dreamer: { opencode: { model: "user/model" }, tasks: { verify: { schedule: "0 3 * * *" } }, prompt: "trusted" }, historian: { opencode: { model: "user/historian" } } }));
+        writeFileSync(projectFile, JSON.stringify({ dreamer: { opencode: { model: "project/model" }, tasks: { verify: { schedule: "1 3 * * *" } }, prompt: "untrusted" }, historian: { opencode: { model: "project/historian" } } }));
+        const load = () => loadPluginConfigDetailed(directory, false).config;
+        const reader = new LiveConfigReader(directory, load(), load, (message) => warnings.push(message));
+        const first = reader.poll();
+        expect(first.effective.dreamer?.opencode?.model).toBe("project/model");
+        expect(first.effective.dreamer?.prompt).toBe("trusted");
+        expect(resolveHistorianModel(first.effective, "opencode").primary?.model).toBe("user/historian");
+        writeFileSync(projectFile, "{ broken:");
+        expect(reader.poll()).toBe(first);
+        expect(reader.poll()).toBe(first);
+        expect(warnings.filter((message) => message.includes("config reload failed"))).toHaveLength(1);
+        writeFileSync(projectFile, JSON.stringify({ dreamer: { opencode: { model: "project/new-model" }, tasks: { verify: { schedule: "2 3 * * *" } }, prompt: "still-untrusted" }, historian: { opencode: { model: "project/new-historian" } } }));
+        const second = reader.poll();
+        expect(second.generation).toBe(2);
+        expect(second.effective.dreamer?.opencode?.model).toBe("project/new-model");
+        expect(second.effective.dreamer?.tasks?.verify.schedule).toBe("2 3 * * *");
+        expect(second.effective.dreamer?.prompt).toBe("trusted");
+        expect(resolveHistorianModel(second.effective, "opencode").primary?.model).toBe("user/historian");
+        expect(first.effective.dreamer?.opencode?.model).toBe("project/model");
+    } finally {
+        if (previous.home === undefined) delete process.env.HOME;
+        else process.env.HOME = previous.home;
+        if (previous.config === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = previous.config;
+        rmSync(root, { recursive: true, force: true });
+    }
+});
