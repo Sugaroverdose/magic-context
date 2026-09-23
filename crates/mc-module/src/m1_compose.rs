@@ -53,7 +53,49 @@ impl From<McStoreError> for M1ComposeError {
     }
 }
 
+/// The in-session m1 revision. Only inputs that m1 actually renders belong here: a watermark
+/// that moves without changing m1 bytes would still count as pending m1 work, and at
+/// execute-band usage pending work is enough to open a cache bust.
+///
+/// Smart notes are not rendered into m1, so the note status watermark is deliberately
+/// absent. Its old slot in the v2 digest is hashed as a constant zero, which keeps every
+/// session that never had a note status change on exactly the digest it already stored.
 fn in_session_revision(
+    max_memory_id: i64,
+    max_memory_mutation_id: i64,
+    max_compartment_seq: i64,
+    user_profile_version: u64,
+) -> u64 {
+    digest_in_session_inputs(
+        max_memory_id,
+        max_memory_mutation_id,
+        max_compartment_seq,
+        0,
+        user_profile_version,
+    )
+}
+
+/// The digest older builds stored in `ModuleMeta::m1_revision`, which also hashed the note
+/// status watermark. It exists only so a stored value from those builds can be recognised
+/// as equivalent to the current revision; see
+/// [`M1RevisionSignal::equivalent_applied_revision`].
+fn in_session_revision_with_note_status(
+    max_memory_id: i64,
+    max_memory_mutation_id: i64,
+    max_compartment_seq: i64,
+    note_status_version: i64,
+    user_profile_version: u64,
+) -> u64 {
+    digest_in_session_inputs(
+        max_memory_id,
+        max_memory_mutation_id,
+        max_compartment_seq,
+        note_status_version,
+        user_profile_version,
+    )
+}
+
+fn digest_in_session_inputs(
     max_memory_id: i64,
     max_memory_mutation_id: i64,
     max_compartment_seq: i64,
@@ -81,9 +123,9 @@ fn in_session_revision(
 
 /// The cheap per-pass revision signal, split into two lanes:
 ///
-/// * `revision` is the IN-SESSION lane. Memory inserts/updates, the mutation log, note
-///   surfacing, profile-version lines, and ordinary compartment publication all become
-///   pending work. A mismatch is intentionally deferred until an independent render.
+/// * `revision` is the IN-SESSION lane. Memory inserts/updates, the mutation log,
+///   profile-version lines, and ordinary compartment publication all become pending work.
+///   Note status changes do not: m1 renders nothing about notes. A mismatch is intentionally deferred until an independent render.
 /// * `external_revision` is the EXTERNAL lane. Workspace membership/visibility changes
 ///   remain eager-HARD because they change the m0 memory universe; project memory epochs
 ///   are carried by state-sync and arm the same HARD path in durable metadata.
@@ -91,7 +133,7 @@ fn in_session_revision(
 /// This table is the ordering contract for the module's bust opportunity gate:
 ///
 /// | input | lane | no independent render | independent render |
-/// | memory/profile/note/compartment signal | in-session | defer, preserve frozen bytes | fold in HARD/SOFT |
+/// | memory/profile/compartment signal | in-session | defer, preserve frozen bytes | fold in HARD/SOFT |
 /// | workspace fingerprint | external | HARD | HARD |
 /// | project memory epoch | external | HARD on next pass | HARD |
 /// | flush/refresh, Force/Emergency, first reduction | opportunity | fold pending delta | fold pending delta |
@@ -109,8 +151,30 @@ pub struct M1RevisionSignal {
     pub max_compartment_seq: i64,
     pub max_memory_id: i64,
     pub max_memory_mutation_id: i64,
+    /// Read for [`Self::legacy_note_revision`] only; it does not feed `revision`.
     pub note_status_version: i64,
     pub user_profile_version: u64,
+    /// The digest an older build would have stored for these same inputs, when it differs
+    /// from `revision` (that is, when the note status watermark is non-zero).
+    pub legacy_note_revision: Option<u64>,
+}
+
+impl M1RevisionSignal {
+    /// The applied revision a pass should compare `revision` against.
+    ///
+    /// Builds that still hashed the note status watermark stored a digest that differs from
+    /// `revision` whenever a project has any note status history. Comparing it directly would
+    /// report pending m1 work that renders nothing, and at execute-band usage that alone opens
+    /// a cache bust. When the stored value equals the old digest of the current store inputs,
+    /// nothing m1 renders has moved since it was applied, so it is equivalent to `revision`.
+    /// Any other stored value is returned unchanged and keeps its ordinary meaning.
+    pub fn equivalent_applied_revision(&self, applied: u64) -> u64 {
+        if self.legacy_note_revision == Some(applied) {
+            self.revision
+        } else {
+            applied
+        }
+    }
 }
 
 pub fn m1_revision_signal(
@@ -137,7 +201,7 @@ pub struct M1RevisionReadTimings {
 }
 
 /// Read both signal lanes for a transform pass. The extra context is supplied by the
-/// already-loaded transform route so note/profile changes are covered without rendering.
+/// already-loaded transform route so profile changes are covered without rendering.
 pub fn m1_revision_signal_parts_for_pass(
     store: &McStore,
     project_path: &str,
@@ -195,9 +259,17 @@ pub fn m1_revision_signal_parts_for_pass_timed(
         max_memory_id,
         max_memory_mutation_id,
         max_compartment_seq,
-        note_status_version,
         user_profile_version,
     );
+    let legacy_note_revision = (note_status_version != 0).then(|| {
+        in_session_revision_with_note_status(
+            max_memory_id,
+            max_memory_mutation_id,
+            max_compartment_seq,
+            note_status_version,
+            user_profile_version,
+        )
+    });
 
     let workspace_fingerprint =
         store.workspace_fingerprint_for_membership(snapshot.membership.as_ref());
@@ -213,6 +285,7 @@ pub fn m1_revision_signal_parts_for_pass_timed(
         max_memory_mutation_id,
         note_status_version,
         user_profile_version,
+        legacy_note_revision,
     })
 }
 
@@ -646,6 +719,48 @@ mod tests {
             .unwrap();
         let s2 = m1_revision_signal(store, p, "ses").unwrap();
         assert_ne!(s1, s2, "new compartment → signal moves");
+    }
+
+    #[test]
+    fn note_status_is_not_an_m1_revision_input_and_note_free_digests_are_unchanged() {
+        // Sessions with no note status history must keep the digest older builds stored.
+        for profile_version in [0, 3] {
+            assert_eq!(
+                in_session_revision(4, 5, 6, profile_version),
+                in_session_revision_with_note_status(4, 5, 6, 0, profile_version)
+            );
+        }
+
+        let fixture = FixtureBuilder::store();
+        let store = &fixture.store;
+        let before =
+            m1_revision_signal_parts_for_pass(store, "git:proj", "git:proj", "ses", 1, true, 0)
+                .unwrap();
+        assert_eq!(before.legacy_note_revision, None);
+        store
+            .insert_note(mc_store::NoteInput {
+                project_path: "git:proj",
+                route_project_root: None,
+                session_id: "ses",
+                content: "a note",
+                surface_condition: None,
+                anchor_block_id: None,
+                now_ms: 1,
+            })
+            .unwrap();
+        store
+            .dismiss_note("git:proj", "ses", 1, None, 2)
+            .unwrap()
+            .expect("note dismissed");
+        let after =
+            m1_revision_signal_parts_for_pass(store, "git:proj", "git:proj", "ses", 1, true, 0)
+                .unwrap();
+        assert!(after.note_status_version > before.note_status_version);
+        assert_eq!(after.revision, before.revision);
+        let legacy = after.legacy_note_revision.expect("older digest differs");
+        assert_ne!(legacy, after.revision);
+        assert_eq!(after.equivalent_applied_revision(legacy), after.revision);
+        assert_eq!(after.equivalent_applied_revision(7), 7);
     }
 
     #[test]

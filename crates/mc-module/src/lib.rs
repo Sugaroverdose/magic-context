@@ -7507,7 +7507,9 @@ impl McHandler {
         let pending_m1_delta = loaded.meta.initialized
             && m1_signal
                 .as_ref()
-                .is_some_and(|signal| signal.revision != loaded.meta.m1_revision);
+                .is_some_and(|signal| {
+                    signal.revision != signal.equivalent_applied_revision(loaded.meta.m1_revision)
+                });
         let pending_m1_age_ms = pending_m1_delta
             .then(|| now_ms().saturating_sub(loaded.meta.m1_pending_since_ms.unwrap_or(now_ms())));
         let tail_hygiene = loaded.meta.tail_hygiene_baseline.as_ref().map(|baseline| {
