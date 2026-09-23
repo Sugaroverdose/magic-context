@@ -31,6 +31,10 @@ import {
 // stored-boundary-upgrade: a compartment stored by an older build already ends on
 //   the instruction row. Trim and injection must find the served row it stands
 //   for without entering degraded mode.
+// stored-boundary-after-host-checkpoint: the same stored boundary, in a session
+//   whose host checkpoint is older than every compartment. The host's window then
+//   still holds rows the compartments cover, and Magic Context restores the rows
+//   between its boundary and the checkpoint itself on every pass.
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 type WireItem = { role?: string; type?: string; content?: unknown };
 
@@ -74,10 +78,8 @@ for (const arm of [
 					{ signal: AbortSignal.timeout(30_000) },
 				);
 			};
-			// The drill session had a host checkpoint older than every compartment
-			// boundary, so the host's own window still held rows the compartments
-			// cover. Magic Context supplies the checkpoint summary and restores the
-			// unarchived rows itself on every later pass.
+			// One reported high-usage turn makes the host compact before any
+			// compartment exists, so its checkpoint precedes every boundary below.
 			if (checkpoint) {
 				host.mock.setDefault({ text: "pressure answer", usage: { input_tokens: 15000, output_tokens: 10 } });
 				await turn("PRE-CHECKPOINT");
@@ -98,7 +100,7 @@ for (const arm of [
 			const rows = reader.history(session.id);
 			const types = new Map(rows.map((row) => [row.id, row.type]));
 			const raw = rawMessages(rows);
-			// Raw rows written before the first COVERED turn (the checkpoint arm's two turns).
+			// Raw rows written before the first COVERED turn: the two checkpoint turns.
 			const base = checkpoint ? 4 : 0;
 			const instruction = raw.find((message) => types.get(message.id) === "system");
 			// Precondition: the host itself wrote the instruction row immediately
@@ -131,7 +133,8 @@ for (const arm of [
 						.get(session.id) as { id: string | null }
 				).id;
 
-			// An older compartment ending on a served row, materialized as the baseline.
+			// Publish and materialize an older compartment ending on a served row, so
+			// the stored baseline sits before the later boundary, as in a real session.
 			insertCompartment.run(session.id, 0, 1, base + 2, raw[0]!.id, raw[base + 1]!.id, "Baseline", "SUMMARY-BASELINE", "SUMMARY-BASELINE", Date.now());
 			forceHard();
 			await turn("BASELINE-PASS");
