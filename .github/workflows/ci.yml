@@ -209,7 +209,7 @@ jobs:
         run: docker run --rm --platform linux/amd64 mc-e2e-opencode
 
   e2e-opencode2:
-    name: E2E (OpenCode 2.0.5, Docker)
+    name: E2E (OpenCode 2.0.12, Docker)
     runs-on: ubuntu-latest
     needs: [check-plugin]
     timeout-minutes: 30
@@ -429,7 +429,7 @@ jobs:
            bun test --timeout 600000 $files
 
   e2e-host-opencode2:
-    name: E2E (OpenCode 2, host behavior)
+    name: E2E (OpenCode 2.0.12, host behavior)
     runs-on: ubuntu-latest
     needs: [e2e-opencode2]
     timeout-minutes: 40
@@ -457,7 +457,7 @@ jobs:
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: Verify the GA host binary
-        run: bun -e "const { CLI } = await import('./packages/e2e-tests/src/opencode2-runner/spawn.ts'); console.log(CLI); const { execFileSync } = await import('node:child_process'); console.log(execFileSync(CLI, ['--version']).toString())"
+        run: bun -e "const { CLI } = await import('./packages/e2e-tests/src/opencode2-runner/spawn.ts'); const { execFileSync } = await import('node:child_process'); const version = execFileSync(CLI, ['--version']).toString().trim(); console.log(CLI, version); if (version !== 'opencode v2.0.12') throw new Error('OpenCode 2 host lane requires 2.0.12')"
 
       - name: Build OpenCode plugin (v1 + v2 entries)
         run: bun run --cwd packages/plugin build

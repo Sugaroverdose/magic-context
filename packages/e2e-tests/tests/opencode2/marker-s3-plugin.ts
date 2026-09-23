@@ -10,8 +10,9 @@ import { runCompartmentAgent } from "../../../plugin/src/hooks/magic-context/com
 export default {
     ...plugin,
     async server(context: any) {
-        if (!process.env.XDG_STATE_HOME) throw new Error("marker observer requires XDG_STATE_HOME");
-        process.env.MAGIC_CONTEXT_LOG_PATH = join(process.env.XDG_STATE_HOME, "marker.log");
+        const state = process.env.XDG_STATE_HOME ?? process.env.XDG_DATA_HOME;
+        if (!state) throw new Error("marker observer requires an isolated XDG directory");
+        process.env.MAGIC_CONTEXT_LOG_PATH = join(state, "marker.log");
         const hooks = await plugin.server(context);
         const sources = new Map<string, any[]>();
         return {

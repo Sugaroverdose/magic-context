@@ -15,9 +15,9 @@
  * stdin is under Bun, so stdin is /dev/null.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { assertOpenPaths, CLI, PLUGIN } from "./spawn";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { assertOpenPaths, CLI } from "./spawn";
 
 /** Control sequences OpenTUI emits around the cells the assertions read. */
 const ANSI =
@@ -26,27 +26,6 @@ const ANSI =
 
 export function stripAnsi(value: string): string {
 	return value.replace(ANSI, "");
-}
-
-/**
- * The PTY wrapper and the shell it execs the host from are part of the sampled
- * process group, so their own executables appear in its fd table. They are
- * system binaries, never a store.
- */
-function wrapperBinaries(): string[] {
-	const which = (name: string) =>
-		spawnSync("which", [name], { encoding: "utf8" }).stdout.trim();
-	return [
-		// The host binary and the installed packages it loads the plugin from, the
-		// same read-only bases `inspectOpenFiles` permits for a spawned server.
-		resolve(PLUGIN, "../../node_modules"),
-		CLI,
-		which("script"),
-		which("expect"),
-		"/bin/sh",
-	]
-		.filter((path) => path.length > 0 && existsSync(path))
-		.map((path) => realpathSync(path));
 }
 
 /**
@@ -76,18 +55,25 @@ export function processTreePids(pid: number): number[] {
 }
 
 /** Every filesystem path the TUI process tree has open, via lsof. */
-function treeOpenPaths(pid: number): string[] {
+function treeOpenPaths(pid: number): { paths: string[]; writable: string[] } {
 	const pids = processTreePids(pid).map(String);
-	if (!pids.length) return [];
-	const result = spawnSync("lsof", ["-p", pids.join(","), "-Fn"], {
+	if (!pids.length) return { paths: [], writable: [] };
+	const result = spawnSync("lsof", ["-p", pids.join(","), "-Ffn"], {
 		encoding: "utf8",
 	});
 	// lsof exits non-zero when some sampled pid has already gone; its output for
 	// the surviving ones is still complete and is what the guard reads.
-	return result.stdout
-		.split("\n")
-		.filter((line) => line.startsWith("n"))
-		.map((line) => line.slice(1));
+	const paths: string[] = [];
+	const writable: string[] = [];
+	let fd = "";
+	for (const line of result.stdout.split("\n")) {
+		if (line.startsWith("f")) fd = line.slice(1);
+		if (!line.startsWith("n")) continue;
+		const path = line.slice(1);
+		paths.push(path);
+		if (/[0-9]+[wu]$/.test(fd)) writable.push(path);
+	}
+	return { paths, writable };
 }
 
 /**
@@ -269,7 +255,6 @@ export async function captureTui(options: TuiCaptureOptions): Promise<TuiCapture
 
 	const started = Date.now();
 	const deadline = started + (options.timeoutMs ?? 120_000);
-	const allowed = wrapperBinaries();
 	let openDatabases: string[] = [];
 	let openPaths: string[] = [];
 	let sampled = false;
@@ -286,9 +271,9 @@ export async function captureTui(options: TuiCaptureOptions): Promise<TuiCapture
 			read();
 			const alive = child.exitCode === null && child.signalCode === null;
 			if (alive && child.pid) {
-				const paths = treeOpenPaths(child.pid);
+				const { paths, writable } = treeOpenPaths(child.pid);
 				if (paths.length > 0) {
-					assertOpenPaths(paths, options.root, allowed);
+					assertOpenPaths(paths, options.root, [], writable);
 					const databases = assertOnlyThrowawayDatabases(paths, options.root);
 					// Keep the sample that actually shows the host holding stores
 					// open: an fd table taken before it reaches its database proves

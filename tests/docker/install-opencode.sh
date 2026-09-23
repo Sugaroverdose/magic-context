@@ -11,10 +11,8 @@
 #     on shared runner egress ("Failed to fetch version information", release
 #     gates on 2026-09-13, 09-15 and again locally on 09-18).
 # So: download the installer to a file (its fetch has its own exit status),
-# resolve the latest tag from the releases redirect on github.com (no API), run the
-# installer with that version pinned (direct download URL, HEAD on github.com), retry
-# each network step with backoff, and assert the binary runs before the layer ends.
-# An explicit OPENCODE_VERSION (e.g. 1.18.30) skips the resolution step.
+# install the tested 2.0.12 host (or an explicit OPENCODE_VERSION), retry each
+# network step with backoff, and assert the binary runs before the layer ends.
 set -euo pipefail
 
 retry() {
@@ -42,20 +40,7 @@ fetch_installer() {
 }
 retry "installer fetch" fetch_installer
 
-version="${OPENCODE_VERSION:-}"
-if [ -z "$version" ]; then
-    resolve_version() {
-        # github.com answers /releases/latest with a redirect to /releases/tag/vX.Y.Z;
-        # reading the Location header needs no API token and no rate-limit budget.
-        local location
-        location="$(curl -fsSI --connect-timeout 15 --max-time 60 \
-            https://github.com/anomalyco/opencode/releases/latest \
-            | tr -d '\r' | awk 'tolower($1) == "location:" { print $2 }' | tail -n 1)"
-        version="${location##*/tag/v}"
-        [ -n "$version" ] && [ "$version" != "$location" ]
-    }
-    retry "latest version resolution" resolve_version
-fi
+version="${OPENCODE_VERSION:-2.0.12}"
 echo "install-opencode: installing opencode v${version}"
 
 run_installer() { bash "$installer" --version "$version"; }

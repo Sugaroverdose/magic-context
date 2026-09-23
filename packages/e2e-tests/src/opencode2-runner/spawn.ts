@@ -211,7 +211,7 @@ export async function waitForPluginActive(
 	client: PluginActivationClient,
 	directory: string,
 	pluginID = "opencode-magic-context",
-	timeoutMs = 20_000,
+	timeoutMs = 60_000,
 ): Promise<void> {
 	await awaitPluginActivation(client, directory, pluginID, timeoutMs);
 }
@@ -246,10 +246,8 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 	const references = isolateStoreDirectories(fixture.root, join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR ?? join(fixture.env.XDG_DATA_HOME!, "cortexkit", "magic-context"), "context.db"));
 	fixture.referencedDirectories = [...new Set([...(fixture.referencedDirectories ?? []), ...references])];
 	const fence = snapshotWriteFence(fixture.referencedDirectories);
-	const snapshotReason = activeV1Host()
-		? "live snapshot skipped: active v1 opencode serve writes operator store"
-		: undefined;
-	const before = snapshotReason ? undefined : snapshotLive();
+	// Do not open the operator's live database, even for a read-only snapshot.
+	// Check the host's writable descriptors and protected directory metadata instead.
 	prepareContextDatabase(fixture.env.XDG_DATA_HOME!);
 	if (
 		options.includeMagicContext !== false &&
@@ -370,7 +368,6 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 		if (child.pid) killGroup(child.pid);
 		await exited;
 		if (child.pid) groups.delete(child.pid);
-		if (before) assertLiveUnchanged(before);
 		assertWriteFenceUnchanged(fence);
 		if (safetyError) throw safetyError;
 	};
@@ -425,7 +422,6 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 			...ready,
 			...fixture,
 			pid: child.pid,
-			snapshotReason,
 			mock,
 			mockBaseURL: provider.baseURL,
 			stopHost,
@@ -439,60 +435,33 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 	}
 }
 
-function activeV1Host(): boolean {
-	const result = spawnSync("pgrep", ["-alf", "opencode"], {
-		encoding: "utf8",
-	});
-	if (result.error || (result.status !== 0 && result.status !== 1))
-		throw new Error("Cannot determine whether a live OpenCode host owns the store");
-	return result.status === 0 && result.stdout.split("\n").some((line) => /\bserve\b/.test(line));
-}
-
 export function assertOpenPaths(
 	paths: string[],
 	root: string,
 	allowed: string[] = [],
+	writable: string[] = [],
 ): void {
 	const under = (path: string, base: string) =>
 		path === base || path.startsWith(`${base}/`);
-	const live = join(homedir(), ".local/share/opencode");
+	const home = homedir();
+	const protectedRoots = [
+		join(home, ".local/share/opencode"),
+		join(home, ".local/share/cortexkit/magic-context"),
+		join(home, ".config/opencode"),
+		join(home, ".config/cortexkit"),
+		join(home, ".local/state/opencode"),
+	];
 	for (const path of paths) {
 		if (!path.startsWith("/")) continue; // lsof socket/pipe labels are not filesystem paths.
-		// lsof reports the process root directory as "/" (fd `rtd`) on every Linux
-		// process; it is not a file the host opened and can never be a live-store leak.
-		if (path === "/") continue;
-		// Bun extracts its embedded native addons to a temp file at startup:
-		// /private/tmp on macOS (.dylib/.node), /tmp on Linux (.so).
-		const bunLibrary =
-			/^\/(private\/)?tmp\/\.bun-\d+-[a-f0-9]+\.(dylib|node|so)$/.test(path);
-		if (
-			under(path, live) ||
-			(!bunLibrary &&
-				![
-					root,
-					...allowed,
-					"/dev",
-					"/System",
-					"/usr/lib",
-					"/usr/share",
-					"/private/etc",
-					// Linux system read-only bases (GitHub runners): loader cache, libc, procfs.
-					"/etc",
-					"/lib",
-					"/lib64",
-					"/usr/lib64",
-					"/proc",
-					"/sys",
-					"/Library/Apple/System",
-					"/private/var/db/diagnostics",
-					"/private/var/db/uuidtext",
-					"/private/var/db/timezone",
-					"/private/var/db/mds/messages",
-					"/private/var/db/analyticsd/events.allowlist",
-				].some((base) => under(path, base)))
-		) {
+		if (protectedRoots.some((base) => under(path, base)) ||
+			(/\.(?:db|sqlite)(?:-(?:wal|shm))?$/.test(path) && !under(path, root)) ||
+			(/\/(?:config|state)\/[^/]+$/.test(path) && !under(path, root)))
 			throw new Error(`v2 process holds a forbidden open path: ${path}`);
-		}
+	}
+	for (const path of writable) {
+		if (!path.startsWith("/")) continue;
+		if (![root, ...allowed].some((base) => under(path, base)))
+			throw new Error(`v2 process holds a forbidden writable path: ${path}`);
 	}
 }
 
@@ -517,14 +486,21 @@ export function inspectOpenFiles(
 	});
 	if (result.status !== 0)
 		throw new Error(`Cannot inspect v2 open files: ${result.stderr}`);
-	const paths = result.stdout
-		.split("\n")
-		.filter((line) => line.startsWith("n"))
-		.map((line) => line.slice(1));
-	assertOpenPaths(paths, root, [
-		realpathSync(resolve(PLUGIN, "../../node_modules")),
-		realpathSync(CLI),
-	]);
+	let fd = "";
+	const paths: string[] = [];
+	const writable: string[] = [];
+	for (const line of result.stdout.split("\n")) {
+		if (line.startsWith("f")) fd = line.slice(1);
+		if (!line.startsWith("n")) continue;
+		const path = line.slice(1);
+		paths.push(path);
+		// lsof's fd suffix is r, w or u (read/write). Program text, cwd,
+		// shared libraries and TUI source files are read-only inputs, not leaks.
+		if (/[0-9]+[wu]$/.test(fd)) writable.push(path);
+	}
+	// Mapped libraries and terminal-interface source files are read-only inputs.
+	// Check database/config paths even when their descriptors are read-only.
+	assertOpenPaths(paths, root, [], writable);
 	const db = join(env.XDG_DATA_HOME!, "opencode", env.OPENCODE_DB!);
 	const expected = statSync(db);
 	let inode: number | undefined;

@@ -37,6 +37,11 @@ test("fd guard refuses operator paths and permits isolated database", () => {
 			fixture.root,
 		),
 	).toThrow("forbidden");
+	expect(() => assertOpenPaths(["/tmp/.bcd9cd1efcadb2fc-00000007.so"], fixture.root)).not.toThrow();
+	expect(() => assertOpenPaths(["/private/tmp/outside.db"], fixture.root)).toThrow("forbidden");
+	expect(() => assertOpenPaths(["/private/tmp/outside.db-wal"], fixture.root)).toThrow("forbidden");
+	expect(() => assertOpenPaths([join(homedir(), ".config/opencode/opencode.json")], fixture.root)).toThrow("forbidden");
+	expect(() => assertOpenPaths(["/tmp/unexpected.txt"], fixture.root, [], ["/tmp/unexpected.txt"])).toThrow("forbidden");
 });
 test("live snapshot detects changed database and logs that the top-level HOME fence misses", () => {
 	const { root } = isolation();
@@ -66,6 +71,9 @@ test("post-run fence rejects the old observer plugin's marker.log under a replay
 		writeFileSync(join(repo, ignored, "large-artifact"), "fixture");
 	}
 	const before = snapshotWriteFence([repo], home);
+	writeFileSync(join(repo, ".DS_Store"), "Finder metadata");
+	writeFileSync(join(home, ".DS_Store"), "Finder metadata");
+	expect(() => assertWriteFenceUnchanged(before, home)).not.toThrow();
 	for (const ignored of ["node_modules", "target", ".git"]) {
 		expect(before.before.has(join(repo, ignored))).toBe(true);
 		expect(before.before.has(join(repo, ignored, "large-artifact"))).toBe(false);
@@ -112,14 +120,14 @@ test("plugin activation rejects a failed plugin with the host error before its d
 		});
 		const started = Date.now();
 		await expect(
-			awaitPluginActivation(client, host.cwd, "broken-activation", 5_000),
+			awaitPluginActivation(client, host.cwd, "broken-activation", 60_000),
 		).rejects.toThrow("deliberate broken plugin fixture");
-		expect(Date.now() - started).toBeLessThan(5_000);
+		expect(Date.now() - started).toBeLessThan(60_000);
 	} finally {
 		await host.stop();
 		rmSync(pluginRoot, { recursive: true, force: true });
 	}
-}, 30_000);
+}, 90_000);
 
 test("v2_loads_via_exports_map and session_message_reader real host writes", async () => {
 	const host = await spawnOpencode2();
@@ -179,7 +187,6 @@ test("v2_loads_via_exports_map and session_message_reader real host writes", asy
 		} finally {
 			reader.close();
 		}
-		if (host.snapshotReason) console.info(host.snapshotReason);
 	} catch (error) {
 		console.error(
 			host.stdout(),

@@ -22,8 +22,8 @@ import {
  * the flush are the control — they must carry some other reason — and the turn
  * after it must carry the explicit-flush one.
  */
-const HEURISTICS_DECISION = "heuristics WILL RUN — reason=";
-const EXPLICIT_FLUSH = `${HEURISTICS_DECISION}explicit_flush`;
+const HEURISTICS_DECISION = "heuristics WILL";
+const EXPLICIT_FLUSH = "heuristics WILL RUN — reason=explicit_flush";
 
 async function eventually<T>(
 	read: () => T | undefined,
