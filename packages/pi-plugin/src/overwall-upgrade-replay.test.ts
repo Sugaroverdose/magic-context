@@ -135,10 +135,14 @@ function fixture(
 		},
 	};
 }
-const calls = (m: any[]) =>
+type TranscriptMessage = {
+	role: string;
+	content?: Array<{ type: string }>;
+};
+const calls = (m: TranscriptMessage[]) =>
 	m.flatMap((x) =>
 		x.role === "assistant"
-			? x.content.filter((p: any) => p.type === "toolCall")
+			? (x.content ?? []).filter((p) => p.type === "toolCall")
 			: [],
 	).length;
 for (const native of [false, true])

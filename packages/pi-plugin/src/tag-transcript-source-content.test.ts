@@ -168,10 +168,10 @@ it("Pi tool reclaim preview retains skeleton mass and leaves served content unch
 		const target = [...targets.values()].find((t) => t.canDrop?.());
 		const before = JSON.stringify(messages);
 		const observed = target?.measureReclaim?.(true);
-		expect(observed).toBeDefined();
-		expect(observed!.beforeTools).toBeGreaterThan(1000);
-		expect(observed!.afterTools).toBeGreaterThan(0);
-		expect(observed!.afterTools).toBeLessThan(observed!.beforeTools);
+		if (!observed) throw new Error("Expected reclaim measurement");
+		expect(observed.beforeTools).toBeGreaterThan(1000);
+		expect(observed.afterTools).toBeGreaterThan(0);
+		expect(observed.afterTools).toBeLessThan(observed.beforeTools);
 		expect(JSON.stringify(messages)).toBe(before);
 	} finally {
 		closeQuietly(db);

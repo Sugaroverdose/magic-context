@@ -20,8 +20,12 @@
  *   Falls back to schema defaults when neither file exists.
  */
 
-import { changedLiveKeys, dreamerRunConfig, historianRunConfig } from '@magic-context/core/config/live-run-config';
-import { LiveConfigReader } from '@magic-context/core/config/live-snapshot';
+import {
+	changedLiveKeys,
+	dreamerRunConfig,
+	historianRunConfig,
+} from "@magic-context/core/config/live-run-config";
+import { LiveConfigReader } from "@magic-context/core/config/live-snapshot";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -1243,13 +1247,27 @@ async function startPiMagicContextRuntime(
 	function liveReaderFor(dir: string, boot: MagicContextConfig) {
 		let reader = liveReaders.get(dir);
 		if (!reader) {
-			reader = new LiveConfigReader(dir, boot, () => {
-				const loaded = loadPiConfigDetailed({ cwd: dir }, false);
-				if (["project-file-parse-error", "project-file-io-error", "schema-recovery"].includes(loaded.loadOutcome)) {
-					throw new Error(`invalid configuration: ${loaded.warnings.join("; ")}`);
-				}
-				return loaded.config;
-			}, warn, changedLiveKeys);
+			reader = new LiveConfigReader(
+				dir,
+				boot,
+				() => {
+					const loaded = loadPiConfigDetailed({ cwd: dir }, false);
+					if (
+						[
+							"project-file-parse-error",
+							"project-file-io-error",
+							"schema-recovery",
+						].includes(loaded.loadOutcome)
+					) {
+						throw new Error(
+							`invalid configuration: ${loaded.warnings.join("; ")}`,
+						);
+					}
+					return loaded.config;
+				},
+				warn,
+				changedLiveKeys,
+			);
 			reader.poll();
 			liveReaders.set(dir, reader);
 		}
@@ -1394,7 +1412,10 @@ async function startPiMagicContextRuntime(
 		dir: string,
 	): PiContextHandlerOptions {
 		const project = resolveProjectDepsForDir(dir);
-		const sampled = historianRunConfig(project.config, liveReaderFor(dir, project.config).poll().effective);
+		const sampled = historianRunConfig(
+			project.config,
+			liveReaderFor(dir, project.config).poll().effective,
+		);
 		const historian = resolveHistorianFromConfig(sampled);
 		return { ...project.contextOptions, historian };
 	}
@@ -1430,9 +1451,14 @@ async function startPiMagicContextRuntime(
 			registrationOwner: dreamerRegistrationOwner,
 			config: current.dreamerConfig,
 			sampleDreamRun: () => {
-				const fresh = liveReaderFor(current.projectDir, current.config).poll().effective;
+				const fresh = liveReaderFor(current.projectDir, current.config).poll()
+					.effective;
 				const sampled = dreamerRunConfig(current.config, fresh);
-				return { dreamerConfig: sampled.dreamer, mural: sampled.mural, gitCommitIndexing: sampled.memory.git_commit_indexing };
+				return {
+					dreamerConfig: sampled.dreamer,
+					mural: sampled.mural,
+					gitCommitIndexing: sampled.memory.git_commit_indexing,
+				};
 			},
 			harness: PI_HARNESS_KIND,
 			// Council finding #7: thread real embedding + memory config so
@@ -1616,7 +1642,9 @@ async function startPiMagicContextRuntime(
 			return {
 				configGeneration: live.current().generation,
 				configAdoptedAt: live.current().adoptedAt,
-				configReloadFailure: failure ? { path: failure.path, message: failure.message } : undefined,
+				configReloadFailure: failure
+					? { path: failure.path, message: failure.message }
+					: undefined,
 				db,
 				projectIdentity: current.projectIdentity,
 				protectedTags: current.config.protected_tags,
@@ -1664,15 +1692,24 @@ async function startPiMagicContextRuntime(
 		compactionOff,
 		resolveRuntimeDeps: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
-			const fresh = historianRunConfig(current.config, liveReaderFor(current.projectDir, current.config).poll().effective);
-			const historian = resolveHistorianFromConfig(fresh) ?? current.historianConfig;
+			const fresh = historianRunConfig(
+				current.config,
+				liveReaderFor(current.projectDir, current.config).poll().effective,
+			);
+			const historian =
+				resolveHistorianFromConfig(fresh) ?? current.historianConfig;
 			return {
 				db,
 				runner: recompRunner,
 				historianModel: historian?.model,
-				historianChunkTokens: historian?.historianChunkTokens ?? deriveHistorianChunkTokens(resolveHistorianContextLimit(historian?.model)),
+				historianChunkTokens:
+					historian?.historianChunkTokens ??
+					deriveHistorianChunkTokens(
+						resolveHistorianContextLimit(historian?.model),
+					),
 				historianFallbacks: historian?.fallbackModels,
-				historianTimeoutMs: historian?.timeoutMs ?? current.config.historian_timeout_ms,
+				historianTimeoutMs:
+					historian?.timeoutMs ?? current.config.historian_timeout_ms,
 				historianThinkingLevel: historian?.thinkingLevel,
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,
@@ -1705,15 +1742,24 @@ async function startPiMagicContextRuntime(
 		executeThresholdTokens: bootProjectDeps.config.execute_threshold_tokens,
 		resolveRuntimeDeps: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
-			const fresh = historianRunConfig(current.config, liveReaderFor(current.projectDir, current.config).poll().effective);
-			const historian = resolveHistorianFromConfig(fresh) ?? current.historianConfig;
+			const fresh = historianRunConfig(
+				current.config,
+				liveReaderFor(current.projectDir, current.config).poll().effective,
+			);
+			const historian =
+				resolveHistorianFromConfig(fresh) ?? current.historianConfig;
 			return {
 				db,
 				runner: wrapupRunner,
 				historianModel: historian?.model,
-				historianChunkTokens: historian?.historianChunkTokens ?? deriveHistorianChunkTokens(resolveHistorianContextLimit(historian?.model)),
+				historianChunkTokens:
+					historian?.historianChunkTokens ??
+					deriveHistorianChunkTokens(
+						resolveHistorianContextLimit(historian?.model),
+					),
 				historianFallbacks: historian?.fallbackModels,
-				historianTimeoutMs: historian?.timeoutMs ?? current.config.historian_timeout_ms,
+				historianTimeoutMs:
+					historian?.timeoutMs ?? current.config.historian_timeout_ms,
 				historianThinkingLevel: historian?.thinkingLevel,
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,

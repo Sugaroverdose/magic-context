@@ -30,7 +30,11 @@ export interface PiDreamerOptions {
 	registrationOwner: object;
 	/** Resolved runnable DreamerConfig from loadPiConfig(). When disable=true, the caller does not register. */
 	config: DreamerConfig;
-	sampleDreamRun?: () => { dreamerConfig?: DreamerConfig; mural?: { enabled: boolean; model?: string }; gitCommitIndexing?: PiDreamerOptions["gitCommitIndexing"] };
+	sampleDreamRun?: () => {
+		dreamerConfig?: DreamerConfig;
+		mural?: { enabled: boolean; model?: string };
+		gitCommitIndexing?: PiDreamerOptions["gitCommitIndexing"];
+	};
 	/** Active Pi-compatible host used to select per-harness model configuration. */
 	harness: Extract<ModelHarness, "pi" | "omp">;
 	/**
@@ -287,9 +291,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 					projectCwd: manualOpts.projectDir,
 				}),
 				primerRawProviderFactory: createPiPrimerRawProviderFactory(),
-				userMemoryCollectionEnabled: userMemoryCollectionEnabled(
-					dreamerConfig,
-				),
+				userMemoryCollectionEnabled: userMemoryCollectionEnabled(dreamerConfig),
 				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 				language: manualOpts.language,
 				retinaHandoff: manualOpts.retinaHandoff,

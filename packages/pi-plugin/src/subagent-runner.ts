@@ -1113,7 +1113,8 @@ export class PiSubagentRunner implements SubagentRunner {
 						? "aborted"
 						: result.reason === "timeout"
 							? "timed_out"
-							: result.reason === "no_assistant" || result.reason === "truncated"
+							: result.reason === "no_assistant" ||
+									result.reason === "truncated"
 								? "empty"
 								: "failed",
 				messages,

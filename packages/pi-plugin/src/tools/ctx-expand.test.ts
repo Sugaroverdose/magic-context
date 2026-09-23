@@ -60,14 +60,14 @@ describe("Pi ctx_expand verbose range", () => {
 				ctx as never,
 			);
 			const text = textOf(result);
-			expect(text).toMatch(/^\[1\] U \(user\)\n    • Read PLAN.md/m);
+			expect(text).toMatch(/^\[1\] U \(user\)\n {4}• Read PLAN.md/m);
 			expect(text).toMatch(/^\[2\] A \(assistant\)/m);
 			expect(text).toMatch(
-				/^\[3\] tool results\n    • tool Read → output ~\d+ tok\n    • tool Read → output ~\d+ tok/m,
+				/^\[3\] tool results\n {4}• tool Read → output ~\d+ tok\n {4}• tool Read → output ~\d+ tok/m,
 			);
 			expect(text).toMatch(/^\[4\] A \(assistant\)/m);
 			expect(text).toMatch(
-				/^\[5\] U \(user\)\n    • tool Read → output ~\d+ tok\n    • Continue/m,
+				/^\[5\] U \(user\)\n {4}• tool Read → output ~\d+ tok\n {4}• Continue/m,
 			);
 		} finally {
 			db.close();

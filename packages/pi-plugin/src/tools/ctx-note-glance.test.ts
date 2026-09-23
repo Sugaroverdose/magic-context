@@ -106,7 +106,11 @@ describe("Pi ctx_note glance", () => {
 			createdAt: now - 2 * DAY,
 			updatedAt: now - 2 * DAY,
 		});
-		insertNoteAt(db, { content: "Fresh plain item", createdAt: now, updatedAt: now });
+		insertNoteAt(db, {
+			content: "Fresh plain item",
+			createdAt: now,
+			updatedAt: now,
+		});
 		insertNoteAt(db, {
 			content: "Two-day-old plain item",
 			createdAt: now - 2 * DAY,
@@ -165,7 +169,10 @@ describe("Pi ctx_note glance", () => {
 			'Showing 25 of 30 — 5 older: ctx_note(action="read", offset=25)',
 		);
 
-		const second = await callNote({ db, params: { action: "read", offset: 25 } });
+		const second = await callNote({
+			db,
+			params: { action: "read", offset: 25 },
+		});
 		expect(second.text).toContain("note 25");
 		expect(second.text).toContain("note 29");
 		expect(second.text).not.toContain("older: ctx_note");
@@ -175,7 +182,11 @@ describe("Pi ctx_note glance", () => {
 		const db = createTestDb();
 		const now = Date.now();
 		insertNoteAt(db, { content: "first body", createdAt: now, updatedAt: now });
-		insertNoteAt(db, { content: "second body", createdAt: now, updatedAt: now });
+		insertNoteAt(db, {
+			content: "second body",
+			createdAt: now,
+			updatedAt: now,
+		});
 		insertNoteAt(db, {
 			content: "foreign body",
 			sessionId: "ses-foreign",
@@ -212,15 +223,18 @@ describe("Pi ctx_note glance", () => {
 			createdAt: now,
 			updatedAt: now,
 		});
-		db.prepare("UPDATE notes SET anchor_ordinal = ?, ready_reason = ? WHERE id = ?").run(
-			512,
-			"tag v2 exists",
-			id,
+		db.prepare(
+			"UPDATE notes SET anchor_ordinal = ?, ready_reason = ? WHERE id = ?",
+		).run(512, "tag v2 exists", id);
+
+		const { text } = await callNote({
+			db,
+			params: { action: "read", note_ids: [id] },
+		});
+
+		expect(text).toContain(
+			"- **#1** · 0m · ready: Ship the release ↳ @msg 512",
 		);
-
-		const { text } = await callNote({ db, params: { action: "read", note_ids: [id] } });
-
-		expect(text).toContain("- **#1** · 0m · ready: Ship the release ↳ @msg 512");
 		expect(text).toContain("Condition met: tag v2 exists");
 	});
 
@@ -262,7 +276,10 @@ describe("Pi ctx_note glance", () => {
 
 	it("still lists a note written through the tool", async () => {
 		const db = createTestDb();
-		addNote(db, "session", { sessionId: "ses-note-1", content: "Remember the docs." });
+		addNote(db, "session", {
+			sessionId: "ses-note-1",
+			content: "Remember the docs.",
+		});
 
 		const { text } = await callNote({ db, params: { action: "read" } });
 

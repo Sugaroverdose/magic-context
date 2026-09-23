@@ -267,7 +267,9 @@ async function runHistorianWith(args: {
 		fallbackModels: args.fallbackModels,
 		fallbackModelId: args.fallbackModelId,
 		historianChunkTokens: args.historianChunkTokens ?? 20_000,
-		historianContextLimit: args.historianContextLimit ?? (args.resolveHostContextLimit ? undefined : 200_000),
+		historianContextLimit:
+			args.historianContextLimit ??
+			(args.resolveHostContextLimit ? undefined : 200_000),
 		producerContextLimits:
 			args.producerContextLimits ??
 			new Map([
@@ -335,9 +337,16 @@ describe("runPiHistorian", () => {
 	});
 
 	it("uses the host catalog output ceiling when no cap is configured", async () => {
-		const { db, runner } = await runHistorianWith({ historianContextLimit: 200_000, resolveHostContextLimit: () => 64_000, resolveHostOutputLimit: () => 1_024, outputs: [successXml()] });
+		const { db, runner } = await runHistorianWith({
+			historianContextLimit: 200_000,
+			resolveHostContextLimit: () => 64_000,
+			resolveHostOutputLimit: () => 1_024,
+			outputs: [successXml()],
+		});
 		try {
-			expect(getHistorianFailureState(db, "ses-historian").lastError).toBeNull();
+			expect(
+				getHistorianFailureState(db, "ses-historian").lastError,
+			).toBeNull();
 			expect(runner.run).toHaveBeenCalledTimes(1);
 			expect(runner.run.mock.calls[0]?.[0].maxOutputTokens).toBe(1_024);
 		} finally {
@@ -353,7 +362,9 @@ describe("runPiHistorian", () => {
 		});
 		try {
 			expect(runner.run).not.toHaveBeenCalled();
-			expect(getHistorianFailureState(db, "ses-historian").lastError).toBeNull();
+			expect(
+				getHistorianFailureState(db, "ses-historian").lastError,
+			).toBeNull();
 			expect(
 				loadProtectedTailMeta(db, "ses-historian").protectedTailDrainTokens,
 			).toBe(0);
@@ -380,7 +391,9 @@ describe("runPiHistorian", () => {
 		});
 		try {
 			expect(refusedRunner.run).toHaveBeenCalledTimes(0);
-			expect(getHistorianFailureState(refused.db, "ses-historian").lastError).toBeNull();
+			expect(
+				getHistorianFailureState(refused.db, "ses-historian").lastError,
+			).toBeNull();
 		} finally {
 			closeQuietly(refused.db);
 		}
