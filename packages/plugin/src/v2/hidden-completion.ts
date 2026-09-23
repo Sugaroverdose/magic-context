@@ -8,6 +8,7 @@ import { HiddenCompletionRefusal } from "../hooks/magic-context/compartment-runn
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import { declareHostLimitation } from "../shared/host-limitations";
 import { log } from "../shared/logger";
+import { recordHiddenVariantWarning } from "../shared/hidden-variant-warnings";
 import type { PromptArgs } from "../shared/model-suggestion-retry";
 import { parseProviderModel, toModelEntry } from "../shared/resolve-fallbacks";
 import type { Database } from "../shared/sqlite";
@@ -652,7 +653,7 @@ export async function createV2HiddenCompletionExecutor(
             const key = `${model.providerID}/${model.modelID}:${model.variant}`;
             if (!warnedVariants.has(key)) {
                 warnedVariants.add(key);
-                note(`[magic-context] variant '${model.variant}' not offered by ${model.providerID}/${model.modelID} on this host; running without it`);
+                note(`[magic-context] ${recordHiddenVariantWarning(model.providerID, model.modelID, model.variant)}`);
             }
             return { providerID: model.providerID, modelID: model.modelID };
         } catch {

@@ -156,6 +156,7 @@ export interface StatusViewSource {
     readonly compactionEnabled?: boolean;
     /** Failure codes to print under the sections, already selected by the host. */
     readonly warnings?: readonly UserFacingFailureKey[];
+    readonly hiddenVariantWarnings?: readonly string[];
 }
 
 export interface StatusViewOptions {
@@ -500,6 +501,7 @@ function statusSections(source: StatusViewSource, now: number): StatusSection[] 
 
 function warningBlock(source: StatusViewSource): StatusWarning[] {
     return [
+        ...(source.hiddenVariantWarnings ?? []).map((text) => ({ text, tone: "warning" as const })),
         ...(source.configParseFailures ?? []).map((failure) => ({
             text: formatConfigParseStatusLine(failure),
             tone: "error" as const,

@@ -18,6 +18,7 @@ import {
     getMostRecentTaskRunAt,
 } from "../features/magic-context/dreamer/storage-task-schedule";
 import { getDreamTaskBacklogs } from "../features/magic-context/dreamer/task-gates";
+import { listHiddenVariantWarnings } from "../shared/hidden-variant-warnings";
 import {
     CANONICAL_DREAM_TASKS,
     type DreamTaskBacklogMap,
@@ -766,6 +767,7 @@ export function buildStatusDetail(
         // pass that ends early costs every project its work, so this is read
         // from the shared store rather than from a project's schedule rows.
         dreamerTickFailure: safeTickFailure(db),
+        hiddenVariantWarnings: listHiddenVariantWarnings(),
         hostBackendsModuleSide: rustMode,
         memoryMirror: rustMode ? getMemoryMirrorStatus(db, moduleFeedHead) : undefined,
         compactionMarker: getCompactionMarkerHealth(db, sessionId),
