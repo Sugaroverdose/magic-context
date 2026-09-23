@@ -1,5 +1,4 @@
 Approved issue: #
-Closes #
 
 ## Harness coverage (required)
 

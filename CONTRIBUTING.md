@@ -8,24 +8,24 @@ wait for a maintainer to apply `design-approved` before spending time on a PR.
 Approval is our agreement that we intend to merge the proposed change, subject to
 implementation review, rather than asking you to build something we may decline.
 
-Link the approved issue in the PR body with `Closes #123` (or `Fixes` / `Resolves`).
+Link the approved issue in the PR body with the template's `Approved issue: #123` line
+(or `Refs #123` / `Part of #123` for a PR that is one step of an issue). Please don't
+use `Closes` / `Fixes` / `Resolves`: GitHub would close the issue when the PR merges,
+before the fix is released. Maintainers close the issue when the change ships.
 Keep the PR in draft until its issue carries `design-approved`. There is no
 path-derived bypass for docs-only or test-only changes: deleting a guarding test
 can change behaviour. The contributor bypass is a maintainer-applied `trivial`
 label on the PR, an explicit judgement rather than a filename heuristic.
 
-The gate is **enforced by draft conversion** when an unapproved PR is
-marked ready for review. It posts one comment and updates that comment on later
-runs. When a maintainer labels the linked issue `design-approved`, the gate marks
-waiting drafts ready for review. The gate does not convert a PR opened
-already ready, or an existing ready PR on edits or pushes; those events report a
-failing check and a comment. Keep new unapproved PRs in draft yourself.
+The gate is **enforced by draft conversion**: an unapproved PR is converted to a
+draft when it is opened or marked ready for review. It posts one comment and
+updates that comment on later runs. When a maintainer labels the linked issue
+`design-approved`, the gate marks waiting drafts ready for review.
 This repository is private today: no required branch-protection check is
 configured; the required-check half must wait until the repository is public.
 
 Maintainer and automation branches in this repository are exempt from the gate;
-fork branches never are. Applying `trivial` does not itself re-run the workflow;
-re-run it from the checks tab or push to refresh the result.
+fork branches never are. Adding or removing a label re-runs the gate.
 
 ## Cover every shipped harness
 
