@@ -80,7 +80,7 @@ import {
     validateChunkCoverage,
     validateStoredCompartments,
 } from "./compartment-runner-validation";
-import { clearInjectionCache, renderMemoryBlock } from "./inject-compartments";
+import { clearInjectionCache, renderHistorianMemoryBlock } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
 import { persistFilteredNoise } from "./persist-filtered-noise";
 import {
@@ -607,7 +607,11 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         // serialization limits.
         const projectPath = resolveProjectIdentity(directory ?? process.cwd());
         const memories = getMemoriesByProject(db, projectPath, ["active", "permanent"]);
-        const projectMemory = renderMemoryBlock(memories) ?? "";
+        // The historian dedups facts by content and never addresses a memory by
+        // id, so its block uses the id-free historian renderer (not the m0/m1
+        // `#id` wire that <memory-updates> corrections address). Byte-parity
+        // with the Rust port is pinned by the historian prompt golden.
+        const projectMemory = renderHistorianMemoryBlock(memories) ?? "";
 
         const references = buildReferenceBlocks({
             sessionId,
