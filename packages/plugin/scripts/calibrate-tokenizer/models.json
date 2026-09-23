@@ -21,6 +21,8 @@
         { "label": "openai/gpt-6-astra", "provider": "openai", "modelId": "gpt-6-astra", "tokenizerKey": "openai/gpt-5" },
         { "label": "anthropic/claude-fable-5-1", "provider": "anthropic", "modelId": "claude-fable-5-1", "tokenizerKey": "anthropic/claude-opus-4.5" },
         { "label": "anthropic/claude-opus-5", "provider": "anthropic", "modelId": "claude-opus-5", "tokenizerKey": "anthropic/claude-opus-4.5" },
+        { "label": "anthropic/claude-opus-5-5", "provider": "anthropic", "modelId": "claude-opus-5-5", "tokenizerKey": "anthropic/claude-opus-4.5" },
+        { "label": "anthropic/claude-sonnet-5", "provider": "anthropic", "modelId": "claude-sonnet-5", "tokenizerKey": "anthropic/claude-opus-4.5" },
         {
             "label": "anthropic/claude-opus-4-7",
             "provider": "anthropic",

@@ -30,6 +30,12 @@
     "proseRatio": 1.571778
   },
   {
+    "prefix": "anthropic/claude-sonnet-5",
+    "systemRatio": 1.511497,
+    "toolsRatio": 1.554814,
+    "proseRatio": 1.571815
+  },
+  {
     "prefix": "openrouter/anthropic/claude-fable-5-1",
     "systemRatio": 1.511497,
     "toolsRatio": 1.551639,
@@ -42,6 +48,12 @@
     "proseRatio": 1.571778
   },
   {
+    "prefix": "openrouter/anthropic/claude-sonnet-5",
+    "systemRatio": 1.511497,
+    "toolsRatio": 1.554814,
+    "proseRatio": 1.571815
+  },
+  {
     "prefix": "github-copilot/claude-fable-5-1",
     "systemRatio": 1.511497,
     "toolsRatio": 1.551639,
@@ -52,6 +64,12 @@
     "systemRatio": 1.511497,
     "toolsRatio": 1.551639,
     "proseRatio": 1.571778
+  },
+  {
+    "prefix": "github-copilot/claude-sonnet-5",
+    "systemRatio": 1.511497,
+    "toolsRatio": 1.554814,
+    "proseRatio": 1.571815
   },
   {
     "prefix": "anthropic/claude-opus-4-8",

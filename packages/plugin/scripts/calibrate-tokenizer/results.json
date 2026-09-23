@@ -1095,5 +1095,95 @@
     },
     "error": null,
     "durationMs": 2106
+  },
+  {
+    "method": "count_tokens",
+    "proseRatio": 1.5718147472642001,
+    "proseTokens": {
+      "local_raw": 61408,
+      "api": 96522
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 35623,
+        "api": 54878,
+        "ratio": 1.5405215731409483
+      },
+      "history": {
+        "local_raw": 23430,
+        "api": 37430,
+        "ratio": 1.597524541186513
+      },
+      "memory": {
+        "local_raw": 2351,
+        "api": 4214,
+        "ratio": 1.7924287537218204
+      }
+    },
+    "label": "anthropic/claude-sonnet-5",
+    "provider": "anthropic",
+    "modelId": "claude-sonnet-5",
+    "tokenizerKey": "anthropic/claude-opus-4.5",
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": 18000,
+      "api": 24716,
+      "ratio_raw": 1.511,
+      "ratio_sdk": 1.373
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": 16477,
+      "api": 33301,
+      "ratio_raw": 1.555,
+      "ratio_sdk": 2.021
+    },
+    "error": null,
+    "durationMs": 1634
+  },
+  {
+    "method": "count_tokens",
+    "proseRatio": 1.5718147472642001,
+    "proseTokens": {
+      "local_raw": 61408,
+      "api": 96522
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 35623,
+        "api": 54878,
+        "ratio": 1.5405215731409483
+      },
+      "history": {
+        "local_raw": 23430,
+        "api": 37430,
+        "ratio": 1.597524541186513
+      },
+      "memory": {
+        "local_raw": 2351,
+        "api": 4214,
+        "ratio": 1.7924287537218204
+      }
+    },
+    "label": "anthropic/claude-opus-5-5",
+    "provider": "anthropic",
+    "modelId": "claude-opus-5-5",
+    "tokenizerKey": "anthropic/claude-opus-4.5",
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": 18000,
+      "api": 24716,
+      "ratio_raw": 1.511,
+      "ratio_sdk": 1.373
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": 16477,
+      "api": 33233,
+      "ratio_raw": 1.552,
+      "ratio_sdk": 2.017
+    },
+    "error": null,
+    "durationMs": 1721
   }
 ]
