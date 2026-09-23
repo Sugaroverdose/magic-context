@@ -506,7 +506,7 @@ fn log_pending_m1_delta(session_id: &str, now_ms: i64, pending_since_ms: Option<
     let mut buckets = buckets.lock().expect("m1 pending log mutex");
     if buckets.get(session_id).copied().unwrap_or(0) < bucket {
         buckets.insert(session_id.to_string(), bucket);
-        eprintln!("mc-module: pending_m1_delta=true age_ms={age_ms} session={session_id}");
+        tracing::info!("mc-module: pending_m1_delta=true age_ms={age_ms} session={session_id}");
     }
 }
 
@@ -931,7 +931,7 @@ fn claim_protected_tags_deprecation(req: &TransformRequest) -> bool {
 
 fn emit_protected_tags_deprecation_once(req: &TransformRequest) {
     if claim_protected_tags_deprecation(req) {
-        eprintln!(
+        tracing::debug!(
             "mc-module: deprecated protected_tags is ignored for session {}; use protected_tokens",
             req.session_id
         );
@@ -3397,9 +3397,10 @@ fn apply_once(
                     .map(|(_, new_key, _)| new_key.as_str())
                     .unwrap_or(ingress_req.session_id.as_str())
         {
-            eprintln!(
+            tracing::error!(
                 "mc-module: lineage protocol error for {}: malformed edge {} or target mismatch",
-                ingress_req.session_id, ingress_req.descent_edge_id
+                ingress_req.session_id,
+                ingress_req.descent_edge_id
             );
             return Ok(lineage_protocol_passthrough(
                 ingress_req,
@@ -3430,9 +3431,10 @@ fn apply_once(
             now_ms: ctx.now_ms,
         })?;
         if outcome.disposition == LineageDescentDisposition::PendingBuildSkew {
-            eprintln!(
+            tracing::debug!(
                 "mc-module: lineage descent pending build-skew for target {} edge {}",
-                ingress_req.session_id, ingress_req.descent_edge_id
+                ingress_req.session_id,
+                ingress_req.descent_edge_id
             );
             return Ok(lineage_protocol_passthrough(
                 ingress_req,
@@ -3584,7 +3586,7 @@ fn apply_once(
     let mut lineage_anchor_failure = false;
     if let Err(detail) = validate_lineage_anchor(&loaded.meta, req, &projection) {
         lineage_anchor_failure = true;
-        eprintln!(
+        tracing::error!(
             "mc-module: lineage anchor validation failed closed for {}: {detail}",
             req.session_id
         );
@@ -3701,9 +3703,10 @@ fn apply_once(
     if pending_rewrite_absent_shape && loaded.meta.anchor_block_id.is_none() {
         let fingerprint = absent_shape_fingerprint(&live);
         if loaded.meta.pending_rewrite.is_some() {
-            eprintln!(
+            tracing::warn!(
                 "mc-module: pending_rewrite raw pass-through for {} fingerprint {}",
-                req.session_id, fingerprint
+                req.session_id,
+                fingerprint
             );
             let passthrough_overlay = tagging_active.then(|| {
                 tag_overlay_state(
@@ -3771,7 +3774,7 @@ fn apply_once(
             if let Some(first_divergence) = &first_divergence {
                 let detail =
                     serde_json::to_string(first_divergence).expect("divergence is serializable");
-                eprintln!(
+                tracing::warn!(
                     "mc-module: first_divergence session={} {detail}",
                     req.session_id
                 );
@@ -3884,14 +3887,16 @@ fn apply_once(
         if let Some(first_divergence) = &first_divergence {
             let detail =
                 serde_json::to_string(first_divergence).expect("divergence is serializable");
-            eprintln!(
+            tracing::warn!(
                 "mc-module: first_divergence session={} {detail}",
                 req.session_id
             );
         }
-        eprintln!(
+        tracing::warn!(
             "mc-module: armed pending_rewrite for {} fingerprint {} ambiguous={}",
-            req.session_id, fingerprint, ambiguous
+            req.session_id,
+            fingerprint,
+            ambiguous
         );
         return Ok(pending_passthrough_result(PendingPassthroughArgs {
             historian_tags: Arc::clone(&tag_rows),
@@ -4123,7 +4128,7 @@ fn apply_once(
     let emergency_no_head_escape =
         req.emergency_recovery_armed && req.emergency_recovery_no_head_escape;
     if emergency_no_head_escape {
-        eprintln!(
+        tracing::warn!(
             "mc-module: overflow recovery arm has no eligible history boundary; suppressing forced emergency pass for {}",
             req.session_id
         );
@@ -4183,7 +4188,7 @@ fn apply_once(
         })
     {
         scheduler_outcome.drain_latch.active_since_ms = None;
-        eprintln!(
+        tracing::info!(
             "emergency disarm: trusted final-wire {} under provider limit {}",
             effective_usage.final_wire_input_tokens,
             provider_proven_limit.unwrap_or_default()
@@ -4307,7 +4312,7 @@ fn apply_once(
             .as_ref()
             .is_some_and(|previous| previous != &calibration_candidate);
     if !pass_already_busting && !pending_drop_target_ids.is_empty() {
-        eprintln!("mc-module: pending drops held session={} reason=no_originating_cache_bust scheduler={:?} historian_active={}", req.session_id, scheduler_outcome.pass, ctx.historian_active);
+        tracing::info!("mc-module: pending drops held session={} reason=no_originating_cache_bust scheduler={:?} historian_active={}", req.session_id, scheduler_outcome.pass, ctx.historian_active);
     }
     // Tail reclaim gates purely on the serializer profile. Every shipping profile is a
     // full-array consumer (healing::tail_reclaim is true for all of them), so the request
@@ -4617,7 +4622,7 @@ fn apply_once(
     if pass_already_busting {
         if calibration_changed {
             if let Some(previous) = loaded.meta.decision_calibration.as_ref() {
-                eprintln!(
+                tracing::debug!(
                     "mc-module: [{}] calibration revision {} → {} adopted (bust={})",
                     req.session_id,
                     previous.revision,
@@ -4675,7 +4680,7 @@ fn apply_once(
                 "boundary_present_recovery",
                 true,
             ));
-            eprintln!(
+            tracing::warn!(
                 "mc-module: pending_rewrite ambiguous after boundary-present recovery for {}",
                 req.session_id
             );
@@ -4739,7 +4744,7 @@ fn apply_once(
     if !lineage_anchor_failure {
         meta.protected_tokens_effective = floor_resolution.persisted;
         if meta.protected_tokens_effective != loaded.meta.protected_tokens_effective {
-            eprintln!(
+            tracing::debug!(
                 "mc-module: protected_tokens session={} floor={} provenance={} usable_soft={}",
                 req.session_id,
                 protected_tokens_floor,
@@ -5717,7 +5722,7 @@ fn apply_once(
                     // One line per invalidation event, not one per pass: the re-measured
                     // baseline is persisted here so the next defer pass compares against
                     // the prefix this pass actually froze.
-                    eprintln!(
+                    tracing::debug!(
                         "mc-module: [{}] {}",
                         req.session_id,
                         mismatch.diagnostic_line(refreshed.baseline.baseline_generation)
@@ -6282,13 +6287,15 @@ fn apply_once(
             );
     }
     for re_adoption in &tail_identity_re_adoptions {
-        eprintln!(
+        tracing::debug!(
             "mc-module: identity re-adopted for tail mid {} old_hash={} new_hash={}",
-            re_adoption.mid, re_adoption.old_hash_prefix, re_adoption.new_hash_prefix
+            re_adoption.mid,
+            re_adoption.old_hash_prefix,
+            re_adoption.new_hash_prefix
         );
     }
     if let Some(divergence) = boundary_divergence_recut {
-        eprintln!(
+        tracing::warn!(
             "mc-module: boundary_divergence_recut session={} old_coverage={} new_coverage={} live_tail_allowance={}",
             req.session_id,
             divergence.old_coverage,
@@ -6298,13 +6305,13 @@ fn apply_once(
     }
     if let Some(first_divergence) = &first_divergence {
         let detail = serde_json::to_string(first_divergence).expect("divergence is serializable");
-        eprintln!(
+        tracing::warn!(
             "mc-module: first_divergence session={} {detail}",
             req.session_id
         );
     }
     if transition_due && is_bust_pass && !transition_shapes.poisoned_reasoning_arc_ids.is_empty() {
-        eprintln!(
+        tracing::debug!(
             "mc-module: frozen-reduction-heal session={} arc_ids={} pass_row={}",
             req.session_id,
             transition_shapes.poisoned_reasoning_arc_ids.join(","),
@@ -6312,7 +6319,7 @@ fn apply_once(
         );
     }
     for mid in &healed_trailing_blank_ids {
-        eprintln!(
+        tracing::debug!(
             "mc-module: trailing-blank-heal session={} mid={} reason=source_without_trailing_blank pass_row={}",
             req.session_id, mid, row_version,
         );
@@ -6958,7 +6965,7 @@ fn render_config_change(
             effective_render_config != meta.last_render_config
         };
     #[cfg(feature = "drive-fault")]
-    eprintln!(
+    tracing::debug!(
         "mc-module: render identity session={} changed={} observed={} coordinator={} transition={} tool_present={} profile={} effective={:?} persisted={:?}",
         req.session_id,
         changed,
@@ -7725,7 +7732,7 @@ fn log_reasoning_drop_seed_skips(core: &CoreState, live: &[&FlatBlock], session_
     for unit in &core.frozen_units {
         if let Some(target) = unit.key.strip_prefix(RED_KEY_PREFIX) {
             if reasoning.contains(target) {
-                eprintln!(
+                tracing::warn!(
                     "mc-module: skipped drop seed targeting reasoning block {target} for session {session_id}"
                 );
             }
@@ -13172,7 +13179,7 @@ fn enforce_unique_tool_use_ids(
     }
 
     for (id, message_index, block_index) in &duplicates {
-        eprintln!(
+        tracing::debug!(
             "mc-module: duplicate_tool_use_id session={} id={} message_index={} block_index={} action=drop_later",
             session_id, id, message_index, block_index
         );

@@ -3196,7 +3196,7 @@ impl NativeAttachmentCache {
             if let Some(session) = self.sessions.remove(&oldest) {
                 self.retained_bytes = self.retained_bytes.saturating_sub(session.retained_bytes);
                 stats.evicted = stats.evicted.saturating_add(1);
-                eprintln!(
+                tracing::debug!(
                     "native-attachment-cache evicted session={oldest} byte_charge={} retained_bytes={} total_budget={} reason=delta_core_admission",
                     session.retained_bytes, self.retained_bytes, self.max_retained_bytes,
                 );
@@ -3284,12 +3284,12 @@ impl NativeAttachmentCache {
 
         if degraded {
             stats.degraded_store = stats.degraded_store.saturating_add(1);
-            eprintln!(
+            tracing::warn!(
                 "native-attachment-cache degraded_store session={session_id} requested_byte_charge={requested_bytes} stored_byte_charge={retained_bytes} dropped_sidecar_trees=true consequence=raw_sidecar_redecode delta_core_preserved=true",
             );
         }
         if retained_bytes > self.max_retained_bytes {
-            eprintln!(
+            tracing::warn!(
                 "native-attachment-cache oversized_core_store session={session_id} stored_byte_charge={retained_bytes} total_budget={} over_budget_by={} consequence=single_session_exceeds_native_cache_budget delta_core_preserved=true",
                 self.max_retained_bytes,
                 retained_bytes.saturating_sub(self.max_retained_bytes),
@@ -3558,6 +3558,7 @@ impl MemoryMirrorHealth {
 /// and the per-route session bindings (route channel → {project, session}).
 pub struct McHandler {
     store: Arc<OnceLock<Arc<McStore>>>,
+    log_directory: Option<PathBuf>,
     store_open: Arc<StoreOpenCoordinator>,
     producer_factory: Arc<dyn HistorianProducerFactory>,
     session_resolver: Arc<dyn SessionResolver>,
@@ -4164,6 +4165,7 @@ impl McHandler {
         };
         McHandler {
             store: Arc::new(OnceLock::new()),
+            log_directory: None,
             store_open: Arc::new(StoreOpenCoordinator::new()),
             producer_factory,
             session_resolver,
@@ -4227,6 +4229,13 @@ impl McHandler {
         }
     }
 
+    /// Keep the logger's resolved directory so the HELLO_ACK store path can be checked
+    /// against it; a mismatch would split module logs from the store's data directory.
+    pub fn with_log_directory(mut self, directory: PathBuf) -> Self {
+        self.log_directory = Some(directory);
+        self
+    }
+
     fn begin_store_open(&self, descriptor: StorageDescriptor, origin: DescriptorOrigin) {
         if self.store.get().is_some()
             || self
@@ -4283,7 +4292,7 @@ impl McHandler {
             }
             Err(error) if store_open_error_is_live_lease(&error) => error,
             Err(error) => {
-                eprintln!("mc-module: store open failed: {error}");
+                tracing::error!("mc-module: store open failed: {error}");
                 coordinator.fail_and_idle(error.to_string(), now_ms().max(0) as u64);
                 return;
             }
@@ -4294,7 +4303,7 @@ impl McHandler {
             .wait_started_at_ms
             .store(now_ms().max(0) as u64, Ordering::Relaxed);
         coordinator.set_phase(STORE_OPEN_WAITING);
-        eprintln!(
+        tracing::warn!(
             "mc-module: storage lease held; waiting up to {}s for predecessor exit",
             STORE_LEASE_WAIT_WINDOW.as_secs()
         );
@@ -4308,7 +4317,7 @@ impl McHandler {
                 return;
             }
             if elapsed >= policy.wait_window {
-                eprintln!(
+                tracing::error!(
                     "mc-module: storage lease wait expired after {:.2}s; store open failed: {last_lease_error}",
                     elapsed.as_secs_f64()
                 );
@@ -4347,7 +4356,7 @@ impl McHandler {
                     }
                     let _ = store_slot.set(Arc::new(opened));
                     coordinator.set_phase(STORE_OPENED);
-                    eprintln!(
+                    tracing::info!(
                         "mc-module: storage lease released; store opened after {:.2}s",
                         started.elapsed().as_secs_f64()
                     );
@@ -4359,7 +4368,7 @@ impl McHandler {
                     attempt = attempt.saturating_add(1);
                 }
                 Err(error) => {
-                    eprintln!(
+                    tracing::error!(
                         "mc-module: storage lease wait ended after {:.2}s; store open failed: {error}",
                         started.elapsed().as_secs_f64()
                     );
@@ -4373,7 +4382,7 @@ impl McHandler {
     /// A shutdown ends the open for good as far as any later request is concerned, so it records a
     /// reason like any other terminal exit rather than leaving the idle phase unexplained.
     fn abandon_lease_wait_on_shutdown(coordinator: &StoreOpenCoordinator, elapsed: Duration) {
-        eprintln!(
+        tracing::info!(
             "mc-module: storage lease wait cancelled during shutdown after {:.2}s",
             elapsed.as_secs_f64()
         );
@@ -4512,6 +4521,7 @@ impl McHandler {
     ) -> Self {
         McHandler {
             store: Arc::new(OnceLock::new()),
+            log_directory: None,
             store_open: Arc::new(StoreOpenCoordinator::new()),
             producer_factory: factory,
             session_resolver,
@@ -4686,7 +4696,7 @@ impl McHandler {
         let line = format!(
             "transform_page_collection_discarded session={session_id} staged_pages={staged_pages} trigger={trigger}"
         );
-        eprintln!("mc-module: {line}");
+        tracing::warn!("mc-module: {line}");
         #[cfg(test)]
         self.transform_page_discard_logs
             .lock()
@@ -4705,7 +4715,7 @@ impl McHandler {
             "mc-todo-verdict session={session_id} unprobed_bust=1 possible_stale_mint={} decision={decision} reason={reason}",
             u8::from(possible_stale_mint)
         );
-        eprintln!("{line}");
+        tracing::info!("{line}");
         #[cfg(test)]
         self.todo_verdict_diagnostic_logs
             .lock()
@@ -5541,7 +5551,9 @@ impl McHandler {
                     }
                     .await;
                     if let Err(e) = result {
-                        eprintln!("mc-module: historian reattach failed for {session_id}: {e}");
+                        tracing::error!(
+                            "mc-module: historian reattach failed for {session_id}: {e}"
+                        );
                     }
                 });
                 Some("reattaching")
@@ -5554,7 +5566,7 @@ impl McHandler {
                         &session_id,
                         now + HISTORIAN_FAILURE_BACKOFF_MS,
                     ) {
-                        eprintln!(
+                        tracing::error!(
                             "mc-module: historian restart recovery failed for {session_id}: {e}"
                         );
                     }
@@ -5716,7 +5728,7 @@ impl McHandler {
             Ok(ordinal) if ordinal > 0 => Some(ordinal as u64),
             Ok(_) | Err(_) if loaded.meta.ordinal_continuation_base.is_some() => {
                 let detail = "continued_ordinal_offset_missing";
-                eprintln!(
+                tracing::info!(
                     "mc-module: aborting historian trigger for {}: {detail}",
                     parsed.session_id
                 );
@@ -6398,7 +6410,7 @@ impl McHandler {
             publication_fence,
         } = task;
         let _guard = live_guard;
-        eprintln!(
+        tracing::info!(
             "mc-module: historian firing for {session_id}: await_timeout_ms={} completion_budget_ms={}",
             historian_await_timeout.as_millis(),
             historian::completion_wait_budget(historian_await_timeout).as_millis()
@@ -6488,12 +6500,14 @@ impl McHandler {
         let factory = Arc::clone(&self.producer_factory);
         let handle = tokio::spawn(Self::execute_historian_firing_task(factory, task));
         let wait_started_at = Instant::now();
-        eprintln!(
+        tracing::info!(
+            target: "perf",
             "mc-pass-stage session={session_id} stage=historian_inline_wait event=begin budget_ms={}",
             wait_budget.as_millis()
         );
         let waited = tokio::time::timeout(wait_budget, handle).await;
-        eprintln!(
+        tracing::info!(
+            target: "perf",
             "mc-pass-stage session={session_id} stage=historian_inline_wait event=end outcome={} elapsed_ms={:.1}",
             if waited.is_ok() { "completed" } else { "timed_out" },
             wait_started_at.elapsed().as_secs_f64() * 1_000.0
@@ -6521,12 +6535,14 @@ impl McHandler {
         wait_budget: Duration,
     ) -> bool {
         let wait_started_at = Instant::now();
-        eprintln!(
+        tracing::info!(
+            target: "perf",
             "mc-pass-stage session={session_id} stage=historian_busy_wait event=begin budget_ms={}",
             wait_budget.as_millis()
         );
         let completed = tokio::time::timeout(wait_budget, completion).await.is_ok();
-        eprintln!(
+        tracing::info!(
+            target: "perf",
             "mc-pass-stage session={session_id} stage=historian_busy_wait event=end outcome={} elapsed_ms={:.1}",
             if completed { "completed" } else { "timed_out" },
             wait_started_at.elapsed().as_secs_f64() * 1_000.0
@@ -6667,9 +6683,13 @@ impl McHandler {
             let result = Self::execute_historian_firing_task(factory, task).await;
             match result {
                 Ok(outcome) => {
-                    eprintln!("mc-module: historian firing finished for {session_id}: {outcome:?}")
+                    tracing::info!(
+                        "mc-module: historian firing finished for {session_id}: {outcome:?}"
+                    )
                 }
-                Err(e) => eprintln!("mc-module: historian firing failed for {session_id}: {e}"),
+                Err(e) => {
+                    tracing::error!("mc-module: historian firing failed for {session_id}: {e}")
+                }
             }
         });
     }
@@ -9579,7 +9599,7 @@ impl McHandler {
             let resolved = binding
                 .config
                 .resolve_execute_threshold(parsed.model_key.as_deref());
-            eprintln!(
+            tracing::debug!(
                 "mc-module: execute_threshold channel={channel} model={} configured={} provenance={} effective={} source={}",
                 parsed.model_key.as_deref().unwrap_or("default"),
                 resolved.percentage,
@@ -9588,9 +9608,9 @@ impl McHandler {
                 if parsed.effective_execute_threshold.is_some() { "host" } else { "config" },
             );
             if let Some(warning) = &resolved_protected_tokens.warning {
-                eprintln!("mc-module: config warning: {warning}");
+                tracing::warn!("mc-module: config warning: {warning}");
             }
-            eprintln!(
+            tracing::debug!(
                 "mc-module: protected_tokens channel={channel} provenance={} effective={} source={}",
                 resolved_protected_tokens.provenance,
                 parsed
@@ -9979,7 +9999,7 @@ impl McHandler {
             lineage_anchor_mid.as_deref(),
             transition_consumed,
         ) {
-            eprintln!("mc-module: native reasoning replay proof not recorded: {error}");
+            tracing::error!("mc-module: native reasoning replay proof not recorded: {error}");
         }
         finalize_native_messages_response(
             &mut response,
@@ -10025,7 +10045,7 @@ impl McHandler {
         match self.observe_memory_mirror_frontier(&store) {
             Ok(feed_head) => response.memory_mirror_head = Some(feed_head),
             Err(error) => {
-                eprintln!("mc-module: memory mirror frontier probe failed: {error}");
+                tracing::error!("mc-module: memory mirror frontier probe failed: {error}");
             }
         }
         if let Some(timings) = response.timings.as_mut() {
@@ -11060,7 +11080,8 @@ impl McHandler {
         };
         let page_stage_ms = page_stage_started_at.elapsed().as_secs_f64() * 1_000.0;
         self.refresh_oldest_queued_at_ms();
-        eprintln!(
+        tracing::info!(
+            target: "perf",
             "mc-transform-page-timing session={} page={}/{} bytes={} digest={:.1} size_encode={:.1} stage={:.1}",
             binding.session,
             page_index + 1,
@@ -11129,7 +11150,7 @@ impl McHandler {
                     }
                 };
                 let page_assembly_ms = page_assembly_started_at.elapsed().as_secs_f64() * 1_000.0;
-                eprintln!(
+                tracing::debug!(
                     "mc-transform-page-assembly session={} pages={} inbound_bytes={} assembly={:.1}",
                     binding.session, page_total, inbound_bytes, page_assembly_ms,
                 );
@@ -11375,7 +11396,7 @@ impl McHandler {
                 child_session_id(&authority_project, command_id, next_attempt_nonce(now_ms()));
             let _dreamer_run_guard = self.register_dreamer_run(&child_session);
             let mut record_attempt = |outcome: &str, detail: String| {
-                eprintln!(
+                tracing::info!(
                     "mc-module: classify attempt={attempts} model={model} session={child_session} outcome={outcome}{}",
                     if detail.is_empty() {
                         String::new()
@@ -11972,7 +11993,7 @@ impl McHandler {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if sessions.insert(session_id.to_string()) {
-            eprintln!(
+            tracing::debug!(
                 "mc-module: {tool} {action} facade mutation omitted command_id for session {session_id}; accepting for transport compatibility"
             );
         }
@@ -11997,7 +12018,7 @@ impl McHandler {
         let authority = store
             .facade_authority_for_project(requested_project, authority_domain)
             .map_err(|error| {
-                eprintln!(
+                tracing::error!(
                     "mc-module: {authority_domain} route lookup failed code=authority_route_lookup_failed: {error}"
                 );
                 HandlerOutcome::Error {
@@ -12012,7 +12033,7 @@ impl McHandler {
             store
                 .bind_authority_route(&context_store_uuid, &project, &route_project_root)
                 .map_err(|error| {
-                    eprintln!(
+                    tracing::error!(
                         "mc-module: {authority_domain} route bind failed code=authority_route_bind_failed: {error}"
                     );
                     HandlerOutcome::Error {
@@ -12046,7 +12067,7 @@ impl McHandler {
             Some(store) => store
                 .authority_project_state_for_route(&route_project_root, authority_domain)
                 .map_err(|error| {
-                    eprintln!(
+                    tracing::error!(
                         "mc-module: {authority_domain} project resolution failed code=authority_project_resolution_failed: {error}"
                     );
                     HandlerOutcome::Error {
@@ -12097,7 +12118,7 @@ impl McHandler {
                     Some(store) => store
                         .authority_project_state_for_route(&route_project_root, authority_domain)
                         .map_err(|error| {
-                            eprintln!(
+                            tracing::error!(
                                 "mc-module: {authority_domain} project resolution failed code=authority_project_resolution_failed: {error}"
                             );
                             HandlerOutcome::Error {
@@ -12113,7 +12134,7 @@ impl McHandler {
         let memory_project_path = match authority_route {
             Some((authority_project, authority_state)) => {
                 if requested_project.is_some_and(|requested| requested != authority_project) {
-                    eprintln!(
+                    tracing::warn!(
                         "mc-module: {authority_domain} route {route_project_root} project mismatch: expected {authority_project}, received {}",
                         requested_project.unwrap_or_default()
                     );
@@ -13545,6 +13566,9 @@ impl ModuleHandler for McHandler {
     /// predecessor's live single-writer lease cannot block transform dispatch.
     async fn on_hello_ack(&self, ack: &ModuleHelloAckBody) {
         let (descriptor, origin) = resolve_descriptor_with_origin(ack.storage.as_ref());
+        if let Some(log_directory) = &self.log_directory {
+            warn_if_log_directory_differs(&descriptor, log_directory);
+        }
         self.begin_store_open(descriptor, origin);
     }
 
@@ -14528,7 +14552,7 @@ fn finalize_native_messages_response(
     }
 
     if let Some(reason) = fallback_reason {
-        eprintln!(
+        tracing::warn!(
             "native-delta fallback session={} native_delta_fallback_reason={}",
             request.session_id,
             reason.as_str(),
@@ -14697,7 +14721,7 @@ async fn maybe_apply_transform_timeout_fault() -> bool {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(16_000);
-    eprintln!(
+    tracing::warn!(
         "mc-module: WARN MC_DRIVE_FAULT=transform_timeout active — stalling transform request by {delay_ms} ms for drive"
     );
     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -14718,7 +14742,7 @@ fn apply_drive_fault(response: &mut transform::TransformResponse, fault: DriveFa
                 None => "_skew".to_string(),
             };
             response.full_array_fingerprint = Some(perturbed);
-            eprintln!(
+            tracing::error!(
                 "mc-module: WARN MC_DRIVE_FAULT=fingerprint_skew active — response deliberately corrupted for drive"
             );
         }
@@ -14727,7 +14751,7 @@ fn apply_drive_fault(response: &mut transform::TransformResponse, fault: DriveFa
             // need_full_sync uses) while keeping the ok status: a success-shaped response
             // with the array field missing.
             response.ck_messages = None;
-            eprintln!(
+            tracing::error!(
                 "mc-module: WARN MC_DRIVE_FAULT=omit_ck_messages active — response deliberately corrupted for drive"
             );
         }
@@ -14745,7 +14769,7 @@ fn apply_drive_fault(response: &mut transform::TransformResponse, fault: DriveFa
                 directive_id: "drive-fault-channel2".to_string(),
                 armed_at_ms: 0,
             });
-            eprintln!(
+            tracing::info!(
                 "mc-module: WARN MC_DRIVE_FAULT=channel2_arm active — directive force-armed for drive"
             );
         }
@@ -14890,7 +14914,7 @@ fn emit_pass_timing(
         timings.response_meta_encode = response_meta_encode_ms;
         timings.response_size_account = response_size_account_ms;
         timings.response_splice = response_splice_ms;
-        eprintln!(
+        tracing::debug!(
             "{}",
             transform::format_pass_timing_line(
                 session_id,
@@ -17557,6 +17581,57 @@ fn resolve_descriptor_with_origin(
     (dev_descriptor(), DescriptorOrigin::DevFallback)
 }
 
+fn log_directory_mismatch(descriptor: &StorageDescriptor, logs_dir: &Path) -> Option<PathBuf> {
+    let StorageBackend::Sqlite { path } = &descriptor.backend else {
+        return None;
+    };
+    let data_dir = Path::new(path).parent()?;
+    (data_dir != logs_dir.parent()?).then(|| data_dir.to_path_buf())
+}
+
+fn log_directory_disagreement(descriptor: &StorageDescriptor, logs_dir: &Path) -> Option<String> {
+    let data_dir = log_directory_mismatch(descriptor, logs_dir)?;
+    Some(format!(
+        "mc-module: HELLO storage data dir {} differs from logger data dir {}",
+        data_dir.display(),
+        logs_dir.parent()?.display()
+    ))
+}
+
+fn warn_if_log_directory_differs(descriptor: &StorageDescriptor, logs_dir: &Path) {
+    if let Some(message) = log_directory_disagreement(descriptor, logs_dir) {
+        tracing::warn!("{message}");
+    }
+}
+
+#[cfg(test)]
+mod fleet_logging_tests {
+    use super::*;
+
+    #[test]
+    fn hello_storage_disagreement_is_detected_without_rederiving_logger_path() {
+        let descriptor = dev_descriptor_at("/tmp/mc-hello-data");
+        let store_dir = Path::new(match &descriptor.backend {
+            StorageBackend::Sqlite { path } => path,
+            _ => panic!("dev descriptor must be sqlite"),
+        })
+        .parent()
+        .unwrap();
+        assert_eq!(
+            log_directory_mismatch(&descriptor, &store_dir.join("logs")),
+            None
+        );
+        assert_eq!(
+            log_directory_mismatch(&descriptor, Path::new("/tmp/other/logs")),
+            Some(store_dir.to_path_buf())
+        );
+        let warning = log_directory_disagreement(&descriptor, Path::new("/tmp/other/logs"))
+            .expect("mismatch must produce a warning");
+        assert!(warning.contains(&store_dir.display().to_string()));
+        assert!(warning.contains("/tmp/other"));
+    }
+}
+
 fn dev_descriptor() -> StorageDescriptor {
     let data_home = std::env::var("XDG_DATA_HOME")
         .ok()
@@ -17828,7 +17903,7 @@ pub fn manifest_with_route_targets(
     .provenance(match build_provenance(option_env!("MC_BUILD_SHA"), None, None) {
         Ok(provenance) => Some(provenance),
         Err(err) => {
-            eprintln!("mc-module: MC_BUILD_SHA rejected by provenance form check, omitting deploy marker: {err}");
+            tracing::warn!("mc-module: MC_BUILD_SHA rejected by provenance form check, omitting deploy marker: {err}");
             None
         }
     })

@@ -32,6 +32,29 @@ afterEach(() => {
 });
 
 describe("parseLogLine", () => {
+    it("reads module store failures through the r2 envelope", () => {
+        const parsed = parseLogLine("2026-09-23T00:11:14.902Z ERROR magic-context: mc-module: store open failed: database locked");
+        expect(parsed?.grammar).toBe("fleet-r2");
+        expect(parsed?.message).toBe("mc-module: store open failed: database locked");
+    });
+
+    it("reads historian lifecycle failures through the r2 envelope", () => {
+        const parsed = parseLogLine("2026-09-23T00:11:14.902Z ERROR magic-context: mc-module: historian firing failed for ses_a: timed out");
+        expect(parsed?.message).toBe("mc-module: historian firing failed for ses_a: timed out");
+    });
+
+    it("reads per-pass stage timing through the r2 envelope", () => {
+        const parsed = parseLogLine("2026-09-23T00:11:14.902Z INFO  magic-context.perf: mc-pass-stage session=ses_a stage=historian_inline_wait event=end outcome=ok elapsed_ms=12.3");
+        expect(parsed?.grammar).toBe("fleet-r2");
+        expect(parsed?.logger).toBe("magic-context.perf");
+        expect(parsed?.message).toBe("mc-pass-stage");
+        expect(parsed?.kv.stage).toBe("historian_inline_wait");
+    });
+
+    it("reads module configuration warnings through the r2 envelope", () => {
+        const parsed = parseLogLine("2026-09-23T00:11:14.902Z WARN  magic-context: mc-module: config warning: invalid setting");
+        expect(parsed?.message).toBe("mc-module: config warning: invalid setting");
+    });
     it("reads every render case of the authority fleet r2 fixture", () => {
         for (const fixture of golden.cases) {
             const bound: Record<string, string> = Object.fromEntries(fixture.event.bound);

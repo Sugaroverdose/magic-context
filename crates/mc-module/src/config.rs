@@ -380,7 +380,7 @@ fn merge_tiers(user: Option<&Value>, project: Option<&Value>) -> McModuleConfig 
 
 fn emit_warnings(warnings: Vec<String>) {
     for warning in warnings {
-        eprintln!("mc-module: config warning: {warning}");
+        tracing::warn!("mc-module: config warning: {warning}");
     }
 }
 

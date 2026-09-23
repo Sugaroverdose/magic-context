@@ -23,6 +23,8 @@ mc-tokenizer = { path = "../mc-tokenizer" }
 cortexkit-store-types = { workspace = true }
 cortexkit-store = { workspace = true }
 cortexkit-lease = { workspace = true }
+cortexkit-log = { path = "../../../commons/crates/cortexkit-log", features = ["store-paths"] }
+tracing = "0.1"
 subc-protocol = { workspace = true }
 subc-control = { workspace = true }
 subc-transport = { workspace = true }

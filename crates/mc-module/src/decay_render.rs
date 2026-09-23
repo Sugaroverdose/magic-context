@@ -523,7 +523,7 @@ mod tests {
         let mut prepared = PreparedDecay::new(&rows);
         let incremental = prepared.render(60_000.0);
         assert_eq!(body, incremental);
-        eprintln!(
+        tracing::debug!(
             "aft-incremental total_ms={:.1} tier_tokenize_ms={:.1}",
             incremental_start.elapsed().as_secs_f64() * 1000.0,
             prepared.tokenize_ms
@@ -544,7 +544,7 @@ mod tests {
             }
         }
         use sha2::{Digest, Sha256};
-        eprintln!(
+        tracing::debug!(
             "aft-compose rows={} total_ms={:.1} tokenize_ms={:.1} calls={} sha256={:x}",
             rows.len(),
             elapsed.as_secs_f64() * 1000.0,
