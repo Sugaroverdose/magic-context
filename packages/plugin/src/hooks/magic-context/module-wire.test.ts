@@ -9,7 +9,9 @@ import {
     __moduleWireTest,
     buildPagedModuleTransformPayloads,
     encodeOpenCodeMessagesToCk,
+    MODULE_ORDINAL_PAGE_SIZE,
     MODULE_PAGE_MAX_BYTES,
+    type OrdinalMemoCheckpoint,
     resolveOrdinalsForModule,
     SUBC_MAX_FRAME_BODY_BYTES,
 } from "./module-wire";
@@ -472,6 +474,126 @@ describe("resolveOrdinalsForModule provisional tails", () => {
     });
 });
 
+describe("resolveOrdinalsForModule bounded rebuild", () => {
+    const ROWS = 10_000;
+    const installCountingStore = (sessionId: string) => {
+        const rows = Array.from({ length: ROWS }, (_, index) => ({
+            id: `m-${String(index + 1).padStart(6, "0")}`,
+            timeCreated: index + 1,
+            contributesOrdinal: true,
+            hasValidInfo: true,
+        }));
+        const counters = { rowsRead: 0, fullReads: 0 };
+        const unregister = setRawMessageProvider(sessionId, {
+            readMessages: () => {
+                counters.fullReads += 1;
+                return [];
+            },
+            readMessageOrdinalPage: (after, limit) => {
+                const page = rows
+                    .filter(
+                        (row) =>
+                            !after ||
+                            row.timeCreated > after.timeCreated ||
+                            (row.timeCreated === after.timeCreated && row.id > after.id),
+                    )
+                    .slice(0, limit);
+                counters.rowsRead += page.length;
+                return page;
+            },
+            getStoredMessageCount: () => rows.length,
+        });
+        return { rows, counters, unregister };
+    };
+    const wire = (sessionId: string, ids: string[]) =>
+        ids.map((id) => ({
+            info: { id, role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: id }],
+        })) as MessageLike[];
+    const ordinals = (input: unknown[]) =>
+        (input as Array<{ absolute_ordinal: number }>).map((message) => message.absolute_ordinal);
+
+    it("rewinds to the newest intact page after a tail removal instead of re-reading the session", async () => {
+        const sessionId = "module-wire-bounded-rewind";
+        const store = installCountingStore(sessionId);
+        const memo = new Map<string, number>();
+        const checkpoints: OrdinalMemoCheckpoint[] = [];
+        try {
+            const tailIds = store.rows.slice(-3).map((row) => row.id);
+            const primed = await resolveOrdinalsForModule({
+                sessionId,
+                messages: wire(sessionId, tailIds),
+                generation: 0,
+                memoGeneration: 0,
+                memo,
+                memoCheckpoints: checkpoints,
+            });
+            if (!primed.ok) throw new Error(primed.reason);
+            expect(primed.stats).toMatchObject({ mode: "prime", rowsRead: ROWS });
+            expect(checkpoints.length).toBe(ROWS / MODULE_ORDINAL_PAGE_SIZE);
+
+            // Revert-style removal of one message near the tail. The wire no longer
+            // carries it, so every id left on the wire is still in the memo.
+            const [removed] = store.rows.splice(ROWS - 2, 1);
+            store.counters.rowsRead = 0;
+            const survivors = [tailIds[0], tailIds[2]] as string[];
+            const verified = await resolveOrdinalsForModule({
+                sessionId,
+                messages: wire(sessionId, survivors),
+                generation: 0,
+                memoGeneration: primed.memoGeneration,
+                memo,
+                memoAnchor: primed.memoAnchor,
+                memoStoredCount: primed.memoStoredCount,
+                memoCanonicalCount: primed.memoCanonicalCount,
+                memoCheckpoints: checkpoints,
+                verifyStore: true,
+            });
+            if (!verified.ok) throw new Error(verified.reason);
+            expect(verified.stats.mode).toBe("rewind");
+            expect(store.counters.rowsRead).toBeLessThanOrEqual(2 * MODULE_ORDINAL_PAGE_SIZE);
+            expect(store.counters.fullReads).toBe(0);
+            expect(ordinals(verified.annotatedInput)).toEqual([ROWS - 2, ROWS - 1]);
+            expect(memo.has(removed!.id)).toBe(false);
+            expect(verified.memoStoredCount).toBe(ROWS - 1);
+            expect(verified.memoCanonicalCount).toBe(ROWS - 1);
+        } finally {
+            store.unregister();
+        }
+    });
+
+    it("keeps a count drift fail-loud when the caller keeps no checkpoints", async () => {
+        const sessionId = "module-wire-bounded-no-checkpoints";
+        const store = installCountingStore(sessionId);
+        const memo = new Map<string, number>();
+        try {
+            const tailId = store.rows.at(-1)!.id;
+            const primed = await resolveOrdinalsForModule({
+                sessionId,
+                messages: wire(sessionId, [tailId]),
+                generation: 0,
+                memoGeneration: 0,
+                memo,
+            });
+            if (!primed.ok) throw new Error(primed.reason);
+            store.rows.splice(ROWS - 2, 1);
+            const drifted = await resolveOrdinalsForModule({
+                sessionId,
+                messages: wire(sessionId, [tailId]),
+                generation: 0,
+                memoGeneration: primed.memoGeneration,
+                memo,
+                memoAnchor: primed.memoAnchor,
+                memoStoredCount: primed.memoStoredCount,
+                memoCanonicalCount: primed.memoCanonicalCount,
+                verifyStore: true,
+            });
+            expect(drifted).toMatchObject({ ok: false, reason: "mismatch" });
+        } finally {
+            store.unregister();
+        }
+    });
+});
 const TEST_PAGE_MAX_BYTES = 512 * 1024;
 
 describe("buildPagedModuleTransformPayloads byte reuse", () => {
