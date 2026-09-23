@@ -13326,7 +13326,7 @@ impl McHandler {
                                         // Render the id the caller asked with.
                                         let mut note = present_note_status(note);
                                         note.id = *note_id;
-                                        NoteByIdRow::Found(note)
+                                        NoteByIdRow::Found(Box::new(note))
                                     }
                                     Ok(None) => NoteByIdRow::Missing,
                                     Err(error) => {
@@ -16971,7 +16971,7 @@ fn format_note_body(note: &StoredNote, now_ms: i64) -> String {
 
 /// One requested id in the bodies-by-id view.
 enum NoteByIdRow {
-    Found(StoredNote),
+    Found(Box<StoredNote>),
     /// Unknown, or owned by someone else: one text for both.
     Missing,
     /// The caller's own note whose host mirror identity has not arrived yet.
