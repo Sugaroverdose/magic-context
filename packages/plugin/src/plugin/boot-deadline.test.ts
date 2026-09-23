@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
     createBootBudget,
     emitBootEnteringBreadcrumb,
+    remainingBootBudgetMs,
     formatBootPhaseDiagnostics,
     runBootPhaseWithDeadline,
     runBootPhaseWithinBudget,
@@ -43,20 +44,26 @@ describe("boot phase deadline", () => {
     });
 
     test("one boot budget bounds consecutive phases by the original deadline", async () => {
-        const startedAt = performance.now();
         const messages: string[] = [];
-        const budget = createBootBudget(45);
+        // Model a first phase consuming 25ms without asking the scheduler to sleep.
+        const budget = createBootBudget(45, performance.now() - 45);
+        expect(remainingBootBudgetMs(budget, budget.startedAt + 25)).toBe(20);
+        expect(remainingBootBudgetMs(budget, budget.deadlineAt)).toBe(0);
 
-        await new Promise((resolve) => setTimeout(resolve, 25));
+        let hooksStarted = false;
         const result = await runBootPhaseWithinBudget(
             budget,
             "hooks",
-            () => new Promise<never>(() => {}),
+            () => {
+                hooksStarted = true;
+                return new Promise<never>(() => {});
+            },
             (message) => messages.push(message),
         );
 
         expect(result.status).toBe("timed_out");
-        expect(performance.now() - startedAt).toBeLessThan(60);
+        expect(result.elapsedMs).toBe(0);
+        expect(hooksStarted).toBe(false);
         expect(messages[0]).toContain("whole-server 45ms budget");
         expect(messages[0]).toContain("phase 'hooks'");
     });
