@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,7 +21,7 @@ afterEach(() => {
     tempDirs.length = 0;
 });
 
-test("historian ledger distinguishes empty, reasoning-only, length-capped and timed-out attempts", async () => {
+test("historian ledger distinguishes empty, reasoning-only, length-capped and valid output", async () => {
     const directory = mkdtempSync(join(tmpdir(), "mc-historian-ledger-"));
     tempDirs.push(directory);
     process.env.XDG_DATA_HOME = directory;
@@ -31,7 +31,7 @@ test("historian ledger distinguishes empty, reasoning-only, length-capped and ti
         { text: null, reasoning: null, lengthCapped: false, expected: "empty" },
         { text: null, reasoning: "thinking", lengthCapped: false, expected: "empty" },
         { text: null, reasoning: "thinking", lengthCapped: true, expected: "empty" },
-        { text: "<compartment></compartment>", reasoning: null, lengthCapped: false, expected: "completed" },
+        { text: '<output><compartment start="1" end="1" title="History"><p1>Preserve this.</p1></compartment></output>', reasoning: null, lengthCapped: false, expected: "completed" },
     ] as const;
     for (const [index, item] of cases.entries()) {
         const executor: HiddenCompletionExecutor = {
@@ -52,6 +52,37 @@ test("historian ledger distinguishes empty, reasoning-only, length-capped and ti
         expect(rows[0]?.status).toBe(item.expected);
         if (item.expected === "empty") expect(rows[0]?.error).toBeTruthy();
     }
+});
+
+test("a resolving timed-out historian prompt is archived and recorded as timed_out", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "mc-historian-timeout-"));
+    tempDirs.push(directory);
+    process.env.XDG_DATA_HOME = directory;
+    const db = openDatabase();
+    const abort = mock(async () => ({}));
+    const update = mock(async () => ({}));
+    const remove = mock(async () => ({}));
+    const client = {
+        session: {
+            create: async () => ({ data: { id: "child-timeout" } }),
+            prompt: ({ signal }: { signal: AbortSignal }) =>
+                new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve())),
+            messages: async () => ({ data: [] }),
+            abort, update, delete: remove,
+        },
+    } as unknown as PluginContext["client"];
+    await runValidatedHistorianPass({
+        client, db, parentSessionId: "parent-timeout", sessionDirectory: directory,
+        prompt: "Messages 1-1:\n1: U: preserve this", timeoutMs: 20,
+        chunk: { startIndex: 1, endIndex: 1, lines: [{ ordinal: 1, messageId: "message-1" }] },
+        priorCompartments: [], sequenceOffset: 0, dumpLabelBase: "timeout",
+    });
+    const rows = getSubagentInvocations(db, "parent-timeout");
+    expect(rows[0]?.status).toBe("timed_out");
+    expect(rows[0]?.error).toContain("prompt timed out after 20ms");
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(remove).not.toHaveBeenCalled();
 });
 
 test("surfaces a settled assistant error instead of reporting empty historian output", async () => {

@@ -9,6 +9,7 @@ import type {
     SubagentKind,
 } from "../../features/magic-context/storage-subagent-invocations";
 import {
+    failedInvocationStatus,
     recordChildInvocation,
     sumTokensFromChildMessages,
 } from "../../features/magic-context/subagent-token-capture";
@@ -678,7 +679,7 @@ async function runHistorianPrompt(args: {
             `historian prompt failed: ${desc.brief} promptLength=${prompt.length}${desc.stackHead ? ` stackHead="${desc.stackHead}"` : ""}`,
         );
         recordInvocation({
-            status: /^prompt timed out after \d+ms$/.test(desc.brief) ? "timed_out" : "failed",
+            status: failedInvocationStatus(modelError),
             error: modelError,
         });
         return {
