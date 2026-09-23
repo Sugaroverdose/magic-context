@@ -993,16 +993,6 @@ mod tests {
     };
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
-
-    // The env var is process-global; serialize the tests that mutate it.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
 
     fn golden_fixture() -> serde_json::Value {
         serde_json::from_str(include_str!(
@@ -1242,8 +1232,8 @@ mod tests {
             .is_empty());
 
         let dated = Regex::new(r"\.\d{4}-\d{2}-\d{2}\.log$").unwrap();
-        let _guard = env_lock();
-        std::env::remove_var("MAGIC_CONTEXT_LOG_PATH");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove("MAGIC_CONTEXT_LOG_PATH");
         for path in resolve_log_paths() {
             assert!(!dated.is_match(&path.to_string_lossy()), "{path:?}");
         }
@@ -1335,8 +1325,8 @@ mod tests {
 
     #[test]
     fn resolve_log_path_for_uses_harness_fallback_when_env_unset() {
-        let _guard = env_lock();
-        std::env::remove_var("MAGIC_CONTEXT_LOG_PATH");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove("MAGIC_CONTEXT_LOG_PATH");
 
         assert_eq!(
             resolve_log_path_for(Harness::Opencode),
@@ -1394,8 +1384,8 @@ mod tests {
 
     #[test]
     fn resolve_log_paths_reads_all_harnesses_when_no_override_is_set() {
-        let _guard = env_lock();
-        std::env::remove_var("MAGIC_CONTEXT_LOG_PATH");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove("MAGIC_CONTEXT_LOG_PATH");
 
         let paths = resolve_log_paths();
         for harness in [Harness::Opencode, Harness::Pi, Harness::Omp] {
@@ -1417,11 +1407,11 @@ mod tests {
 
     #[test]
     fn resolve_log_paths_keeps_standard_families_with_a_shared_override() {
-        let _guard = env_lock();
+        let mut env = crate::test_env::EnvGuard::new();
         let custom = std::env::temp_dir()
             .join("custom")
             .join("magic-context.log");
-        std::env::set_var(
+        env.set(
             "MAGIC_CONTEXT_LOG_PATH",
             custom.to_string_lossy().to_string(),
         );
@@ -1434,7 +1424,7 @@ mod tests {
             Harness::Omp
         )));
 
-        std::env::remove_var("MAGIC_CONTEXT_LOG_PATH");
+        env.remove("MAGIC_CONTEXT_LOG_PATH");
     }
 
     #[test]
@@ -1462,11 +1452,11 @@ mod tests {
 
     #[test]
     fn resolve_log_path_for_honors_magic_context_log_path_override() {
-        let _guard = env_lock();
+        let mut env = crate::test_env::EnvGuard::new();
         let custom = std::env::temp_dir()
             .join("custom")
             .join("magic-context.log");
-        std::env::set_var(
+        env.set(
             "MAGIC_CONTEXT_LOG_PATH",
             custom.to_string_lossy().to_string(),
         );
@@ -1477,13 +1467,13 @@ mod tests {
         );
         assert_eq!(resolve_log_path_for(Harness::Pi), PathBuf::from(&custom));
 
-        std::env::remove_var("MAGIC_CONTEXT_LOG_PATH");
+        env.remove("MAGIC_CONTEXT_LOG_PATH");
     }
 
     #[test]
     fn resolve_log_path_for_ignores_blank_magic_context_log_path() {
-        let _guard = env_lock();
-        std::env::set_var("MAGIC_CONTEXT_LOG_PATH", "   ");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("MAGIC_CONTEXT_LOG_PATH", "   ");
 
         assert_eq!(
             resolve_log_path_for(Harness::Pi),
@@ -1493,6 +1483,6 @@ mod tests {
                 .join("magic-context.log")
         );
 
-        std::env::remove_var("MAGIC_CONTEXT_LOG_PATH");
+        env.remove("MAGIC_CONTEXT_LOG_PATH");
     }
 }

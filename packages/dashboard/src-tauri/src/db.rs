@@ -10,12 +10,6 @@ use crate::external_cache_sessions;
 use crate::pi_sessions;
 use crate::project_identity::{basename, normalize_stored_project_path};
 
-#[cfg(test)]
-use std::sync::Mutex;
-
-#[cfg(test)]
-static RESOLVE_DB_PATH_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 pub fn resolve_db_path() -> Option<PathBuf> {
     // Keep the dashboard on the same harness-side database as the plugin. An
     // explicit override is a complete absolute storage directory; do not fall
@@ -79,7 +73,7 @@ mod storage_path_tests {
 
     #[test]
     fn explicit_absolute_storage_override_beats_xdg_and_rejects_relative() {
-        let _guard = super::RESOLVE_DB_PATH_ENV_LOCK.lock().unwrap();
+        let mut env = crate::test_env::EnvGuard::new();
         let root = tempfile::tempdir().unwrap();
         let explicit = root.path().join("shared");
         fs::create_dir_all(&explicit).unwrap();
@@ -90,25 +84,13 @@ mod storage_path_tests {
         let xdg_db = xdg.join("cortexkit/magic-context/context.db");
         fs::write(&xdg_db, b"xdg-fixture").unwrap();
 
-        let old_storage = std::env::var_os("MAGIC_CONTEXT_STORAGE_DIR");
-        let old_xdg = std::env::var_os("XDG_DATA_HOME");
-        std::env::set_var("MAGIC_CONTEXT_STORAGE_DIR", &explicit);
-        std::env::set_var("XDG_DATA_HOME", &xdg);
+        env.set("MAGIC_CONTEXT_STORAGE_DIR", &explicit);
+        env.set("XDG_DATA_HOME", &xdg);
+        assert!(resolve_db_path().unwrap().starts_with(root.path()));
         assert_eq!(resolve_db_path(), Some(PathBuf::from(&explicit_db)));
 
-        std::env::set_var("MAGIC_CONTEXT_STORAGE_DIR", "relative/shared");
+        env.set("MAGIC_CONTEXT_STORAGE_DIR", "relative/shared");
         assert_eq!(resolve_db_path(), None);
-
-        if let Some(value) = old_storage {
-            std::env::set_var("MAGIC_CONTEXT_STORAGE_DIR", value);
-        } else {
-            std::env::remove_var("MAGIC_CONTEXT_STORAGE_DIR");
-        }
-        if let Some(value) = old_xdg {
-            std::env::set_var("XDG_DATA_HOME", value);
-        } else {
-            std::env::remove_var("XDG_DATA_HOME");
-        }
     }
 }
 
@@ -141,12 +123,12 @@ fn opencode_data_dir() -> PathBuf {
         .join("opencode")
 }
 
-fn opencode_resolution_key(data_dir: &Path) -> String {
+fn opencode_resolution_key(data_dir: &Path, overrides: &OpenCodeDbOverrides) -> String {
     [
         data_dir.to_string_lossy().to_string(),
-        std::env::var("OPENCODE_DB").unwrap_or_default(),
-        std::env::var("OPENCODE_DISABLE_CHANNEL_DB").unwrap_or_default(),
-        std::env::var("OPENCODE_CHANNEL").unwrap_or_default(),
+        overrides.explicit.clone().unwrap_or_default(),
+        overrides.disable_channel_db.clone().unwrap_or_default(),
+        overrides.channel.clone().unwrap_or_default(),
     ]
     .join("\0")
 }
@@ -229,13 +211,24 @@ fn discover_opencode_db(data_dir: &Path) -> OpenCodeDbResolution {
     }
 }
 
-fn resolve_opencode_db_fresh(
-    data_dir: &Path,
-    explicit: Option<&str>,
-    disable_channel_db: Option<&str>,
-    channel: Option<&str>,
+#[derive(Default)]
+pub struct OpenCodeDbOverrides {
+    pub explicit: Option<String>,
+    pub disable_channel_db: Option<String>,
+    pub channel: Option<String>,
+}
+
+/// Resolve the OpenCode store without consulting process environment or cache.
+pub fn resolve_opencode_db_for(
+    data_home: &Path,
+    overrides: &OpenCodeDbOverrides,
 ) -> OpenCodeDbResolution {
-    if let Some(explicit) = explicit.filter(|value| !value.is_empty()) {
+    let data_dir = &data_home.join("opencode");
+    if let Some(explicit) = overrides
+        .explicit
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         let raw = PathBuf::from(explicit);
         return OpenCodeDbResolution {
             path: if explicit == ":memory:" || raw.is_absolute() {
@@ -248,7 +241,7 @@ fn resolve_opencode_db_fresh(
         };
     }
 
-    if matches!(disable_channel_db, Some("1" | "true")) {
+    if matches!(overrides.disable_channel_db.as_deref(), Some("1" | "true")) {
         return OpenCodeDbResolution {
             path: data_dir.join("opencode.db"),
             source: "default",
@@ -256,7 +249,11 @@ fn resolve_opencode_db_fresh(
         };
     }
 
-    if let Some(channel) = channel.filter(|value| !value.is_empty()) {
+    if let Some(channel) = overrides
+        .channel
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         return OpenCodeDbResolution {
             path: opencode_channel_path(data_dir, channel),
             source: "channel",
@@ -268,8 +265,9 @@ fn resolve_opencode_db_fresh(
 }
 
 pub fn resolve_opencode_db() -> OpenCodeDbResolution {
-    let data_dir = opencode_data_dir();
-    let key = opencode_resolution_key(&data_dir);
+    let data_home = data_home();
+    let overrides = opencode_overrides();
+    let key = opencode_resolution_key(&data_home, &overrides);
     let cache = OPENCODE_DB_RESOLUTION.get_or_init(|| RwLock::new(None));
     if let Ok(guard) = cache.read() {
         if let Some(cached) = guard.as_ref() {
@@ -278,16 +276,7 @@ pub fn resolve_opencode_db() -> OpenCodeDbResolution {
             }
         }
     }
-
-    let explicit = std::env::var("OPENCODE_DB").ok();
-    let disable_channel_db = std::env::var("OPENCODE_DISABLE_CHANNEL_DB").ok();
-    let channel = std::env::var("OPENCODE_CHANNEL").ok();
-    let resolution = resolve_opencode_db_fresh(
-        &data_dir,
-        explicit.as_deref(),
-        disable_channel_db.as_deref(),
-        channel.as_deref(),
-    );
+    let resolution = resolve_opencode_db_for(&data_home, &overrides);
     let existed = resolution.path != Path::new(":memory:") && resolution.path.exists();
     if let Ok(mut guard) = cache.write() {
         *guard = Some(CachedOpenCodeDbResolution {
@@ -299,10 +288,33 @@ pub fn resolve_opencode_db() -> OpenCodeDbResolution {
     resolution
 }
 
-pub fn resolve_opencode_db_path() -> Option<PathBuf> {
-    let resolution = resolve_opencode_db();
+pub fn data_home() -> PathBuf {
+    std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".local/share"))
+}
+
+pub fn opencode_overrides() -> OpenCodeDbOverrides {
+    OpenCodeDbOverrides {
+        explicit: std::env::var("OPENCODE_DB").ok(),
+        disable_channel_db: std::env::var("OPENCODE_DISABLE_CHANNEL_DB").ok(),
+        channel: std::env::var("OPENCODE_CHANNEL").ok(),
+    }
+}
+
+pub fn resolve_opencode_db_path_for(
+    data_home: &Path,
+    overrides: &OpenCodeDbOverrides,
+) -> Option<PathBuf> {
+    let resolution = resolve_opencode_db_for(data_home, overrides);
     (resolution.path != Path::new(":memory:") && resolution.path.exists())
         .then_some(resolution.path)
+}
+
+pub fn resolve_opencode_db_path() -> Option<PathBuf> {
+    let data_home = data_home();
+    let overrides = opencode_overrides();
+    resolve_opencode_db_path_for(&data_home, &overrides)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,7 +473,14 @@ mod opencode_path_tests {
         let (_root, data_dir) = data_dir();
         let absolute = data_dir.join("absolute.db");
         assert_eq!(
-            resolve_opencode_db_fresh(&data_dir, absolute.to_str(), Some("true"), Some("dev")),
+            resolve_opencode_db_for(
+                data_dir.parent().unwrap(),
+                &OpenCodeDbOverrides {
+                    explicit: absolute.to_str().map(str::to_string),
+                    disable_channel_db: Some("true".to_string()),
+                    channel: Some("dev".to_string())
+                }
+            ),
             OpenCodeDbResolution {
                 path: absolute,
                 source: "OPENCODE_DB",
@@ -469,11 +488,26 @@ mod opencode_path_tests {
             }
         );
         assert_eq!(
-            resolve_opencode_db_fresh(&data_dir, Some("relative.db"), None, None).path,
+            resolve_opencode_db_for(
+                data_dir.parent().unwrap(),
+                &OpenCodeDbOverrides {
+                    explicit: Some("relative.db".to_string()),
+                    disable_channel_db: None,
+                    channel: None
+                }
+            )
+            .path,
             data_dir.join("relative.db")
         );
         assert_eq!(
-            resolve_opencode_db_fresh(&data_dir, None, Some("1"), Some("dev")),
+            resolve_opencode_db_for(
+                data_dir.parent().unwrap(),
+                &OpenCodeDbOverrides {
+                    explicit: None,
+                    disable_channel_db: Some("1".to_string()),
+                    channel: Some("dev".to_string())
+                }
+            ),
             OpenCodeDbResolution {
                 path: data_dir.join("opencode.db"),
                 source: "default",
@@ -481,7 +515,14 @@ mod opencode_path_tests {
             }
         );
         assert_eq!(
-            resolve_opencode_db_fresh(&data_dir, None, None, Some("dev")),
+            resolve_opencode_db_for(
+                data_dir.parent().unwrap(),
+                &OpenCodeDbOverrides {
+                    explicit: None,
+                    disable_channel_db: None,
+                    channel: Some("dev".to_string())
+                }
+            ),
             OpenCodeDbResolution {
                 path: data_dir.join("opencode-dev.db"),
                 source: "channel",
@@ -489,7 +530,15 @@ mod opencode_path_tests {
             }
         );
         assert_eq!(
-            resolve_opencode_db_fresh(&data_dir, Some(":memory:"), None, None).path,
+            resolve_opencode_db_for(
+                data_dir.parent().unwrap(),
+                &OpenCodeDbOverrides {
+                    explicit: Some(":memory:".to_string()),
+                    disable_channel_db: None,
+                    channel: None
+                }
+            )
+            .path,
             PathBuf::from(":memory:")
         );
     }
@@ -3443,7 +3492,65 @@ pub struct ProjectInfo {
     pub path: Option<String>, // resolved filesystem path, if found
 }
 
-pub fn get_projects(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlite::Error> {
+/// Resolve context project identities only against the supplied store and OpenCode path.
+/// Config discovery must not scan the operator's other session directories.
+pub fn get_projects_for_config(
+    conn: &Connection,
+    opencode_path: Option<&PathBuf>,
+) -> Result<Vec<ProjectInfo>, rusqlite::Error> {
+    let mut projects = get_project_identities(conn)?;
+    let identities = load_session_identity_map_from_conn(conn);
+    let mut paths = HashMap::new();
+    let mut names = HashMap::new();
+    if let Some(path) = opencode_path {
+        if let Ok((opencode, generation)) = open_opencode_readonly(path) {
+            let harness = match generation {
+                OpenCodeStoreGeneration::V1 => Harness::Opencode,
+                OpenCodeStoreGeneration::V2 => Harness::Opencode2,
+            };
+            if let Ok(mut stmt) = opencode.prepare(
+                "SELECT id, directory FROM session WHERE directory IS NOT NULL AND directory != ''",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                }) {
+                    for (session_id, directory) in rows.flatten() {
+                        let identity = lookup_session_identity(&identities, harness, &session_id);
+                        if !identity.is_empty() {
+                            paths.insert(directory, identity);
+                        }
+                    }
+                }
+            }
+            if let Ok(mut stmt) = opencode.prepare("SELECT name, worktree FROM project") {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+                }) {
+                    for (name, path) in rows.flatten() {
+                        if let Some(name) = name.filter(|name| !name.is_empty()) {
+                            names.insert(path.clone(), name);
+                        }
+                        paths
+                            .entry(path.clone())
+                            .or_insert_with(|| normalize_stored_project_path(&path));
+                    }
+                }
+            }
+        }
+    }
+    for project in &mut projects {
+        if let Some((path, _)) = paths
+            .iter()
+            .find(|(_, identity)| *identity == &project.identity)
+        {
+            project.label = names.get(path).cloned().unwrap_or_else(|| basename(path));
+            project.path = Some(path.clone());
+        }
+    }
+    Ok(projects)
+}
+
+fn get_project_identities(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlite::Error> {
     let workspace_identities =
         crate::workspaces::extra_workspace_member_identities(conn).unwrap_or_default();
 
@@ -3475,17 +3582,28 @@ pub fn get_projects(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlite::Err
     let mut identities: Vec<String> = identity_set.into_iter().collect();
     identities.sort();
 
-    // Use the same enumeration as the project list shown to the user. It keys on
-    // recorded project identities instead of comparing against OpenCode's own
-    // project identifier.
+    let projects = identities
+        .into_iter()
+        .map(|id| ProjectInfo {
+            label: id.clone(),
+            identity: id,
+            path: None,
+        })
+        .collect();
+    Ok(projects)
+}
+
+pub fn get_projects(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlite::Error> {
+    // Use the same enumeration as the project list shown to the user.
     let identity_to_row: HashMap<String, ProjectRow> = enumerate_projects_filtered(None)
         .into_iter()
         .map(|row| (row.identity.clone(), row))
         .collect();
 
-    let projects = identities
+    let projects = get_project_identities(conn)?
         .into_iter()
-        .map(|id| {
+        .map(|project| {
+            let id = project.identity;
             let (label, path) = if let Some(row) = identity_to_row.get(&id) {
                 (row.display_name.clone(), Some(row.primary_path.clone()))
             } else if id.starts_with("git:") {
@@ -6550,8 +6668,9 @@ pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, ru
     let dir_by_identity = session_directories_by_identity();
 
     // 3. Global (user) dreamer schedules — the baseline every project inherits.
-    let global_schedules =
-        crate::jsonc::read_dreamer_task_schedules(&crate::config::resolve_user_config_path());
+    let global_schedules = crate::jsonc::read_dreamer_task_schedules(
+        &crate::config::resolve_user_config_path(&crate::config::config_home()),
+    );
 
     let projects = state_by_identity
         .into_iter()
@@ -7449,7 +7568,7 @@ mod opencode_parent_id_subagent_hide_tests {
 
     #[test]
     fn hide_subagents_uses_opencode_parent_id_when_session_meta_is_missing() {
-        let _guard = super::RESOLVE_DB_PATH_ENV_LOCK.lock().unwrap();
+        let mut env = crate::test_env::EnvGuard::new();
         let root = tempfile::tempdir().unwrap();
         let storage = root.path().join("mc");
         fs::create_dir_all(&storage).unwrap();
@@ -7498,10 +7617,10 @@ mod opencode_parent_id_subagent_hide_tests {
         insert_cache_message(&oc, "m-primary", "ses-primary", 200);
         insert_cache_message(&oc, "m-child", "ses-child", 300);
 
-        let old_storage = std::env::var_os("MAGIC_CONTEXT_STORAGE_DIR");
-        let old_opencode = std::env::var_os("OPENCODE_DB");
-        std::env::set_var("MAGIC_CONTEXT_STORAGE_DIR", &storage);
-        std::env::set_var("OPENCODE_DB", &opencode_db);
+        env.set("MAGIC_CONTEXT_STORAGE_DIR", &storage);
+        env.set("XDG_DATA_HOME", root.path());
+        env.set("OPENCODE_DB", &opencode_db);
+        assert!(resolve_db_path().unwrap().starts_with(root.path()));
 
         let stats = get_session_cache_stats_from_db(10, true, true, Some(Harness::Opencode));
         let ids: Vec<&str> = stats.iter().map(|row| row.session_id.as_str()).collect();
@@ -7513,15 +7632,6 @@ mod opencode_parent_id_subagent_hide_tests {
             !ids.contains(&"ses-child"),
             "child with parent_id and no session_meta row must still be hidden: {ids:?}",
         );
-
-        match old_storage {
-            Some(value) => std::env::set_var("MAGIC_CONTEXT_STORAGE_DIR", value),
-            None => std::env::remove_var("MAGIC_CONTEXT_STORAGE_DIR"),
-        }
-        match old_opencode {
-            Some(value) => std::env::set_var("OPENCODE_DB", value),
-            None => std::env::remove_var("OPENCODE_DB"),
-        }
     }
 }
 
@@ -7629,16 +7739,6 @@ mod session_identity_map_tests {
     use super::*;
     use rusqlite::Connection;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
 
     fn context_db_path(data_home: &Path) -> PathBuf {
         data_home
@@ -7652,21 +7752,21 @@ mod session_identity_map_tests {
     }
 
     fn with_temp_data_home<T>(run: impl FnOnce(&Path) -> T) -> T {
-        let _guard = env_lock();
+        let mut env = crate::test_env::EnvGuard::new();
         let data_home = tempfile::tempdir().expect("data home");
         let pi_root = tempfile::tempdir().expect("pi root");
-        let old_xdg = std::env::var_os("XDG_DATA_HOME");
-        std::env::set_var("XDG_DATA_HOME", data_home.path());
+        env.set("XDG_DATA_HOME", data_home.path());
+        env.remove("MAGIC_CONTEXT_STORAGE_DIR");
+        env.remove("OPENCODE_DB");
+        env.remove("OPENCODE_CHANNEL");
+        env.remove("OPENCODE_DISABLE_CHANNEL_DB");
+        assert_eq!(super::data_home(), data_home.path());
+        assert!(resolve_db_path().map_or(true, |path| path.starts_with(data_home.path())));
         crate::pi_sessions::clear_caches_for_tests();
         crate::pi_sessions::set_test_root_for_tests(pi_root.path().to_path_buf());
 
         let result = run(data_home.path());
 
-        if let Some(old) = old_xdg {
-            std::env::set_var("XDG_DATA_HOME", old);
-        } else {
-            std::env::remove_var("XDG_DATA_HOME");
-        }
         crate::pi_sessions::clear_caches_for_tests();
         result
     }
