@@ -18,7 +18,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use mc_store::RenderedCompartmentCoverage;
-use mc_store::{McStore, McStoreError, ModuleMeta, NoteDelivery, StoredMemory, StoredNote};
+use mc_store::{McStore, McStoreError, ModuleMeta, StoredMemory};
 
 use crate::compartment_coverage::{partition_by_folded_seq, resolve_coverage, CoverageGap};
 use crate::decay_render::DecayRenderCompartment;
@@ -230,72 +230,19 @@ pub struct M1Composition {
     pub new_coverage: Option<(String, u64)>,
     /// Coverage of the compartment delta composed into these bytes, independent of applied meta.
     pub rendered_coverage: RenderedCompartmentCoverage,
-    pub note_deliveries: Vec<NoteDelivery>,
     /// True only when the pending profile version produced a non-empty, budgeted block.
     pub profile_rendered: bool,
-    /// The claimed-notes block alone. A pressure refold folds every other m1 section
-    /// into the recomposed m0, so rendering `body` there would duplicate memories,
-    /// mutations, and compartments across both layers for the rest of the epoch; only
-    /// the notes (which m0 never absorbs) may survive as the post-fold m1.
-    pub notes_block: String,
-}
-
-pub fn claim_and_render_notes(
-    store: &McStore,
-    project_path: &str,
-    session_id: &str,
-    delivered_pass_fingerprint: &str,
-    transform_pass_id: &str,
-    now_ms: i64,
-) -> Result<(String, Vec<NoteDelivery>), McStoreError> {
-    let deliveries = store.claim_note_delivery(
-        project_path,
-        session_id,
-        delivered_pass_fingerprint,
-        transform_pass_id,
-        now_ms,
-    )?;
-    let notes = deliveries
-        .iter()
-        .map(|(note, _)| note.clone())
-        .collect::<Vec<_>>();
-    Ok((
-        render_note_delta(&notes),
-        deliveries
-            .into_iter()
-            .map(|(_, delivery)| delivery)
-            .collect(),
-    ))
-}
-
-fn render_note_delta(notes: &[StoredNote]) -> String {
-    if notes.is_empty() {
-        return String::new();
-    }
-    let mut lines = vec!["<new-notes>".to_string()];
-    for note in notes {
-        let condition = note
-            .ready_reason
-            .as_deref()
-            .or(note.surface_condition.as_deref())
-            .unwrap_or("Condition satisfied");
-        lines.push(format!(
-            "- #{}: {}\n  Condition: {}",
-            note.id, note.content, condition
-        ));
-    }
-    lines.push("</new-notes>".to_string());
-    lines.join("\n")
 }
 
 /// EXPENSIVE bust-only: compose the m1 delta body from the store against the watermarks
 /// the last HARD froze in `meta`. `now_ms` is the frozen expiry cutoff (same as the m0
-/// compose). Reads compartments + memories; never call on a defer.
+/// compose). Reads compartments + memories; never call on a defer. `_note_project_path`
+/// is accepted for call-site stability only: ready smart notes are not rendered into m1.
 #[allow(clippy::too_many_arguments)]
 pub fn compose_m1_from_store(
     store: &McStore,
     project_path: &str,
-    note_project_path: &str,
+    _note_project_path: &str,
     session_id: &str,
     meta: &ModuleMeta,
     now_ms: i64,
@@ -538,31 +485,14 @@ pub fn compose_m1_from_store(
             (String::new(), false)
         };
 
-    // Rendered note BYTES, claims, and deliveries do not participate in
-    // m1_revision_signal (note_status_version DOES — that is the evaluation-side
-    // signal that a note became ready). The distinction matters: a condition can
-    // become true during a defer and must ride the next natural bust rather than
-    // creating a cache bust of its own, and the applied post-fold digest must be
-    // identical whether this pass rendered notes or a placeholder. Unacknowledged
-    // ledger rows are included again, which is the honest at-least-once contract.
-    let (notes_block, note_deliveries) = claim_and_render_notes(
-        store,
-        note_project_path,
-        session_id,
-        &format!("m1:{}:{}", meta.m1_revision, now_ms),
-        &format!("m1:{}:{}", meta.m1_revision, now_ms),
-        now_ms,
-    )?;
-    let profile_and_notes = [new_user_profile_block.as_str(), notes_block.as_str()]
-        .into_iter()
-        .filter(|block| !block.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Ready smart notes are deliberately absent from m1. They reach the agent the
+    // same way in every transform mode: the host's deferred-notes reminder, then
+    // `ctx_note read`, both of which show the ids the agent can act on.
     let body = assemble_m1(
         &memory_updates_block,
         &new_compartments_block,
         &new_memories_block,
-        &profile_and_notes, // profile and project-owned notes share the existing m1 delta slot
+        &new_user_profile_block,
         M1_PLACEHOLDER,
     );
 
@@ -571,9 +501,7 @@ pub fn compose_m1_from_store(
         body,
         memory_update_count: mutations.len(),
         new_coverage,
-        note_deliveries,
         profile_rendered,
-        notes_block,
     })
 }
 

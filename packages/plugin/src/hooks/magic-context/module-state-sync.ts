@@ -1957,9 +1957,7 @@ export interface ModuleStateSyncClient {
             | "agent_drops.append"
             | "ctx_note"
             | "ctx_memory"
-            | "note.evaluate"
-            | "transform.ack"
-            | "transform.nack";
+            | "note.evaluate";
         body: unknown;
         signal?: AbortSignal;
         generationSensitive?: boolean;

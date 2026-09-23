@@ -1008,19 +1008,6 @@ function mirrorRustRenderedMemoryIds(args: {
         .run(serialized, rawIds.length, args.sessionId, serialized, rawIds.length);
 }
 
-function noteDeliveryPassIds(response: Record<string, unknown>): string[] {
-    if (!Array.isArray(response.note_deliveries)) return [];
-    return [
-        ...new Set(
-            response.note_deliveries.flatMap((delivery) => {
-                if (!isRecord(delivery)) return [];
-                const passId = delivery.transform_pass_id;
-                return typeof passId === "string" && passId.length > 0 ? [passId] : [];
-            }),
-        ),
-    ];
-}
-
 function modelFromMessages(
     messages: MessageLike[],
 ): { providerID: string; modelID: string } | undefined {
@@ -3458,24 +3445,6 @@ export function createRustModeTransform(
                     throw new Error("rust module omitted native content after a full-array retry");
                 }
             }
-            const deliveryPassIds = noteDeliveryPassIds(response);
-            const sendNoteDeliveryDisposition = async (
-                method: "transform.ack" | "transform.nack",
-            ) => {
-                for (const transformPassId of deliveryPassIds) {
-                    await callModule({
-                        sessionId,
-                        projectRoot,
-                        method,
-                        body: {
-                            method,
-                            v: 1,
-                            session_id: sessionId,
-                            transform_pass_id: transformPassId,
-                        },
-                    });
-                }
-            };
             const explicitDecision =
                 typeof response.decision === "string" && response.decision.length > 0
                     ? response.decision
@@ -3744,11 +3713,6 @@ export function createRustModeTransform(
                 );
             } catch (error) {
                 logStage(sessionId, "apply", applyStartedAt, timings, "failed=true");
-                try {
-                    await sendNoteDeliveryDisposition("transform.nack");
-                } catch (nackError) {
-                    sessionLog(sessionId, "rust note delivery nack failed (ignored):", nackError);
-                }
                 throw error;
             }
             const bookkeepingStartedAt = performance.now();
@@ -3783,17 +3747,6 @@ export function createRustModeTransform(
                 // recording the nudge must not fail the pass; a later publish arms it again.
                 sessionLog(sessionId, "rust note-nudge arm after publish failed (ignored):", error);
             }
-            const deliveryStartedAt = performance.now();
-            if (deliveryPassIds.length > 0) {
-                try {
-                    await sendNoteDeliveryDisposition("transform.ack");
-                } catch (ackError) {
-                    // Leave the delivery unacknowledged when the acknowledgement transport
-                    // fails; the module will re-serve those bytes on a later natural bust.
-                    sessionLog(sessionId, "rust note delivery ack failed (will retry):", ackError);
-                }
-            }
-            timings.delivery += performance.now() - deliveryStartedAt;
             const ordinalContinuationBase = response.ordinal_continuation_base;
             if (
                 typeof ordinalContinuationBase === "number" &&

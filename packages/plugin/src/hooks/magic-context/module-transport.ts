@@ -487,8 +487,6 @@ export class SubcModuleTransport {
             | "ctx_note"
             | "ctx_memory"
             | "note.evaluate"
-            | "transform.ack"
-            | "transform.nack"
             | "dreamer.run_task"
             | "memory.set_classification";
         body: unknown;

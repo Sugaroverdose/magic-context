@@ -13127,70 +13127,6 @@ impl McHandler {
         }
     }
 
-    async fn handle_note_delivery_value(
-        &self,
-        channel: u16,
-        request: &Value,
-        ack: bool,
-    ) -> HandlerOutcome {
-        let Some(session_id) = request.get("session_id").and_then(Value::as_str) else {
-            return HandlerOutcome::Error {
-                code: "bad_request".to_string(),
-                message: "transform delivery acknowledgement requires session_id".to_string(),
-            };
-        };
-        let pass_id = request
-            .get("transform_pass_id")
-            .and_then(Value::as_str)
-            .or_else(|| request.get("pass_id").and_then(Value::as_str));
-        let Some(pass_id) = pass_id.filter(|id| !id.trim().is_empty()) else {
-            return HandlerOutcome::Error {
-                code: "bad_request".to_string(),
-                message: "transform delivery acknowledgement requires transform_pass_id"
-                    .to_string(),
-            };
-        };
-        let scope = match self
-            .resolve_facade_scope(channel, None, "notes", false)
-            .await
-        {
-            Ok(scope) => scope,
-            Err(outcome) => return outcome,
-        };
-        if scope.conversation_key != session_id {
-            return HandlerOutcome::Error {
-                code: "session_mismatch".to_string(),
-                message: "delivery acknowledgement session_id does not match the channel binding"
-                    .to_string(),
-            };
-        }
-        let Some(store) = self.store.get() else {
-            return self.store_refusal();
-        };
-        let result = if ack {
-            store.ack_note_delivery(
-                scope.memory_project_path.as_str(),
-                session_id,
-                pass_id,
-                now_ms(),
-            )
-        } else {
-            store.nack_note_delivery(
-                scope.memory_project_path.as_str(),
-                session_id,
-                pass_id,
-                now_ms(),
-            )
-        };
-        match result {
-            Ok(changed) => respond(json!({ "ok": true, "updated": changed })),
-            Err(error) => HandlerOutcome::Error {
-                code: "note_store_failed".to_string(),
-                message: error.to_string(),
-            },
-        }
-    }
-
     async fn handle_ctx_note_facade(&self, channel: u16, request: &Value) -> HandlerOutcome {
         let Some(args) = facade_arguments(request, &["action", "content"]) else {
             return invalid_params_error("ctx_note arguments must be an object");
@@ -13714,14 +13650,6 @@ impl McHandler {
                 "state_import" => self.handle_state_import_value(channel, request),
                 "agent_drops.append" => self.handle_agent_drops_value(channel, request),
                 "note.evaluate" => self.handle_note_evaluation_value(channel, &request).await,
-                "transform.ack" => {
-                    self.handle_note_delivery_value(channel, &request, true)
-                        .await
-                }
-                "transform.nack" => {
-                    self.handle_note_delivery_value(channel, &request, false)
-                        .await
-                }
                 "todo_state.set" => self.handle_todo_state_set_value(channel, &request),
                 "session.flush" => self.handle_session_flush_value(channel, &request),
                 "session.recomp" => self.handle_session_recomp_value(channel, &request),
@@ -27382,7 +27310,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn authority_note_lifecycle_resolves_identity_for_evaluate_render_and_ack() {
+    async fn authority_note_lifecycle_resolves_identity_for_evaluate_and_leaves_ready_notes_out_of_m1(
+    ) {
         let resolver = FakeSessionResolver::with(&[("token", FakeResolve::Hit("ses".to_string()))]);
         let (handler, store, _dir, _project) = handler_with_store_and_resolver(
             Arc::new(ProducerState::default()),
@@ -27429,33 +27358,18 @@ mod tests {
             request(vec![ck("m0", 0, "live input")]),
         )
         .await;
-        assert!(synthetic_text(&rendered, 1).contains("identity note lifecycle"));
-        let pass_id = rendered["note_deliveries"][0]["transform_pass_id"]
-            .as_str()
-            .unwrap();
-        let ack = handler
-            .dispatch_value(
-                8,
-                json!({
-                    "method": "transform.ack",
-                    "session_id": "ses",
-                    "transform_pass_id": pass_id
-                }),
-            )
-            .await;
-        assert!(matches!(ack, HandlerOutcome::Response(_)));
+        // The module never renders ready notes into m1 or claims them; the host's
+        // deferred-notes reminder announces them from its mirrored copy.
+        assert!(!synthetic_text(&rendered, 1).contains("identity note lifecycle"));
+        assert!(rendered.get("note_deliveries").is_none());
         assert_eq!(
             store
                 .get_note_by_id("git:identity", "ses", note.id)
                 .unwrap()
                 .unwrap()
                 .status,
-            "surfaced"
+            "ready"
         );
-        assert!(store
-            .search_notes_like("/repo", "ses", "identity note lifecycle")
-            .unwrap()
-            .is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
