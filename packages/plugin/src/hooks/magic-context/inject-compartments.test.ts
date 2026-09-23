@@ -52,8 +52,8 @@ import {
     prepareCompartmentInjection,
     readCurrentM0SnapshotMarkers,
     renderCompartmentInjection,
-    renderM1,
     renderHistorianMemoryBlock,
+    renderM1,
     renderMemoryBlockV2,
     renderMemoryLineV2,
     trimMemoriesToBudgetV2,
@@ -312,9 +312,7 @@ describe("historian project-memory block", () => {
 
     it("returns null when no memory survives the category filter", () => {
         expect(renderHistorianMemoryBlock([])).toBeNull();
-        expect(
-            renderHistorianMemoryBlock([renderMemory(1, "UNKNOWN", "not rendered")]),
-        ).toBeNull();
+        expect(renderHistorianMemoryBlock([renderMemory(1, "UNKNOWN", "not rendered")])).toBeNull();
     });
 });
 
