@@ -1,8 +1,12 @@
-import { getMeasuredToolDefinitionTokens } from "../../features/magic-context/tool-definition-tokens";
+import {
+    getLargestMeasuredToolDefinitionTokens,
+    getMeasuredToolDefinitionTokens,
+} from "../../features/magic-context/tool-definition-tokens";
 import { providerMass, resolveDecisionCalibration } from "./decision-calibration";
 import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
+import { UNKNOWN_FIT_RATIO } from "./tokenizer-calibration";
 
 export interface MessageTokenEstimate {
     conversation: number;
@@ -170,9 +174,24 @@ export function estimateFinalWireInputTokens(
             ? getMeasuredToolDefinitionTokens(input.providerID, input.modelID, input.agentName)
             : undefined;
     const calibration = resolveDecisionCalibration(input.providerID, input.modelID);
+    const largestToolDefinitions =
+        measuredToolDefinitions === undefined
+            ? getLargestMeasuredToolDefinitionTokens()
+            : undefined;
+    // An unknown route inherits an upper envelope from observed tool sets, not zero.
+    // Account for calibration below one on known models; unknown models already apply
+    // UNKNOWN_FIT_RATIO to the whole request in providerMass.
+    const toolDefinitions =
+        measuredToolDefinitions ??
+        (largestToolDefinitions === undefined
+            ? undefined
+            : Math.ceil(
+                  (largestToolDefinitions * UNKNOWN_FIT_RATIO) /
+                      (calibration.seeded ? calibration.toolsRatio : UNKNOWN_FIT_RATIO),
+              ));
     const rawComponents = {
         system: input.systemPromptTokens,
-        tools: (measuredToolDefinitions ?? 0) + messageTokens.toolCall,
+        tools: (toolDefinitions ?? 0) + messageTokens.toolCall,
         prose: messageTokens.conversation,
     };
     const tokens = providerMass(rawComponents, calibration, true);
@@ -181,15 +200,18 @@ export function estimateFinalWireInputTokens(
         tokens > 0 &&
         Number.isFinite(input.systemPromptTokens) &&
         input.systemPromptTokens > 0 &&
-        measuredToolDefinitions !== undefined &&
+        toolDefinitions !== undefined &&
         input.messages.every(hasCountableParts);
     const systemTokens = Math.round(
         Math.max(0, input.systemPromptTokens) * calibration.systemRatio,
     );
     const toolDefinitionTokens =
-        measuredToolDefinitions === undefined
+        toolDefinitions === undefined
             ? undefined
-            : Math.round(measuredToolDefinitions * calibration.toolsRatio);
+            : Math.round(
+                  toolDefinitions *
+                      (calibration.seeded ? calibration.toolsRatio : UNKNOWN_FIT_RATIO),
+              );
     return {
         tokens,
         trusted: complete,
@@ -197,7 +219,7 @@ export function estimateFinalWireInputTokens(
         rawComponents,
         completeness: complete ? "complete" : "partial",
         componentsComplete:
-            measuredToolDefinitions !== undefined && input.messages.every(hasCountableParts),
+            toolDefinitions !== undefined && input.messages.every(hasCountableParts),
         messageTokens,
         systemTokens,
         toolDefinitionTokens,

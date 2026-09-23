@@ -168,6 +168,21 @@ describe("cache-bust attribution contract", () => {
         expect(classify(true)).toBe("accounted_hard_epoch");
     });
 
+    test("two epoch HARDs within a minute without an external epoch wake the sentinel", () => {
+        const first = decision({ timestampMs: 10_000, materialized: true, materializeReason: "epoch_change", identityDelta: ["other"] });
+        const second = decision({ timestampMs: 16_000, materialized: true, materializeReason: "epoch_change", identityDelta: ["other"] });
+        const classify = (prior: CacheBustDecisionAttribution, current: CacheBustDecisionAttribution) => classifyCacheBust({
+            divergenceIndex: 2,
+            previousMessageCount: 10,
+            decision: current,
+            previousEpochHard: prior,
+        });
+        expect(classify(first, second)).toBe("self_inflicted_epoch");
+        expect(classify(first, { ...second, externalEpoch: true })).toBe("accounted_hard_epoch");
+        expect(classify({ ...first, timestampMs: -50_000 }, second)).toBe("accounted_hard_epoch");
+        expect(classify(first, { ...second, materializeReason: "model_change" })).toBe("accounted_hard_model_change");
+    });
+
     test("a zero provider read with no MC pass row is still a provider full miss, not no_mc_pass_row", () => {
         // A billing-header rotation on a subagent session (no decision row) rewrote
         // 322k tokens at read=0; the sentinel woke the operator with

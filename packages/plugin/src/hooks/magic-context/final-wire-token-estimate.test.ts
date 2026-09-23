@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import {
     __resetToolDefinitionMeasurements,
+    getLargestMeasuredToolDefinitionTokens,
     recordToolDefinition,
 } from "../../features/magic-context/tool-definition-tokens";
 import {
@@ -136,6 +137,26 @@ it("unknown-model fit inflates raw mass instead of admitting a locally-fitting r
     expect(result.rawTokens).toBeLessThan(11000);
     expect(result.trusted).toBe(true);
 });
+it("uses a conservative measured tool-definition envelope when the current model is unmeasured", () => {
+    recordToolDefinition("test-provider", "measured-model", "build", "read", "A".repeat(4000), {});
+    const result = estimateFinalWireInputTokens({
+        messages: [
+            {
+                info: { id: "m", role: "user" },
+                parts: [{ type: "text", text: "hello" }],
+            } as MessageLike,
+        ],
+        systemPromptTokens: 10_000,
+        providerID: "test-provider",
+        modelID: "unmeasured-model",
+        agentName: "build",
+    });
+    expect(result.trusted).toBe(true);
+    expect(result.toolDefinitionTokens).toBeGreaterThanOrEqual(
+        2 * (getLargestMeasuredToolDefinitionTokens() ?? 0),
+    );
+});
+
 it("unsupported nontext parts never produce a trusted fit estimate", () => {
     const result = estimate([
         {

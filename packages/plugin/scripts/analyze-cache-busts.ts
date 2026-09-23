@@ -861,6 +861,16 @@ export function analyzeSnapshots(
                           .map((segment) => segment.canonical)
                           .join("\n"),
                       decision: attributionDecision,
+                      previousEpochHard: attributionDecision
+                          ? decisions
+                                .filter(
+                                    (candidate) =>
+                                        candidate.timestampMs < attributionDecision.timestampMs &&
+                                        candidate.materialized &&
+                                        candidate.materializeReason?.toLowerCase() === "epoch_change",
+                                )
+                                .at(-1)
+                          : undefined,
                   })
                 : undefined;
         previousBustDivergenceIndex = verdict === "BUST" ? divergenceIndex : undefined;

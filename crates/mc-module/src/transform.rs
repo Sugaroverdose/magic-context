@@ -2193,6 +2193,7 @@ fn pass_scheduler_observation(
         canonical_decision: Some(pass.canonical_decision().to_string()),
         defer_reason: defer_reason.map(|reason| reason.as_str().to_string()),
         drain_latch_active,
+        identity_delta: Vec::new(),
     }
 }
 
@@ -6134,9 +6135,18 @@ fn apply_once(
     let first_divergence =
         divergence::first_divergence(&loaded.meta.served_output_fingerprint, &served_fingerprints);
     timings.divergence = elapsed_ms(divergence_started_at);
-    let first_divergence_json = first_divergence
-        .as_ref()
-        .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
+    let identity_delta =
+        render_identity_delta(&loaded.meta.last_render_config, &meta.last_render_config);
+    let first_divergence_json = first_divergence.as_ref().map(|divergence| {
+        let mut record = serde_json::to_value(divergence).expect("divergence is serializable");
+        // Keep changed render-identity components with a divergent pass trace.
+        if !identity_delta.is_empty() {
+            record["identity_delta"] = serde_json::json!(identity_delta);
+            record.to_string()
+        } else {
+            serde_json::to_string(divergence).expect("divergence is serializable")
+        }
+    });
     // Pinning the baseline is itself a hold, and it is the one hold that can never expire on
     // its own: the pinned fingerprint is only released by a pass that reprices the prefix.
     // Gate it on the same question every other hold asks, so a session that has no served
@@ -6213,6 +6223,13 @@ fn apply_once(
     }
     let commit_required =
         state_changed || !consumed_drop_ids.is_empty() || !pending_overlays.is_empty();
+    let mut scheduler_observation = pass_scheduler_observation(
+        scheduler_outcome.pass,
+        scheduler_outcome.defer_reason,
+        scheduler_outcome.drain_latch.is_active(),
+        ctx.now_ms,
+    );
+    scheduler_observation.identity_delta = identity_delta.clone();
     let store_commit_started_at = Instant::now();
     let row_version = if commit_required {
         #[cfg(test)]
@@ -6229,12 +6246,7 @@ fn apply_once(
                 compartment_max_seq: is_bust_pass.then_some(m1_signal.max_compartment_seq),
                 project_root: Some(ctx.project_directory),
                 first_divergence: first_divergence_json.as_deref(),
-                scheduler_observation: Some(&pass_scheduler_observation(
-                    scheduler_outcome.pass,
-                    scheduler_outcome.defer_reason,
-                    scheduler_outcome.drain_latch.is_active(),
-                    ctx.now_ms,
-                )),
+                scheduler_observation: Some(&scheduler_observation),
                 scheduler_request_observed_at_ms: req.request_observed_at_ms,
                 scheduler_full_array_fingerprint: req.full_array_fingerprint.as_deref(),
                 scheduler_eligible_supersession_count: eligible_supersession_count,
@@ -6698,6 +6710,27 @@ fn render_identity_parts(render_config: &str) -> (&str, Option<&str>, &str) {
     (render_config, None, "")
 }
 
+fn render_identity_epoch_fields(
+    identity: &str,
+) -> Option<(&str, std::collections::BTreeMap<String, &str>)> {
+    let (base, suffix) = identity.split_once("|m0epoch[")?;
+    let suffix = suffix.strip_suffix(']')?;
+    let mut fields = std::collections::BTreeMap::new();
+    let mut remaining = suffix;
+    while !remaining.is_empty() {
+        let (label, rest) = remaining.split_once(':')?;
+        let (length, rest) = rest.split_once(':')?;
+        let length = length.parse::<usize>().ok()?;
+        let value = rest.get(..length)?;
+        fields.insert(label.to_string(), value);
+        remaining = rest.get(length..)?;
+        if !remaining.is_empty() {
+            remaining = remaining.strip_prefix(';')?;
+        }
+    }
+    Some((base, fields))
+}
+
 fn render_identity_delta(previous: &str, current: &str) -> Vec<String> {
     let previous = render_identity_parts(previous);
     let current = render_identity_parts(current);
@@ -6706,7 +6739,28 @@ fn render_identity_delta(previous: &str, current: &str) -> Vec<String> {
         delta.push("mur".to_string());
     }
     if previous.0 != current.0 || previous.2 != current.2 {
-        delta.push("other".to_string());
+        let previous_epoch = format!("{}{}", previous.0, previous.2);
+        let current_epoch = format!("{}{}", current.0, current.2);
+        if let (Some((old_base, old_fields)), Some((new_base, new_fields))) = (
+            render_identity_epoch_fields(&previous_epoch),
+            render_identity_epoch_fields(&current_epoch),
+        ) {
+            if old_base != new_base {
+                delta.push("base".to_string());
+            }
+            for label in old_fields.keys().chain(new_fields.keys()) {
+                if old_fields.get(label) != new_fields.get(label)
+                    && !delta.iter().any(|part| part == label)
+                {
+                    delta.push(label.clone());
+                }
+            }
+            if previous.2 != current.2 {
+                delta.push("suffix".to_string());
+            }
+        } else {
+            delta.push("other".to_string());
+        }
     }
     delta
 }
@@ -16934,10 +16988,11 @@ pub(crate) mod tests {
             Some("inserted#0")
         );
         let trace = store.load_pass_trace(session).unwrap().unwrap();
-        let inserted_json = serde_json::to_string(inserted_divergence).unwrap();
+        let inserted_json: Value =
+            serde_json::from_str(trace.first_divergence.as_deref().unwrap()).unwrap();
         assert_eq!(
-            trace.first_divergence.as_deref(),
-            Some(inserted_json.as_str())
+            inserted_json,
+            serde_json::to_value(inserted_divergence).unwrap()
         );
 
         let removed_request = req(session, "cfg0", vec![item("a", 0, "a"), item("c", 3, "c")]);
@@ -16962,6 +17017,22 @@ pub(crate) mod tests {
         );
         assert!(last_divergence["pass_id"].is_number());
         assert!(last_divergence["timestamp_ms"].is_number());
+
+        let changed = run(
+            &store,
+            &req(session, "cfg1", vec![item("a", 0, "a"), item("c", 3, "c")]),
+            &spine(),
+        );
+        assert_eq!(changed.materialize_reason.as_deref(), Some("epoch_change"));
+        let trace = store.load_pass_trace(session).unwrap().unwrap();
+        assert_eq!(
+            trace.scheduler_history.last().unwrap().identity_delta,
+            ["base"]
+        );
+        let interesting = store
+            .load_interesting_pass_scheduler_history(session, i64::MIN, i64::MAX)
+            .unwrap();
+        assert_eq!(interesting.last().unwrap().identity_delta, ["base"]);
     }
 
     fn comparable_response(response: TransformResponse) -> Value {
@@ -21916,6 +21987,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn render_identity_delta_names_epoch_fields_without_exposing_values() {
+        assert_eq!(
+            render_identity_delta(
+                "cfg|m0epoch[ws:3:old;upg:0:;mem:0:]",
+                "cfg|m0epoch[ws:3:new;upg:0:;mem:0:]",
+            ),
+            vec!["ws"]
+        );
+        assert_eq!(
+            render_identity_delta(
+                "cfg|m0epoch[ws:0:;upg:0:;mem:0:]",
+                "cfg|m0epoch[ws:0:;upg:0:;mem:0:;pse:3:abc]",
+            ),
+            vec!["pse"]
+        );
+        assert_eq!(
+            render_identity_delta(
+                "old|m0epoch[ws:0:;upg:0:;mem:0:]",
+                "new|m0epoch[ws:0:;upg:0:;mem:0:]",
+            ),
+            vec!["base"]
+        );
+        assert_eq!(
+            render_identity_delta(
+                "cfg|m0epoch[ws:3:a;b;upg:0:;mem:0:]",
+                "cfg|m0epoch[ws:3:a;c;upg:0:;mem:0:]",
+            ),
+            vec!["ws"]
+        );
+    }
+
+    #[test]
     fn mural_changes_wait_for_a_natural_hard_and_then_replay_byte_identically() {
         fn request_with_mural(
             session: &str,
@@ -22028,7 +22131,7 @@ pub(crate) mod tests {
         );
         let folded = run(&store, &mural_b_hard, &spine());
         assert_eq!(folded.action, "HARD");
-        assert_eq!(folded.identity_delta, vec!["mur", "other"]);
+        assert_eq!(folded.identity_delta, vec!["mur", "base"]);
         let identity_b = store.load("mural-replay").unwrap().meta.last_render_config;
         assert_ne!(identity_b, identity_a);
         assert!(identity_b.contains("mur:12:mural-hash-b"));

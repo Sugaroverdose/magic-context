@@ -97,6 +97,8 @@ export interface CacheBustAttributionInput {
     /** Current raw OpenCode message count divided by the preceding pass count. */
     ocInputStepRatio?: number;
     decision?: CacheBustDecisionAttribution;
+    /** The last session pass that rebuilt the cached prefix after its rendering identity changed. */
+    previousEpochHard?: CacheBustDecisionAttribution;
 }
 
 export interface CacheBustRule {
@@ -352,10 +354,16 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
         if (materializeReason === "system_hash") return "accounted_hard_system_hash";
         const muralOnlyIdentityDelta =
             decision.identityDelta?.length === 1 && decision.identityDelta[0] === "mur";
+        const repeatedEpochHard = input.previousEpochHard !== undefined &&
+            input.previousEpochHard.materialized &&
+            input.previousEpochHard.materializeReason?.toLowerCase() === "epoch_change" &&
+            !input.previousEpochHard.externalEpoch &&
+            decision.timestampMs > input.previousEpochHard.timestampMs &&
+            decision.timestampMs - input.previousEpochHard.timestampMs <= 60_000;
         if (
             materializeReason === "epoch_change" &&
             !decision.externalEpoch &&
-            (muralOnlyIdentityDelta || (input.ocInputStepRatio ?? 0) >= 4)
+            (repeatedEpochHard || muralOnlyIdentityDelta || (input.ocInputStepRatio ?? 0) >= 4)
         ) {
             return "self_inflicted_epoch";
         }
