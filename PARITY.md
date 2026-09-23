@@ -98,13 +98,16 @@ host registered no service stays recorded for a later process and is reported as
 `MC-H02`. `doctor list-hidden-sessions` lists these roots read-only. The marker
 hook refuses any unregistered prompt on a Magic Context child.
 
-**Retention:** `keep_subagents: true` follows the OpenCode 1 rule. A child
-retired while idle is kept for either role; an unsettled historian child is also
-kept (the OpenCode 1 age-gated sweep retains historian children under the
-setting); only a Dreamer child retired mid-run, the privacy-sensitive class, is
-still deleted. Kept children stay in the retired list, so every boot still
-registers them as hidden, and the boot sweep skips them until the setting is
-turned off.
+**Retention:** `keep_subagents: true` follows the OpenCode 1 rule, adapted to a
+child that holds many runs. OpenCode 1 keeps every settled child and hands an
+unsettled one to its age-gated sweep, which under the setting still retains
+historian children and deletes the privacy-sensitive Dreamer ones. On OpenCode 2
+one child carries every run for its role, so a retired child that ever completed
+a settled run is kept whatever its latest run did: deleting it would discard
+those settled runs, which OpenCode 1 never does. A historian child is always
+kept; only a Dreamer child none of whose runs ever settled is still deleted.
+Kept children stay in the retired list, so every boot still registers them as
+hidden, and the boot sweep skips them until the setting is turned off.
 
 ### 4. Fail-closed interruption
 

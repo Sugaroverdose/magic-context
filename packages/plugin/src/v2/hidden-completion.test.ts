@@ -33,6 +33,12 @@ const run: HiddenRunIdentity = {
     directory: "/project",
 };
 
+const dreamerRun: HiddenRunIdentity = {
+    ...run,
+    agent: HIDDEN_DREAMER_AGENT,
+    kind: "dreamer-task",
+};
+
 const request = (
     modelID = "cheap",
     extra: Record<string, unknown> = {},
@@ -348,9 +354,9 @@ async function setup(
                         .get(hiddenChildrenMetaKey("/project")) as { value: string }
                 ).value,
             ) as {
-                retired_children: Array<{ id: string; reason: string; settled?: boolean }>;
+                retired_children: Array<{ id: string; reason: string; ever_settled?: boolean }>;
             },
-        seedRetired(children: Array<ReturnType<typeof retiredChild> & { settled?: boolean }>) {
+        seedRetired(children: Array<ReturnType<typeof retiredChild> & { ever_settled?: boolean }>) {
             db.prepare(
                 `INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -1036,7 +1042,7 @@ describe("OpenCode 2 hidden child completion", () => {
             await settleRemovals();
             expect(state.removals).toEqual([]);
             expect(state.meta().retired_children).toMatchObject([
-                { id: "child-1", reason: "host-generation-changed", settled: true },
+                { id: "child-1", reason: "host-generation-changed", ever_settled: true },
             ]);
             expect(state.hook.owns("child-1")).toBe(true);
         } finally {
@@ -1074,7 +1080,50 @@ describe("OpenCode 2 hidden child completion", () => {
             await settleRemovals();
             expect(state.removals).toEqual([]);
             expect(state.meta().retired_children).toMatchObject([
-                { id: "child-1", reason: "hidden-run-failed", settled: false },
+                { id: "child-1", reason: "hidden-run-failed" },
+            ]);
+            expect(state.meta().retired_children[0]?.ever_settled).toBeUndefined();
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("keep_subagents keeps a reused dreamer child with an earlier settled run, not one that never settled", async () => {
+        const state = await setup("host-generation-1", { remove: true, keepSubagents: true });
+        const interrupt = async (
+            executor: typeof state.executor,
+            handle: Awaited<ReturnType<typeof state.executor.open>>,
+        ) => {
+            state.setDelayRow(1000);
+            const controller = new AbortController();
+            setTimeout(() => controller.abort(), 20);
+            await expect(
+                executor.attempt(handle, { ...request(), signal: controller.signal }),
+            ).rejects.toThrow("aborted");
+            await close(executor, handle, false);
+            state.setDelayRow(0);
+        };
+        try {
+            // One settled run, then an interrupted run in the same reused child.
+            const settled = await state.executor.open(dreamerRun);
+            await state.executor.attempt(settled, request());
+            await close(state.executor, settled, true);
+            const reused = await state.executor.open(dreamerRun);
+            expect(reused.id).toBe("child-1");
+            await interrupt(state.executor, reused);
+
+            // A fresh child whose only run is interrupted.
+            const fresh = await state.executor.open(dreamerRun);
+            expect(fresh.id).toBe("child-2");
+            await interrupt(state.executor, fresh);
+
+            await eventually(() => state.removed.includes("child-2"));
+            // A later boot sweeps the retired list; the child with a settled run survives it.
+            await state.create();
+            await settleRemovals();
+            expect(state.removed).toEqual(["child-2"]);
+            expect(state.meta().retired_children).toMatchObject([
+                { id: "child-1", ever_settled: true },
             ]);
         } finally {
             state.db.close();
@@ -1085,10 +1134,10 @@ describe("OpenCode 2 hidden child completion", () => {
         const state = await setup("host-generation-1", { remove: true, keepSubagents: true });
         try {
             state.seedRetired([
-                { ...retiredChild("historian-settled", 1), settled: true },
-                { ...retiredChild("historian-unsettled", 2), settled: false },
-                { ...retiredChild("dreamer-settled", 3, "dreamer"), settled: true },
-                { ...retiredChild("dreamer-unsettled", 4, "dreamer"), settled: false },
+                { ...retiredChild("historian-settled", 1), ever_settled: true },
+                { ...retiredChild("historian-unsettled", 2), ever_settled: false },
+                { ...retiredChild("dreamer-settled", 3, "dreamer"), ever_settled: true },
+                { ...retiredChild("dreamer-unsettled", 4, "dreamer"), ever_settled: false },
                 // Rows written before settlement was recorded count as unsettled.
                 retiredChild("dreamer-legacy", 5, "dreamer"),
             ]);
@@ -1110,8 +1159,8 @@ describe("OpenCode 2 hidden child completion", () => {
         const state = await setup("host-generation-1", { remove: true });
         try {
             state.seedRetired([
-                { ...retiredChild("historian-settled", 1), settled: true },
-                { ...retiredChild("dreamer-settled", 2, "dreamer"), settled: true },
+                { ...retiredChild("historian-settled", 1), ever_settled: true },
+                { ...retiredChild("dreamer-settled", 2, "dreamer"), ever_settled: true },
             ]);
             await state.create();
             await eventually(() => state.meta().retired_children.length === 0);

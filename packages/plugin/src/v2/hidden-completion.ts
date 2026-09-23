@@ -47,23 +47,24 @@ interface PersistedHiddenChild {
      * be left behind and reported.
      */
     owner?: HostServiceOwner;
+    /**
+     * True once any run in this child has completed with a settled reply. A child is reused across
+     * many runs, so this stays true whatever a later run does, and it is carried onto the retired
+     * entry. Absent on rows written before this was recorded, which count as never settled.
+     */
+    ever_settled?: boolean;
 }
 
 interface RetiredHiddenChild extends PersistedHiddenChild {
     retired_at: number;
     reason: string;
-    /**
-     * True when the child was idle at retirement: nothing was left running in it. Absent on rows
-     * written before this was recorded, which are treated as unsettled.
-     */
-    settled?: boolean;
 }
 
 /** The parts of a retired child that deleting its session needs. */
 type RetirableChild = Pick<PersistedHiddenChild, "id" | "owner">;
 
 /** The parts of a retired child that the `keep_subagents` retention rule looks at. */
-type RetentionFacts = Pick<RetiredHiddenChild, "role" | "settled">;
+type RetentionFacts = Pick<PersistedHiddenChild, "role" | "ever_settled">;
 
 interface HiddenChildrenMeta {
     version: 1;
@@ -202,6 +203,7 @@ function isPersistedChild(value: unknown): value is PersistedHiddenChild {
         isModel(child.model) &&
         typeof child.created_at === "number" &&
         typeof child.title_reasserted === "boolean" &&
+        (child.ever_settled === undefined || typeof child.ever_settled === "boolean") &&
         (child.owner === undefined || isOwner(child.owner))
     );
 }
@@ -238,8 +240,7 @@ function parseMeta(value: string | null): HiddenChildrenMeta {
             (child) =>
                 !isPersistedChild(child) ||
                 typeof (child as Partial<RetiredHiddenChild>).retired_at !== "number" ||
-                typeof (child as Partial<RetiredHiddenChild>).reason !== "string" ||
-                ![undefined, true, false].includes((child as Partial<RetiredHiddenChild>).settled),
+                typeof (child as Partial<RetiredHiddenChild>).reason !== "string",
         )
     ) {
         throw new Error("Invalid OpenCode 2 retired-child metadata");
@@ -302,7 +303,16 @@ class HiddenChildStateStore {
         });
     }
 
-    retire(child: PersistedHiddenChild, reason: string, settled: boolean): void {
+    markEverSettled(child: PersistedHiddenChild): PersistedHiddenChild {
+        return this.mutate((state) => {
+            const active = state.active[child.role];
+            if (!active || active.id !== child.id) return { ...child, ever_settled: true };
+            active.ever_settled = true;
+            return { ...active };
+        });
+    }
+
+    retire(child: PersistedHiddenChild, reason: string): void {
         this.mutate((state) => {
             const active = state.active[child.role];
             if (!active || active.id !== child.id) return;
@@ -310,7 +320,6 @@ class HiddenChildStateStore {
                 ...active,
                 retired_at: Date.now(),
                 reason,
-                settled,
             });
             const excess = state.retired_children.length - RETIRED_CHILDREN_LIMIT;
             if (excess > 0) state.retired_children.splice(0, excess);
@@ -629,14 +638,18 @@ export async function createV2HiddenCompletionExecutor(
      * The `keep_subagents` rule of the OpenCode 1 lane, applied to a retired child. There, a child
      * whose prompt settled is kept, and an unsettled one is left to the age-gated orphan sweep,
      * which under `keep_subagents` still retains historian children but deletes the
-     * privacy-sensitive dreamer ones. Without the setting every retired child is deleted.
+     * privacy-sensitive dreamer ones. Here one child holds many runs, so it counts as settled once
+     * any of its runs settled: deleting it for a later unsettled run would throw away every
+     * settled run it kept, which OpenCode 1 never does. Without the setting every retired child
+     * is deleted.
      */
     const keptUnderRetention = (child: RetentionFacts): boolean =>
-        options.keepSubagents === true && (child.settled === true || child.role === "historian");
+        options.keepSubagents === true &&
+        (child.ever_settled === true || child.role === "historian");
 
-    const retireChild = (child: PersistedHiddenChild, reason: string, settled: boolean): void => {
-        store.retire(child, reason, settled);
-        if (!keptUnderRetention({ role: child.role, settled })) scheduleRemoval(child);
+    const retireChild = (child: PersistedHiddenChild, reason: string): void => {
+        store.retire(child, reason);
+        if (!keptUnderRetention(child)) scheduleRemoval(child);
     };
 
     // Boot sweep. Anything left over from an earlier process — including the backlog built up
@@ -739,18 +752,17 @@ export async function createV2HiddenCompletionExecutor(
         run.child = store.updateModel(run.child, requested);
     };
 
-    const retire = (run: RunState, reason: string, settled: boolean): void => {
+    const retire = (run: RunState, reason: string): void => {
         if (run.retired) return;
-        retireChild(run.child, reason, settled);
+        retireChild(run.child, reason);
         run.retired = true;
     };
 
-    // A child interrupted mid-prompt was, by definition, still running.
     const interruptAndRetire = async (run: RunState, reason: string): Promise<void> => {
         try {
             await host.interrupt({ sessionID: run.child.id });
         } finally {
-            retire(run, reason, false);
+            retire(run, reason);
         }
     };
 
@@ -764,6 +776,10 @@ export async function createV2HiddenCompletionExecutor(
                 await options.ensureAgent?.();
                 const head = await resolveHead(identity);
                 let active = store.read().active[role];
+                if (active && active.generation !== generation) {
+                    retireChild(active, "host-generation-changed");
+                    active = undefined;
+                }
                 if (active) {
                     const activeID = active.id;
                     const latest = withReader(options.openReader, (reader) => ({
@@ -780,12 +796,8 @@ export async function createV2HiddenCompletionExecutor(
                         ((idleOutcome === undefined || idleOutcome === "succeeded") &&
                             (successfulReusableAssistant(latest.assistant) ||
                                 settledProviderError(latest.assistant)));
-                    // A reusable child is an idle one, which is what "settled" means for retention.
-                    if (active.generation !== generation) {
-                        retireChild(active, "host-generation-changed", reusable);
-                        active = undefined;
-                    } else if (!reusable) {
-                        retireChild(active, "newest-assistant-not-reusable", false);
+                    if (!reusable) {
+                        retireChild(active, "newest-assistant-not-reusable");
                         active = undefined;
                     }
                 }
@@ -836,8 +848,7 @@ export async function createV2HiddenCompletionExecutor(
                 await switchChildModel(run, head);
                 return handle;
             } catch (error) {
-                // Open never prompts, so the child it fails on is idle.
-                if (openedChild) retireChild(openedChild, "hidden-run-open-failed", true);
+                if (openedChild) retireChild(openedChild, "hidden-run-open-failed");
                 releaseRole();
                 throw error;
             }
@@ -959,6 +970,8 @@ export async function createV2HiddenCompletionExecutor(
                     providerId: row.data.model?.providerID ?? requested.providerID,
                     modelId: row.data.model?.id ?? requested.modelID,
                 };
+                // Recorded for `keep_subagents` retention: this child now holds a settled run.
+                if (!run.child.ever_settled) run.child = store.markEverSettled(run.child);
             } catch (error) {
                 run.failed = true;
                 if (!(error instanceof HiddenProviderError)) {
@@ -997,8 +1010,7 @@ export async function createV2HiddenCompletionExecutor(
                 // being a persisted provider error row (the child is idle) is what decides.
                 const reusable = run.failed && !run.unsettledFailure;
                 if (!run.completion && (run.failed || !settlement.promptSettled) && !reusable) {
-                    // Reaching here means an unsettled failure or an unsettled prompt.
-                    retire(run, "hidden-run-failed", false);
+                    retire(run, "hidden-run-failed");
                 }
             } finally {
                 runs.delete(handle);
