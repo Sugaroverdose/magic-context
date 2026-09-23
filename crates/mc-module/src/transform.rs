@@ -1365,6 +1365,8 @@ pub struct TransformTimings {
     #[serde(default)]
     pub native_cache_evicted: usize,
     #[serde(default)]
+    pub native_cache_reencode_drift: usize,
+    #[serde(default)]
     pub response_encode: f64,
     #[serde(default)]
     pub response_meta_encode: f64,
@@ -1431,7 +1433,7 @@ pub fn format_pass_timing_line(
            divergence={:.1} store_commit={:.1} trigger_ms={:.1} trigger_boundary_build={:.1} trigger_eval={:.1} \
              trigger_cache_store={:.1} trigger_token_cache_hits={} trigger_tokenized_blocks={} \
              post_attach_ms={:.1} native_cache_reused_messages={} native_cache_encoded_messages={} \
-            native_cache_refused_store={} native_cache_degraded_store={} native_cache_evicted={} \
+            native_cache_refused_store={} native_cache_degraded_store={} native_cache_evicted={} native_cache_reencode_drift={} \
              response_encode={response_encode_ms:.1} response_meta_encode={:.1} response_size_account={:.1} response_splice={:.1} \
              frozen_units={} tail_units_matched={} \
            projection_blocks={} tail_messages_emitted={} build_identity_messages={} \
@@ -1518,6 +1520,7 @@ pub fn format_pass_timing_line(
         timings.native_cache_refused_store,
         timings.native_cache_degraded_store,
         timings.native_cache_evicted,
+        timings.native_cache_reencode_drift,
         timings.response_meta_encode,
         timings.response_size_account,
         timings.response_splice,
@@ -15471,6 +15474,7 @@ pub(crate) mod tests {
             "native_cache_refused_store",
             "native_cache_degraded_store",
             "native_cache_evicted",
+            "native_cache_reencode_drift",
             "frozen_units",
             "tail_units_matched",
             "projection_blocks",

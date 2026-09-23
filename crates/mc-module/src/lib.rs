@@ -2977,6 +2977,9 @@ impl NativeDeltaFallbackReason {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct NativeAttachmentCacheStats {
     reused_messages: usize,
+    /// Re-encoded chunks whose cache keys were unchanged but whose bytes differ from the
+    /// previous serve (see `native_reencode_drift`). Always zero when encoding is deterministic.
+    reencode_drift: usize,
     encoded_messages: usize,
     request_native_retained_bytes: usize,
     refused_store: usize,
@@ -10076,6 +10079,7 @@ impl McHandler {
             timings.native_cache_refused_store = native_cache_stats.refused_store;
             timings.native_cache_degraded_store = native_cache_stats.degraded_store;
             timings.native_cache_evicted = native_cache_stats.evicted;
+            timings.native_cache_reencode_drift = native_cache_stats.reencode_drift;
             timings.post_attach = post_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
         }
         respond_transform(&parsed, response)
@@ -14043,6 +14047,40 @@ fn restore_degraded_sidecar_raw(
     restored
 }
 
+/// Chunks this pass re-encoded whose inputs are unchanged since the previous pass yet whose
+/// bytes differ from what that pass served, as `(start_index, end_index)` pairs.
+///
+/// A message's cache key covers everything the encoder reads for it (served content, position,
+/// raw sidecar hash, tag number and exemption flags). A chunk re-encoded only because an
+/// earlier chunk changed must therefore reproduce its previous bytes exactly; a mismatch means
+/// already-served provider bytes changed without any recorded cause, which busts the provider
+/// cache while the pass still reports itself as cache-preserving.
+fn native_reencode_drift(
+    previous_chunks: &[NativeEncodedChunk],
+    previous_keys: &[[u8; 32]],
+    current_keys: &[[u8; 32]],
+    encoded: &[codec::opencode::EncodedOpencodeChunk],
+    values: &[Value],
+) -> Vec<(usize, usize)> {
+    encoded
+        .iter()
+        .zip(values)
+        .filter_map(|(chunk, value)| {
+            let span = chunk.start_index..chunk.end_index;
+            let keys_unchanged = chunk.end_index <= previous_keys.len()
+                && chunk.end_index <= current_keys.len()
+                && previous_keys[span.clone()] == current_keys[span];
+            if !keys_unchanged {
+                return None;
+            }
+            let previous = previous_chunks.iter().find(|previous| {
+                previous.start_index == chunk.start_index && previous.end_index == chunk.end_index
+            })?;
+            (previous.value.as_ref() != value).then_some((chunk.start_index, chunk.end_index))
+        })
+        .collect()
+}
+
 fn native_sidecar_hash_and_size(meta: &codec::sidecar::HarnessMessageMeta) -> ([u8; 32], usize) {
     let bytes = serde_json::to_vec(meta).expect("OpenCode sidecar metadata must serialize");
     let retained_bytes = std::mem::size_of_val(meta).saturating_add(bytes.len().saturating_mul(2));
@@ -14491,6 +14529,29 @@ fn attach_native_messages_incremental(
         &sidecar,
         &response.native_reasoning_keep_mids,
     );
+    let reencode_drift = if cache_compatible {
+        let previous = cached
+            .as_ref()
+            .expect("compatible native cache has a snapshot");
+        native_reencode_drift(
+            &previous.chunks,
+            &previous.message_keys,
+            &message_keys,
+            &encoded_suffix,
+            &suffix_values,
+        )
+    } else {
+        Vec::new()
+    };
+    if let Some(first) = reencode_drift.first() {
+        tracing::error!(
+            "native-attachment-cache reencode_drift session={} drifted_chunks={} first_start={} first_end={} consequence=served_prefix_bytes_changed_under_unchanged_cache_keys",
+            request.session_id,
+            reencode_drift.len(),
+            first.0,
+            first.1,
+        );
+    }
     chunks.extend(
         encoded_suffix
             .into_iter()
@@ -14536,6 +14597,7 @@ fn attach_native_messages_incremental(
             .saturating_add(ingress_chunk_retained_bytes.iter().copied().sum::<usize>())
     });
     let mut stats = NativeAttachmentCacheStats {
+        reencode_drift: reencode_drift.len(),
         reused_messages: suffix_start,
         encoded_messages: message_keys.len().saturating_sub(suffix_start),
         request_native_retained_bytes,
@@ -22473,6 +22535,7 @@ mod tests {
             stats_b.reused_messages, 0,
             "the fixture must re-encode the served prefix: {stats_b:?}"
         );
+        assert_eq!(stats_b.reencode_drift, 0, "{stats_b:?}");
         let native_messages_b = pass_b.native_messages.unwrap();
         let prefix_bytes_b = serde_json::to_vec(&native_messages_b[..native_a.len()]).unwrap();
         assert_eq!(
@@ -22481,6 +22544,49 @@ mod tests {
             "re-encoding a degraded prefix changed already-served bytes:\nA={}\nB={}",
             String::from_utf8_lossy(&served_bytes_a),
             String::from_utf8_lossy(&prefix_bytes_b),
+        );
+    }
+
+    #[test]
+    fn reencode_drift_reports_changed_bytes_only_under_unchanged_keys() {
+        let chunk = |start: usize, value: Value| NativeEncodedChunk {
+            start_index: start,
+            end_index: start + 1,
+            retained_bytes: 0,
+            value: Arc::new(value),
+        };
+        let encoded = |start: usize, value: Value| codec::opencode::EncodedOpencodeChunk {
+            start_index: start,
+            end_index: start + 1,
+            value,
+        };
+        let previous_chunks = vec![
+            chunk(0, json!({ "m": 0 })),
+            chunk(1, json!({ "m": 1, "caller": "direct" })),
+            chunk(2, json!({ "m": 2 })),
+        ];
+        let previous_keys = vec![[0_u8; 32], [1_u8; 32], [2_u8; 32]];
+        // Message 0 changed its key (the cause of the re-encode); messages 1 and 2 did not.
+        let current_keys = vec![[9_u8; 32], [1_u8; 32], [2_u8; 32]];
+        let current = [
+            encoded(0, json!({ "m": "changed" })),
+            encoded(1, json!({ "m": 1 })),
+            encoded(2, json!({ "m": 2 })),
+        ];
+        let values = current
+            .iter()
+            .map(|chunk| chunk.value.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            native_reencode_drift(
+                &previous_chunks,
+                &previous_keys,
+                &current_keys,
+                &current,
+                &values,
+            ),
+            vec![(1, 2)],
+            "only the key-stable chunk whose bytes changed is drift"
         );
     }
 
