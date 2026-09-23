@@ -459,6 +459,7 @@ export async function registerContext(context: V2Context) {
                       db,
                       projectIdentity: resolveProjectIdentity(directory) ?? directory,
                       hook: hiddenChildHook,
+                      keepSubagents: config.keep_subagents === true,
                       ensureAgent: () => (hiddenAgentsReady ??= context.agent.reload()),
                       modelCatalog: () => Promise.resolve(context.model.list()),
                       openReader: () =>

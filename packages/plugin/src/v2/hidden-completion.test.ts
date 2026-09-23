@@ -150,10 +150,22 @@ async function eventually(check: () => boolean, timeoutMs = 2000): Promise<void>
     }
 }
 
-function retiredChild(id: string, retiredAt: number) {
+/**
+ * Gives any removal the executor might have queued time to reach the host, so a test can assert
+ * that nothing was deleted. Removals are spaced 0 ms apart in these tests.
+ */
+async function settleRemovals(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+}
+
+function retiredChild(
+    id: string,
+    retiredAt: number,
+    role: "historian" | "dreamer" | "dreamer-curate" = "historian",
+) {
     return {
         id,
-        role: "historian" as const,
+        role,
         generation: "host-generation-1",
         title: "Magic Context historian",
         model: { providerID: "mock", modelID: "cheap" },
@@ -175,6 +187,7 @@ async function setup(
          * a host that registered no service at all (`--standalone`, or a plain `serve`).
          */
         owner?: HostServiceOwner;
+        keepSubagents?: boolean;
     } = {},
 ) {
     const db = new Database(":memory:");
@@ -308,6 +321,7 @@ async function setup(
             generation: hostGeneration,
             removalSpacingMs: 0,
             resolveOwner: () => capabilities.owner,
+            ...(capabilities.keepSubagents ? { keepSubagents: true } : {}),
             log: (message) => capabilities.logs?.push(message),
             ...(capabilities.modelCatalog ? { modelCatalog: capabilities.modelCatalog } : {}),
         });
@@ -333,8 +347,10 @@ async function setup(
                         .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
                         .get(hiddenChildrenMetaKey("/project")) as { value: string }
                 ).value,
-            ) as { retired_children: Array<{ id: string; reason: string }> },
-        seedRetired(children: ReturnType<typeof retiredChild>[]) {
+            ) as {
+                retired_children: Array<{ id: string; reason: string; settled?: boolean }>;
+            },
+        seedRetired(children: Array<ReturnType<typeof retiredChild> & { settled?: boolean }>) {
             db.prepare(
                 `INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -997,6 +1013,109 @@ describe("OpenCode 2 hidden child completion", () => {
             await restarted.attempt(reused, request("after restart"));
             await close(restarted, reused);
             expect(state.creates).toHaveLength(1);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("keep_subagents keeps a settled child a new host generation retires, across later boots", async () => {
+        const state = await setup("host-generation-1", { remove: true, keepSubagents: true });
+        try {
+            const first = await state.executor.open(run);
+            await state.executor.attempt(first, request());
+            await close(state.executor, first, true);
+
+            const restarted = await state.create("host-generation-2");
+            const second = await restarted.open(run);
+            expect(second.id).toBe("child-2");
+            await restarted.attempt(second, request());
+            await close(restarted, second, true);
+
+            // A later boot sweeps the retired list; the kept child must survive that too.
+            await state.create("host-generation-2");
+            await settleRemovals();
+            expect(state.removals).toEqual([]);
+            expect(state.meta().retired_children).toMatchObject([
+                { id: "child-1", reason: "host-generation-changed", settled: true },
+            ]);
+            expect(state.hook.owns("child-1")).toBe(true);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("without keep_subagents a settled child a new host generation retires is deleted", async () => {
+        const state = await setup("host-generation-1", { remove: true });
+        try {
+            const first = await state.executor.open(run);
+            await state.executor.attempt(first, request());
+            await close(state.executor, first, true);
+
+            const restarted = await state.create("host-generation-2");
+            const second = await restarted.open(run);
+            await close(restarted, second, true);
+
+            await eventually(() => state.removed.includes("child-1"));
+            await eventually(() => state.meta().retired_children.length === 0);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("keep_subagents keeps an unsettled historian child, as the OpenCode 1 sweep does", async () => {
+        const state = await setup("host-generation-1", { remove: true, keepSubagents: true });
+        try {
+            state.setFailPrompt(true);
+            const handle = await state.executor.open(run);
+            await expect(state.executor.attempt(handle, request())).rejects.toThrow(
+                "provider unavailable",
+            );
+            await close(state.executor, handle, false);
+            await settleRemovals();
+            expect(state.removals).toEqual([]);
+            expect(state.meta().retired_children).toMatchObject([
+                { id: "child-1", reason: "hidden-run-failed", settled: false },
+            ]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("keep_subagents boot sweep deletes only unsettled dreamer children", async () => {
+        const state = await setup("host-generation-1", { remove: true, keepSubagents: true });
+        try {
+            state.seedRetired([
+                { ...retiredChild("historian-settled", 1), settled: true },
+                { ...retiredChild("historian-unsettled", 2), settled: false },
+                { ...retiredChild("dreamer-settled", 3, "dreamer"), settled: true },
+                { ...retiredChild("dreamer-unsettled", 4, "dreamer"), settled: false },
+                // Rows written before settlement was recorded count as unsettled.
+                retiredChild("dreamer-legacy", 5, "dreamer"),
+            ]);
+            await state.create();
+            await eventually(() => state.removed.length === 2);
+            await settleRemovals();
+            expect(state.removed).toEqual(["dreamer-unsettled", "dreamer-legacy"]);
+            expect(state.meta().retired_children.map((child) => child.id)).toEqual([
+                "historian-settled",
+                "historian-unsettled",
+                "dreamer-settled",
+            ]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("without keep_subagents the boot sweep deletes settled children too", async () => {
+        const state = await setup("host-generation-1", { remove: true });
+        try {
+            state.seedRetired([
+                { ...retiredChild("historian-settled", 1), settled: true },
+                { ...retiredChild("dreamer-settled", 2, "dreamer"), settled: true },
+            ]);
+            await state.create();
+            await eventually(() => state.meta().retired_children.length === 0);
+            expect(state.removed).toEqual(["historian-settled", "dreamer-settled"]);
         } finally {
             state.db.close();
         }

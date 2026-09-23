@@ -52,10 +52,18 @@ interface PersistedHiddenChild {
 interface RetiredHiddenChild extends PersistedHiddenChild {
     retired_at: number;
     reason: string;
+    /**
+     * True when the child was idle at retirement: nothing was left running in it. Absent on rows
+     * written before this was recorded, which are treated as unsettled.
+     */
+    settled?: boolean;
 }
 
 /** The parts of a retired child that deleting its session needs. */
 type RetirableChild = Pick<PersistedHiddenChild, "id" | "owner">;
+
+/** The parts of a retired child that the `keep_subagents` retention rule looks at. */
+type RetentionFacts = Pick<RetiredHiddenChild, "role" | "settled">;
 
 interface HiddenChildrenMeta {
     version: 1;
@@ -118,6 +126,11 @@ export interface V2HiddenCompletionOptions {
      * per created child so a host that starts serving later still binds correctly.
      */
     resolveOwner?: () => HostServiceOwner | undefined;
+    /**
+     * The user's `keep_subagents` setting. When true, retired children that the OpenCode 1 lane
+     * would keep are left in the host instead of deleted (see `keptUnderRetention`).
+     */
+    keepSubagents?: boolean;
     log?: (message: string) => void;
     /** Return the host catalog when available; catalog failures leave the request unchanged. */
     modelCatalog?: () => Promise<unknown>;
@@ -143,7 +156,9 @@ const REMOVAL_SPACING_MS = 250;
  * it only grows while deletion is failing or unavailable; the cap keeps a long outage from growing
  * the project's metadata row without limit. The oldest entries are dropped first because the sweep
  * drains oldest first, so anything still at the front after a full pass is what deletion keeps
- * refusing; those sessions are then left behind in the host rather than retried forever.
+ * refusing; those sessions are then left behind in the host rather than retried forever. Children
+ * kept under `keep_subagents` also stay listed (so every boot still recognises them as hidden
+ * children) and count toward the same cap; evicting one only forgets it, its session stays.
  */
 const RETIRED_CHILDREN_LIMIT = 200;
 
@@ -223,7 +238,8 @@ function parseMeta(value: string | null): HiddenChildrenMeta {
             (child) =>
                 !isPersistedChild(child) ||
                 typeof (child as Partial<RetiredHiddenChild>).retired_at !== "number" ||
-                typeof (child as Partial<RetiredHiddenChild>).reason !== "string",
+                typeof (child as Partial<RetiredHiddenChild>).reason !== "string" ||
+                ![undefined, true, false].includes((child as Partial<RetiredHiddenChild>).settled),
         )
     ) {
         throw new Error("Invalid OpenCode 2 retired-child metadata");
@@ -286,7 +302,7 @@ class HiddenChildStateStore {
         });
     }
 
-    retire(child: PersistedHiddenChild, reason: string): void {
+    retire(child: PersistedHiddenChild, reason: string, settled: boolean): void {
         this.mutate((state) => {
             const active = state.active[child.role];
             if (!active || active.id !== child.id) return;
@@ -294,6 +310,7 @@ class HiddenChildStateStore {
                 ...active,
                 retired_at: Date.now(),
                 reason,
+                settled,
             });
             const excess = state.retired_children.length - RETIRED_CHILDREN_LIMIT;
             if (excess > 0) state.retired_children.splice(0, excess);
@@ -608,14 +625,27 @@ export async function createV2HiddenCompletionExecutor(
             });
     };
 
-    const retireChild = (child: PersistedHiddenChild, reason: string): void => {
-        store.retire(child, reason);
-        scheduleRemoval(child);
+    /**
+     * The `keep_subagents` rule of the OpenCode 1 lane, applied to a retired child. There, a child
+     * whose prompt settled is kept, and an unsettled one is left to the age-gated orphan sweep,
+     * which under `keep_subagents` still retains historian children but deletes the
+     * privacy-sensitive dreamer ones. Without the setting every retired child is deleted.
+     */
+    const keptUnderRetention = (child: RetentionFacts): boolean =>
+        options.keepSubagents === true && (child.settled === true || child.role === "historian");
+
+    const retireChild = (child: PersistedHiddenChild, reason: string, settled: boolean): void => {
+        store.retire(child, reason, settled);
+        if (!keptUnderRetention({ role: child.role, settled })) scheduleRemoval(child);
     };
 
     // Boot sweep. Anything left over from an earlier process — including the backlog built up
     // before retirement deleted anything — is drained here, spaced like every other removal.
-    for (const child of persisted.retired_children) scheduleRemoval(child);
+    // Children the current setting keeps are skipped; turning `keep_subagents` off later lets the
+    // next boot delete them, as the OpenCode 1 sweep does.
+    for (const child of persisted.retired_children) {
+        if (!keptUnderRetention(child)) scheduleRemoval(child);
+    }
 
     const acquireRole = async (role: HiddenChildRole): Promise<() => void> => {
         const previous = roleTails.get(role) ?? Promise.resolve();
@@ -709,17 +739,18 @@ export async function createV2HiddenCompletionExecutor(
         run.child = store.updateModel(run.child, requested);
     };
 
-    const retire = (run: RunState, reason: string): void => {
+    const retire = (run: RunState, reason: string, settled: boolean): void => {
         if (run.retired) return;
-        retireChild(run.child, reason);
+        retireChild(run.child, reason, settled);
         run.retired = true;
     };
 
+    // A child interrupted mid-prompt was, by definition, still running.
     const interruptAndRetire = async (run: RunState, reason: string): Promise<void> => {
         try {
             await host.interrupt({ sessionID: run.child.id });
         } finally {
-            retire(run, reason);
+            retire(run, reason, false);
         }
     };
 
@@ -733,10 +764,6 @@ export async function createV2HiddenCompletionExecutor(
                 await options.ensureAgent?.();
                 const head = await resolveHead(identity);
                 let active = store.read().active[role];
-                if (active && active.generation !== generation) {
-                    retireChild(active, "host-generation-changed");
-                    active = undefined;
-                }
                 if (active) {
                     const activeID = active.id;
                     const latest = withReader(options.openReader, (reader) => ({
@@ -753,8 +780,12 @@ export async function createV2HiddenCompletionExecutor(
                         ((idleOutcome === undefined || idleOutcome === "succeeded") &&
                             (successfulReusableAssistant(latest.assistant) ||
                                 settledProviderError(latest.assistant)));
-                    if (!reusable) {
-                        retireChild(active, "newest-assistant-not-reusable");
+                    // A reusable child is an idle one, which is what "settled" means for retention.
+                    if (active.generation !== generation) {
+                        retireChild(active, "host-generation-changed", reusable);
+                        active = undefined;
+                    } else if (!reusable) {
+                        retireChild(active, "newest-assistant-not-reusable", false);
                         active = undefined;
                     }
                 }
@@ -805,7 +836,8 @@ export async function createV2HiddenCompletionExecutor(
                 await switchChildModel(run, head);
                 return handle;
             } catch (error) {
-                if (openedChild) retireChild(openedChild, "hidden-run-open-failed");
+                // Open never prompts, so the child it fails on is idle.
+                if (openedChild) retireChild(openedChild, "hidden-run-open-failed", true);
                 releaseRole();
                 throw error;
             }
@@ -965,7 +997,8 @@ export async function createV2HiddenCompletionExecutor(
                 // being a persisted provider error row (the child is idle) is what decides.
                 const reusable = run.failed && !run.unsettledFailure;
                 if (!run.completion && (run.failed || !settlement.promptSettled) && !reusable) {
-                    retire(run, "hidden-run-failed");
+                    // Reaching here means an unsettled failure or an unsettled prompt.
+                    retire(run, "hidden-run-failed", false);
                 }
             } finally {
                 runs.delete(handle);
