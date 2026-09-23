@@ -22,9 +22,11 @@ import {
     collectNpmReleaseAgeWarnings,
     describeAutoUpdateStall,
     describeOpenCodeDatabaseDoctorCheck,
+    findUndeclaredConfiguredVariants,
     getUserNpmrcPath,
     isPinnedOpenCodePluginSpecifier,
     migrateLegacyAgentEnabledConfigForDoctor,
+    parseOpenCodeModelCatalog,
 } from "./doctor-opencode";
 import { clearPluginCache } from "./doctor-opencode-cache";
 
@@ -36,6 +38,28 @@ function migrate(input: Record<string, unknown>) {
     });
     return { config: input, logs, result };
 }
+
+describe("OpenCode model catalog parsing", () => {
+    it("reports configured variants absent from the matching catalog model", () => {
+        const catalog = [{ providerID: "provider", id: "model", variants: { high: {} } }];
+        expect(
+            findUndeclaredConfiguredVariants(
+                [
+                    { agent: "historian", model: "provider/model", variant: "medium" },
+                    { agent: "dreamer", model: "provider/model", variant: "high" },
+                ],
+                catalog,
+            ),
+        ).toEqual([{ agent: "historian", model: "provider/model", variant: "medium" }]);
+    });
+    it("reads model variants from verbose CLI output", () => {
+        expect(
+            parseOpenCodeModelCatalog(
+                `provider/model\n{\n  "id": "model",\n  "providerID": "provider",\n  "variants": {\n    "medium": {}\n  }\n}`,
+            ),
+        ).toEqual([{ providerID: "provider", id: "model", variants: { medium: {} } }]);
+    });
+});
 
 describe("OpenCode database doctor surface", () => {
     it("reports the resolved path on success and the explicit candidate on failure", () => {

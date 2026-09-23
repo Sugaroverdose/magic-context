@@ -101,6 +101,7 @@ import {
 import { resolveCacheTtlDisplay } from "../shared/cache-ttl-display";
 import type { ConfigParseFailure } from "../shared/config-diagnostics";
 import { getMagicContextStorageDir } from "../shared/data-path";
+import { listHiddenVariantWarnings } from "../shared/hidden-variant-warnings";
 import { activeHostLimitations } from "../shared/host-limitations";
 import { getLoggerDiagnostics, log } from "../shared/logger";
 import { pushNotification } from "../shared/rpc-notifications";
@@ -766,6 +767,7 @@ export function buildStatusDetail(
         // pass that ends early costs every project its work, so this is read
         // from the shared store rather than from a project's schedule rows.
         dreamerTickFailure: safeTickFailure(db),
+        hiddenVariantWarnings: listHiddenVariantWarnings(),
         hostBackendsModuleSide: rustMode,
         memoryMirror: rustMode ? getMemoryMirrorStatus(db, moduleFeedHead) : undefined,
         compactionMarker: getCompactionMarkerHealth(db, sessionId),

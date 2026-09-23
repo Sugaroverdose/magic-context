@@ -33,6 +33,7 @@ export interface UserStatusSummary {
     };
     compactionMarker?: StatusDetail["compactionMarker"];
     warnings: UserFacingFailureKey[];
+    hiddenVariantWarnings?: string[];
 }
 
 export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary {
@@ -97,6 +98,7 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
         historianRefusal: detail.historianRefusal,
         compactionMarker: detail.compactionMarker,
         warnings: [...new Set(warnings)],
+        hiddenVariantWarnings: detail.hiddenVariantWarnings ?? [],
     };
 }
 
@@ -188,6 +190,9 @@ export function renderUserStatusSummary(
                   ...values.map(([label, value]) => `- **${label}:** ${value}`),
               ]
             : ["Magic Context Status", ...values.map(([label, value]) => `${label}: ${value}`)];
+    for (const warning of summary.hiddenVariantWarnings ?? []) {
+        lines.push(style === "markdown" ? `- **Warning:** ${warning}` : `Warning: ${warning}`);
+    }
     for (const warning of summary.warnings) {
         lines.push(
             style === "markdown"

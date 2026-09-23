@@ -441,6 +441,7 @@ export async function registerContext(context: V2Context) {
                       projectIdentity: resolveProjectIdentity(directory) ?? directory,
                       hook: hiddenChildHook,
                       ensureAgent: () => (hiddenAgentsReady ??= context.agent.reload()),
+                      modelCatalog: () => Promise.resolve(context.model.list()),
                       openReader: () =>
                           new V2StoreReader(
                               gaDatabasePath(

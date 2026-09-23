@@ -6,6 +6,7 @@ import type {
 } from "../hooks/magic-context/compartment-runner-types";
 import { HiddenCompletionRefusal } from "../hooks/magic-context/compartment-runner-types";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
+import { recordHiddenVariantWarning } from "../shared/hidden-variant-warnings";
 import { declareHostLimitation } from "../shared/host-limitations";
 import { log } from "../shared/logger";
 import type { PromptArgs } from "../shared/model-suggestion-retry";
@@ -118,6 +119,8 @@ export interface V2HiddenCompletionOptions {
      */
     resolveOwner?: () => HostServiceOwner | undefined;
     log?: (message: string) => void;
+    /** Return the host catalog when available; catalog failures leave the request unchanged. */
+    modelCatalog?: () => Promise<unknown>;
 }
 
 interface RunState {
@@ -629,9 +632,48 @@ export async function createV2HiddenCompletionExecutor(
         };
     };
 
+    const warnedVariants = new Set<string>();
+    const validateVariant = async (model: Model): Promise<Model> => {
+        if (!model.variant || !options.modelCatalog) return model;
+        try {
+            const listed = await options.modelCatalog();
+            const rows = Array.isArray(listed)
+                ? listed
+                : listed &&
+                    typeof listed === "object" &&
+                    Array.isArray((listed as { data?: unknown }).data)
+                  ? (listed as { data: unknown[] }).data
+                  : [];
+            const entry = rows.find(
+                (row) =>
+                    row &&
+                    typeof row === "object" &&
+                    (row as { providerID?: unknown }).providerID === model.providerID &&
+                    (row as { id?: unknown }).id === model.modelID,
+            ) as { variants?: unknown } | undefined;
+            if (!entry) return model;
+            if (
+                entry.variants &&
+                typeof entry.variants === "object" &&
+                Object.hasOwn(entry.variants, model.variant)
+            )
+                return model;
+            const key = `${model.providerID}/${model.modelID}:${model.variant}`;
+            if (!warnedVariants.has(key)) {
+                warnedVariants.add(key);
+                note(
+                    `[magic-context] ${recordHiddenVariantWarning(model.providerID, model.modelID, model.variant)}`,
+                );
+            }
+            return { providerID: model.providerID, modelID: model.modelID };
+        } catch {
+            return model;
+        }
+    };
+
     const resolveHead = async (identity: HiddenRunIdentity): Promise<Model> => {
         const configured = configuredHead(identity);
-        if (configured) return configured;
+        if (configured) return validateVariant(configured);
         if (!identity.parentSessionId) {
             throw new HiddenCompletionRefusal(
                 "hidden_model_unsupported",
@@ -776,7 +818,7 @@ export async function createV2HiddenCompletionExecutor(
                 throw new Error("Hidden completion prompt aborted");
             }
 
-            const requested = requestModel(request, run.child.model);
+            const requested = await validateVariant(requestModel(request, run.child.model));
             await switchChildModel(run, requested);
             const baseline = withReader(options.openReader, (reader) =>
                 reader.latestSequence(run.child.id),

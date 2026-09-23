@@ -175,6 +175,8 @@ export interface MemoryImportanceHistogram {
 }
 
 export interface StatusDetail extends SidebarSnapshot {
+    /** OpenCode 2 hidden-run model variants dropped because the host catalog did not declare them. */
+    hiddenVariantWarnings?: string[];
     /** Runner refusal provenance reported by the Rust historian, including received text. */
     historianRefusal?: {
         stage: "credential" | "provider" | "model" | "resolution";

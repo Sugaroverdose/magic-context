@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
 import { isCompactionEnabled } from "@magic-context/core/config/agent-disable";
@@ -125,6 +125,106 @@ import {
 } from "./doctor-store-generation";
 
 const CLI_PACKAGE_NAME = "@cortexkit/magic-context";
+
+export function findUndeclaredConfiguredVariants(
+    configured: Array<{ agent: string; model: string; variant: string }>,
+    catalog: ReturnType<typeof parseOpenCodeModelCatalog>,
+): Array<{ agent: string; model: string; variant: string }> {
+    return configured.filter((entry) => {
+        const [providerID, id] = entry.model.split("/", 2);
+        const model = catalog.find((item) => item.providerID === providerID && item.id === id);
+        return model !== undefined && !Object.hasOwn(model.variants, entry.variant);
+    });
+}
+
+function checkConfiguredVariantCatalog(config: unknown, warn: (message: string) => void): void {
+    const configured: Array<{ agent: string; model: string; variant: string }> = [];
+    const root = config && typeof config === "object" ? (config as Record<string, unknown>) : {};
+    for (const agent of ["historian", "dreamer"] as const) {
+        const section = root[agent];
+        if (!section || typeof section !== "object") continue;
+        const block = (section as Record<string, unknown>).opencode ?? section;
+        if (!block || typeof block !== "object") continue;
+        const record = block as Record<string, unknown>;
+        const add = (entry: unknown, defaultVariant: unknown) => {
+            const value =
+                entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+            const model = typeof entry === "string" ? entry : value.model;
+            const variant = value.variant ?? defaultVariant;
+            if (typeof model === "string" && typeof variant === "string" && model.includes("/")) {
+                configured.push({ agent, model, variant });
+            }
+        };
+        add(record.model, record.variant);
+        if (Array.isArray(record.fallback_models)) {
+            for (const entry of record.fallback_models) add(entry, undefined);
+        }
+    }
+    if (configured.length === 0) return;
+    const tempRoot = mkdtempSync(join(tmpdir(), "magic-context-opencode-catalog-"));
+    try {
+        const result = spawnSync("opencode", ["models", "--verbose"], {
+            cwd: tempRoot,
+            encoding: "utf8",
+            timeout: 45_000,
+            maxBuffer: 16 * 1024 * 1024,
+        });
+        const catalog = parseOpenCodeModelCatalog(result.stdout ?? "");
+        if (result.error || result.status !== 0 || catalog.length === 0) {
+            warn(
+                "Could not verify configured hidden-agent variants: this OpenCode host did not provide a readable model catalog. Check opencode models --verbose.",
+            );
+            return;
+        }
+        for (const entry of findUndeclaredConfiguredVariants(configured, catalog)) {
+            warn(
+                `${entry.agent} model ${entry.model} requests variant '${entry.variant}', which this host does not offer. Remove the variant or choose one listed by opencode models --verbose.`,
+            );
+        }
+    } finally {
+        rmSync(tempRoot, { recursive: true, force: true });
+    }
+}
+
+export function parseOpenCodeModelCatalog(output: string): Array<{
+    providerID: string;
+    id: string;
+    variants: Record<string, unknown>;
+}> {
+    const models: Array<{ providerID: string; id: string; variants: Record<string, unknown> }> = [];
+    const lines = output.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index++) {
+        if (lines[index]?.trim() !== "{") continue;
+        const jsonLines = [lines[index] ?? "{"];
+        while (++index < lines.length) {
+            jsonLines.push(lines[index] ?? "");
+            if (lines[index] === "}") break;
+        }
+        try {
+            const value = JSON.parse(jsonLines.join("\n")) as {
+                providerID?: unknown;
+                id?: unknown;
+                variants?: unknown;
+            };
+            if (
+                typeof value.providerID === "string" &&
+                typeof value.id === "string" &&
+                value.variants &&
+                typeof value.variants === "object" &&
+                !Array.isArray(value.variants)
+            ) {
+                models.push({
+                    providerID: value.providerID,
+                    id: value.id,
+                    variants: value.variants as Record<string, unknown>,
+                });
+            }
+        } catch {
+            // Ignore non-model output; a wholly unparseable catalog is reported by the caller.
+        }
+    }
+    return models;
+}
 
 export function describeOpenCodeDatabaseDoctorCheck(
     resolution: OpenCodeDbPathResolution,
@@ -1016,6 +1116,7 @@ export async function runDoctor(
         try {
             const result = loadPluginConfig(process.cwd());
             autoUpdateEnabled = result.auto_update !== false;
+            checkConfiguredVariantCatalog(result, warn);
             const warnings = result.configWarnings ?? [];
             if (warnings.length > 0) {
                 warn(
