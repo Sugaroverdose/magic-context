@@ -7505,9 +7505,9 @@ impl McHandler {
             }
         };
         let pending_m1_delta = loaded.meta.initialized
-            && m1_signal
-                .as_ref()
-                .is_some_and(|signal| signal.revision != loaded.meta.m1_revision);
+            && m1_signal.as_ref().is_some_and(|signal| {
+                signal.revision != signal.equivalent_applied_revision(loaded.meta.m1_revision)
+            });
         let pending_m1_age_ms = pending_m1_delta
             .then(|| now_ms().saturating_sub(loaded.meta.m1_pending_since_ms.unwrap_or(now_ms())));
         let tail_hygiene = loaded.meta.tail_hygiene_baseline.as_ref().map(|baseline| {
@@ -30819,6 +30819,18 @@ mod tests {
             .superseded_by_memory_id
             .expect("merge created a canonical replacement");
         assert_ne!(canonical, target);
+        // This request uses a host-backed profile, so m1 renders host mirror ids. The host
+        // mirror acknowledges the merge's new row before the next pass, as it does for the
+        // rows `insert_memory` created.
+        store
+            .acknowledge_host_memory_ids(
+                project,
+                &[HostMemoryIdentityAck {
+                    module_row_id: canonical,
+                    host_row_id: canonical,
+                }],
+            )
+            .unwrap();
         let revision_after = crate::m1_compose::m1_revision_signal(&store, project, "ses").unwrap();
         assert_ne!(revision_before, revision_after);
         assert_eq!(
@@ -30903,6 +30915,7 @@ mod tests {
             "ses",
             &before_transition.meta,
             before_transition.meta.expiry_cutoff_ms,
+            true,
             true,
             8_000.0,
             4_000.0,

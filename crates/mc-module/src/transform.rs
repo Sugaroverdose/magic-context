@@ -2859,6 +2859,7 @@ fn apply_additive_only(
         m1_visibility_cutoff_ms,
         Some(&mut m1_revision_read_timings),
     )?;
+    let applied_m1_revision = m1_signal.equivalent_applied_revision(loaded.meta.m1_revision);
     let external_revision_changed = loaded.meta.initialized
         && loaded.meta.m1_external_revision != 0
         && m1_signal.external_revision != loaded.meta.m1_external_revision;
@@ -2930,7 +2931,7 @@ fn apply_additive_only(
         || external_revision_changed
         || project_memory_epoch_hard_due;
     let ordinary_historian_veto = ctx.historian_active
-        && m1_signal.revision == loaded.meta.m1_revision
+        && m1_signal.revision == applied_m1_revision
         && scheduler_outcome.pass == scheduler::PassDecision::Execute
         && !hard_fold_requested
         && !loaded.meta.soft_refresh_pending
@@ -2942,7 +2943,7 @@ fn apply_additive_only(
         || render_config_changed
         || hard_fold_requested;
     let m1_revision_changed =
-        m1_signal.revision != loaded.meta.m1_revision || loaded.meta.soft_refresh_pending;
+        m1_signal.revision != applied_m1_revision || loaded.meta.soft_refresh_pending;
     let plan = classify(&ClassifierInput {
         initialized: loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
         is_legacy_baseline: is_legacy_baseline(&loaded.core),
@@ -2977,6 +2978,9 @@ fn apply_additive_only(
 
     let mut core = loaded.core.clone();
     let mut meta = loaded.meta.clone();
+    // Persist an equivalent revision written by an older digest format. This changes only
+    // stored metadata; the served bytes are decided by the plan above.
+    meta.m1_revision = applied_m1_revision;
     if !identity_observed && coordinator_identity {
         meta.last_provider_id = req.provider_id.clone().unwrap_or_default();
         meta.last_model_key = req.model_key.clone().unwrap_or_default();
@@ -3087,6 +3091,7 @@ fn apply_additive_only(
                 &additive_meta,
                 meta.expiry_cutoff_ms,
                 ctx.memory_enabled,
+                serializer_profile != Some(SerializerProfile::ClaudeCodeAnthropic),
                 ctx.memory_budget_tokens,
                 ctx.user_profile_budget_tokens,
                 ctx.temporal_awareness,
@@ -3133,7 +3138,7 @@ fn apply_additive_only(
             }
         }
         PassPlan::Defer => {
-            if m1_signal.revision != loaded.meta.m1_revision {
+            if m1_signal.revision != applied_m1_revision {
                 log_pending_m1_delta(&req.session_id, ctx.now_ms, loaded.meta.m1_pending_since_ms);
             }
         }
@@ -4036,14 +4041,17 @@ fn apply_once(
         }
         m1_signal = revalidated;
     }
-    // The combined revision also contains project memories, notes, and profile state. Gate the
+    // A stored revision from the older digest format that still matches the current inputs is
+    // the same applied state; comparing it raw would report pending work that renders nothing.
+    let applied_m1_revision = m1_signal.equivalent_applied_revision(loaded.meta.m1_revision);
+    // The combined revision also contains project memories and profile state. Gate the
     // healthy pending-publication window on its compartment component so unrelated churn cannot
     // suppress repair. Metadata from before that component existed falls back to the combined
     // digest, then escalates after a small number of coherent observations if it never converges.
     let compartment_revision_matches = loaded
         .meta
         .m1_compartment_seq
-        .map_or(m1_signal.revision == loaded.meta.m1_revision, |applied| {
+        .map_or(m1_signal.revision == applied_m1_revision, |applied| {
             applied == m1_signal.max_compartment_seq
         });
     // Legacy rows can borrow an active producer's publication window while their bytes lack
@@ -4103,7 +4111,7 @@ fn apply_once(
     // The next natural bust adopts the gated digest; the mismatch does not authorize a bust now.
     let memory_gate_digest_transition = !ctx.memory_enabled
         && !loaded.meta.memory_disabled
-        && current_m1_digest != loaded.meta.m1_revision;
+        && current_m1_digest != applied_m1_revision;
     let external_revision_changed = loaded.meta.initialized
         && loaded.meta.m1_external_revision != 0
         && m1_signal.external_revision != loaded.meta.m1_external_revision;
@@ -4270,7 +4278,7 @@ fn apply_once(
             || reconcile_hard_due
             || lineage_state.force_hard
             || (scheduler_outcome.pass != scheduler::PassDecision::Defer
-                && current_m1_digest != loaded.meta.m1_revision)))
+                && current_m1_digest != applied_m1_revision)))
         || force_episode_available
         || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
         || loaded.meta.soft_refresh_pending;
@@ -4531,7 +4539,7 @@ fn apply_once(
         hard_fold_requested,
         boundary_present,
         reconcile_pending: loaded.core.reconcile_pending,
-        m1_revision_changed: current_m1_digest != loaded.meta.m1_revision
+        m1_revision_changed: current_m1_digest != applied_m1_revision
             || loaded.meta.soft_refresh_pending
             || todo_injection_pending,
         reductions_pending: reclaim_pending_now,
@@ -4574,7 +4582,7 @@ fn apply_once(
         coverage_fold_due: system_absorb_hard_due,
         reconcile_hard_due,
         coverage_delta: compartment_seq_changed_since_meta,
-        m1_delta: current_m1_digest != loaded.meta.m1_revision,
+        m1_delta: current_m1_digest != applied_m1_revision,
         explicit_flush: loaded.meta.soft_refresh_pending,
         reductions_pending: reclaim_pending_now,
     });
@@ -4602,6 +4610,9 @@ fn apply_once(
     let mut core = loaded.core.clone();
     log_reasoning_drop_seed_skips(&core, &live, &req.session_id);
     let mut meta = loaded.meta.clone();
+    // Persist an equivalent revision written by an older digest format. This changes only
+    // stored metadata; the served bytes are decided by the plan above.
+    meta.m1_revision = applied_m1_revision;
     if pass_already_busting {
         if calibration_changed {
             if let Some(previous) = loaded.meta.decision_calibration.as_ref() {
@@ -5187,6 +5198,7 @@ fn apply_once(
                     &meta,
                     meta.expiry_cutoff_ms,
                     ctx.memory_enabled,
+                    serializer_profile != Some(SerializerProfile::ClaudeCodeAnthropic),
                     ctx.memory_budget_tokens,
                     ctx.user_profile_budget_tokens,
                     ctx.temporal_awareness,
@@ -5467,7 +5479,7 @@ fn apply_once(
                 }
             }
             PassPlan::Defer => {
-                if current_m1_digest != loaded.meta.m1_revision {
+                if current_m1_digest != applied_m1_revision {
                     log_pending_m1_delta(
                         &req.session_id,
                         ctx.now_ms,
@@ -5479,9 +5491,7 @@ fn apply_once(
                     boundary_present: boundary_token,
                     ..Default::default()
                 });
-                if compartment_seq_changed_since_meta
-                    && current_m1_digest == loaded.meta.m1_revision
-                {
+                if compartment_seq_changed_since_meta && current_m1_digest == applied_m1_revision {
                     meta.coverage_compartment_seq = Some(m1_signal.max_compartment_seq);
                 }
             }
@@ -26702,6 +26712,7 @@ pub(crate) mod tests {
             max_memory_mutation_id: 3,
             note_status_version: 2,
             user_profile_version: 1,
+            legacy_note_revision: None,
         };
         let sequence_collision = M1RevisionSignal {
             max_compartment_seq: 48,
@@ -27843,6 +27854,74 @@ pub(crate) mod tests {
             "{}",
             m1_bytes(&soft)
         );
+    }
+
+    /// Boot a session on `profile`, then insert a memory whose host mirror id differs from its
+    /// module id. Returns the boot response, the defer that follows the insert, and the SOFT
+    /// that an explicit refresh opens afterwards.
+    fn new_memory_passes_with_distinct_host_id(
+        profile: SerializerProfile,
+    ) -> (TransformResponse, TransformResponse, TransformResponse) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "m1msg", "SUMMARY")])
+            .unwrap();
+        let request = profile_req(profile, "ses", "cfg0", vec![item("m1msg", 1, "raw")]);
+        let boot = run(&s, &request, &spine());
+        assert_eq!(boot.action, "HARD");
+
+        let module_id = s
+            .insert_memory(memory_input(
+                "git:proj",
+                "ARCHITECTURE",
+                "a durable rule",
+                1,
+            ))
+            .unwrap();
+        assert_eq!(module_id, 1);
+        s.acknowledge_host_memory_ids(
+            "git:proj",
+            &[mc_store::HostMemoryIdentityAck {
+                module_row_id: module_id,
+                host_row_id: 901,
+            }],
+        )
+        .unwrap();
+
+        let deferred = run(&s, &request, &spine());
+        s.arm_soft_refresh("ses").unwrap();
+        let soft = run(&s, &request, &spine());
+        (boot, deferred, soft)
+    }
+
+    #[test]
+    fn host_backed_m1_new_memories_render_host_ids_and_ride_the_next_bust() {
+        let (boot, deferred, soft) =
+            new_memory_passes_with_distinct_host_id(SerializerProfile::OpencodeAiSdk);
+        // A pending memory changes nothing on its own: the defer replays the frozen bytes.
+        assert_eq!(deferred.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_string(deferred.messages()).unwrap(),
+            serde_json::to_string(boot.messages()).unwrap()
+        );
+        assert_eq!(soft.action, "SOFT");
+        let m1 = m1_bytes(&soft);
+        assert!(m1.contains("<new-memories>"), "{m1}");
+        assert!(
+            m1.contains("#901: a durable rule"),
+            "OpenCode m1 must render the host id, as m0 does: {m1}"
+        );
+        assert!(!m1.contains("#1: a durable rule"), "{m1}");
+    }
+
+    #[test]
+    fn claude_code_m1_new_memories_keep_module_ids() {
+        let (_, _, soft) =
+            new_memory_passes_with_distinct_host_id(SerializerProfile::ClaudeCodeAnthropic);
+        assert_eq!(soft.action, "SOFT");
+        let m1 = m1_bytes(&soft);
+        assert!(m1.contains("#1: a durable rule"), "{m1}");
+        assert!(!m1.contains("#901"), "{m1}");
     }
 
     #[test]
@@ -34140,6 +34219,150 @@ pub(crate) mod tests {
                 .status,
             "ready",
             "no transform pass may claim a ready note"
+        );
+    }
+
+    fn write_pending_smart_note(s: &McStore) -> mc_store::StoredNote {
+        s.insert_project_note(NoteWriteInput {
+            project_path: "git:proj",
+            route_project_root: None,
+            session_id: Some("writer"),
+            content: "smart note whose readiness is a background event",
+            surface_condition: Some("condition true"),
+            compiled_provider: None,
+            compiled_config: None,
+            compiled_at: None,
+            compile_status: None,
+            anchor_block_id: None,
+            anchor_ordinal: None,
+            now_ms: 1,
+        })
+        .unwrap()
+    }
+
+    fn mark_smart_note_ready(s: &McStore, note: &mc_store::StoredNote) {
+        assert!(matches!(
+            s.write_note_evaluation(NoteEvaluationInput {
+                project_path: "git:proj",
+                note_id: note.id,
+                source_revision: note.status_version,
+                verdict: true,
+                compiled_check: None,
+                manifest_json: None,
+                check_hash: None,
+                next_due_at: None,
+                now_ms: 2,
+            })
+            .unwrap(),
+            NoteCasOutcome::Applied(ready) if ready.status == "ready"
+        ));
+    }
+
+    #[test]
+    fn note_readiness_alone_never_opens_a_bust_at_execute_usage() {
+        // m1 renders nothing about notes, and note readiness is written by a background
+        // evaluator. At execute-band usage a changed m1 revision is enough to open a bust
+        // (queued drops and heuristics then ride it), so a note status change must not move
+        // that revision: the pass after a note becomes ready is a pure, byte-identical defer.
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let note = write_pending_smart_note(&s);
+        let messages = vec![item("a", 1, "raw"), item("t2", 2, "tail")];
+        let boot = run(&s, &req("ses", "cfg0", messages.clone()), &spine());
+        assert_eq!(boot.action, "HARD");
+
+        let execute = with_usage(req("ses", "cfg0", messages), 70, 100);
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        let baseline = transform(&s, &execute, &ctx).unwrap();
+        assert_eq!(
+            baseline.action, "SOFT+",
+            "an execute-band pass with nothing pending is a defer"
+        );
+        let revision_before = s.load("ses").unwrap().meta.m1_revision;
+
+        mark_smart_note_ready(&s, &note);
+        let after = transform(&s, &execute, &ctx).unwrap();
+        assert_eq!(
+            after.action, "SOFT+",
+            "a note becoming ready must not originate a cache bust"
+        );
+        assert_eq!(
+            serde_json::to_string(after.messages()).unwrap(),
+            serde_json::to_string(baseline.messages()).unwrap(),
+            "the defer after a note status change must serve byte-identical output"
+        );
+        assert_eq!(s.load("ses").unwrap().meta.m1_revision, revision_before);
+    }
+
+    #[test]
+    fn revision_stored_with_note_status_is_adopted_on_a_defer_after_upgrade() {
+        // Older builds hashed the note status watermark into the stored m1 revision. The first
+        // pass on this build must treat that stored value as already applied: a pure defer with
+        // byte-identical output that persists the current digest, so a later note change still
+        // cannot surface as pending m1 work.
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let note = write_pending_smart_note(&s);
+        mark_smart_note_ready(&s, &note);
+        let messages = vec![item("a", 1, "raw"), item("t2", 2, "tail")];
+        let boot = run(&s, &req("ses", "cfg0", messages.clone()), &spine());
+        assert_eq!(boot.action, "HARD");
+
+        let execute = with_usage(req("ses", "cfg0", messages), 70, 100);
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        let baseline = transform(&s, &execute, &ctx).unwrap();
+        assert_eq!(baseline.action, "SOFT+");
+
+        // Rewrite the stored revision into the older note-bearing digest.
+        let loaded = s.load("ses").unwrap();
+        let signal = m1_revision_signal_parts_for_pass(
+            &s,
+            "git:proj",
+            "git:proj",
+            "ses",
+            loaded.meta.user_profile_version,
+            true,
+            loaded.meta.expiry_cutoff_ms,
+        )
+        .unwrap();
+        assert_eq!(loaded.meta.m1_revision, signal.revision);
+        let legacy_revision = signal
+            .legacy_note_revision
+            .expect("a note status change makes the older digest differ");
+        assert_ne!(legacy_revision, signal.revision);
+        let mut legacy_meta = loaded.meta.clone();
+        legacy_meta.m1_revision = legacy_revision;
+        s.commit("ses", loaded.row_version, &loaded.core, &legacy_meta)
+            .unwrap();
+
+        let upgrade = transform(&s, &execute, &ctx).unwrap();
+        assert_eq!(
+            upgrade.action, "SOFT+",
+            "the older digest must not read as pending m1 work"
+        );
+        assert_eq!(
+            serde_json::to_string(upgrade.messages()).unwrap(),
+            serde_json::to_string(baseline.messages()).unwrap(),
+            "the first pass after upgrade must serve byte-identical output"
+        );
+        assert_eq!(
+            s.load("ses").unwrap().meta.m1_revision,
+            signal.revision,
+            "the defer persists the current digest"
+        );
+
+        s.dismiss_note("git:proj", "writer", note.id, None, 3)
+            .unwrap()
+            .expect("note dismissed");
+        let after_note_change = transform(&s, &execute, &ctx).unwrap();
+        assert_eq!(after_note_change.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_string(after_note_change.messages()).unwrap(),
+            serde_json::to_string(baseline.messages()).unwrap()
         );
     }
 
