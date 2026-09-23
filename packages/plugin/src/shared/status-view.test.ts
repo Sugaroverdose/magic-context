@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { StatusDetail } from "./rpc-types";
-import { buildStatusView, type StatusViewSource } from "./status-view";
+import {
+    buildStatusView,
+    distributeBarWidths,
+    STATUS_COLUMN_GAP,
+    statusColumnsFor,
+    statusSectionWidth,
+    type StatusViewSource,
+} from "./status-view";
 
 const NOW = 1_730_000_000_000;
 
@@ -223,6 +230,123 @@ describe("status view model", () => {
         expect(built.title).toBe("⚡ Magic Context Status");
         expect(built.version).toBe("v1.2.3");
         expect(built.footer).toBe("Esc to close");
+    });
+
+    /**
+     * The tokenizer calibration leaves the hygiene masses fractional. A token
+     * count is a whole number to the reader, so a raw `63,063.522` beside a
+     * `288,527.546` reads as a measurement error rather than as precision.
+     */
+    test("prints the hygiene masses as whole token counts", () => {
+        const built = view({
+            tailHygiene: {
+                u: 63_063.522,
+                t: 288_527.546,
+                severity: 0.2186,
+                evaluable: true,
+                reclaimableToolOutputCount: 3,
+            },
+        });
+        expect(built.hygiene?.value).toBe("21.9% · 63,064 / 288,528 tok");
+        // The masses are whole numbers; only the percentage keeps a decimal.
+        const masses = (built.hygiene?.value ?? "").split("·")[1] ?? "";
+        expect(masses).not.toMatch(/\d\.\d/);
+    });
+
+    /**
+     * A value never wraps, so a section needs `labelWidth + 1 + longest value`
+     * columns. The grid is drawn only when both columns' requirements plus the
+     * gap fit; otherwise the caller draws one column.
+     */
+    test("draws two columns only when both columns' values fit", () => {
+        const sections = view().sections;
+        for (const section of sections) {
+            const longest = Math.max(...section.rows.map((row) => row.value.length));
+            expect(statusSectionWidth(section)).toBe(section.labelWidth + 1 + longest);
+        }
+
+        // The values the dialog actually prints at ~88 columns: the longest is
+        // `~98K tok (100% used)` in History Compression, so both columns fit.
+        const narrowValues = view({
+            cacheTtl: "never",
+            cacheTtlSource: "session",
+            compressionBudget: 98_000,
+            compressionUsage: "100%",
+            lastDreamerRunAt: NOW - 16 * 3_600_000,
+            lastNudgeTokens: 495_000,
+        }).sections;
+        const layout = statusColumnsFor(narrowValues, 84);
+        expect(layout.twoColumn).toBe(true);
+        expect(layout.leftWidth + layout.rightWidth + STATUS_COLUMN_GAP).toBeLessThanOrEqual(84);
+        // The columns are sized from these requirements, so a value in the wider
+        // column cannot wrap inside the narrower one.
+        expect(layout.leftWidth).toBe(
+            Math.max(...narrowValues.filter((_s, i) => i % 2 === 0).map(statusSectionWidth)),
+        );
+        expect(layout.rightWidth).toBe(
+            Math.max(...narrowValues.filter((_s, i) => i % 2 === 1).map(statusSectionWidth)),
+        );
+
+        // One column short of the two requirements plus the gap: no grid.
+        const needed = layout.leftWidth + layout.rightWidth + STATUS_COLUMN_GAP;
+        expect(statusColumnsFor(narrowValues, needed).twoColumn).toBe(true);
+        expect(statusColumnsFor(narrowValues, needed - 1).twoColumn).toBe(false);
+
+        // A long value — the model key on the Configured row — pushes the left
+        // column past what the dialog has, so the same sections go one column
+        // rather than wrapping that value mid-word.
+        expect(statusColumnsFor(sections, 84).twoColumn).toBe(false);
+    });
+
+    /**
+     * Rounding each segment's share on its own leaves the bar short of its
+     * container by up to one column per segment, which paints as blank cells
+     * between the coloured runs.
+     */
+    test("distributes the bar width so the segments sum to the bar with no gap", () => {
+        const tokens = view().bar.map((segment) => segment.tokens);
+        for (const width of [20, 56, 84, 88, 120]) {
+            const widths = distributeBarWidths(tokens, width);
+            expect(widths.reduce((sum, value) => sum + value, 0)).toBe(width);
+            expect(widths.every((value) => value >= 1)).toBe(true);
+        }
+        // A category whose share rounds below a column still gets one, so the
+        // bar never drops a segment the legend below it lists.
+        const tiny = distributeBarWidths([1_000_000, 1], 40);
+        expect(tiny.reduce((sum, value) => sum + value, 0)).toBe(40);
+        expect(tiny[1]).toBe(1);
+        // Narrower than the number of categories: the leftmost ones keep a cell.
+        expect(distributeBarWidths([5, 4, 3, 2, 1], 3)).toEqual([1, 1, 1, 0, 0]);
+    });
+
+    /**
+     * The window line is one line at the dialog's narrowest width and carries no
+     * window-geometry vocabulary: the bracketed derivation tag names an internal
+     * mode, and the percentage is already on the headline row above it.
+     */
+    test("prints the window line without the derivation tag or a second percentage", () => {
+        const line = view().windowLine ?? "";
+        expect(line).toBe("623k / 872k usable · window 904k · 32k output reserve");
+        expect(line).not.toContain("[");
+        expect(line).not.toContain("%");
+        // The narrowest dialog content width is 56 columns (an 88-column dialog
+        // less its padding); a longer line wraps onto a second row.
+        expect(line.length).toBeLessThanOrEqual(56);
+    });
+
+    /**
+     * `Last response 180s ago` is a raw stopwatch reading; the sidebar and the
+     * Dreamer rows say `3m ago` for the same age.
+     */
+    test("humanizes the last-response age like the other age rows", () => {
+        const row = (lastResponseTime: number) =>
+            view({ lastResponseTime })
+                .sections.find((section) => section.title === "Cache TTL")
+                ?.rows.find((entry) => entry.label === "Last response")?.value;
+        expect(row(NOW - 180_000)).toBe("3m ago");
+        expect(row(NOW - 42_000)).toBe("just now");
+        expect(row(NOW - 2 * 3_600_000)).toBe("2h ago");
+        expect(row(0)).toBe("never");
     });
 
     test("breaks the context down by category, with counts and percentages", () => {

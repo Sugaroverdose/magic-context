@@ -15,7 +15,8 @@ import packageJson from "../../../package.json"
 import { statusSummaryFromDetail } from "../../shared/status-summary"
 import {
     buildStatusView,
-    STATUS_TWO_COLUMN_MIN_COLUMNS,
+    distributeBarWidths,
+    statusColumnsFor,
     type StatusRow,
     type StatusSection,
     type StatusTone,
@@ -112,8 +113,8 @@ export const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
             { version: packageJson.version },
         ),
     )
-    // Two columns only when both label columns fit; below that the same sections
-    // are drawn in one column, in the same order, instead of being squeezed.
+    // The dialog's own laid-out width, which is what the sections have to fit
+    // into; the terminal width is only the pre-layout fallback.
     const [dialogWidth, setDialogWidth] = createSignal(0)
     const measureRoot = (element: any) => {
         const read = () => {
@@ -126,10 +127,27 @@ export const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
     }
     // paddingLeft + paddingRight below; what the sections get is what is left.
     const contentWidth = () => (dialogWidth() > 0 ? dialogWidth() - 4 : terminalColumns())
-    const singleColumn = () => contentWidth() < STATUS_TWO_COLUMN_MIN_COLUMNS
+    // The shared model decides whether the sections fit in two columns at this
+    // width, and how wide each column has to be; below that the same sections
+    // are drawn in one column, in the same order, instead of being squeezed
+    // into mid-word wraps.
+    const columns = () => statusColumnsFor(view().sections, contentWidth())
     const columnSections = (parity: number) =>
         view().sections.filter((_section, index) => index % 2 === parity)
     const hygiene = () => view().hygiene
+    // Integer segment widths that sum to the bar's own width. Proportional
+    // flexGrow lets the layout engine round each segment on its own, which
+    // leaves blank cells between the coloured runs; the shared helper
+    // distributes the remainder so the bar has no gaps. Before the first
+    // layout there is no width to divide, so the flex fallback stays.
+    const barWidths = () => {
+        const width = contentWidth()
+        if (!Number.isFinite(width) || width <= 0) return null
+        return distributeBarWidths(
+            view().bar.map((segment) => segment.tokens),
+            width,
+        )
+    }
 
     return (
         <box ref={measureRoot} flexDirection="column" width="100%" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
@@ -150,19 +168,25 @@ export const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
             {view().windowLine && <text fg={t().textMuted}>{view().windowLine}</text>}
 
             {/* Segmented breakdown bar: a flex row of colored boxes filling the
-                dialog width. Each segment grows with its token count, so opentui
-                distributes the full width proportionally whatever the dialog's
-                rendered width turns out to be. */}
+                dialog width. Once the dialog has a laid-out width the shared
+                helper hands each segment an integer width that sums to the bar
+                width, so no blank cell can appear between the runs; before the
+                first layout the flex weights stand in. */}
             <box width="100%" flexDirection="row" height={1}>
-                {view().bar.map((seg) => (
-                    <box
-                        key={seg.label}
-                        flexGrow={Math.max(1, seg.tokens)}
-                        flexBasis={0}
-                        height={1}
-                        backgroundColor={seg.color}
-                    />
-                ))}
+                {view().bar.map((seg, index) => {
+                    const widths = barWidths()
+                    const fixed = widths ? (widths[index] ?? 0) : undefined
+                    return (
+                        <box
+                            key={seg.label}
+                            {...(fixed === undefined
+                                ? { flexGrow: Math.max(1, seg.tokens), flexBasis: 0 }
+                                : { width: fixed, flexShrink: 0 })}
+                            height={1}
+                            backgroundColor={seg.color}
+                        />
+                    )
+                })}
             </box>
 
             {/* Breakdown legend */}
@@ -225,24 +249,24 @@ export const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 </box>
             )}
 
-            {singleColumn() ? (
-                <box flexDirection="column" width="100%">
-                    {view().sections.map((section) => (
-                        <StatusSectionView t={t()} section={section} />
-                    ))}
-                </box>
-            ) : (
+            {columns().twoColumn ? (
                 <box flexDirection="row" width="100%" gap={4}>
-                    <box flexDirection="column" flexGrow={1} flexBasis={0}>
+                    <box flexDirection="column" width={columns().leftWidth} flexShrink={0}>
                         {columnSections(0).map((section) => (
                             <StatusSectionView t={t()} section={section} />
                         ))}
                     </box>
-                    <box flexDirection="column" flexGrow={1} flexBasis={0}>
+                    <box flexDirection="column" width={columns().rightWidth} flexShrink={0}>
                         {columnSections(1).map((section) => (
                             <StatusSectionView t={t()} section={section} />
                         ))}
                     </box>
+                </box>
+            ) : (
+                <box flexDirection="column" width="100%">
+                    {view().sections.map((section) => (
+                        <StatusSectionView t={t()} section={section} />
+                    ))}
                 </box>
             )}
 

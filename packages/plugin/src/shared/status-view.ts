@@ -187,14 +187,127 @@ export const STATUS_CATEGORY_COLORS = {
 } as const;
 
 /**
- * Terminal columns below which the two-column section grid is not drawn.
- *
- * Two columns need, per column, the widest label column (19) plus a space plus
- * room for a value (about 14), and the dialog adds four columns of padding and
- * four of gap between the columns: 2 × 34 + 8 = 76. Narrower than that, the
- * sections are drawn in one column instead of squeezing labels into wraps.
+ * Columns reserved between the two section columns when the grid is drawn.
+ * The dialog draws its two columns at equal width with this gap between them.
  */
-export const STATUS_TWO_COLUMN_MIN_COLUMNS = 76;
+export const STATUS_COLUMN_GAP = 4;
+
+/**
+ * Columns one section needs so that neither its labels nor its values wrap:
+ * the label column, one separating space, and the longest value in the section.
+ */
+export function statusSectionWidth(section: StatusSection): number {
+    const longestValue = section.rows.reduce(
+        (longest, row) => Math.max(longest, row.value.length),
+        0,
+    );
+    return section.labelWidth + 1 + longestValue;
+}
+
+/** How the sections are laid out at one content width. */
+export interface StatusColumnLayout {
+    /** True when both columns fit; false means the caller draws one column. */
+    readonly twoColumn: boolean;
+    /** Columns the widest section in the left column needs. */
+    readonly leftWidth: number;
+    /** Columns the widest section in the right column needs. */
+    readonly rightWidth: number;
+}
+
+function widestSectionWidth(sections: readonly StatusSection[]): number {
+    return sections.reduce((widest, section) => Math.max(widest, statusSectionWidth(section)), 0);
+}
+
+/**
+ * Whether the sections fit in two columns at this content width, and how wide
+ * each column has to be.
+ *
+ * A value never wraps, so a section needs `labelWidth + 1 + longest value`
+ * columns and the grid is drawn only when both columns' requirements plus the
+ * gap fit the content width. When they do not, the caller draws the same
+ * sections in one column instead of squeezing values into mid-word wraps.
+ *
+ * The returned widths are the columns' own requirements, so a caller that sizes
+ * its columns from them cannot wrap a value even when the two requirements are
+ * very different. Both renderers call this so neither decides the layout on its
+ * own.
+ */
+export function statusColumnsFor(
+    sections: readonly StatusSection[],
+    contentWidth: number,
+): StatusColumnLayout {
+    const left = sections.filter((_section, index) => index % 2 === 0);
+    const right = sections.filter((_section, index) => index % 2 === 1);
+    const leftWidth = widestSectionWidth(left);
+    const rightWidth = widestSectionWidth(right);
+    const twoColumn =
+        left.length > 0 &&
+        right.length > 0 &&
+        leftWidth + rightWidth + STATUS_COLUMN_GAP <= contentWidth;
+    return { twoColumn, leftWidth, rightWidth };
+}
+
+/**
+ * Integer column widths for the breakdown bar, summing exactly to `totalWidth`.
+ *
+ * Each segment's proportional share is rounded down and the leftover columns go
+ * to the largest fractional remainders, so the widths always add up to the bar
+ * width. Rounding every segment independently instead leaves the bar short of
+ * its container by up to one column per segment, which paints as blank cells
+ * between the coloured runs.
+ *
+ * Every segment that carries tokens keeps at least one column, so a category
+ * whose share rounds below a column stays visible in the bar.
+ */
+export function distributeBarWidths(
+    tokens: readonly number[],
+    totalWidth: number,
+): number[] {
+    const width = Math.max(0, Math.floor(totalWidth));
+    if (tokens.length === 0) return [];
+    if (width === 0) return tokens.map(() => 0);
+    const weights = tokens.map((value) =>
+        typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0,
+    );
+    const total = weights.reduce((sum, value) => sum + value, 0);
+    if (total <= 0) {
+        // No token counts to weigh by: split the bar as evenly as possible.
+        const base = Math.floor(width / tokens.length);
+        const remainder = width - base * tokens.length;
+        return tokens.map((_value, index) => base + (index < remainder ? 1 : 0));
+    }
+    const floors: number[] = weights.map((weight) => (weight > 0 ? 1 : 0));
+    const assigned = floors.reduce((sum, value) => sum + value, 0);
+    if (assigned > width) {
+        // Narrower than the number of categories: keep the leftmost ones.
+        let remaining = width;
+        return floors.map((value) => {
+            if (value === 0 || remaining === 0) return 0;
+            remaining -= 1;
+            return 1;
+        });
+    }
+    const remaining = width - assigned;
+    const exact = weights.map((weight) => (weight / total) * remaining);
+    const shares = exact.map((value) => Math.floor(value));
+    let leftover = remaining - shares.reduce((sum, value) => sum + value, 0);
+    const byRemainder = exact
+        .map((value, index) => ({
+            index,
+            fraction: value - Math.floor(value),
+            weight: weights[index] ?? 0,
+        }))
+        .sort(
+            (a, b) =>
+                b.fraction - a.fraction || b.weight - a.weight || a.index - b.index,
+        );
+    for (const entry of byRemainder) {
+        if (leftover <= 0) break;
+        shares[entry.index] = (shares[entry.index] ?? 0) + 1;
+        leftover -= 1;
+    }
+    return floors.map((value, index) => value + (shares[index] ?? 0));
+}
 
 /** Compact token count, e.g. 623K. Shared so every host prints one spelling. */
 export function formatStatusTokens(value: number): string {
@@ -315,7 +428,7 @@ function cacheRows(source: StatusViewSource, now: number): StatusRow[] {
             label: "Last response",
             value:
                 source.lastResponseTime > 0
-                    ? `${Math.round((now - source.lastResponseTime) / 1000)}s ago`
+                    ? formatRelativeTime(source.lastResponseTime, now)
                     : "never",
             tone: "text",
         },

@@ -63,6 +63,7 @@ import type {
 import { renderUserStatusSummary } from "@magic-context/core/shared/status-summary";
 import {
 	buildStatusView,
+	distributeBarWidths,
 	type StatusBarSegment,
 	type StatusRow,
 	type StatusTone,
@@ -461,7 +462,7 @@ export function renderPiStatusOverlay(
 	);
 	if (view.windowLine) lines.push(theme.fg("muted", view.windowLine));
 
-	const bar = renderBar(view.bar, s.inputTokens, innerWidth);
+	const bar = renderBar(view.bar, innerWidth);
 	if (bar) lines.push(bar);
 	for (const row of view.breakdown) {
 		lines.push(
@@ -899,10 +900,12 @@ function safeStringify(value: unknown): string {
  * Draws the breakdown bar with block characters, one coloured run per segment,
  * filling the row. Pi's renderer emits truecolor escapes (see `colorHex`), so
  * the bar carries the same category colours as the legend below it.
+ *
+ * The segment widths come from the shared `distributeBarWidths`, so the runs
+ * always add up to the bar width and no blank cell can appear between them.
  */
 function renderBar(
 	segments: readonly StatusBarSegment[],
-	inputTokens: number,
 	innerWidth: number,
 ): string {
 	// Fill the full inner content row. Clamp to a sensible minimum so
@@ -910,22 +913,10 @@ function renderBar(
 	// collapsing all segments to width 1.
 	const barWidth = Math.max(20, innerWidth);
 	if (segments.length === 0) return "";
-	const widths = segments.map((seg) =>
-		Math.max(1, Math.round((seg.tokens / (inputTokens || 1)) * barWidth)),
+	const widths = distributeBarWidths(
+		segments.map((seg) => seg.tokens),
+		barWidth,
 	);
-	let sum = widths.reduce((a, b) => a + b, 0);
-	while (sum > barWidth) {
-		const maxIdx = widths.indexOf(Math.max(...widths));
-		if ((widths[maxIdx] ?? 0) > 1) {
-			widths[maxIdx] -= 1;
-			sum--;
-		} else break;
-	}
-	while (sum < barWidth) {
-		const maxIdx = widths.indexOf(Math.max(...widths));
-		widths[maxIdx] = (widths[maxIdx] ?? 0) + 1;
-		sum++;
-	}
 	return segments
 		.map((seg, i) => colorHex(seg.color, "\u2588".repeat(widths[i] ?? 0)))
 		.join("");

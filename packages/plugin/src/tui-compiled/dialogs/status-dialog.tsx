@@ -1,4 +1,6 @@
 import { createTextNode as _$createTextNode } from "opentui:runtime-module:%40opentui%2Fsolid";
+import { spread as _$spread } from "opentui:runtime-module:%40opentui%2Fsolid";
+import { mergeProps as _$mergeProps } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { memo as _$memo } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { use as _$use } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { createComponent as _$createComponent } from "opentui:runtime-module:%40opentui%2Fsolid";
@@ -21,7 +23,7 @@ import { createElement as _$createElement } from "opentui:runtime-module:%40open
 import { createMemo, createSignal, onCleanup } from "opentui:runtime-module:solid-js";
 import packageJson from "../../../package.json";
 import { statusSummaryFromDetail } from "../../shared/status-summary";
-import { buildStatusView, STATUS_TWO_COLUMN_MIN_COLUMNS } from "../../shared/status-view";
+import { buildStatusView, distributeBarWidths, statusColumnsFor } from "../../shared/status-view";
 import { RUST_MODE_HOST_PATHS_LINE } from "../../shared/rust-mode-status";
 const R = props => (() => {
   var _el$ = _$createElement("box"),
@@ -152,8 +154,8 @@ export const StatusDialog = props => {
   }, {
     version: packageJson.version
   }));
-  // Two columns only when both label columns fit; below that the same sections
-  // are drawn in one column, in the same order, instead of being squeezed.
+  // The dialog's own laid-out width, which is what the sections have to fit
+  // into; the terminal width is only the pre-layout fallback.
   const [dialogWidth, setDialogWidth] = createSignal(0);
   const measureRoot = element => {
     const read = () => {
@@ -166,9 +168,23 @@ export const StatusDialog = props => {
   };
   // paddingLeft + paddingRight below; what the sections get is what is left.
   const contentWidth = () => dialogWidth() > 0 ? dialogWidth() - 4 : terminalColumns();
-  const singleColumn = () => contentWidth() < STATUS_TWO_COLUMN_MIN_COLUMNS;
+  // The shared model decides whether the sections fit in two columns at this
+  // width, and how wide each column has to be; below that the same sections
+  // are drawn in one column, in the same order, instead of being squeezed
+  // into mid-word wraps.
+  const columns = () => statusColumnsFor(view().sections, contentWidth());
   const columnSections = parity => view().sections.filter((_section, index) => index % 2 === parity);
   const hygiene = () => view().hygiene;
+  // Integer segment widths that sum to the bar's own width. Proportional
+  // flexGrow lets the layout engine round each segment on its own, which
+  // leaves blank cells between the coloured runs; the shared helper
+  // distributes the remainder so the bar has no gaps. Before the first
+  // layout there is no width to divide, so the flex fallback stays.
+  const barWidths = () => {
+    const width = contentWidth();
+    if (!Number.isFinite(width) || width <= 0) return null;
+    return distributeBarWidths(view().bar.map(segment => segment.tokens), width);
+  };
   return (() => {
     var _el$1 = _$createElement("box"),
       _el$10 = _$createElement("box"),
@@ -225,25 +241,30 @@ export const StatusDialog = props => {
     _$setProp(_el$18, "width", "100%");
     _$setProp(_el$18, "flexDirection", "row");
     _$setProp(_el$18, "height", 1);
-    _$insert(_el$18, () => view().bar.map(seg => (() => {
-      var _el$23 = _$createElement("box");
-      _$setProp(_el$23, "flexBasis", 0);
-      _$setProp(_el$23, "height", 1);
-      _$effect(_p$ => {
-        var _v$1 = seg.label,
-          _v$10 = Math.max(1, seg.tokens),
-          _v$11 = seg.color;
-        _v$1 !== _p$.e && (_p$.e = _$setProp(_el$23, "key", _v$1, _p$.e));
-        _v$10 !== _p$.t && (_p$.t = _$setProp(_el$23, "flexGrow", _v$10, _p$.t));
-        _v$11 !== _p$.a && (_p$.a = _$setProp(_el$23, "backgroundColor", _v$11, _p$.a));
-        return _p$;
-      }, {
-        e: undefined,
-        t: undefined,
-        a: undefined
-      });
-      return _el$23;
-    })()));
+    _$insert(_el$18, () => view().bar.map((seg, index) => {
+      const widths = barWidths();
+      const fixed = widths ? widths[index] ?? 0 : undefined;
+      return (() => {
+        var _el$23 = _$createElement("box");
+        _$spread(_el$23, _$mergeProps({
+          get key() {
+            return seg.label;
+          }
+        }, () => fixed === undefined ? {
+          flexGrow: Math.max(1, seg.tokens),
+          flexBasis: 0
+        } : {
+          width: fixed,
+          flexShrink: 0
+        }, {
+          "height": 1,
+          get backgroundColor() {
+            return seg.color;
+          }
+        }), false);
+        return _el$23;
+      })();
+    }));
     _$setProp(_el$19, "flexDirection", "column");
     _$setProp(_el$19, "width", "100%");
     _$insert(_el$19, () => view().breakdown.map(row => (() => {
@@ -259,12 +280,12 @@ export const StatusDialog = props => {
       _$insert(_el$25, () => row.label);
       _$insert(_el$26, () => row.value);
       _$effect(_p$ => {
-        var _v$12 = row.label,
-          _v$13 = row.color,
-          _v$14 = t().textMuted;
-        _v$12 !== _p$.e && (_p$.e = _$setProp(_el$24, "key", _v$12, _p$.e));
-        _v$13 !== _p$.t && (_p$.t = _$setProp(_el$25, "fg", _v$13, _p$.t));
-        _v$14 !== _p$.a && (_p$.a = _$setProp(_el$26, "fg", _v$14, _p$.a));
+        var _v$1 = row.label,
+          _v$10 = row.color,
+          _v$11 = t().textMuted;
+        _v$1 !== _p$.e && (_p$.e = _$setProp(_el$24, "key", _v$1, _p$.e));
+        _v$10 !== _p$.t && (_p$.t = _$setProp(_el$25, "fg", _v$10, _p$.t));
+        _v$11 !== _p$.a && (_p$.a = _$setProp(_el$26, "fg", _v$11, _p$.a));
         return _p$;
       }, {
         e: undefined,
@@ -423,10 +444,10 @@ export const StatusDialog = props => {
         _$insertNode(_el$32, _$createTextNode(`Rust Mode`));
         _$insert(_el$34, RUST_MODE_HOST_PATHS_LINE);
         _$effect(_p$ => {
-          var _v$15 = t().text,
-            _v$16 = t().textMuted;
-          _v$15 !== _p$.e && (_p$.e = _$setProp(_el$31, "fg", _v$15, _p$.e));
-          _v$16 !== _p$.t && (_p$.t = _$setProp(_el$34, "fg", _v$16, _p$.t));
+          var _v$12 = t().text,
+            _v$13 = t().textMuted;
+          _v$12 !== _p$.e && (_p$.e = _$setProp(_el$31, "fg", _v$12, _p$.e));
+          _v$13 !== _p$.t && (_p$.t = _$setProp(_el$34, "fg", _v$13, _p$.t));
           return _p$;
         }, {
           e: undefined,
@@ -436,46 +457,54 @@ export const StatusDialog = props => {
       })();
     })(), _el$20);
     _$insert(_el$1, (() => {
-      var _c$5 = _$memo(() => !!singleColumn());
+      var _c$5 = _$memo(() => !!columns().twoColumn);
       return () => _c$5() ? (() => {
-        var _el$35 = _$createElement("box");
-        _$setProp(_el$35, "flexDirection", "column");
+        var _el$35 = _$createElement("box"),
+          _el$36 = _$createElement("box"),
+          _el$37 = _$createElement("box");
+        _$insertNode(_el$35, _el$36);
+        _$insertNode(_el$35, _el$37);
+        _$setProp(_el$35, "flexDirection", "row");
         _$setProp(_el$35, "width", "100%");
-        _$insert(_el$35, () => view().sections.map(section => _$createComponent(StatusSectionView, {
+        _$setProp(_el$35, "gap", 4);
+        _$setProp(_el$36, "flexDirection", "column");
+        _$setProp(_el$36, "flexShrink", 0);
+        _$insert(_el$36, () => columnSections(0).map(section => _$createComponent(StatusSectionView, {
           get t() {
             return t();
           },
           section: section
         })));
+        _$setProp(_el$37, "flexDirection", "column");
+        _$setProp(_el$37, "flexShrink", 0);
+        _$insert(_el$37, () => columnSections(1).map(section => _$createComponent(StatusSectionView, {
+          get t() {
+            return t();
+          },
+          section: section
+        })));
+        _$effect(_p$ => {
+          var _v$14 = columns().leftWidth,
+            _v$15 = columns().rightWidth;
+          _v$14 !== _p$.e && (_p$.e = _$setProp(_el$36, "width", _v$14, _p$.e));
+          _v$15 !== _p$.t && (_p$.t = _$setProp(_el$37, "width", _v$15, _p$.t));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined
+        });
         return _el$35;
       })() : (() => {
-        var _el$36 = _$createElement("box"),
-          _el$37 = _$createElement("box"),
-          _el$38 = _$createElement("box");
-        _$insertNode(_el$36, _el$37);
-        _$insertNode(_el$36, _el$38);
-        _$setProp(_el$36, "flexDirection", "row");
-        _$setProp(_el$36, "width", "100%");
-        _$setProp(_el$36, "gap", 4);
-        _$setProp(_el$37, "flexDirection", "column");
-        _$setProp(_el$37, "flexGrow", 1);
-        _$setProp(_el$37, "flexBasis", 0);
-        _$insert(_el$37, () => columnSections(0).map(section => _$createComponent(StatusSectionView, {
-          get t() {
-            return t();
-          },
-          section: section
-        })));
+        var _el$38 = _$createElement("box");
         _$setProp(_el$38, "flexDirection", "column");
-        _$setProp(_el$38, "flexGrow", 1);
-        _$setProp(_el$38, "flexBasis", 0);
-        _$insert(_el$38, () => columnSections(1).map(section => _$createComponent(StatusSectionView, {
+        _$setProp(_el$38, "width", "100%");
+        _$insert(_el$38, () => view().sections.map(section => _$createComponent(StatusSectionView, {
           get t() {
             return t();
           },
           section: section
         })));
-        return _el$36;
+        return _el$38;
       })();
     })(), _el$20);
     _$insert(_el$1, (() => {

@@ -83,7 +83,10 @@ function createSidebarController(initialPrefs) {
 function compactTokens(value) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(0)}K`;
-  return String(value);
+  // Token counts are whole numbers to the reader even when the tokenizer
+  // calibration leaves them fractional; a raw `522.4` beside a `63K` reads as
+  // a measurement error rather than as precision.
+  return String(Math.round(value));
 }
 
 /**
