@@ -38,6 +38,7 @@ import {
     COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
     HISTORIAN_EDITOR_SYSTEM_PROMPT,
 } from "./hooks/magic-context/compartment-prompt";
+import { recordToolParameters } from "./hooks/magic-context/dropped-input-guard";
 import { createLiveSessionState } from "./hooks/magic-context/live-session-state";
 import {
     getDefaultSubcConnectionFile,
@@ -901,10 +902,14 @@ const server: Plugin = async (ctx) => {
             // flight that reuses a historian/dreamer agent whose
             // chat.message preceded plugin init), skip — the measurement will
             // land correctly on the next flight.
-            if (!lastChatContext) return;
             const typedInput = input as { toolID?: string };
             const typedOutput = output as { description?: unknown; parameters?: unknown };
             if (!typedInput.toolID) return;
+            // The execute hook sees only the tool name, so keep the parameter
+            // names for the dropped-input refusal to list. This needs no chat
+            // context, so it runs before the measurement's early return.
+            recordToolParameters(typedInput.toolID, typedOutput.parameters);
+            if (!lastChatContext) return;
             recordToolDefinition(
                 lastChatContext.providerID,
                 lastChatContext.modelID,

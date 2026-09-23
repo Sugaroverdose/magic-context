@@ -30,8 +30,8 @@ forEachHost(import.meta.url, "dropped-input guard through the plugin entry", (ho
 
     it(host === "opencode2" ? "refuses a native shell call whose command is a copied drop placeholder" : "refuses a bash call whose command is a copied drop placeholder", async () => {
         const sessionId = await h.createSession();
-        // A second, harmless argument proves the refusal is per-call, not a
-        // coincidence of the command text: it must not appear in any output.
+        // A second, harmless argument proves the refusal quotes the call it
+        // received, not a canned string: it must be echoed back in the refusal.
         const marker = "hello-from-a-blocked-call";
         let emitted = false;
         h.mock.addMatcher((body) => {
@@ -77,14 +77,17 @@ forEachHost(import.meta.url, "dropped-input guard through the plugin entry", (ho
                 expect(rows.length).toBe(1);
                 const state = JSON.parse(rows[0]!.data).state as { status: string; error?: string; output?: string };
                 expect(state.status).toBe("error");
-                expect(String(state.error ?? state.output ?? "")).toContain("dropped placeholder");
-                expect(String(state.error ?? state.output ?? "")).not.toContain(marker);
+                const refusal = String(state.error ?? state.output ?? "");
+                expect(refusal).toContain("placeholder Magic Context shows");
+                expect(refusal).toContain('"command":"[dropped §7§]"');
+                expect(refusal).toContain(marker);
             } finally {
                 db.close();
             }
         }
-        // And the model was told how to recover, on the wire of the next request.
-        const followUp = h.requests().find((r) => JSON.stringify(r.body).includes("Recover the original arguments with ctx_expand"));
+        // The next request to the model carries the refusal, including its
+        // instruction to retry the tool call with real parameter values.
+        const followUp = h.requests().find((r) => JSON.stringify(r.body).includes("again with real values"));
         expect(followUp).toBeDefined();
     }, 120_000);
 });
