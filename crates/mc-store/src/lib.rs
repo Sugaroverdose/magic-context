@@ -3330,6 +3330,10 @@ pub struct PassSchedulerObservation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defer_reason: Option<String>,
     pub drain_latch_active: bool,
+    /// Changed render-identity components. A pass that rebuilds the cached prefix may
+    /// produce no changed message block; committing it still replaces the old identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identity_delta: Vec<String>,
 }
 
 /// Incident-worthy scheduler evidence retained independently of the recency ring.
@@ -3342,6 +3346,8 @@ pub struct InterestingPassSchedulerObservation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defer_reason: Option<String>,
     pub drain_latch_active: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identity_delta: Vec<String>,
     /// Sender-stamped request instant. Missing remains missing; it is never backfilled from the
     /// module clock because the two clocks are not interchangeable correlation keys.
     pub request_observed_at_ms: Option<u64>,
@@ -3381,6 +3387,7 @@ impl InterestingPassSchedulerObservation {
             canonical_decision: observation.canonical_decision.clone(),
             defer_reason: observation.defer_reason.clone(),
             drain_latch_active: observation.drain_latch_active,
+            identity_delta: observation.identity_delta.clone(),
             request_observed_at_ms,
             full_array_fingerprint: full_array_fingerprint
                 .filter(|fingerprint| fingerprint.len() <= MAX_FULL_ARRAY_FINGERPRINT_BYTES)
@@ -10436,11 +10443,12 @@ impl McStore {
             .transpose()?;
         let next = expected.unwrap_or(0) + 1;
         let scheduler_interesting_json = scheduler_observation
-            .filter(|_| {
-                scheduler_pass_is_interesting(
-                    scheduler_applied_reductions,
-                    first_divergence.is_some(),
-                )
+            .filter(|observation| {
+                !observation.identity_delta.is_empty()
+                    || scheduler_pass_is_interesting(
+                        scheduler_applied_reductions,
+                        first_divergence.is_some(),
+                    )
             })
             .map(|observation| {
                 serialize_interesting_scheduler_observation(
@@ -22040,6 +22048,7 @@ mod tests {
             canonical_decision: None,
             defer_reason: None,
             drain_latch_active: false,
+            identity_delta: Vec::new(),
         };
         let force = PassSchedulerObservation {
             timestamp_ms: 33,
@@ -22047,6 +22056,7 @@ mod tests {
             canonical_decision: None,
             defer_reason: None,
             drain_latch_active: true,
+            identity_delta: Vec::new(),
         };
         store
             .trace_pass_stable("scheduler-trace", &defer, None, None)
@@ -22076,6 +22086,7 @@ mod tests {
                         canonical_decision: None,
                         defer_reason: None,
                         drain_latch_active: false,
+                        identity_delta: Vec::new(),
                     },
                     None,
                     None,
@@ -22111,6 +22122,7 @@ mod tests {
             canonical_decision: None,
             defer_reason: None,
             drain_latch_active: true,
+            identity_delta: Vec::new(),
         };
 
         commit_scheduler_observation(
@@ -22132,6 +22144,7 @@ mod tests {
                         canonical_decision: None,
                         defer_reason: None,
                         drain_latch_active: true,
+                        identity_delta: Vec::new(),
                     },
                     Some(10_000 + timestamp_ms as u64),
                     None,
@@ -22200,6 +22213,7 @@ mod tests {
                     canonical_decision: None,
                     defer_reason: None,
                     drain_latch_active,
+                    identity_delta: Vec::new(),
                 },
                 (
                     produced_output_divergence,
@@ -22249,6 +22263,7 @@ mod tests {
             canonical_decision: None,
             defer_reason: None,
             drain_latch_active: true,
+            identity_delta: Vec::new(),
         };
         let divergence = PassSchedulerObservation {
             timestamp_ms: 701,
@@ -22256,6 +22271,7 @@ mod tests {
             canonical_decision: None,
             defer_reason: None,
             drain_latch_active: false,
+            identity_delta: Vec::new(),
         };
 
         let first_version = commit_scheduler_observation(
@@ -22334,6 +22350,7 @@ mod tests {
             canonical_decision: Some("defer".to_string()),
             defer_reason: Some("mid_turn_boundary".to_string()),
             drain_latch_active: false,
+            identity_delta: Vec::new(),
         };
         assert_eq!(
             serialize_scheduler_observation(&worst_observation)
@@ -22371,6 +22388,7 @@ mod tests {
                     canonical_decision: None,
                     defer_reason: None,
                     drain_latch_active: true,
+                    identity_delta: Vec::new(),
                 },
                 (false, Some(3), Some(0), Some(0), Some(3), 1),
                 Some(timestamp_ms as u64),
@@ -22420,6 +22438,7 @@ mod tests {
                     canonical_decision: None,
                     defer_reason: None,
                     drain_latch_active: decision == "Execute",
+                    identity_delta: Vec::new(),
                 },
                 (false, Some(3), Some(0), Some(0), Some(3), 1),
                 Some(request_time),
@@ -22472,6 +22491,7 @@ mod tests {
                 canonical_decision: None,
                 defer_reason: None,
                 drain_latch_active: false,
+                identity_delta: Vec::new(),
             },
             (false, Some(3), Some(0), Some(0), Some(3), 1),
             None,
@@ -22499,6 +22519,7 @@ mod tests {
             canonical_decision: None,
             defer_reason: None,
             drain_latch_active: false,
+            identity_delta: Vec::new(),
         };
 
         for (session_id, first_divergence, applied_reductions, fingerprint) in [

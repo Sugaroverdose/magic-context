@@ -2187,6 +2187,7 @@ fn pass_scheduler_observation(
         canonical_decision: Some(pass.canonical_decision().to_string()),
         defer_reason: defer_reason.map(|reason| reason.as_str().to_string()),
         drain_latch_active,
+        identity_delta: Vec::new(),
     }
 }
 
@@ -6216,6 +6217,13 @@ fn apply_once(
     }
     let commit_required =
         state_changed || !consumed_drop_ids.is_empty() || !pending_overlays.is_empty();
+    let mut scheduler_observation = pass_scheduler_observation(
+        scheduler_outcome.pass,
+        scheduler_outcome.defer_reason,
+        scheduler_outcome.drain_latch.is_active(),
+        ctx.now_ms,
+    );
+    scheduler_observation.identity_delta = identity_delta.clone();
     let store_commit_started_at = Instant::now();
     let row_version = if commit_required {
         #[cfg(test)]
@@ -6232,12 +6240,7 @@ fn apply_once(
                 compartment_max_seq: is_bust_pass.then_some(m1_signal.max_compartment_seq),
                 project_root: Some(ctx.project_directory),
                 first_divergence: first_divergence_json.as_deref(),
-                scheduler_observation: Some(&pass_scheduler_observation(
-                    scheduler_outcome.pass,
-                    scheduler_outcome.defer_reason,
-                    scheduler_outcome.drain_latch.is_active(),
-                    ctx.now_ms,
-                )),
+                scheduler_observation: Some(&scheduler_observation),
                 scheduler_request_observed_at_ms: req.request_observed_at_ms,
                 scheduler_full_array_fingerprint: req.full_array_fingerprint.as_deref(),
                 scheduler_eligible_supersession_count: eligible_supersession_count,
@@ -17007,6 +17010,22 @@ pub(crate) mod tests {
         );
         assert!(last_divergence["pass_id"].is_number());
         assert!(last_divergence["timestamp_ms"].is_number());
+
+        let changed = run(
+            &store,
+            &req(session, "cfg1", vec![item("a", 0, "a"), item("c", 3, "c")]),
+            &spine(),
+        );
+        assert_eq!(changed.materialize_reason.as_deref(), Some("epoch_change"));
+        let trace = store.load_pass_trace(session).unwrap().unwrap();
+        assert_eq!(
+            trace.scheduler_history.last().unwrap().identity_delta,
+            ["base"]
+        );
+        let interesting = store
+            .load_interesting_pass_scheduler_history(session, i64::MIN, i64::MAX)
+            .unwrap();
+        assert_eq!(interesting.last().unwrap().identity_delta, ["base"]);
     }
 
     fn comparable_response(response: TransformResponse) -> Value {
