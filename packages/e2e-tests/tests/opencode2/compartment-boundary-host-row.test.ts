@@ -34,14 +34,21 @@ import {
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 type WireItem = { role?: string; type?: string; content?: unknown };
 
-for (const arm of ["historian-wrapup", "stored-boundary-upgrade"] as const) {
+for (const arm of [
+	"historian-wrapup",
+	"stored-boundary-upgrade",
+	"stored-boundary-after-host-checkpoint",
+] as const) {
 	test(`OpenCode 2 compartment boundary on an instructions-updated row (${arm}) serves a byte-stable prefix without degraded mode or double serving`, async () => {
 		const fixture = isolation();
 		const logPath = join(fixture.root, "magic-context.log");
 		fixture.env.MAGIC_CONTEXT_LOG_PATH = logPath;
 		writeFileSync(join(fixture.cwd, "AGENTS.md"), "Rule one: be brief.\n");
+		const checkpoint = arm === "stored-boundary-after-host-checkpoint";
 		const host = await spawnOpencode2({
 			existingIsolation: fixture,
+			// A small window lets one reported high-usage turn make the host compact.
+			...(checkpoint ? { modelContextLimit: 16_000, modelOutputLimit: 1024 } : {}),
 			magicContextConfig: {
 				memory: { enabled: false },
 				dreamer: { disable: true },
@@ -67,6 +74,16 @@ for (const arm of ["historian-wrapup", "stored-boundary-upgrade"] as const) {
 					{ signal: AbortSignal.timeout(30_000) },
 				);
 			};
+			// The drill session had a host checkpoint older than every compartment
+			// boundary, so the host's own window still held rows the compartments
+			// cover. Magic Context supplies the checkpoint summary and restores the
+			// unarchived rows itself on every later pass.
+			if (checkpoint) {
+				host.mock.setDefault({ text: "pressure answer", usage: { input_tokens: 15000, output_tokens: 10 } });
+				await turn("PRE-CHECKPOINT");
+				host.mock.setDefault({ text: "fixture reply", usage: { input_tokens: 100, output_tokens: 10 } });
+				await turn("AFTER-CHECKPOINT");
+			}
 			for (const k of [1, 2, 3]) await turn(`COVERED-${k} ${"older history ".repeat(40)}`);
 			writeFileSync(
 				join(fixture.cwd, "AGENTS.md"),
@@ -81,13 +98,20 @@ for (const arm of ["historian-wrapup", "stored-boundary-upgrade"] as const) {
 			const rows = reader.history(session.id);
 			const types = new Map(rows.map((row) => [row.id, row.type]));
 			const raw = rawMessages(rows);
+			// Raw rows written before the first COVERED turn (the checkpoint arm's two turns).
+			const base = checkpoint ? 4 : 0;
 			const instruction = raw.find((message) => types.get(message.id) === "system");
-			// Precondition: the host itself wrote the instruction row, as ordinal 7,
-			// immediately before the user turn it announces.
-			expect(instruction?.ordinal).toBe(7);
-			expect(types.get(raw[7]!.id)).toBe("user");
-			const servedBefore = raw[5]!;
+			// Precondition: the host itself wrote the instruction row immediately
+			// before the user turn it announces.
+			expect(instruction?.ordinal).toBe(base + 7);
+			expect(types.get(raw[base + 7]!.id)).toBe("user");
+			const servedBefore = raw[base + 5]!;
 			expect(types.get(servedBefore.id)).toBe("assistant");
+			if (checkpoint) {
+				const cut = reader.latestCompaction(session.id);
+				expect(cut?.data.status).toBe("completed");
+				expect(cut!.seq).toBeLessThan(reader.sequenceForId(session.id, raw[base]!.id)!);
+			}
 
 			const mc = new Database(mcPath);
 			mc.exec("PRAGMA busy_timeout = 5000");
@@ -108,13 +132,13 @@ for (const arm of ["historian-wrapup", "stored-boundary-upgrade"] as const) {
 				).id;
 
 			// An older compartment ending on a served row, materialized as the baseline.
-			insertCompartment.run(session.id, 0, 1, 2, raw[0]!.id, raw[1]!.id, "Baseline", "SUMMARY-BASELINE", "SUMMARY-BASELINE", Date.now());
+			insertCompartment.run(session.id, 0, 1, base + 2, raw[0]!.id, raw[base + 1]!.id, "Baseline", "SUMMARY-BASELINE", "SUMMARY-BASELINE", Date.now());
 			forceHard();
 			await turn("BASELINE-PASS");
-			expect(baselineId()).toBe(raw[1]!.id);
+			expect(baselineId()).toBe(raw[base + 1]!.id);
 
-			if (arm === "stored-boundary-upgrade") {
-				insertCompartment.run(session.id, 1, 3, 7, raw[2]!.id, instruction!.id, "Upgrade", "SUMMARY-UPGRADE", "SUMMARY-UPGRADE", Date.now());
+			if (arm !== "historian-wrapup") {
+				insertCompartment.run(session.id, 1, base + 3, base + 7, raw[base + 2]!.id, instruction!.id, "Upgrade", "SUMMARY-UPGRADE", "SUMMARY-UPGRADE", Date.now());
 			} else {
 				host.mock.addMatcher((body) => {
 					const range = JSON.stringify(body).match(/Messages (\d+)-(\d+):/);
