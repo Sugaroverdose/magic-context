@@ -316,12 +316,11 @@ describe("explicit shared storage resolution", () => {
             }) as typeof execFileSync,
         });
 
-        const startedAt = performance.now();
         const db = openDatabase({ busyTimeoutMs: 0 });
-        const elapsedMs = performance.now() - startedAt;
 
         expect(db).not.toBeNull();
-        expect(elapsedMs).toBeLessThan(1_000);
+        expect(openDatabase({ busyTimeoutMs: 0 })).toBe(db);
+        expect(processListProbeCalls).toHaveLength(3);
         expect(processListProbeCalls[0]).toBe("ps -axo pid=,command=");
         expect(processListProbeCalls.slice(1)).toHaveLength(2);
         expect(
