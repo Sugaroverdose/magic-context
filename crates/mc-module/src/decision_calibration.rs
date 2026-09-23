@@ -267,6 +267,35 @@ mod tests {
         local_budget: f64,
     }
 
+    #[derive(Deserialize)]
+    struct ResolverCase {
+        provider: String,
+        model: String,
+        prefix: Option<String>,
+        source: String,
+    }
+
+    #[test]
+    fn resolves_shared_model_and_provider_cases() {
+        let cases: Vec<ResolverCase> = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/calibration-resolver.json"
+        ))
+        .unwrap();
+        for case in cases {
+            let key = format!("{}/{}", case.provider, case.model);
+            let result = DecisionCalibration::for_model(Some(&key));
+            let expected = case
+                .prefix
+                .as_ref()
+                .map(|prefix| seeds().iter().find(|seed| &seed.prefix == prefix).unwrap());
+            assert_eq!(result.system_ratio, expected.map_or(1.0, |s| s.system_ratio), "{key}");
+            assert_eq!(result.tools_ratio, expected.map_or(1.0, |s| s.tools_ratio), "{key}");
+            assert_eq!(result.prose_ratio, expected.map_or(1.0, |s| s.prose_ratio), "{key}");
+            assert_eq!(result.seeded, expected.is_some(), "{key}");
+            assert_eq!(seed_source(Some(&key)), case.source, "{key}");
+        }
+    }
+
     #[test]
     fn shares_independent_fable_arithmetic_with_typescript() {
         let fixture: Fixture = serde_json::from_str(include_str!(
