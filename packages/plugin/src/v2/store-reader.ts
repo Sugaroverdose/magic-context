@@ -160,6 +160,8 @@ SELECT (SELECT COUNT(*) FROM session_message WHERE session_id = ? AND type IN (?
         "SELECT id FROM session_message WHERE session_id = ? AND type IN (?) ORDER BY seq ASC LIMIT ? OFFSET ?",
     messageOrdinalPage:
         "SELECT id, type, seq, json_valid(data) AS valid FROM session_message WHERE session_id = ? AND seq > ? ORDER BY seq ASC, id ASC LIMIT ?",
+    rawRowsThrough:
+        "SELECT id, session_id, type, seq, time_created, data FROM session_message WHERE session_id = ? AND type IN (?) AND seq <= ? ORDER BY seq DESC LIMIT ?",
 };
 
 function debugCounters(): V2StoreReaderDebugCounters {
@@ -514,6 +516,25 @@ export class V2StoreReader {
         return trackDecodeOperation("range", () =>
             through <= after ? [] : this.all(sessionID, after, undefined, through),
         );
+    }
+
+    /** Conversational rows at or before `throughSeq`, newest first. */
+    rawRowsThrough(sessionID: string, throughSeq: number, limit: number): StoreRow[] {
+        return trackDecodeOperation("rawRowsThrough", () => {
+            if (!Number.isSafeInteger(throughSeq)) throw new Error("Invalid seq upper bound");
+            if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000)
+                throw new Error("Invalid page limit");
+            const rawTypes = RAW_MESSAGE_TYPES.map(() => "?").join(", ");
+            return (
+                this.db
+                    .prepare(
+                        `SELECT id, session_id, type, seq, time_created, data FROM session_message
+                         WHERE session_id = ? AND type IN (${rawTypes}) AND seq <= ?
+                         ORDER BY seq DESC LIMIT ?`,
+                    )
+                    .all(sessionID, ...RAW_MESSAGE_TYPES, throughSeq, limit) as RawRow[]
+            ).map(decode);
+        });
     }
 
     sequenceForId(sessionID: string, id: string | null | undefined): number | undefined {

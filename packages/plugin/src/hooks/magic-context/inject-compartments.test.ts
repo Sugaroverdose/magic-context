@@ -58,6 +58,7 @@ import {
     renderMemoryLineV2,
     trimMemoriesToBudgetV2,
 } from "./inject-compartments";
+import { withRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -731,6 +732,100 @@ describe("prepared prefix source-order trimming", () => {
 
         expect(result.prefixTrimStatus).toBe("refused");
         expect(live.map((entry) => entry.info.id)).toEqual([undefined, "before", "after"]);
+    });
+
+    // OpenCode 2 renders an instruction-update row as an id-less system message.
+    // A boundary stored on such a row stands for the served row before it.
+    const hostSystem = (text: string): MessageLike => ({
+        info: { role: "system", sessionID: SESSION_ID },
+        parts: [{ type: "text", text }],
+    });
+    const withServedBoundary = <T>(served: Record<string, string>, run: () => T): T =>
+        withRawMessageProvider(
+            SESSION_ID,
+            {
+                readMessages: () => [],
+                readServedBoundaryId: (id: string) => served[id] ?? null,
+            },
+            run,
+        );
+
+    it("trims at the served row a boundary on an unserved instruction row stands for", () => {
+        db = makeDb();
+        const live = [
+            message("covered", "user"),
+            hostSystem("covered instruction"),
+            message("served-boundary", "assistant"),
+            hostSystem("instruction row"),
+            message("after", "user"),
+        ];
+
+        const result = withServedBoundary({ "instruction-row": "served-boundary" }, () =>
+            injectM0M1({
+                db,
+                sessionId: SESSION_ID,
+                state: getOrCreateSessionMeta(db, SESSION_ID),
+                messages: live,
+                preparedPrefix: preparedPrefix("instruction-row"),
+            }),
+        );
+
+        expect(result.prefixTrimStatus).toBe("applied");
+        expect(live.map((entry) => entry.parts[0]?.text)).toEqual([
+            "new prefix",
+            "instruction row",
+            "after",
+        ]);
+    });
+
+    it("orders id-less host system messages by their persisted neighbours", () => {
+        db = makeDb();
+        const source = [
+            message("covered", "user"),
+            hostSystem("covered instruction"),
+            message("served-boundary", "assistant"),
+            hostSystem("instruction row"),
+            message("after", "user"),
+        ];
+        const evidence = capturePrefixTrimSourceOrder(source);
+        expect(evidence.invalidReason).toBeNull();
+        const live = [...source];
+
+        const result = withServedBoundary({ "instruction-row": "served-boundary" }, () =>
+            injectM0M1({
+                db,
+                sessionId: SESSION_ID,
+                state: getOrCreateSessionMeta(db, SESSION_ID),
+                messages: live,
+                preparedPrefix: preparedPrefix("instruction-row"),
+                prefixTrimSourceOrder: evidence,
+            }),
+        );
+
+        expect(result.prefixTrimStatus).toBe("applied");
+        expect(live.map((entry) => entry.parts[0]?.text)).toEqual([
+            "new prefix",
+            "instruction row",
+            "after",
+        ]);
+    });
+
+    it("still refuses an unserved boundary when no served row stands for it", () => {
+        db = makeDb();
+        const live = [message("before", "user"), hostSystem("instruction row")];
+
+        const result = withServedBoundary({}, () =>
+            injectM0M1({
+                db,
+                sessionId: SESSION_ID,
+                state: getOrCreateSessionMeta(db, SESSION_ID),
+                messages: live,
+                preparedPrefix: preparedPrefix("instruction-row"),
+            }),
+        );
+
+        expect(result.prefixTrimStatus).toBe("refused");
+        expect(live).toHaveLength(3);
     });
 });
 

@@ -97,6 +97,7 @@ import {
     createV2RawMessageProvider,
     createV2RawMessageReader,
     readAllV2RawMessagesForConversion,
+    servedBoundaryRow,
 } from "./store";
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
@@ -994,7 +995,16 @@ export async function registerContext(context: V2Context) {
                     // checkpoint; older rows are already present in the cached messages. The
                     // first fold has no cached prefix, so it starts immediately before the
                     // first retained seq instead of using an unbounded seq-zero scan.
+                    // A boundary on a row the host never serves by id (an instruction
+                    // update) stands for the nearest earlier served row. Restoring from
+                    // that row keeps the unserved rows after it in the raw tail, the
+                    // same cut the transform's trim makes, so a priced pass and the
+                    // defers after it restore identical rows.
+                    const servedBoundary = boundaryID
+                        ? servedBoundaryRow(reader, draft.sessionID, boundaryID)
+                        : null;
                     const boundary =
+                        servedBoundary?.seq ??
                         reader.sequenceForId(draft.sessionID, boundaryID) ??
                         (reader.earliestSequence(draft.sessionID) ?? 0) - 1;
                     const present = new Set(draft.messages.map((message) => message.id));

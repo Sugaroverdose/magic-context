@@ -5,6 +5,7 @@ import {
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import type { Database } from "../../shared/sqlite";
 import { removeSystemReminders } from "../../shared/system-directive";
+import { isHostUnservedRow, markHostUnservedRow } from "./host-served-rows";
 import {
     getMessageTimesFromOpenCodeDb,
     getRawSessionMessageCountFromDb,
@@ -139,6 +140,12 @@ export interface RawMessageProvider {
     getMessageCount?: () => number;
     /** Stored row count including compaction summaries, used for ordinal drift detection. */
     getStoredMessageCount?: () => number;
+    /**
+     * Id of the row a request carries in place of a stored compartment boundary.
+     * Only hosts that store rows they never serve by id implement it; null means
+     * keep the stored id.
+     */
+    readServedBoundaryId?: (messageId: string) => string | null;
 }
 
 /**
@@ -158,9 +165,19 @@ export interface BoundedRawMessageProvider {
     ): RawMessageOrdinalEntry[];
     getMessageCount(): number;
     getStoredMessageCount(): number;
+    readServedBoundaryId?: (messageId: string) => string | null;
 }
 
 const sessionProviders = new Map<string, RawMessageProvider>();
+
+/**
+ * Map a stored compartment boundary id to the message id a request actually
+ * carries for it. Identity for every host whose raw rows are all served by id.
+ */
+export function resolveHostServedBoundaryId(sessionId: string, messageId: string): string {
+    if (messageId.length === 0) return messageId;
+    return sessionProviders.get(sessionId)?.readServedBoundaryId?.(messageId) ?? messageId;
+}
 
 /** Whether this session has an explicit non-OpenCode raw-history source. */
 export function hasRawMessageProvider(sessionId: string): boolean {
@@ -1022,6 +1039,7 @@ export function readSessionChunk(
         if (msg.ordinal < startOrdinal) continue;
 
         const meta = { ordinal: msg.ordinal, messageId: msg.id };
+        if (isHostUnservedRow(msg)) markHostUnservedRow(meta);
 
         // Skip user messages that are pure system notifications (background task
         // completions, internal initiator markers, system directives). These carry

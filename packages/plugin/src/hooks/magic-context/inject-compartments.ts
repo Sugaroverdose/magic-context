@@ -62,6 +62,8 @@ import {
 } from "./compartment-render-epoch";
 import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
 import { historyLocalBudget } from "./decision-calibration";
+import { isHostRenderedSystemMessage } from "./host-served-rows";
+import { resolveHostServedBoundaryId } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -423,8 +425,10 @@ export function prepareCompartmentInjection(
         } else {
             // Re-do the splice with the cached boundary (messages are rebuilt fresh each pass)
             if (prepared.compartmentEndMessageId.length > 0) {
-                const cutoffIndex = messages.findIndex(
-                    (message) => message.info.id === prepared.compartmentEndMessageId,
+                const cutoffIndex = findBoundaryIndex(
+                    sessionId,
+                    messages,
+                    prepared.compartmentEndMessageId,
                 );
                 if (cutoffIndex >= 0) {
                     const remaining = messages.slice(cutoffIndex + 1);
@@ -626,7 +630,7 @@ export function prepareCompartmentInjection(
     let needsFreshMaterialization = false;
     let resultEndMessage: number = lastEnd;
     let resultEndMessageId: string | null = null;
-    const cutoffIndex = messages.findIndex((message) => message.info.id === trimEndMessageId);
+    const cutoffIndex = findBoundaryIndex(sessionId, messages, trimEndMessageId);
     if (cutoffIndex >= 0) {
         // Natural boundary is visible — normal splice, and any degraded-mode
         // bookkeeping from earlier passes is cleared.
@@ -658,8 +662,10 @@ export function prepareCompartmentInjection(
             const reAnchorIndex = findVisibleReanchorIndex(compartments, visibleMessageIds);
             if (reAnchorIndex >= 0) {
                 const reAnchorCompartment = compartments[reAnchorIndex];
-                const reAnchorCutoff = messages.findIndex(
-                    (message) => message.info.id === reAnchorCompartment.endMessageId,
+                const reAnchorCutoff = findBoundaryIndex(
+                    sessionId,
+                    messages,
+                    reAnchorCompartment.endMessageId,
                 );
                 if (reAnchorCutoff >= 0) {
                     skippedVisibleMessages = reAnchorCutoff + 1;
@@ -3300,6 +3306,24 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
     };
 }
 
+/**
+ * Locate a stored compartment boundary in the live messages. A boundary on a row
+ * the host never serves by id (OpenCode 2 instruction updates) is found through
+ * the served row it stands for; the direct lookup runs first so every host whose
+ * rows are all served by id reads nothing extra.
+ */
+function findBoundaryIndex(
+    sessionId: string,
+    messages: readonly MessageLike[],
+    boundaryId: string,
+): number {
+    const direct = messages.findIndex((message) => message.info.id === boundaryId);
+    if (direct >= 0) return direct;
+    const served = resolveHostServedBoundaryId(sessionId, boundaryId);
+    if (served === boundaryId) return -1;
+    return messages.findIndex((message) => message.info.id === served);
+}
+
 function isSyntheticPrefixHead(message: MessageLike): boolean {
     if (
         message.info.id !== undefined ||
@@ -3326,6 +3350,10 @@ export function capturePrefixTrimSourceOrder(
 
     for (const [index, message] of messages.entries()) {
         const id = message.info.id;
+        // OpenCode 2 renders instruction-update rows as id-less system messages
+        // anywhere in history. They carry no row identity to order, and the trim
+        // places them by their persisted neighbours.
+        if (isHostRenderedSystemMessage(message)) continue;
         if (typeof id !== "string" || id.length === 0) {
             if (!sawPersistedRow && isSyntheticPrefixHead(message)) {
                 syntheticHeadCount += 1;
@@ -3380,7 +3408,9 @@ function trimToPreparedPrefix(
                 sourceOrder.messageIds.forEach((id, index) => {
                     sourcePosition.set(id, index);
                 });
-                const boundaryPosition = sourcePosition.get(boundary);
+                const boundaryPosition =
+                    sourcePosition.get(boundary) ??
+                    sourcePosition.get(resolveHostServedBoundaryId(options.sessionId, boundary));
                 if (boundaryPosition === undefined) {
                     status = refuse("boundary absent from immutable source order");
                 } else {
@@ -3390,6 +3420,13 @@ function trimToPreparedPrefix(
                     const retained: MessageLike[] = [];
                     for (const [index, message] of options.messages.entries()) {
                         const id = message.info.id;
+                        if (isHostRenderedSystemMessage(message)) {
+                            // Belongs to the rows around its persisted neighbours:
+                            // kept exactly when the row before it is kept or is the
+                            // boundary, the same cut the id-lookup trim makes.
+                            if (lastSourcePosition >= boundaryPosition) retained.push(message);
+                            continue;
+                        }
                         if (typeof id !== "string" || id.length === 0) {
                             if (!sawPersistedRow && isSyntheticPrefixHead(message)) continue;
                             liveOrderError = `live message at index ${index} has no stable id outside the synthetic head`;
@@ -3416,7 +3453,7 @@ function trimToPreparedPrefix(
                 }
             }
         } else {
-            const index = options.messages.findIndex((message) => message.info.id === boundary);
+            const index = findBoundaryIndex(options.sessionId, options.messages, boundary);
             if (index >= 0) {
                 options.messages.splice(0, index + 1);
                 status = "applied";

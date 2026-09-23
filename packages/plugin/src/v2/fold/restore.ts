@@ -103,12 +103,15 @@ export function restoreRow(row: StoreRow, model: { providerID: string; id: strin
               ]
             : [];
     }
-    if (["synthetic", "skill", "system"].includes(row.type))
-        return [
-            make(row.type === "system" ? "system" : "user", [
-                { type: "text", text: data.text ?? "" },
-            ]),
-        ];
+    // The host renders an instruction-update row as a bare system message with
+    // neither the row id nor its metadata. Restoring it the same way keeps a
+    // restored row byte-identical to the host-rendered one, so the request does
+    // not change when the row moves between the restored range and the host's
+    // own window, and an id-less row is never tagged or dropped as history.
+    if (row.type === "system")
+        return [{ role: "system", content: [{ type: "text", text: data.text ?? "" }] }];
+    if (["synthetic", "skill"].includes(row.type))
+        return [make("user", [{ type: "text", text: data.text ?? "" }])];
     if (row.type === "location-switched")
         return [
             make("user", [
