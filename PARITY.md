@@ -92,10 +92,19 @@ fallback. Retryable fallback switches the child's model before re-prompting.
 **Constraint:** the GA plugin Pick cannot remove or archive a session. Each active
 historian child is therefore a visible root titled `Magic Context historian`, and
 Dreamer uses a second root titled `Magic Context dreamer`. Failed or incompatible-host-generation
-children are retired but never deleted by the plugin. `doctor
-list-hidden-sessions` lists these roots read-only; removal is manual until the
-host honours `archived` or projects `remove`. The marker hook refuses any
-unregistered prompt on a Magic Context child.
+children are retired and deleted through the host's own session-delete route,
+bound to the `serve --service` registration that created them; a child whose
+host registered no service stays recorded for a later process and is reported as
+`MC-H02`. `doctor list-hidden-sessions` lists these roots read-only. The marker
+hook refuses any unregistered prompt on a Magic Context child.
+
+**Retention:** `keep_subagents: true` follows the OpenCode 1 rule. A child
+retired while idle is kept for either role; an unsettled historian child is also
+kept (the OpenCode 1 age-gated sweep retains historian children under the
+setting); only a Dreamer child retired mid-run, the privacy-sensitive class, is
+still deleted. Kept children stay in the retired list, so every boot still
+registers them as hidden, and the boot sweep skips them until the setting is
+turned off.
 
 ### 4. Fail-closed interruption
 
