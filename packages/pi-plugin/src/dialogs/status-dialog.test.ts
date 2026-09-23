@@ -9,7 +9,11 @@ import {
 	updateTagTokenCount,
 } from "@magic-context/core/features/magic-context/storage-tags";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
-import { buildStatusView } from "@magic-context/core/shared/status-view";
+import {
+	buildStatusView,
+	STATUS_COLUMN_GAP,
+	statusColumnsFor,
+} from "@magic-context/core/shared/status-view";
 import {
 	clearPiChannel1State,
 	setPiChannel1Baseline,
@@ -37,6 +41,37 @@ function plainTheme() {
 		fg: (_color: string, text: string) => text,
 		bold: (text: string) => text,
 	} as never;
+}
+
+/**
+ * A detail whose shared model carries every section, so a layout test can assert
+ * on the whole grid instead of on whichever sections a sparse fixture happens to
+ * produce. The cache TTL is pinned to a session value so the Configured row is
+ * short: the default spelling carries the model key and is long enough that the
+ * shared column rule would keep the sections in one column at any width. The
+ * caller owns the returned database and must close it.
+ */
+function fullStatusDetail(sessionId: string) {
+	const db = createTestDb();
+	insertTag(db, sessionId, "m1", "tool", 4_000, 1);
+	const detail = buildPiStatusDetail(
+		{ getAllTools: () => [] } as never,
+		{
+			...fakeContext(sessionId),
+			getContextUsage: () => ({
+				tokens: 40_000,
+				percent: 20,
+				contextWindow: 200_000,
+			}),
+			getSystemPrompt: () => "system prompt",
+		} as never,
+		{ db, projectIdentity: resolveProjectIdentity(process.cwd()) },
+		sessionId,
+	);
+	return {
+		db,
+		detail: { ...detail, cacheTtl: "5m", cacheTtlSource: "session" as const },
+	};
 }
 
 describe("Pi status dialog", () => {
@@ -884,6 +919,94 @@ Warning: History compression could not finish this turn. It will retry automatic
 				"Press D",
 			]) {
 				expect(text).not.toContain(gone);
+			}
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("pairs sections into two columns when the overlay is wide enough", () => {
+		const { db, detail } = fullStatusDetail("ses-status-two-column");
+		try {
+			const innerWidth = 96;
+			const lines = renderPiStatusOverlay(detail, plainTheme(), innerWidth);
+			const view = buildStatusView(statusViewSourceFromPiDetail(detail), {
+				version: "0.0.0",
+			});
+			// The shared model decides the layout and sizes each column from its own
+			// widest section, so a value never wraps inside its column.
+			const layout = statusColumnsFor(view.sections, innerWidth);
+			expect(layout.twoColumn).toBe(true);
+			const gap = STATUS_COLUMN_GAP;
+
+			expect(view.sections.length).toBe(7);
+			for (let i = 0; i < view.sections.length; i += 2) {
+				const left = view.sections[i];
+				if (!left) throw new Error("left section missing");
+				const right = view.sections[i + 1];
+				// The pair shares one title line: the left title at the start, the
+				// right title exactly after the left column and the gap.
+				const titleIndex = lines.findIndex((line) =>
+					right
+						? line.startsWith(left.title) && line.includes(right.title)
+						: line.trimEnd() === left.title,
+				);
+				expect(titleIndex).toBeGreaterThanOrEqual(0);
+				const titleLine = lines[titleIndex] ?? "";
+				expect(titleLine.startsWith(left.title)).toBe(true);
+				if (right) {
+					expect(titleLine.slice(layout.leftWidth + gap)).toBe(right.title);
+				}
+
+				const rowCount = Math.max(left.rows.length, right?.rows.length ?? 0);
+				for (let r = 0; r < rowCount; r++) {
+					const line = lines[titleIndex + 1 + r] ?? "";
+					const leftRow = left.rows[r];
+					if (leftRow) {
+						expect(line.startsWith(leftRow.label)).toBe(true);
+						// The value is right-aligned within the left column: it ends at
+						// the column's right edge.
+						expect(
+							line.slice(layout.leftWidth - leftRow.value.length, layout.leftWidth),
+						).toBe(leftRow.value);
+					}
+					const rightRow = right?.rows[r];
+					if (rightRow && right) {
+						const rightStart = layout.leftWidth + gap;
+						const rightEnd = rightStart + layout.rightWidth;
+						expect(line.slice(rightEnd - rightRow.value.length, rightEnd)).toBe(
+							rightRow.value,
+						);
+					}
+				}
+			}
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("keeps the one-column shape below the two-column minimum", () => {
+		const { db, detail } = fullStatusDetail("ses-status-one-column");
+		try {
+			const innerWidth = 60;
+			const lines = renderPiStatusOverlay(detail, plainTheme(), innerWidth);
+			const view = buildStatusView(statusViewSourceFromPiDetail(detail), {
+				version: "0.0.0",
+			});
+
+			// Walk the sections in model order: each title is alone on its own
+			// line, followed by its rows, each padded to the full inner width.
+			let cursor = 0;
+			for (const section of view.sections) {
+				const titleIndex = lines.indexOf(section.title, cursor);
+				expect(titleIndex).toBeGreaterThanOrEqual(cursor);
+				cursor = titleIndex + 1;
+				for (const row of section.rows) {
+					const line = lines[cursor] ?? "";
+					expect(line.startsWith(row.label)).toBe(true);
+					expect(visibleWidth(line)).toBe(innerWidth);
+					cursor += 1;
+				}
 			}
 		} finally {
 			closeQuietly(db);
