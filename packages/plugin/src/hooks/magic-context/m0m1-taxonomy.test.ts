@@ -435,7 +435,7 @@ it("class-B protected_tokens edit remains boot-bound across a live-config defer 
     mkdirSync(configDir, { recursive: true });
     const configFile = join(configDir, "magic-context.jsonc");
     try {
-        writeFileSync(configFile, JSON.stringify({ protected_tokens: 16000, historian: { opencode: { model: "old/model" } } }));
+        writeFileSync(configFile, JSON.stringify({ protected_tokens: 16000, toast_duration_ms: 1500, historian: { opencode: { model: "old/model" } } }));
         const load = () => loadPluginConfigDetailed(projectDirectory, false).config;
         const boot = load();
         const reader = new LiveConfigReader(projectDirectory, boot, load, () => {});
@@ -443,9 +443,10 @@ it("class-B protected_tokens edit remains boot-bound across a live-config defer 
         db = makeDb();
         appendCompartments(db, SESSION_ID, [compartment(0, "A", "Alpha baseline")]);
         const seeded = pass({ projectDirectory, isCacheBustingPass: true });
-        writeFileSync(configFile, JSON.stringify({ protected_tokens: 24000, historian: { opencode: { model: "new/model-long" } } }));
+        writeFileSync(configFile, JSON.stringify({ protected_tokens: 24000, toast_duration_ms: 2900, historian: { opencode: { model: "new/model-long" } } }));
         const run = historianRunConfig(boot, reader.poll().effective);
         expect(run.protected_tokens).toBe(16000);
+        expect(run.toast_duration_ms).toBe(2900);
         expect(resolveHistorianModel(run, "opencode").primary?.model).toBe("new/model-long");
         const deferred = pass({ projectDirectory, isCacheBustingPass: false });
         expect(deferred.m0).toBe(seeded.m0);

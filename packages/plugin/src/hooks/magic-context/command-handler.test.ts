@@ -1395,6 +1395,43 @@ describe("createMagicContextCommandHandler", () => {
             );
         });
 
+        it("samples toast duration once when a dream run starts", async () => {
+            let duration = 3000;
+            const sampleToastDurationMs = mock(() => duration);
+            const sendNotification = mock(async () => {});
+            const handler = createMagicContextCommandHandler({
+                db,
+                sendNotification,
+                sampleToastDurationMs,
+                dreamer: {
+                    config: {} as never,
+                    projectPath: "/repo/project",
+                    runManual: async () => {
+                        duration = 9000;
+                        return { ran: ["verify"], details: [], skippedNoWork: [], deferredBusy: [], failed: [] };
+                    },
+                },
+            });
+            const run = () => expectSentinel(
+                handler["command.execute.before"](
+                    { command: "ctx-dream", sessionID: "ses-dream", arguments: "" },
+                    makeOutput(""),
+                    {},
+                ),
+                "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
+            );
+            await run();
+            expect(sampleToastDurationMs).toHaveBeenCalledTimes(1);
+            expect(sendNotification.mock.calls.slice(0, 2).map((call) => call[2])).toEqual([
+                { toastDurationMs: 3000 }, { toastDurationMs: 3000 },
+            ]);
+            await run();
+            expect(sampleToastDurationMs).toHaveBeenCalledTimes(2);
+            expect(sendNotification.mock.calls.slice(2, 4).map((call) => call[2])).toEqual([
+                { toastDurationMs: 9000 }, { toastDurationMs: 9000 },
+            ]);
+        });
+
         it("force-runs a single named task when given an argument", async () => {
             const sendNotification = mock(async () => {});
             const runManual = mock(async () => ({

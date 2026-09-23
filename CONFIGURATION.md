@@ -65,6 +65,7 @@ Keys listed below apply from the next historian or dreamer run (or dream-timer t
 - `memory.git_commit_indexing.max_commits`
 - `memory.git_commit_indexing.since_days`
 - `mural.model`
+- `toast_duration_ms`
 <!-- LIVE-CONFIG-KEYS-END -->
 
 `dreamer.<host>.tasks` is a map: each task's model, fallback chain, reasoning qualifier and timeout inherit this live behavior. Project-tier restrictions still apply; for example, historian model selection remains user-tier only.

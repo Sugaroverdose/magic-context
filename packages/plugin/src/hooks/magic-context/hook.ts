@@ -498,7 +498,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             liveModelBySession,
             variantBySession,
             agentBySession,
-            deps.config.toast_duration_ms,
+            (deps.sampleDreamConfig?.() ?? deps.config).toast_duration_ms,
         );
         void sendStatusNotification(deps.client, sessionId, warning, notificationParams).catch(
             (error) => {
@@ -1348,6 +1348,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         db,
         compactionOff,
         toastDurationMs: deps.config.toast_duration_ms,
+        sampleToastDurationMs: () => (deps.sampleDreamConfig?.() ?? deps.config).toast_duration_ms,
         executeThresholdPercentage: deps.config.execute_threshold_percentage ?? 65,
         executeThresholdTokens: deps.config.execute_threshold_tokens,
         historyBudgetPercentage: deps.config.history_budget_percentage,
@@ -1355,6 +1356,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         rustModeModuleClient,
         projectRoot: deps.directory,
         commitClusterTrigger: deps.config.commit_cluster_trigger,
+        sampleCommitClusterTrigger: () => (deps.sampleHistorianConfig?.() ?? deps.config).commit_cluster_trigger,
         cacheTtlConfig: deps.config.cache_ttl,
         cacheTtlConfigured: deps.config.cacheTtlConfigured === true,
         configParseFailures: deps.config.configParseFailures ?? [],
@@ -1420,7 +1422,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                     liveModelBySession,
                     variantBySession,
                     agentBySession,
-                    deps.config.toast_duration_ms,
+                    (deps.sampleDreamConfig?.() ?? deps.config).toast_duration_ms,
                 ),
                 ...params,
             });

@@ -430,6 +430,7 @@ export function createMagicContextCommandHandler(deps: {
     executeThresholdTokens?: { default?: number; [modelKey: string]: number | undefined };
     historyBudgetPercentage?: number;
     commitClusterTrigger?: { enabled: boolean; min_clusters: number };
+    sampleCommitClusterTrigger?: () => { enabled: boolean; min_clusters: number } | undefined;
     getLiveModelKey?: (sessionId: string) => string | undefined;
     cacheTtlConfig?: MagicContextConfig["cache_ttl"];
     cacheTtlConfigured?: boolean;
@@ -705,7 +706,7 @@ export function createMagicContextCommandHandler(deps: {
                             deps.executeThresholdPercentage,
                             liveModelKey,
                             deps.historyBudgetPercentage,
-                            deps.commitClusterTrigger,
+                            deps.sampleCommitClusterTrigger?.() ?? deps.commitClusterTrigger,
                             deps.executeThresholdTokens,
                             liveContextLimit,
                             deps.dreamer

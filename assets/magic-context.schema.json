@@ -2048,6 +2048,7 @@
     "toast_duration_ms": {
       "default": 5000,
       "description": "TUI toast lifetime in milliseconds for Magic Context notifications. Set to 0 to disable Magic Context toasts entirely (min: 0, max: 60000, default: 5000)",
+      "x-mc-live-reload": true,
       "type": "number",
       "minimum": 0,
       "maximum": 60000

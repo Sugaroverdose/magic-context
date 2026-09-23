@@ -1396,7 +1396,7 @@ export function registerRpcHandlers(
             liveSessionState.liveModelBySession,
             liveSessionState.variantBySession,
             liveSessionState.agentBySession,
-            config.toast_duration_ms,
+            currentPluginConfigReader(directory)?.poll().effective.toast_duration_ms ?? config.toast_duration_ms,
         );
 
     const injectionBudgetTokens = config.memory?.injection_budget_tokens;
@@ -1713,10 +1713,11 @@ export function registerRpcHandlers(
     });
 
     rpcServer.handle("toast-duration", async () => {
+        const duration = currentPluginConfigReader(directory)?.poll().effective.toast_duration_ms ?? config.toast_duration_ms;
         const resolved =
-            typeof config.toast_duration_ms === "number" &&
-            Number.isFinite(config.toast_duration_ms)
-                ? config.toast_duration_ms
+            typeof duration === "number" &&
+            Number.isFinite(duration)
+                ? duration
                 : 5000;
         return { toastDurationMs: resolved };
     });
