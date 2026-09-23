@@ -99,7 +99,10 @@ export function formatPendingCoordinateRebases(
 /**
  * Compartments a rebase could not re-anchor, because the message their saved
  * endpoint id names is absent from the projection the host now serves. They
- * stay readable by id but are excluded from range recovery and injection.
+ * still render in the injected session history and stay readable by id; only
+ * range recovery (`ctx_expand`) refuses them, because their
+ * saved message range can no longer be trusted. The next store conversion in
+ * either direction re-evaluates them.
  */
 export function listUnresolvedCompartments(
     contextDb: Pick<Database, "prepare">,
