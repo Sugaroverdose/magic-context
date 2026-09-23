@@ -220,7 +220,10 @@ const DEFAULT_READ_LIMIT = 25;
 
 /** The tray line appended to a write reply: how many active session notes the
  *  writer now holds and how old the oldest one is. */
-function writeTray(db: ContextDatabase, sessionId: string): {
+function writeTray(
+	db: ContextDatabase,
+	sessionId: string,
+): {
 	activeCount: number;
 	oldestTouchedAt: number | null;
 } {
@@ -341,11 +344,7 @@ export function createCtxNoteTool(
 					anchorOrdinal,
 				});
 				return ok(
-					formatWriteReply(
-						note.id,
-						writeTray(deps.db, sessionId),
-						Date.now(),
-					),
+					formatWriteReply(note.id, writeTray(deps.db, sessionId), Date.now()),
 				);
 			}
 

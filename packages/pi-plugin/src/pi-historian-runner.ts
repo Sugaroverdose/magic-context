@@ -261,10 +261,21 @@ async function runHistorianSubagentWithTransientRetriesGuarded(args: {
 			const window =
 				args.resolveContextLimit?.(key) ??
 				resolveKnownHistorianContextLimit(key);
-			const reserve = historianProducerReserve(window, args.options.maxOutputTokens, args.resolveOutputLimit?.(key));
-			if (window !== undefined && producerInputTokenLimit(window, reserve) === undefined && !loggedInconsistentWindows.has(key)) {
+			const reserve = historianProducerReserve(
+				window,
+				args.options.maxOutputTokens,
+				args.resolveOutputLimit?.(key),
+			);
+			if (
+				window !== undefined &&
+				producerInputTokenLimit(window, reserve) === undefined &&
+				!loggedInconsistentWindows.has(key)
+			) {
 				loggedInconsistentWindows.add(key);
-				sessionLog(args.sessionId, `producer window inconsistent for ${key}: window=${window} reserve=${reserve}; sending unguarded`);
+				sessionLog(
+					args.sessionId,
+					`producer window inconsistent for ${key}: window=${window} reserve=${reserve}; sending unguarded`,
+				);
 			}
 			const failure = producerPromptFailureReason({
 				sourceLocal: estimateTokens(args.options.userMessage),
@@ -513,15 +524,20 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		forceDrainQuota,
 		forceKeepLastCompartment,
 	} = deps;
-	const primaryModelKey = piModelRefToCanonical(historianModel ?? fallbackModelId ?? "");
-	const primaryWindow = deps.resolveHostContextLimit?.(primaryModelKey) ?? historianContextLimit;
-	const maxOutputTokens = configuredMaxOutputTokens ?? (primaryWindow === undefined
-		? 32_000
-		: historianProducerReserve(
-				primaryWindow,
-				undefined,
-				deps.resolveHostOutputLimit?.(primaryModelKey) ?? 32_000,
-			));
+	const primaryModelKey = piModelRefToCanonical(
+		historianModel ?? fallbackModelId ?? "",
+	);
+	const primaryWindow =
+		deps.resolveHostContextLimit?.(primaryModelKey) ?? historianContextLimit;
+	const maxOutputTokens =
+		configuredMaxOutputTokens ??
+		(primaryWindow === undefined
+			? 32_000
+			: historianProducerReserve(
+					primaryWindow,
+					undefined,
+					deps.resolveHostOutputLimit?.(primaryModelKey) ?? 32_000,
+				));
 	const historianChunkTokens = producerSourceLocalBudget(
 		providerHistorianChunkTokens,
 		piModelRefToCanonical(historianModel ?? fallbackModelId ?? ""),
@@ -1138,10 +1154,16 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						: validatedPass.kind === "spawn-failed"
 							? `subagent run failed (${validatedPass.reason}): ${validatedPass.error}`
 							: "historian returned no usable text";
-				if (!producerDispatched && /producer_prompt_(?:exceeds_window|fit_unavailable)/.test(errorMsg)) {
+				if (
+					!producerDispatched &&
+					/producer_prompt_(?:exceeds_window|fit_unavailable)/.test(errorMsg)
+				) {
 					retainDrainReservationForRetryThrottle = false;
 					rollbackDrainReservation();
-					sessionLog(sessionId, `historian producer admission refused: ${errorMsg}`);
+					sessionLog(
+						sessionId,
+						`historian producer admission refused: ${errorMsg}`,
+					);
 					return;
 				}
 				sessionLog(sessionId, `historian failure: ${errorMsg}`);

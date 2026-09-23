@@ -18,13 +18,6 @@ import { measurePiTailHygiene } from "./tail-hygiene-walk-pi";
 import { createTestDb } from "./test-utils.test";
 import { createPiTranscript } from "./transcript-pi";
 
-type WirePart = {
-	type: string;
-	id?: string;
-	call_id?: string;
-	tool_use_id?: string;
-};
-type WirePayload = { messages: { role: string; content: WirePart[] }[] };
 const call = (id: string) => ({
 	type: "toolCall",
 	id,
@@ -336,7 +329,11 @@ test("Q8 indices survive marking and commit; identity finalizer tolerates interv
 		tagger.initFromDb("indices", db);
 		const { targets } = tagTranscript("indices", tr, tagger, db);
 		const tags = getTagsBySession(db, "indices");
-		targets.get(tags.find((t) => t.messageId === "old")!.tagNumber)!.drop!();
+		const oldTag = tags.find((t) => t.messageId === "old");
+		if (!oldTag) throw new Error("Expected old tool tag");
+		const oldTarget = targets.get(oldTag.tagNumber);
+		if (!oldTarget?.drop) throw new Error("Expected droppable old target");
+		oldTarget.drop();
 		expect(tr.getWorkingMessages().length).toBe(3);
 		expect(tr.messages.some((m) => m.info.id === "tail-entry")).toBe(true);
 		tr.commit();
@@ -379,9 +376,11 @@ test("Q4 Anthropic sole signed tool arc retains serialized separator", async () 
 		const tagger = createTagger();
 		tagger.initFromDb("sole", db);
 		const { targets } = tagTranscript("sole", tr, tagger, db);
-		targets.get(
-			getTagsBySession(db, "sole").find((t) => t.type === "tool")!.tagNumber,
-		)!.drop!();
+		const soleTag = getTagsBySession(db, "sole").find((t) => t.type === "tool");
+		if (!soleTag) throw new Error("Expected sole tool tag");
+		const soleTarget = targets.get(soleTag.tagNumber);
+		if (!soleTarget?.drop) throw new Error("Expected droppable sole target");
+		soleTarget.drop();
 		tr.commit();
 		tr.finalizeToolRemovals();
 		const w: unknown = await wire(messages, false);

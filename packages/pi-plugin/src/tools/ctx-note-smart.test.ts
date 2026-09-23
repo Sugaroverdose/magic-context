@@ -23,7 +23,6 @@ import {
 	getNotes,
 	updateNote,
 } from "@magic-context/core/features/magic-context/storage";
-import { renderGlance } from "@magic-context/core/tools/ctx-note/render";
 
 import { createTestDb, fakeContext } from "../test-utils.test";
 import { createCtxNoteTool } from "./ctx-note";
@@ -451,7 +450,9 @@ describe("Pi ctx_note smart notes", () => {
 			params: { action: "read" },
 		});
 		expect(defaultText).toContain("Active session note");
-		expect(defaultText).toContain("Active smart note (not yet ready) · pending");
+		expect(defaultText).toContain(
+			"Active smart note (not yet ready) · pending",
+		);
 
 		// Explicit filter='active' returns only active-status notes, so the
 		// pending smart note drops out.
