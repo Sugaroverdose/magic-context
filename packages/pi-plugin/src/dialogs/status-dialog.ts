@@ -376,7 +376,9 @@ export function formatPiStatusSummary(s: StatusDialogDetail): string {
 		},
 		"plain",
 	);
-	return s.configGeneration === undefined ? summary : `${summary}\nConfig generation: ${s.configGeneration} (adopted ${s.configAdoptedAt ? new Date(s.configAdoptedAt).toLocaleString() : "unknown"})${s.configReloadFailure ? `\nConfig reload failed ${s.configReloadFailure.path}: ${s.configReloadFailure.message}` : ""}`;
+	return s.configGeneration === undefined
+		? summary
+		: `${summary}\nConfig generation: ${s.configGeneration} (adopted ${s.configAdoptedAt ? new Date(s.configAdoptedAt).toLocaleString() : "unknown"})${s.configReloadFailure ? `\nConfig reload failed ${s.configReloadFailure.path}: ${s.configReloadFailure.message}` : ""}`;
 }
 
 /**
