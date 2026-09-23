@@ -3091,6 +3091,7 @@ fn apply_additive_only(
                 &additive_meta,
                 meta.expiry_cutoff_ms,
                 ctx.memory_enabled,
+                serializer_profile != Some(SerializerProfile::ClaudeCodeAnthropic),
                 ctx.memory_budget_tokens,
                 ctx.user_profile_budget_tokens,
                 ctx.temporal_awareness,
@@ -5197,6 +5198,7 @@ fn apply_once(
                     &meta,
                     meta.expiry_cutoff_ms,
                     ctx.memory_enabled,
+                    serializer_profile != Some(SerializerProfile::ClaudeCodeAnthropic),
                     ctx.memory_budget_tokens,
                     ctx.user_profile_budget_tokens,
                     ctx.temporal_awareness,
@@ -5489,9 +5491,7 @@ fn apply_once(
                     boundary_present: boundary_token,
                     ..Default::default()
                 });
-                if compartment_seq_changed_since_meta
-                    && current_m1_digest == applied_m1_revision
-                {
+                if compartment_seq_changed_since_meta && current_m1_digest == applied_m1_revision {
                     meta.coverage_compartment_seq = Some(m1_signal.max_compartment_seq);
                 }
             }
@@ -27854,6 +27854,74 @@ pub(crate) mod tests {
             "{}",
             m1_bytes(&soft)
         );
+    }
+
+    /// Boot a session on `profile`, then insert a memory whose host mirror id differs from its
+    /// module id. Returns the boot response, the defer that follows the insert, and the SOFT
+    /// that an explicit refresh opens afterwards.
+    fn new_memory_passes_with_distinct_host_id(
+        profile: SerializerProfile,
+    ) -> (TransformResponse, TransformResponse, TransformResponse) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "m1msg", "SUMMARY")])
+            .unwrap();
+        let request = profile_req(profile, "ses", "cfg0", vec![item("m1msg", 1, "raw")]);
+        let boot = run(&s, &request, &spine());
+        assert_eq!(boot.action, "HARD");
+
+        let module_id = s
+            .insert_memory(memory_input(
+                "git:proj",
+                "ARCHITECTURE",
+                "a durable rule",
+                1,
+            ))
+            .unwrap();
+        assert_eq!(module_id, 1);
+        s.acknowledge_host_memory_ids(
+            "git:proj",
+            &[mc_store::HostMemoryIdentityAck {
+                module_row_id: module_id,
+                host_row_id: 901,
+            }],
+        )
+        .unwrap();
+
+        let deferred = run(&s, &request, &spine());
+        s.arm_soft_refresh("ses").unwrap();
+        let soft = run(&s, &request, &spine());
+        (boot, deferred, soft)
+    }
+
+    #[test]
+    fn host_backed_m1_new_memories_render_host_ids_and_ride_the_next_bust() {
+        let (boot, deferred, soft) =
+            new_memory_passes_with_distinct_host_id(SerializerProfile::OpencodeAiSdk);
+        // A pending memory changes nothing on its own: the defer replays the frozen bytes.
+        assert_eq!(deferred.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_string(deferred.messages()).unwrap(),
+            serde_json::to_string(boot.messages()).unwrap()
+        );
+        assert_eq!(soft.action, "SOFT");
+        let m1 = m1_bytes(&soft);
+        assert!(m1.contains("<new-memories>"), "{m1}");
+        assert!(
+            m1.contains("#901: a durable rule"),
+            "OpenCode m1 must render the host id, as m0 does: {m1}"
+        );
+        assert!(!m1.contains("#1: a durable rule"), "{m1}");
+    }
+
+    #[test]
+    fn claude_code_m1_new_memories_keep_module_ids() {
+        let (_, _, soft) =
+            new_memory_passes_with_distinct_host_id(SerializerProfile::ClaudeCodeAnthropic);
+        assert_eq!(soft.action, "SOFT");
+        let m1 = m1_bytes(&soft);
+        assert!(m1.contains("#1: a durable rule"), "{m1}");
+        assert!(!m1.contains("#901"), "{m1}");
     }
 
     #[test]

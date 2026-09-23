@@ -311,6 +311,10 @@ pub struct M1Composition {
 /// the last HARD froze in `meta`. `now_ms` is the frozen expiry cutoff (same as the m0
 /// compose). Reads compartments + memories; never call on a defer. `_note_project_path`
 /// is accepted for call-site stability only: ready smart notes are not rendered into m1.
+///
+/// `host_backed_memory_ids` must be the same choice the m0 render made for this request's
+/// serializer profile: true for every harness except Claude Code. It selects which id space
+/// m1 renders, and which id space `meta.rendered_memory_ids` (written by m0) is in.
 #[allow(clippy::too_many_arguments)]
 pub fn compose_m1_from_store(
     store: &McStore,
@@ -320,6 +324,7 @@ pub fn compose_m1_from_store(
     meta: &ModuleMeta,
     now_ms: i64,
     memory_enabled: bool,
+    host_backed_memory_ids: bool,
     memory_budget_tokens: f64,
     user_profile_budget_tokens: f64,
     temporal_awareness: bool,
@@ -373,8 +378,6 @@ pub fn compose_m1_from_store(
             .map(|workspace| workspace.union_identities.clone())
             .unwrap_or_else(|| vec![project_path.to_string()]);
 
-        let host_backed_memory_ids = !meta.last_serializer_profile.is_empty()
-            && meta.last_serializer_profile != "claude-code-anthropic";
         let baseline_module_ids = if host_backed_memory_ids {
             let mapped = store.module_memory_ids_for_host_ids(&paths, &meta.rendered_memory_ids)?;
             meta.rendered_memory_ids
@@ -791,6 +794,7 @@ mod tests {
             &profile_delta_meta(),
             0,
             true,
+            false,
             8_000.0,
             100.0,
             true,
@@ -811,6 +815,7 @@ mod tests {
             &profile_delta_meta(),
             0,
             true,
+            false,
             8_000.0,
             100.0,
             true,
@@ -831,6 +836,7 @@ mod tests {
             &profile_delta_meta(),
             0,
             true,
+            false,
             8_000.0,
             1.0,
             true,
@@ -936,6 +942,7 @@ mod tests {
             &meta,
             0,
             false,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -965,6 +972,7 @@ mod tests {
             &meta,
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -992,6 +1000,7 @@ mod tests {
             &meta,
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1027,6 +1036,7 @@ mod tests {
             &meta,
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1122,6 +1132,7 @@ mod tests {
             &meta,
             1,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1155,6 +1166,7 @@ mod tests {
             &meta,
             1,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1196,6 +1208,7 @@ mod tests {
             &reconciled_meta,
             30,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1289,6 +1302,7 @@ mod tests {
                 &meta,
                 0,
                 true,
+                false,
                 8_000.0,
                 4_000.0,
                 true,
@@ -1343,6 +1357,7 @@ mod tests {
             &meta,
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1357,6 +1372,7 @@ mod tests {
             &meta,
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1410,6 +1426,7 @@ mod tests {
             &meta,
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1468,6 +1485,7 @@ mod tests {
             &meta,
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1543,6 +1561,7 @@ mod tests {
             &meta_after_hard(0, None, terminal, cursor, vec![source]),
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1590,6 +1609,7 @@ mod tests {
             &meta_after_hard(0, None, terminal, folded_cursor, vec![source]),
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1628,6 +1648,7 @@ mod tests {
             &meta_after_hard(0, None, cycle_target, 0, vec![cycle_source]),
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1670,6 +1691,7 @@ mod tests {
             &meta_after_hard(0, None, target, cursor, vec![source]),
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1749,6 +1771,7 @@ mod tests {
             &meta_after_hard(0, None, own_id, 0, vec![own_id]),
             100,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1781,6 +1804,7 @@ mod tests {
             &meta_after_hard(0, None, own_id, grant_cursor, vec![foreign_id, own_id]),
             100,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1835,6 +1859,7 @@ mod tests {
             &meta,
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
@@ -1880,6 +1905,7 @@ mod tests {
             &meta,
             0,
             true,
+            false,
             8_000.0,
             4_000.0,
             true,
