@@ -26,6 +26,16 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_MODULE_ID.to_string());
 
+    let logger = match cortexkit_log::init_from_env() {
+        Ok(logger) => logger,
+        Err(cortexkit_log::InitError::ModuleIdNotInEnvironment) => {
+            let logger = cortexkit_log::init(cortexkit_log::Config::for_module(DEFAULT_MODULE_ID))?;
+            tracing::info!("SUBC_MODULE_ID absent; using magic-context for local module logging");
+            logger
+        }
+        Err(error) => return Err(error.into()),
+    };
+    tracing::info!("mc-module: logger initialized");
     let connection_file = parse_subc_arg(std::env::args_os().skip(1))?;
     let route_targets = RouteTargetConfig::default();
     subc_client_rs::serve_with(
@@ -34,7 +44,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         McHandler::new_with_connection_file_and_route_targets(
             Some(connection_file.clone()),
             route_targets,
-        ),
+        )
+        .with_log_directory(logger.logs_dir().to_path_buf()),
     )
     .await?;
     Ok(())

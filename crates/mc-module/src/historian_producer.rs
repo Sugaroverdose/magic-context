@@ -518,7 +518,7 @@ impl HistorianProducerError {
 
 fn record_deprecated_heuristic_use(code: &str) {
     DEPRECATED_HEURISTIC_USES.fetch_add(1, Ordering::Relaxed);
-    eprintln!("[mc-module] untagged producer error (deprecated heuristic used): code={code}");
+    tracing::error!("[mc-module] untagged producer error (deprecated heuristic used): code={code}");
 }
 
 fn retryable_code(s: &str) -> bool {

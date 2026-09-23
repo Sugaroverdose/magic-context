@@ -398,7 +398,7 @@ pub fn compose_m1_from_store(
         forced_ids.sort_unstable();
         forced_ids.dedup();
         if forced_ids.len() > MAX_MERGE_REPLACEMENTS_PER_DELTA {
-            eprintln!(
+            tracing::warn!(
                 "mc-module: m1 forced-memory cap exceeded session={} memories={} cap={}",
                 session_id,
                 forced_ids.len(),

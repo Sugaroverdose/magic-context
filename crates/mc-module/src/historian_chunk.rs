@@ -951,7 +951,7 @@ pub fn assemble_historian_firing(
         .as_ref()
         .filter(|fitted| fitted.removed_tokens > 0)
     {
-        eprintln!(
+        tracing::info!(
             "[mc-module][{}] historian pathological component split: range={}-{} resultBoundary={} removedTokens={} producerSourceTokens={} producerInputLimitTokens={}",
             config.session_id,
             chunk.chunk.start_index,
@@ -981,7 +981,7 @@ pub fn assemble_historian_firing(
             config.historian_context_limit_tokens,
             config.max_output_tokens,
         );
-        eprintln!("[mc-module][{}] historian oversize admission: range={}-{} rawChunkTokens={} producerSourceTokens={} historianChunkTokens={} guardReason={}", config.session_id, chunk.chunk.start_index, chunk.chunk.end_index, raw_chunk_tokens, producer_source_tokens, source_budget, guard_reason.as_deref().unwrap_or("none"));
+        tracing::warn!("[mc-module][{}] historian oversize admission: range={}-{} rawChunkTokens={} producerSourceTokens={} historianChunkTokens={} guardReason={}", config.session_id, chunk.chunk.start_index, chunk.chunk.end_index, raw_chunk_tokens, producer_source_tokens, source_budget, guard_reason.as_deref().unwrap_or("none"));
     }
     let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
         seed_examples: &reference_blocks.seed_examples,

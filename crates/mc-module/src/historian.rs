@@ -1763,7 +1763,7 @@ where
         request.historian_context_limit_tokens,
         request.max_output_tokens,
     ) {
-        eprintln!(
+        tracing::warn!(
             "[mc-module][{}] historian oversize admission refused before spawn: {reason}",
             request.session_id
         );
@@ -1822,7 +1822,7 @@ where
                 .expect("unknown window log mutex")
                 .insert(model.clone())
             {
-                eprintln!("[mc-module] producer window unknown or inconsistent for {model}: sending unguarded");
+                tracing::warn!("[mc-module] producer window unknown or inconsistent for {model}: sending unguarded");
             }
         }
         if fit_limit.is_some_and(|limit| {
@@ -1901,7 +1901,7 @@ where
                     }
                     let entry = runner_refusal_entry(model, &refusal);
                     runner_refusal_failures.push((model.clone(), refusal));
-                    eprintln!("[mc-module] {entry}");
+                    tracing::debug!("[mc-module] {entry}");
                     let remaining = remaining_available_models(
                         &request.model_chain[index + 1..],
                         runner_refusal_cache,
