@@ -3,9 +3,10 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { buildDreamTaskRuntimeConfigs } from '../features/magic-context/dreamer/task-config';
 import { resolveHistorianModel } from "../shared/model-resolution";
 import { loadPluginConfigDetailed } from "./index";
-import { historianRunConfig } from "./live-run-config";
+import { dreamerRunConfig, historianRunConfig } from './live-run-config';
 import { LiveConfigReader } from "./live-snapshot";
 
 for (const host of ["OC1", "OC2", "Pi"] as const) {
@@ -37,6 +38,47 @@ for (const host of ["OC1", "OC2", "Pi"] as const) {
             expect(resolveHistorianModel(runTwo, harness).primary?.model).toBe("anthropic/new-model-with-longer-name");
             expect(resolveHistorianModel(runTwo, harness).fallbacks[0]?.model).toBe("anthropic/new-fallback-with-longer-name");
             expect(reader.current().generation).toBe(2);
+        } finally {
+            if (previous.home === undefined) delete process.env.HOME;
+            else process.env.HOME = previous.home;
+            if (previous.config === undefined) delete process.env.XDG_CONFIG_HOME;
+            else process.env.XDG_CONFIG_HOME = previous.config;
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+}
+
+for (const host of ["OC1", "OC2", "Pi"] as const) {
+    test(`${host} dreamer samples the new schedule and model chain without changing a running task`, () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-live-dreamer-"));
+        const previous = { home: process.env.HOME, config: process.env.XDG_CONFIG_HOME };
+        process.env.HOME = root;
+        process.env.XDG_CONFIG_HOME = join(root, "config");
+        const directory = join(root, "project");
+        const userFile = join(root, "config", "cortexkit", "magic-context.jsonc");
+        const projectFile = join(directory, ".cortexkit", "magic-context.jsonc");
+        mkdirSync(join(root, "config", "cortexkit"), { recursive: true });
+        mkdirSync(join(directory, ".cortexkit"), { recursive: true });
+        try {
+            const block = host === "Pi" ? "pi" : "opencode";
+            writeFileSync(userFile, JSON.stringify({ dreamer: { [block]: { model: "old/model", fallback_models: ["old/fallback"] } } }));
+            const writeSchedule = (schedule: string) => writeFileSync(projectFile, JSON.stringify({ dreamer: { tasks: { verify: { schedule } } } }));
+            writeSchedule("0 3 * * *");
+            const load = () => loadPluginConfigDetailed(directory, false).config;
+            const boot = load();
+            const reader = new LiveConfigReader(directory, boot, load, () => {});
+            reader.poll();
+            const runOne = dreamerRunConfig(boot, reader.current().effective);
+            writeFileSync(userFile, JSON.stringify({ dreamer: { [block]: { model: "new/model-long", fallback_models: ["new/fallback-long"] } } }));
+            writeSchedule("15 4 * * *");
+            const runTwo = dreamerRunConfig(boot, reader.poll().effective);
+            const task = (cfg: typeof runOne) => buildDreamTaskRuntimeConfigs(cfg.dreamer, host === "Pi" ? "pi" : "opencode").find((entry) => entry.task === "verify")!;
+            expect(task(runOne).schedule).toBe("0 3 * * *");
+            expect(task(runOne).model?.model).toBe("old/model");
+            expect(task(runOne).fallbackModels[0]?.model).toBe("old/fallback");
+            expect(task(runTwo).schedule).toBe("15 4 * * *");
+            expect(task(runTwo).model?.model).toBe("new/model-long");
+            expect(task(runTwo).fallbackModels[0]?.model).toBe("new/fallback-long");
         } finally {
             if (previous.home === undefined) delete process.env.HOME;
             else process.env.HOME = previous.home;

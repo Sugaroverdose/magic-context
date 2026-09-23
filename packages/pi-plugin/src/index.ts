@@ -20,7 +20,7 @@
  *   Falls back to schema defaults when neither file exists.
  */
 
-import { historianRunConfig } from '@magic-context/core/config/live-run-config';
+import { dreamerRunConfig, historianRunConfig } from '@magic-context/core/config/live-run-config';
 import { LiveConfigReader } from '@magic-context/core/config/live-snapshot';
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
@@ -1429,6 +1429,11 @@ async function startPiMagicContextRuntime(
 			projectIdentity: current.projectIdentity,
 			registrationOwner: dreamerRegistrationOwner,
 			config: current.dreamerConfig,
+			sampleDreamRun: () => {
+				const fresh = liveReaderFor(current.projectDir, current.config).poll().effective;
+				const sampled = dreamerRunConfig(current.config, fresh);
+				return { dreamerConfig: sampled.dreamer, mural: sampled.mural, gitCommitIndexing: sampled.memory.git_commit_indexing };
+			},
 			harness: PI_HARNESS_KIND,
 			// Council finding #7: thread real embedding + memory config so
 			// dreamer can do semantic dedup AND can write memory updates.

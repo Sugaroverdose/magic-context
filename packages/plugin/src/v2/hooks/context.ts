@@ -1,6 +1,6 @@
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
-import { historianRunConfig, pluginConfigReader } from '../../config/live-run-config';
+import { dreamerRunConfig, historianRunConfig, pluginConfigReader } from '../../config/live-run-config';
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
 import { formatUnsupportedDreamTasks } from "../../features/magic-context/dreamer/task-registry";
@@ -458,6 +458,10 @@ export async function registerContext(context: V2Context) {
         hiddenCompletionExecutor && config.dreamer && !config.dreamer.disable
             ? startDreamTrigger(context, {
                   config: config.dreamer,
+                  sample: () => {
+                      const current = dreamerRunConfig(config, liveConfigReader.poll().effective);
+                      return { config: current.dreamer ?? config.dreamer!, mural: current.mural };
+                  },
                   executor: hiddenCompletionExecutor,
                   projectIdentity: () => resolveProjectIdentity(directory) ?? directory,
                   language: config.language,

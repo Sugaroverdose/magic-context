@@ -21,6 +21,30 @@ export function historianRunConfig<T extends MagicContextConfig>(boot: T, fresh:
     };
 }
 
+export function dreamerRunConfig<T extends MagicContextConfig>(boot: T, fresh: T): T {
+    return {
+        ...boot,
+        mural: { ...boot.mural, model: fresh.mural.model },
+        memory: {
+            ...boot.memory,
+            auto_promote: fresh.memory.auto_promote,
+            retrieval_count_promotion_threshold: fresh.memory.retrieval_count_promotion_threshold,
+            git_commit_indexing: fresh.memory.git_commit_indexing,
+        },
+        dreamer: boot.dreamer
+            ? {
+                  ...boot.dreamer,
+                  temperature: fresh.dreamer?.temperature,
+                  top_p: fresh.dreamer?.top_p,
+                  opencode: fresh.dreamer?.opencode,
+                  pi: fresh.dreamer?.pi,
+                  omp: fresh.dreamer?.omp,
+                  tasks: fresh.dreamer?.tasks ?? boot.dreamer.tasks,
+              }
+            : boot.dreamer,
+    };
+}
+
 const pluginReaders = new Map<string, LiveConfigReader<MagicContextPluginConfig>>();
 
 /** Shared by all OpenCode entry points for one project in this process. */

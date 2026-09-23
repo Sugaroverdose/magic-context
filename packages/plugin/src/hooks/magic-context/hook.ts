@@ -147,6 +147,7 @@ export interface MagicContextDeps {
     compactionHandler: ReturnType<typeof createCompactionHandler>;
     liveSessionState?: LiveSessionState;
     sampleHistorianConfig?: () => MagicContextDeps["config"];
+    sampleDreamConfig?: () => MagicContextDeps["config"];
     config: {
         protected_tokens?: number;
         protectedTokenTierOverrides?: ProtectedTokensTierOverrides;
@@ -1280,7 +1281,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             }
             return;
         }
-        const dreaming = deps.config.dreamer;
+        const sampledDream = deps.sampleDreamConfig?.() ?? deps.config;
+        const dreaming = sampledDream.dreamer;
         if (!dreaming || dreaming.disable === true) {
             return;
         }
@@ -1298,7 +1300,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             dreaming,
             "opencode",
             deps.config.language,
-            deps.config.mural?.model,
+            sampledDream.mural?.model,
         );
         const executor = createDreamTaskExecutor({
             client: deps.client,
@@ -1427,15 +1429,17 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                   // Manual /ctx-dream → Dreamer v2 per-task scheduler. Runs in this
                   // hook's own checkout (not a stale sibling worktree from the
                   // shared git:<sha> identity map).
-                  runManual: (task) =>
-                      runManualDream({
+                  runManual: (task) => {
+                      const sampledDream = deps.sampleDreamConfig?.() ?? deps.config;
+                      const currentDreamer = sampledDream.dreamer ?? dreamerConfig;
+                      return runManualDream({
                           db,
                           projectIdentity: projectPath,
                           tasks: buildDreamTaskRuntimeConfigs(
-                              dreamerConfig,
-                              "opencode",
-                              deps.config.language,
-                              deps.config.mural?.model,
+                               currentDreamer,
+                               "opencode",
+                               deps.config.language,
+                               sampledDream.mural?.model,
                           ),
                           executor: createDreamTaskExecutor({
                               client: deps.client,
@@ -1447,9 +1451,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                                       openOpenCodeDb,
                                   }),
                               userMemoryCollectionEnabled:
-                                  userMemoryCollectionEnabled(dreamerConfig),
-                              language: deps.config.language,
-                              mural: deps.config.mural,
+userMemoryCollectionEnabled(currentDreamer),
+                               language: deps.config.language,
+                               mural: sampledDream.mural,
                               memoryInjectionBudgetTokens:
                                   deps.config.memory?.injection_budget_tokens,
                               retinaHandoff: deps.config.smart_notes?.retina_handoff === true,
@@ -1469,9 +1473,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                                   }
                               },
                           }),
-                          task,
-                      }),
-              }
+                           task,
+                       });
+                   },
+               }
             : undefined,
     });
 

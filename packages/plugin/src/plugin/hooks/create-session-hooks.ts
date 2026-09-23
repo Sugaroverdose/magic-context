@@ -1,5 +1,5 @@
 import type { MagicContextPluginConfig } from "../../config";
-import { historianRunConfig } from "../../config/live-run-config";
+import { dreamerRunConfig, historianRunConfig } from "../../config/live-run-config";
 import type { LiveConfigReader } from "../../config/live-snapshot";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "../../config/schema/magic-context";
@@ -75,6 +75,9 @@ export function createSessionHooks(args: {
         sampleHistorianConfig: args.liveConfigReader
             ? () => buildMagicContextHookConfig(historianRunConfig(pluginConfig, args.liveConfigReader!.poll().effective))
             : undefined,
+        sampleDreamConfig: args.liveConfigReader
+            ? () => buildMagicContextHookConfig(dreamerRunConfig(pluginConfig, args.liveConfigReader!.poll().effective))
+            : undefined,
     });
 
     return {
@@ -118,6 +121,9 @@ export async function createSessionHooksAsync(args: {
         config: buildMagicContextHookConfig(pluginConfig),
         sampleHistorianConfig: args.liveConfigReader
             ? () => buildMagicContextHookConfig(historianRunConfig(pluginConfig, args.liveConfigReader!.poll().effective))
+            : undefined,
+        sampleDreamConfig: args.liveConfigReader
+            ? () => buildMagicContextHookConfig(dreamerRunConfig(pluginConfig, args.liveConfigReader!.poll().effective))
             : undefined,
     });
 
