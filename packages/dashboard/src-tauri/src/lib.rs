@@ -9,6 +9,8 @@ pub mod pi_sessions;
 pub mod process_ext;
 pub mod project_identity;
 pub mod serve;
+#[cfg(test)]
+pub mod test_env;
 pub mod workspaces;
 
 use std::path::PathBuf;

@@ -560,7 +560,7 @@ pub fn get_config(source: String, project_path: Option<String>) -> config::Confi
             config::read_config(&path, "project")
         }
         _ => {
-            let path = config::resolve_user_config_path();
+            let path = config::resolve_user_config_path(&config::config_home());
             config::read_config(&path, "user")
         }
     }
@@ -569,7 +569,7 @@ pub fn get_config(source: String, project_path: Option<String>) -> config::Confi
 #[tauri::command(async)]
 pub fn save_config(source: String, content: String) -> Result<(), String> {
     let path = match source.as_str() {
-        "user" => config::resolve_user_config_path(),
+        "user" => config::resolve_user_config_path(&config::config_home()),
         _ => return Err("Only user config editing is supported in V1".to_string()),
     };
     config::write_config(&path, &content)
@@ -578,7 +578,12 @@ pub fn save_config(source: String, content: String) -> Result<(), String> {
 #[tauri::command(async)]
 pub fn get_project_configs(state: State<'_, AppState>) -> Vec<config::ProjectConfigEntry> {
     let db_path = state.db_path.lock().ok().and_then(|guard| guard.clone());
-    config::discover_project_configs_with_db(db_path.as_ref())
+    config::discover_project_configs_with_db(
+        db_path.as_ref(),
+        &db::data_home(),
+        &config::config_home(),
+        &db::opencode_overrides(),
+    )
 }
 
 #[tauri::command(async)]
@@ -1352,7 +1357,7 @@ pub(crate) fn prepare_embedding_probe_options(
 
     // Relative `{file:}` references resolve against the user config file's dir,
     // matching the plugin's load-time resolution.
-    let config_dir = config::resolve_user_config_path()
+    let config_dir = config::resolve_user_config_path(&config::config_home())
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -1909,7 +1914,8 @@ mod tests {
 
     #[test]
     fn embedding_probe_expands_env_model_token_for_the_test() {
-        std::env::set_var("MC_DASHBOARD_TEST_MODEL", "resolved-model");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("MC_DASHBOARD_TEST_MODEL", "resolved-model");
         let options = prepare_embedding_probe_options(
             "https://example.com/v1".to_string(),
             "{env:MC_DASHBOARD_TEST_MODEL}".to_string(),
@@ -1919,14 +1925,15 @@ mod tests {
             None,
         )
         .expect("resolvable env token should expand, not error");
-        std::env::remove_var("MC_DASHBOARD_TEST_MODEL");
+        env.remove("MC_DASHBOARD_TEST_MODEL");
 
         assert_eq!(options.model, "resolved-model");
     }
 
     #[test]
     fn embedding_probe_reports_unresolved_env_token() {
-        std::env::remove_var("MC_DASHBOARD_UNSET_TEST_VAR");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove("MC_DASHBOARD_UNSET_TEST_VAR");
         let outcome = prepare_embedding_probe_options(
             "https://example.com/v1".to_string(),
             "text-embedding-3-small".to_string(),
@@ -1948,10 +1955,11 @@ mod tests {
 
     #[test]
     fn embedding_probe_refuses_project_scope_without_expanding() {
+        let mut env = crate::test_env::EnvGuard::new();
         // Project config is untrusted. A project-scope probe must refuse BEFORE
         // expanding any {env:}/{file:} token, so a malicious repo can't
         // exfiltrate a secret to its endpoint via one Test Connection click.
-        std::env::set_var("MC_DASHBOARD_PROJECT_SECRET", "should-not-leak");
+        env.set("MC_DASHBOARD_PROJECT_SECRET", "should-not-leak");
         let outcome = prepare_embedding_probe_options(
             "https://attacker.example/v1".to_string(),
             "text-embedding-3-small".to_string(),
@@ -1961,7 +1969,7 @@ mod tests {
             Some("project".to_string()),
         )
         .expect_err("project scope must be refused");
-        std::env::remove_var("MC_DASHBOARD_PROJECT_SECRET");
+        env.remove("MC_DASHBOARD_PROJECT_SECRET");
 
         match outcome {
             EmbeddingProbeOutcome::ScopeNotAllowed { scope } => assert_eq!(scope, "project"),
@@ -1971,7 +1979,8 @@ mod tests {
 
     #[test]
     fn embedding_probe_allows_explicit_user_scope() {
-        std::env::set_var("MC_DASHBOARD_USER_SCOPE_MODEL", "ok-model");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("MC_DASHBOARD_USER_SCOPE_MODEL", "ok-model");
         let options = prepare_embedding_probe_options(
             "https://example.com/v1".to_string(),
             "{env:MC_DASHBOARD_USER_SCOPE_MODEL}".to_string(),
@@ -1981,7 +1990,7 @@ mod tests {
             Some("user".to_string()),
         )
         .expect("explicit user scope should expand + probe");
-        std::env::remove_var("MC_DASHBOARD_USER_SCOPE_MODEL");
+        env.remove("MC_DASHBOARD_USER_SCOPE_MODEL");
         assert_eq!(options.model, "ok-model");
     }
 }
