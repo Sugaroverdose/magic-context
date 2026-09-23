@@ -227,7 +227,10 @@ describe("promptSyncWithModelSuggestionRetry", () => {
 
     test("timeout with a resolving transport still aborts the child", async () => {
         const abort = mock(async () => ({}));
-        const client = createClient(mock(async () => ({})), abort);
+        const client = createClient(
+            mock(async () => ({})),
+            abort,
+        );
         const transport = Object.assign(
             ({ signal }: { signal?: AbortSignal }) =>
                 new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve())),
@@ -246,7 +249,10 @@ describe("promptSyncWithModelSuggestionRetry", () => {
     test("external abort with a resolving transport still aborts the child", async () => {
         const controller = new AbortController();
         const abort = mock(async () => ({}));
-        const client = createClient(mock(async () => ({})), abort);
+        const client = createClient(
+            mock(async () => ({})),
+            abort,
+        );
         const transport = Object.assign(
             ({ signal }: { signal?: AbortSignal }) =>
                 new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve())),

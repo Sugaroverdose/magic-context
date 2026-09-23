@@ -22,8 +22,8 @@ import {
     type Primer,
     updatePrimerAnswer,
 } from "../storage-primers";
-import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
 import type { SubagentInvocationStatus } from "../storage-subagent-invocations";
+import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
 import { type LeaseAcquisition, runLeaseGuardedWrite, startLeaseHeartbeat } from "./lease";
 import { buildPrimerSeed } from "./primer-seed";
 import { PRIMER_INVESTIGATOR_SYSTEM_PROMPT } from "./task-prompts";

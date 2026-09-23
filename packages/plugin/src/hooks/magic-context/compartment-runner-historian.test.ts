@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { getSubagentInvocations } from "../../features/magic-context/storage-subagent-invocations";
-import type { HiddenCompletionExecutor } from "./compartment-runner-types";
 import type { PluginContext } from "../../plugin/types";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
+import type { HiddenCompletionExecutor } from "./compartment-runner-types";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -31,7 +31,12 @@ test("historian ledger distinguishes empty, reasoning-only, length-capped and va
         { text: null, reasoning: null, lengthCapped: false, expected: "empty" },
         { text: null, reasoning: "thinking", lengthCapped: false, expected: "empty" },
         { text: null, reasoning: "thinking", lengthCapped: true, expected: "empty" },
-        { text: '<output><compartment start="1" end="1" title="History"><p1>Preserve this.</p1></compartment></output>', reasoning: null, lengthCapped: false, expected: "completed" },
+        {
+            text: '<output><compartment start="1" end="1" title="History"><p1>Preserve this.</p1></compartment></output>',
+            reasoning: null,
+            lengthCapped: false,
+            expected: "completed",
+        },
     ] as const;
     for (const [index, item] of cases.entries()) {
         const executor: HiddenCompletionExecutor = {
@@ -42,11 +47,16 @@ test("historian ledger distinguishes empty, reasoning-only, length-capped and va
             close: async () => {},
         };
         await runValidatedHistorianPass({
-            client: undefined, hiddenCompletionExecutor: executor, db,
-            parentSessionId: `parent-${index}`, sessionDirectory: directory,
+            client: undefined,
+            hiddenCompletionExecutor: executor,
+            db,
+            parentSessionId: `parent-${index}`,
+            sessionDirectory: directory,
             prompt: "Messages 1-1:\n1: U: preserve this",
             chunk: { startIndex: 1, endIndex: 1, lines: [{ ordinal: 1, messageId: "message-1" }] },
-            priorCompartments: [], sequenceOffset: 0, dumpLabelBase: `case-${index}`,
+            priorCompartments: [],
+            sequenceOffset: 0,
+            dumpLabelBase: `case-${index}`,
         });
         const rows = getSubagentInvocations(db, `parent-${index}`);
         expect(rows[0]?.status).toBe(item.expected);
@@ -68,14 +78,22 @@ test("a resolving timed-out historian prompt is archived and recorded as timed_o
             prompt: ({ signal }: { signal: AbortSignal }) =>
                 new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve())),
             messages: async () => ({ data: [] }),
-            abort, update, delete: remove,
+            abort,
+            update,
+            delete: remove,
         },
     } as unknown as PluginContext["client"];
     await runValidatedHistorianPass({
-        client, db, parentSessionId: "parent-timeout", sessionDirectory: directory,
-        prompt: "Messages 1-1:\n1: U: preserve this", timeoutMs: 20,
+        client,
+        db,
+        parentSessionId: "parent-timeout",
+        sessionDirectory: directory,
+        prompt: "Messages 1-1:\n1: U: preserve this",
+        timeoutMs: 20,
         chunk: { startIndex: 1, endIndex: 1, lines: [{ ordinal: 1, messageId: "message-1" }] },
-        priorCompartments: [], sequenceOffset: 0, dumpLabelBase: "timeout",
+        priorCompartments: [],
+        sequenceOffset: 0,
+        dumpLabelBase: "timeout",
     });
     const rows = getSubagentInvocations(db, "parent-timeout");
     expect(rows[0]?.status).toBe("timed_out");

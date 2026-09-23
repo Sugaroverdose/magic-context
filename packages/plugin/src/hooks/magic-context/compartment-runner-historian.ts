@@ -664,7 +664,15 @@ async function runHistorianPrompt(args: {
             return { ok: false, error: emptyError, invocationId: invocationId ?? undefined };
         }
 
-        const result = textResult ?? reasoningResult!;
+        // The empty-output guard above returns when neither text nor reasoning came back.
+        const result = textResult ?? reasoningResult;
+        if (result == null) {
+            return {
+                ok: false,
+                error: emptyError ?? "Historian returned no assistant output.",
+                invocationId: invocationId ?? undefined,
+            };
+        }
         const dumpPath = dumpHistorianResponse(
             parentSessionId,
             sessionDirectory,

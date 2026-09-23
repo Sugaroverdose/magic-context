@@ -28,8 +28,8 @@ import {
 import type { SmartNoteCheckNote } from "../smart-notes/types";
 import { wakePlaneStatus } from "../smart-notes/wake-plane";
 import { getPendingSmartNotes, markNoteChecked, markNoteReady } from "../storage-notes";
-import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
 import type { SubagentInvocationStatus } from "../storage-subagent-invocations";
+import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
 import { runHiddenSingleShotPrompt } from "./hidden-single-shot";
 import { type LeaseAcquisition, peekLeaseHolderAndExpiry, startLeaseHeartbeat } from "./lease";
 

@@ -22,8 +22,8 @@ import {
     normalizeVerificationFiles,
     recordMemoryMapping,
 } from "../memory";
-import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
 import type { SubagentInvocationStatus } from "../storage-subagent-invocations";
+import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
 import { type LeaseAcquisition, runLeaseGuardedWrite, startLeaseHeartbeat } from "./lease";
 import { assertNoDuplicateManifestIds } from "./manifest-parser";
 import {

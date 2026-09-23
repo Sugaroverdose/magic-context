@@ -89,7 +89,9 @@ function modelFromMessage(message: Record<string, unknown>): LastAssistantModel 
 export function failedInvocationStatus(error: unknown): SubagentInvocationStatus {
     const message = describeError(error).brief;
     if (/timed out after \d+ms|prompt timed out/i.test(message)) return "timed_out";
-    if (/length-capped|no (?:assistant )?output|empty (?:assistant )?(?:output|text)/i.test(message)) {
+    if (
+        /length-capped|no (?:assistant )?output|empty (?:assistant )?(?:output|text)/i.test(message)
+    ) {
         return "empty";
     }
     return "failed";

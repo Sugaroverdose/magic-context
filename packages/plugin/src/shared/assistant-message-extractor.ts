@@ -109,8 +109,11 @@ export function hasLengthCappedOutput(value: unknown): boolean {
 
     if (value.length_capped === true || value.lengthCapped === true) return true;
     const finishReason =
-        value.finish_reason ?? value.finishReason ?? value.finish ??
-        (value.type === "step-finish" ? value.reason : undefined) ?? value.stopReason;
+        value.finish_reason ??
+        value.finishReason ??
+        value.finish ??
+        (value.type === "step-finish" ? value.reason : undefined) ??
+        value.stopReason;
     if (typeof finishReason === "string") {
         const normalized = finishReason.toLowerCase();
         if (

@@ -79,16 +79,24 @@ describe("subagent invocation storage", () => {
             ["empty", "returned no output"],
         ] as const) {
             recordSubagentInvocation(db, {
-                sessionId: "ses", harness: "opencode", subagent: "dreamer",
-                startedAt: 1, endedAt: 2, status,
-                inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+                sessionId: "ses",
+                harness: "opencode",
+                subagent: "dreamer",
+                startedAt: 1,
+                endedAt: 2,
+                status,
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
                 error,
             });
         }
-        expect(getSubagentInvocations(db, "ses").map(({ status, error }) => ({ status, error })))
-            .toEqual([
-                { status: "timed_out", error: "prompt timed out after 20ms" },
-                { status: "empty", error: "returned no output" },
-            ]);
+        expect(
+            getSubagentInvocations(db, "ses").map(({ status, error }) => ({ status, error })),
+        ).toEqual([
+            { status: "timed_out", error: "prompt timed out after 20ms" },
+            { status: "empty", error: "returned no output" },
+        ]);
     });
 });
