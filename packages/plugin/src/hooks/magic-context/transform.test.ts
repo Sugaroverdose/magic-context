@@ -944,9 +944,15 @@ describe("createTransform", () => {
         })();
         const tags = getTagsBySession(realDb, sessionId);
         expect(tags).toHaveLength(2000);
-        expect(tags.filter((tag) => tag.status === "active" && tag.cavemanDepth === 0)).toHaveLength(1960);
+        expect(
+            tags.filter((tag) => tag.status === "active" && tag.cavemanDepth === 0),
+        ).toHaveLength(1960);
 
-        const hydrated = getDroppedTagsByNumbers(db, sessionId, tags.map((tag) => tag.tagNumber));
+        const hydrated = getDroppedTagsByNumbers(
+            db,
+            sessionId,
+            tags.map((tag) => tag.tagNumber),
+        );
         expect(replayChunkSizes).toEqual([900, 900, 200]);
         expect(replayRows).toHaveLength(40);
         expect(hydrated).toHaveLength(40);

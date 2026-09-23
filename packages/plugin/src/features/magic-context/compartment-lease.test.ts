@@ -184,32 +184,42 @@ describe("compartment state lease", () => {
                 }),
             );
             type Outcome = { outcome: "won" | "lost" | "error"; error?: string };
-            const reports = await Promise.all(children.map(async (child) => {
-                const reader = child.stdout.getReader();
-                const { value } = await reader.read();
-                if (!value) {
-                    const stderr = await new Response(child.stderr).text();
-                    return { outcome: "error", error: `exit ${await child.exited}: ${stderr}` } as Outcome;
-                }
-                try {
-                    return JSON.parse(new TextDecoder().decode(value)) as Outcome;
-                } catch (error) {
-                    return { outcome: "error", error: `invalid child output: ${String(error)}` } as Outcome;
-                } finally {
-                    reader.releaseLock();
-                }
-            }));
+            const reports = await Promise.all(
+                children.map(async (child) => {
+                    const reader = child.stdout.getReader();
+                    const { value } = await reader.read();
+                    if (!value) {
+                        const stderr = await new Response(child.stderr).text();
+                        return {
+                            outcome: "error",
+                            error: `exit ${await child.exited}: ${stderr}`,
+                        } as Outcome;
+                    }
+                    try {
+                        return JSON.parse(new TextDecoder().decode(value)) as Outcome;
+                    } catch (error) {
+                        return {
+                            outcome: "error",
+                            error: `invalid child output: ${String(error)}`,
+                        } as Outcome;
+                    } finally {
+                        reader.releaseLock();
+                    }
+                }),
+            );
             for (const child of children) child.stdin.end();
-            const exits = await Promise.all(children.map(async (child) => ({
-                code: await child.exited,
-                stderr: await new Response(child.stderr).text(),
-            })));
+            const exits = await Promise.all(
+                children.map(async (child) => ({
+                    code: await child.exited,
+                    stderr: await new Response(child.stderr).text(),
+                })),
+            );
             expect({ reports, exits }).toEqual({
-                reports: expect.arrayContaining([
-                    { outcome: "won" },
-                    { outcome: "lost" },
-                ]),
-                exits: [{ code: 0, stderr: "" }, { code: 0, stderr: "" }],
+                reports: expect.arrayContaining([{ outcome: "won" }, { outcome: "lost" }]),
+                exits: [
+                    { code: 0, stderr: "" },
+                    { code: 0, stderr: "" },
+                ],
             });
             expect(reports).toHaveLength(2);
         } finally {
