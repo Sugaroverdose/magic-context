@@ -688,6 +688,7 @@ export interface TransformDeps {
         twoPass: boolean;
         autoPromote: boolean;
         commitClusterTrigger?: { enabled: boolean; min_clusters: number };
+        toastDurationMs?: number;
         chunkTokens: number;
     };
     /** False when historian.disable=true, blocking historian-backed child agents. */
@@ -878,6 +879,12 @@ export function createTransform(deps: TransformDeps) {
             return;
         }
         const resolvedSessionId = sessionId;
+        const runNotificationParams = (sid: string) => {
+            const params = deps.getNotificationParams?.(sid) ?? {};
+            return historianRun?.toastDurationMs === undefined
+                ? params
+                : { ...params, toastDurationMs: historianRun.toastDurationMs };
+        };
         beginLkgPass(sessionId);
         clearOpenCodePendingTransformDecision(sessionId);
         logTransformTiming(sessionId, "findSessionId", startTime, `messages=${messages.length}`);
@@ -1006,7 +1013,7 @@ export function createTransform(deps: TransformDeps) {
                             deps.client,
                             sessionId,
                             notice,
-                            deps.getNotificationParams?.(sessionId) ?? {},
+                            runNotificationParams(sessionId) ?? {},
                         )) === "sent";
                 }
                 if (noticeDelivered && transition.recordToWrite !== null) {
@@ -1427,7 +1434,7 @@ export function createTransform(deps: TransformDeps) {
                         deps.client,
                         sessionId,
                         "Magic Context can't compact yet — the recent history is a single in-progress block. Continuing; it will compact once the block completes. Run `/ctx-recomp` if this persists.",
-                        deps.getNotificationParams?.(sessionId) ?? {},
+                        runNotificationParams(sessionId) ?? {},
                     );
                 }
             } catch (error) {
@@ -1599,7 +1606,7 @@ export function createTransform(deps: TransformDeps) {
         const consumingDeferredEarly =
             canConsumeDeferredEarly && deferredHistoryWasPendingAtPassStart;
         const isCacheBusting = historyRefreshExplicitBeforePrepare || consumingDeferredEarly;
-        const notificationParams = deps.getNotificationParams?.(sessionId) ?? {};
+        const notificationParams = runNotificationParams(sessionId) ?? {};
         const boundaryContextLimit =
             resolvedContextLimit && resolvedContextLimit > 0
                 ? resolvedContextLimit
@@ -2252,7 +2259,7 @@ export function createTransform(deps: TransformDeps) {
         const watermark = getMaxDroppedTagNumber(db, sessionId);
 
         let contextUsage = contextUsageEarly;
-        const rawGetNotifParams = deps.getNotificationParams;
+        const rawGetNotifParams = runNotificationParams;
         const tCompartmentPhase = performance.now();
         const compartmentPhase = await runCompartmentPhase({
             hiddenCompletionExecutor: deps.hiddenCompletionExecutor,

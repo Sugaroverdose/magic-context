@@ -389,6 +389,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             contextLimit: resolveKnownHistorianContextLimit(attempts.primary?.model),
             maxOutputTokens: config.historian?.maxTokens ?? 32_000,
             timeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+            toastDurationMs: config.toast_duration_ms,
             twoPass: config.historian?.two_pass === true,
             autoPromote: config.memory?.auto_promote ?? true,
             commitClusterTrigger: config.commit_cluster_trigger,
@@ -572,7 +573,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 liveModelBySession,
                 variantBySession,
                 agentBySession,
-                deps.config.toast_duration_ms,
+                historianRun.toastDurationMs,
             ),
         };
     };
@@ -1233,7 +1234,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 liveModelBySession,
                 variantBySession,
                 agentBySession,
-                deps.config.toast_duration_ms,
+                (deps.sampleDreamConfig?.() ?? deps.config).toast_duration_ms,
             ),
         onSessionCacheInvalidated: (sessionId: string) => {
             dropSlot(sessionId, "session-cache-invalidated");

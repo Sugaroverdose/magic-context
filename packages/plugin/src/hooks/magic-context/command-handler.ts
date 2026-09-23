@@ -341,6 +341,7 @@ async function executeDreaming(
             params: NotificationParams,
         ) => Promise<void>;
         toastDurationMs?: number;
+        sampleToastDurationMs?: () => number | undefined;
         dreamer?: {
             config: DreamerConfig;
             projectPath: string;
@@ -353,7 +354,7 @@ async function executeDreaming(
     argText?: string,
 ): Promise<never> {
     const dreamNotificationParams: NotificationParams = {
-        toastDurationMs: deps.toastDurationMs ?? 5000,
+        toastDurationMs: deps.sampleToastDurationMs?.() ?? deps.toastDurationMs ?? 5000,
     };
 
     if (!deps.dreamer) {
@@ -466,6 +467,7 @@ export function createMagicContextCommandHandler(deps: {
     ) => Promise<void>;
     /** Configured toast lifetime (ms) forwarded into diagnostics logs. */
     toastDurationMs?: number;
+    sampleToastDurationMs?: () => number | undefined;
     transformMode?: ResolvedTransformMode;
     rustModeModuleClient?: RustModeModuleClient;
     projectRoot?: string;

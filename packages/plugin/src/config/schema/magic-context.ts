@@ -1502,6 +1502,7 @@ export const MagicContextConfigSchema = z
 /** Settings whose fresh values can be used by later agent runs without changing rendered prompt bytes. */
 export const LIVE_RELOAD_CONFIG_PATHS = [
     "mural.model",
+    "toast_duration_ms",
     "historian.opencode.model", "historian.opencode.fallback_models", "historian.opencode.variant",
     "historian.pi.model", "historian.pi.fallback_models", "historian.pi.thinking_level",
     "historian.omp.model", "historian.omp.fallback_models", "historian.omp.thinking_level",
