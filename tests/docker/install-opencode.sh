@@ -11,8 +11,11 @@
 #     on shared runner egress ("Failed to fetch version information", release
 #     gates on 2026-09-13, 09-15 and again locally on 09-18).
 # So: download the installer to a file (its fetch has its own exit status),
-# install the tested 2.0.12 host (or an explicit OPENCODE_VERSION), retry each
+# install the tested OpenCode 1.x host (or an explicit OPENCODE_VERSION), retry each
 # network step with backoff, and assert the binary runs before the layer ends.
+# This script installs OpenCode 1.x through its release installer. OpenCode 2 is not
+# installed this way: its images install `@opencode/cli` from npm (see
+# tests/docker/opencode2/Dockerfile), and this installer cannot unpack a 2.x release.
 set -euo pipefail
 
 retry() {
@@ -40,7 +43,7 @@ fetch_installer() {
 }
 retry "installer fetch" fetch_installer
 
-version="${OPENCODE_VERSION:-2.0.12}"
+version="${OPENCODE_VERSION:-1.18.31}"
 echo "install-opencode: installing opencode v${version}"
 
 run_installer() { bash "$installer" --version "$version"; }
