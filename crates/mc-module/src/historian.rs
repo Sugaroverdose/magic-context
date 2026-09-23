@@ -1224,6 +1224,7 @@ pub struct HistorianFireRequest<'a> {
     pub prompt: &'a str,
     pub model_chain: &'a [String],
     pub temperature: Option<f64>,
+    pub await_timeout: Duration,
     pub producer_source_tokens: usize,
     pub historian_context_limit_tokens: Option<usize>,
     /// Fallback windows must belong to their own model, never to the primary model.
@@ -1277,9 +1278,14 @@ pub struct HistorianReattachRequest<'a> {
 /// live as template-echo and seed-regurgitation on the calibration model itself).
 pub const MC_CHILD_SESSION_PREFIX: &str = "mc-historian:";
 
+/// Older adapters omit the timeout. Bound untrusted wire values before using them as deadlines.
+pub fn historian_await_timeout(timeout_ms: Option<u64>) -> Duration {
+    Duration::from_millis(timeout_ms.unwrap_or(600_000).clamp(60_000, 3_600_000))
+}
+
 /// Wait budget for a full historian run plus its one short timeout recovery re-drain.
-pub fn completion_wait_budget() -> Duration {
-    Duration::from_secs(660)
+pub fn completion_wait_budget(timeout: Duration) -> Duration {
+    timeout + Duration::from_secs(60)
 }
 
 /// The per-attempt deadline a consumer sets, VERBATIM, for `session.wrapup` calls —
@@ -1987,9 +1993,14 @@ where
             producer_started(&fired, producer_session_id.clone(), handle.run_id.clone())?;
         persist_historian_state(request.store, request.session_id, awaiting.clone())?;
 
-        let output = match producer.await_output(&handle.run_id).await {
+        let output = match producer
+            .await_output_with_timeout(&handle.run_id, request.await_timeout)
+            .await
+        {
             Ok(output) => output,
             Err(HistorianProducerError::TimedOut) => {
+                // Like the TypeScript model-suggestion-retry loop, timeout stops the model
+                // chain; only re-drain this run to salvage an already-finished result.
                 match producer.redrain_output(&handle.run_id).await {
                     Ok(output) => output,
                     Err(recovery_err) => {
@@ -2597,6 +2608,7 @@ mod tests {
             detected_context_limit_model_key: None,
             history_budget_tokens: None,
             historian_model_chain: None,
+            historian_timeout_ms: None,
             declared_trim: None,
             lineage_switched: false,
             descent_edge_id: 0,
@@ -2829,6 +2841,7 @@ mod tests {
         observed_prompts: Vec<String>,
         observed_temperatures: Vec<Option<f64>>,
         await_run_ids: Vec<String>,
+        observed_await_timeouts: Vec<Duration>,
         cancels: Vec<String>,
         closes: usize,
         on_await_output: Option<Box<dyn FnOnce() + Send>>,
@@ -2903,6 +2916,15 @@ mod tests {
             self.outputs
                 .pop_front()
                 .expect("scripted output result available")
+        }
+
+        async fn await_output_with_timeout(
+            &mut self,
+            run_id: &str,
+            timeout: Duration,
+        ) -> Result<ProducerOutput, HistorianProducerError> {
+            self.observed_await_timeouts.push(timeout);
+            self.await_output(run_id).await
         }
 
         async fn status(&mut self, _run_id: &str) -> Result<RunState, HistorianProducerError> {
@@ -2994,6 +3016,7 @@ mod tests {
             prompt,
             model_chain: models,
             temperature: None,
+            await_timeout: historian_await_timeout(None),
             producer_source_tokens: 1,
             historian_context_limit_tokens: Some(200_000),
             fallback_context_limits: models
@@ -4493,6 +4516,38 @@ mod tests {
             .unwrap(),
             FireOutcome::Fired(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn configured_historian_timeout_reaches_producer_await_and_completion_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_compartment(&store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model-a".to_string()];
+        let timeout = historian_await_timeout(Some(720_000));
+        let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+        request.await_timeout = timeout;
+        let mut producer = ScriptedProducer::default()
+            .with_start(Ok(run_handle("run-1")))
+            .with_output(Ok(producer_output(historian_xml("summary"))));
+        run_historian_firing(&mut producer, request).await.unwrap();
+        assert_eq!(
+            producer.observed_await_timeouts,
+            vec![Duration::from_secs(720)]
+        );
+        assert_eq!(completion_wait_budget(timeout), Duration::from_secs(780));
+        assert_eq!(historian_await_timeout(None), Duration::from_secs(600));
+        assert_eq!(
+            completion_wait_budget(historian_await_timeout(None)),
+            Duration::from_secs(660)
+        );
+        assert_eq!(historian_await_timeout(Some(0)), Duration::from_secs(60));
+        assert_eq!(
+            historian_await_timeout(Some(u64::MAX)),
+            Duration::from_secs(3600)
+        );
     }
 
     #[tokio::test]

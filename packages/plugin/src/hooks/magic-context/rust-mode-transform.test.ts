@@ -2726,6 +2726,38 @@ describe("Rust mode authority adapter", () => {
         expect(new Set(servedDigests)).toEqual(new Set([servedDigests[0]]));
     });
 
+    it("sends the resolved historian timeout and default on the transform request", async () => {
+        for (const [configured, expected] of [
+            [720_000, 720_000],
+            [undefined, 600_000],
+        ] as const) {
+            const sessionId = `rust-historian-timeout-${configured ?? "default"}-${Date.now()}`;
+            sessions.push(sessionId);
+            const db = makeDb();
+            installRawProvider(sessionId);
+            let requestBody: Record<string, unknown> | undefined;
+            const moduleClient: RustModeModuleClient = {
+                call: async ({ method, body }) => {
+                    if (method === "transform") requestBody = body as Record<string, unknown>;
+                    return method === "transform"
+                        ? { decision: "SOFT+", native_messages: [] }
+                        : { ok: true };
+                },
+            };
+            const deps = makeDeps(db, moduleClient);
+            deps.historianTimeoutMs = configured;
+            const transform = createRustModeTransform(deps, { moduleClient });
+            const messages = makeMessages(sessionId);
+            await transform.run(
+                sessionId,
+                messages,
+                { messages: messages as unknown[] },
+                makeMeta(db, sessionId),
+            );
+            expect(requestBody?.historian_timeout_ms).toBe(expected);
+        }
+    });
+
     it("sends fail-closed tool verdicts while availability remains provisional", async () => {
         const sessionId = `rust-availability-provisional-${Date.now()}`;
         sessions.push(sessionId);
