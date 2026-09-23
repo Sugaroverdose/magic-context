@@ -6380,10 +6380,15 @@ describe("Rust stalled transform probe", () => {
         input[0]!.info.model = { providerID: "test-provider", modelID: "test-model" };
         let transformCalls = 0;
         let healthProbes = 0;
+        let releaseProbe: () => void = () => {};
+        const probeObserved = new Promise<void>((resolve) => {
+            releaseProbe = resolve;
+        });
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, signal }) => {
                 if (method === "session.status") {
                     healthProbes += 1;
+                    releaseProbe();
                     throw new Error("probe unavailable");
                 }
                 if (method !== "transform") return { ok: true };
@@ -6406,23 +6411,32 @@ describe("Rust stalled transform probe", () => {
         const transform = createRustModeTransform(deps, {
             moduleClient,
             moduleTimeoutMs: 50,
-            stallProbeAfterMsForTests: 10,
+            stallProbeAfterMsForTests: 0,
             healthProbeTimeoutMsForTests: 20,
         });
 
-        await expect(
-            transform.run(
-                sessionId,
-                input,
-                { messages: [...input] as unknown[] },
-                makeMeta(db, sessionId),
-            ),
-        ).rejects.toEqual(
+        const run = transform.run(
+            sessionId,
+            input,
+            { messages: [...input] as unknown[] },
+            makeMeta(db, sessionId),
+        );
+        const refusal = expect(run).rejects.toEqual(
             expect.objectContaining({
                 name: "EmergencyFailClosedError",
                 message: ENGINE_RECONNECTING_USER_MESSAGE,
             }),
         );
+        expect(
+            await Promise.race([
+                probeObserved.then(() => true),
+                run.then(
+                    () => false,
+                    () => false,
+                ),
+            ]),
+        ).toBe(true);
+        await refusal;
         expect(healthProbes).toBe(1);
         expect(transformCalls).toBe(1);
     });
