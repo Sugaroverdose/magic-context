@@ -30,6 +30,23 @@ const HOST_PACKAGES: Record<PiRunnerHost, string> = {
 
 export function resolvePiPackageJson(host: PiRunnerHost = "pi"): string {
   const packageName = HOST_PACKAGES[host];
+  // Host-version comparisons (for example a control run on an older Pi) pin
+  // the host explicitly: either an absolute package.json from a separate
+  // install, or an exact version already present in the repository's bun store.
+  if (host === "pi") {
+    const explicitPackageJson = process.env.MC_E2E_PI_PACKAGE_JSON;
+    if (explicitPackageJson) return explicitPackageJson;
+    const pinnedVersion = process.env.MC_E2E_PI_VERSION;
+    if (pinnedVersion) {
+      const bunModules = join(REPO_ROOT, "node_modules/.bun");
+      const prefix = `${packageName.replace("/", "+")}@${pinnedVersion}+`;
+      const match = readdirSync(bunModules).find((name) => name.startsWith(prefix));
+      if (match === undefined) {
+        throw new Error(`MC_E2E_PI_VERSION=${pinnedVersion} is not installed under ${bunModules}`);
+      }
+      return join(bunModules, match, "node_modules", packageName, "package.json");
+    }
+  }
   try {
     return require_.resolve(`${packageName}/package.json`);
   } catch {
@@ -142,12 +159,15 @@ export function createPiIsolatedEnv(
 }
 
 export function ensurePluginAvailable(env: PiIsolatedEnv): void {
-  const distEntry = join(PI_PLUGIN_ROOT, "dist", "index.js");
+  // MC_E2E_PI_PLUGIN_ROOT runs a released plugin package (for example an npm
+  // tarball extracted elsewhere) instead of this checkout's build.
+  const pluginRoot = process.env.MC_E2E_PI_PLUGIN_ROOT ?? PI_PLUGIN_ROOT;
+  const distEntry = join(pluginRoot, "dist", "index.js");
   if (!existsSync(distEntry)) {
     throw new Error(`${distEntry} is missing. Run: cd packages/pi-plugin && bun run build`);
   }
   if (!existsSync(env.pluginDir)) {
-    symlinkSync(PI_PLUGIN_ROOT, env.pluginDir, "dir");
+    symlinkSync(pluginRoot, env.pluginDir, "dir");
   }
 }
 

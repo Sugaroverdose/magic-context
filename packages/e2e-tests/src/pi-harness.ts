@@ -219,7 +219,9 @@ export class PiTestHarness implements PiHostHarness {
     const host = options.host ?? "pi";
     const env = createPiIsolatedEnv(options.sharedDataDir, host);
     if (options.workdir) env.workdir = options.workdir;
-    if (options.magicContextConfig?.enabled !== false) {
+    // A released plugin build under MC_E2E_PI_PLUGIN_ROOT owns an older schema
+    // and refuses a database this checkout migrated ahead of it.
+    if (options.magicContextConfig?.enabled !== false && !process.env.MC_E2E_PI_PLUGIN_ROOT) {
       try {
         prepareContextDatabase(env.dataDir);
       } catch (error) {
