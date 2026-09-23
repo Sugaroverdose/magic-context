@@ -1032,6 +1032,42 @@ mod tests {
     const R1_LINE: &str = "2026-09-05T10:41:03.130Z WARN  magic-context session=opencode:ses_00fc88222ffe tag=perf transform stage folded ms=412 retry=2";
     const LEGACY_LINE: &str = "[2026-09-05T10:41:03.130Z] [magic-context][ses_00fc88222ffe] transform stage folded ms=412 retry=2";
 
+    /// The writer removes complete CSI escape sequences (7-bit `ESC [` or the C1
+    /// byte U+009B, then parameter bytes 0x30-0x3F, intermediate bytes 0x20-0x2F
+    /// and one final byte 0x40-0x7E) before rendering, so a reader can never
+    /// recover them. The fixture's `event` still holds the colored input; the
+    /// expected record is the event with those sequences removed. A lone ESC and
+    /// other control characters are escaped, not removed, and round-trip.
+    fn strip_complete_csi(value: &str) -> String {
+        let chars: Vec<char> = value.chars().collect();
+        let mut out = String::with_capacity(value.len());
+        let mut i = 0;
+        while i < chars.len() {
+            let start = if chars[i] == '\u{1b}' && chars.get(i + 1) == Some(&'[') {
+                Some(i + 2)
+            } else if chars[i] == '\u{9b}' {
+                Some(i + 1)
+            } else {
+                None
+            };
+            if let Some(mut j) = start {
+                while j < chars.len() && ('\u{30}'..='\u{3f}').contains(&chars[j]) {
+                    j += 1;
+                }
+                while j < chars.len() && ('\u{20}'..='\u{2f}').contains(&chars[j]) {
+                    j += 1;
+                }
+                if j < chars.len() && ('\u{40}'..='\u{7e}').contains(&chars[j]) {
+                    i = j + 1;
+                    continue;
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    }
+
     #[test]
     fn reads_every_render_case_of_the_authority_fleet_r2_fixture() {
         let fixture = golden_fixture();
@@ -1063,8 +1099,16 @@ mod tests {
                 "{name}"
             );
             assert_eq!(record.bound, bound, "{name}");
-            assert_eq!(record.message, event["message"].as_str().unwrap(), "{name}");
-            assert_eq!(record.kv, pairs(&event["fields"]), "{name}");
+            assert_eq!(
+                record.message,
+                strip_complete_csi(event["message"].as_str().unwrap()),
+                "{name}"
+            );
+            let mut expected_kv = pairs(&event["fields"]);
+            for value in expected_kv.values_mut() {
+                *value = strip_complete_csi(value);
+            }
+            assert_eq!(record.kv, expected_kv, "{name}");
             assert_eq!(record.grammar, LogGrammar::FleetR2, "{name}");
         }
     }

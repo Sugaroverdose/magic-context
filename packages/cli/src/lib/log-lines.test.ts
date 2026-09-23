@@ -15,6 +15,36 @@ import {
 } from "./log-lines";
 import { extractHistorianFailureLines } from "./logs-opencode";
 
+/**
+ * The writer removes complete CSI escape sequences (7-bit `ESC [` or the C1
+ * byte 0x9b, parameters, intermediates, final byte) before rendering, so a
+ * reader can never recover them. The fixture's `event` still holds the colored
+ * input, so the expected record is the event with those sequences removed.
+ * Lone ESC and other control characters are escaped, not removed, and round-trip.
+ */
+function stripCompleteCsi(value: string): string {
+    const inRange = (char: string | undefined, low: number, high: number) =>
+        char !== undefined && char.charCodeAt(0) >= low && char.charCodeAt(0) <= high;
+    let out = "";
+    let i = 0;
+    while (i < value.length) {
+        let j = -1;
+        if (value[i] === "\u001b" && value[i + 1] === "[") j = i + 2;
+        else if (value[i] === "\u009b") j = i + 1;
+        if (j >= 0) {
+            while (inRange(value[j], 0x30, 0x3f)) j++;
+            while (inRange(value[j], 0x20, 0x2f)) j++;
+            if (inRange(value[j], 0x40, 0x7e)) {
+                i = j + 1;
+                continue;
+            }
+        }
+        out += value[i];
+        i++;
+    }
+    return out;
+}
+
 const roots: string[] = [];
 const original = {
     MAGIC_CONTEXT_LOG_PATH: process.env.MAGIC_CONTEXT_LOG_PATH,
@@ -33,18 +63,24 @@ afterEach(() => {
 
 describe("parseLogLine", () => {
     it("reads module store failures through the r2 envelope", () => {
-        const parsed = parseLogLine("2026-09-23T00:11:14.902Z ERROR magic-context: mc-module: store open failed: database locked");
+        const parsed = parseLogLine(
+            "2026-09-23T00:11:14.902Z ERROR magic-context: mc-module: store open failed: database locked",
+        );
         expect(parsed?.grammar).toBe("fleet-r2");
         expect(parsed?.message).toBe("mc-module: store open failed: database locked");
     });
 
     it("reads historian lifecycle failures through the r2 envelope", () => {
-        const parsed = parseLogLine("2026-09-23T00:11:14.902Z ERROR magic-context: mc-module: historian firing failed for ses_a: timed out");
+        const parsed = parseLogLine(
+            "2026-09-23T00:11:14.902Z ERROR magic-context: mc-module: historian firing failed for ses_a: timed out",
+        );
         expect(parsed?.message).toBe("mc-module: historian firing failed for ses_a: timed out");
     });
 
     it("reads per-pass stage timing through the r2 envelope", () => {
-        const parsed = parseLogLine("2026-09-23T00:11:14.902Z INFO  magic-context.perf: mc-pass-stage session=ses_a stage=historian_inline_wait event=end outcome=ok elapsed_ms=12.3");
+        const parsed = parseLogLine(
+            "2026-09-23T00:11:14.902Z INFO  magic-context.perf: mc-pass-stage session=ses_a stage=historian_inline_wait event=end outcome=ok elapsed_ms=12.3",
+        );
         expect(parsed?.grammar).toBe("fleet-r2");
         expect(parsed?.logger).toBe("magic-context.perf");
         expect(parsed?.message).toBe("mc-pass-stage");
@@ -52,7 +88,9 @@ describe("parseLogLine", () => {
     });
 
     it("reads module configuration warnings through the r2 envelope", () => {
-        const parsed = parseLogLine("2026-09-23T00:11:14.902Z WARN  magic-context: mc-module: config warning: invalid setting");
+        const parsed = parseLogLine(
+            "2026-09-23T00:11:14.902Z WARN  magic-context: mc-module: config warning: invalid setting",
+        );
         expect(parsed?.message).toBe("mc-module: config warning: invalid setting");
     });
     it("reads every render case of the authority fleet r2 fixture", () => {
@@ -72,8 +110,10 @@ describe("parseLogLine", () => {
                 session,
                 tags: fixture.event.logger.split(".").slice(1),
                 bound,
-                message: fixture.event.message,
-                kv: Object.fromEntries(fixture.event.fields),
+                message: stripCompleteCsi(fixture.event.message),
+                kv: Object.fromEntries(
+                    fixture.event.fields.map(([key, value]) => [key, stripCompleteCsi(value)]),
+                ),
                 grammar: "fleet-r2",
             });
         }
