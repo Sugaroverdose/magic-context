@@ -4,9 +4,9 @@ import {
     buildStatusView,
     distributeBarWidths,
     STATUS_COLUMN_GAP,
+    type StatusViewSource,
     statusColumnsFor,
     statusSectionWidth,
-    type StatusViewSource,
 } from "./status-view";
 
 const NOW = 1_730_000_000_000;

@@ -259,10 +259,7 @@ export function statusColumnsFor(
  * Every segment that carries tokens keeps at least one column, so a category
  * whose share rounds below a column stays visible in the bar.
  */
-export function distributeBarWidths(
-    tokens: readonly number[],
-    totalWidth: number,
-): number[] {
+export function distributeBarWidths(tokens: readonly number[], totalWidth: number): number[] {
     const width = Math.max(0, Math.floor(totalWidth));
     if (tokens.length === 0) return [];
     if (width === 0) return tokens.map(() => 0);
@@ -297,10 +294,7 @@ export function distributeBarWidths(
             fraction: value - Math.floor(value),
             weight: weights[index] ?? 0,
         }))
-        .sort(
-            (a, b) =>
-                b.fraction - a.fraction || b.weight - a.weight || a.index - b.index,
-        );
+        .sort((a, b) => b.fraction - a.fraction || b.weight - a.weight || a.index - b.index);
     for (const entry of byRemainder) {
         if (leftover <= 0) break;
         shares[entry.index] = (shares[entry.index] ?? 0) + 1;
