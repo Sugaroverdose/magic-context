@@ -4173,7 +4173,10 @@ function spawnPiHistorianRun(args: {
 				resolveHostOutputLimit: (model) => {
 					const slash = model.indexOf("/");
 					if (slash < 1) return undefined;
-					return ctx.modelRegistry?.find(model.slice(0, slash), model.slice(slash + 1))?.maxTokens;
+					return ctx.modelRegistry?.find(
+						model.slice(0, slash),
+						model.slice(slash + 1),
+					)?.maxTokens;
 				},
 				resolveHostContextLimit: (model) => {
 					const slash = model.indexOf("/");
@@ -6370,8 +6373,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// a HARD trigger. injectM0M1Pi now keeps cached m[0] and soft-refreshes m[1];
 			// HARD triggers (model/system/ttl/epoch/upgrade/mutation) still
 			// re-materialize inside mustMaterializePi when genuinely needed.
+			if (!piM0State) {
+				throw new Error("Pi m[0] state must exist before wire injection");
+			}
 			const wireInjectionResult = injectM0M1PiForRun(
-				piM0State!,
+				piM0State,
 				args.db,
 				args.messages as Parameters<typeof injectM0M1Pi>[2],
 				args.entryIds,

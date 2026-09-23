@@ -98,11 +98,11 @@ describe("renderVerboseRange", () => {
         ]);
         try {
             const out = renderVerboseRange(SESSION, 2, 7, 15_000);
-            expect(out.text).toMatch(/^\[2\] U \(user\)\n    • Read PLAN.md/m);
-            expect(out.text).toMatch(/^\[3\] A \(assistant\)\n    • tool read\(PLAN.md\)/m);
-            expect(out.text).toMatch(/^\[4\] tool results\n    • tool read → output ~\d+ tok/m);
+            expect(out.text).toMatch(/^\[2\] U \(user\)\n {4}• Read PLAN.md/m);
+            expect(out.text).toMatch(/^\[3\] A \(assistant\)\n {4}• tool read\(PLAN.md\)/m);
+            expect(out.text).toMatch(/^\[4\] tool results\n {4}• tool read → output ~\d+ tok/m);
             expect(out.text).toMatch(
-                /^\[5\] U \(user\)\n    • tool tool_result → output ~\d+ tok\n    • Continue/m,
+                /^\[5\] U \(user\)\n {4}• tool tool_result → output ~\d+ tok\n {4}• Continue/m,
             );
             expect(out.text).toMatch(/^\[6\] tool results/m);
             expect(out.text).toMatch(/^\[7\] A \(assistant\)/m);
@@ -129,7 +129,7 @@ describe("renderVerboseRange", () => {
         ]);
         try {
             expect(renderVerboseRange(SESSION, 2, 3, 15_000).text).toBe(
-                "[2] U (user)\n    • Read PLAN.md\n\n[3] A (assistant)\n    • Reading",
+                "[2] U (user)\n {4}• Read PLAN.md\n\n[3] A (assistant)\n {4}• Reading",
             );
         } finally {
             cleanup();
