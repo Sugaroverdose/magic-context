@@ -392,6 +392,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             toastDurationMs: config.toast_duration_ms,
             twoPass: config.historian?.two_pass === true,
             autoPromote: config.memory?.auto_promote ?? true,
+            userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
             commitClusterTrigger: config.commit_cluster_trigger,
             chunkTokens: deriveHistorianChunkTokens(resolveHistorianContextLimit(attempts.primary?.model)),
         };
@@ -565,7 +566,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         // during historian runs only when the user has SCHEDULED the
         // review-user-memories task (schedule != ""). Replaces the v1
         // user_memories.enabled flag that gated both collection and review.
-        userMemoriesEnabled: userMemoryCollectionEnabled(dreamerConfig),
+        userMemoriesEnabled: historianRun.userMemoriesEnabled,
         ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
         getNotificationParams: (sid) =>
             getLiveNotificationParams(

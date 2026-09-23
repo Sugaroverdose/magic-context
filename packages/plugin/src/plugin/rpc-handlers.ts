@@ -8,7 +8,7 @@ import { chmodSync, createWriteStream, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { COMPACTION_ENABLED_PATH, isCompactionEnabled } from "../config/agent-disable";
-import { currentPluginConfigReader } from '../config/live-run-config';
+import { currentPluginConfigReader, historianRunConfig } from '../config/live-run-config';
 import type { MagicContextConfig } from "../config/schema/magic-context";
 import {
     getAuthorityManagedMarker,
@@ -1522,7 +1522,8 @@ export function registerRpcHandlers(
             "../features/magic-context/dreamer/task-config"
         );
         const DEFAULT_HISTORIAN_TIMEOUT_MS = 10 * 60 * 1000;
-        const historianModel = resolveHistorianModel(config, "opencode");
+        const runConfig = historianRunConfig(config, currentPluginConfigReader(directory)?.poll().effective ?? config);
+        const historianModel = resolveHistorianModel(runConfig, "opencode");
         return {
             client: args.client as ManagedRecompContext["client"],
             hiddenCompletionExecutor: args.hiddenCompletionExecutor,
@@ -1532,14 +1533,20 @@ export function registerRpcHandlers(
             historianChunkTokens: deriveHistorianChunkTokens(
                 resolveHistorianContextLimit(historianModel.primary?.model),
             ),
-            historianTimeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+            historianTimeoutMs: runConfig.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
             memoryEnabled: config.memory?.enabled ?? true,
-            autoPromote: config.memory?.auto_promote ?? true,
+            autoPromote: runConfig.memory?.auto_promote ?? true,
             historianModel: historianModel.primary,
             fallbackModels: historianModel.fallbacks,
-            userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
-            historianTwoPass: config.historian?.two_pass === true,
-            getNotificationParams,
+            userMemoriesEnabled: userMemoryCollectionEnabled(runConfig.dreamer),
+            historianTwoPass: runConfig.historian?.two_pass === true,
+            getNotificationParams: (sessionId) => getLiveNotificationParams(
+                sessionId,
+                liveSessionState.liveModelBySession,
+                liveSessionState.variantBySession,
+                liveSessionState.agentBySession,
+                runConfig.toast_duration_ms,
+            ),
         };
     };
 

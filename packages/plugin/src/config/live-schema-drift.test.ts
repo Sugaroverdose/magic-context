@@ -45,4 +45,7 @@ test("schema live marks equal the keys sampled by producer consumers and publish
     expect(generatedLive).not.toContain("language");
     expect(generatedLive).not.toContain("historian.top_p");
     expect(generatedLive).not.toContain("protected_tokens");
+    const report = await Bun.file(new URL("../../../../CONFIG-LIVE-RELOAD-REPORT.md", import.meta.url)).text();
+    const reported = [...report.matchAll(/^\| `([^`]+)` \|/gm)].map((match) => match[1]).sort();
+    expect(reported).toEqual(generatedLive);
 });

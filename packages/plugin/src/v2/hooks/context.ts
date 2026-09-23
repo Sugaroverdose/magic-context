@@ -3,6 +3,7 @@ import { isCompactionEnabled } from "../../config/agent-disable";
 import { dreamerRunConfig, historianRunConfig, pluginConfigReader } from '../../config/live-run-config';
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
+import { userMemoryCollectionEnabled } from '../../features/magic-context/dreamer/task-config';
 import { formatUnsupportedDreamTasks } from "../../features/magic-context/dreamer/task-registry";
 import { isFailClosedBlockingError } from "../../features/magic-context/fail-closed-block";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
@@ -479,6 +480,7 @@ export async function registerContext(context: V2Context) {
             timeoutMs: fresh.historian_timeout_ms,
             twoPass: fresh.historian?.two_pass === true,
             autoPromote: fresh.memory?.auto_promote ?? true,
+            userMemoriesEnabled: userMemoryCollectionEnabled(fresh.dreamer),
             commitClusterTrigger: fresh.commit_cluster_trigger,
             chunkTokens: deriveHistorianChunkTokens(resolveHistorianContextLimit(models.primary?.model)),
         };

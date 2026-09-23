@@ -687,6 +687,7 @@ export interface TransformDeps {
         timeoutMs: number;
         twoPass: boolean;
         autoPromote: boolean;
+        userMemoriesEnabled: boolean;
         commitClusterTrigger?: { enabled: boolean; min_clusters: number };
         toastDurationMs?: number;
         chunkTokens: number;
@@ -1703,7 +1704,7 @@ export function createTransform(deps: TransformDeps) {
                 directory: compartmentDirectory,
                 fallbackModelId,
                 getNotificationParams: () => notificationParams,
-                experimentalUserMemories: deps.experimentalUserMemories,
+                experimentalUserMemories: historianRun?.userMemoriesEnabled ?? deps.experimentalUserMemories,
                 experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
                 historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
                 // Issue #44: gate historian-driven memory promotion so users
@@ -2301,7 +2302,7 @@ export function createTransform(deps: TransformDeps) {
             safeForBackgroundCompression:
                 historianRunnable && (isCacheBusting || schedulerDecision === "execute"),
             deferredHistoryRefreshSessions,
-            experimentalUserMemories: deps.experimentalUserMemories,
+            experimentalUserMemories: historianRun?.userMemoriesEnabled ?? deps.experimentalUserMemories,
             experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
             historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
             // Issue #44: forward memory gating so the normal historian path

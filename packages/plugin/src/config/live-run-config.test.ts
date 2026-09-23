@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildDreamTaskRuntimeConfigs } from '../features/magic-context/dreamer/task-config';
+import { buildDreamTaskRuntimeConfigs, userMemoryCollectionEnabled } from '../features/magic-context/dreamer/task-config';
 import { resolveHistorianModel } from "../shared/model-resolution";
 import { loadPluginConfigDetailed } from "./index";
 import { dreamerRunConfig, historianRunConfig } from './live-run-config';
@@ -68,7 +68,7 @@ for (const host of ["OC1", "OC2", "Pi"] as const) {
         try {
             const block = host === "Pi" ? "pi" : "opencode";
             writeFileSync(userFile, JSON.stringify({ dreamer: { [block]: { model: "old/model", fallback_models: ["old/fallback"] } } }));
-            const writeSchedule = (schedule: string) => writeFileSync(projectFile, JSON.stringify({ dreamer: { tasks: { verify: { schedule } } } }));
+            const writeSchedule = (schedule: string) => writeFileSync(projectFile, JSON.stringify({ dreamer: { tasks: { verify: { schedule }, "review-user-memories": { schedule: schedule === "0 3 * * *" ? "" : "0 0 * * *" } } } }));
             writeSchedule("0 3 * * *");
             const load = () => loadPluginConfigDetailed(directory, false).config;
             const boot = load();
@@ -80,9 +80,11 @@ for (const host of ["OC1", "OC2", "Pi"] as const) {
             const runTwo = dreamerRunConfig(boot, reader.poll().effective);
             const task = (cfg: typeof runOne) => buildDreamTaskRuntimeConfigs(cfg.dreamer, host === "Pi" ? "pi" : "opencode").find((entry) => entry.task === "verify")!;
             expect(task(runOne).schedule).toBe("0 3 * * *");
+            expect(userMemoryCollectionEnabled(runOne.dreamer)).toBe(false);
             expect(task(runOne).model?.model).toBe("old/model");
             expect(task(runOne).fallbackModels[0]?.model).toBe("old/fallback");
             expect(task(runTwo).schedule).toBe("15 4 * * *");
+            expect(userMemoryCollectionEnabled(historianRunConfig(boot, reader.current().effective).dreamer)).toBe(true);
             expect(task(runTwo).model?.model).toBe("new/model-long");
             expect(task(runTwo).fallbackModels[0]?.model).toBe("new/fallback-long");
         } finally {
