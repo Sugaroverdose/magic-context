@@ -19,8 +19,9 @@ describe("historian timer fallback budget", () => {
         const source = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
 
         expect(source).toMatch(
-            /fallbackModelCount:\s*resolveHistorianModel\(\s*pluginConfig,\s*"opencode",?\s*\)\.fallbacks\s*\.length,/,
+            /fallbackModelCount:\s*resolveHistorianModel\(\s*historian,\s*"opencode",?\s*\)\.fallbacks\s*\.length,/,
         );
+        expect(source).toContain("historianRunConfig(pluginConfig, liveConfigReader.poll().effective)");
         expect(source).not.toContain("pluginConfig.historian?.fallback_models");
     });
 });
