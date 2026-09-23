@@ -390,6 +390,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             maxOutputTokens: config.historian?.maxTokens ?? 32_000,
             timeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
             twoPass: config.historian?.two_pass === true,
+            autoPromote: config.memory?.auto_promote ?? true,
+            commitClusterTrigger: config.commit_cluster_trigger,
             chunkTokens: deriveHistorianChunkTokens(resolveHistorianContextLimit(attempts.primary?.model)),
         };
     };
@@ -547,7 +549,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         historianChunkTokens: historianRun.chunkTokens,
         historianTimeoutMs: historianRun.timeoutMs,
         memoryEnabled: deps.config.memory?.enabled ?? true,
-        autoPromote: deps.config.memory?.auto_promote ?? true,
+        autoPromote: historianRun.autoPromote,
         historianModel: historianRun.model,
         historianContextLimit: historianRun.contextLimit,
         historianMaxOutputTokens: historianRun.maxOutputTokens,
@@ -1114,7 +1116,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         protectedTokenTierOverrides: deps.config.protectedTokenTierOverrides,
         smartDrops: deps.config.smart_drops === true,
         clearReasoningAge: deps.config.clear_reasoning_age ?? 50,
-        commitClusterTrigger: deps.config.commit_cluster_trigger,
+        commitClusterTrigger: bootHistorian.commitClusterTrigger,
         historyRefreshSessions,
         deferredHistoryRefreshSessions,
         pendingMaterializationSessions,

@@ -124,8 +124,8 @@ The background agent that condenses old conversation into compact history.
 | `historian.disallowed_tools` | `"\*"` \| `"read"` \| `"aft_outline"` \| `"aft_zoom"` \| `"aft_search"`[] | `[]` | OpenCode only. Tools to REMOVE from the historian's default allow-list [read, aft_outline, aft_zoom, aft_search]. Applies to both historian and historian-editor agents. Use ["\*"] to strip all tool definitions from the model request — this prevents weak instruction-following models (e.g. mistral-small-latest) from entering tool-calling loops. Individual tool names remove just that tool. Note: a user-supplied historian.permission override can re-allow a tool that disallowed_tools removed — disallowed_tools sets the baseline, permission overrides take precedence. (default: []) |
 | `historian_timeout_ms` **Live** | number (60000–) | `600000` | Timeout for each historian prompt call in milliseconds (default: 600000) |
 | `commit_cluster_trigger` | object | — | Commit-cluster trigger: fire historian when enough commit clusters accumulate in the unsummarized tail |
-| `commit_cluster_trigger.enabled` | boolean | `true` | Enable commit-cluster based historian triggering (default: true) |
-| `commit_cluster_trigger.min_clusters` | number (1–) | `3` | Minimum commit clusters required to trigger historian (min: 1, default: 3) |
+| `commit_cluster_trigger.enabled` **Live** | boolean | `true` | Enable commit-cluster based historian triggering (default: true) |
+| `commit_cluster_trigger.min_clusters` **Live** | number (1–) | `3` | Minimum commit clusters required to trigger historian (min: 1, default: 3) |
 
 ## Memory & recall
 
@@ -136,7 +136,7 @@ Durable project memory, semantic search, and recall features. OpenAI-compatible 
 | `memory` | object | — | Cross-session memory configuration |
 | `memory.enabled` | boolean | `true` | Enable cross-session memory (default: true) |
 | `memory.injection_budget_tokens` | number (500–20000) | `4000` | Token budget for memory injection on session start (min: 500, max: 20000, default: 4000) |
-| `memory.auto_promote` | boolean | `true` | Automatically promote eligible session facts into memory (default: true) |
+| `memory.auto_promote` **Live** | boolean | `true` | Automatically promote eligible session facts into memory (default: true) |
 | `memory.retrieval_count_promotion_threshold` | number (1–) | `3` | retrieval_count threshold for promoting memory to permanent status (min: 1, default: 3) |
 | `memory.auto_search` | object | — | Auto-search hint: transform-time ctx_search on each new user message; when the top hit clears the threshold, append a compact <ctx-search-hint> block of vague fragments to that user message. Does NOT inject full content. Graduated from experimental.auto_search; enabled by default (set enabled: false to opt out). Independent of memory.enabled. |
 | `memory.auto_search.enabled` | boolean | `true` | Automatically append a compact <ctx-search-hint> to eligible user messages when relevant memories, conversation, or commits are found. Graduated from experimental.auto_search; on by default (set false to opt out). Independent of memory.enabled. |

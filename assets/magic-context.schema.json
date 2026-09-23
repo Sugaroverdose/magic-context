@@ -2138,11 +2138,13 @@
         "enabled": {
           "default": true,
           "description": "Enable commit-cluster based historian triggering (default: true)",
+          "x-mc-live-reload": true,
           "type": "boolean"
         },
         "min_clusters": {
           "default": 3,
           "description": "Minimum commit clusters required to trigger historian (min: 1, default: 3)",
+          "x-mc-live-reload": true,
           "type": "number",
           "minimum": 1
         }
@@ -2472,6 +2474,7 @@
         "auto_promote": {
           "default": true,
           "description": "Automatically promote eligible session facts into memory (default: true)",
+          "x-mc-live-reload": true,
           "type": "boolean"
         },
         "retrieval_count_promotion_threshold": {

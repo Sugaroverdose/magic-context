@@ -1664,19 +1664,19 @@ async function startPiMagicContextRuntime(
 		compactionOff,
 		resolveRuntimeDeps: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
+			const fresh = historianRunConfig(current.config, liveReaderFor(current.projectDir, current.config).poll().effective);
+			const historian = resolveHistorianFromConfig(fresh) ?? current.historianConfig;
 			return {
 				db,
 				runner: recompRunner,
-				historianModel: current.historianConfig?.model,
-				historianChunkTokens: deriveHistorianChunkTokens(
-					resolveHistorianContextLimit(current.historianConfig?.model),
-				),
-				historianFallbacks: current.historianConfig?.fallbackModels,
-				historianTimeoutMs: current.config.historian_timeout_ms,
-				historianThinkingLevel: current.historianConfig?.thinkingLevel,
+				historianModel: historian?.model,
+				historianChunkTokens: historian?.historianChunkTokens ?? deriveHistorianChunkTokens(resolveHistorianContextLimit(historian?.model)),
+				historianFallbacks: historian?.fallbackModels,
+				historianTimeoutMs: historian?.timeoutMs ?? current.config.historian_timeout_ms,
+				historianThinkingLevel: historian?.thinkingLevel,
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,
-				autoPromote: current.config.memory.auto_promote,
+				autoPromote: fresh.memory.auto_promote,
 				compactionOff,
 			};
 		},
@@ -1705,19 +1705,19 @@ async function startPiMagicContextRuntime(
 		executeThresholdTokens: bootProjectDeps.config.execute_threshold_tokens,
 		resolveRuntimeDeps: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
+			const fresh = historianRunConfig(current.config, liveReaderFor(current.projectDir, current.config).poll().effective);
+			const historian = resolveHistorianFromConfig(fresh) ?? current.historianConfig;
 			return {
 				db,
 				runner: wrapupRunner,
-				historianModel: current.historianConfig?.model,
-				historianChunkTokens: deriveHistorianChunkTokens(
-					resolveHistorianContextLimit(current.historianConfig?.model),
-				),
-				historianFallbacks: current.historianConfig?.fallbackModels,
-				historianTimeoutMs: current.config.historian_timeout_ms,
-				historianThinkingLevel: current.historianConfig?.thinkingLevel,
+				historianModel: historian?.model,
+				historianChunkTokens: historian?.historianChunkTokens ?? deriveHistorianChunkTokens(resolveHistorianContextLimit(historian?.model)),
+				historianFallbacks: historian?.fallbackModels,
+				historianTimeoutMs: historian?.timeoutMs ?? current.config.historian_timeout_ms,
+				historianThinkingLevel: historian?.thinkingLevel,
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,
-				autoPromote: current.config.memory.auto_promote,
+				autoPromote: fresh.memory.auto_promote,
 				compactionOff,
 				userMemoriesEnabled: userMemoryCollectionEnabled(
 					current.config.dreamer,

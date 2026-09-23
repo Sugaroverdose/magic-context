@@ -20,6 +20,8 @@ Project config always merges on top of user config. The unified setup wizard (`n
 Keys listed below apply from the next historian or dreamer run (or dream-timer tick); a run in progress keeps its original inputs. All other keys require a host restart. On a malformed edit, the last good config remains active and `/ctx-status` reports the error. The live mark in the [JSON schema](assets/magic-context.schema.json) is authoritative; this list is checked against it.
 
 <!-- LIVE-CONFIG-KEYS-START -->
+- `commit_cluster_trigger.enabled`
+- `commit_cluster_trigger.min_clusters`
 - `dreamer.omp.fallback_models`
 - `dreamer.omp.model`
 - `dreamer.omp.tasks`
@@ -58,6 +60,7 @@ Keys listed below apply from the next historian or dreamer run (or dream-timer t
 - `historian.pi.thinking_level`
 - `historian.two_pass`
 - `historian_timeout_ms`
+- `memory.auto_promote`
 - `memory.git_commit_indexing.enabled`
 - `memory.git_commit_indexing.max_commits`
 - `memory.git_commit_indexing.since_days`

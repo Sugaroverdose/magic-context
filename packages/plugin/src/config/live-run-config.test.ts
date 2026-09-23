@@ -21,22 +21,28 @@ for (const host of ["OC1", "OC2", "Pi"] as const) {
         mkdirSync(join(directory, ".cortexkit"), { recursive: true });
         try {
             const block = host === "Pi" ? "pi" : "opencode";
-            const write = (model: string, fallback: string) => writeFileSync(file, JSON.stringify({
+            const write = (model: string, fallback: string, autoPromote: boolean, minClusters: number) => writeFileSync(file, JSON.stringify({
                 historian: { [block]: { model, fallback_models: [fallback] } },
+                memory: { auto_promote: autoPromote },
+                commit_cluster_trigger: { enabled: true, min_clusters: minClusters },
             }));
-            write("anthropic/old-model", "anthropic/old-fallback");
+            write("anthropic/old-model", "anthropic/old-fallback", true, 3);
             const load = () => loadPluginConfigDetailed(directory, false).config;
             const boot = load();
             const reader = new LiveConfigReader(directory, boot, load, () => {});
             reader.poll();
             const runOne = historianRunConfig(boot, reader.current().effective);
-            write("anthropic/new-model-with-longer-name", "anthropic/new-fallback-with-longer-name");
+            write("anthropic/new-model-with-longer-name", "anthropic/new-fallback-with-longer-name", false, 5);
             const runTwo = historianRunConfig(boot, reader.poll().effective);
             const harness = host === "Pi" ? "pi" : "opencode";
             expect(resolveHistorianModel(runOne, harness).primary?.model).toBe("anthropic/old-model");
             expect(resolveHistorianModel(runOne, harness).fallbacks[0]?.model).toBe("anthropic/old-fallback");
             expect(resolveHistorianModel(runTwo, harness).primary?.model).toBe("anthropic/new-model-with-longer-name");
             expect(resolveHistorianModel(runTwo, harness).fallbacks[0]?.model).toBe("anthropic/new-fallback-with-longer-name");
+            expect(runOne.memory.auto_promote).toBe(true);
+            expect(runTwo.memory.auto_promote).toBe(false);
+            expect(runOne.commit_cluster_trigger.min_clusters).toBe(3);
+            expect(runTwo.commit_cluster_trigger.min_clusters).toBe(5);
             expect(reader.current().generation).toBe(2);
         } finally {
             if (previous.home === undefined) delete process.env.HOME;

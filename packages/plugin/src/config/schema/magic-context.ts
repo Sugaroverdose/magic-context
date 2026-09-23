@@ -1506,6 +1506,8 @@ export const LIVE_RELOAD_CONFIG_PATHS = [
     "historian.pi.model", "historian.pi.fallback_models", "historian.pi.thinking_level",
     "historian.omp.model", "historian.omp.fallback_models", "historian.omp.thinking_level",
     "historian.two_pass", "historian_timeout_ms",
+    "commit_cluster_trigger.enabled", "commit_cluster_trigger.min_clusters",
+    "memory.auto_promote",
     "dreamer.opencode.model", "dreamer.opencode.fallback_models", "dreamer.opencode.variant", "dreamer.opencode.tasks",
     "dreamer.pi.model", "dreamer.pi.fallback_models", "dreamer.pi.thinking_level", "dreamer.pi.tasks",
     "dreamer.omp.model", "dreamer.omp.fallback_models", "dreamer.omp.thinking_level", "dreamer.omp.tasks",

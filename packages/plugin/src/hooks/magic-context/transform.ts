@@ -686,6 +686,8 @@ export interface TransformDeps {
         maxOutputTokens?: number;
         timeoutMs: number;
         twoPass: boolean;
+        autoPromote: boolean;
+        commitClusterTrigger?: { enabled: boolean; min_clusters: number };
         chunkTokens: number;
     };
     /** False when historian.disable=true, blocking historian-backed child agents. */
@@ -867,6 +869,7 @@ export function createTransform(deps: TransformDeps) {
         output: { messages: unknown[] },
     ): Promise<void> => {
         const startTime = performance.now();
+        const historianRun = deps.resolveHistorianRun?.();
         const messages = output.messages as MessageLike[];
         const passOutcome = createPassOutcome();
         const lkgInput = projectLkgEntry(messages);
@@ -1676,7 +1679,6 @@ export function createTransform(deps: TransformDeps) {
                 return false;
             }
 
-            const historianRun = deps.resolveHistorianRun?.();
             updateSessionMeta(db, sessionId, { compartmentInProgress: true });
             startCompartmentAgent({
                 client: deps.client,
@@ -1700,7 +1702,7 @@ export function createTransform(deps: TransformDeps) {
                 // Issue #44: gate historian-driven memory promotion so users
                 // who disable the feature actually see no memories created.
                 memoryEnabled: deps.memoryConfig?.enabled,
-                autoPromote: deps.memoryConfig?.autoPromote,
+                autoPromote: historianRun?.autoPromote ?? deps.memoryConfig?.autoPromote,
                 ensureProjectRegistered: deps.ensureProjectRegistered,
                 // Historian publication invalidates the injection cache AND
                 // changes compartments/facts that render into message[0]. We
@@ -1903,7 +1905,7 @@ export function createTransform(deps: TransformDeps) {
                     boundaryExecuteThreshold,
                     deriveTriggerBudget(boundaryContextLimit, boundaryExecuteThreshold),
                     deps.clearReasoningAge,
-                    deps.commitClusterTrigger,
+                    historianRun?.commitClusterTrigger ?? deps.commitClusterTrigger,
                     undefined,
                     boundaryContextLimit,
                     inMemoryTail,
@@ -2252,7 +2254,6 @@ export function createTransform(deps: TransformDeps) {
         let contextUsage = contextUsageEarly;
         const rawGetNotifParams = deps.getNotificationParams;
         const tCompartmentPhase = performance.now();
-        const historianRun = deps.resolveHistorianRun?.();
         const compartmentPhase = await runCompartmentPhase({
             hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
             compactionMarkerStrategy: deps.compactionMarkerStrategy,
@@ -2300,7 +2301,7 @@ export function createTransform(deps: TransformDeps) {
             // (not just the recovery path above) honors memory.enabled and
             // memory.auto_promote.
             memoryEnabled: deps.memoryConfig?.enabled,
-            autoPromote: deps.memoryConfig?.autoPromote,
+            autoPromote: historianRun?.autoPromote ?? deps.memoryConfig?.autoPromote,
             ensureProjectRegistered: deps.ensureProjectRegistered,
             // See startRecoveryRun above for the full rationale —
             // historian/recomp publication signals history rebuild +

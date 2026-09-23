@@ -478,6 +478,8 @@ export async function registerContext(context: V2Context) {
             maxOutputTokens: fresh.historian?.maxTokens,
             timeoutMs: fresh.historian_timeout_ms,
             twoPass: fresh.historian?.two_pass === true,
+            autoPromote: fresh.memory?.auto_promote ?? true,
+            commitClusterTrigger: fresh.commit_cluster_trigger,
             chunkTokens: deriveHistorianChunkTokens(resolveHistorianContextLimit(models.primary?.model)),
         };
     };
