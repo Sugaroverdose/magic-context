@@ -1270,6 +1270,15 @@ fn extract_session_history_slice(m0_text: &str) -> Option<String> {
     Some(m0_text[start..end].to_string())
 }
 
+/// Extract the m[1] block containing compartments published since the last fold.
+fn extract_new_compartments_slice(m1_text: &str) -> Option<String> {
+    const OPEN: &str = "<new-compartments>";
+    const CLOSE: &str = "</new-compartments>";
+    let start = m1_text.find(OPEN)?;
+    let end = m1_text[start..].find(CLOSE)? + start + CLOSE.len();
+    Some(m1_text[start..end].to_string())
+}
+
 pub fn get_context_token_breakdown(
     conn: &Connection,
     session_id: &str,
@@ -1304,30 +1313,38 @@ pub fn get_context_token_breakdown(
     // snapshot (cached_m0_bytes). Measuring Σp1 instead overcounts the
     // Compartments bucket AND starves Conversation toward 0. Mirrors the
     // plugin sidebar fix (rpc-handlers.ts).
-    let m0_bytes: Option<Vec<u8>> = conn
+    let (m0_bytes, m1_bytes): (Option<Vec<u8>>, Option<Vec<u8>>) = conn
         .query_row(
-            "SELECT cached_m0_bytes FROM session_meta WHERE session_id = ?1",
+            "SELECT cached_m0_bytes, cached_m1_bytes FROM session_meta WHERE session_id = ?1",
             [session_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .unwrap_or(None);
-    let compartment_chars: i64 = m0_bytes
+        .unwrap_or((None, None));
+    let m0_history = m0_bytes
         .as_ref()
         .and_then(|b| String::from_utf8(b.clone()).ok())
-        .and_then(|text| extract_session_history_slice(&text))
-        .map(|slice| slice.len() as i64)
-        .unwrap_or_else(|| {
+        .and_then(|text| extract_session_history_slice(&text));
+    let m1_compartments = m1_bytes
+        .as_ref()
+        .and_then(|b| String::from_utf8(b.clone()).ok())
+        .and_then(|text| extract_new_compartments_slice(&text));
+    let compartment_tokens = match (m0_history, m1_compartments) {
+        (Some(history), new_compartments) => {
+            estimate_tokens(history.len() as i64)
+                + new_compartments.map_or(0, |block| estimate_tokens(block.len() as i64))
+        }
+        (None, _) => {
             // No materialized m[0] yet (brand-new / pre-first-materialization).
             // Fall back to the Σp1 estimate so the bucket isn't blank on a cold
             // session; it self-corrects to the decayed size on first render.
-            conn.query_row(
+            estimate_tokens(conn.query_row(
                 "SELECT COALESCE(SUM(LENGTH(title) + LENGTH(content) + ?2), 0)
                  FROM compartments WHERE session_id = ?1",
                 rusqlite::params![session_id, COMPARTMENT_HEADING_OVERHEAD],
                 |r| r.get(0),
-            )
-            .unwrap_or(0)
-        });
+            ).unwrap_or(0))
+        }
+    };
 
     // v2: facts are retired as a render source (promoted to memories), so they
     // contribute 0 render tokens. fact_count stays available for display from
@@ -1357,7 +1374,6 @@ pub fn get_context_token_breakdown(
         .unwrap_or(0);
 
     // Estimate tokens
-    let compartment_tokens = estimate_tokens(compartment_chars);
     let fact_tokens = estimate_tokens(fact_chars);
     let memory_tokens = estimate_tokens(memory_chars);
 
@@ -7508,7 +7524,7 @@ mod opencode_parent_id_subagent_hide_tests {
 
 #[cfg(test)]
 mod session_history_slice_tests {
-    use super::extract_session_history_slice;
+    use super::{extract_new_compartments_slice, extract_session_history_slice};
 
     #[test]
     fn extracts_inclusive_block() {
@@ -7520,6 +7536,17 @@ mod session_history_slice_tests {
         // Must NOT bleed into neighboring blocks.
         assert!(!slice.contains("project-docs"));
         assert!(!slice.contains("user-profile"));
+    }
+
+    #[test]
+    fn m1_compartments_are_counted_when_m0_history_is_empty() {
+        let m0 = "<session-history>\n</session-history>";
+        let m1 = "<session-history-since>\n<new-compartments>\n## 11-14 · Continued\nnew material\n</new-compartments>\n</session-history-since>";
+        let m0_chars = extract_session_history_slice(m0).unwrap().len() as i64;
+        let m1_chars = extract_new_compartments_slice(m1).unwrap().len() as i64;
+        let compartment_tokens = super::estimate_tokens(m0_chars) + super::estimate_tokens(m1_chars);
+        assert_eq!(compartment_tokens, super::estimate_tokens(m0_chars) + super::estimate_tokens(m1_chars));
+        assert!(compartment_tokens > super::estimate_tokens(m0_chars));
     }
 
     #[test]
