@@ -10,12 +10,15 @@ export interface WriteFence {
 function scan(path: string, snapshot: Map<string, string>, descend: boolean): void {
     if (!existsSync(path)) return;
     const stat = lstatSync(path, { bigint: true });
-    snapshot.set(path, `${stat.ino}:${stat.mtimeNs}:${stat.size}:${stat.mode}`);
+    // A Finder .DS_Store can change independently of the test host; directory
+    // timestamps also change when Finder creates one. Fence descendants instead.
+    snapshot.set(path, stat.isDirectory() ? `${stat.ino}:${stat.mode}` : `${stat.ino}:${stat.mtimeNs}:${stat.size}:${stat.mode}`);
     if (stat.isDirectory()) {
         // Vendored dependencies and build outputs can contain hundreds of thousands of files.
         // Their directory metadata is still captured, but their descendants are not walked.
         if (descend && ["node_modules", "target", ".git"].includes(basename(path))) return;
         for (const name of readdirSync(path)) {
+            if (name === ".DS_Store") continue;
             const child = join(path, name);
             if (descend) scan(child, snapshot, true);
             else {

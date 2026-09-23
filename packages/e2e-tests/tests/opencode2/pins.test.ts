@@ -11,6 +11,8 @@ test("v1_untouched and captured fixture bytes remain sha256 pinned", () => {
 		if (path === "packages/plugin/src/index.ts") {
 			// The dual-loader composition is additive. Keep the original whole
 			// v1 entry golden after removing only those three exact additions.
+			// The updated v1 entry records tool parameters when refusing input
+			// that was dropped; the v2 loader does not add this behavior.
 			bytes = bytes
 				.replace('import { setup } from "./v2/server";\n', "")
 				.replace("PluginModule & { setup: typeof setup }", "PluginModule")

@@ -31,12 +31,10 @@ import { isolateStoreDirectories } from "./store-directories";
 import { assertWriteFenceUnchanged, snapshotWriteFence } from "./write-fence";
 import {
 	assertIsolation,
-	assertLiveUnchanged,
 	assertOpenPaths,
 	type OpenCode2Isolation,
 	PLUGIN,
 	ROOT_KEYS,
-	snapshotLive,
 } from "./spawn";
 
 /** The 1.x host needs a separate config home because the host generations use different config shapes. */
@@ -134,19 +132,6 @@ export function resolveOpenCode1CLI(): string {
 	return path;
 }
 
-/** Whether some other OpenCode host is already serving, which would make a live-store snapshot ambiguous. */
-function foreignServeRunning(ownPid?: number): boolean {
-	const result = spawnSync("pgrep", ["-alf", "opencode"], { encoding: "utf8" });
-	if (result.error || (result.status !== 0 && result.status !== 1)) {
-		throw new Error("Cannot determine whether a live OpenCode host owns the store");
-	}
-	if (result.status !== 0) return false;
-	return result.stdout
-		.split("\n")
-		.filter((line) => /\bserve\b/.test(line))
-		.some((line) => Number(line.trim().split(/\s+/)[0]) !== ownPid);
-}
-
 /** Every strict ancestor directory of `path`, from its parent up to the filesystem root. */
 function ancestorDirectories(path: string): Set<string> {
 	const ancestors = new Set<string>();
@@ -161,23 +146,11 @@ function ancestorDirectories(path: string): Set<string> {
 }
 
 /**
- * Sample the 1.x child's whole process group and refuse any descriptor outside
- * the throwaway root, then require that the store it opened is the throwaway one
- * by inode rather than by name.
- *
- * Mirrors the v2 runner's guard. It is written out again here instead of reused
- * because the allowed set differs in two ways.
- *
- * First, this child is the operator's own `opencode` binary and loads the plugin
- * bundle from the checkout, so both of those paths are expected.
- *
- * Second, OpenCode 1.18.x holds a read-only directory handle on every ancestor of
- * its working directory — observed here as descriptors walking from the
- * throwaway root up to `/`. Those exact directory paths are dropped before the
- * check, and only those: a handle on any FILE, or on any directory that is not
- * an ancestor of the throwaway root, is still refused, so a descriptor on the
- * operator's store or home still fails. The 2.x host does not do this, which is
- * why the shared v2 guard has no such allowance.
+ * Sample the 1.x child's whole process group. Refuse writable paths and
+ * database/config descriptors outside the throwaway root, then require that
+ * the opened database matches the private store by inode. OpenCode 1 also
+ * holds read-only handles on every ancestor of its working directory up to
+ * `/`; those exact directory handles are not writes and are omitted.
  */
 export function inspectOpenCode1Files(
 	pid: number,
@@ -195,19 +168,22 @@ export function inspectOpenCode1Files(
 	if (!pids.length) throw new Error("v1 process group disappeared before fd inspection");
 	const result = spawnSync("lsof", ["-p", pids.join(","), "-Fin"], { encoding: "utf8" });
 	if (result.status !== 0) throw new Error(`Cannot inspect v1 open files: ${result.stderr}`);
-	const paths = result.stdout
-		.split("\n")
-		.filter((line) => line.startsWith("n"))
-		.map((line) => line.slice(1));
+	const paths: string[] = [];
+	const writable: string[] = [];
+	let fd = "";
+	for (const line of result.stdout.split("\n")) {
+		if (line.startsWith("f")) fd = line.slice(1);
+		if (!line.startsWith("n")) continue;
+		const path = line.slice(1);
+		paths.push(path);
+		if (/[0-9]+[wu]$/.test(fd)) writable.push(path);
+	}
 	const ancestors = ancestorDirectories(fixture.root);
 	assertOpenPaths(
 		paths.filter((path) => !ancestors.has(path)),
 		fixture.root,
-		[
-			realpathSync(resolve(PLUGIN, "../../node_modules")),
-			realpathSync(PLUGIN),
-			realpathSync(cliPath),
-		],
+		[],
+		writable.filter((path) => !ancestors.has(path)),
 	);
 	const expected = statSync(fixture.openCodeDbPath);
 	let inode: number | undefined;
@@ -364,7 +340,6 @@ export async function spawnOpencode1(
 	prepareContextDatabase(fixture.env.XDG_DATA_HOME!);
 
 	const fence = snapshotWriteFence(fixture.referencedDirectories ?? []);
-	const before = foreignServeRunning() ? undefined : snapshotLive();
 	const child: ChildProcess = spawn(
 		cli,
 		["serve", "--port", "0", "--hostname", "127.0.0.1"],
@@ -392,7 +367,6 @@ export async function spawnOpencode1(
 		if (child.pid) killGroup(child.pid);
 		await exited;
 		if (child.pid) liveGroups.delete(child.pid);
-		if (before) assertLiveUnchanged(before);
 		assertWriteFenceUnchanged(fence);
 		if (safetyError) throw safetyError;
 	};

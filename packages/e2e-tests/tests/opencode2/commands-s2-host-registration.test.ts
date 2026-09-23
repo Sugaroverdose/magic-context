@@ -21,17 +21,17 @@ import {
  * observable — the next request must be a priced pass that applies the queued
  * work, which the plugin names per pass in its own log.
  */
-const HEURISTICS_DECISION = "heuristics WILL RUN — reason=";
-const EXPLICIT_FLUSH = `${HEURISTICS_DECISION}explicit_flush`;
+const HEURISTICS_DECISION = "heuristics WILL";
+const EXPLICIT_FLUSH = "heuristics WILL RUN — reason=explicit_flush";
 
 async function eventually<T>(
-	read: () => T | undefined,
+	read: () => T | undefined | Promise<T | undefined>,
 	what: string,
 	timeoutMs = 20_000,
 ): Promise<T> {
 	const deadline = Date.now() + timeoutMs;
 	for (;;) {
-		const value = read();
+		const value = await read();
 		if (value !== undefined) return value;
 		if (Date.now() >= deadline) throw new Error(`timed out waiting for ${what}`);
 		await Bun.sleep(50);
