@@ -6307,7 +6307,10 @@ describe("Rust stalled transform probe", () => {
         expect(
             await Promise.race([
                 probeObserved.then(() => true),
-                run.then(() => false, () => false),
+                run.then(
+                    () => false,
+                    () => false,
+                ),
             ]),
         ).toBe(true);
         await refusal;

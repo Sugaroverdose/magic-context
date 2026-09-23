@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
     createBootBudget,
     emitBootEnteringBreadcrumb,
-    remainingBootBudgetMs,
     formatBootPhaseDiagnostics,
+    remainingBootBudgetMs,
     runBootPhaseWithDeadline,
     runBootPhaseWithinBudget,
 } from "./boot-deadline";
