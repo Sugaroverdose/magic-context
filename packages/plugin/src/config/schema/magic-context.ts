@@ -1204,7 +1204,9 @@ export const MagicContextConfigSchema = z
             .number()
             .min(60_000)
             .default(DEFAULT_HISTORIAN_TIMEOUT_MS)
-            .describe("Timeout for each historian prompt call in milliseconds (default: 600000)"),
+            .describe(
+                "Timeout for each historian prompt call in both TypeScript and Rust transform modes, in milliseconds (default: 600000)",
+            ),
         commit_cluster_trigger: z
             .object({
                 enabled: z

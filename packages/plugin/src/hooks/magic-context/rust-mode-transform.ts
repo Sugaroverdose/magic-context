@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
+
 import {
     type AuthorityDrainResponse,
     type AuthorityModuleClient,
@@ -1692,6 +1694,7 @@ function buildTransformBody(args: {
         auto_search_min_prompt_chars: args.passInputs.auto_search_min_prompt_chars,
         history_budget_tokens: args.passInputs.history_budget_tokens,
         historian_model_chain: args.passInputs.historian_model_chain,
+        historian_timeout_ms: args.passInputs.historian_timeout_ms,
         clear_reasoning_age: args.passInputs.clear_reasoning_age,
         caveman_enabled: args.passInputs.caveman_enabled === true,
         caveman_min_chars: args.passInputs.caveman_min_chars ?? 500,
@@ -2640,6 +2643,7 @@ export function createRustModeTransform(
                 auto_search_min_prompt_chars: deps.autoSearch?.minPromptChars ?? 20,
                 history_budget_tokens: historyBudgetTokens,
                 historian_model_chain: resolvedHistorianModelChain(deps),
+                historian_timeout_ms: deps.historianTimeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
                 clear_reasoning_age: deps.clearReasoningAge,
                 caveman_enabled:
                     !sessionMeta.isSubagent && deps.cavemanTextCompression?.enabled === true,

@@ -2084,7 +2084,7 @@
     },
     "historian_timeout_ms": {
       "default": 600000,
-      "description": "Timeout for each historian prompt call in milliseconds (default: 600000)",
+      "description": "Timeout for each historian prompt call in both TypeScript and Rust transform modes, in milliseconds (default: 600000)",
       "type": "number",
       "minimum": 60000
     },

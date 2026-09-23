@@ -713,6 +713,7 @@ impl AssembledHistorianFiring {
             prompt: &self.prompt,
             model_chain: &self.model_chain,
             temperature: None,
+            await_timeout: crate::historian::historian_await_timeout(None),
             producer_source_tokens: self.producer_source_tokens,
             historian_context_limit_tokens: self.historian_context_limit_tokens,
             fallback_context_limits: Default::default(),

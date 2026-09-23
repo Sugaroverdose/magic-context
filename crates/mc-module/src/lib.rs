@@ -4102,6 +4102,7 @@ struct HistorianFiringTask {
     session_id: String,
     language: Option<String>,
     historian_temperature: Option<f64>,
+    historian_await_timeout: Duration,
     project_path: String,
     project_root: PathBuf,
     project_slug: String,
@@ -6142,6 +6143,9 @@ impl McHandler {
                 session_id: parsed.session_id.clone(),
                 language: cfg.language.clone(),
                 historian_temperature: cfg.historian_temperature,
+                historian_await_timeout: historian::historian_await_timeout(
+                    parsed.historian_timeout_ms,
+                ),
                 project_path: project_path.to_string(),
                 project_root: binding.project_root.clone(),
                 project_slug,
@@ -6284,6 +6288,7 @@ impl McHandler {
             session_id: parsed.session_id.clone(),
             language,
             historian_temperature: binding.config.historian_temperature,
+            historian_await_timeout: historian::historian_await_timeout(None),
             project_path,
             project_root: binding.project_root.clone(),
             project_slug,
@@ -6381,6 +6386,7 @@ impl McHandler {
             session_id,
             language,
             historian_temperature,
+            historian_await_timeout,
             project_path,
             project_root,
             project_slug,
@@ -6392,6 +6398,11 @@ impl McHandler {
             publication_fence,
         } = task;
         let _guard = live_guard;
+        eprintln!(
+            "mc-module: historian firing for {session_id}: await_timeout_ms={} completion_budget_ms={}",
+            historian_await_timeout.as_millis(),
+            historian::completion_wait_budget(historian_await_timeout).as_millis()
+        );
         let failure_started_at_ms = firing.now_ms;
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
         let result = match factory.connect(&project_root).await {
@@ -6404,6 +6415,7 @@ impl McHandler {
                     language.as_deref(),
                 );
                 request.temperature = historian_temperature;
+                request.await_timeout = historian_await_timeout;
                 request.publication_fence = publication_fence.as_deref();
                 run_historian_firing_with_model_cache(
                     &mut *producer,
@@ -6637,7 +6649,8 @@ impl McHandler {
         let Some(remaining) = Self::remaining_wrapup_budget(deadline) else {
             return Err("wrapup request budget expired before joining historian".to_string());
         };
-        let wait = historian::completion_wait_budget().min(remaining);
+        let wait = historian::completion_wait_budget(historian::historian_await_timeout(None))
+            .min(remaining);
         match tokio::time::timeout(wait, completion).await {
             Ok(()) => Ok(()),
             Err(_) if Instant::now() >= deadline => {
@@ -19714,6 +19727,7 @@ mod tests {
         binds: AtomicUsize,
         statuses: AtomicUsize,
         await_outputs: AtomicUsize,
+        await_timeouts: Mutex<Vec<Duration>>,
         block_output: std::sync::atomic::AtomicBool,
         notify: Notify,
         connect_errors: Mutex<VecDeque<HistorianProducerError>>,
@@ -19830,6 +19844,19 @@ mod tests {
             Ok(RunHandle {
                 run_id: format!("run-{n}"),
             })
+        }
+
+        async fn await_output_with_timeout(
+            &mut self,
+            run_id: &str,
+            timeout: Duration,
+        ) -> Result<ProducerOutput, HistorianProducerError> {
+            self.state
+                .await_timeouts
+                .lock()
+                .expect("await timeouts mutex")
+                .push(timeout);
+            self.await_output(run_id).await
         }
 
         async fn await_output(
@@ -35074,6 +35101,36 @@ mod tests {
             Value::Null
         );
         assert!(store.load_compartment_events("ses").unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn transform_historian_timeout_reaches_producer_and_old_requests_keep_default() {
+        for (configured, expected) in [(Some(720_000), 720), (None, 600)] {
+            let producer = Arc::new(ProducerState::default());
+            let (handler, store, _dir, _project) =
+                handler_with_store(Arc::clone(&producer), default_test_config());
+            let mut transform = request(big_messages());
+            transform["serializer_profile"] = json!("opencode-aisdk");
+            if let Some(timeout) = configured {
+                transform["historian_timeout_ms"] = json!(timeout);
+            }
+            let response = call_transform_request(&handler, transform).await;
+            assert_eq!(response["historian"]["fired"], true);
+            wait_for_count(&producer.await_outputs, 1).await;
+            wait_for_idle(&store).await;
+            assert_eq!(
+                producer
+                    .await_timeouts
+                    .lock()
+                    .expect("await timeouts mutex")
+                    .as_slice(),
+                [Duration::from_secs(expected)]
+            );
+            assert_eq!(
+                historian::completion_wait_budget(historian::historian_await_timeout(configured)),
+                Duration::from_secs(expected + 60)
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

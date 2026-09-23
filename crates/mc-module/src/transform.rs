@@ -854,6 +854,9 @@ pub struct TransformRequest {
     /// a present but empty list disables historian dispatch for this OpenCode route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub historian_model_chain: Option<Vec<String>>,
+    /// Host-resolved per-attempt historian deadline; absent on older adapters.
+    #[serde(default)]
+    pub historian_timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared_trim: Option<DeclaredTrim>,
     /// Composed fake-compaction edge delivered by the lineage owner. Missing fields retain
@@ -1040,6 +1043,8 @@ struct TransformRequestWire {
     #[serde(default)]
     historian_model_chain: Option<Vec<String>>,
     #[serde(default)]
+    historian_timeout_ms: Option<u64>,
+    #[serde(default)]
     declared_trim: Option<DeclaredTrim>,
     #[serde(default)]
     lineage_switched: bool,
@@ -1125,6 +1130,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             detected_context_limit_model_key: wire.detected_context_limit_model_key,
             history_budget_tokens: wire.history_budget_tokens,
             historian_model_chain: wire.historian_model_chain,
+            historian_timeout_ms: wire.historian_timeout_ms,
             declared_trim: wire.declared_trim,
             lineage_switched: wire.lineage_switched,
             descent_edge_id: wire.descent_edge_id,
@@ -16323,6 +16329,7 @@ pub(crate) mod tests {
             detected_context_limit_model_key: None,
             history_budget_tokens: None,
             historian_model_chain: None,
+            historian_timeout_ms: None,
             declared_trim: None,
             lineage_switched: false,
             descent_edge_id: 0,
