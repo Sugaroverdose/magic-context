@@ -2166,6 +2166,7 @@ struct FacadeScope {
     route_project_root: String,
     conversation_key: String,
     memory_enabled: bool,
+    host_backed_memory_ids: bool,
 }
 
 fn default_importance() -> i32 {
@@ -12192,6 +12193,7 @@ impl McHandler {
             route_project_root,
             conversation_key,
             memory_enabled: binding.config.memory_enabled,
+            host_backed_memory_ids: binding.harness != "claude-code",
         })
     }
 
@@ -12857,9 +12859,7 @@ impl McHandler {
             Ok(membership) => membership,
             Err(error) => return tool_error_result(format!("Error: {error}")),
         };
-        let host_backed_memory_ids = !state.meta.last_serializer_profile.is_empty()
-            && state.meta.last_serializer_profile != "claude-code-anthropic";
-        let visible_memory_ids = if host_backed_memory_ids {
+        let visible_memory_ids = if facade_scope.host_backed_memory_ids {
             let paths = workspace_membership
                 .as_ref()
                 .map(|workspace| workspace.union_identities.clone())
@@ -31189,6 +31189,109 @@ mod tests {
         assert_eq!(
             unsupported_corpus,
             "No results found for \"needle\" across notes, memories, primers, git commits, or message history."
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ctx_search_excludes_host_visible_memory_but_keeps_hidden_memory() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver = FakeSessionResolver::with(&[("token", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        let project = project.to_str().unwrap();
+        handler.bind_route(7, binding_with_harness(project, "opencode", "ses"));
+
+        let visible = insert_memory(&store, project, "CONSTRAINTS", "needle visible", 10);
+        let host_visible = 101;
+        store
+            .acknowledge_host_memory_ids(
+                project,
+                &[HostMemoryIdentityAck {
+                    module_row_id: visible,
+                    host_row_id: host_visible,
+                }],
+            )
+            .unwrap();
+        let mut transform = request(vec![ck("m0", 0, "live input")]);
+        transform["serializer_profile"] = json!("opencode-aisdk");
+        let initial = call_transform_request(&handler, transform).await;
+        assert_eq!(initial["action"], "HARD");
+        assert_eq!(initial["rendered_memory_ids"], json!([host_visible]));
+        assert_ne!(visible, host_visible);
+        assert!(store
+            .load("ses")
+            .unwrap()
+            .meta
+            .last_serializer_profile
+            .is_empty());
+
+        let hidden = insert_memory(&store, project, "CONSTRAINTS", "needle hidden", 20);
+        let results = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": "needle", "sources": ["memory"]}),
+            )
+            .await,
+        );
+        assert!(
+            !results.contains(&format!("[memory] score=1.00 id={visible} ")),
+            "{results}"
+        );
+        assert!(
+            results.contains(&format!("[memory] score=1.00 id={hidden} ")),
+            "{results}"
+        );
+        assert!(results.contains(&format!("ids {visible}")), "{results}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ctx_search_keeps_claude_code_module_visible_memory_ids() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver = FakeSessionResolver::with(&[("token", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        let project = project.to_str().unwrap();
+        handler.bind_route(7, binding_with_harness(project, "claude-code", "token"));
+
+        let visible = insert_memory(&store, project, "CONSTRAINTS", "needle visible", 10);
+        store
+            .acknowledge_host_memory_ids(
+                project,
+                &[HostMemoryIdentityAck {
+                    module_row_id: visible,
+                    host_row_id: 101,
+                }],
+            )
+            .unwrap();
+        let hidden = insert_memory(&store, project, "CONSTRAINTS", "needle hidden", 20);
+        store
+            .commit(
+                "ses",
+                None,
+                &CoreState::default(),
+                &ModuleMeta {
+                    rendered_memory_ids: vec![visible],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let results = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": "needle", "sources": ["memory"]}),
+            )
+            .await,
+        );
+        assert!(
+            !results.contains(&format!("[memory] score=1.00 id={visible} ")),
+            "{results}"
+        );
+        assert!(
+            results.contains(&format!("[memory] score=1.00 id={hidden} ")),
+            "{results}"
         );
     }
 
