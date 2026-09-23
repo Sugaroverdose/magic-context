@@ -151,6 +151,9 @@ export interface StatusViewSource {
     readonly readySmartNoteCount?: number;
     readonly archivedCompartmentCount?: number;
     readonly configParseFailures?: readonly ConfigParseFailure[];
+    readonly configGeneration?: number;
+    readonly configAdoptedAt?: number;
+    readonly configReloadFailure?: { readonly path: string; readonly message: string };
     /** OpenCode spells this `compaction_enabled`; both spellings are accepted. */
     readonly compaction_enabled?: boolean;
     readonly compactionEnabled?: boolean;
@@ -434,7 +437,12 @@ function knowledgeSections(source: StatusViewSource, now: number): StatusSection
  * been arranged), and a narrow host draws the same list in one column.
  */
 function statusSections(source: StatusViewSource, now: number): StatusSection[] {
-    if (!compactionEnabled(source)) return knowledgeSections(source, now);
+    const configSection: StatusSection[] = source.configGeneration === undefined ? [] : [{
+        title: "Config",
+        labelWidth: 12,
+        rows: [{ label: "Generation", value: `${source.configGeneration} · adopted ${source.configAdoptedAt ? new Date(source.configAdoptedAt).toLocaleString() : "unknown"}`, tone: "muted" }],
+    }];
+    if (!compactionEnabled(source)) return [...knowledgeSections(source, now), ...configSection];
     return [
         { title: "Tags", labelWidth: 8, rows: tagRows(source) },
         {
@@ -487,6 +495,7 @@ function statusSections(source: StatusViewSource, now: number): StatusSection[] 
         },
         { title: "Cache TTL", labelWidth: 14, rows: cacheRows(source, now) },
         { title: "History Compression", labelWidth: 14, rows: historyRows(source, now) },
+        ...configSection,
         {
             title: "Memory",
             labelWidth: 9,
@@ -500,6 +509,7 @@ function statusSections(source: StatusViewSource, now: number): StatusSection[] 
 
 function warningBlock(source: StatusViewSource): StatusWarning[] {
     return [
+        ...(source.configReloadFailure ? [{ text: `Config reload failed ${source.configReloadFailure.path}: ${source.configReloadFailure.message}`, tone: "error" as const }] : []),
         ...(source.configParseFailures ?? []).map((failure) => ({
             text: formatConfigParseStatusLine(failure),
             tone: "error" as const,

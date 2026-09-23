@@ -38,6 +38,8 @@ export class LiveConfigReader<T> {
         initial: T,
         private readonly load: () => T,
         private readonly onLog: (message: string) => void = console.warn,
+        private readonly changedKeys: (previous: T, next: T) => readonly string[] = (previous, next) =>
+            Object.keys(next as object).filter((key) => JSON.stringify((previous as Record<string, unknown>)[key]) !== JSON.stringify((next as Record<string, unknown>)[key])),
     ) {
         this.snapshot = { generation: 1, digest: "initial", adoptedAt: Date.now(), effective: initial };
     }
@@ -111,8 +113,9 @@ export class LiveConfigReader<T> {
             this.initialized = true;
             this.snapshot = { generation: 1, digest, adoptedAt: this.snapshot.adoptedAt, effective };
         } else if (this.snapshot.digest !== digest) {
+            const keys = this.changedKeys(this.snapshot.effective, effective);
             this.snapshot = { generation: this.snapshot.generation + 1, digest, adoptedAt: Date.now(), effective };
-            this.onLog(`config reloaded gen=${this.snapshot.generation} keys=[…]`);
+            this.onLog(`config reloaded gen=${this.snapshot.generation} keys=[${keys.join(",")}]`);
         }
         return this.snapshot;
     }

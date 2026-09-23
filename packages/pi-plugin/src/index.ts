@@ -20,7 +20,7 @@
  *   Falls back to schema defaults when neither file exists.
  */
 
-import { dreamerRunConfig, historianRunConfig } from '@magic-context/core/config/live-run-config';
+import { changedLiveKeys, dreamerRunConfig, historianRunConfig } from '@magic-context/core/config/live-run-config';
 import { LiveConfigReader } from '@magic-context/core/config/live-snapshot';
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
@@ -1249,7 +1249,7 @@ async function startPiMagicContextRuntime(
 					throw new Error(`invalid configuration: ${loaded.warnings.join("; ")}`);
 				}
 				return loaded.config;
-			}, warn);
+			}, warn, changedLiveKeys);
 			reader.poll();
 			liveReaders.set(dir, reader);
 		}
@@ -1611,7 +1611,12 @@ async function startPiMagicContextRuntime(
 		compactionEnabled: isCompactionEnabled(bootProjectDeps.config),
 		resolveStatusDeps: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
+			const live = liveReaderFor(current.projectDir, current.config);
+			const failure = live.lastFailure();
 			return {
+				configGeneration: live.current().generation,
+				configAdoptedAt: live.current().adoptedAt,
+				configReloadFailure: failure ? { path: failure.path, message: failure.message } : undefined,
 				db,
 				projectIdentity: current.projectIdentity,
 				protectedTags: current.config.protected_tags,

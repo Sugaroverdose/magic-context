@@ -38,7 +38,7 @@ test("one snapshot per run survives a malformed tier and adopts both tiers atomi
         expect(second.effective.model).toBe("second-model");
         expect(first.effective.model).toBe("project");
         expect(reader.lastFailure()).toBeUndefined();
-        expect(logs.filter((line) => line.includes("config reloaded"))).toHaveLength(1);
+        expect(logs.filter((line) => line.includes("config reloaded"))).toEqual(["config reloaded gen=2 keys=[model]"]);
     } finally {
         if (oldConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
         else process.env.XDG_CONFIG_HOME = oldConfigHome;

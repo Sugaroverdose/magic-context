@@ -23,6 +23,12 @@ export function sampleLiveConfig<T extends MagicContextConfig>(boot: T, fresh: T
     return result as T;
 }
 
+export function changedLiveKeys(previous: MagicContextConfig, next: MagicContextConfig): string[] {
+    const at = (config: MagicContextConfig, path: string): unknown =>
+        path.split(".").reduce<unknown>((node, part) => (node as Record<string, unknown> | undefined)?.[part], config);
+    return LIVE_RELOAD_CONFIG_PATHS.filter((path) => JSON.stringify(at(previous, path)) !== JSON.stringify(at(next, path)));
+}
+
 export const historianRunConfig = sampleLiveConfig;
 export const dreamerRunConfig = sampleLiveConfig;
 
@@ -38,9 +44,13 @@ export function pluginConfigReader(directory: string, boot: MagicContextPluginCo
                 throw new Error(`invalid configuration: ${loaded.config.configWarnings?.join("; ") ?? loaded.loadOutcome}`);
             }
             return loaded.config;
-        });
+        }, console.warn, changedLiveKeys);
         reader.poll();
         pluginReaders.set(directory, reader);
     }
     return reader;
+}
+
+export function currentPluginConfigReader(directory: string) {
+    return pluginReaders.get(directory);
 }

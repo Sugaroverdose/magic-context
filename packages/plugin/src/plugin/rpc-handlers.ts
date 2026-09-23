@@ -8,6 +8,7 @@ import { chmodSync, createWriteStream, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { COMPACTION_ENABLED_PATH, isCompactionEnabled } from "../config/agent-disable";
+import { currentPluginConfigReader } from '../config/live-run-config';
 import type { MagicContextConfig } from "../config/schema/magic-context";
 import {
     getAuthorityManagedMarker,
@@ -759,8 +760,13 @@ export function buildStatusDetail(
                   detail: historianRefusalDetail,
               }
             : undefined;
+    const liveConfig = currentPluginConfigReader(directory);
+    const liveFailure = liveConfig?.lastFailure();
     const detail: StatusDetail = {
         ...base,
+        configGeneration: liveConfig?.current().generation,
+        configAdoptedAt: liveConfig?.current().adoptedAt,
+        configReloadFailure: liveFailure ? { path: liveFailure.path, message: liveFailure.message } : undefined,
         memoryImportanceHistogram: emptyMemoryImportanceHistogram(),
         // Not project-scoped: the maintenance timer is one per process, and a
         // pass that ends early costs every project its work, so this is read

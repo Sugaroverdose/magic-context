@@ -288,3 +288,13 @@ describe("status view model", () => {
         });
     });
 });
+
+test("status displays adopted config generation and last reload failure without disabling the view", () => {
+    const result = view({
+        configGeneration: 3,
+        configAdoptedAt: NOW,
+        configReloadFailure: { path: "/tmp/project/.cortexkit/magic-context.jsonc", message: "invalid JSONC" },
+    });
+    expect(result.sections.find((section) => section.title === "Config")?.rows[0]?.value).toContain("3 · adopted");
+    expect(result.warnings).toContainEqual({ text: "Config reload failed /tmp/project/.cortexkit/magic-context.jsonc: invalid JSONC", tone: "error" });
+});

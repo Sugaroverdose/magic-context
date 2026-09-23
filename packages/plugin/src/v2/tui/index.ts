@@ -100,6 +100,8 @@ export function statusText(detail: StatusDetail): string {
         `Memories: ${detail.memoryBlockCount} injected / ${detail.memoryCount} stored`,
         `Pending reductions: ${detail.pendingOpsCount}`,
         `Harness: opencode2`,
+        ...(detail.configGeneration === undefined ? [] : [`Config generation: ${detail.configGeneration} (adopted ${detail.configAdoptedAt ? new Date(detail.configAdoptedAt).toLocaleString() : "unknown"})`]),
+        ...(detail.configReloadFailure ? [`Config reload failed ${detail.configReloadFailure.path}: ${detail.configReloadFailure.message}`] : []),
         ...(detail.lastTransformError ? [`Warning: ${detail.lastTransformError}`] : []),
     ].join("\n");
 }
