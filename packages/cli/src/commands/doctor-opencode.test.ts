@@ -18,6 +18,7 @@ import {
 import { inspectPinnedOpenCodePluginSchemaFences } from "../lib/opencode-plugin-schema-fence";
 import { runV22BackfillCommands } from "../lib/v22-backfill-commands";
 import {
+    checkConfiguredVariantCatalog,
     checkUserMemoriesDreamerCompatibility,
     collectNpmReleaseAgeWarnings,
     describeAutoUpdateStall,
@@ -51,6 +52,60 @@ describe("OpenCode model catalog parsing", () => {
                 catalog,
             ),
         ).toEqual([{ agent: "historian", model: "provider/model", variant: "medium" }]);
+    });
+    it("checks the v2 model.list API envelope and reports an absent variant", () => {
+        // 2.0.12 `opencode api --standalone model.list` returns {location,data};
+        // the isolated unauthenticated host returned data: [], so supply catalog rows here.
+        const output = JSON.stringify({
+            location: { directory: "/private/tmp/mc-oc2-catalog/work" },
+            data: [{ providerID: "provider", id: "model", variants: { high: {} } }],
+        });
+        const warnings: string[] = [];
+        const args: string[][] = [];
+        checkConfiguredVariantCatalog(
+            { historian: { opencode: { model: "provider/model", variant: "medium" } } },
+            "v2",
+            (message) => warnings.push(message),
+            (command) => {
+                args.push(command);
+                return { stdout: output, status: 0 };
+            },
+        );
+        expect(args).toEqual([["api", "--standalone", "model.list"]]);
+        expect(warnings).toEqual([
+            "historian model provider/model requests variant 'medium', which this host does not offer. Remove the variant or choose one listed by opencode api --standalone model.list.",
+        ]);
+    });
+    it("does not recommend --verbose when v2 returned no catalog", () => {
+        const warnings: string[] = [];
+        checkConfiguredVariantCatalog(
+            { dreamer: { opencode: { model: "provider/model", variant: "high" } } },
+            "v2",
+            (message) => warnings.push(message),
+            () => ({
+                stdout: '{"location":{"directory":"/private/tmp/mc-oc2-catalog/work"},"data":[]}',
+                status: 0,
+            }),
+        );
+        expect(warnings).toEqual([
+            "Could not verify configured hidden-agent variants: this OpenCode host did not provide a readable model catalog. Check opencode api --standalone model.list.",
+        ]);
+    });
+    it("retains the v1 verbose catalog check", () => {
+        const args: string[][] = [];
+        checkConfiguredVariantCatalog(
+            { historian: { opencode: { model: "provider/model", variant: "high" } } },
+            "v1",
+            () => {},
+            (command) => {
+                args.push(command);
+                return {
+                    stdout: 'provider/model\n{\n  "id": "model",\n  "providerID": "provider",\n  "variants": { "high": {} }\n}',
+                    status: 0,
+                };
+            },
+        );
+        expect(args).toEqual([["models", "--verbose"]]);
     });
     it("reads model variants from verbose CLI output", () => {
         expect(
