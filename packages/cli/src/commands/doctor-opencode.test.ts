@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -18,6 +18,7 @@ import {
 import { inspectPinnedOpenCodePluginSchemaFences } from "../lib/opencode-plugin-schema-fence";
 import { runV22BackfillCommands } from "../lib/v22-backfill-commands";
 import {
+    checkConfiguredVariantCatalog,
     checkUserMemoriesDreamerCompatibility,
     collectNpmReleaseAgeWarnings,
     describeAutoUpdateStall,
@@ -51,6 +52,61 @@ describe("OpenCode model catalog parsing", () => {
                 catalog,
             ),
         ).toEqual([{ agent: "historian", model: "provider/model", variant: "medium" }]);
+    });
+    it("checks real v2 model.list variant IDs for both missing and declared variants", () => {
+        // Captured from OpenCode 2.0.12 in an isolated root with a dummy API key.
+        const output = readFileSync(
+            join(import.meta.dir, "fixtures/opencode-2.0.12-model-list.json"),
+            "utf8",
+        );
+        const warnings: string[] = [];
+        const args: string[][] = [];
+        checkConfiguredVariantCatalog(
+            {
+                historian: { opencode: { model: "anthropic/claude-opus-5-5", variant: "ultra" } },
+                dreamer: { opencode: { model: "anthropic/claude-opus-5-5", variant: "high" } },
+            },
+            "v2",
+            (message) => warnings.push(message),
+            (command) => {
+                args.push(command);
+                return { stdout: output, status: 0 };
+            },
+            "/tmp/project",
+        );
+        expect(args).toEqual([["api", "model.list", "--param", "directory=/tmp/project"]]);
+        expect(warnings).toEqual([
+            "historian model anthropic/claude-opus-5-5 requests variant 'ultra', which this host does not offer. Remove the variant or choose one listed by opencode api model.list --param directory=/tmp/project.",
+        ]);
+    });
+    it("names the background service startup command when v2 cannot read a catalog", () => {
+        const warnings: string[] = [];
+        checkConfiguredVariantCatalog(
+            { dreamer: { opencode: { model: "provider/model", variant: "high" } } },
+            "v2",
+            (message) => warnings.push(message),
+            () => ({ stdout: "", status: 1 }),
+            "/tmp/project",
+        );
+        expect(warnings).toEqual([
+            "Could not verify configured hidden-agent variants: this OpenCode host did not provide a readable model catalog. Start the background service with opencode service start, then check opencode api model.list --param directory=/tmp/project.",
+        ]);
+    });
+    it("retains the v1 verbose catalog check", () => {
+        const args: string[][] = [];
+        checkConfiguredVariantCatalog(
+            { historian: { opencode: { model: "provider/model", variant: "high" } } },
+            "v1",
+            () => {},
+            (command) => {
+                args.push(command);
+                return {
+                    stdout: 'provider/model\n{\n  "id": "model",\n  "providerID": "provider",\n  "variants": { "high": {} }\n}',
+                    status: 0,
+                };
+            },
+        );
+        expect(args).toEqual([["models", "--verbose"]]);
     });
     it("reads model variants from verbose CLI output", () => {
         expect(

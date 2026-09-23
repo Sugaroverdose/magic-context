@@ -137,7 +137,22 @@ export function findUndeclaredConfiguredVariants(
     });
 }
 
-function checkConfiguredVariantCatalog(config: unknown, warn: (message: string) => void): void {
+export function checkConfiguredVariantCatalog(
+    config: unknown,
+    hostGeneration: "v1" | "v2",
+    warn: (message: string) => void,
+    run: (
+        args: string[],
+        cwd: string,
+    ) => { stdout: string; status: number | null; error?: Error } = (args, cwd) =>
+        spawnSync("opencode", args, {
+            cwd,
+            encoding: "utf8",
+            timeout: hostGeneration === "v2" ? 90_000 : 45_000,
+            maxBuffer: 16 * 1024 * 1024,
+        }),
+    projectDir = process.cwd(),
+): void {
     const configured: Array<{ agent: string; model: string; variant: string }> = [];
     const root = config && typeof config === "object" ? (config as Record<string, unknown>) : {};
     for (const agent of ["historian", "dreamer"] as const) {
@@ -163,26 +178,61 @@ function checkConfiguredVariantCatalog(config: unknown, warn: (message: string) 
     if (configured.length === 0) return;
     const tempRoot = mkdtempSync(join(tmpdir(), "magic-context-opencode-catalog-"));
     try {
-        const result = spawnSync("opencode", ["models", "--verbose"], {
-            cwd: tempRoot,
-            encoding: "utf8",
-            timeout: 45_000,
-            maxBuffer: 16 * 1024 * 1024,
-        });
-        const catalog = parseOpenCodeModelCatalog(result.stdout ?? "");
+        const command =
+            hostGeneration === "v2"
+                ? ["api", "model.list", "--param", `directory=${projectDir}`]
+                : ["models", "--verbose"];
+        const guidance = `opencode ${command.join(" ")}`;
+        const result = run(command, tempRoot);
+        const catalog =
+            hostGeneration === "v2"
+                ? parseOpenCodeV2ModelCatalog(result.stdout ?? "")
+                : parseOpenCodeModelCatalog(result.stdout ?? "");
         if (result.error || result.status !== 0 || catalog.length === 0) {
             warn(
-                "Could not verify configured hidden-agent variants: this OpenCode host did not provide a readable model catalog. Check opencode models --verbose.",
+                `Could not verify configured hidden-agent variants: this OpenCode host did not provide a readable model catalog. ${hostGeneration === "v2" ? "Start the background service with opencode service start, then check" : "Check"} ${guidance}.`,
             );
             return;
         }
         for (const entry of findUndeclaredConfiguredVariants(configured, catalog)) {
             warn(
-                `${entry.agent} model ${entry.model} requests variant '${entry.variant}', which this host does not offer. Remove the variant or choose one listed by opencode models --verbose.`,
+                `${entry.agent} model ${entry.model} requests variant '${entry.variant}', which this host does not offer. Remove the variant or choose one listed by ${guidance}.`,
             );
         }
     } finally {
         rmSync(tempRoot, { recursive: true, force: true });
+    }
+}
+
+export function parseOpenCodeV2ModelCatalog(
+    output: string,
+): ReturnType<typeof parseOpenCodeModelCatalog> {
+    try {
+        const payload: unknown = JSON.parse(output);
+        const rows =
+            payload && typeof payload === "object" && "data" in payload
+                ? (payload as { data: unknown }).data
+                : payload;
+        if (!Array.isArray(rows)) return [];
+        return rows.flatMap((row) => {
+            if (!row || typeof row !== "object") return [];
+            const model = row as Record<string, unknown>;
+            if (
+                typeof model.providerID !== "string" ||
+                typeof model.id !== "string" ||
+                !Array.isArray(model.variants)
+            )
+                return [];
+            const variants: Record<string, unknown> = {};
+            for (const variant of model.variants) {
+                if (variant && typeof variant === "object" && typeof variant.id === "string") {
+                    variants[variant.id] = variant;
+                }
+            }
+            return [{ providerID: model.providerID, id: model.id, variants }];
+        });
+    } catch {
+        return [];
     }
 }
 
@@ -1116,7 +1166,7 @@ export async function runDoctor(
         try {
             const result = loadPluginConfig(process.cwd());
             autoUpdateEnabled = result.auto_update !== false;
-            checkConfiguredVariantCatalog(result, warn);
+            checkConfiguredVariantCatalog(result, hostGeneration, warn);
             const warnings = result.configWarnings ?? [];
             if (warnings.length > 0) {
                 warn(
