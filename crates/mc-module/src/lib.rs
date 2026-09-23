@@ -6414,9 +6414,14 @@ impl McHandler {
         } = task;
         let _guard = live_guard;
         tracing::info!(
-            "mc-module: historian firing for {session_id}: await_timeout_ms={} completion_budget_ms={}",
+            "mc-module: historian firing for {session_id}: await_timeout_ms={} attempt_budget_ms={} firing_budget_ms={}",
             historian_await_timeout.as_millis(),
-            historian::completion_wait_budget(historian_await_timeout).as_millis()
+            historian::completion_wait_budget(historian_await_timeout).as_millis(),
+            historian::firing_completion_wait_budget(
+                historian_await_timeout,
+                firing.model_chain.len()
+            )
+            .as_millis()
         );
         let failure_started_at_ms = firing.now_ms;
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
@@ -6660,16 +6665,35 @@ impl McHandler {
         }
     }
 
+    /// How long a join may wait for an already-running firing it did not start. The
+    /// firing may walk its whole model chain (a timed-out attempt moves on to the next
+    /// model), so the join allows one per-attempt budget per model rather than one
+    /// attempt in total. The joiner does not know which chain or timeout the running
+    /// firing was started with, so it takes the larger of the host-supplied and
+    /// configured chains and of the host-supplied and default per-attempt timeouts.
+    fn active_firing_join_budget(
+        &self,
+        project_root: &Path,
+        host_model_chain: Option<&[String]>,
+        host_timeout_ms: Option<u64>,
+    ) -> Duration {
+        let configured_chain_len = self.effective_config(project_root).model_chain.len();
+        let host_chain_len = host_model_chain.map_or(0, <[String]>::len);
+        let timeout = historian::historian_await_timeout(host_timeout_ms)
+            .max(historian::historian_await_timeout(None));
+        historian::firing_completion_wait_budget(timeout, configured_chain_len.max(host_chain_len))
+    }
+
     async fn await_wrapup_historian_completion(
         &self,
         completion: LiveHistorianCompletionWait,
         deadline: Instant,
+        join_budget: Duration,
     ) -> Result<(), String> {
         let Some(remaining) = Self::remaining_wrapup_budget(deadline) else {
             return Err("wrapup request budget expired before joining historian".to_string());
         };
-        let wait = historian::completion_wait_budget(historian::historian_await_timeout(None))
-            .min(remaining);
+        let wait = join_budget.min(remaining);
         match tokio::time::timeout(wait, completion).await {
             Ok(()) => Ok(()),
             Err(_) if Instant::now() >= deadline => {
@@ -8157,8 +8181,13 @@ impl McHandler {
             match prepared {
                 PreparedWrapupAction::FilteredNoiseSkipped => continue,
                 PreparedWrapupAction::Busy(completion) => {
+                    let join_budget = self.active_firing_join_budget(
+                        &binding.project_root,
+                        parsed.historian_model_chain.as_deref(),
+                        parsed.historian_timeout_ms,
+                    );
                     if let Err(reason) = self
-                        .await_wrapup_historian_completion(completion, deadline)
+                        .await_wrapup_historian_completion(completion, deadline, join_budget)
                         .await
                     {
                         let retry_reason = if reason.contains("request budget expired") {
@@ -35552,6 +35581,35 @@ mod tests {
                 Duration::from_secs(expected + 60)
             );
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wrapup_join_budget_covers_a_two_model_walk_whose_first_attempt_times_out() {
+        let mut config = default_test_config();
+        config.model_chain = vec!["prov/model-a".to_string(), "prov/model-b".to_string()];
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), config);
+        let one_attempt =
+            historian::completion_wait_budget(historian::historian_await_timeout(Some(720_000)));
+
+        // The running firing may spend a full attempt budget timing out on model-a and
+        // then another on model-b; joining it must not give up after the first.
+        let budget = handler.active_firing_join_budget(&project, None, Some(720_000));
+        assert_eq!(budget, one_attempt * 2);
+
+        // A longer host-resolved chain widens the join; the default timeout is the floor
+        // when the host asks for a shorter per-attempt deadline.
+        let host_chain = vec![
+            "prov/model-a".to_string(),
+            "prov/model-b".to_string(),
+            "prov/model-c".to_string(),
+        ];
+        let default_attempt =
+            historian::completion_wait_budget(historian::historian_await_timeout(None));
+        assert_eq!(
+            handler.active_firing_join_budget(&project, Some(&host_chain), Some(60_000)),
+            default_attempt * 3
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
