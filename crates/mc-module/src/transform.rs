@@ -27,8 +27,8 @@ use crate::injection::{
 };
 use crate::m0_compose::{trim_memories_to_budget, trim_user_profile_to_budget};
 use crate::m1_compose::{
-    claim_and_render_notes, compose_m1_from_store, m1_revision_signal_parts_for_pass_timed,
-    M1RevisionReadTimings, M1RevisionSignal,
+    compose_m1_from_store, m1_revision_signal_parts_for_pass_timed, M1RevisionReadTimings,
+    M1RevisionSignal,
 };
 use crate::memory_render::{render_m0, workspace_source_names, M0Inputs, M1_PLACEHOLDER};
 use crate::project_docs::read_project_docs_canonical;
@@ -57,11 +57,10 @@ use mc_core::{classify, CkItem, ClassifierInput, CoreState, FrozenUnit, PassInpu
 use mc_store::{
     BlockIdentity, Channel1AppendRow, DeferredExecuteState, LineageAnchor, LineageConstituent,
     LineageDescentDisposition, LineageDescentRequest, McStore, McStoreError, McTagRow,
-    MemoryRevision, ModuleMeta, ModuleUsage, NoteDelivery, PassSchedulerObservation,
-    PendingAgentDrop, PendingChannel2Directive, PendingRewriteState, ServedBlockFingerprint,
-    StoredCompartment, TagCacheSummary, TagMintInput, TailHygieneBaseline, TailHygienePartKind,
-    TemporalMarkInput, TemporalMarkRow, TransformCommit, TransformOverlayBatch,
-    UserHintDecisionInput, UserHintRow,
+    MemoryRevision, ModuleMeta, ModuleUsage, PassSchedulerObservation, PendingAgentDrop,
+    PendingChannel2Directive, PendingRewriteState, ServedBlockFingerprint, StoredCompartment,
+    TagCacheSummary, TagMintInput, TailHygieneBaseline, TailHygienePartKind, TemporalMarkInput,
+    TemporalMarkRow, TransformCommit, TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
 };
 use mc_store::{CompartmentBoundary, RenderedCompartmentCoverage};
 use regex::Regex;
@@ -1638,10 +1637,6 @@ pub struct TransformResponse {
     /// Claude Code gateway instruction. It is response metadata and never enters `ck_messages`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub channel2_directive: Option<Channel2Directive>,
-    /// Delivery ledger rows whose note bytes were included in this bust. The host sends
-    /// the existing transform.ack/nack after applying and validating the response.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note_deliveries: Option<Vec<NoteDelivery>>,
 }
 
 impl TransformResponse {
@@ -1684,7 +1679,6 @@ impl TransformResponse {
             native_messages_delta: None,
             host_directives: None,
             channel2_directive: None,
-            note_deliveries: None,
         }
     }
 
@@ -1729,7 +1723,6 @@ impl TransformResponse {
             native_messages_delta: None,
             host_directives: None,
             channel2_directive: None,
-            note_deliveries: None,
         }
     }
 }
@@ -3004,7 +2997,6 @@ fn apply_additive_only(
     let compose_started_at = Instant::now();
     let mut commit_memory_revision = None;
     let mut commit_compartment_max_seq = None;
-    let mut note_deliveries = Vec::new();
     match plan {
         PassPlan::Hard | PassPlan::MigrateHard => {
             let composition = compose_additive_m0(
@@ -3015,20 +3007,10 @@ fn apply_additive_only(
                 serializer_profile,
                 estimate_tokens,
             )?;
-            let (note_body, hard_note_deliveries) = claim_and_render_notes(
-                store,
-                ctx.note_project_path,
-                &req.session_id,
-                &format!("m1:{}:{}", m1_signal.revision, ctx.now_ms),
-                &format!("m1:{}:{}", m1_signal.revision, ctx.now_ms),
-                ctx.now_ms,
-            )?;
-            note_deliveries = hard_note_deliveries;
-            let m1_unit = if note_body.is_empty() {
-                render_m1_placeholder()
-            } else {
-                render_m1_body(&note_body)
-            };
+            // Ready smart notes are not rendered into m1: the host's deferred-notes
+            // reminder announces them and `ctx_note read` shows them, exactly as in
+            // TypeScript mode. A HARD therefore always starts m1 empty.
+            let m1_unit = render_m1_placeholder();
             let mural_unit = composition.mural.as_ref().map(render_mural_block);
             let committed_mural_hash = composition
                 .mural
@@ -3110,7 +3092,6 @@ fn apply_additive_only(
                 ctx.temporal_awareness,
                 mc_tokenizer::estimate_tokens,
             )?;
-            note_deliveries = m1.note_deliveries.clone();
             let profile_rendered = m1.profile_rendered;
             meta.rendered_m1_coverage = Some(m1.rendered_coverage);
             core.step(PassInput {
@@ -3323,7 +3304,6 @@ fn apply_additive_only(
             native_messages_delta: None,
             host_directives: None,
             channel2_directive: None,
-            note_deliveries: (!note_deliveries.is_empty()).then_some(note_deliveries),
         },
     })
 }
@@ -4115,7 +4095,7 @@ fn apply_once(
     if boundary_divergence_recut.is_some() && !active_legitimate_publication_window {
         boundary_divergence_pending_count = 0;
     }
-    let mut current_m1_digest = m1_signal.revision;
+    let current_m1_digest = m1_signal.revision;
     let compartment_seq_changed_since_meta = loaded.meta.initialized
         && m1_signal.max_compartment_seq != meta_coverage_compartment_seq(&loaded.meta);
     *boundary_divergence_detected = boundary_divergence_recut.is_some();
@@ -4852,7 +4832,6 @@ fn apply_once(
     let mut coverage_shrunk_on_bust = false;
     let compose_m0m1_started_at = Instant::now();
     let mut commit_memory_revision = None;
-    let mut note_deliveries: Vec<NoteDelivery> = Vec::new();
     let mut committed_mural_hash = persisted_mural_hash;
 
     if req.is_subagent {
@@ -4986,7 +4965,6 @@ fn apply_once(
                                 m1_visibility_cutoff_ms,
                                 Some(&mut m1_revision_read_timings),
                             )?;
-                            current_m1_digest = m1_signal.revision;
                             let recut_compartments = store.load_compartments(&req.session_id)?;
                             let recut_coverage_bounds =
                                 coverage_bounds_from_compartments(&recut_compartments)?;
@@ -5090,20 +5068,9 @@ fn apply_once(
                 );
                 core.frozen_units.clear();
                 core.pending_changes.clear();
-                let (note_body, hard_note_deliveries) = claim_and_render_notes(
-                    store,
-                    ctx.note_project_path,
-                    &req.session_id,
-                    &format!("m1:{}:{}", current_m1_digest, ctx.now_ms),
-                    &format!("m1:{}:{}", current_m1_digest, ctx.now_ms),
-                    ctx.now_ms,
-                )?;
-                note_deliveries = hard_note_deliveries;
-                let m1_unit = if note_body.is_empty() {
-                    render_m1_placeholder()
-                } else {
-                    render_m1_body(&note_body)
-                };
+                // Ready smart notes are delivered by the host reminder and `ctx_note read`,
+                // not through m1, so this rebuild leaves m1 empty.
+                let m1_unit = render_m1_placeholder();
                 let mural_unit = comp.mural.as_ref().map(render_mural_block);
                 committed_mural_hash = comp
                     .mural
@@ -5225,7 +5192,6 @@ fn apply_once(
                     ctx.temporal_awareness,
                     mc_tokenizer::estimate_tokens,
                 )?;
-                note_deliveries = m1.note_deliveries.clone();
                 let m0_tokens = core
                     .frozen_units
                     .iter()
@@ -5333,15 +5299,11 @@ fn apply_once(
                     );
                     core.frozen_units.clear();
                     core.pending_changes.clear();
-                    // Post-fold m1 parity with the ordinary HARD arm: everything except the
-                    // claimed notes was just folded into the recomposed m0, so rendering the
-                    // full composed body here would duplicate memories/mutations/compartments
-                    // across both layers for the rest of the epoch. Only the notes survive.
-                    let refold_m1_unit = if m1.notes_block.is_empty() {
-                        render_m1_placeholder()
-                    } else {
-                        render_m1_body(&m1.notes_block)
-                    };
+                    // Post-fold m1 parity with the ordinary HARD arm: everything m1 carried
+                    // was just folded into the recomposed m0, so rendering the composed body
+                    // here would duplicate memories/mutations/compartments across both layers
+                    // for the rest of the epoch. The post-fold m1 is therefore empty.
+                    let refold_m1_unit = render_m1_placeholder();
                     let mural_unit = comp.mural.as_ref().map(render_mural_block);
                     committed_mural_hash = comp
                         .mural
@@ -6394,7 +6356,6 @@ fn apply_once(
             native_messages_delta: None,
             host_directives: channel2_output.host_directives,
             channel2_directive: channel2_output.channel2_directive,
-            note_deliveries: (!note_deliveries.is_empty()).then_some(note_deliveries),
         },
     })
 }
@@ -34098,7 +34059,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn pressure_refold_renders_ready_note_and_ack_prevents_redelivery() {
+    fn pressure_refold_keeps_ready_notes_out_of_m1_and_ready() {
+        // Ready smart notes reach the agent through the host's deferred-notes reminder
+        // and `ctx_note read`, never through m1. A pressure refold with a ready note in
+        // the store must therefore leave m1 empty and must not claim the note: it stays
+        // `ready`, so the host mirror keeps announcing it.
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
@@ -34113,7 +34078,7 @@ pub(crate) mod tests {
                 project_path: "git:proj",
                 route_project_root: None,
                 session_id: Some("writer"),
-                content: "ready note survives pressure refold",
+                content: "ready note announced by the host reminder",
                 surface_condition: Some("condition true"),
                 compiled_provider: None,
                 compiled_config: None,
@@ -34153,41 +34118,93 @@ pub(crate) mod tests {
             Some("pressure_refold")
         );
         assert!(
-            m1_bytes(&pressure).contains("ready note survives pressure refold"),
-            "pressure refold must keep the claimed note model-visible"
-        );
-        // Exact-once across layers: the pressure-causing memory deltas fold into m0 and
-        // must NOT survive in the post-fold m1 (the ordinary-HARD notes-only contract).
-        assert!(
             m0_bytes(&pressure).contains("updated rule 1"),
             "folded m0 must carry the memory deltas that caused the pressure"
         );
-        assert!(
-            !m1_bytes(&pressure).contains("updated rule"),
-            "post-refold m1 must not duplicate memory deltas already folded into m0"
-        );
-        assert!(
-            !m1_bytes(&pressure).contains("<memory-updates>"),
-            "post-refold m1 must be notes-only"
-        );
-        let deliveries = pressure.note_deliveries.clone().expect("note delivery");
-        assert_eq!(deliveries.len(), 1);
+        assert!(!m1_bytes(&pressure).contains("ready note announced"));
+        assert!(!m1_bytes(&pressure).contains("<new-notes>"));
+        assert!(!m1_bytes(&pressure).contains("updated rule"));
 
         let stable = transform(
             &s,
-            &with_usage(req("ses", "cfg0", messages.clone()), 10, 100),
+            &with_usage(req("ses", "cfg0", messages), 10, 100),
             &pctx("git:proj", "/nonexistent-docs", 0),
         )
         .unwrap();
         assert_eq!(stable.action, "SOFT+");
         assert_eq!(m1_bytes(&stable), m1_bytes(&pressure));
-
-        let delivery = &deliveries[0];
         assert_eq!(
-            s.ack_note_delivery("git:proj", "ses", &delivery.transform_pass_id, 3,)
-                .unwrap(),
-            1
+            s.get_note_by_id("git:proj", "writer", note.id)
+                .unwrap()
+                .expect("note")
+                .status,
+            "ready",
+            "no transform pass may claim a ready note"
         );
+    }
+
+    #[test]
+    fn legacy_new_notes_m1_replays_verbatim_on_defer_and_drops_on_next_bust() {
+        // Sessions served by an older binary froze an m1 unit carrying a `<new-notes>`
+        // block. Dropping that block must not cost a cache bust of its own: unchanged
+        // passes keep serving the frozen bytes, and the block disappears on the next
+        // bust that happens for an independent reason.
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let messages = vec![item("a", 1, "raw")];
+        let boot = run(&s, &req("ses", "cfg0", messages.clone()), &spine());
+        assert_eq!(boot.action, "HARD");
+
+        let loaded = s.load("ses").unwrap();
+        let mut core = loaded.core.clone();
+        let legacy_body =
+            "<new-notes>\n- #7: legacy delivered note\n  Condition: condition true\n</new-notes>";
+        core.frozen_units
+            .iter_mut()
+            .find(|unit| unit.key == "m1")
+            .expect("HARD froze an m1 unit")
+            .frozen_payload = legacy_body.to_string();
+        s.commit("ses", loaded.row_version, &core, &loaded.meta)
+            .unwrap();
+
+        let first = transform(
+            &s,
+            &with_usage(req("ses", "cfg0", messages.clone()), 10, 100),
+            &pctx("git:proj", "/nonexistent-docs", 0),
+        )
+        .unwrap();
+        assert_eq!(first.action, "SOFT+");
+        assert!(
+            m1_bytes(&first).contains("legacy delivered note"),
+            "a defer pass must serve the legacy frozen m1 verbatim"
+        );
+        let second = transform(
+            &s,
+            &with_usage(req("ses", "cfg0", messages.clone()), 10, 100),
+            &pctx("git:proj", "/nonexistent-docs", 0),
+        )
+        .unwrap();
+        assert_eq!(second.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_string(second.messages()).unwrap(),
+            serde_json::to_string(first.messages()).unwrap(),
+            "consecutive defer passes must serve byte-identical output"
+        );
+        assert_eq!(
+            s.load("ses")
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .find(|unit| unit.key == "m1")
+                .unwrap()
+                .frozen_payload,
+            legacy_body,
+            "a defer pass must not rewrite the legacy frozen unit"
+        );
+
         let next_bust = transform(
             &s,
             &with_usage(req("ses", "cfg1", messages), 10, 100),
@@ -34195,8 +34212,8 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(next_bust.action, "HARD");
-        assert!(next_bust.note_deliveries.is_none());
-        assert!(!m1_bytes(&next_bust).contains("ready note survives pressure refold"));
+        assert!(!m1_bytes(&next_bust).contains("<new-notes>"));
+        assert!(!m1_bytes(&next_bust).contains("legacy delivered note"));
     }
 
     #[test]
