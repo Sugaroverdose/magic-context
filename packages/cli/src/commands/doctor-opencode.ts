@@ -126,6 +126,17 @@ import {
 
 const CLI_PACKAGE_NAME = "@cortexkit/magic-context";
 
+export function findUndeclaredConfiguredVariants(
+    configured: Array<{ agent: string; model: string; variant: string }>,
+    catalog: ReturnType<typeof parseOpenCodeModelCatalog>,
+): Array<{ agent: string; model: string; variant: string }> {
+    return configured.filter((entry) => {
+        const [providerID, id] = entry.model.split("/", 2);
+        const model = catalog.find((item) => item.providerID === providerID && item.id === id);
+        return model !== undefined && !Object.hasOwn(model.variants, entry.variant);
+    });
+}
+
 function checkConfiguredVariantCatalog(config: unknown, warn: (message: string) => void): void {
     const configured: Array<{ agent: string; model: string; variant: string }> = [];
     const root = config && typeof config === "object" ? (config as Record<string, unknown>) : {};
@@ -165,14 +176,10 @@ function checkConfiguredVariantCatalog(config: unknown, warn: (message: string) 
             );
             return;
         }
-        for (const entry of configured) {
-            const [providerID, id] = entry.model.split("/", 2);
-            const model = catalog.find((item) => item.providerID === providerID && item.id === id);
-            if (model && !Object.hasOwn(model.variants, entry.variant)) {
-                warn(
-                    `${entry.agent} model ${entry.model} requests variant '${entry.variant}', which this host does not offer. Remove the variant or choose one listed by opencode models --verbose.`,
-                );
-            }
+        for (const entry of findUndeclaredConfiguredVariants(configured, catalog)) {
+            warn(
+                `${entry.agent} model ${entry.model} requests variant '${entry.variant}', which this host does not offer. Remove the variant or choose one listed by opencode models --verbose.`,
+            );
         }
     } finally {
         rmSync(tempRoot, { recursive: true, force: true });

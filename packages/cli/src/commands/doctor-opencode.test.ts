@@ -25,6 +25,7 @@ import {
     getUserNpmrcPath,
     isPinnedOpenCodePluginSpecifier,
     migrateLegacyAgentEnabledConfigForDoctor,
+    findUndeclaredConfiguredVariants,
     parseOpenCodeModelCatalog,
 } from "./doctor-opencode";
 import { clearPluginCache } from "./doctor-opencode-cache";
@@ -39,6 +40,18 @@ function migrate(input: Record<string, unknown>) {
 }
 
 describe("OpenCode model catalog parsing", () => {
+    it("reports configured variants absent from the matching catalog model", () => {
+        const catalog = [{ providerID: "provider", id: "model", variants: { high: {} } }];
+        expect(
+            findUndeclaredConfiguredVariants(
+                [
+                    { agent: "historian", model: "provider/model", variant: "medium" },
+                    { agent: "dreamer", model: "provider/model", variant: "high" },
+                ],
+                catalog,
+            ),
+        ).toEqual([{ agent: "historian", model: "provider/model", variant: "medium" }]);
+    });
     it("reads model variants from verbose CLI output", () => {
         expect(
             parseOpenCodeModelCatalog(
