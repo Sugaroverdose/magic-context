@@ -13,7 +13,6 @@ import {
 import type { ResolvedTransformMode } from "../../config/transform-mode";
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
 import {
-    applyMirroredNoteCompileFields,
     applyTargetedMemoryMirrorRow,
     drainMirrorPages,
     ensureContextStoreUuid,
@@ -68,6 +67,7 @@ import {
     translateModuleMemoryMutationReply,
 } from "../../plugin/memory-id-translation";
 import { buildStatusDetail } from "../../plugin/rpc-handlers";
+import { createRustNoteBackend, moduleNoteResponseIsError } from "../../plugin/rust-note-backend";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../plugin/types";
 import type { ConfigParseFailure } from "../../shared/config-diagnostics";
@@ -249,38 +249,6 @@ function notifyMagicContextDisabled(client: PluginContext["client"], reason: str
         .catch((error) => {
             log("[magic-context] failed to show disabled toast:", error);
         });
-}
-
-function moduleNoteRowId(response: unknown, depth = 0): number | null {
-    if (depth > 4 || response === null || response === undefined) return null;
-    if (typeof response === "string") {
-        const match = response.match(/\b(?:smart\s+)?note\s+#(\d+)/i);
-        return match ? Number(match[1]) : null;
-    }
-    if (Array.isArray(response)) {
-        for (const item of response) {
-            const id = moduleNoteRowId(item, depth + 1);
-            if (id !== null) return id;
-        }
-        return null;
-    }
-    if (typeof response !== "object") return null;
-    const record = response as Record<string, unknown>;
-    return (
-        moduleNoteRowId(record.result, depth + 1) ??
-        moduleNoteRowId(record.content, depth + 1) ??
-        moduleNoteRowId(record.text, depth + 1)
-    );
-}
-
-function moduleNoteResponseIsError(response: unknown, depth = 0): boolean {
-    if (depth > 4 || response === null || typeof response !== "object") return false;
-    if (Array.isArray(response)) {
-        return response.some((item) => moduleNoteResponseIsError(item, depth + 1));
-    }
-    const record = response as Record<string, unknown>;
-    if (record.isError === true || record.ok === false || record.error !== undefined) return true;
-    return moduleNoteResponseIsError(record.result, depth + 1);
 }
 
 export function createMagicContextHook(deps: MagicContextDeps) {
@@ -845,75 +813,11 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                               command_id: commandId,
                           },
                       }),
-                  note: async ({
-                      commandId,
-                      sessionId,
-                      projectRoot,
-                      memoryProject,
-                      action,
-                      content,
-                      surfaceCondition,
-                      compiledProvider,
-                      compiledConfig,
-                      compiledAt,
-                      compileStatus,
-                      filter,
-                      limit,
-                      offset,
-                      noteIds,
-                  }) => {
-                      const response = await rustModeModuleClient.call({
-                          sessionId,
-                          projectRoot,
-                          method: "ctx_note",
-                          body: {
-                              name: "ctx_note",
-                              arguments: {
-                                  ...(commandId ? { command_id: commandId } : {}),
-                                  action,
-                                  content,
-                                  memory_project: memoryProject,
-                                  surface_condition: surfaceCondition,
-                                  compiled_provider: compiledProvider,
-                                  compiled_config: compiledConfig,
-                                  compiled_at: compiledAt,
-                                  compile_status: compileStatus,
-                                  filter,
-                                  limit,
-                                  offset,
-                                  note_ids: noteIds,
-                              },
-                          },
-                      });
-                      // The module is authoritative, but context.db remains the local
-                      // read model for note nudges and dashboard/RPC consumers.
-                      await syncModuleNotes();
-                      if (compileStatus && !moduleNoteResponseIsError(response)) {
-                          const moduleRowId =
-                              action === "write"
-                                  ? moduleNoteRowId(response)
-                                  : (noteIds?.[0] ?? null);
-                          if (
-                              moduleRowId === null ||
-                              !applyMirroredNoteCompileFields({
-                                  db,
-                                  moduleProject: memoryProject,
-                                  moduleRowId,
-                                  fields: {
-                                      compiledProvider: compiledProvider ?? null,
-                                      compiledConfig: compiledConfig ?? null,
-                                      compiledAt: compiledAt ?? null,
-                                      compileStatus,
-                                  },
-                              })
-                          ) {
-                              throw new Error(
-                                  "Rust note was written but its host compilation metadata could not be mirrored",
-                              );
-                          }
-                      }
-                      return response;
-                  },
+                  note: createRustNoteBackend({
+                      db,
+                      module: rustModeModuleClient,
+                      syncNotes: syncModuleNotes,
+                  }),
                   memory: async ({
                       commandId,
                       sessionId,
