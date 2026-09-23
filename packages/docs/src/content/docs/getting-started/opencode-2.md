@@ -126,7 +126,11 @@ The same limit applies to the [dreamer](/concepts/dreamer/). Tasks that need a t
 
 OpenCode 2 gives plugins no way to attach a session to a parent. Magic Context keeps one reusable hidden session per project for the historian and one for the dreamer. They are titled `Magic Context historian` and `Magic Context dreamer`.
 
-When a failed run retires one of these sessions, Magic Context deletes it through OpenCode's own session API. That works only when the host registered itself as a service, as `opencode serve --service` does. A plain `opencode serve` or a `--standalone` host registers no service. There, retired sessions are kept and retried by a later process, and Magic Context reports the limitation `MC-H02`. To list them:
+A session is retired when a run in it fails or is interrupted, or when a new OpenCode version replaces it.
+
+With [`keep_subagents: true`](/reference/configuration/), retired sessions are kept by the same rule as OpenCode 1. A session that ever completed a run is kept for either role, whatever its latest run did, because it holds those earlier runs. A historian session is always kept. Only a dreamer session none of whose runs ever completed is deleted. Kept sessions stay marked as hidden, and turning the option off lets the next start delete them.
+
+Otherwise Magic Context deletes a retired session through OpenCode's own session API. That works only when the host registered itself as a service, as `opencode serve --service` does. A plain `opencode serve` or a `--standalone` host registers no service. There, retired sessions are kept and retried by a later process, and Magic Context reports the limitation `MC-H02`. To list them:
 
 ```bash
 npx @cortexkit/magic-context@latest doctor list-hidden-sessions

@@ -47,6 +47,12 @@ interface PersistedHiddenChild {
      * be left behind and reported.
      */
     owner?: HostServiceOwner;
+    /**
+     * True once any run in this child has completed with a settled reply. A child is reused across
+     * many runs, so this stays true whatever a later run does, and it is carried onto the retired
+     * entry. Absent on rows written before this was recorded, which count as never settled.
+     */
+    ever_settled?: boolean;
 }
 
 interface RetiredHiddenChild extends PersistedHiddenChild {
@@ -56,6 +62,9 @@ interface RetiredHiddenChild extends PersistedHiddenChild {
 
 /** The parts of a retired child that deleting its session needs. */
 type RetirableChild = Pick<PersistedHiddenChild, "id" | "owner">;
+
+/** The parts of a retired child that the `keep_subagents` retention rule looks at. */
+type RetentionFacts = Pick<PersistedHiddenChild, "role" | "ever_settled">;
 
 interface HiddenChildrenMeta {
     version: 1;
@@ -118,6 +127,11 @@ export interface V2HiddenCompletionOptions {
      * per created child so a host that starts serving later still binds correctly.
      */
     resolveOwner?: () => HostServiceOwner | undefined;
+    /**
+     * The user's `keep_subagents` setting. When true, retired children that the OpenCode 1 lane
+     * would keep are left in the host instead of deleted (see `keptUnderRetention`).
+     */
+    keepSubagents?: boolean;
     log?: (message: string) => void;
     /** Return the host catalog when available; catalog failures leave the request unchanged. */
     modelCatalog?: () => Promise<unknown>;
@@ -143,7 +157,9 @@ const REMOVAL_SPACING_MS = 250;
  * it only grows while deletion is failing or unavailable; the cap keeps a long outage from growing
  * the project's metadata row without limit. The oldest entries are dropped first because the sweep
  * drains oldest first, so anything still at the front after a full pass is what deletion keeps
- * refusing; those sessions are then left behind in the host rather than retried forever.
+ * refusing; those sessions are then left behind in the host rather than retried forever. Children
+ * kept under `keep_subagents` also stay listed (so every boot still recognises them as hidden
+ * children) and count toward the same cap; evicting one only forgets it, its session stays.
  */
 const RETIRED_CHILDREN_LIMIT = 200;
 
@@ -187,6 +203,7 @@ function isPersistedChild(value: unknown): value is PersistedHiddenChild {
         isModel(child.model) &&
         typeof child.created_at === "number" &&
         typeof child.title_reasserted === "boolean" &&
+        (child.ever_settled === undefined || typeof child.ever_settled === "boolean") &&
         (child.owner === undefined || isOwner(child.owner))
     );
 }
@@ -282,6 +299,15 @@ class HiddenChildStateStore {
             const active = state.active[child.role];
             if (!active || active.id !== child.id) return { ...child, title_reasserted: true };
             active.title_reasserted = true;
+            return { ...active };
+        });
+    }
+
+    markEverSettled(child: PersistedHiddenChild): PersistedHiddenChild {
+        return this.mutate((state) => {
+            const active = state.active[child.role];
+            if (!active || active.id !== child.id) return { ...child, ever_settled: true };
+            active.ever_settled = true;
             return { ...active };
         });
     }
@@ -608,14 +634,31 @@ export async function createV2HiddenCompletionExecutor(
             });
     };
 
+    /**
+     * The `keep_subagents` rule of the OpenCode 1 lane, applied to a retired child. There, a child
+     * whose prompt settled is kept, and an unsettled one is left to the age-gated orphan sweep,
+     * which under `keep_subagents` still retains historian children but deletes the
+     * privacy-sensitive dreamer ones. Here one child holds many runs, so it counts as settled once
+     * any of its runs settled: deleting it for a later unsettled run would throw away every
+     * settled run it kept, which OpenCode 1 never does. Without the setting every retired child
+     * is deleted.
+     */
+    const keptUnderRetention = (child: RetentionFacts): boolean =>
+        options.keepSubagents === true &&
+        (child.ever_settled === true || child.role === "historian");
+
     const retireChild = (child: PersistedHiddenChild, reason: string): void => {
         store.retire(child, reason);
-        scheduleRemoval(child);
+        if (!keptUnderRetention(child)) scheduleRemoval(child);
     };
 
     // Boot sweep. Anything left over from an earlier process — including the backlog built up
     // before retirement deleted anything — is drained here, spaced like every other removal.
-    for (const child of persisted.retired_children) scheduleRemoval(child);
+    // Children the current setting keeps are skipped; turning `keep_subagents` off later lets the
+    // next boot delete them, as the OpenCode 1 sweep does.
+    for (const child of persisted.retired_children) {
+        if (!keptUnderRetention(child)) scheduleRemoval(child);
+    }
 
     const acquireRole = async (role: HiddenChildRole): Promise<() => void> => {
         const previous = roleTails.get(role) ?? Promise.resolve();
@@ -927,6 +970,8 @@ export async function createV2HiddenCompletionExecutor(
                     providerId: row.data.model?.providerID ?? requested.providerID,
                     modelId: row.data.model?.id ?? requested.modelID,
                 };
+                // Recorded for `keep_subagents` retention: this child now holds a settled run.
+                if (!run.child.ever_settled) run.child = store.markEverSettled(run.child);
             } catch (error) {
                 run.failed = true;
                 if (!(error instanceof HiddenProviderError)) {
