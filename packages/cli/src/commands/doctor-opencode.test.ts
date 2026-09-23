@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -53,42 +53,43 @@ describe("OpenCode model catalog parsing", () => {
             ),
         ).toEqual([{ agent: "historian", model: "provider/model", variant: "medium" }]);
     });
-    it("checks the v2 model.list API envelope and reports an absent variant", () => {
-        // 2.0.12 `opencode api --standalone model.list` returns {location,data};
-        // the isolated unauthenticated host returned data: [], so supply catalog rows here.
-        const output = JSON.stringify({
-            location: { directory: "/private/tmp/mc-oc2-catalog/work" },
-            data: [{ providerID: "provider", id: "model", variants: { high: {} } }],
-        });
+    it("checks real v2 model.list variant IDs for both missing and declared variants", () => {
+        // Captured from OpenCode 2.0.12 in an isolated root with a dummy API key.
+        const output = readFileSync(
+            join(import.meta.dir, "fixtures/opencode-2.0.12-model-list.json"),
+            "utf8",
+        );
         const warnings: string[] = [];
         const args: string[][] = [];
         checkConfiguredVariantCatalog(
-            { historian: { opencode: { model: "provider/model", variant: "medium" } } },
+            {
+                historian: { opencode: { model: "anthropic/claude-opus-5-5", variant: "ultra" } },
+                dreamer: { opencode: { model: "anthropic/claude-opus-5-5", variant: "high" } },
+            },
             "v2",
             (message) => warnings.push(message),
             (command) => {
                 args.push(command);
                 return { stdout: output, status: 0 };
             },
+            "/tmp/project",
         );
-        expect(args).toEqual([["api", "--standalone", "model.list"]]);
+        expect(args).toEqual([["api", "model.list", "--param", "directory=/tmp/project"]]);
         expect(warnings).toEqual([
-            "historian model provider/model requests variant 'medium', which this host does not offer. Remove the variant or choose one listed by opencode api --standalone model.list.",
+            "historian model anthropic/claude-opus-5-5 requests variant 'ultra', which this host does not offer. Remove the variant or choose one listed by opencode api model.list --param directory=/tmp/project.",
         ]);
     });
-    it("does not recommend --verbose when v2 returned no catalog", () => {
+    it("names the background service startup command when v2 cannot read a catalog", () => {
         const warnings: string[] = [];
         checkConfiguredVariantCatalog(
             { dreamer: { opencode: { model: "provider/model", variant: "high" } } },
             "v2",
             (message) => warnings.push(message),
-            () => ({
-                stdout: '{"location":{"directory":"/private/tmp/mc-oc2-catalog/work"},"data":[]}',
-                status: 0,
-            }),
+            () => ({ stdout: "", status: 1 }),
+            "/tmp/project",
         );
         expect(warnings).toEqual([
-            "Could not verify configured hidden-agent variants: this OpenCode host did not provide a readable model catalog. Check opencode api --standalone model.list.",
+            "Could not verify configured hidden-agent variants: this OpenCode host did not provide a readable model catalog. Start the background service with opencode service start, then check opencode api model.list --param directory=/tmp/project.",
         ]);
     });
     it("retains the v1 verbose catalog check", () => {

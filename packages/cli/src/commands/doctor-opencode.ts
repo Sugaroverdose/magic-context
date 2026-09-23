@@ -151,6 +151,7 @@ export function checkConfiguredVariantCatalog(
             timeout: hostGeneration === "v2" ? 90_000 : 45_000,
             maxBuffer: 16 * 1024 * 1024,
         }),
+    projectDir = process.cwd(),
 ): void {
     const configured: Array<{ agent: string; model: string; variant: string }> = [];
     const root = config && typeof config === "object" ? (config as Record<string, unknown>) : {};
@@ -179,7 +180,7 @@ export function checkConfiguredVariantCatalog(
     try {
         const command =
             hostGeneration === "v2"
-                ? ["api", "--standalone", "model.list"]
+                ? ["api", "model.list", "--param", `directory=${projectDir}`]
                 : ["models", "--verbose"];
         const guidance = `opencode ${command.join(" ")}`;
         const result = run(command, tempRoot);
@@ -189,7 +190,7 @@ export function checkConfiguredVariantCatalog(
                 : parseOpenCodeModelCatalog(result.stdout ?? "");
         if (result.error || result.status !== 0 || catalog.length === 0) {
             warn(
-                `Could not verify configured hidden-agent variants: this OpenCode host did not provide a readable model catalog. Check ${guidance}.`,
+                `Could not verify configured hidden-agent variants: this OpenCode host did not provide a readable model catalog. ${hostGeneration === "v2" ? "Start the background service with opencode service start, then check" : "Check"} ${guidance}.`,
             );
             return;
         }
@@ -219,18 +220,16 @@ export function parseOpenCodeV2ModelCatalog(
             if (
                 typeof model.providerID !== "string" ||
                 typeof model.id !== "string" ||
-                !model.variants ||
-                typeof model.variants !== "object" ||
-                Array.isArray(model.variants)
+                !Array.isArray(model.variants)
             )
                 return [];
-            return [
-                {
-                    providerID: model.providerID,
-                    id: model.id,
-                    variants: model.variants as Record<string, unknown>,
-                },
-            ];
+            const variants: Record<string, unknown> = {};
+            for (const variant of model.variants) {
+                if (variant && typeof variant === "object" && typeof variant.id === "string") {
+                    variants[variant.id] = variant;
+                }
+            }
+            return [{ providerID: model.providerID, id: model.id, variants }];
         });
     } catch {
         return [];
