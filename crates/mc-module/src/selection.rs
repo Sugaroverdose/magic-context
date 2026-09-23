@@ -1788,6 +1788,46 @@ mod tests {
         );
     }
 
+    /// A tool loop at >=95% pressure (the recency window yields): the newest tool
+    /// call/result pair is what ends the provider request with a user turn. The
+    /// emergency drop may reduce that pair only to a call skeleton plus a result
+    /// placeholder; removing it would end the request on an assistant turn, which
+    /// models without prefill support reject. The TypeScript OpenCode and Pi drop
+    /// targets enforce the same rule.
+    #[test]
+    fn emergency_at_window_yield_keeps_the_newest_arc_as_a_skeleton() {
+        let mut items = vec![text_with_id("prompt#0", 1, 100)];
+        for n in 1..=8u64 {
+            let mid = format!("c{n}");
+            items.push(tool_call(
+                &mid,
+                n * 2,
+                "bash",
+                serde_json::json!({"command": "cat"}),
+                100,
+            ));
+            items.push(tool_result(&mid, n * 2 + 1, "bash", 40_000));
+        }
+        // Pressure far past the ceiling so the tiered walk reaches every arc.
+        let mut ctx = base_ctx(PassClass::EmergencyForce);
+        ctx.current_total_input_tokens = 400_000.0;
+        ctx.ceiling_tokens = 65_000.0;
+        ctx.emergency_window_yields = true;
+        let decisions =
+            select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
+        assert!(!decisions.is_empty());
+        let newest_call = decisions
+            .iter()
+            .find(|d| d.target_id == call_block_id("c8"))
+            .expect("the newest arc is selected at window yield");
+        assert_eq!(newest_call.kind, "skeleton");
+        let newest_result = decisions
+            .iter()
+            .find(|d| d.target_id == result_block_id("c8"))
+            .expect("the newest result is reduced in place");
+        assert_eq!(newest_result.payload, DROPPED_PLACEHOLDER);
+    }
+
     #[test]
     fn contract_legacy_call_only_reduction_does_not_strand_result() {
         let items = vec![
