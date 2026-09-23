@@ -15,6 +15,57 @@ Project config always merges on top of user config. The unified setup wizard (`n
 
 > **Migrating from an earlier version?** Config used to live in per-harness paths (`~/.config/opencode/`, `~/.pi/agent/`, `<project>/.opencode/`, `<project>/.pi/`, or the project root). On first run after upgrading, Magic Context moves your existing config to the CortexKit location automatically and leaves a `<old-name>.MOVED_READPLEASE` breadcrumb (preserving your original settings) at each old path. If two old locations held *different* settings it won't guess — it leaves both in place and warns you to consolidate by hand.
 
+### Changing config without a restart
+
+Keys listed below apply from the next historian or dreamer run (or dream-timer tick); a run in progress keeps its original inputs. All other keys require a host restart. On a malformed edit, the last good config remains active and `/ctx-status` reports the error. The live mark in the [JSON schema](assets/magic-context.schema.json) is authoritative; this list is checked against it.
+
+<!-- LIVE-CONFIG-KEYS-START -->
+- `dreamer.omp.fallback_models`
+- `dreamer.omp.model`
+- `dreamer.omp.tasks`
+- `dreamer.omp.thinking_level`
+- `dreamer.opencode.fallback_models`
+- `dreamer.opencode.model`
+- `dreamer.opencode.tasks`
+- `dreamer.opencode.variant`
+- `dreamer.pi.fallback_models`
+- `dreamer.pi.model`
+- `dreamer.pi.tasks`
+- `dreamer.pi.thinking_level`
+- `dreamer.tasks.classify-memories.schedule`
+- `dreamer.tasks.compress-cues.schedule`
+- `dreamer.tasks.curate.schedule`
+- `dreamer.tasks.evaluate-smart-notes.schedule`
+- `dreamer.tasks.maintain-docs.schedule`
+- `dreamer.tasks.map-memories.schedule`
+- `dreamer.tasks.promote-primers.promotion_threshold`
+- `dreamer.tasks.promote-primers.schedule`
+- `dreamer.tasks.refresh-primers.schedule`
+- `dreamer.tasks.retrospective.recency_days`
+- `dreamer.tasks.retrospective.schedule`
+- `dreamer.tasks.review-user-memories.promotion_threshold`
+- `dreamer.tasks.review-user-memories.schedule`
+- `dreamer.tasks.verify-broad.schedule`
+- `dreamer.tasks.verify.schedule`
+- `historian.omp.fallback_models`
+- `historian.omp.model`
+- `historian.omp.thinking_level`
+- `historian.opencode.fallback_models`
+- `historian.opencode.model`
+- `historian.opencode.variant`
+- `historian.pi.fallback_models`
+- `historian.pi.model`
+- `historian.pi.thinking_level`
+- `historian.two_pass`
+- `historian_timeout_ms`
+- `memory.git_commit_indexing.enabled`
+- `memory.git_commit_indexing.max_commits`
+- `memory.git_commit_indexing.since_days`
+- `mural.model`
+<!-- LIVE-CONFIG-KEYS-END -->
+
+`dreamer.<host>.tasks` is a map: each task's model, fallback chain, reasoning qualifier and timeout inherit this live behavior. Project-tier restrictions still apply; for example, historian model selection remains user-tier only.
+
 ### Per-harness model migration
 
 Historian and dreamer model execution live in independent `opencode`, `pi`, and `omp` blocks. On the first user-config read that finds the former flat model fields, Magic Context writes one exact-byte recovery copy at `<config>.pre-per-harness.bak` before rewriting the config. **Magic Context retains `<config>.pre-per-harness.bak` indefinitely and never garbage-collects it. You may delete it manually after you no longer need the recovery copy.**

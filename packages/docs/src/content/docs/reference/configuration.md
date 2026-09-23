@@ -14,6 +14,10 @@ Magic Context reads `magic-context.jsonc` (or `.json`) from one shared CortexKit
 
 Upgrading from an earlier version moves your existing config here automatically on first run (a `.MOVED_READPLEASE` breadcrumb is left at the old per-harness path).
 
+## Changing config without a restart
+
+Keys marked **Live** apply from the next historian or dreamer run (or dream-timer tick); a run already in progress keeps its original settings. Everything else requires a host restart. If a changed file is malformed, the last good configuration stays active and /ctx-status reports the error.
+
 Add the schema line for editor validation and autocomplete:
 
 ```jsonc
@@ -42,7 +46,7 @@ Global on/off switches for the plugin and its agent-facing surface.
 | `todowrite.overlay` | boolean | `true` | Pi only: show the persistent todo overlay above the editor while tasks are active. |
 | `mural` | object | — | Experimental mural: a single deterministically-rendered image of project memories that did not fit the context budget. Cues are compressed per-memory by the compress-cues dreamer task. |
 | `mural.enabled` | boolean | `false` |  |
-| `mural.model` | string | — | Model for the compress-cues task that compresses each memory into a mural cue. The mural image itself is rendered deterministically (no author model). |
+| `mural.model` **Live** | string | — | Model for the compress-cues task that compresses each memory into a mural cue. The mural image itself is rendered deterministically (no author model). |
 
 ## Prompt surface
 
@@ -105,20 +109,20 @@ The background agent that condenses old conversation into compact history.
 | `historian.permission.external_directory` | `"ask"` \| `"allow"` \| `"deny"` | — |  |
 | `historian.maxTokens` | number | — | Maximum output tokens |
 | `historian.opencode` | object | — | Strict OpenCode model-resolution block. It accepts no Pi vocabulary. |
-| `historian.opencode.model` | string \| object | — | Primary OpenCode model entry. |
-| `historian.opencode.fallback_models` | string \| object[] | — | Ordered fallback OpenCode entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array. |
-| `historian.opencode.variant` | string | — | OpenCode reasoning variant for the primary entry when it declares none. Fallback entries declare variants per-entry. |
+| `historian.opencode.model` **Live** | string \| object | — | Primary OpenCode model entry. |
+| `historian.opencode.fallback_models` **Live** | string \| object[] | — | Ordered fallback OpenCode entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array. |
+| `historian.opencode.variant` **Live** | string | — | OpenCode reasoning variant for the primary entry when it declares none. Fallback entries declare variants per-entry. |
 | `historian.pi` | object | — | Strict Pi model-resolution block. It accepts no OpenCode vocabulary. |
-| `historian.pi.model` | string \| object | — | Primary Pi model entry. |
-| `historian.pi.fallback_models` | string \| object[] | — | Ordered fallback Pi entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array. |
-| `historian.pi.thinking_level` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | — | Pi thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
+| `historian.pi.model` **Live** | string \| object | — | Primary Pi model entry. |
+| `historian.pi.fallback_models` **Live** | string \| object[] | — | Ordered fallback Pi entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array. |
+| `historian.pi.thinking_level` **Live** | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | — | Pi thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
 | `historian.omp` | object | — | Strict OMP model-resolution block. It accepts no OpenCode vocabulary. |
-| `historian.omp.model` | string \| object | — | Primary OMP model entry. |
-| `historian.omp.fallback_models` | string \| object[] | — | Ordered fallback OMP entries. |
-| `historian.omp.thinking_level` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` \| `"inherit"` \| `"auto"` | — | OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
-| `historian.two_pass` | boolean | `false` | Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false) |
+| `historian.omp.model` **Live** | string \| object | — | Primary OMP model entry. |
+| `historian.omp.fallback_models` **Live** | string \| object[] | — | Ordered fallback OMP entries. |
+| `historian.omp.thinking_level` **Live** | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` \| `"inherit"` \| `"auto"` | — | OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
+| `historian.two_pass` **Live** | boolean | `false` | Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false) |
 | `historian.disallowed_tools` | `"\*"` \| `"read"` \| `"aft_outline"` \| `"aft_zoom"` \| `"aft_search"`[] | `[]` | OpenCode only. Tools to REMOVE from the historian's default allow-list [read, aft_outline, aft_zoom, aft_search]. Applies to both historian and historian-editor agents. Use ["\*"] to strip all tool definitions from the model request — this prevents weak instruction-following models (e.g. mistral-small-latest) from entering tool-calling loops. Individual tool names remove just that tool. Note: a user-supplied historian.permission override can re-allow a tool that disallowed_tools removed — disallowed_tools sets the baseline, permission overrides take precedence. (default: []) |
-| `historian_timeout_ms` | number (60000–) | `600000` | Timeout for each historian prompt call in milliseconds (default: 600000) |
+| `historian_timeout_ms` **Live** | number (60000–) | `600000` | Timeout for each historian prompt call in milliseconds (default: 600000) |
 | `commit_cluster_trigger` | object | — | Commit-cluster trigger: fire historian when enough commit clusters accumulate in the unsummarized tail |
 | `commit_cluster_trigger.enabled` | boolean | `true` | Enable commit-cluster based historian triggering (default: true) |
 | `commit_cluster_trigger.min_clusters` | number (1–) | `3` | Minimum commit clusters required to trigger historian (min: 1, default: 3) |
@@ -139,9 +143,9 @@ Durable project memory, semantic search, and recall features. OpenAI-compatible 
 | `memory.auto_search.score_threshold` | number (0.3–0.95) | `0.6` | Top hit score must exceed this threshold for the hint to fire (min: 0.3, max: 0.95, default: 0.60) |
 | `memory.auto_search.min_prompt_chars` | number (5–500) | `20` | Skip hint when user message is shorter than this (min: 5, max: 500, default: 20) |
 | `memory.git_commit_indexing` | object | — | Index git commit messages from HEAD into ctx_search. Commits become a 4th searchable source alongside memories and session history. Graduated from experimental.git_commit_indexing; opt-in, default off (per-project embedding cost). Independent of memory.enabled. |
-| `memory.git_commit_indexing.enabled` | boolean | `false` | Index HEAD git commits for ctx_search (git_commit source). Graduated from experimental.git_commit_indexing; opt-in, default off. Independent of memory.enabled. |
-| `memory.git_commit_indexing.since_days` | number (7–3650) | `365` | Days of HEAD history to index (min: 7, max: 3650, default: 365) |
-| `memory.git_commit_indexing.max_commits` | number (100–20000) | `2000` | Max commits kept per project; oldest evicted (min: 100, max: 20000, default: 2000) |
+| `memory.git_commit_indexing.enabled` **Live** | boolean | `false` | Index HEAD git commits for ctx_search (git_commit source). Graduated from experimental.git_commit_indexing; opt-in, default off. Independent of memory.enabled. |
+| `memory.git_commit_indexing.since_days` **Live** | number (7–3650) | `365` | Days of HEAD history to index (min: 7, max: 3650, default: 365) |
+| `memory.git_commit_indexing.max_commits` **Live** | number (100–20000) | `2000` | Max commits kept per project; oldest evicted (min: 100, max: 20000, default: 2000) |
 | `embedding` | object | — | Embedding provider configuration |
 | `embedding.provider` | `"local"` \| `"openai-compatible"` \| `"off"` \| `"synapse"` | `"local"` | Embedding provider. 'local' uses Xenova/all-MiniLM-L6-v2, 'openai-compatible' requires endpoint and model, 'synapse' uses the certified local Synapse lane with an explicit fallback provider, and 'off' disables embeddings. |
 | `embedding.fallback_provider` | `"local"` \| `"openai-compatible"` \| `"off"` | — | Fallback provider for the Synapse lane. Required when provider is 'synapse'; local, openai-compatible, and off are valid. |
@@ -181,36 +185,36 @@ Off-hours maintenance through Dreamer.
 | `dreamer.permission.external_directory` | `"ask"` \| `"allow"` \| `"deny"` | — |  |
 | `dreamer.maxTokens` | number | — | Maximum output tokens |
 | `dreamer.opencode` | object | — | Strict OpenCode dreamer model-resolution block. It accepts no Pi vocabulary. |
-| `dreamer.opencode.model` | string \| object | — | Primary OpenCode model entry. |
-| `dreamer.opencode.fallback_models` | string \| object[] | — | Ordered fallback OpenCode entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array. |
-| `dreamer.opencode.variant` | string | — | OpenCode reasoning variant for the primary entry when it declares none. Fallback entries declare variants per-entry. |
-| `dreamer.opencode.tasks` | map<string, object> | — | OpenCode task execution overrides. Each named task accepts only model, fallback_models, variant, and timeout_minutes. |
+| `dreamer.opencode.model` **Live** | string \| object | — | Primary OpenCode model entry. |
+| `dreamer.opencode.fallback_models` **Live** | string \| object[] | — | Ordered fallback OpenCode entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array. |
+| `dreamer.opencode.variant` **Live** | string | — | OpenCode reasoning variant for the primary entry when it declares none. Fallback entries declare variants per-entry. |
+| `dreamer.opencode.tasks` **Live** | map<string, object> | — | OpenCode task execution overrides. Each named task accepts only model, fallback_models, variant, and timeout_minutes. |
 | `dreamer.pi` | object | — | Strict Pi dreamer model-resolution block. It accepts no OpenCode vocabulary. |
-| `dreamer.pi.model` | string \| object | — | Primary Pi model entry. |
-| `dreamer.pi.fallback_models` | string \| object[] | — | Ordered fallback Pi entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array. |
-| `dreamer.pi.thinking_level` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | — | Pi thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
-| `dreamer.pi.tasks` | map<string, object> | — | Pi task execution overrides. Each named task accepts only model, fallback_models, thinking_level, and timeout_minutes. |
+| `dreamer.pi.model` **Live** | string \| object | — | Primary Pi model entry. |
+| `dreamer.pi.fallback_models` **Live** | string \| object[] | — | Ordered fallback Pi entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array. |
+| `dreamer.pi.thinking_level` **Live** | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | — | Pi thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
+| `dreamer.pi.tasks` **Live** | map<string, object> | — | Pi task execution overrides. Each named task accepts only model, fallback_models, thinking_level, and timeout_minutes. |
 | `dreamer.omp` | object | — | Strict OMP dreamer model-resolution block. It accepts no OpenCode vocabulary. |
-| `dreamer.omp.model` | string \| object | — | Primary OMP model entry. |
-| `dreamer.omp.fallback_models` | string \| object[] | — | Ordered fallback OMP entries. |
-| `dreamer.omp.thinking_level` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` \| `"inherit"` \| `"auto"` | — | OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
-| `dreamer.omp.tasks` | map<string, object> | — | OMP task execution overrides. Each named task accepts only model, fallback_models, thinking_level, and timeout_minutes. |
+| `dreamer.omp.model` **Live** | string \| object | — | Primary OMP model entry. |
+| `dreamer.omp.fallback_models` **Live** | string \| object[] | — | Ordered fallback OMP entries. |
+| `dreamer.omp.thinking_level` **Live** | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` \| `"inherit"` \| `"auto"` | — | OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
+| `dreamer.omp.tasks` **Live** | map<string, object> | — | OMP task execution overrides. Each named task accepts only model, fallback_models, thinking_level, and timeout_minutes. |
 | `dreamer.tasks` | object | — | Harness-independent task metadata. schedule, promotion_threshold, and other task metadata remain here; execution settings live under dreamer.opencode.tasks, dreamer.pi.tasks, or dreamer.omp.tasks. |
-| `dreamer.tasks.map-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
-| `dreamer.tasks.verify.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
-| `dreamer.tasks.verify-broad.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
-| `dreamer.tasks.curate.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
-| `dreamer.tasks.compress-cues.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
-| `dreamer.tasks.classify-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
-| `dreamer.tasks.retrospective.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
-| `dreamer.tasks.retrospective.recency_days` | integer (1–3650) | `30` | retrospective: collect source messages from only the most recent N days |
-| `dreamer.tasks.maintain-docs.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
-| `dreamer.tasks.evaluate-smart-notes.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
-| `dreamer.tasks.review-user-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
-| `dreamer.tasks.review-user-memories.promotion_threshold` | number (2–20) | — | review-user-memories: min candidate observations before promotion is considered (default: 3) |
-| `dreamer.tasks.promote-primers.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
-| `dreamer.tasks.promote-primers.promotion_threshold` | number (2–20) | — | promote-primers: min recurring source days before promotion is considered (default: 2) |
-| `dreamer.tasks.refresh-primers.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.map-memories.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.verify.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.verify-broad.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.curate.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.compress-cues.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.classify-memories.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.retrospective.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.retrospective.recency_days` **Live** | integer (1–3650) | `30` | retrospective: collect source messages from only the most recent N days |
+| `dreamer.tasks.maintain-docs.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.evaluate-smart-notes.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.review-user-memories.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.review-user-memories.promotion_threshold` **Live** | number (2–20) | — | review-user-memories: min candidate observations before promotion is considered (default: 3) |
+| `dreamer.tasks.promote-primers.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.promote-primers.promotion_threshold` **Live** | number (2–20) | — | promote-primers: min recurring source days before promotion is considered (default: 2) |
+| `dreamer.tasks.refresh-primers.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
 | `dreamer.inject_docs` | boolean | `true` | Inject ARCHITECTURE.md and STRUCTURE.md into the m[0] `<project-docs>` block (default true) |
 
 ## Advanced
