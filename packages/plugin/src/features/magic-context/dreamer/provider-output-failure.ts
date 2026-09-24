@@ -1,18 +1,8 @@
 import { createHash } from "node:crypto";
 
-import { extractLatestAssistantFailure } from "../../../shared/assistant-message-extractor";
 import { isRecord } from "../../../shared/record-type-guard";
 
 const MAX_NEAR_ZERO_OUTPUT_TOKENS = 32;
-
-/** Preserve errors recorded by the host even when the assistant produced no text. */
-export function throwIfLatestAssistantFailed(messages: unknown): void {
-    const failure = extractLatestAssistantFailure(messages);
-    if (!failure) return;
-    const error = new Error(`Host recorded assistant error: ${String(failure.error)}`);
-    Object.assign(error, { transient: true });
-    throw error;
-}
 
 interface AssistantCompletionShape {
     createdAt: number;

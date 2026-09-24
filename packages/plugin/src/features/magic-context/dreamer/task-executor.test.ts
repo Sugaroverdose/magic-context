@@ -877,6 +877,121 @@ describe("createDreamTaskExecutor — structured failure telemetry", () => {
 });
 
 describe("createDreamTaskExecutor — verify-broad disposition", () => {
+    test("keeps a textless assistant completion without a row error as empty_completion", async () => {
+        db = freshDb();
+        const project = "/repo/verify-plain-empty";
+        const memory = insertMemory(db, {
+            projectPath: project,
+            category: "ARCHITECTURE",
+            content: "Mapped fact with a plain empty completion.",
+        });
+        recordMemoryVerifications(db, memory.id, ["src/fact.ts"], 1_000);
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [] })),
+                create: mock(async () => ({ data: { id: "verify-plain-empty" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({
+                    data: [
+                        {
+                            info: {
+                                role: "assistant",
+                                time: { created: 1 },
+                                finish: "stop",
+                                error: null,
+                                tokens: { output: 0, reasoning: 0 },
+                            },
+                            parts: [],
+                        },
+                    ],
+                })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+        });
+        const leaseKey = leaseKeyFor("verify", project);
+        expect(acquireLease(db, "holder-plain-empty", leaseKey)).toBe(true);
+
+        await executor(
+            { task: "verify", schedule: "0 3 * * *", model: "synthetic/model", timeoutMinutes: 20 },
+            { db, projectIdentity: project, holderId: "holder-plain-empty", leaseKey },
+        );
+
+        const task = JSON.parse(getDreamRuns(db, project)[0]?.tasks_json ?? "[]")[0] as {
+            failure?: { failure_class: string; provider_error: string | null };
+        };
+        expect(task.failure).toMatchObject({
+            failure_class: "empty_completion",
+            provider_error: null,
+        });
+    });
+    test("records a host-recorded provider refusal on an empty assistant row", async () => {
+        db = freshDb();
+        const project = "/repo/verify-host-refusal";
+        seedTaskScheduleState(db, project, "verify-broad", null, null, "0 3 * * *");
+        const memory = insertMemory(db, {
+            projectPath: project,
+            category: "ARCHITECTURE",
+            content: "Mapped fact refused by provider.",
+        });
+        recordMemoryVerifications(db, memory.id, ["src/fact.ts"], 1_000);
+        const providerText =
+            "UnknownError: custody accounts exhausted: provider=synthetic accounts=main:cooldown";
+        const messages = [
+            {
+                info: {
+                    role: "assistant",
+                    time: { created: 1 },
+                    finish: "stop",
+                    error: null,
+                    tokens: { output: 0, reasoning: 0 },
+                },
+                parts: [],
+            },
+            {
+                info: { role: "assistant", time: { created: 2 }, error: providerText },
+                parts: [],
+            },
+        ];
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [] })),
+                create: mock(async () => ({ data: { id: "verify-host-refusal" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({ data: messages })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+        });
+        const leaseKey = leaseKeyFor("verify-broad", project);
+        expect(acquireLease(db, "holder-host-refusal", leaseKey)).toBe(true);
+        const result = await executor(
+            {
+                task: "verify-broad",
+                schedule: "0 3 * * *",
+                model: "synthetic/model",
+                timeoutMinutes: 20,
+            },
+            { db, projectIdentity: project, holderId: "holder-host-refusal", leaseKey },
+        );
+        expect(result.status).toBe("failed");
+        expect(result.transient).toBe(true);
+        const run = getDreamRuns(db, project)[0];
+        const task = JSON.parse(run?.tasks_json ?? "[]")[0] as {
+            failure?: { failure_class: string; provider_error: string | null };
+        };
+        expect(task.failure?.failure_class).toBe("provider_error");
+        expect(task.failure?.provider_error).toContain("custody accounts exhausted");
+        expect(task.failure?.provider_error).toContain("provider=synthetic");
+    });
     test("records cycle progress as a completed run result instead of an error status", async () => {
         db = freshDb();
         const project = "/repo/verify-broad-result";

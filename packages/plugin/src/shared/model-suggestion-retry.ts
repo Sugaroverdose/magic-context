@@ -609,7 +609,10 @@ async function attemptAndValidate<TOutput, TValidated>(
                 const error = new Error(
                     `Host recorded assistant error: ${String(assistantFailure.error)}`,
                 );
-                Object.assign(error, { transient: true });
+                Object.assign(error, {
+                    name: "DreamerProviderOutputFailureError",
+                    transient: true,
+                });
                 throw error;
             }
         }
