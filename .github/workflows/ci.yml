@@ -818,7 +818,7 @@ jobs:
         run: chmod +x packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault packages/e2e-tests/.cache/prebuilt/ck-subc
       - name: Install pinned OpenCode
         run: |
-          OPENCODE_VERSION=1.18.31 bash tests/docker/install-opencode.sh
+          OPENCODE_VERSION=1.18.32 bash tests/docker/install-opencode.sh
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
       - name: Build host plugins
         run: |
