@@ -83,6 +83,7 @@ import { saveLkgSlotToDb } from "./lkg-persist";
 import { replayLkg, resolveLkgModelKeys } from "./lkg-replay";
 import {
     captureSlot,
+    contentSnapshotValue,
     dropSlot,
     exactReusablePrefix,
     getSlot,
@@ -100,7 +101,6 @@ import {
     type LkgSlot,
     type MessageContentSnapshot,
     messageContentFields,
-    contentSnapshotValue,
     messageContentSnapshot,
     noteEntry,
     signatureForFields,
