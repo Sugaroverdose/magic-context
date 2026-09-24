@@ -571,6 +571,38 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/converted-drop-replay.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Converted 1.x tool arc reduced via the real ctx_reduce tool and replayed on the pinned OpenCode 2 host; the runner validates every returned draft against the host schema",
+            "contract_refs": ["S2-MIGRATION", "OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
+            "path": "tests/opencode2/mural-media-schema.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "The real OpenCode 2 host replays a persisted vision mural and validates m0 media against its own LLM schema",
+            "contract_refs": ["S2-MIGRATION", "OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
+            "path": "tests/opencode2/synthetic-todo-schema.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "The real OpenCode 2 host with a native todowrite fixture captures todo state, then validates priced and cached synthetic reminder drafts against its own LLM schema",
+            "contract_refs": ["S2-MIGRATION", "OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
+            "path": "tests/opencode2/reporter-emergency-drop.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "a converted 1.x store with a provider-proven over-window reading exercises the real 2.0.15 host schema after an explicit flush and tiered emergency drop",
+            "contract_refs": ["S2-MIGRATION", "OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/dreamer-s2-carrier.test.ts",
             "tier": "excluded",
             "invocation": {

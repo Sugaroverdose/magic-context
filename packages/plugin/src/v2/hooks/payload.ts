@@ -1,8 +1,29 @@
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
+import { log, sessionLog } from "../../shared/logger";
+import { hostMediaAsset } from "../fold/host-media";
 import type { SessionContext, V2Message } from "./types";
 
 export const HEAD_IDS = ["__magic_context_v2_m0__", "__magic_context_v2_m1__"] as const;
 type Part = Record<string, unknown>;
+const HOST_CONTENT_TYPES = new Set([
+    "text",
+    "media",
+    "tool-call",
+    "tool-result",
+    "reasoning",
+    "compaction",
+    "effort",
+]);
+
+// Logged to the plugin's own log, never the host's stderr: this runs inside the host's
+// per-turn context hook.
+function rejectContentPart(message: MessageLike, part: Part, reason: string): void {
+    const type = typeof part.type === "string" ? part.type : "<missing>";
+    const text = `v2 context omitted a content part the host would reject: type=${type} message=${String(message.info.id ?? "<head>")} reason=${reason}`;
+    if (typeof message.info.sessionID === "string") sessionLog(message.info.sessionID, text);
+    else log(text);
+}
+
 interface ToolBridge {
     call?: Part;
     result?: Part;
@@ -238,6 +259,78 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                             ? bridgesFor(message)?.get(part.callID)
                             : undefined);
                     if (!bridge) {
+                        if (part.type === "tool") {
+                            const state = part.state as Part | undefined;
+                            if (
+                                typeof part.callID !== "string" ||
+                                typeof part.tool !== "string" ||
+                                !state ||
+                                typeof state !== "object"
+                            ) {
+                                rejectContentPart(
+                                    message,
+                                    part,
+                                    "tool has no call ID, name, or state",
+                                );
+                                continue;
+                            }
+                            content.push({
+                                type: "tool-call",
+                                id: part.callID,
+                                name: part.tool,
+                                input: state.input,
+                            });
+                            if (state.status === "completed" || state.status === "error") {
+                                following.push({
+                                    role: "tool",
+                                    content: [
+                                        {
+                                            type: "tool-result",
+                                            id: part.callID,
+                                            name: part.tool,
+                                            result: {
+                                                type: state.status === "error" ? "error" : "text",
+                                                value: toolStateContent(state),
+                                            },
+                                        },
+                                    ],
+                                });
+                            }
+                            continue;
+                        }
+                        if (part.type === "file") {
+                            const mime = part.mime;
+                            const url = part.url;
+                            const prefix = `data:${mime};base64,`;
+                            if (
+                                typeof mime !== "string" ||
+                                !/^image\/(png|jpeg|gif|webp)$/.test(mime) ||
+                                typeof url !== "string" ||
+                                !url.startsWith(prefix)
+                            ) {
+                                rejectContentPart(
+                                    message,
+                                    part,
+                                    "file is not an inline supported image",
+                                );
+                                continue;
+                            }
+                            const asset = hostMediaAsset(url.slice(prefix.length), mime);
+                            if (typeof asset === "string") {
+                                rejectContentPart(
+                                    message,
+                                    part,
+                                    `host media unavailable: ${asset}`,
+                                );
+                                continue;
+                            }
+                            content.push({ type: "media", media: asset });
+                            continue;
+                        }
+                        if (!HOST_CONTENT_TYPES.has(String(part.type))) {
+                            rejectContentPart(message, part, "unknown host content type");
+                            continue;
+                        }
                         const { synthetic: _synthetic, ...clean } = part;
                         const original =
                             hostPartTypes.has(clean.type) && !containsHostInstance(clean)
@@ -248,20 +341,26 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                     }
                     const state = part.state as Part;
                     if (bridge.native) {
-                        const sourceState =
-                            bridge.native.state && typeof bridge.native.state === "object"
-                                ? (bridge.native.state as Part)
-                                : {};
-                        const nextState: Part = { ...sourceState, input: state.input };
-                        if (sourceState.content !== undefined) {
-                            nextState.content =
-                                state.output === bridge.output
-                                    ? sourceState.content
-                                    : [{ type: "text", text: state.output }];
-                        } else {
-                            nextState.output = state.output;
+                        // Converted OpenCode 1 store rows still carry `type: "tool"`. That is a
+                        // session-store part, not an LLM content part; a surviving skeleton must
+                        // become the same call/result pair as a native OpenCode 2 tool arc.
+                        const native = bridge.native;
+                        const callID = String(native.id ?? native.callID ?? part.callID);
+                        const name = String(native.name ?? native.tool ?? part.tool);
+                        content.push({ type: "tool-call", id: callID, name, input: state.input });
+                        if (state.status === "completed" || state.status === "error") {
+                            following.push({
+                                role: "tool",
+                                content: [
+                                    {
+                                        type: "tool-result",
+                                        id: callID,
+                                        name,
+                                        result: { type: "text", value: state.output },
+                                    },
+                                ],
+                            });
                         }
-                        content.push({ ...bridge.native, state: nextState });
                         continue;
                     }
                     if (bridge.call) content.push({ ...bridge.call, input: state.input });

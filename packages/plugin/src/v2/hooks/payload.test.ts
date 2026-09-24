@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
+import { Message } from "@opencode/ai/schema/messages";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import {
     createToolDropTarget,
@@ -9,6 +10,8 @@ import {
     type ToolCallIndex,
     ToolMutationBatch,
 } from "../../hooks/magic-context/tool-drop-target";
+import * as logger from "../../shared/logger";
+import { rememberHostMedia, resetHostMediaForTests } from "../fold/host-media";
 import { adaptPayload } from "./payload";
 import type { SessionContext, V2Message } from "./types";
 
@@ -100,6 +103,8 @@ describe("adaptPayload", () => {
             payload.commit();
 
             expect(nonV2Parts(context.messages)).toEqual([]);
+            for (const message of context.messages)
+                expect(() => Message.make(message)).not.toThrow();
             const { calls, results } = callsAndResults(context.messages);
             expect(calls).toEqual([
                 {
@@ -136,6 +141,8 @@ describe("adaptPayload", () => {
             payload.commit();
 
             expect(nonV2Parts(context.messages)).toEqual([]);
+            for (const message of context.messages)
+                expect(() => Message.make(message)).not.toThrow();
             const { results } = callsAndResults(context.messages);
             expect(results[0]).toMatchObject({ result: { type: "text", value: "[dropped §9§]" } });
         });
@@ -161,6 +168,8 @@ describe("adaptPayload", () => {
             payload.commit();
 
             expect(nonV2Parts(context.messages)).toEqual([]);
+            for (const message of context.messages)
+                expect(() => Message.make(message)).not.toThrow();
             const { calls } = callsAndResults(context.messages);
             expect(calls.map((call) => [call.name, call.input])).toEqual([
                 ["first_tool", { dropped: "[dropped §3§]" }],
@@ -188,6 +197,8 @@ describe("adaptPayload", () => {
             payload.commit();
 
             expect(nonV2Parts(context.messages)).toEqual([]);
+            for (const message of context.messages)
+                expect(() => Message.make(message)).not.toThrow();
             expect(context.messages.map((message) => [message.id, message.role])).toEqual([
                 ["msg-1", "assistant"],
                 [undefined, "tool"],
@@ -236,13 +247,188 @@ describe("adaptPayload", () => {
             payload.commit();
 
             expect(context.messages[0]?.content[0]).toMatchObject({
-                type: "tool",
+                type: "tool-call",
                 id: "call-converted",
-                state: {
-                    input: { dropped: "[dropped §11§]" },
-                    content: [{ type: "text", text: "[dropped §11§]" }],
-                },
+                name: "read",
+                input: { dropped: "[dropped §11§]" },
             });
+            expect(context.messages[1]?.content[0]).toMatchObject({
+                type: "tool-result",
+                id: "call-converted",
+                name: "read",
+                result: { type: "text", value: "[dropped §11§]" },
+            });
+            for (const message of context.messages)
+                expect(() => Message.make(message)).not.toThrow();
+        });
+    });
+
+    describe("#given a migrated OpenCode 1 assistant row with a surviving tool skeleton", () => {
+        it("#then the returned draft passes the OpenCode 2.0.15 LLM message schema", () => {
+            const context = draft([
+                {
+                    id: "msg-converted",
+                    role: "assistant",
+                    content: [
+                        { type: "text", text: "before" },
+                        { type: "reasoning", text: "thinking" },
+                        {
+                            type: "tool",
+                            id: "call-converted",
+                            name: "read",
+                            state: {
+                                status: "completed",
+                                input: { path: "large.log" },
+                                content: [{ type: "text", text: "converted output".repeat(100) }],
+                            },
+                        },
+                    ],
+                },
+            ]);
+            const payload = adaptPayload(context);
+            const target = createToolDropTarget(
+                "call-converted",
+                [],
+                indexMessage(payload.messages[0]),
+                new ToolMutationBatch(payload.messages),
+                11,
+            );
+            expect(target.truncate()).toBe("truncated");
+            payload.commit();
+            for (const message of context.messages)
+                expect(() => Message.make(message)).not.toThrow();
+        });
+    });
+
+    describe("#given an injected system row removed alongside a fully dropped tool arc", () => {
+        it("#then commit() leaves only host-schema-valid content", () => {
+            const context = draft([
+                {
+                    id: "msg-injection",
+                    role: "system",
+                    content: [{ type: "text", text: "temporary" }],
+                },
+                ...toolTurn("msg-old", "call-old", "read", "old output"),
+                { id: "msg-user", role: "user", content: [{ type: "text", text: "continue" }] },
+            ]);
+            const payload = adaptPayload(context);
+            const owner = payload.messages[1];
+            const batch = new ToolMutationBatch(payload.messages);
+            const target = createToolDropTarget("call-old", [], indexMessage(owner), batch, 4);
+            expect(target.drop()).toBe("removed");
+            batch.finalize();
+            payload.messages.splice(0, 1);
+            payload.commit();
+            for (const message of context.messages)
+                expect(() => Message.make(message)).not.toThrow();
+            expect(context.messages.some((message) => message.id === "msg-injection")).toBe(false);
+        });
+    });
+
+    describe("#given a synthetic todowrite reminder without a host bridge", () => {
+        it("#then commits a host tool-call and result on both priced and replayed passes", () => {
+            const synthetic = {
+                type: "tool",
+                tool: "todowrite",
+                callID: "mc_synthetic_todo_0123456789abcdef",
+                state: {
+                    status: "completed",
+                    input: { todos: [{ content: "Finish", status: "pending", priority: "high" }] },
+                    output: "1 todos",
+                },
+                syntheticTodoMarker: true,
+            };
+            for (const pass of ["priced", "cache_hit"]) {
+                const context = draft([
+                    {
+                        id: "msg-assistant",
+                        role: "assistant",
+                        content: [{ type: "text", text: pass }],
+                    },
+                ]);
+                const payload = adaptPayload(context);
+                payload.messages[0].parts.push(structuredClone(synthetic));
+                payload.commit();
+                expect(context.messages[0]?.content[1]).toEqual({
+                    type: "tool-call",
+                    id: synthetic.callID,
+                    name: "todowrite",
+                    input: synthetic.state.input,
+                });
+                expect(context.messages[1]?.content[0]).toEqual({
+                    type: "tool-result",
+                    id: synthetic.callID,
+                    name: "todowrite",
+                    result: { type: "text", value: "1 todos" },
+                });
+                for (const message of context.messages)
+                    expect(() => Message.make(message)).not.toThrow();
+            }
+        });
+    });
+
+    describe("#given a pipeline-created mural image and an unknown part", () => {
+        it("#then uses the host's Media.Asset and refuses unknown content rather than forwarding it", () => {
+            resetHostMediaForTests();
+            rememberHostMedia([
+                Message.make({ role: "user", content: [{ type: "text", text: "seed schema" }] }),
+            ]);
+            const context = draft([
+                { id: "msg-user", role: "user", content: [{ type: "text", text: "m0" }] },
+            ]);
+            const payload = adaptPayload(context);
+            const png =
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+            payload.messages[0].parts.push({
+                type: "file",
+                mime: "image/png",
+                url: `data:image/png;base64,${png}`,
+            });
+            payload.messages[0].parts.push({ type: "unknown_future_content", value: "bad" });
+            const warnings: string[] = [];
+            const logSpy = spyOn(logger, "sessionLog").mockImplementation((_session, message) => {
+                warnings.push(message);
+            });
+            try {
+                payload.commit();
+            } finally {
+                logSpy.mockRestore();
+                resetHostMediaForTests();
+            }
+            expect(context.messages[0]?.content[1]).toMatchObject({ type: "media" });
+            expect(context.messages[0]?.content).toHaveLength(2);
+            expect(warnings).toHaveLength(1);
+            expect(warnings[0]).toContain("type=unknown_future_content");
+            expect(() => Message.make(context.messages[0])).not.toThrow();
+        });
+    });
+
+    describe("#given a mural image with no host Media.Asset constructor", () => {
+        it("#then omits it with a logged reason instead of emitting an invalid file part", () => {
+            resetHostMediaForTests();
+            const context = draft([
+                { id: "msg-user", role: "user", content: [{ type: "text", text: "m0" }] },
+            ]);
+            const payload = adaptPayload(context);
+            payload.messages[0].parts.push({
+                type: "file",
+                mime: "image/png",
+                url: "data:image/png;base64,AA==",
+            });
+            const warnings: string[] = [];
+            const logSpy = spyOn(logger, "sessionLog").mockImplementation((_session, message) => {
+                warnings.push(message);
+            });
+            try {
+                payload.commit();
+            } finally {
+                logSpy.mockRestore();
+                resetHostMediaForTests();
+            }
+            expect(context.messages[0]?.content).toEqual([{ type: "text", text: "m0" }]);
+            expect(warnings[0]).toContain("type=file");
+            expect(warnings[0]).toContain("host media unavailable");
+            expect(() => Message.make(context.messages[0])).not.toThrow();
         });
     });
 

@@ -22,7 +22,7 @@ describe("mode manifest validator", () => {
         // removed. Adding an OpenCode 2 lane file moves this number and the excluded
         // list below and nothing else, because those files carry tier "excluded" and
         // so never enter a TS or Rust invocation list.
-        expect(validation.files.length).toBe(99);
+        expect(validation.files.length).toBe(103);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -56,6 +56,7 @@ describe("mode manifest validator", () => {
             "tests/opencode2/commands-s2-wrapup.test.ts",
             "tests/opencode2/compartment-boundary-host-row.test.ts",
             "tests/opencode2/context-s2-lanes.test.ts",
+            "tests/opencode2/converted-drop-replay.test.ts",
             "tests/opencode2/converted-store-overwindow.test.ts",
             "tests/opencode2/dream-loop.test.ts",
             "tests/opencode2/dreamer-s2-carrier.test.ts",
@@ -67,9 +68,11 @@ describe("mode manifest validator", () => {
             "tests/opencode2/hidden-child-unbound.test.ts",
             "tests/opencode2/image-attachment.test.ts",
             "tests/opencode2/marker-s3-runtime.test.ts",
+            "tests/opencode2/mural-media-schema.test.ts",
             "tests/opencode2/pins.test.ts",
             "tests/opencode2/probes.test.ts",
             "tests/opencode2/prompt-surface-s6.test.ts",
+            "tests/opencode2/reporter-emergency-drop.test.ts",
             "tests/opencode2/rpc-s2-listener.test.ts",
             "tests/opencode2/runner.test.ts",
             "tests/opencode2/rust-mode-limitation.test.ts",
@@ -78,6 +81,7 @@ describe("mode manifest validator", () => {
             "tests/opencode2/store-directories.test.ts",
             "tests/opencode2/store-generation-conversion.test.ts",
             "tests/opencode2/store-reader.test.ts",
+            "tests/opencode2/synthetic-todo-schema.test.ts",
             "tests/opencode2/tool-definition-telemetry.test.ts",
             "tests/window-overlay-reload.test.ts",
         ]);

@@ -93,6 +93,9 @@ function inflateConvertedToolOutputs(
                     }
                 }
                 if (rowChanged) {
+                    if (data.content?.some((part) => part.id === outputs.keys().next().value)) {
+                        data.content.unshift({ type: "reasoning", text: "converted thinking" });
+                    }
                     update.run(JSON.stringify(data), row.id);
                     changed += 1;
                 }
@@ -294,6 +297,7 @@ test("the first priced pass reclaims an over-window converted-store tail", async
             .slice(requestStart)
             .filter((request) => JSON.stringify(request.body).includes(marker));
         expect(served).toHaveLength(1);
+        expect(JSON.stringify(served[0]!.body)).toContain(callIds[0]!);
         const afterTokens = requestTokens(served[0]!.body);
         expect(afterTokens).toBeLessThan(CONTEXT_LIMIT);
         expect(afterTokens).toBeLessThan(beforeTokens);
@@ -307,6 +311,12 @@ test("the first priced pass reclaims an over-window converted-store tail", async
             ...callIds,
         );
         const dropped = taggedAfter.filter((row) => row.status === "dropped");
+        const dropModes = contextRows<{ messageId: string; dropMode: string }>(
+            fixture.contextDbPath,
+            "SELECT message_id AS messageId, drop_mode AS dropMode FROM tags WHERE session_id = ? AND type = 'tool' AND message_id IN (?, ?, ?)",
+            sessionId, ...callIds,
+        );
+        expect(dropModes.find((row) => row.messageId === callIds[0])?.dropMode).toBe("truncated");
 
         await v2.stopHost();
         v2 = undefined;
