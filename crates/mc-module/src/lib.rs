@@ -18280,13 +18280,13 @@ pub fn manifest_with_route_targets(
     // the HELLO identical to the pre-field wire shape (serde skips None).
     .capabilities(None)
     // Introduced by subc-protocol 0.14: optional self-signal manifest registry.
-    // Some(vec![]) is deliberate over None per the falsy-value discrimination
-    // rule: it declares "examined, none to register" (MC emits no self-signals
-    // today), while None would read as "never examined". Serde still emits the
-    // field, which is the examined marker the daemon census reads. Actual
-    // signal publication remains deferred; this empty marker is preserved
-    // byte-identically from the pre-builder manifest.
-    .self_signals(Some(vec![]))
+    // The historian firing and the classify task both spend provider quota through
+    // the runner route, so they are declared from the same resolved route registry
+    // that fills `consumes` below. Under a host-runner configuration the list is
+    // empty, and Some(vec![]) is kept over None per the falsy-value discrimination
+    // rule: it declares "examined, none to register", while None would read as
+    // "never examined".
+    .self_signals(Some(route_targets::self_signals(resolved_routes)))
     // Introduced by subc-protocol 0.13: build provenance for the deploy ladder.
     // The git sha is stamped by the release build command (MC_BUILD_SHA env at
     // compile time); a bare `cargo build` leaves it absent rather than wrong.
@@ -18385,6 +18385,16 @@ mod tests {
                 of: vec!["thalamus".to_string()],
             }]
         );
+        // Self-signals drop out with the runner target, but the field stays declared
+        // ("examined, none").
+        assert_eq!(hosted.self_signals, Some(vec![]));
+        assert_eq!(
+            custom.self_signals,
+            Some(route_targets::self_signals(
+                &RouteTargetConfig::runner_module("custom-runner")
+            ))
+        );
+        assert_eq!(custom.self_signals.as_ref().map(Vec::len), Some(2));
     }
 
     #[test]
@@ -19564,10 +19574,21 @@ mod tests {
             "bindings must not appear on the wire"
         );
         assert_eq!(m.protocol_ver, PROTOCOL_VERSION);
-        // The builder migration must preserve the deliberate empty self-signal
-        // marker ("examined, none to register") byte-identically; actual signal
-        // publication remains deferred.
-        assert_eq!(m.self_signals, Some(vec![]));
+        // The default runner route spends provider quota for the historian and the
+        // classify task, so both are declared.
+        assert_eq!(
+            m.self_signals
+                .as_ref()
+                .expect("self_signals must be declared, not omitted")
+                .iter()
+                .map(|signal| signal.name.as_str())
+                .collect::<Vec<_>>(),
+            ["historian_firing", "dreamer_classify"]
+        );
+        assert_eq!(
+            wire["self_signals"][0]["domain"],
+            serde_json::json!("provider-usage")
+        );
         // Provenance is stamped by the subc-protocol build_provenance helper.
         // The wire_crate_version is always present (a compile-time constant of
         // the linked subc-protocol crate); build_git_sha is present only when
