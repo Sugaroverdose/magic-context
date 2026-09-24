@@ -31,6 +31,7 @@ VERSION=""
 DRY=""
 FORCE_E2E_HOST=0
 SKIP_RUST_E2E=0
+CI_GATE_SHA=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -39,6 +40,13 @@ for arg in "$@"; do
       ;;
     --e2e-host)
       FORCE_E2E_HOST=1
+      ;;
+    --ci-gate=*)
+      # Use a green master CI run as the test gate instead of re-running the
+      # unit and host e2e suites locally (they are load-sensitive on a busy
+      # machine). Names the CI-verified commit; checked below. The tag workflow
+      # still runs its own full gate before anything publishes.
+      CI_GATE_SHA="${arg#--ci-gate=}"
       ;;
     --skip-rust-e2e)
       # One-off operator decision to release without the experimental Rust-mode
@@ -49,13 +57,13 @@ for arg in "$@"; do
       ;;
     --*)
       echo "Error: unknown option '$arg'"
-      echo "Usage: ./scripts/release.sh <version> [--dry] [--e2e-host] [--skip-rust-e2e]"
+      echo "Usage: ./scripts/release.sh <version> [--dry] [--e2e-host] [--skip-rust-e2e] [--ci-gate=<sha>]"
       exit 1
       ;;
     *)
       if [[ -n "$VERSION" ]]; then
         echo "Error: more than one version was supplied"
-        echo "Usage: ./scripts/release.sh <version> [--dry] [--e2e-host] [--skip-rust-e2e]"
+        echo "Usage: ./scripts/release.sh <version> [--dry] [--e2e-host] [--skip-rust-e2e] [--ci-gate=<sha>]"
         exit 1
       fi
       VERSION="$arg"
@@ -64,7 +72,7 @@ for arg in "$@"; do
 done
 
 if [[ -z "$VERSION" ]]; then
-  echo "Usage: ./scripts/release.sh <version> [--dry] [--e2e-host] [--skip-rust-e2e]"
+  echo "Usage: ./scripts/release.sh <version> [--dry] [--e2e-host] [--skip-rust-e2e] [--ci-gate=<sha>]"
   echo "  e.g. ./scripts/release.sh 0.1.0"
   exit 1
 fi
@@ -75,6 +83,27 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?
 fi
 
 TAG="v$VERSION"
+
+if [[ -n "$CI_GATE_SHA" ]]; then
+  CI_GATE_SHA=$(git rev-parse --verify "$CI_GATE_SHA^{commit}") || { echo "Error: --ci-gate names no commit"; exit 1; }
+  if ! git merge-base --is-ancestor "$CI_GATE_SHA" HEAD; then
+    echo "Error: --ci-gate commit $CI_GATE_SHA is not an ancestor of HEAD"; exit 1
+  fi
+  # Only release tooling and release notes may differ from the CI-verified commit.
+  CI_GATE_DRIFT=$(git diff --name-only "$CI_GATE_SHA" HEAD | grep -vE '^(scripts/release[^/]*\.sh|\.cortexkit/)' || true)
+  if [[ -n "$CI_GATE_DRIFT" ]]; then
+    echo "Error: HEAD differs from the CI-verified commit outside release tooling:"; echo "$CI_GATE_DRIFT"; exit 1
+  fi
+  CI_RESULT=$(gh api "repos/cortexkit/magic-context/actions/runs?head_sha=$CI_GATE_SHA&event=push" \
+    -q '[.workflow_runs[] | select(.name=="CI")][0] | "\(.status)/\(.conclusion)"' 2>/dev/null || true)
+  if [[ "$CI_RESULT" != "completed/success" ]]; then
+    echo "Error: master CI for $CI_GATE_SHA is '${CI_RESULT:-missing}', not completed/success"; exit 1
+  fi
+  echo ""
+  echo "  NOTE: test gate = master CI run on $CI_GATE_SHA (completed/success);"
+  echo "        local unit and host e2e suites are skipped. Lint, typecheck and builds still run."
+  echo ""
+fi
 
 if [[ "$SKIP_RUST_E2E" -eq 1 ]]; then
   SKIP_VAR=$(gh api repos/cortexkit/magic-context/actions/variables/RELEASE_SKIP_RUST_E2E -q .value 2>/dev/null || true)
@@ -160,6 +189,10 @@ manifest_files() {
 # and was green (the Bun-panic case).
 run_package_tests() {
   local label="$1" dir="$2" output status
+  if [[ -n "$CI_GATE_SHA" ]]; then
+    echo "  [$label] tests: covered by master CI on $CI_GATE_SHA"
+    return 0
+  fi
   echo "  [$label] bun run test..."
   # `set -e` would abort the script at this assignment the instant the package
   # test command exits non-zero — BEFORE `status=$?` and the panic-tolerance
@@ -403,7 +436,11 @@ run_host_e2e() {
 # Rust stays on the host: its daemon and private sibling path dependencies cross
 # the container boundary. The shared executable owns the exact manifest selection,
 # prerequisites, and true-green summary check used by release CI as well.
-run_host_e2e
+if [[ -n "$CI_GATE_SHA" ]]; then
+  echo "  [e2e] host legs: covered by master CI on $CI_GATE_SHA"
+else
+  run_host_e2e
+fi
 if [[ "$SKIP_RUST_E2E" -eq 1 ]]; then
   echo "  [e2e:rust] SKIPPED by operator for $TAG (--skip-rust-e2e)"
 else
