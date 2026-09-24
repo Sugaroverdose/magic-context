@@ -6754,10 +6754,15 @@ fn render_config_base(render_config: &str) -> &str {
 }
 
 /// Provider-cache facts for model identities whose effort can change without invalidating
-/// cached prompt bytes: Fable 5.1 was observed on 2026-09-02 and GPT-6 Astra on 2026-09-05.
-const VARIANT_CACHE_PRESERVING_MODELS: [(&str, &str); 2] = [
+/// cached prompt bytes: Fable 5.1 was observed on 2026-09-02, GPT-6 Astra on 2026-09-05, and
+/// Opus 5.5 on 2026-09-23. For Opus 5.5, the first request after `output_config.effort` went
+/// from `high` to absent still read the 1h-TTL message-prefix cache written only by `high`
+/// requests, and the flip back read that same prefix again. The flip itself therefore costs
+/// nothing at the provider, while a HARD on it rewrites every re-rendered message.
+const VARIANT_CACHE_PRESERVING_MODELS: [(&str, &str); 3] = [
     ("anthropic/claude-fable-5-1", "2026-09-02"),
     ("openai/gpt-6-astra", "2026-09-05"),
+    ("anthropic/claude-opus-5-5", "2026-09-23"),
 ];
 
 fn canonical_variant_model_identity(
@@ -18506,6 +18511,10 @@ pub(crate) mod tests {
             Some("bedrock"),
             Some("bedrock/anthropic.claude-fable-5-1-v1:0")
         ));
+        assert!(!variant_change_busts_provider_cache(
+            Some("anthropic"),
+            Some("anthropic/claude-opus-5-5")
+        ));
         assert!(variant_change_busts_provider_cache(
             Some("anthropic"),
             Some("anthropic/claude-opus-4-1")
@@ -18540,6 +18549,91 @@ pub(crate) mod tests {
         let after = run(&s, &request, &spine());
         assert_eq!(after.scheduler_decision.as_deref(), Some("defer"));
         assert_eq!(canonical_response_hash(&after), before_hash);
+    }
+
+    /// Mirrors a live Opus 5.5 session where the host dropped the `high` variant and later
+    /// restored it. Wire dumps showed the provider served the cached message prefix in both
+    /// directions, so the effort flip alone must not change the render identity.
+    fn opus_55_request(session: &str, render_config: &str) -> TransformRequest {
+        let mut request = req(session, render_config, vec![item("a", 1, "keep me")]);
+        request.serializer_profile = "opencode-aisdk".to_string();
+        request.provider_id = Some("anthropic".to_string());
+        request.model_key = Some("anthropic/claude-opus-5-5".to_string());
+        request.system_prompt_hash = "5364d9e7f78d5cee3aadbc8f2ce85aa7".to_string();
+        request
+    }
+
+    #[test]
+    fn opus_55_variant_flip_keeps_render_identity_and_served_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let with_variant = "provider:anthropic|model:anthropic/claude-opus-5-5|variant:high|system:5364d9e7f78d5cee3aadbc8f2ce85aa7";
+        let without_variant =
+            "provider:anthropic|model:anthropic/claude-opus-5-5|system:5364d9e7f78d5cee3aadbc8f2ce85aa7";
+        let mut request = opus_55_request("opus-variant", without_variant);
+        run(&s, &request, &spine());
+        let before = run(&s, &request, &spine());
+        assert_eq!(before.action, "SOFT+");
+        let before_hash = canonical_response_hash(&before);
+
+        request.render_config = with_variant.to_string();
+        let after = run(&s, &request, &spine());
+        assert_eq!(
+            after.action, "SOFT+",
+            "identity_delta={:?}",
+            after.identity_delta
+        );
+        assert!(after.identity_delta.is_empty());
+        assert_eq!(canonical_response_hash(&after), before_hash);
+
+        request.render_config = without_variant.to_string();
+        let back = run(&s, &request, &spine());
+        assert_eq!(
+            back.action, "SOFT+",
+            "identity_delta={:?}",
+            back.identity_delta
+        );
+        assert_eq!(canonical_response_hash(&back), before_hash);
+    }
+
+    #[test]
+    fn opus_55_system_prompt_change_still_hards_on_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut request = opus_55_request(
+            "opus-system",
+            "provider:anthropic|model:anthropic/claude-opus-5-5|variant:high|system:5364d9e7f78d5cee3aadbc8f2ce85aa7",
+        );
+        run(&s, &request, &spine());
+        assert_eq!(run(&s, &request, &spine()).action, "SOFT+");
+
+        request.render_config =
+            "provider:anthropic|model:anthropic/claude-opus-5-5|variant:high|system:0000000000000000000000000000beef"
+                .to_string();
+        request.system_prompt_hash = "0000000000000000000000000000beef".to_string();
+        let changed = run(&s, &request, &spine());
+        assert_eq!(changed.action, "HARD");
+        assert_eq!(changed.identity_delta, vec!["base"]);
+    }
+
+    #[test]
+    fn older_anthropic_variant_flip_still_hards_on_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut request = opus_55_request(
+            "opus-41-variant",
+            "provider:anthropic|model:anthropic/claude-opus-4-1|system:5364d9e7f78d5cee3aadbc8f2ce85aa7",
+        );
+        request.model_key = Some("anthropic/claude-opus-4-1".to_string());
+        run(&s, &request, &spine());
+        assert_eq!(run(&s, &request, &spine()).action, "SOFT+");
+
+        request.render_config =
+            "provider:anthropic|model:anthropic/claude-opus-4-1|variant:high|system:5364d9e7f78d5cee3aadbc8f2ce85aa7"
+                .to_string();
+        let changed = run(&s, &request, &spine());
+        assert_eq!(changed.action, "HARD");
+        assert_eq!(changed.identity_delta, vec!["base"]);
     }
 
     #[test]

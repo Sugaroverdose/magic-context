@@ -41,11 +41,15 @@ export function modelAcceptsEmptyContent(providerID?: string): boolean {
 /**
  * Provider-cache facts for model identities whose effort can change without
  * invalidating cached prompt bytes: Anthropic Fable 5.1 was observed on
- * 2026-09-02 and OpenAI GPT-6 Astra on 2026-09-05.
+ * 2026-09-02, OpenAI GPT-6 Astra on 2026-09-05, and Anthropic Opus 5.5 on
+ * 2026-09-23 (an effort high -> default -> high round trip kept reading the
+ * same cached message prefix). Keep this list in sync with
+ * `VARIANT_CACHE_PRESERVING_MODELS` in crates/mc-module/src/transform.rs.
  */
 const VARIANT_CACHE_PRESERVING_MODELS: Readonly<Record<string, string>> = {
     "anthropic/claude-fable-5-1": "2026-09-02",
     "openai/gpt-6-astra": "2026-09-05",
+    "anthropic/claude-opus-5-5": "2026-09-23",
 };
 
 function canonicalVariantModelIdentity(providerID: string, modelID: string): string {
