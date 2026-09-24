@@ -1687,14 +1687,14 @@
         },
         {
             "path": "tests/subagent-behavior.test.ts",
-            "tier": "ts-only",
+            "tier": "both-modes",
             "invocation": {
                 "ts": true,
-                "rust": false
+                "rust": true
             },
-            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
+            "rationale": "subagent tag delivery and provider bytes run through both the TS and Rust OpenCode harnesses",
             "contract_refs": [
-                "TS-HARNESS"
+                "S2-MIGRATION"
             ],
             "hosts": [
                 "opencode"
