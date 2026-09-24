@@ -791,6 +791,7 @@ pub enum Harness {
     Opencode2,
     Pi,
     Omp,
+    Broca,
     ClaudeCode,
     Codex,
 }
@@ -802,6 +803,7 @@ impl Harness {
             Self::Opencode2 => "opencode2",
             Self::Pi => "pi",
             Self::Omp => "omp",
+            Self::Broca => "broca",
             Self::ClaudeCode => "claude_code",
             Self::Codex => "codex",
         }
@@ -843,6 +845,7 @@ impl std::str::FromStr for Harness {
             "opencode2" => Ok(Self::Opencode2),
             "pi" => Ok(Self::Pi),
             "omp" => Ok(Self::Omp),
+            "broca" => Ok(Self::Broca),
             "claude_code" | "claude-code" | "claudecode" | "cc" => Ok(Self::ClaudeCode),
             "codex" => Ok(Self::Codex),
             other => Err(format!("unknown harness: {other}")),
@@ -2600,6 +2603,163 @@ struct CacheSessionListEntry {
     title: Option<String>,
 }
 
+// Each export fact is an immutable billing segment. A run represents one turn,
+// but changing its frozen configuration can split its usage across several facts.
+// Sum segments by run so the cache timeline shows one event per turn.
+fn broca_store_path() -> Option<PathBuf> {
+    let root = std::env::var_os("BROCA_STATE_ROOT")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    if let Some(root) = root {
+        return root
+            .join("run-index.db")
+            .is_file()
+            .then(|| root.join("run-index.db"));
+    }
+    let home = dirs::home_dir()?;
+    [
+        home.join(".local/share/cortexkit/broca/run-index.db"),
+        home.join(".local/share/cortexkit/run/broca-state/run-index.db"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+fn open_broca_store(path: &Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(std::time::Duration::from_millis(50))?;
+    Ok(conn)
+}
+
+fn broca_managed_session(session_id: &str) -> bool {
+    let Ok(identity) = serde_json::from_str::<serde_json::Value>(session_id) else {
+        return false;
+    };
+    identity["session"].as_str().is_some_and(|session| {
+        session.starts_with("mc-historian:")
+            || session.starts_with("dreamer:")
+            || session.starts_with("mc-dreamer:")
+    })
+}
+
+fn load_broca_cache_sessions(limit: usize, show_unmanaged: bool) -> Vec<CacheSessionListEntry> {
+    let Some(path) = broca_store_path() else {
+        return Vec::new();
+    };
+    let Ok(conn) = open_broca_store(&path) else {
+        return Vec::new();
+    };
+    load_broca_cache_sessions_from_conn(&conn, limit, show_unmanaged).unwrap_or_default()
+}
+
+fn load_broca_cache_sessions_from_conn(
+    conn: &Connection,
+    limit: usize,
+    show_unmanaged: bool,
+) -> rusqlite::Result<Vec<CacheSessionListEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT json_extract(segment_json, '$.session') AS identity,
+                MAX(CAST(json_extract(segment_json, '$.occurred_at_ms') AS INTEGER)) AS activity
+         FROM export_facts
+         WHERE ?1 OR json_extract(segment_json, '$.session.session') LIKE 'mc-historian:%'
+                  OR json_extract(segment_json, '$.session.session') LIKE 'mc-dreamer:%'
+                  OR json_extract(segment_json, '$.session.session') LIKE 'dreamer:%'
+         GROUP BY identity HAVING activity IS NOT NULL
+         ORDER BY activity DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![show_unmanaged, limit as i64], |row| {
+        let session_id: String = row.get(0)?;
+        let activity: i64 = row.get(1)?;
+        let title = serde_json::from_str::<serde_json::Value>(&session_id)
+            .ok()
+            .and_then(|identity| identity["session"].as_str().map(str::to_owned));
+        Ok(CacheSessionListEntry {
+            harness: Harness::Broca,
+            session_id,
+            last_activity_ms: activity,
+            title,
+        })
+    })?;
+    rows.collect()
+}
+
+fn get_broca_session_cache_events(
+    session_id: &str,
+    limit: Option<usize>,
+    since_timestamp: Option<i64>,
+) -> Vec<DbCacheEvent> {
+    let Some(path) = broca_store_path() else {
+        return Vec::new();
+    };
+    let Ok(conn) = open_broca_store(&path) else {
+        return Vec::new();
+    };
+    load_broca_cache_events_from_conn(&conn, session_id, limit, since_timestamp)
+        .map(|rows| build_db_cache_events(rows, false))
+        .unwrap_or_default()
+}
+
+fn load_broca_cache_events_from_conn(
+    conn: &Connection,
+    session_id: &str,
+    limit: Option<usize>,
+    since_timestamp: Option<i64>,
+) -> rusqlite::Result<Vec<RawDbCacheEvent>> {
+    let mut stmt = conn.prepare(
+        "SELECT run_id,
+                MAX(CAST(json_extract(segment_json, '$.occurred_at_ms') AS INTEGER)) AS activity,
+                SUM(COALESCE(CAST(json_extract(segment_json, '$.usage.input_tokens') AS INTEGER), 0)),
+                SUM(COALESCE(CAST(json_extract(segment_json, '$.usage.cached_input_tokens') AS INTEGER), 0)),
+                SUM(COALESCE(CAST(json_extract(segment_json, '$.usage.cache_write_tokens') AS INTEGER), 0)),
+                SUM(COALESCE(CAST(json_extract(segment_json, '$.usage.output_tokens') AS INTEGER), 0)),
+                MAX(json_extract(segment_json, '$.provider')),
+                MAX(json_extract(segment_json, '$.model'))
+         FROM export_facts
+         WHERE json_extract(segment_json, '$.session') = ?1
+         GROUP BY run_id HAVING activity IS NOT NULL AND (?3 IS NULL OR activity >= ?3)
+         ORDER BY activity DESC, run_id DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(
+        params![
+            session_id,
+            if since_timestamp.is_some() {
+                i64::MAX
+            } else {
+                limit.unwrap_or(200).max(1) as i64
+            },
+            since_timestamp
+        ],
+        |row| {
+            let run_id: String = row.get(0)?;
+            let timestamp: i64 = row.get(1)?;
+            let input: i64 = row.get(2)?;
+            let read: i64 = row.get(3)?;
+            let write: i64 = row.get(4)?;
+            let output: i64 = row.get(5)?;
+            Ok(RawDbCacheEvent {
+                harness: Harness::Broca,
+                message_id: run_id.clone(),
+                session_id: session_id.to_owned(),
+                timestamp,
+                input_tokens: input,
+                cache_read: read,
+                cache_write: write,
+                total_tokens: input + read + write + output,
+                agent: row
+                    .get::<_, Option<String>>(6)?
+                    .zip(row.get::<_, Option<String>>(7)?)
+                    .map(|(provider, model)| format!("{provider}/{model}")),
+                finish: None,
+                native_turn_id: Some(run_id),
+                context_limit: None,
+            })
+        },
+    )?;
+    let mut rows: Vec<_> = rows.collect::<rusqlite::Result<_>>()?;
+    rows.reverse();
+    Ok(rows)
+}
+
 const RECENT_OPENCODE_CACHE_SESSIONS_SQL: &str = "SELECT id, time_updated, NULLIF(title, '')
      FROM session
      WHERE time_archived IS NULL
@@ -2892,6 +3052,7 @@ fn is_managed_cache_session(
     detected: &HashSet<(Harness, String)>,
 ) -> bool {
     harness.has_magic_context_plugin_state()
+        || (harness == Harness::Broca && broca_managed_session(session_id))
         || detected.contains(&(harness, session_id.to_string()))
 }
 
@@ -3060,6 +3221,9 @@ pub fn get_session_cache_stats_from_db(
                 codex.join().unwrap_or_default(),
             )
         });
+    if includes_harness(Harness::Broca) {
+        sessions.extend(load_broca_cache_sessions(limit, show_unmanaged));
+    }
     sessions.extend(pi_sessions.into_iter().map(|meta| CacheSessionListEntry {
         harness: Harness::Pi,
         session_id: meta.session_id,
@@ -3180,6 +3344,7 @@ pub fn get_session_cache_events(
             get_claude_code_session_cache_events(session_id, limit, since_timestamp)
         }
         Harness::Codex => get_codex_session_cache_events(session_id, limit, since_timestamp),
+        Harness::Broca => get_broca_session_cache_events(session_id, limit, since_timestamp),
     }
 }
 
@@ -3227,6 +3392,7 @@ pub fn get_session_cache_events_by_turn_count(
             get_claude_code_session_cache_events(session_id, Some(max_events), None)
         }
         Harness::Codex => get_codex_session_cache_events(session_id, Some(max_events), None),
+        Harness::Broca => get_broca_session_cache_events(session_id, Some(max_events), None),
     };
     trim_events_to_turns(raw, target_turns)
 }
@@ -5798,7 +5964,7 @@ pub fn get_session_detail(
     match harness {
         Harness::Opencode | Harness::Opencode2 => get_opencode_session_detail(conn, session_id),
         Harness::Pi | Harness::Omp => Ok(get_pi_session_detail(conn, harness, session_id)),
-        Harness::ClaudeCode | Harness::Codex => Ok(None),
+        Harness::ClaudeCode | Harness::Codex | Harness::Broca => Ok(None),
     }
 }
 
@@ -5838,7 +6004,7 @@ pub fn get_session_messages(
                 })
                 .collect())
         }
-        Harness::ClaudeCode | Harness::Codex => Ok(Vec::new()),
+        Harness::ClaudeCode | Harness::Codex | Harness::Broca => Ok(Vec::new()),
     }
 }
 
@@ -10617,5 +10783,93 @@ mod external_cache_incremental_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].message_id, "cc-main-1");
         external_cache_sessions::clear_caches_for_tests();
+    }
+}
+
+#[cfg(test)]
+mod broca_cache_tests {
+    use super::*;
+
+    #[test]
+    fn broca_store_is_opened_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run-index.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE export_facts (run_id TEXT);")
+            .unwrap();
+        let conn = open_broca_store(&path).unwrap();
+        assert!(conn
+            .execute("INSERT INTO export_facts VALUES ('run')", [])
+            .is_err());
+        assert!(open_broca_store(&dir.path().join("missing.db")).is_err());
+    }
+
+    #[test]
+    fn export_facts_group_refrozen_segments_into_one_turn_per_run() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE export_facts (export_seq INTEGER PRIMARY KEY, fact_id TEXT UNIQUE, run_id TEXT NOT NULL, segment_json TEXT NOT NULL);").unwrap();
+        let session = serde_json::json!({"project_root":"/work/project","harness":"opencode","session":"mc-historian:one"});
+        let other =
+            serde_json::json!({"project_root":"/work/other","harness":"pi","session":"other"});
+        for (id, run, identity, ts, input, read, write) in [
+            ("f1", "r1", &session, 1000, 10, 30, 5),
+            ("f2", "r1", &session, 1000, 20, 40, 7),
+            ("f3", "r2", &session, 2000, 15, 2, 0),
+            ("f4", "r3", &other, 3000, 80, 90, 10),
+        ] {
+            let segment = serde_json::json!({
+                "run_id": run, "session": identity, "provider": "anthropic", "model": "claude",
+                "occurred_at_ms": ts,
+                "usage": {"input_tokens": input, "cached_input_tokens": read,
+                          "cache_write_tokens": write, "output_tokens": 3}
+            });
+            conn.execute(
+                "INSERT INTO export_facts (fact_id, run_id, segment_json) VALUES (?1, ?2, ?3)",
+                params![id, run, segment.to_string()],
+            )
+            .unwrap();
+        }
+        let identity = session.to_string();
+        let sessions = load_broca_cache_sessions_from_conn(&conn, 10, true).unwrap();
+        assert_eq!(
+            load_broca_cache_sessions_from_conn(&conn, 10, false)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[1].session_id, identity);
+        assert_eq!(sessions[1].last_activity_ms, 2000);
+        assert!(broca_managed_session(&identity));
+        assert!(!broca_managed_session(&other.to_string()));
+        let rows = load_broca_cache_events_from_conn(&conn, &identity, Some(10), None).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].message_id, "r1");
+        assert_eq!(
+            (
+                rows[0].input_tokens,
+                rows[0].cache_read,
+                rows[0].cache_write
+            ),
+            (30, 70, 12)
+        );
+        assert_eq!(rows[0].native_turn_id.as_deref(), Some("r1"));
+        assert_eq!(rows[1].message_id, "r2");
+        let events = build_db_cache_events(rows, false);
+        assert_eq!(events.len(), 2);
+        assert_ne!(events[0].turn_id, events[1].turn_id);
+        assert_eq!(
+            load_broca_cache_events_from_conn(&conn, &identity, Some(1), None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            load_broca_cache_events_from_conn(&conn, &identity, None, Some(2000))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }
