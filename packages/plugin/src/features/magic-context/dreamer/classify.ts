@@ -16,7 +16,11 @@ import { describeError, getErrorMessage } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
 import type { ModelInput } from "../../../shared/model-resolution";
 import { hasShareabilitySensitiveText } from "../../../shared/redaction";
-import { modelBodyField, toModelEntry } from "../../../shared/resolve-fallbacks";
+import {
+    modelBodyField,
+    parseProviderModel,
+    toModelEntry,
+} from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
 import { renderCapabilityRefusal } from "../../../shared/user-facing-codes";
 import {
@@ -26,7 +30,11 @@ import {
     setMemoryClassification,
 } from "../memory";
 import type { SubagentInvocationStatus } from "../storage-subagent-invocations";
-import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
+import {
+    failedInvocationStatus,
+    recordChildInvocation,
+    type TokenTotals,
+} from "../subagent-token-capture";
 import {
     buildClassifyPrompt,
     CLASSIFY_SYSTEM_PROMPT,
@@ -347,8 +355,16 @@ async function classifyOneChunk(
             anchors,
         });
         if (moduleRoute) {
-            const run = await runClassifyThroughModule(args, chunk, anchors, signal);
-            recordInvocation(args, startedAt, { status: "completed" });
+            const { accounting, ...run } = await runClassifyThroughModule(
+                args,
+                chunk,
+                anchors,
+                signal,
+            );
+            recordInvocation(args, startedAt, {
+                status: "completed",
+                moduleAccounting: accounting,
+            });
             return run;
         }
 
@@ -479,7 +495,7 @@ async function runClassifyThroughModule(
     chunk: ClassifyCandidate[],
     anchors: ClassifyAnchorMemory[],
     signal: AbortSignal,
-): Promise<{ classified: number; changed: number }> {
+): Promise<{ classified: number; changed: number; accounting: ModuleClassifyAccounting }> {
     const prompt = buildClassifyPrompt({
         projectPath: args.projectIdentity,
         memories: chunk.map(toPromptMemory),
@@ -529,6 +545,7 @@ async function runClassifyThroughModule(
     if ((result as { truncated?: unknown }).truncated === true) {
         throw new Error("classify returned length-capped output");
     }
+    const accounting = moduleClassifyAccounting(result as Record<string, unknown>);
     const parsed = validateClassifyManifest(
         manifestText,
         new Set(chunk.map((candidate) => candidate.id)),
@@ -618,7 +635,57 @@ async function runClassifyThroughModule(
         if (!candidate) throw new Error(`module accepted unknown memory ${moduleId}`);
         return candidate.contextMemory.id;
     });
-    return { classified: acceptedContextIds.length, changed: acceptedContextIds.length };
+    return {
+        classified: acceptedContextIds.length,
+        changed: acceptedContextIds.length,
+        accounting,
+    };
+}
+
+/** Spend and model the module reports for a classify run, in the shape the
+ *  invocation record takes. */
+export interface ModuleClassifyAccounting {
+    tokens?: TokenTotals;
+    providerId?: string;
+    modelId?: string;
+}
+
+function nonNegativeCount(value: unknown): number {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+/** Reads the `dreamer.run_task` response's `usage` (input / output / cache_read /
+ *  cache_write) and `diagnostics.model` ("provider/model"). Either may be absent:
+ *  modules that predate `usage` omit it, and the row then keeps zero tokens. */
+export function moduleClassifyAccounting(
+    result: Record<string, unknown>,
+): ModuleClassifyAccounting {
+    const accounting: ModuleClassifyAccounting = {};
+    const usage = result.usage;
+    if (usage && typeof usage === "object") {
+        const record = usage as Record<string, unknown>;
+        accounting.tokens = {
+            input: nonNegativeCount(record.input),
+            output: nonNegativeCount(record.output),
+            cacheRead: nonNegativeCount(record.cache_read),
+            cacheWrite: nonNegativeCount(record.cache_write),
+        };
+    }
+    const diagnostics = result.diagnostics;
+    const model =
+        diagnostics && typeof diagnostics === "object"
+            ? (diagnostics as Record<string, unknown>).model
+            : undefined;
+    if (typeof model === "string") {
+        const parsed = parseProviderModel(model);
+        if (parsed) {
+            accounting.providerId = parsed.providerID;
+            accounting.modelId = parsed.modelID;
+        } else if (model.trim()) {
+            accounting.modelId = model.trim();
+        }
+    }
+    return accounting;
 }
 
 export function applyClassifications(
@@ -667,6 +734,7 @@ function recordInvocation(
         messages?: unknown[];
         error?: unknown;
         completion?: HiddenCompletion;
+        moduleAccounting?: ModuleClassifyAccounting;
     },
 ): void {
     if (!args.parentSessionId) return;
@@ -684,6 +752,13 @@ function recordInvocation(
                   tokens: params.completion.usage,
                   providerId: params.completion.providerId,
                   modelId: params.completion.modelId,
+              }
+            : {}),
+        ...(params.moduleAccounting
+            ? {
+                  tokens: params.moduleAccounting.tokens,
+                  providerId: params.moduleAccounting.providerId,
+                  modelId: params.moduleAccounting.modelId,
               }
             : {}),
         error: params.error,

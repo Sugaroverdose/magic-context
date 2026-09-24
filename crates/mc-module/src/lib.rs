@@ -11540,7 +11540,7 @@ impl McHandler {
             };
         }
         let (model, result, child_session) = output.expect("classifier output set");
-        let response = json!({
+        let mut response = json!({
             "ok": true,
             "manifest_text": result.text,
             "truncated": result.length_capped,
@@ -11555,6 +11555,17 @@ impl McHandler {
                 "recovery_timeout_ms": CLASSIFY_RECOVERY_TIMEOUT.as_millis(),
             }
         });
+        // The runner's token spend for the successful attempt, so the host can record
+        // it on its invocation row. Omitted when the runner reported none; hosts that
+        // predate the field ignore it.
+        if let Some(usage) = result.usage {
+            response["usage"] = json!({
+                "input": usage.input,
+                "output": usage.output,
+                "cache_read": usage.cache_read,
+                "cache_write": usage.cache_write,
+            });
+        }
         match store.record_dream_task_command(
             &ledger_session,
             command_id,
@@ -20362,6 +20373,7 @@ mod tests {
             Ok(ProducerOutput {
                 text,
                 length_capped: false,
+                usage: None,
             })
         }
 
@@ -30547,10 +30559,12 @@ mod tests {
                 Ok(ProducerOutput {
                     text: "All Antigravity endpoints failed".to_string(),
                     length_capped: false,
+                    usage: None,
                 }),
                 Ok(ProducerOutput {
                     text: "<classify></classify>".to_string(),
                     length_capped: false,
+                    usage: None,
                 }),
             ]);
         let (handler, store, _dir, project) =
@@ -30605,6 +30619,68 @@ mod tests {
                 .contains("Write human-readable prose you author in: Turkish (Türkçe).")));
     }
 
+    /// The classify response carries the runner's token spend so the host can record it
+    /// on the invocation row, and omits the field when the runner reported none.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_response_carries_producer_usage() {
+        for usage in [
+            Some(crate::historian_producer::ProducerUsage {
+                input: 14_039,
+                output: 6_125,
+                cache_read: 12,
+                cache_write: 3,
+            }),
+            None,
+        ] {
+            let producer = Arc::new(ProducerState::default());
+            producer
+                .await_results
+                .lock()
+                .expect("await results mutex")
+                .push_back(Ok(ProducerOutput {
+                    text: "<classify></classify>".to_string(),
+                    length_capped: false,
+                    usage,
+                }));
+            let (handler, store, _dir, project) =
+                handler_with_store(Arc::clone(&producer), default_test_config());
+            let route_root = project.to_str().unwrap();
+            handler.bind_route(7, binding(route_root, "ses"));
+            activate_module_authority(&store, "context", "git:identity", route_root, "memories");
+            let generation = store
+                .authority_status("context", "git:identity", "memories")
+                .unwrap()
+                .unwrap()
+                .generation;
+            let outcome = handler
+                .handle_dreamer_run_task(
+                    7,
+                    &json!({
+                        "v": 1,
+                        "session_id": "ses",
+                        "task": CLASSIFY_TASK,
+                        "command_id": "usage-command",
+                        "authority_generation": generation,
+                        "model_chain": ["test/classifier"],
+                        "payload": { "prompt_body": "classify", "items": [] },
+                    }),
+                )
+                .await;
+            let response = match outcome {
+                HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+                other => panic!("dreamer run failed: {other:?}"),
+            };
+            assert_eq!(response["diagnostics"]["model"], json!("test/classifier"));
+            match usage {
+                Some(_) => assert_eq!(
+                    response["usage"],
+                    json!({ "input": 14_039, "output": 6_125, "cache_read": 12, "cache_write": 3 })
+                ),
+                None => assert!(response.get("usage").is_none(), "{response}"),
+            }
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn classify_fallback_attempts_never_share_a_provider_session() {
         // A parked run does not end: it keeps holding its provider session. A second
@@ -30625,6 +30701,7 @@ mod tests {
                 Ok(ProducerOutput {
                     text: "<classify></classify>".to_string(),
                     length_capped: false,
+                    usage: None,
                 }),
             ]);
         let (handler, store, _dir, project) =
@@ -34704,6 +34781,7 @@ mod tests {
                         "A stale snapshot must not publish this fact.",
                     ),
                     length_capped: false,
+                    usage: None,
                 }));
             hook_handler
                 .transform_snapshots
@@ -34811,6 +34889,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: historian_output_with_fact(start, end, "Atomic cleanup race fact."),
                     length_capped: false,
+                    usage: None,
                 }));
             hook_handler
                 .transform_snapshots
@@ -34887,6 +34966,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: historian_output_with_fact(start, end, "Fence race fact."),
                     length_capped: false,
+                    usage: None,
                 }));
             hook_handler
                 .transform_snapshots

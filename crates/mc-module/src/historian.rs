@@ -3041,6 +3041,7 @@ mod tests {
         ProducerOutput {
             text,
             length_capped: false,
+            usage: None,
         }
     }
 
