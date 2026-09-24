@@ -47,7 +47,9 @@ describe("tagMessages steady replay cost", () => {
             initializeDatabase(db);
             runMigrations(db);
 
-            const measure = (count: number): { perMessageMs: number; fallbackLookups: number } => {
+            const measure = (
+                count: number,
+            ): { perMessageCpuMs: number; fallbackLookups: number } => {
                 const sessionId = `ses-perf-${count}`;
                 const tagger = createTagger();
                 tagger.initFromDb(sessionId, db);
@@ -58,15 +60,16 @@ describe("tagMessages steady replay cost", () => {
                 for (let pass = 0; pass < 5; pass += 1) {
                     tagger.initFromDb(sessionId, db);
                     const messages = buildMessages(sessionId, count);
-                    const startedAt = performance.now();
+                    const startedAt = process.cpuUsage();
                     tagMessages(sessionId, messages, tagger, db, {
                         onToolOwnerFallbackLookup: () => {
                             fallbackLookups += 1;
                         },
                     });
-                    samples.push(performance.now() - startedAt);
+                    const elapsed = process.cpuUsage(startedAt);
+                    samples.push((elapsed.user + elapsed.system) / 1000);
                 }
-                return { perMessageMs: median(samples) / count, fallbackLookups };
+                return { perMessageCpuMs: median(samples) / count, fallbackLookups };
             };
 
             const small = measure(200);
@@ -74,13 +77,13 @@ describe("tagMessages steady replay cost", () => {
             expect(small.fallbackLookups).toBe(0);
             expect(large.fallbackLookups).toBe(0);
 
-            const perMessageRatio = large.perMessageMs / small.perMessageMs;
+            const perMessageRatio = large.perMessageCpuMs / small.perMessageCpuMs;
             if (process.env.MC_PERF_GATE === "1") {
                 expect(perMessageRatio).toBeLessThanOrEqual(3);
             } else {
                 console.log(
                     `tagMessages per-message ratio 2000/200=${perMessageRatio.toFixed(2)} ` +
-                        `(small=${small.perMessageMs.toFixed(4)}ms large=${large.perMessageMs.toFixed(4)}ms; perf gate off)`,
+                        `(small=${small.perMessageCpuMs.toFixed(4)} CPU-ms large=${large.perMessageCpuMs.toFixed(4)}ms; perf gate off)`,
                 );
             }
         } finally {
