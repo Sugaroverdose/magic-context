@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionCacheStats } from "../../lib/types";
-import { cacheHarnessOptions, cacheSessionTitle, cacheSessionVisible } from "./CacheDiagnostics";
+import type { DbCacheEvent, SessionCacheStats } from "../../lib/types";
+import {
+  cacheEventPercentage,
+  cacheHarnessOptions,
+  cachePercentage,
+  cacheSessionRatio,
+  cacheSessionTitle,
+  cacheSessionVisible,
+} from "./CacheDiagnostics";
 
 const brocaRow: SessionCacheStats = {
   harness: "broca",
@@ -17,6 +24,57 @@ const brocaRow: SessionCacheStats = {
   is_subagent: false,
   title: "mc-historian:one",
 };
+
+function event(partial: Partial<DbCacheEvent>): DbCacheEvent {
+  return {
+    harness: "broca",
+    message_id: "m",
+    session_id: "s",
+    timestamp: 1,
+    input_tokens: 10,
+    cache_read: 0,
+    cache_write: 0,
+    cache_reported: true,
+    total_tokens: 10,
+    hit_ratio: 0,
+    severity: "full_bust",
+    cause: null,
+    agent: null,
+    turn_id: "t",
+    is_turn_start: false,
+    context_limit: 0,
+    context_limit_estimated: false,
+    is_drop: false,
+    ...partial,
+  };
+}
+
+describe("cache reporting", () => {
+  test("unreported event is neutral without a percentage", () => {
+    expect(cacheEventPercentage(event({ cache_reported: false }))).toBe(
+      "No cached tokens reported",
+    );
+  });
+
+  test("reported zero retains its existing percentage", () => {
+    expect(cacheEventPercentage(event({ cache_reported: true }))).toBe("0.0%");
+  });
+
+  test("mixed session scores only reported events", () => {
+    const ratio = cacheSessionRatio([
+      event({ cache_reported: false, input_tokens: 1000 }),
+      event({ cache_read: 80, input_tokens: 20 }),
+    ]);
+    expect(ratio).toBe(0.8);
+    expect(cachePercentage(ratio)).toBe("80.0%");
+  });
+
+  test("all-unreported session card has neutral text rather than red zero", () => {
+    const ratio = cacheSessionRatio([event({ cache_reported: false })]);
+    expect(ratio).toBeNull();
+    expect(cachePercentage(ratio)).toBe("No cached tokens reported");
+  });
+});
 
 describe("Broca cache sessions", () => {
   test("filter includes Broca and managed session rows keep their title", () => {

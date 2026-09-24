@@ -1225,6 +1225,7 @@ pub struct DbCacheEvent {
     pub input_tokens: i64,
     pub cache_read: i64,
     pub cache_write: i64,
+    pub cache_reported: bool,
     pub total_tokens: i64,
     pub hit_ratio: f64,
     pub severity: String,
@@ -1280,6 +1281,7 @@ pub struct RawDbCacheEvent {
     input_tokens: i64,
     cache_read: i64,
     cache_write: i64,
+    cache_reported: bool,
     total_tokens: i64,
     agent: Option<String>,
     finish: Option<String>,
@@ -1646,6 +1648,7 @@ pub fn load_raw_db_cache_events(
             finish: row.get(8)?,
             native_turn_id: row.get(9)?,
             context_limit: None,
+            cache_reported: true,
         })
     })?;
 
@@ -1710,6 +1713,7 @@ fn load_raw_pi_compatible_cache_events(
                     finish: message.stop_reason.clone(),
                     native_turn_id: None,
                     context_limit: None,
+                    cache_reported: true,
                 })
             })
             .collect();
@@ -1806,6 +1810,7 @@ fn load_raw_external_cache_events(
                     finish: event.finish.clone(),
                     native_turn_id: None,
                     context_limit: event.context_limit,
+                    cache_reported: true,
                 })
             })
             .collect();
@@ -2247,6 +2252,7 @@ fn build_db_cache_events_with_attribution(
             input_tokens: row.input_tokens,
             cache_read: row.cache_read,
             cache_write: row.cache_write,
+            cache_reported: row.cache_reported,
             total_tokens: row.total_tokens,
             hit_ratio,
             severity: String::new(),
@@ -2380,7 +2386,7 @@ fn build_db_cache_events_with_attribution(
         };
 
         let (severity, cause, retention): (String, Option<String>, Option<f64>) =
-            if no_cache_session {
+            if !chronological[i].cache_reported || no_cache_session {
                 ("unknown".to_string(), None, None)
             } else if uses_codex_no_write_model {
                 if is_first_in_window {
@@ -2522,7 +2528,9 @@ fn build_db_cache_events_with_attribution(
             chronological[i].hit_ratio = ret;
         }
 
-        prev_event_idx_by_session.insert(session_key.clone(), i);
+        if chronological[i].cache_reported {
+            prev_event_idx_by_session.insert(session_key.clone(), i);
+        }
         last_finish_by_session.insert(
             session_key,
             chronological[i].finish.clone().unwrap_or_default(),
@@ -2710,7 +2718,9 @@ fn load_broca_cache_events_from_conn(
                 SUM(COALESCE(CAST(json_extract(segment_json, '$.usage.cache_write_tokens') AS INTEGER), 0)),
                 SUM(COALESCE(CAST(json_extract(segment_json, '$.usage.output_tokens') AS INTEGER), 0)),
                 MAX(json_extract(segment_json, '$.provider')),
-                MAX(json_extract(segment_json, '$.model'))
+                MAX(json_extract(segment_json, '$.model')),
+                MAX(json_extract(segment_json, '$.usage.cached_input_tokens') IS NOT NULL
+                    OR json_extract(segment_json, '$.usage.cache_write_tokens') IS NOT NULL)
          FROM export_facts
          WHERE json_extract(segment_json, '$.session') = ?1
          GROUP BY run_id HAVING activity IS NOT NULL AND (?3 IS NULL OR activity >= ?3)
@@ -2749,6 +2759,7 @@ fn load_broca_cache_events_from_conn(
                 finish: None,
                 native_turn_id: Some(run_id),
                 context_limit: None,
+                cache_reported: row.get::<_, i64>(8)? != 0,
             })
         },
     )?;
@@ -3501,6 +3512,7 @@ fn get_opencode_session_cache_events_from_conn(
             finish: row.get(8)?,
             native_turn_id: row.get(9)?,
             context_limit: None,
+            cache_reported: true,
         })
     }) else {
         return Vec::new();
@@ -3539,6 +3551,7 @@ fn get_pi_session_cache_events(
                 finish: message.stop_reason,
                 native_turn_id: None,
                 context_limit: None,
+                cache_reported: true,
             })
         })
         .collect();
@@ -3628,6 +3641,7 @@ fn get_external_session_cache_events(
             finish: event.finish.clone(),
             native_turn_id: None,
             context_limit: event.context_limit,
+            cache_reported: true,
         })
         .collect();
     match since_timestamp {
@@ -8620,6 +8634,7 @@ mod cache_turn_tests {
             finish: finish.map(|s| s.to_string()),
             native_turn_id: None,
             context_limit: None,
+            cache_reported: true,
         }
     }
 
@@ -9986,6 +10001,7 @@ mod get_session_cache_events_by_turn_count_tests {
             input_tokens: 10,
             cache_read: 80,
             cache_write: 10,
+            cache_reported: true,
             total_tokens: 100,
             hit_ratio: 0.8,
             severity: "stable".to_string(),
@@ -10786,6 +10802,80 @@ mod external_cache_incremental_tests {
 #[cfg(test)]
 mod broca_cache_tests {
     use super::*;
+
+    fn broca_cache_presence_fixture() -> Vec<DbCacheEvent> {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE export_facts (run_id TEXT, segment_json TEXT);")
+            .unwrap();
+        let session = r#"{"session":"mc-historian:test"}"#;
+        for (run, timestamp, usage) in [
+            ("unreported", 100, r#"{"input_tokens":10}"#),
+            (
+                "warm",
+                200,
+                r#"{"input_tokens":10,"cached_input_tokens":120}"#,
+            ),
+            (
+                "zero",
+                300,
+                r#"{"input_tokens":10,"cached_input_tokens":0}"#,
+            ),
+        ] {
+            let segment = serde_json::json!({
+                "session": {"session": "mc-historian:test"},
+                "occurred_at_ms": timestamp,
+                "usage": serde_json::from_str::<serde_json::Value>(usage).unwrap(),
+            });
+            conn.execute(
+                "INSERT INTO export_facts VALUES (?1, ?2)",
+                params![run, segment.to_string()],
+            )
+            .unwrap();
+        }
+        let rows = load_broca_cache_events_from_conn(&conn, session, None, None).unwrap();
+        build_db_cache_events(rows, false)
+    }
+
+    #[test]
+    fn broca_missing_cache_fields_are_unreported_and_unknown() {
+        let events = broca_cache_presence_fixture();
+        assert!(!events[0].cache_reported);
+        assert_eq!(events[0].severity, "unknown");
+    }
+
+    #[test]
+    fn broca_reported_zero_cache_read_remains_a_full_bust() {
+        let events = broca_cache_presence_fixture();
+        assert!(events[1].cache_reported);
+        assert!(events[2].cache_reported);
+        assert_eq!(events[2].cache_read, 0);
+        assert_eq!(events[2].severity, "full_bust");
+    }
+
+    #[test]
+    fn non_broca_cache_counts_are_reported() {
+        let event = RawDbCacheEvent {
+            harness: Harness::Opencode,
+            message_id: "m1".to_string(),
+            session_id: "s1".to_string(),
+            timestamp: 100,
+            input_tokens: 10,
+            cache_read: 0,
+            cache_write: 0,
+            cache_reported: true,
+            total_tokens: 10,
+            agent: None,
+            finish: None,
+            native_turn_id: None,
+            context_limit: None,
+        };
+        let events = build_db_cache_events(vec![event], false);
+        assert!(events[0].cache_reported);
+        assert_eq!(
+            serde_json::to_value(&events[0]).unwrap()["cache_reported"],
+            true
+        );
+    }
 
     #[test]
     fn broca_store_is_opened_read_only() {

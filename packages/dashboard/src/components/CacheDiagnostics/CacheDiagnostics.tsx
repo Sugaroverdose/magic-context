@@ -30,6 +30,28 @@ export const cacheHarnessOptions: { value: HarnessFilter; label: string }[] = [
   { value: "codex", label: "Codex" },
 ];
 
+export function cacheSessionRatio(events: DbCacheEvent[]): number | null {
+  let read = 0;
+  let total = 0;
+  let reported = false;
+  for (const event of events) {
+    if (!event.cache_reported) continue;
+    reported = true;
+    read += event.cache_read;
+    total += event.cache_read + event.cache_write + event.input_tokens;
+  }
+  return reported ? (total > 0 ? read / total : 0) : null;
+}
+
+export function cachePercentage(ratio: number | null): string {
+  return ratio === null ? "No cached tokens reported" : `${(ratio * 100).toFixed(1)}%`;
+}
+
+export function cacheEventPercentage(event: DbCacheEvent): string {
+  if (!event.cache_reported) return "No cached tokens reported";
+  return event.severity === "unknown" ? "no cache data" : cachePercentage(event.hit_ratio);
+}
+
 export function cacheSessionTitle(row: SessionCacheStats): string {
   return row.title || truncate(row.session_id, 16);
 }
@@ -377,10 +399,10 @@ export default function CacheDiagnostics() {
   // Cards: per-session stats aggregated over each session's OWN window (never a
   // shared global pool), ordered by the cache stats recency. Reading
   // windowsVersion() makes this re-run when any window changes.
-  const filteredStats = (): CacheSessionStats[] => {
+  const filteredStats = (): (CacheSessionStats & { reportedRatio: number | null })[] => {
     windowsVersion();
     const harness = harnessFilter();
-    const rows: CacheSessionStats[] = [];
+    const rows: (CacheSessionStats & { reportedRatio: number | null })[] = [];
     for (const s of cachedSessions) {
       if (!cacheSessionVisible(s, harness, showUnmanagedSessions(), hideSubagents())) continue;
       const win = cachedWindows.get(windowKey(s.harness, s.session_id));
@@ -397,7 +419,7 @@ export default function CacheDiagnostics() {
         if (e.severity === "bust" || e.severity === "full_bust") busts++;
         if (e.timestamp > lastTs) lastTs = e.timestamp;
       }
-      const total = read + write + input;
+      const reportedRatio = cacheSessionRatio(win.events);
       rows.push({
         harness: s.harness,
         session_id: s.session_id,
@@ -405,7 +427,8 @@ export default function CacheDiagnostics() {
         total_cache_read: read,
         total_cache_write: write,
         total_input: input,
-        hit_ratio: total > 0 ? read / total : 0,
+        hit_ratio: reportedRatio ?? 0,
+        reportedRatio,
         last_timestamp: new Date(lastTs).toISOString(),
         last_activity_ms: lastTs,
         bust_count: busts,
@@ -693,11 +716,14 @@ export default function CacheDiagnostics() {
                       style={{
                         "font-size": "20px",
                         "font-weight": "700",
-                        color: hitColor(stat.hit_ratio),
+                        color:
+                          stat.reportedRatio === null
+                            ? "var(--text-muted)"
+                            : hitColor(stat.hit_ratio),
                         "font-family": "var(--mono-font)",
                       }}
                     >
-                      {(stat.hit_ratio * 100).toFixed(1)}%
+                      {cachePercentage(stat.reportedRatio)}
                     </div>
                     <div class="card-meta" style={{ "margin-top": "4px" }}>
                       <span>{stat.event_count} events</span>
@@ -776,6 +802,7 @@ export default function CacheDiagnostics() {
                   // Retention of the turn's final (shipped) step — hit_ratio now
                   // carries the cross-step retention computed in the backend.
                   const turnRetention = last.hit_ratio;
+                  const unreportedTurn = !last.cache_reported;
                   const isMultiStep = turn.events.length > 1;
                   // Only multi-step turns are expandable. Interactive rows get a real
                   // button role + keyboard activation; single-step rows are purely
@@ -860,10 +887,10 @@ export default function CacheDiagnostics() {
                       </div>
                       <div class="card-meta" style={{ gap: "12px" }}>
                         <Show
-                          when={turn.worstSeverity !== "unknown"}
+                          when={turn.worstSeverity !== "unknown" && !unreportedTurn}
                           fallback={
                             <span class="mono" style={{ color: "var(--text-muted)" }}>
-                              no cache data
+                              {unreportedTurn ? "No cached tokens reported" : "no cache data"}
                             </span>
                           }
                         >
@@ -947,10 +974,10 @@ export default function CacheDiagnostics() {
                                   </div>
                                   <div class="cache-step-meta">
                                     <Show
-                                      when={event.severity !== "unknown"}
+                                      when={event.severity !== "unknown" && event.cache_reported}
                                       fallback={
                                         <span class="mono" style={{ color: "var(--text-muted)" }}>
-                                          no cache data
+                                          {cacheEventPercentage(event)}
                                         </span>
                                       }
                                     >
@@ -962,7 +989,7 @@ export default function CacheDiagnostics() {
                                         }}
                                         title="Cache retention vs the previous step's expected prefix"
                                       >
-                                        {(event.hit_ratio * 100).toFixed(1)}%
+                                        {cacheEventPercentage(event)}
                                       </span>
                                     </Show>
                                     <span class="mono">
