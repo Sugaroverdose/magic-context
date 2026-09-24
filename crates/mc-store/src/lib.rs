@@ -10894,6 +10894,7 @@ impl McStore {
                 }
             };
             let initialized_before_sync = meta.initialized;
+            let mut adopted_over_materialized_boundary = false;
 
             if !request.compartments.is_empty()
                 && meta.historian.state != HistorianPhase::Idle
@@ -10923,16 +10924,58 @@ impl McStore {
                         })
                     }
                 };
-                if meta.initialized {
-                    // A force seed is process-local cold-start behavior, but this cache state is
-                    // durable. Re-adopting a lagging TypeScript mirror would move only the trim
-                    // cursor while retaining the module's newer m0/m1 bytes, so the next defer
-                    // would silently re-emit the already-folded interval as raw tail messages.
+                // An initialized row already has a materialized boundary. Which side wins
+                // depends on whose coverage ends later:
+                // - Seed at or behind the module's coverage: the TypeScript mirror is lagging
+                //   (for example a second adapter process force-seeding a stale mirror).
+                //   Adopting it would move only the trim cursor back while the module's newer
+                //   m0/m1 bytes stay, so the next defer would re-emit the already-folded
+                //   interval as raw tail messages. The module keeps its boundary.
+                // - Seed strictly after the module's coverage: the session ran under
+                //   TypeScript authority after its last Rust pass and the host folded further.
+                //   OpenCode's compaction marker has usually cut the module's old boundary out
+                //   of the live array, so keeping it would arm `pending_rewrite` and serve
+                //   every later pass raw with no way back. The seed is adopted like a bootstrap
+                //   seed: `bootstrap_seed_fold_pending` makes the next transform pass fold once
+                //   from the adopted coverage, and later defers replay that fold.
+                // "The module's coverage" includes compartments the module historian has already
+                // published but not yet folded. A mirror of those is not ahead of the module:
+                // the module folds them itself on a priced pass, so a restarted adapter's seed
+                // must not force that fold early onto a pass the scheduler would defer.
+                // A row with no folded coverage (compaction off, or nothing folded yet) has no
+                // boundary to strand, so it keeps its state as before.
+                let seed_ahead_of_module = meta.initialized
+                    && match meta.coverage_ordinal {
+                        Some(folded_end) => {
+                            let published_end: Option<i64> = tx.query_row(
+                                "SELECT MAX(end_message) FROM mc_compartments WHERE session_id = ?1",
+                                params![request.session_id],
+                                |row| row.get(0),
+                            )?;
+                            let module_end = published_end
+                                .and_then(|end| u64::try_from(end).ok())
+                                .map_or(folded_end, |end| end.max(folded_end));
+                            adoption.coverage_end_ordinal > module_end
+                        }
+                        None => false,
+                    };
+                if meta.initialized && !seed_ahead_of_module {
                     eprintln!(
-                        "mc-store: retained materialized boundary {:?} over state-sync seed {:?} for session {}",
+                        "mc-store: retained materialized boundary {:?} over state-sync seed {:?} at or behind it for session {}",
                         core.boundary_id, adoption.boundary_id, request.session_id
                     );
                 } else {
+                    if seed_ahead_of_module {
+                        eprintln!(
+                            "mc-store: adopted state-sync seed {:?} (coverage end {}) over older materialized boundary {:?} (coverage end {:?}) for session {}",
+                            adoption.boundary_id,
+                            adoption.coverage_end_ordinal,
+                            core.boundary_id,
+                            meta.coverage_ordinal,
+                            request.session_id
+                        );
+                        adopted_over_materialized_boundary = true;
+                    }
                     core.boundary_id = adoption.boundary_id;
                     core.reconcile_pending = false;
                     meta.coverage_ordinal = Some(adoption.coverage_end_ordinal);
@@ -11024,7 +11067,9 @@ impl McStore {
 
             let mut compartment_overwrites_skipped = 0usize;
             for compartment in request.compartments {
-                if initialized_before_sync {
+                // After adopting a newer seed the host's compartments define the coverage the
+                // next fold renders, so they replace the module's older rows by sequence.
+                if initialized_before_sync && !adopted_over_materialized_boundary {
                     let retained_sequence = meta.folded_compartment_seq;
                     if compartment.sequence <= retained_sequence
                         || !write_seed_compartment_tx(
