@@ -3617,8 +3617,8 @@ fn apply_once(
         fold_mural_content_identity(&effective_render_config_base, &persisted_mural_hash);
     // The store namespace exists before snapshots and tags load, so tag decisions can commit
     // atomically with cache state. New and previously inactive sessions therefore emit their full
-    // requested tag surface during the HARD that changes render configuration. Subagents use the
-    // same first-render path because they do not emit a module-composed provider prefix.
+    // requested tag surface during the HARD that changes render configuration. Subagents instead
+    // select a Soft pass for a surface flip, without a module-composed prefix.
     let bootstrap_tagging_active = !loaded.meta.initialized;
     let suppress_bootstrap_reduction_tag_overlay = bootstrap_tagging_active
         && serializer_profile == Some(SerializerProfile::ClaudeCodeAnthropic);
@@ -4565,10 +4565,16 @@ fn apply_once(
     }
     timings.decide += elapsed_ms(classify_started_at);
     if req.is_subagent {
-        plan = if matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer) {
-            PassPlan::Defer
-        } else {
+        // Activating or disabling the tag surface changes the render identity itself.
+        // Spend that one intentional rewrite now, so old blocks do not acquire tags
+        // piecemeal during later defers. Ordinary late mints still wait for an
+        // independent Soft pass selected by the scheduler.
+        plan = if surface_transition
+            || !matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer)
+        {
             PassPlan::Soft
+        } else {
+            PassPlan::Defer
         };
     } else if lineage_state.force_hard {
         plan = PassPlan::Hard;
@@ -29886,7 +29892,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn subagent_defer_holds_a_late_tool_result_tag() {
+    fn subagent_surface_activation_tags_served_tool_result_once() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let mut request = opencode_req(
@@ -29905,16 +29911,24 @@ pub(crate) mod tests {
         let first = run(&s, &request, &spine());
         let served = serde_json::to_vec(first.messages()).unwrap();
         request.tool_present = true;
-        let defer = run(&s, &request, &spine());
-        assert_eq!(defer.action, "SOFT+");
-        assert_eq!(serde_json::to_vec(defer.messages()).unwrap(), served);
+        let activation = run(&s, &request, &spine());
+        assert_eq!(activation.action, "SOFT");
+        assert_ne!(serde_json::to_vec(activation.messages()).unwrap(), served);
+        assert!(serde_json::to_string(activation.messages())
+            .unwrap()
+            .contains("§1§ served tool output"));
         assert!(s
             .load("subagent-late-tool-result")
             .unwrap()
             .meta
             .pending_tag_block_ids
-            .iter()
-            .any(|id| id.starts_with("result#")));
+            .is_empty());
+        let replay = run(&s, &request, &spine());
+        assert_eq!(replay.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_vec(replay.messages()).unwrap(),
+            serde_json::to_vec(activation.messages()).unwrap()
+        );
     }
 
     #[test]
@@ -29955,12 +29969,17 @@ pub(crate) mod tests {
             Some("completed answer")
         );
 
+        for ordinal in 3..65 {
+            request.messages.push(wire_item(
+                "user",
+                &format!("history-{ordinal}"),
+                ordinal,
+                &["completed work"],
+            ));
+        }
         request
             .messages
-            .push(wire_item("user", "next-prompt", 3, &["continue"]));
-        request
-            .messages
-            .push(reasoning_item("newer", 4, "next thought", "new answer"));
+            .push(reasoning_item("newer", 65, "next thought", "new answer"));
         let defer = run(&s, &request, &spine());
         assert_eq!(defer.action, "SOFT+");
         assert_eq!(

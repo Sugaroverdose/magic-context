@@ -132,8 +132,8 @@ fn subagent_flip_defers_served_tags_and_tags_new_tail_on_first_sight() {
     let before = run(&store, &request);
     request.tool_present = true;
     let transition = run(&store, &request);
-    // The surface flip alone does not grant a bust for previously served content.
-    // A new tail message can still be tagged on first sight during a defer pass.
+    // The surface flip spends one intentional Soft pass tagging previously served
+    // content; a new tail message is still tagged on first sight on a later defer.
     let mut raw = serde_json::to_value(&request).unwrap();
     raw["messages"].as_array_mut().unwrap().push(json!({
         "mid": "m9", "ordinal": 9,
@@ -145,13 +145,13 @@ fn subagent_flip_defers_served_tags_and_tags_new_tail_on_first_sight() {
     let replay = run(&store, &grown);
     assert!(!store.load("review").unwrap().meta.initialized);
     assert_eq!(before.action, "SOFT+");
-    assert_eq!(transition.action, "SOFT+");
+    assert_eq!(transition.action, "SOFT");
     assert!(!tagged(&before));
-    assert!(!tagged(&transition));
+    assert!(tagged(&transition));
     assert_eq!(first_sight.action, "SOFT+");
     let wire = String::from_utf8(bytes(&first_sight)).unwrap();
     assert!(wire.contains("§9§ <!-- +10m -->"));
-    assert!(!wire.contains("§1§ message 1"));
+    assert!(wire.contains("§1§ message 1"));
     assert_eq!(replay.action, "SOFT+");
     assert_eq!(bytes(&first_sight), bytes(&replay));
 }
