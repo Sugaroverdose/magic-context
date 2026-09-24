@@ -209,6 +209,7 @@ Off-hours maintenance through Dreamer.
 | `dreamer.tasks.retrospective.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
 | `dreamer.tasks.retrospective.recency_days` **Live** | integer (1–3650) | `30` | retrospective: collect source messages from only the most recent N days |
 | `dreamer.tasks.maintain-docs.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.maintain-docs.max_tokens` | integer (–9007199254740991) | `12000` | Maximum combined token count of proposed ARCHITECTURE.md and STRUCTURE.md |
 | `dreamer.tasks.evaluate-smart-notes.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
 | `dreamer.tasks.review-user-memories.schedule` **Live** | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
 | `dreamer.tasks.review-user-memories.promotion_threshold` **Live** | number (2–20) | — | review-user-memories: min candidate observations before promotion is considered (default: 3) |

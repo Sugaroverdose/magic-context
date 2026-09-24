@@ -8,6 +8,7 @@
  * installation and native context/memory conflict handling.
  */
 import type { HarnessAdapter } from "../adapters/types";
+import { ensureDocsProposalGitignore } from "../lib/docs-proposal-gitignore";
 import { resolveAdaptersForCommand } from "../lib/harness-select";
 import { intro, log, note, outro } from "../lib/prompts";
 import { runSetup as runOmpSetup } from "./setup-omp";
@@ -49,7 +50,10 @@ export async function runSetup(argv: string[]): Promise<number> {
             anyFailure = true;
             continue;
         }
-        if (!dryRun) printNextSteps(adapter);
+        if (!dryRun) {
+            ensureDocsProposalGitignore(process.cwd());
+            printNextSteps(adapter);
+        }
     }
 
     if (anyFailure) {

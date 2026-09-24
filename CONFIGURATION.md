@@ -39,6 +39,7 @@ Keys listed below apply from the next historian or dreamer run (or dream-timer t
 - `dreamer.tasks.curate.schedule`
 - `dreamer.tasks.evaluate-smart-notes.schedule`
 - `dreamer.tasks.maintain-docs.schedule`
+- `dreamer.tasks.maintain-docs.max_tokens` (default 12000; combined proposed docs budget)
 - `dreamer.tasks.map-memories.schedule`
 - `dreamer.tasks.promote-primers.promotion_threshold`
 - `dreamer.tasks.promote-primers.schedule`
@@ -657,7 +658,7 @@ To disable the dreamer entirely, set `dreamer.disable: true`. To disable a singl
 | `curate` | `0 4 * * 0` | Curate the whole active memory pool: consolidate duplicates, tighten wording, and archive low-value or redundant entries. |
 | `classify-memories` | `0 6 * * *` | Score memory importance, scope, and shareability so recall stays focused. |
 | `retrospective` | `0 5 * * *` | Learn from moments you had to correct or re-explain, and record the durable lesson. |
-| `maintain-docs` | `""` (off) | Keep `ARCHITECTURE.md` and `STRUCTURE.md` at project root synchronized with the codebase. |
+| `maintain-docs` | `""` (off) | Propose section corrections for `ARCHITECTURE.md` and `STRUCTURE.md` without editing either file. |
 | `promote-primers` | `0 3 * * *` | Promote recurring standing questions the historian noticed into durable primers. |
 | `refresh-primers` | `0 3 * * *` | Re-investigate stale primers against current code and refresh their answers. |
 | `evaluate-smart-notes` | `0 3 * * *` | Surface smart notes whose `ctx_note` conditions have come true. |

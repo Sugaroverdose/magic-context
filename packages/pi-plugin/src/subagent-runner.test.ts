@@ -1077,7 +1077,7 @@ describe("subagent-runner pure helpers", () => {
 		expect(args).not.toContain("--tools");
 	});
 
-	it("locks dreamer-docs to file tools plus optional AFT read tools, with no ctx_memory and no extension", () => {
+	it("locks dreamer-docs to read-only file tools and optional AFT reads", () => {
 		const args = buildArgsForTest({
 			...baseOptions,
 			agent: "dreamer-docs",
@@ -1086,11 +1086,10 @@ describe("subagent-runner pure helpers", () => {
 		const idx = args.indexOf("--tools");
 		expect(idx).toBeGreaterThan(-1);
 		expect(args[idx + 1]).toBe(
-			"read,grep,find,ls,bash,write,edit,aft_outline,aft_zoom,aft_search",
+			"read,grep,find,ls,aft_outline,aft_zoom,aft_search",
 		);
 		expect(args).not.toContain("--no-tools");
-		// Edits docs, never the memory store: no ctx_memory, and the lean extension
-		// (which would register it) is not loaded for this agent.
+		// No shell, writing, memory tools or extension are available.
 		expect(args[idx + 1]).not.toContain("ctx_memory");
 		expect(args).not.toContain("--magic-context-dreamer-actions");
 	});

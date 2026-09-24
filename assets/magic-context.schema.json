@@ -1693,7 +1693,8 @@
               "recency_days": 30
             },
             "maintain-docs": {
-              "schedule": ""
+              "schedule": "",
+              "max_tokens": 12000
             },
             "evaluate-smart-notes": {
               "schedule": "0 3 * * *"
@@ -1828,7 +1829,8 @@
             },
             "maintain-docs": {
               "default": {
-                "schedule": ""
+                "schedule": "",
+                "max_tokens": 12000
               },
               "type": "object",
               "properties": {
@@ -1837,6 +1839,13 @@
                   "x-mc-live-reload": true,
                   "type": "string",
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
+                },
+                "max_tokens": {
+                  "default": 12000,
+                  "description": "Maximum combined token count of proposed ARCHITECTURE.md and STRUCTURE.md",
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
                 }
               },
               "additionalProperties": false

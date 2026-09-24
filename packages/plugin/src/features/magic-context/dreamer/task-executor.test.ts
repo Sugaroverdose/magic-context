@@ -1059,7 +1059,7 @@ describe("createDreamTaskExecutor — verify-broad disposition", () => {
 });
 
 describe("createDreamTaskExecutor — parent session resolution", () => {
-    test("concurrent task runs all create children under the resolved parentID (no race-NULL)", async () => {
+    test("concurrent tasks share parent resolution while docs without a git repo skip model invocation", async () => {
         db = freshDb();
         const project = "/repo/project";
         for (let i = 0; i < 3; i += 1) {
@@ -1113,10 +1113,10 @@ describe("createDreamTaskExecutor — parent session resolution", () => {
             ),
         ]);
 
-        // The list runs once (shared promise), and BOTH children carry the real
-        // parent — none created with an undefined parentID.
+        // Without a Git repository, maintain-docs skips its child session;
+        // curation still receives the resolved parent session.
         expect(listCalls).toBe(1);
-        expect(createParentIds.length).toBe(2);
+        expect(createParentIds.length).toBe(1);
         expect(createParentIds.every((id) => id === "real-parent-session")).toBe(true);
     });
 });

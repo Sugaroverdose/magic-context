@@ -36,6 +36,11 @@ export function buildDreamTaskRuntimeConfigs(
             language,
             timeoutMinutes: resolved.timeoutMinutes ?? 20,
             promotionThreshold: resolved.promotionThreshold,
+            docsMaxTokens:
+                task === "maintain-docs"
+                    ? ((dreamer as DreamerConfig | undefined)?.tasks?.["maintain-docs"]
+                          ?.max_tokens ?? 12000)
+                    : undefined,
             retrospectiveRecencyDays:
                 task === "retrospective"
                     ? ((dreamer as DreamerConfig | undefined)?.tasks?.retrospective?.recency_days ??

@@ -126,23 +126,11 @@ export function buildHiddenAgentRegistrations(args: {
             hidden: true,
             description: HIDDEN_AGENT_DESCRIPTION,
             prompt: args.dreamerPrompt,
-            // maintain-docs: explore code + write/edit ARCHITECTURE.md/STRUCTURE.md
-            // + bash (git log, find). NO ctx_memory/ctx_search/ctx_note — it edits
-            // docs, never the memory store. (Inline literal — kept byte-identical to
-            // DREAMER_DOCS_ALLOWED_TOOLS by agent-registration-drift.test.ts.)
-            allowedTools: [
-                "read",
-                "grep",
-                "glob",
-                "bash",
-                "write",
-                "edit",
-                "aft_outline",
-                "aft_zoom",
-                "aft_search",
-            ],
-            // Docs maintenance reads the tree and writes two files — a bounded loop,
-            // not the whole-pool 150.
+            // Documentation proposals may inspect source files but cannot mutate them.
+            // Keep this list synchronized with DREAMER_DOCS_ALLOWED_TOOLS and locked against overrides.
+            allowedTools: ["read", "grep", "glob", "aft_outline", "aft_zoom", "aft_search"],
+            // Documentation investigation reads the repository tree in a bounded loop,
+            // unlike whole-memory-pool tasks with a 150-step limit.
             maxSteps: 60,
             overrides: args.dreamerOverrides,
             // Lock so a user override can't add the memory surface back.
