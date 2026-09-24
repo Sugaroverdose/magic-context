@@ -43,7 +43,7 @@ Magic Context rewrites the message array and system prompt the host is about to 
 
 ## Transform modes
 
-The transform runs in TypeScript by default. With `transform_mode: "rust"` (experimental, OpenCode 1 only), the TypeScript layer becomes a coordinator: it syncs state to the module, sends each pass over subc, and serves the module's output. If the module fails, it replays the last known good output for the session (`lkg-slot.ts`, `lkg-replay.ts`) so the cached prefix survives the fault, and refuses the turn rather than send an unmanaged prompt when it cannot.
+The transform runs in TypeScript by default. With `transform_mode: "rust"` (experimental; OpenCode 1 only, and only when subc is configured at user level; otherwise it falls back to TypeScript), the TypeScript layer becomes a coordinator: it syncs state to the module, sends each pass over subc, and serves the module's output. If the module fails, it replays the last known good output for the session (`lkg-slot.ts`, `lkg-replay.ts`) so the cached prefix survives the fault, and refuses the turn rather than send an unmanaged prompt when it cannot.
 
 <!-- mc:protected START — hand-authored cache-stability core. The dreamer's maintain-docs task MUST NOT edit, reword, reorder, trim, or drop anything between mc:protected START and mc:protected END; carry it forward byte-for-byte on any rewrite. Only a human edits this region, deliberately. -->
 
@@ -125,7 +125,7 @@ Memories are project-scoped facts in five categories (project rules, architectur
 
 ## Dreamer
 
-A process-wide timer checks each task's cron schedule and runs due tasks in their own child sessions, one at a time per conflict domain (all memory-changing tasks share one lease). Tasks: map memories to the files that back them, verify them against code, curate, classify, learn from user friction (retrospective), maintain docs, promote and refresh primers, evaluate smart notes, review user memories, render the memory mural. Background writes never force a cache bust; they appear on the next natural rebuild. A failed task retries; a run's failure class and provider error are recorded and shown in `/ctx-status`.
+A process-wide timer checks each task's cron schedule and runs due tasks in their own child sessions, one at a time per conflict domain (all memory-changing tasks share one lease). Tasks: map memories to the files that back them, verify them against code, curate, classify, learn from user friction (retrospective), maintain docs, promote and refresh primers, evaluate smart notes, review user memories, compress memory cues for the mural (the mural itself is rendered on demand, not by a dreamer task). Background writes never force a cache bust; they appear on the next natural rebuild. A failed task retries; a run's failure class and provider error are recorded and shown in `/ctx-status`.
 
 ## Storage
 
