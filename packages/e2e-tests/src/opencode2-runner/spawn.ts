@@ -223,6 +223,7 @@ export interface OpenCode2SpawnOptions {
 	providerID?: string;
 	probeStandalone?: boolean;
 	defaultModelID?: string;
+    visionModel?: boolean;
 	additionalModelIDs?: string[];
 	mockResponse?: MockResponse;
 	extraConfig?: Record<string, unknown>;
@@ -294,6 +295,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 							id,
 							{
 								name: id,
+                                ...(options.visionModel ? { modalities: { input: ["text", "image"], output: ["text"] } } : {}),
 								limit: {
 									// 2.0.5 required() is unchanged, but 16k minus a 32k output
 									// makes the first-request ceiling negative. Ordinary turns

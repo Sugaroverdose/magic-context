@@ -26,6 +26,7 @@ async function until(check: () => boolean, label: string): Promise<void> {
 
 test("a real todowrite call projects a synthetic reminder on priced and cached OC2 passes", async () => {
     const fixture = isolation();
+    fixture.env.MAGIC_CONTEXT_LOG_PATH = join(fixture.root, "todo-transform.log");
     const probe = join(fixture.root, "native-todowrite");
     mkdirSync(probe);
     // AFT-like extra tool: OpenCode 2 does not ship its own native todowrite.
@@ -75,6 +76,16 @@ test("a real todowrite call projects a synthetic reminder on priced and cached O
         await until(() => todoState(contextPath, session.id).includes("Finish the fixture"), "persisted todowrite state");
         await host.stopHost();
         host = undefined;
+        const stateDb = new Database(contextPath);
+        try {
+            const row = stateDb.prepare("SELECT cached_m0_upgrade_state AS upgrade FROM session_meta WHERE session_id = ?")
+                .get(session.id) as { upgrade: string | null } | undefined;
+            if (!row?.upgrade || !/\|mural-enabled:[01]/.test(row.upgrade))
+                throw new Error("initial fold did not persist a render configuration");
+            stateDb.prepare("UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?")
+                .run(row.upgrade.replace(/\|mural-enabled:([01])/, (_, value: string) =>
+                    `|mural-enabled:${value === "0" ? "1" : "0"}`), session.id);
+        } finally { stateDb.close(); }
         host = await spawnOpencode2({ ...options,
             magicContextConfig: { ...options.magicContextConfig, memory: { enabled: true } } });
         client = OpenCode.make({ baseUrl: host.url,
@@ -82,11 +93,15 @@ test("a real todowrite call projects a synthetic reminder on priced and cached O
         await waitForPluginActive(client, fixture.cwd);
         await client.session.prompt({ sessionID: session.id, text: "use the todo reminder" });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
-        const pricedDb = new Database(contextPath, { readonly: true, fileMustExist: true });
-        const anchor = pricedDb.prepare("SELECT todo_synthetic_call_id AS callId FROM session_meta WHERE session_id = ?")
-            .get(session.id) as { callId: string } | undefined;
-        pricedDb.close();
-        expect(anchor?.callId).toMatch(/^mc_synthetic_todo_[0-9a-f]{16}$/);
+        let callID = "";
+        await until(() => {
+            const pricedDb = new Database(contextPath, { readonly: true, fileMustExist: true });
+            try {
+                callID = (pricedDb.prepare("SELECT todo_synthetic_call_id AS callId FROM session_meta WHERE session_id = ?")
+                    .get(session.id) as { callId: string } | undefined)?.callId ?? "";
+                return /^mc_synthetic_todo_[0-9a-f]{16}$/.test(callID);
+            } finally { pricedDb.close(); }
+        }, "persisted synthetic todo anchor on the priced pass");
         await client.session.prompt({ sessionID: session.id, text: "replay the todo reminder" });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
         const schemaTrace = readFileSync(join(fixture.root, "llm-schema-guard.jsonl"), "utf8");

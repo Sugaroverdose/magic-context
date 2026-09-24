@@ -571,6 +571,14 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/mural-media-schema.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "The real OpenCode 2 host replays a persisted vision mural and validates m0 media against its own LLM schema",
+            "contract_refs": ["S2-MIGRATION", "OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/synthetic-todo-schema.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
