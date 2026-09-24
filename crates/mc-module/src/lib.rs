@@ -5026,7 +5026,35 @@ impl McHandler {
                 .lock()
                 .expect("prompt surface epoch mutex")
                 .remove(&session);
+            self.evict_session_lineage_caches(&session);
         }
+    }
+
+    /// Retention bound for the per-session lineage caches `transform_session_roots` and
+    /// `guidance_dates`: an entry lives only while the session has a bound route, and is
+    /// evicted when its last route closes (`unbind_route`). `session.delete` also evicts the
+    /// guidance date, and the root entry when no route is still bound. Without this both
+    /// maps grow with every session the process has ever served.
+    ///
+    /// Evicting cannot change served bytes for a returning session, because each map is a
+    /// process-local copy of something the store already holds, and the rebuild is the same
+    /// one a module restart performs:
+    /// - `transform_session_roots` caches the durable `mc_transform_session_roots` proof.
+    ///   `module_knows_transform_session` re-reads that row (plus the cache-state row) on a
+    ///   miss and re-caches it, and a new transform on the session re-inserts its root.
+    /// - `guidance_dates` holds a date line only until it is persisted in the session's
+    ///   `ModuleMeta::guidance_date` (or the first committed transform). A persisted date is
+    ///   always read from the store first, so only a session with no durable row loses its
+    ///   in-memory line, exactly as it would across a restart.
+    fn evict_session_lineage_caches(&self, session_id: &str) {
+        self.transform_session_roots
+            .lock()
+            .expect("transform session roots mutex")
+            .remove(session_id);
+        self.guidance_dates
+            .lock()
+            .expect("guidance date mutex")
+            .remove(session_id);
     }
 
     /// Resolve the binding for a transform request on `channel`, FAIL-LOUD: the channel
@@ -7295,6 +7323,23 @@ impl McHandler {
                     .lock()
                     .expect("recomp sessions mutex")
                     .remove(&session_id);
+                // The delete removed the durable rows the lineage caches mirror. While a route
+                // is still bound, its in-memory root is the only lineage proof left for facade
+                // calls on that route, so it stays until `unbind_route` evicts it.
+                let still_bound = self
+                    .bindings
+                    .lock()
+                    .expect("bindings mutex")
+                    .values()
+                    .any(|candidate| candidate.session == session_id);
+                if still_bound {
+                    self.guidance_dates
+                        .lock()
+                        .expect("guidance date mutex")
+                        .remove(&session_id);
+                } else {
+                    self.evict_session_lineage_caches(&session_id);
+                }
                 respond(json!({ "ok": true, "deleted_rows": deleted_rows }))
             }
             Err(error) => HandlerOutcome::Error {
@@ -38090,6 +38135,105 @@ mod tests {
         assert_eq!(replay["scheduler_decision"], json!("defer"), "{replay}");
         assert_eq!(replay["decision"], json!("SOFT+"));
         assert_eq!(replay["ck_messages"], folded["ck_messages"]);
+    }
+
+    fn lineage_cache_sizes(handler: &McHandler) -> (usize, usize) {
+        (
+            handler.transform_session_roots.lock().unwrap().len(),
+            handler.guidance_dates.lock().unwrap().len(),
+        )
+    }
+
+    #[tokio::test]
+    async fn session_lineage_caches_are_evicted_when_the_last_route_closes() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let root = project.to_str().unwrap();
+        handler.unbind_route(7);
+        let live = vec![ck("m0", 0, "zero"), ck("m1", 1, "one")];
+        let mut first_bytes = BTreeMap::new();
+        for index in 0..40u16 {
+            let session = format!("ses-{index}");
+            let channel = 100 + index;
+            handler.bind_route(channel, binding(root, &session));
+            let mut req = request(live.clone());
+            req["session_id"] = json!(session);
+            let served = call_transform_request_on_channel(&handler, channel, req).await;
+            assert_eq!(served["action"], "HARD", "{served}");
+            first_bytes.insert(session.clone(), served["ck_messages"].clone());
+            // A guidance read for a session with no durable row keeps its date in memory.
+            handler
+                .guidance_date_for_session(&store, &format!("guidance-only-{index}"))
+                .unwrap();
+        }
+        assert_eq!(lineage_cache_sizes(&handler).0, 40);
+        assert_eq!(lineage_cache_sizes(&handler).1, 40);
+
+        // A second route on the same session keeps its entries until the last one closes.
+        handler.bind_route(99, binding(root, "ses-0"));
+        for index in 0..40u16 {
+            handler.unbind_route(100 + index);
+        }
+        assert!(handler
+            .transform_session_roots
+            .lock()
+            .unwrap()
+            .contains_key("ses-0"));
+        handler.unbind_route(99);
+        assert_eq!(lineage_cache_sizes(&handler).0, 0);
+        // Guidance-only sessions never had a route, so they are bounded by deletion instead.
+        for index in 0..40u16 {
+            let session = format!("guidance-only-{index}");
+            handler.bind_route(7, binding(root, &session));
+            let deleted = call_dispatch_request(
+                &handler,
+                json!({ "method": "session.delete", "v": 1, "session_id": session }),
+            )
+            .await;
+            assert_eq!(deleted["ok"], json!(true), "{deleted}");
+            handler.unbind_route(7);
+        }
+        assert_eq!(lineage_cache_sizes(&handler), (0, 0));
+
+        // A returning session rebuilds its lineage from the store, as after a restart, and
+        // replays the same bytes it served before it left.
+        for index in [0u16, 17, 39] {
+            let session = format!("ses-{index}");
+            assert!(handler.module_knows_transform_session(&session, &project));
+            handler.bind_route(7, binding(root, &session));
+            let mut req = request_with_usage(live.clone(), 1_000, 50_000);
+            req["session_id"] = json!(session);
+            let replay = call_transform_request_on_channel(&handler, 7, req).await;
+            assert_eq!(replay["decision"], json!("SOFT+"), "{replay}");
+            assert_eq!(replay["ck_messages"], first_bytes[&session]);
+            handler.unbind_route(7);
+        }
+        assert_eq!(lineage_cache_sizes(&handler), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn session_delete_evicts_guidance_date_and_defers_root_to_route_close() {
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let served = call_transform_request(&handler, request(vec![ck("m0", 0, "zero")])).await;
+        assert_eq!(served["action"], "HARD");
+        handler.guidance_dates.lock().unwrap().insert(
+            "ses".to_string(),
+            "Today's date: Thu Sep 24 2026".to_string(),
+        );
+        assert_eq!(lineage_cache_sizes(&handler), (1, 1));
+        let deleted = call_dispatch_request(
+            &handler,
+            json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+        )
+        .await;
+        assert_eq!(deleted["ok"], json!(true), "{deleted}");
+        // The live route keeps authenticating its own lineage after the delete; the root
+        // entry goes when that route closes.
+        assert_eq!(lineage_cache_sizes(&handler), (1, 0));
+        assert!(handler.module_knows_transform_session("ses", &project));
+        handler.unbind_route(7);
+        assert_eq!(lineage_cache_sizes(&handler), (0, 0));
     }
 
     #[tokio::test]
