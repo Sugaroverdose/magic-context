@@ -38,6 +38,8 @@ export interface TestHarnessOptions {
     expectMagicContext?: boolean;
     /** Debug harnesses may boot the plugin with hooks configured off while retaining diagnostics. */
     expectedMagicContextState?: "enabled" | "configured-disabled" | "conflict-disabled";
+    /** Leave schema initialization to an older released plugin during compatibility probes. */
+    prepareContextDatabase?: boolean;
     /**
      * Default response used when the mock queue is empty. Lets tests send extra
      * prompts without worrying about scripting every one.
@@ -146,7 +148,7 @@ export class TestHarness implements HostHarness {
             openCodeGlobalConfigExtra: options.openCodeGlobalConfigExtra,
             omitConfigDirCompaction: options.omitConfigDirCompaction,
             modelContextLimit: options.modelContextLimit,
-            prepareContextDatabase: expectMagicContext,
+            prepareContextDatabase: options.prepareContextDatabase ?? expectMagicContext,
             expectedMagicContextState,
         };
         let opencode: SpawnedOpencode | undefined;

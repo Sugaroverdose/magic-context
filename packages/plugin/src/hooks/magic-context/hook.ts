@@ -129,7 +129,7 @@ import {
 import type { LiveSessionState } from "./live-session-state";
 import {
     type NotificationParams,
-    sendIgnoredMessage,
+    sendCommandResult,
     sendStatusNotification,
 } from "./send-session-notification";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
@@ -1326,7 +1326,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         pauseEmbedDrain,
         getEmbedStatusText,
         sendNotification: async (sessionId, text, params) => {
-            await sendIgnoredMessage(deps.client, sessionId, text, {
+            await sendCommandResult(deps.client, sessionId, text, {
                 ...getLiveNotificationParams(
                     sessionId,
                     liveModelBySession,
