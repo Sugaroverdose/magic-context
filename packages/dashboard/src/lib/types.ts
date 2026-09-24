@@ -476,6 +476,7 @@ export interface DbCacheEvent {
   input_tokens: number;
   cache_read: number;
   cache_write: number;
+  cache_reported: boolean;
   total_tokens: number;
   hit_ratio: number;
   severity: "stable" | "info" | "warning" | "bust" | "full_bust" | "warming" | "unknown";

@@ -16,6 +16,7 @@ function ev(partial: Partial<DbCacheEvent>): DbCacheEvent {
     input_tokens: 0,
     cache_read: 0,
     cache_write: 0,
+    cache_reported: true,
     total_tokens: 0,
     hit_ratio: 0,
     severity: "stable",
