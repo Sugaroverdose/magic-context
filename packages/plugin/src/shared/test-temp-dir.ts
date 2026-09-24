@@ -39,6 +39,9 @@ export const TEST_TEMP_DIR_PREFIXES = [
     "magic-context-pi-latch-test-",
     "magic-context-pi-index-test-",
     "mc-test-temp-dir-helper-",
+    "mc-v2-surface-",
+    // Created by the NODE_ENV=test storage backstop in data-path.ts.
+    "mc-test-db-backstop-",
 ] as const;
 
 export type TestTempDirPrefix = (typeof TEST_TEMP_DIR_PREFIXES)[number];

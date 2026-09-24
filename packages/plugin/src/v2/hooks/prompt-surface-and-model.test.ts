@@ -1,13 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
     ACTIVE_TOOL_IDS,
     createPromptSurfaceRuntime,
     LIGHT_TOOL_DESCRIPTIONS,
 } from "../../shared/prompt-surface-runtime";
+import { createTestTempDir } from "../../shared/test-temp-dir";
 import { applyV2PromptSurfaceTools, catalogModels, createHostSeams } from "./context";
 import type { SessionContext, V2Context } from "./types";
 
@@ -33,7 +33,8 @@ function draft(modelID: string): SessionContext {
 describe("v2 per-model tool surface", () => {
     it("is byte-identical across three same-model passes and follows a model switch", () => {
         const runtime = createPromptSurfaceRuntime({
-            userConfigDirectory: mkdtempSync(join(tmpdir(), "mc-v2-surface-")),
+            // Registered, so the test preload removes it when the suite ends.
+            userConfigDirectory: createTestTempDir("mc-v2-surface-").dir,
             warn: () => undefined,
         });
         const config = {

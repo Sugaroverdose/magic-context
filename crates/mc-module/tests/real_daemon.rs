@@ -109,6 +109,15 @@ async fn mc_transform_spine_through_real_daemon() {
     let runtime_dir = temp.join("runtime");
     let config_dir = temp.join("config");
     let data_home = temp.join("data"); // store lands here (dev_descriptor → XDG_DATA_HOME)
+
+    // Project roots live under the temp root so they are removed with it.
+    let projects = temp.join("projects");
+    fs::create_dir_all(&projects).unwrap();
+    // Canonicalize so the seeded project_path matches the binding's project_root after
+    // any path resolution in the daemon/on_bind (e.g. macOS /var → /private/var).
+    PROJECT_BASE
+        .set(fs::canonicalize(&projects).unwrap_or(projects))
+        .expect("one real-daemon test per process sets the project base once");
     fs::create_dir_all(&runtime_dir).unwrap();
     fs::create_dir_all(&data_home).unwrap();
     write_empty_config(&config_dir);
@@ -578,18 +587,17 @@ fn fast_call_options() -> CallOptions {
     }
 }
 
+/// Base directory for project roots, set by the test under its `TempRoot` so the roots
+/// are removed with it.
+static PROJECT_BASE: OnceLock<PathBuf> = OnceLock::new();
+
 /// A DETERMINISTIC project_root per session, shared by `identity_for` (the route binding)
 /// and `seed_store` (the memory's project_path) so the module resolves the SAME project a
-/// seeded memory was written under. A per-process base keeps runs isolated.
+/// seeded memory was written under.
 fn project_root_for(session: &str) -> String {
-    static BASE: OnceLock<PathBuf> = OnceLock::new();
-    let base = BASE.get_or_init(|| {
-        let d = unique_temp_dir("mc-module-projects");
-        fs::create_dir_all(&d).unwrap();
-        // Canonicalize so the seeded project_path matches the binding's project_root after
-        // any path resolution in the daemon/on_bind (e.g. macOS /var → /private/var).
-        fs::canonicalize(&d).unwrap_or(d)
-    });
+    let base = PROJECT_BASE
+        .get()
+        .expect("the test sets PROJECT_BASE before resolving a project root");
     let p = base.join(session);
     fs::create_dir_all(&p).unwrap();
     p.to_string_lossy().to_string()
