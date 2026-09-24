@@ -63,6 +63,7 @@ export interface IsolatedEnv {
 export interface SpawnedOpencode {
     url: string;
     port: number;
+    pid: number;
     env: IsolatedEnv;
     kill: () => Promise<void>;
     stdout: () => string;
@@ -282,7 +283,7 @@ function writeConfigs(
     mockProviderURL: string,
     opts: SpawnOptions,
 ): void {
-    const pluginSpec = `file://${PLUGIN_ENTRY}`;
+    const pluginSpec = `file://${process.env.MC_E2E_PLUGIN_ENTRY ?? PLUGIN_ENTRY}`;
     const mockProviderID = opts.mockProviderID ?? "mock-anthropic";
     const mockProviderAPI = opts.mockProviderAPI ?? "@ai-sdk/anthropic";
     const mockModelID = opts.mockModelID ?? "mock-sonnet";
@@ -678,6 +679,10 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
     childEnv.XDG_CONFIG_HOME = env.configDir;
     childEnv.XDG_DATA_HOME = env.dataDir;
     childEnv.XDG_CACHE_HOME = env.cacheDir;
+    childEnv.XDG_STATE_HOME = join(env.dataDir, "state");
+    childEnv.XDG_RUNTIME_DIR = join(env.dataDir, "runtime");
+    childEnv.OPENCODE_DB = join(env.dataDir, "opencode", "opencode.db");
+    childEnv.MAGIC_CONTEXT_STORAGE_DIR = join(env.dataDir, "cortexkit", "magic-context");
     // Ensure anthropic doesn't bail for missing env vars — we use a fake key.
     childEnv.ANTHROPIC_API_KEY = "test-key-not-real";
     // Caller overrides (e.g. MAGIC_CONTEXT_LOG_PATH pointing the plugin log at a
@@ -787,6 +792,7 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
     return {
         url,
         port,
+        pid: child.pid!,
         env,
         stdout: () => stdoutBuf,
         stderr: () => stderrBuf,

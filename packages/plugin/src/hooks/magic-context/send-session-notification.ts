@@ -1,5 +1,6 @@
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
+import { isDefaultSessionTitle } from "../../shared/safe-notification-target";
 import { shouldHoldIgnoredNotification } from "./read-session-db";
 
 export interface NotificationParams {
@@ -429,6 +430,50 @@ async function revertNoticeIfUnsafe(notification: {
     // Consume the attempt even if deletion succeeded or the SDK returned no row ID.
     lastDeliveredText.set(notification.sessionId, notification.text);
     return true;
+}
+
+export async function sendCommandResult(
+    client: unknown,
+    sessionId: string,
+    text: string,
+    params: NotificationParams,
+): Promise<NotificationDeliveryDisposition> {
+    // A command intercepted before prompt persistence has no run-loop idle event.
+    // Do not infer an idle boundary if a real turn is awaiting its answer.
+    if (shouldHoldIgnoredNotification(sessionId)) {
+        return sendIgnoredMessage(client, sessionId, text, params);
+    }
+    const { isTuiConnected } = await import("../../shared/rpc-notifications");
+    if (isTuiConnected(sessionId)) return sendIgnoredMessage(client, sessionId, text, params);
+    const session = (client as {
+        session?: {
+            get?: (input: unknown) => Promise<{ data?: { title?: string } }>;
+            update?: (input: unknown) => Promise<{ error?: unknown }>;
+            abort?: (input: unknown) => Promise<unknown>;
+        };
+    })?.session;
+    try {
+        const title = (await session?.get?.({ path: { id: sessionId } }))?.data?.title;
+        if (title && isDefaultSessionTitle(title)) {
+            // Ignored output is a non-synthetic user row (Desktop renders only that
+            // shape). Give the otherwise empty session a title before appending it;
+            // the host would not generate one after a second user row appears.
+            if (!session?.update) return "failed";
+            const updated = await session.update({ path: { id: sessionId }, body: { title: "Magic Context" } });
+            if (updated.error) return "failed";
+        }
+        idleSessions.add(sessionId);
+        const disposition = await sendIgnoredMessage(client, sessionId, text, params);
+        // The 204 suppression exits before OpenCode starts a runner. Desktop's
+        // optimistic busy state needs the host's idle event to clear its stop button.
+        if (disposition === "sent" && !shouldHoldIgnoredNotification(sessionId)) {
+            await session?.abort?.({ path: { id: sessionId } });
+        }
+        return disposition;
+    } catch (error) {
+        sessionLog(sessionId, "command result delivery failed:", getErrorMessage(error));
+        return "failed";
+    }
 }
 
 export async function sendIgnoredMessage(
