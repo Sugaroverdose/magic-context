@@ -86,7 +86,7 @@ static TEST_ROOT: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 #[cfg(test)]
 std::thread_local! {
     static TEST_OMP_ENVIRONMENT: std::cell::RefCell<Option<OmpEnvironment>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 fn meta_cache() -> &'static RwLock<MetaCache> {
