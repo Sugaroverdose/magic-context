@@ -138,6 +138,33 @@ test("OC2 runner rejects a malformed returned draft with message and part indice
     expect(trace).toContain("FAIL ");
 });
 
+test("OC2 runner rejects a plain-object media part while accepting host-created attachments", async () => {
+    const fixture = isolation();
+    const plugin = join(fixture.root, "plain-media-probe");
+    mkdirSync(plugin);
+    writeFileSync(join(plugin, "server.js"), `export default {
+        id: "plain-media-probe", async setup(ctx) {
+            await ctx.session.hook("context", draft => {
+                draft.messages.push({ role: "user", content: [
+                    { type: "text", text: "image" },
+                    { type: "media", media: { source: { type: "base64", data: "AA==", mediaType: "image/png" } } },
+                ] });
+            });
+        },
+    };`);
+    const host = await spawnOpencode2({ existingIsolation: fixture, probePlugin: plugin, includeMagicContext: false });
+    try {
+        const client = OpenCode.make({ baseUrl: host.url,
+            headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
+        const session = await client.session.create({ location: { directory: host.cwd },
+            model: { providerID: "openai", id: "mock-model" } });
+        await client.session.prompt({ sessionID: session.id, text: "trigger invalid media" });
+        await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(10_000) }).catch(() => undefined);
+    } finally {
+        await expect(host.stop()).rejects.toThrow(/"partIndex":1.*"type":"media".*Media.Asset instance/);
+    }
+});
+
 test("plugin activation rejects a failed plugin with the host error before its deadline", async () => {
 	const pluginRoot = mkdtempSync(join(tmpdir(), "mc-oc2-broken-plugin-"));
 	writeFileSync(

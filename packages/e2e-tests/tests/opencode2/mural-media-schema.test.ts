@@ -63,8 +63,11 @@ test("a persisted project mural reaches the vision-capable host as Media on pric
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
         await client.session.prompt({ sessionID: session.id, text: "reuse the mural" });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
-        await until(() => host!.mock.requests().some((request) => JSON.stringify(request.body).includes(png)),
-            "project mural at the mock provider");
+        const muralRequests = () => host!.mock.requests().filter((request) => {
+            const body = JSON.stringify(request.body);
+            return body.includes('"model":"gpt-4o"') && body.includes(png);
+        });
+        await until(() => muralRequests().length >= 2, "project mural on priced and cached provider requests");
         const schemaTrace = readFileSync(join(fixture.root, "llm-schema-guard.jsonl"), "utf8");
         expect(schemaTrace.split("\n").filter((line) => line.startsWith(`PASS ${session.id} `)).length)
             .toBeGreaterThanOrEqual(3);

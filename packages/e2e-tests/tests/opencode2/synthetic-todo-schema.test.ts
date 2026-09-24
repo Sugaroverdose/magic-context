@@ -8,7 +8,7 @@ import { isolation, spawnOpencode2, waitForPluginActive } from "../../src/openco
 const todos = [{ content: "Finish the fixture", status: "in_progress", priority: "high" }];
 
 function todoState(path: string, sessionID: string): string {
-    const db = new Database(path, { readonly: true, fileMustExist: true });
+    const db = new Database(path, { readonly: true });
     try {
         return (db.prepare("SELECT last_todo_state AS state FROM session_meta WHERE session_id = ?")
             .get(sessionID) as { state: string } | undefined)?.state ?? "";
@@ -95,7 +95,7 @@ test("a real todowrite call projects a synthetic reminder on priced and cached O
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
         let callID = "";
         await until(() => {
-            const pricedDb = new Database(contextPath, { readonly: true, fileMustExist: true });
+            const pricedDb = new Database(contextPath, { readonly: true });
             try {
                 callID = (pricedDb.prepare("SELECT todo_synthetic_call_id AS callId FROM session_meta WHERE session_id = ?")
                     .get(session.id) as { callId: string } | undefined)?.callId ?? "";
@@ -104,6 +104,11 @@ test("a real todowrite call projects a synthetic reminder on priced and cached O
         }, "persisted synthetic todo anchor on the priced pass");
         await client.session.prompt({ sessionID: session.id, text: "replay the todo reminder" });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
+        const replayed = host.mock.requests().filter((request) =>
+            JSON.stringify(request.body).includes(callID));
+        expect(replayed.length).toBeGreaterThanOrEqual(2);
+        const log = readFileSync(fixture.env.MAGIC_CONTEXT_LOG_PATH, "utf8");
+        expect(log).toContain("rematerialized=false, reason=cache_hit");
         const schemaTrace = readFileSync(join(fixture.root, "llm-schema-guard.jsonl"), "utf8");
         expect(schemaTrace.split("\n").filter((line) => line.startsWith(`PASS ${session.id} `)).length).toBeGreaterThanOrEqual(3);
     } finally {

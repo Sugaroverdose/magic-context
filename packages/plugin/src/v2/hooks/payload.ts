@@ -1,8 +1,19 @@
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
+import { hostMediaAsset } from "../fold/host-media";
 import type { SessionContext, V2Message } from "./types";
 
 export const HEAD_IDS = ["__magic_context_v2_m0__", "__magic_context_v2_m1__"] as const;
 type Part = Record<string, unknown>;
+const HOST_CONTENT_TYPES = new Set(["text", "media", "tool-call", "tool-result", "reasoning", "compaction", "effort"]);
+
+function rejectContentPart(message: MessageLike, part: Part, reason: string): void {
+    console.warn("[magic-context] v2 context refused unsupported content part", {
+        messageId: message.info.id,
+        type: typeof part.type === "string" ? part.type : "<missing>",
+        reason,
+    });
+}
+
 interface ToolBridge {
     call?: Part;
     result?: Part;
@@ -238,6 +249,44 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                             ? bridgesFor(message)?.get(part.callID)
                             : undefined);
                     if (!bridge) {
+                        if (part.type === "tool") {
+                            const state = part.state as Part | undefined;
+                            if (typeof part.callID !== "string" || typeof part.tool !== "string" ||
+                                !state || typeof state !== "object") {
+                                rejectContentPart(message, part, "tool has no call ID, name, or state");
+                                continue;
+                            }
+                            content.push({ type: "tool-call", id: part.callID, name: part.tool, input: state.input });
+                            if (state.status === "completed" || state.status === "error") {
+                                following.push({ role: "tool", content: [{
+                                    type: "tool-result", id: part.callID, name: part.tool,
+                                    result: { type: state.status === "error" ? "error" : "text",
+                                        value: toolStateContent(state) },
+                                }] });
+                            }
+                            continue;
+                        }
+                        if (part.type === "file") {
+                            const mime = part.mime;
+                            const url = part.url;
+                            const prefix = `data:${mime};base64,`;
+                            if (typeof mime !== "string" || !/^image\/(png|jpeg|gif|webp)$/.test(mime) ||
+                                typeof url !== "string" || !url.startsWith(prefix)) {
+                                rejectContentPart(message, part, "file is not an inline supported image");
+                                continue;
+                            }
+                            const asset = hostMediaAsset(url.slice(prefix.length), mime);
+                            if (typeof asset === "string") {
+                                rejectContentPart(message, part, `host media unavailable: ${asset}`);
+                                continue;
+                            }
+                            content.push({ type: "media", media: asset });
+                            continue;
+                        }
+                        if (!HOST_CONTENT_TYPES.has(String(part.type))) {
+                            rejectContentPart(message, part, "unknown host content type");
+                            continue;
+                        }
                         const { synthetic: _synthetic, ...clean } = part;
                         const original =
                             hostPartTypes.has(clean.type) && !containsHostInstance(clean)

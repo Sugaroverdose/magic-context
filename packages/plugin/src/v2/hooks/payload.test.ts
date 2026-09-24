@@ -3,6 +3,7 @@
 import { describe, expect, it } from "bun:test";
 import { Message } from "@opencode/ai/schema/messages";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
+import { rememberHostMedia, resetHostMediaForTests } from "../fold/host-media";
 import {
     createToolDropTarget,
     extractToolCallObservation,
@@ -295,6 +296,69 @@ describe("adaptPayload", () => {
             payload.commit();
             for (const message of context.messages) expect(() => Message.make(message)).not.toThrow();
             expect(context.messages.some((message) => message.id === "msg-injection")).toBe(false);
+        });
+    });
+
+    describe("#given a synthetic todowrite reminder without a host bridge", () => {
+        it("#then commits a host tool-call and result on both priced and replayed passes", () => {
+            const synthetic = {
+                type: "tool", tool: "todowrite", callID: "mc_synthetic_todo_0123456789abcdef",
+                state: { status: "completed", input: { todos: [{ content: "Finish", status: "pending", priority: "high" }] },
+                    output: "1 todos" }, syntheticTodoMarker: true,
+            };
+            for (const pass of ["priced", "cache_hit"]) {
+                const context = draft([{ id: "msg-assistant", role: "assistant",
+                    content: [{ type: "text", text: pass }] }]);
+                const payload = adaptPayload(context);
+                payload.messages[0].parts.push(structuredClone(synthetic));
+                payload.commit();
+                expect(context.messages[0]?.content[1]).toEqual({
+                    type: "tool-call", id: synthetic.callID, name: "todowrite", input: synthetic.state.input,
+                });
+                expect(context.messages[1]?.content[0]).toEqual({
+                    type: "tool-result", id: synthetic.callID, name: "todowrite",
+                    result: { type: "text", value: "1 todos" },
+                });
+                for (const message of context.messages) expect(() => Message.make(message)).not.toThrow();
+            }
+        });
+    });
+
+    describe("#given a pipeline-created mural image and an unknown part", () => {
+        it("#then uses the host's Media.Asset and refuses unknown content rather than forwarding it", () => {
+            resetHostMediaForTests();
+            rememberHostMedia([Message.make({ role: "user", content: [{ type: "text", text: "seed schema" }] })]);
+            const context = draft([{ id: "msg-user", role: "user", content: [{ type: "text", text: "m0" }] }]);
+            const payload = adaptPayload(context);
+            const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+            payload.messages[0].parts.push({ type: "file", mime: "image/png", url: `data:image/png;base64,${png}` });
+            payload.messages[0].parts.push({ type: "unknown_future_content", value: "bad" });
+            const warn = console.warn;
+            const warnings: unknown[][] = [];
+            console.warn = (...args) => { warnings.push(args); };
+            try { payload.commit(); } finally { console.warn = warn; resetHostMediaForTests(); }
+            expect(context.messages[0]?.content[1]).toMatchObject({ type: "media" });
+            expect(context.messages[0]?.content).toHaveLength(2);
+            expect(warnings).toHaveLength(1);
+            expect(warnings[0]?.[1]).toMatchObject({ type: "unknown_future_content" });
+            expect(() => Message.make(context.messages[0])).not.toThrow();
+        });
+    });
+
+    describe("#given a mural image with no host Media.Asset constructor", () => {
+        it("#then omits it with a logged reason instead of emitting an invalid file part", () => {
+            resetHostMediaForTests();
+            const context = draft([{ id: "msg-user", role: "user", content: [{ type: "text", text: "m0" }] }]);
+            const payload = adaptPayload(context);
+            payload.messages[0].parts.push({ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" });
+            const warn = console.warn;
+            const warnings: unknown[][] = [];
+            console.warn = (...args) => { warnings.push(args); };
+            try { payload.commit(); } finally { console.warn = warn; resetHostMediaForTests(); }
+            expect(context.messages[0]?.content).toEqual([{ type: "text", text: "m0" }]);
+            expect(warnings[0]?.[1]).toMatchObject({ type: "file",
+                reason: expect.stringContaining("host media unavailable") });
+            expect(() => Message.make(context.messages[0])).not.toThrow();
         });
     });
 
