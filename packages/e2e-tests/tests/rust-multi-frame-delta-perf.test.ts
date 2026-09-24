@@ -168,9 +168,8 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
         );
         expect(missedBusts).toEqual([]);
         expect(smallDeltas.every((pass) => pass.applied)).toBe(true);
-        // The adapter may resend the full wire array after the initial load, but
-        // incremental updates must resolve message positions from only the new rows,
-        // not scan the 2,000-row history. Shared runners cannot enforce ms limits.
+        // Steady updates must resolve message positions and serialize only the new
+        // tail, not the 2,000-message history. Shared runners cannot enforce ms limits.
         expect(smallDeltas.every((pass) => /ordinal_mode:incremental\b/.test(pass.raw))).toBe(true);
         expect(smallDeltas.every((pass) => {
             const rows = /\bordinal_rows:(\d+)\b/.exec(pass.raw);
@@ -191,9 +190,10 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
                 `[rust-e2e] strict transport gate=off observed_ms=${smallDelta.transportMs} strict_budget_ms=30`,
             );
         }
+        expect(smallDeltas.every((pass) => pass.wireMessages > 0 && pass.wireMessages <= 4)).toBe(true);
         expect(smallDeltas.every((pass) => pass.transportPages === 1)).toBe(true);
-        // Even a full retransmission of the synthetic history must fit in one page.
-        expect(smallDeltas.every((pass) => pass.transportBytes <= MODULE_PAGE_MAX_BYTES)).toBe(true);
+        // Small steady-state deltas carry only a few KB, not the entire history.
+        expect(smallDeltas.every((pass) => pass.transportBytes < 160_000)).toBe(true);
 
         // SOFT+ may reuse the caller-owned tail in one small module request or retransmit the
         // same bytes across bounded pages. The page cap is derived from subc's frame limit, so
@@ -203,6 +203,7 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
         expect(largeTailDelta.applied).toBe(true);
         expect(largeTailDelta.transportPages).toBeGreaterThanOrEqual(1);
         expect(largeTailDelta.transportPages).toBeLessThanOrEqual(6);
+        expect(largeTailDelta.wireMessages).toBeLessThanOrEqual(4);
         expect(largeTailDelta.raw).toMatch(/ordinal_mode:incremental\b/);
         expect(Number(/\bordinal_rows:(\d+)\b/.exec(largeTailDelta.raw)?.[1])).toBeLessThanOrEqual(4);
         expect(largeTailDelta.transportBytes).toBeGreaterThan(160_000);
