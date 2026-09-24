@@ -932,7 +932,7 @@ describe("createDreamTaskExecutor — verify-broad disposition", () => {
     test("records a host-recorded provider refusal on an empty assistant row", async () => {
         db = freshDb();
         const project = "/repo/verify-host-refusal";
-        seedTaskScheduleState(db, project, "verify-broad", null, null, "0 3 * * *");
+        seedTaskScheduleState(db, project, "verify", null, null, "0 3 * * *");
         const memory = insertMemory(db, {
             projectPath: project,
             category: "ARCHITECTURE",
@@ -971,19 +971,35 @@ describe("createDreamTaskExecutor — verify-broad disposition", () => {
             sessionDirectory: project,
             openOpenCodeDb: () => null,
         });
-        const leaseKey = leaseKeyFor("verify-broad", project);
-        expect(acquireLease(db, "holder-host-refusal", leaseKey)).toBe(true);
-        const result = await executor(
-            {
-                task: "verify-broad",
-                schedule: "0 3 * * *",
-                model: "synthetic/model",
-                timeoutMinutes: 20,
-            },
-            { db, projectIdentity: project, holderId: "holder-host-refusal", leaseKey },
-        );
-        expect(result.status).toBe("failed");
-        expect(result.transient).toBe(true);
+        const now = Date.now();
+        writeTaskScheduleState(db, {
+            projectPath: project,
+            task: "verify",
+            lastRunAt: null,
+            nextDueAt: now - 1_000,
+            schedule: "0 3 * * *",
+            lastStatus: null,
+            lastError: null,
+            retryCount: 0,
+        });
+        await runDueTasksForProject({
+            db,
+            projectIdentity: project,
+            tasks: [
+                {
+                    task: "verify",
+                    schedule: "0 3 * * *",
+                    model: "synthetic/model",
+                    timeoutMinutes: 20,
+                },
+            ],
+            executor,
+            now,
+        });
+        const scheduled = getTaskScheduleState(db, project, "verify");
+        expect(scheduled?.retryCount).toBe(1);
+        expect(scheduled?.lastRunAt).toBeNull();
+        expect(scheduled?.nextDueAt).toBeLessThan(now);
         const run = getDreamRuns(db, project)[0];
         const task = JSON.parse(run?.tasks_json ?? "[]")[0] as {
             failure?: { failure_class: string; provider_error: string | null };
