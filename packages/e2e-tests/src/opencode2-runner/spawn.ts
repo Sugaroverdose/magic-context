@@ -63,6 +63,7 @@ function resolveCLI(): string {
 }
 export const CLI = resolveCLI();
 export const PLUGIN = resolve(import.meta.dir, "../../../plugin");
+const SCHEMA_GUARD = resolve(import.meta.dir, "schema-guard");
 const groups = new Set<number>();
 function killGroup(pid: number): void {
 	try {
@@ -266,6 +267,8 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
         });
         if (options.mockResponse) mock.setDefault(options.mockResponse);
     }
+	const schemaTrace = join(fixture.root, "llm-schema-guard.jsonl");
+	fixture.env.MC_E2E_SCHEMA_TRACE_PATH = schemaTrace;
 	const defaultModelID = options.defaultModelID ?? "mock-model";
 	const modelIDs = new Set([
 		defaultModelID,
@@ -278,6 +281,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 			plugins: [
 				...(options.includeMagicContext === false ? [] : [PLUGIN]),
 				...(options.probePlugin ? [options.probePlugin] : []),
+				SCHEMA_GUARD,
 			],
 			model: `${providerID}/${defaultModelID}`,
 			compaction: { auto: true, buffer: 1024, keep: { tokens: 1024 } },
@@ -370,6 +374,10 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 		if (child.pid) groups.delete(child.pid);
 		assertWriteFenceUnchanged(fence);
 		if (safetyError) throw safetyError;
+		if (existsSync(schemaTrace)) {
+			const failures = readFileSync(schemaTrace, "utf8").split("\n").filter((line) => line.startsWith("FAIL "));
+			if (failures.length) throw new Error(`OC2 LLM schema guard rejected returned drafts:\n${failures.join("\n")}`);
+		}
 	};
 	const stop = async () => {
 		try {

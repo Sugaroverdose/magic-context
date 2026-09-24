@@ -142,6 +142,7 @@ test("/ctx-flush makes the next OpenCode 2 request a priced pass", async () => {
 			"the post-flush turn to run as an explicit-flush pass",
 		);
 		expect(afterFlush.length).toBeGreaterThan(0);
+		expect(readFileSync(join(fixture.root, "llm-schema-guard.jsonl"), "utf8")).toContain(`PASS ${session.id} `);
 	} catch (error) {
 		console.error(host.stdout(), host.stderr());
 		throw error;
