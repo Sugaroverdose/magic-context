@@ -883,7 +883,9 @@ const server: Plugin = async (ctx) => {
             // Update tool-def measurement latch before delegating to magic-context
             // hooks. `registry.tools()` is invoked right after chat.message inside
             // OpenCode's prompt flow (see session/prompt.ts), so by the time
-            // `tool.definition` fires we'll have the correct {provider, model, agent}.
+            // `tool.definition` fires we'll have the correct provider and model.
+            // The host can omit `agent` for its default route; still measure the
+            // observed tools under the default key rather than losing the envelope.
             const typed = input as {
                 model?: { providerID?: string; modelID?: string };
                 agent?: string;
@@ -891,9 +893,10 @@ const server: Plugin = async (ctx) => {
             const provId = typed.model?.providerID;
             const modId = typed.model?.modelID;
             const agent = typed.agent;
-            if (provId && modId && agent) {
-                lastChatContext = { providerID: provId, modelID: modId, agentName: agent };
-            }
+            lastChatContext =
+                provId && modId
+                    ? { providerID: provId, modelID: modId, agentName: agent || "default" }
+                    : null;
             await magicContextRuntime.magicContext?.["chat.message"]?.(input, output);
         },
         "tool.definition": async (input, output) => {

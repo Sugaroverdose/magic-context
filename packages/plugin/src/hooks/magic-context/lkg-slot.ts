@@ -162,9 +162,34 @@ export function visitMessageContentFields(
     return visitor.field(LKG_SNAPSHOT_UNDEFINED);
 }
 
+function contentSnapshotValue(value: unknown): unknown {
+    if (!value || typeof value !== "object") return value;
+    const message = value as Partial<MessageLike>;
+    const info = message.info as Record<string, unknown> | undefined;
+    const summary = info?.summary;
+    // OpenCode may attach an empty diff summary to an already-served user message.
+    // It does not change provider content. Preserve every nonempty or extended
+    // summary so a substantive change still invalidates the captured prefix.
+    if (
+        !Array.isArray(message.parts) ||
+        info?.role !== "user" ||
+        summary === null ||
+        typeof summary !== "object" ||
+        Array.isArray(summary) ||
+        Object.keys(summary).length !== 1 ||
+        !Array.isArray((summary as { diffs?: unknown }).diffs) ||
+        (summary as { diffs: unknown[] }).diffs.length !== 0
+    )
+        return value;
+    return {
+        ...message,
+        info: Object.fromEntries(Object.entries(info).filter(([key]) => key !== "summary")),
+    };
+}
+
 export function messageContentFields(message: MessageLike): LkgContentField[] {
     const fields: LkgContentField[] = [];
-    const complete = visitMessageContentFields(message, {
+    const complete = visitMessageContentFields(contentSnapshotValue(message), {
         field(value) {
             fields.push(value);
             return true;
@@ -233,7 +258,7 @@ export function lkgContentFields(value: unknown): LkgContentField[] | null {
         } else fields.push(LKG_SNAPSHOT_UNDEFINED);
     };
     try {
-        visit(value);
+        visit(contentSnapshotValue(value));
         return fields;
     } catch {
         return null;

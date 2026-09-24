@@ -682,6 +682,7 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
     childEnv.XDG_STATE_HOME = join(env.dataDir, "state");
     childEnv.XDG_RUNTIME_DIR = join(env.dataDir, "runtime");
     childEnv.OPENCODE_DB = join(env.dataDir, "opencode", "opencode.db");
+    // The child must not inherit a storage override pointing outside its per-test data home.
     childEnv.MAGIC_CONTEXT_STORAGE_DIR = join(env.dataDir, "cortexkit", "magic-context");
     // Ensure anthropic doesn't bail for missing env vars — we use a fake key.
     childEnv.ANTHROPIC_API_KEY = "test-key-not-real";

@@ -304,16 +304,11 @@ function committedSiblingSource(subconsciousRoot: string): { root: string; sha: 
 }
 
 /**
- * Build the module and daemon from their current workspaces, incrementally.
- *
- * `ck-mc` links protocol/client path dependencies from the sibling workspace, so
- * pairing it with any prebuilt component can exercise different source revisions.
- * Running Cargo for both workspaces keeps the hermetic pair coherent. The module
- * build always targets this checkout, even when a release preflight exported a
- * PATH fallback through `MC_E2E_CK_MC_BIN`; Cargo still reuses valid incremental
- * artifacts. Both builds use the e2e-owned target directory, avoiding either live
- * workspace's Cargo target lock. Builds are memoized by feature set for this test
- * process, because the drive-fault build below is a different binary.
+ * Use an explicitly supplied CI-built module/daemon pair, or build both from
+ * their current workspaces incrementally for local release runs. The fault-feature
+ * variant is a separate binary; never pair only one prebuilt component with a
+ * locally rebuilt counterpart. Local builds use the e2e-owned Cargo target and
+ * are memoized by feature set for this test process.
  */
 export async function buildHermeticBinaries(
     subconsciousRoot: string,
@@ -327,6 +322,16 @@ export async function buildHermeticBinaries(
     const existing = buildPromises.get(buildKey);
     if (existing) return existing;
     const buildPromise = (async () => {
+        const prebuiltModule = options.driveFault
+            ? process.env.MC_E2E_CK_MC_DRIVE_FAULT_BIN
+            : process.env.MC_E2E_CK_MC_PREBUILT_BIN;
+        const prebuiltDaemon = process.env.MC_E2E_CK_SUBC_BIN;
+        if (prebuiltModule || prebuiltDaemon) {
+            if (!prebuiltModule || !prebuiltDaemon || !existsSync(prebuiltModule) || !existsSync(prebuiltDaemon)) {
+                throw new Error(`incomplete hermetic prebuilt binary pair for ${buildKey}`);
+            }
+            return { ckMcBin: prebuiltModule, ckSubcBin: prebuiltDaemon };
+        }
         const cargoEnv = rustE2eCargoEnv();
         let ckMcBin = currentTreeCkMcBinary(process.env.MC_E2E_CK_MC_BIN);
         const moduleArgs = ["build", "--release", "-p", "mc-module"];
@@ -620,6 +625,7 @@ export class HermeticSubcStack {
                 // The module opens its store under this data home — the SAME dir
                 // opencode uses, matching production's shared cortexkit layout.
                 XDG_DATA_HOME: this.dataDir,
+                MAGIC_CONTEXT_STORAGE_DIR: join(this.dataDir, "cortexkit", "magic-context"),
             },
         });
         this.module = module;
@@ -986,13 +992,24 @@ export class HermeticSubcStack {
         }
     }
 
-    /** Best-effort read of the module log (diagnostics on failure). */
+    /** Read the module's dated file sink and its separately captured stderr. */
     moduleLog(): string {
-        try {
-            return readFileSync(this.moduleLogPath, "utf8");
-        } catch {
-            return "";
+        const logDir = join(this.dataDir, "cortexkit", "magic-context", "logs");
+        const segments = existsSync(logDir)
+            ? readdirSync(logDir)
+                  .filter((name) => name.startsWith("magic-context.") && name.endsWith(".log"))
+                  .sort()
+                  .map((name) => join(logDir, name))
+            : [];
+        let output = "";
+        for (const path of [...segments, this.moduleLogPath]) {
+            try {
+                output += readFileSync(path, "utf8");
+            } catch {
+                // A module that died before creating its sink can still have stderr.
+            }
         }
+        return output;
     }
 
     /** Hard teardown. Safe to call more than once; never throws. */

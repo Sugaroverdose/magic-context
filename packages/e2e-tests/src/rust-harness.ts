@@ -72,6 +72,8 @@ export interface RustTestHarnessOptions {
     seedModuleStorePath?: string;
     /** Build the hermetic module with the otherwise-absent drive-fault feature. */
     driveFaultBinary?: boolean;
+    /** Module-only environment, for scenario-specific logging or fault controls. */
+    moduleEnv?: Record<string, string>;
 }
 
 export interface SdkClient {
@@ -242,6 +244,7 @@ export class RustTestHarness {
             ckMcBin,
             ckSubcBin,
             startProducer: options.startHistorianProducer ?? true,
+            moduleEnv: options.moduleEnv ?? {},
         });
         if (options.seedModuleStorePath) {
             const deadline = Date.now() + 65_000;
