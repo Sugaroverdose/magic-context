@@ -1264,6 +1264,11 @@ pub struct HistorianReattachRequest<'a> {
     pub prior_compartments: &'a [StoredCompartmentRange],
     pub validate_options: ValidateOptions,
     pub publication_floor_ordinal: u64,
+    /// Per-attempt wait for the reattached run, resolved from the host's
+    /// `historian_timeout_ms` with [`historian_await_timeout`] exactly as a fresh
+    /// attempt resolves it. Without it the await would fall back to the producer's own
+    /// default and ignore the configured timeout.
+    pub await_timeout: Duration,
     pub now_ms: i64,
     pub failure_backoff_at_ms: i64,
     pub completion_now_ms: fn() -> i64,
@@ -2310,7 +2315,10 @@ where
 
     let loaded = request.store.load(request.session_id)?;
     let awaiting = loaded.meta.historian.clone();
-    let output = match producer.await_output(&producer_run_id).await {
+    let output = match producer
+        .await_output_with_timeout(&producer_run_id, request.await_timeout)
+        .await
+    {
         Ok(output) => output,
         Err(err) => {
             let _ = producer.cancel(&producer_run_id).await;
@@ -3142,6 +3150,7 @@ mod tests {
             prior_compartments: prior,
             validate_options: validate_options(),
             publication_floor_ordinal: 4,
+            await_timeout: historian_await_timeout(None),
             now_ms: 123,
             failure_backoff_at_ms: 999,
             completion_now_ms: || 123,
@@ -4437,6 +4446,7 @@ mod tests {
             prior_compartments: &prior,
             validate_options: validate_options(),
             publication_floor_ordinal: 4,
+            await_timeout: historian_await_timeout(None),
             now_ms: 123,
             failure_backoff_at_ms: 999,
             completion_now_ms: || 123,
@@ -4454,6 +4464,7 @@ mod tests {
             prior_compartments: &prior,
             validate_options: validate_options(),
             publication_floor_ordinal: 4,
+            await_timeout: historian_await_timeout(None),
             now_ms: 123,
             failure_backoff_at_ms: 999,
             completion_now_ms: || 123,
@@ -4544,6 +4555,60 @@ mod tests {
         assert_eq!(producer.await_run_ids, vec!["run-1"]);
         let c2 = store.load_compartments("ses").unwrap().pop().unwrap();
         assert_eq!(c2.p1.as_deref(), Some("full replay summary"));
+    }
+
+    /// A reattach after a module restart must wait the configured historian timeout,
+    /// resolved and clamped the same way as a fresh attempt, not the producer's 600 s
+    /// default.
+    #[tokio::test]
+    async fn reattach_awaits_with_the_configured_historian_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_compartment(&store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let fired = match fire(
+            &HistorianDurableState::default(),
+            2,
+            4,
+            "fp".into(),
+            test_selected_range_identities(),
+            0,
+            CompartmentSetGeneration {
+                max_sequence: 1,
+                count: 1,
+            },
+            1,
+            None,
+        )
+        .unwrap()
+        {
+            FireOutcome::Fired(state) => state,
+            FireOutcome::Busy(_) => unreachable!(),
+        };
+        let awaiting = producer_started(&fired, "producer-session".into(), "run-1".into()).unwrap();
+        store
+            .commit(
+                "ses",
+                None,
+                &CoreState::default(),
+                &test_meta_with_historian(awaiting),
+            )
+            .unwrap();
+        let mut producer = ScriptedProducer::default()
+            .with_status(Ok(RunState::Terminal))
+            .with_output(Ok(producer_output(historian_xml("reattached summary"))));
+        let configured = historian_await_timeout(Some(90_000));
+        assert_ne!(configured, historian_await_timeout(None));
+        let mut request = reattach_request(&store, &chunk, &prior);
+        request.await_timeout = configured;
+
+        let outcome = reattach_historian_producer(&mut producer, request)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, HistorianReattachOutcome::Published(_)));
+        assert_eq!(producer.observed_await_timeouts, vec![configured]);
     }
 
     #[tokio::test]
@@ -5142,6 +5207,7 @@ mod tests {
             prior_compartments: &prior,
             validate_options: validate_options(),
             publication_floor_ordinal: 4,
+            await_timeout: historian_await_timeout(None),
             now_ms: 123,
             failure_backoff_at_ms: 999,
             completion_now_ms: || 123,

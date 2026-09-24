@@ -5510,6 +5510,10 @@ impl McHandler {
                 let fingerprint_items: Vec<_> =
                     chunk.snapshot.iter().map(|item| item.as_item()).collect();
                 let observed = historian::compute_chunk_fingerprint(&fingerprint_items);
+                // The same resolution and clamp a fresh attempt applies to the host's
+                // per-request timeout.
+                let reattach_await_timeout =
+                    historian::historian_await_timeout(parsed.historian_timeout_ms);
                 tokio::spawn(async move {
                     let _guard = guard;
                     let result = async {
@@ -5552,6 +5556,7 @@ impl McHandler {
                                     force_keep_last_compartment: false,
                                 },
                                 publication_floor_ordinal: range.to_ordinal,
+                                await_timeout: reattach_await_timeout,
                                 now_ms: now,
                                 failure_backoff_at_ms: now + HISTORIAN_FAILURE_BACKOFF_MS,
                                 completion_now_ms: now_ms,
@@ -36247,6 +36252,42 @@ mod tests {
             assert_eq!(
                 historian::completion_wait_budget(historian::historian_await_timeout(configured)),
                 Duration::from_secs(expected + 60)
+            );
+        }
+    }
+
+    /// A reattach to a run left in `AwaitingProducer` by a module restart honours the
+    /// host's per-request `historian_timeout_ms` like a fresh attempt does, and an older
+    /// host that omits it keeps the default.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reattach_after_restart_awaits_with_the_transform_historian_timeout() {
+        for (configured, expected) in [(Some(90_000), 90), (None, 600)] {
+            let producer = Arc::new(ProducerState::default());
+            producer.outputs.lock().unwrap().push_back(historian_output(
+                1,
+                3,
+                "reattached summary",
+            ));
+            let (handler, store, _dir, _project) =
+                handler_with_store(Arc::clone(&producer), default_test_config());
+            let messages = big_messages();
+            seed_awaiting(&store, &messages);
+            let mut transform = request(messages);
+            if let Some(timeout) = configured {
+                transform["historian_timeout_ms"] = json!(timeout);
+            }
+            let response = call_transform_request(&handler, transform).await;
+            assert_eq!(response["historian"]["no_fire"], "reattaching");
+            wait_for_count(&producer.await_outputs, 1).await;
+            wait_for_idle(&store).await;
+            assert_eq!(
+                producer
+                    .await_timeouts
+                    .lock()
+                    .expect("await timeouts mutex")
+                    .as_slice(),
+                [Duration::from_secs(expected)],
+                "configured={configured:?}"
             );
         }
     }
