@@ -1,0 +1,88 @@
+# Tagging and reclaim
+
+Every piece of content Magic Context can remove is first given a durable tag, and every removal is decided once, persisted, and replayed byte-identically on later passes. This page covers how tags are identified, the lanes that remove tagged content (agent drops, age reclaim, smart drops, emergency drops, strips and caveman compression), and the rule they all share: a removal never causes a prompt-cache bust of its own.
+
+Paths are relative to `packages/plugin/`. Pi mirrors most of these files with a `-pi` suffix in `packages/pi-plugin/src/`; the Rust module mirrors them in `crates/mc-module/src/`.
+
+## Where the code is
+
+- `src/hooks/magic-context/tag-messages.ts`, `src/features/magic-context/storage-tags.ts`: tagging and the `tags` table.
+- `src/tools/ctx-reduce/tools.ts`: the agent's drop tool.
+- `src/hooks/magic-context/apply-operations.ts`: applying queued drops, placeholders and skeletons.
+- `src/features/magic-context/protection-window.ts`, `reclaim-protection.ts`: what automatic reclaim may not touch.
+- `src/hooks/magic-context/tool-reclaim.ts`: age reclaim.
+- `src/hooks/magic-context/supersession-reclaim.ts`, `edit-marker.ts`: smart drops.
+- `src/hooks/magic-context/heuristic-cleanup.ts`, `emergency-drop.ts`: heuristic cleanup and the emergency tiers.
+- `src/hooks/magic-context/tool-drop-target.ts`, `dropped-input-guard.ts`: which tool parts can be dropped, and the guard against replaying dropped arguments.
+- `src/hooks/magic-context/strip-content.ts`, `sentinel.ts`, `drop-stale-reduce-calls.ts`: strip-and-replay.
+- `src/hooks/magic-context/caveman.ts`, `caveman-cleanup.ts`: caveman compression.
+- `src/hooks/magic-context/transform-postprocess-phase.ts`: the mutation gates that decide when any of this may first apply.
+
+## When removals may happen
+
+`ARCHITECTURE.md` (the protected section on transform pass mechanics) defines the rule every lane on this page follows: automatic reclaim only rides a pass that is already busting the cached prefix (an execute pass, a HARD fold, `/ctx-flush`, or the force band), and every lane consults the same per-pass bust permission. A lane that could first-apply on a defer pass would change tail bytes and bust everything after them. Read that section first; this page assumes it.
+
+## Tags and tag identity
+
+Each row in `tags` is one taggable unit of source content, of type `message`, `file` or `tool`, with a per-session `tag_number` that the agent sees as `§N§`. The original content is kept in `source_contents`, which is what `ctx_expand` and every replay read.
+
+- `message` and `file` tags key on `(session_id, message_id)`, where the message id is a synthetic content id for the part.
+- `tool` tags key on `(session_id, callID, tool_owner_message_id)`. OpenCode reuses call ids across assistant turns, so the owning assistant message is part of the key. An invocation part owns itself; a result part takes the oldest unpaired invocation; a result whose invocation was compacted away falls back to the nearest earlier persisted owner. The drop queue and heuristic cleanup use the same composite key.
+
+Token counts (`token_count`, `input_token_count`, `reasoning_token_count`) are computed once when a tag is inserted and summed later for the sidebar, boundary and nudge arithmetic, so those paths never re-tokenize.
+
+A tag's `status` is `active`, `dropped` or `compacted` (content from before a compaction boundary). A dropped tag's `drop_mode` records how it was removed, and replay reproduces exactly that shape.
+
+## The protected window
+
+Automatic reclaim never touches the newest part of the conversation. `protection-window.ts` computes the protected set in tag-number space from `protected_tokens`, whose default is `clamp(round(0.05 × usableSoft), min(16,000, round(0.08 × usableSoft)), 64,000)` (`deriveDefaultProtectedTokens`). Separately, `reclaim-protection.ts` keeps the newest three `ctx_reduce` calls (`CTX_REDUCE_KEEP`) in every lane, so the agent always has recent examples of the tool.
+
+## Agent drops (`ctx_reduce`)
+
+`ctx_reduce` takes tag ids and ranges (`"3-5"`, `"1,2,9"`) and only queues them: each id becomes a `drop` row in `pending_ops`. Ids already dropped or queued are skipped; content from before compaction is refused. Ids inside the protected window are accepted but reported as held, and apply once newer work pushes them out. Queued drops are applied on the next pass that is busting anyway, never on their own.
+
+`apply-operations.ts` applies them:
+
+- A dropped message part becomes `[dropped §N§]`. This is the only drop placeholder, and it is a pure function of the tag number; nothing derives placeholder bytes from the current (possibly already mutated) content, because a placeholder that differed between passes would bust the cache.
+- A dropped tool call among the newest 20 tool calls (`RECENT_TOOL_SKELETON_WINDOW`) keeps a skeleton (`drop_mode = truncated`): the call stays, its output becomes the placeholder, and its arguments are replaced by the inert marker `{ dropped: "[dropped §N§]" }`. Recent skeletons give the model anchors for what it actually did; without them, smaller models start inventing tool-call shapes. Older tool drops remove the call and its result entirely (`full`). The mode is decided once at drop time and never demoted later.
+- Only completed tool arcs can be dropped (`partHasCompletedResult` in `tool-drop-target.ts`): a call whose result is still pending or running is never touched, while an errored call counts as closed.
+
+If the model copies a dropped marker back into a new tool call, `dropped-input-guard.ts` stops the call before it runs and returns an error that lists the real parameters and suggests `ctx_expand` to recover the original arguments.
+
+## Age reclaim
+
+Age reclaim drops old tool outputs without the agent asking, in two steps so it never surprises a pass (`tool-reclaim.ts`). On one application opportunity it records `tool_reclaim_watermark` as the current newest tag number. On a later opportunity it queues synthetic drops for active tool tags at or below that watermark that sit outside the protected window, are worth at least 250 tokens (`AGE_RECLAIM_MIN_TOKENS`), are not the newest `todowrite`, and are not already queued. The watermark only advances on a pass that could actually apply, so a long run of plain execute passes does not age everything at once.
+
+## Smart drops
+
+`smart_drops: true` (opt-in, off by default) adds content-aware reclaim on busting passes (`supersession-reclaim.ts`):
+
+- **Spent control-plane outputs**: all but the newest `todowrite`, `ctx_reduce` calls beyond the protected three, zero-value meta calls (`bash_status`, `bash_kill`), and `ctx_note` read and dismiss calls.
+- **Superseded edits**: an `edit` or `write` to a file that has been edited again later is compressed to `edit_marker` mode (`edit-marker.ts`), which keeps the file path verbatim and the first 40 characters of the change as a region hint and replaces the output with the placeholder. The newest edit per file stays whole, so the model still knows which files and regions it touched.
+
+Supersession ignores tool calls owned by the newest 20 distinct messages (`SUPERSESSION_RECENT_MESSAGE_WINDOW`), derived from persisted tag order so the protection does not shift when the provider-visible array contracts and re-expands.
+
+## Heuristic cleanup and emergency drops
+
+`heuristic-cleanup.ts` runs on busting passes: once per user turn for primary sessions, on every execute pass for subagents (a subagent run is effectively one long parent turn). It deduplicates repeated read-only tool results (keeping the newest in full), strips injected system content, and runs caveman compression when enabled.
+
+At the force band (`max(85%, execute threshold + 2%)`, so 92% at the highest allowed threshold of 90%), heuristic cleanup also runs the emergency drop (`emergency-drop.ts`), which removes tool outputs by need instead of by position:
+
+- The target is `fixedFloor + 0.30 × (ceiling − fixedFloor)`: reclaim down to about 30% of working space.
+- Tools are dropped oldest first by tier: tier 3 (everything else, such as `bash`) before tier 2 (`edit`, `write`, `apply_patch`, `grep`, `glob`, `aft_search`) before tier 1 (`read`, `todowrite`, `task`, `aft_outline`, `aft_zoom`). The newest 20% of tier 1 and tier 2 are held back as continuation context.
+- A computed reclaim of 2,000 tokens or less is not worth a bust and does nothing.
+- Emergency drops use the same newest-20 skeleton rule as agent drops.
+- One continuous stay in the force band gets one non-empty emergency batch. The latch (`last_emergency_input_sample`) re-arms when usage leaves the band, or when another provider-visible mutation is already busting the prefix, so accumulated candidates share one rewrite. Heuristic cleanup, dedup, caveman and reasoning clearing follow the same episode rule.
+- At 95% or more (provider-proven or estimated), selection also gives up the protected window and the tier reserve, fully removing selected completed arcs while keeping open arcs and the three newest `ctx_reduce` calls. Tool arcs next to signed reasoning keep a paired skeleton (`requiresToolArcSkeleton`) so the provider does not merge signed assistant turns. Subagents, and primary sessions on models that cannot end on an assistant turn, keep skeletons where removing an arc would leave the request without a final tool result.
+
+## Strip and replay
+
+Some mutations are not drops but strips of content the provider does not need (`strip-content.ts`): cleared reasoning older than `clear_reasoning_age` tags (default 50), structural noise, stale placeholders, processed images, merged-assistant reasoning, stale `ctx_reduce` calls (`drop-stale-reduce-calls.ts`) and injected system messages. Each strip is a stateless function plus persisted state. The pattern is **detect and freeze on a busting pass, replay on every pass**: the affected ids are recorded in `session_meta` (for example `stripped_placeholder_ids`, `stale_reduce_stripped_ids`, `processed_image_stripped_ids`, `merged_reasoning_stripped_ids`) and every later pass, defer passes included, re-applies exactly that set. Frozen sets are bounded and entries are removed when their message is removed.
+
+Emptied content is provider-aware (`sentinel.ts`): providers that accept empty parts get an empty sentinel, others get a placeholder, because some providers break tool adjacency on empty parts. `variantChangeBustsProviderCache` decides whether a reasoning-effort change is itself a cache bust worth flushing queued work into.
+
+## Caveman compression
+
+`caveman_text_compression` (opt-in, primary sessions only, never subagents) compresses old long user and assistant text deterministically (`caveman.ts`: dropping filler, hedging, pleasantries, articles and auxiliaries, with `lite`, `full` and `ultra` levels, while preserving code, paths and similar regions). Eligible tags outside the protected window are bucketed by age: the oldest 20% go to `ultra`, the next 20% to `full`, the next 20% to `lite`, and the newest 40% stay untouched (`caveman-cleanup.ts`).
+
+Only busting passes may increase a tag's `caveman_depth`; every pass replays the persisted depth. Compression is always computed from the pristine text in `source_contents`, never from an already-compressed intermediate, so any depth change converges to the same bytes as compressing directly.
