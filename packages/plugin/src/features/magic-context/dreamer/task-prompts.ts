@@ -54,7 +54,9 @@ export const CURATE_SYSTEM_PROMPT = `You are a memory-pool curator for the magic
 ${PROJECT_MEMORY_TAXONOMY}`;
 
 // The docs investigator can only inspect source and return section proposals.
-export const MAINTAIN_DOCS_SYSTEM_PROMPT = `You are a read-only documentation investigator. Use read, grep, glob and navigation tools to verify source. Never edit any file or run commands. Return only a proposed change to the project's ARCHITECTURE.md and STRUCTURE.md, not a change log. The protected regions between <!-- mc:protected START ... --> and <!-- mc:protected END --> must remain byte-identical. If the docs are accurate, return [].`;
+// It keeps the "for the magic-context system" identity phrase: isMagicContextInternalAgent
+// keys on it to keep MC's own guidance out of this child's system prompt.
+export const MAINTAIN_DOCS_SYSTEM_PROMPT = `You are a read-only documentation investigator for the magic-context system. Use read, grep, glob and navigation tools to verify source. Never edit any file or run commands. Return only a proposed change to the project's ARCHITECTURE.md and STRUCTURE.md, not a change log. The protected regions between <!-- mc:protected START ... --> and <!-- mc:protected END --> must remain byte-identical. If the docs are accurate, return [].`;
 
 // review-user-memories: a pure JSON reviewer of behavioral observations about the
 // human user (the GLOBAL user profile, NOT project memories). It calls no tools
