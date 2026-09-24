@@ -30,6 +30,7 @@ fi
 VERSION=""
 DRY=""
 FORCE_E2E_HOST=0
+SKIP_RUST_E2E=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -39,15 +40,22 @@ for arg in "$@"; do
     --e2e-host)
       FORCE_E2E_HOST=1
       ;;
+    --skip-rust-e2e)
+      # One-off operator decision to release without the experimental Rust-mode
+      # suite. Requires the repo variable RELEASE_SKIP_RUST_E2E to name this exact
+      # tag, so the tag workflow skips the same suite and the skip can never carry
+      # over to a later release.
+      SKIP_RUST_E2E=1
+      ;;
     --*)
       echo "Error: unknown option '$arg'"
-      echo "Usage: ./scripts/release.sh <version> [--dry] [--e2e-host]"
+      echo "Usage: ./scripts/release.sh <version> [--dry] [--e2e-host] [--skip-rust-e2e]"
       exit 1
       ;;
     *)
       if [[ -n "$VERSION" ]]; then
         echo "Error: more than one version was supplied"
-        echo "Usage: ./scripts/release.sh <version> [--dry] [--e2e-host]"
+        echo "Usage: ./scripts/release.sh <version> [--dry] [--e2e-host] [--skip-rust-e2e]"
         exit 1
       fi
       VERSION="$arg"
@@ -56,7 +64,7 @@ for arg in "$@"; do
 done
 
 if [[ -z "$VERSION" ]]; then
-  echo "Usage: ./scripts/release.sh <version> [--dry] [--e2e-host]"
+  echo "Usage: ./scripts/release.sh <version> [--dry] [--e2e-host] [--skip-rust-e2e]"
   echo "  e.g. ./scripts/release.sh 0.1.0"
   exit 1
 fi
@@ -67,6 +75,19 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?
 fi
 
 TAG="v$VERSION"
+
+if [[ "$SKIP_RUST_E2E" -eq 1 ]]; then
+  SKIP_VAR=$(gh variable get RELEASE_SKIP_RUST_E2E 2>/dev/null || true)
+  if [[ "$SKIP_VAR" != "$TAG" ]]; then
+    echo "Error: --skip-rust-e2e needs the repo variable RELEASE_SKIP_RUST_E2E set to '$TAG' (found '${SKIP_VAR}'),"
+    echo "       so the tag workflow skips the same suite: gh variable set RELEASE_SKIP_RUST_E2E --body $TAG"
+    exit 1
+  fi
+  echo ""
+  echo "  WARNING: releasing $TAG WITHOUT the Rust hermetic e2e suite (operator decision)."
+  echo "  This release does not claim Rust transform mode passed its behaviour suite."
+  echo ""
+fi
 
 # Check if tag already exists
 if git rev-parse "$TAG" >/dev/null 2>&1; then
@@ -383,7 +404,11 @@ run_host_e2e() {
 # the container boundary. The shared executable owns the exact manifest selection,
 # prerequisites, and true-green summary check used by release CI as well.
 run_host_e2e
-"$SCRIPT_DIR/run-rust-hermetic-e2e.sh"
+if [[ "$SKIP_RUST_E2E" -eq 1 ]]; then
+  echo "  [e2e:rust] SKIPPED by operator for $TAG (--skip-rust-e2e)"
+else
+  "$SCRIPT_DIR/run-rust-hermetic-e2e.sh"
+fi
 
 echo "  ✓ All checks passed"
 echo ""

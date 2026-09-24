@@ -348,9 +348,21 @@ jobs:
         env:
           CK_CI_APP_ID: ${{ secrets.CK_CI_APP_ID }}
           CK_CI_APP_PRIVATE_KEY: ${{ secrets.CK_CI_APP_PRIVATE_KEY }}
+          # One-off operator skip: only a variable naming exactly this tag skips
+          # the suite, so it cannot silently carry over to a later release.
+          SKIP_RUST_E2E_TAG: ${{ vars.RELEASE_SKIP_RUST_E2E }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -n "${SKIP_RUST_E2E_TAG:-}" && "$SKIP_RUST_E2E_TAG" == "$GITHUB_REF_NAME" ]]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Rust hermetic E2E skipped::Skipped by operator decision for $GITHUB_REF_NAME (RELEASE_SKIP_RUST_E2E). This release does not claim the Rust suite passed."
+            {
+              echo "## Rust hermetic E2E"
+              echo "SKIPPED by operator decision for $GITHUB_REF_NAME."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           missing_secrets=()
           [[ -n "$CK_CI_APP_ID" ]] || missing_secrets+=("CK_CI_APP_ID")
           [[ -n "$CK_CI_APP_PRIVATE_KEY" ]] || missing_secrets+=("CK_CI_APP_PRIVATE_KEY")
