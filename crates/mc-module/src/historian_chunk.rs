@@ -930,12 +930,42 @@ pub fn assemble_historian_firing(
             && chunk.chunk.completed_tool_arcs.iter().any(|arc| {
                 arc.start <= chunk.chunk.end_index && arc.end >= chunk.chunk.start_index
             });
+    let system_tokens = estimate_tokens(crate::historian_prompt::HISTORIAN_SYSTEM_PROMPT) as f64;
+    let producer_input_limit = crate::historian::producer_input_token_limit(
+        config.historian_context_limit_tokens,
+        config.max_output_tokens,
+    );
+    // A source-only allowance can consume the entire producer window before the
+    // historian's system instructions, references, and wrapper are counted.
+    let fits_producer_prompt = |source: &str| {
+        let Some(limit) = producer_input_limit else {
+            return false;
+        };
+        let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
+            seed_examples: &reference_blocks.seed_examples,
+            session_references: &reference_blocks.session_references,
+            project_memory: &memory_block,
+            input_source: source,
+            memory_enabled: config.memory_enabled,
+            extraction_free: config.extraction_free,
+        });
+        let full_tokens = seed.provider_mass(
+            crate::decision_calibration::LocalMass {
+                system: system_tokens,
+                prose: estimate_tokens(&prompt) as f64,
+                tools: 0.0,
+            },
+            true,
+        );
+        full_tokens.is_finite() && full_tokens > 0.0 && full_tokens <= limit as f64
+    };
     let fitted_atomic_source = oversize_atomic_unit.then(|| {
         fit_atomic_historian_source_to_producer_window(
             &chunk.text,
             &chunk.tool_result_boundaries,
             config.historian_context_limit_tokens,
             config.max_output_tokens,
+            &fits_producer_prompt,
         )
     });
     let input_source = if oversize_atomic_unit {
@@ -1070,6 +1100,7 @@ fn fit_atomic_historian_source_to_producer_window(
     result_boundaries: &[HistorianResultBoundary],
     context_limit_tokens: Option<usize>,
     max_output_tokens: u32,
+    fits_producer_prompt: &impl Fn(&str) -> bool,
 ) -> FittedHistorianSource {
     let producer_input_limit_tokens =
         crate::historian::producer_input_token_limit(context_limit_tokens, max_output_tokens);
@@ -1082,7 +1113,7 @@ fn fit_atomic_historian_source_to_producer_window(
             removed_tokens: 0,
         };
     };
-    if original_tokens < limit || limit == 0 {
+    if limit == 0 || (original_tokens < limit && fits_producer_prompt(input)) {
         return FittedHistorianSource {
             text: input.to_string(),
             producer_input_limit_tokens,
@@ -1115,7 +1146,7 @@ fn fit_atomic_historian_source_to_producer_window(
             HISTORIAN_SPLIT_MARKERS,
             &right[right_start..]
         );
-        if estimate_tokens(&candidate) <= target {
+        if estimate_tokens(&candidate) <= target && fits_producer_prompt(&candidate) {
             best = candidate;
             lo = scale.saturating_add(1);
         } else if scale == 0 {
@@ -2011,6 +2042,34 @@ mod tests {
         let usable_input_tokens = source_tokens * 100 / 102;
         let max_output_tokens = 32_000;
         let context_limit_tokens = usable_input_tokens + max_output_tokens as usize;
+        let fits_prompt = |source: &str| {
+            let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
+                seed_examples: "",
+                session_references: "",
+                project_memory: "",
+                input_source: source,
+                memory_enabled: false,
+                extraction_free: false,
+            });
+            let calibration = crate::decision_calibration::DecisionCalibration::for_model(Some(
+                "mock-anthropic/mock-sonnet",
+            ));
+            let full_tokens = calibration.provider_mass(
+                crate::decision_calibration::LocalMass {
+                    system: estimate_tokens(crate::historian_prompt::HISTORIAN_SYSTEM_PROMPT)
+                        as f64,
+                    prose: estimate_tokens(&prompt) as f64,
+                    tools: 0.0,
+                },
+                true,
+            );
+            let limit = crate::historian::producer_input_token_limit(
+                Some(context_limit_tokens),
+                max_output_tokens,
+            )
+            .unwrap();
+            full_tokens.is_finite() && full_tokens > 0.0 && full_tokens <= limit as f64
+        };
         let fitted = fit_atomic_historian_source_to_producer_window(
             &input,
             &[HistorianResultBoundary {
@@ -2020,6 +2079,7 @@ mod tests {
             }],
             Some(context_limit_tokens),
             max_output_tokens,
+            &fits_prompt,
         );
         let limit = crate::historian::producer_input_token_limit(
             Some(context_limit_tokens),
@@ -2028,6 +2088,29 @@ mod tests {
         .unwrap();
         assert!(source_tokens >= usable_input_tokens * 101 / 100);
         assert!(estimate_tokens(&fitted.text) <= limit);
+        let wrapped = build_compartment_agent_prompt(&CompartmentPromptInputs {
+            seed_examples: "",
+            session_references: "",
+            project_memory: "",
+            input_source: &fitted.text,
+            memory_enabled: false,
+            extraction_free: false,
+        });
+        let calibration = crate::decision_calibration::DecisionCalibration::for_model(Some(
+            "mock-anthropic/mock-sonnet",
+        ));
+        let full_tokens = calibration.provider_mass(
+            crate::decision_calibration::LocalMass {
+                system: estimate_tokens(crate::historian_prompt::HISTORIAN_SYSTEM_PROMPT) as f64,
+                prose: estimate_tokens(&wrapped) as f64,
+                tools: 0.0,
+            },
+            true,
+        );
+        assert!(
+            full_tokens <= limit as f64,
+            "the system and wrapper must fit with the split source: {full_tokens} > {limit}"
+        );
         assert_eq!(fitted.split_boundary_ordinal, Some(4));
         assert_eq!(
             fitted
