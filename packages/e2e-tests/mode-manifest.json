@@ -571,6 +571,14 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/synthetic-todo-schema.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "The real OpenCode 2 host with a native todowrite fixture captures todo state, then validates priced and cached synthetic reminder drafts against its own LLM schema",
+            "contract_refs": ["S2-MIGRATION", "OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/reporter-emergency-drop.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
