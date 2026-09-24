@@ -18,6 +18,8 @@ import {
     HIDDEN_HISTORIAN_AGENT,
     type HiddenChildAttempt,
     type HiddenChildHook,
+    hiddenAgentFor,
+    hiddenToolLoop,
 } from "./hooks/hidden-child";
 import { type HostServiceOwner, HostServiceUnavailable, hostServiceOwner } from "./host-service";
 import type { StoreRow } from "./store-reader";
@@ -423,6 +425,39 @@ function successfulReusableAssistant(row: StoreRow<"assistant"> | undefined): bo
     );
 }
 
+function toolLoopMessages(attempt: HiddenChildAttempt): unknown[] {
+    const messages = attempt.observedMessages ?? [];
+    const results = new Map<string, { status: string }>();
+    for (const message of messages) {
+        if (message.role !== "tool") continue;
+        for (const part of message.content) {
+            if (part.type !== "tool-result" || typeof part.id !== "string") continue;
+            const result = part.result as { type?: unknown } | undefined;
+            results.set(part.id, { status: result?.type === "error" ? "error" : "completed" });
+        }
+    }
+    return messages.flatMap((message) => {
+        if (message.role !== "assistant") return [];
+        const parts = message.content.flatMap((part) => {
+            if (
+                part.type !== "tool-call" ||
+                typeof part.id !== "string" ||
+                typeof part.name !== "string"
+            )
+                return [];
+            const result = results.get(part.id);
+            return [
+                {
+                    type: "tool",
+                    tool: part.name,
+                    state: { status: result?.status ?? "pending", input: part.input },
+                },
+            ];
+        });
+        return parts.length ? [{ info: { role: "assistant" }, parts }] : [];
+    });
+}
+
 function assistantText(row: StoreRow<"assistant">): string | null {
     const text = (row.data.content ?? [])
         .flatMap((part) =>
@@ -767,7 +802,7 @@ export async function createV2HiddenCompletionExecutor(
     };
 
     return {
-        capabilities: { tools: false, harness: "opencode2" },
+        capabilities: { tools: true, harness: "opencode2" },
         async open(identity) {
             const role = roleFor(identity);
             const releaseRole = await acquireRole(role);
@@ -776,6 +811,10 @@ export async function createV2HiddenCompletionExecutor(
                 await options.ensureAgent?.();
                 const head = await resolveHead(identity);
                 let active = store.read().active[role];
+                if (active && hiddenToolLoop(identity)) {
+                    retireChild(active, "fresh-tool-loop-run");
+                    active = undefined;
+                }
                 if (active && active.generation !== generation) {
                     retireChild(active, "host-generation-changed");
                     active = undefined;
@@ -805,7 +844,9 @@ export async function createV2HiddenCompletionExecutor(
                     const title = roleTitle(role);
                     const created = await host.create({
                         title,
-                        agent: roleAgent(role),
+                        agent: hiddenToolLoop(identity)
+                            ? hiddenAgentFor(identity)
+                            : roleAgent(role),
                         model: {
                             providerID: head.providerID,
                             id: head.modelID,
@@ -867,6 +908,7 @@ export async function createV2HiddenCompletionExecutor(
                 reader.latestSequence(run.child.id),
             );
             const marker = `mc:hidden:${crypto.randomUUID()}:${crypto.randomUUID()}`;
+            run.completion = undefined;
             const attempt: HiddenChildAttempt = {
                 childSessionId: run.child.id,
                 identity: run.identity,
@@ -953,6 +995,9 @@ export async function createV2HiddenCompletionExecutor(
                 }
                 run.completion = {
                     text,
+                    ...(hiddenToolLoop(run.identity)
+                        ? { messages: toolLoopMessages(attempt) }
+                        : {}),
                     reasoning: null,
                     // If either side is numeric, retain the provider's partial usage
                     // and floor omitted components to zero. With no numeric usage,
@@ -1009,7 +1054,16 @@ export async function createV2HiddenCompletionExecutor(
                 // attempt, so it cannot tell this case apart; the run's own record of every failure
                 // being a persisted provider error row (the child is idle) is what decides.
                 const reusable = run.failed && !run.unsettledFailure;
-                if (!run.completion && (run.failed || !settlement.promptSettled) && !reusable) {
+                if (hiddenToolLoop(run.identity)) {
+                    retire(
+                        run,
+                        settlement.promptSettled ? "tool-loop-settled" : "tool-loop-failed",
+                    );
+                } else if (
+                    !run.completion &&
+                    (run.failed || !settlement.promptSettled) &&
+                    !reusable
+                ) {
                     retire(run, "hidden-run-failed");
                 }
             } finally {

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { DREAMER_MEMORY_MAPPER_AGENT } from "../../../agents/dreamer";
 import { withContentLanguageDirective } from "../../../agents/language-directive";
 import { createChildSessionWithFence } from "../../../hooks/magic-context/child-session-spawn";
+import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-types";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import {
@@ -30,6 +31,7 @@ import { computeNormalizedHash } from "../memory/normalize-hash";
 import { queueMemoryMutation } from "../storage-memory-mutation-log";
 import type { SubagentInvocationStatus } from "../storage-subagent-invocations";
 import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
+import { runHiddenSingleShotPrompt } from "./hidden-single-shot";
 import { type LeaseAcquisition, runLeaseGuardedWrite, startLeaseHeartbeat } from "./lease";
 import { assertNoDuplicateManifestIds } from "./manifest-parser";
 import { isDirectiveShapedProjectRule } from "./memory-claim-safety";
@@ -90,7 +92,8 @@ interface VerifyBatchResult extends VerifyVerdictCounts {
 
 export interface VerifyArgs {
     db: Database;
-    client: PluginContext["client"];
+    client?: PluginContext["client"];
+    hiddenCompletionExecutor?: HiddenCompletionExecutor;
     projectIdentity: string;
     parentSessionId: string | undefined;
     sessionDirectory: string;
@@ -264,8 +267,38 @@ async function verifyOneBatch(
     let promptSettled = false;
     const startedAt = Date.now();
     try {
+        const prompt = buildVerifyPrompt(args.projectIdentity, batch);
+        if (args.hiddenCompletionExecutor) {
+            const run = await runHiddenSingleShotPrompt({
+                executor: args.hiddenCompletionExecutor,
+                parentSessionId: args.parentSessionId,
+                sessionDirectory: args.sessionDirectory,
+                agent: DREAMER_MEMORY_MAPPER_AGENT,
+                system: VERIFY_SYSTEM_PROMPT,
+                prompt,
+                title: "magic-context-dream-verify",
+                callContext: "dreamer:verify",
+                model: args.model,
+                fallbackModels: args.fallbackModels,
+                language: args.language,
+                timeoutMs: sliceMs,
+                signal,
+                parse: (text) => {
+                    const providerFailure = providerOutputFailureFromInvalidManifest([], text);
+                    if (providerFailure) throw providerFailure;
+                    return validateVerifyManifest(text, new Set(batch.map((memory) => memory.id)));
+                },
+            });
+            recordInvocation(args, startedAt, {
+                status: "completed",
+                messages: run.completion.messages ?? [],
+            });
+            return applyParsedVerifyManifest(args, batch, run.validated);
+        }
+        const client = args.client;
+        if (!client) throw new Error("verify requires a client or hidden completion executor");
         const createResponse = await createChildSessionWithFence({
-            client: args.client,
+            client,
             db: args.db,
             parentSessionId: args.parentSessionId,
             title: "magic-context-dream-verify",
@@ -281,9 +314,8 @@ async function verifyOneBatch(
         agentSessionId = typeof created?.id === "string" ? created.id : null;
         if (!agentSessionId) throw new Error("Could not create verify session.");
 
-        const prompt = buildVerifyPrompt(args.projectIdentity, batch);
         const run = await shared.promptSyncWithValidatedOutputRetry(
-            args.client,
+            client,
             {
                 path: { id: agentSessionId },
                 query: { directory: args.sessionDirectory },
@@ -300,7 +332,7 @@ async function verifyOneBatch(
                 fallbackModels: args.fallbackModels,
                 callContext: "dreamer:verify",
                 fetchOutput: async () => {
-                    const messagesResponse = await args.client.session.messages({
+                    const messagesResponse = await client.session.messages({
                         path: { id: agentSessionId as string },
                         query: { directory: args.sessionDirectory, limit: 100 },
                     });
@@ -357,15 +389,16 @@ async function verifyOneBatch(
             providerFailure,
         };
     } finally {
-        await teardownChildSession({
-            client: args.client,
-            sessionId: agentSessionId,
-            sessionDirectory: args.sessionDirectory,
-            promptSettled,
-            privacySensitive: true,
-            context: "[dreamer] verify",
-            log,
-        });
+        if (agentSessionId && args.client)
+            await teardownChildSession({
+                client: args.client,
+                sessionId: agentSessionId,
+                sessionDirectory: args.sessionDirectory,
+                promptSettled,
+                privacySensitive: true,
+                context: "[dreamer] verify",
+                log,
+            });
     }
 }
 

@@ -116,7 +116,7 @@ test("the refusal names each task and why its tool loop is needed", () => {
     expect(text).toContain("- verify: unavailable on this host (MC-D08)");
     expect(text).toContain("re-check each memory against the code");
     expect(text).toContain("- maintain-docs: unavailable on this host (MC-D08)");
-    expect(text).toContain("update project documentation");
+    expect(text).toContain("read-only file tools to investigate documentation corrections");
 });
 
 test("an explicitly requested tool-requiring task is reported unsupported, not run", () => {

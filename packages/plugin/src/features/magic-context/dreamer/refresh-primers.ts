@@ -1,6 +1,7 @@
 import { DREAMER_PRIMER_INVESTIGATOR_AGENT } from "../../../agents/dreamer";
 import { withContentLanguageDirective } from "../../../agents/language-directive";
 import { createChildSessionWithFence } from "../../../hooks/magic-context/child-session-spawn";
+import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-types";
 import {
     type RawMessageProvider,
     setRawMessageProvider,
@@ -24,6 +25,7 @@ import {
 } from "../storage-primers";
 import type { SubagentInvocationStatus } from "../storage-subagent-invocations";
 import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
+import { runHiddenSingleShotPrompt } from "./hidden-single-shot";
 import { type LeaseAcquisition, runLeaseGuardedWrite, startLeaseHeartbeat } from "./lease";
 import { buildPrimerSeed } from "./primer-seed";
 import { PRIMER_INVESTIGATOR_SYSTEM_PROMPT } from "./task-prompts";
@@ -32,7 +34,8 @@ const REFRESH_PRIMERS_PER_RUN = 5;
 
 export interface RefreshPrimersArgs {
     db: Database;
-    client: PluginContext["client"];
+    client?: PluginContext["client"];
+    hiddenCompletionExecutor?: HiddenCompletionExecutor;
     projectIdentity: string;
     parentSessionId: string | undefined;
     sessionDirectory: string;
@@ -238,8 +241,45 @@ async function refreshOnePrimer(
     let promptSettled = false;
     const startedAt = Date.now();
     try {
+        const prompt = buildInvestigationPrompt(primer, seed.kind, seed.orientation, seed.prePost);
+        if (args.hiddenCompletionExecutor) {
+            const run = await runHiddenSingleShotPrompt({
+                executor: args.hiddenCompletionExecutor,
+                parentSessionId: args.parentSessionId,
+                sessionDirectory: args.sessionDirectory,
+                agent: DREAMER_PRIMER_INVESTIGATOR_AGENT,
+                system: PRIMER_INVESTIGATOR_SYSTEM_PROMPT,
+                prompt,
+                title: "magic-context-dream-refresh-primers",
+                callContext: "dreamer:refresh-primers",
+                model: args.model,
+                fallbackModels: args.fallbackModels,
+                language: args.language,
+                timeoutMs: sliceMs,
+                signal,
+                parse: (text) =>
+                    parseAnswer(
+                        [{ info: { role: "assistant" }, parts: [{ type: "text", text }] }],
+                        primer.answer,
+                    ),
+            });
+            recordInvocation(args, startedAt, {
+                status: "completed",
+                messages: run.completion.messages ?? [],
+            });
+            const answer = run.validated.trim();
+            if (!answer || investigationToolCallCount(run.completion.messages ?? []) === 0)
+                return false;
+            runLeaseGuardedWrite(args.db, args.holderId, args.leaseKey, () => {
+                updatePrimerAnswer(args.db, primer.id, answer);
+            });
+            return true;
+        }
+        const client = args.client;
+        if (!client)
+            throw new Error("refresh-primers requires a client or hidden completion executor");
         const createResponse = await createChildSessionWithFence({
-            client: args.client,
+            client,
             db: args.db,
             parentSessionId: args.parentSessionId,
             title: "magic-context-dream-refresh-primers",
@@ -255,9 +295,8 @@ async function refreshOnePrimer(
         agentSessionId = typeof created?.id === "string" ? created.id : null;
         if (!agentSessionId) throw new Error("Could not create primer refresh session.");
 
-        const prompt = buildInvestigationPrompt(primer, seed.kind, seed.orientation, seed.prePost);
         const run = await shared.promptSyncWithValidatedOutputRetry(
-            args.client,
+            client,
             {
                 path: { id: agentSessionId },
                 query: { directory: args.sessionDirectory },
@@ -277,7 +316,7 @@ async function refreshOnePrimer(
                 fallbackModels: args.fallbackModels,
                 callContext: "dreamer:refresh-primers",
                 fetchOutput: async () => {
-                    const messagesResponse = await args.client.session.messages({
+                    const messagesResponse = await client.session.messages({
                         path: { id: agentSessionId as string },
                         query: { directory: args.sessionDirectory, limit: 100 },
                     });
@@ -317,15 +356,16 @@ async function refreshOnePrimer(
         recordInvocation(args, startedAt, { status: failedInvocationStatus(error), error });
         throw error;
     } finally {
-        await teardownChildSession({
-            client: args.client,
-            sessionId: agentSessionId,
-            sessionDirectory: args.sessionDirectory,
-            promptSettled,
-            privacySensitive: true,
-            context: "[dreamer] refresh-primers",
-            log,
-        });
+        if (agentSessionId && args.client)
+            await teardownChildSession({
+                client: args.client,
+                sessionId: agentSessionId,
+                sessionDirectory: args.sessionDirectory,
+                promptSettled,
+                privacySensitive: true,
+                context: "[dreamer] refresh-primers",
+                log,
+            });
     }
 }
 

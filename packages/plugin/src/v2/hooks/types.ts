@@ -30,6 +30,7 @@ export interface V2AgentEditor {
             description?: string;
             mode: "subagent" | "primary" | "all";
             hidden: boolean;
+            steps?: number;
             request: {
                 settings: Record<string, unknown>;
                 headers: Record<string, string>;

@@ -563,6 +563,14 @@
             ]
         },
         {
+            "path": "tests/opencode2/dream-loop.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "OpenCode 2.0.15 pinned-host tool-loop proof: scoped read, memory and search tools, retained calibrated prompt and results, host-applied mapping, denied tools, and child cleanup; runs in the dedicated v2 lane",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/dreamer-s2-carrier.test.ts",
             "tier": "excluded",
             "invocation": {

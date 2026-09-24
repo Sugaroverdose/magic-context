@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { DREAMER_MEMORY_MAPPER_AGENT } from "../../../agents/dreamer";
 import { createChildSessionWithFence } from "../../../hooks/magic-context/child-session-spawn";
+import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-types";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import {
@@ -24,6 +25,7 @@ import {
 } from "../memory";
 import type { SubagentInvocationStatus } from "../storage-subagent-invocations";
 import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
+import { runHiddenSingleShotPrompt } from "./hidden-single-shot";
 import { type LeaseAcquisition, runLeaseGuardedWrite, startLeaseHeartbeat } from "./lease";
 import { assertNoDuplicateManifestIds } from "./manifest-parser";
 import {
@@ -87,7 +89,8 @@ export const MAX_INDEPENDENT_REQUEUE_PER_RUN = MAP_BATCH_SIZE;
 
 export interface MapMemoriesArgs {
     db: Database;
-    client: PluginContext["client"];
+    client?: PluginContext["client"];
+    hiddenCompletionExecutor?: HiddenCompletionExecutor;
     projectIdentity: string;
     parentSessionId: string | undefined;
     sessionDirectory: string;
@@ -328,8 +331,37 @@ async function mapOneBatch(
     let promptSettled = false;
     const startedAt = Date.now();
     try {
+        const prompt = buildMapMemoriesPrompt(args.projectIdentity, batch);
+        if (args.hiddenCompletionExecutor) {
+            const run = await runHiddenSingleShotPrompt({
+                executor: args.hiddenCompletionExecutor,
+                parentSessionId: args.parentSessionId,
+                sessionDirectory: args.sessionDirectory,
+                agent: DREAMER_MEMORY_MAPPER_AGENT,
+                system: MAP_MEMORIES_SYSTEM_PROMPT,
+                prompt,
+                title: "magic-context-dream-map-memories",
+                callContext: "dreamer:map-memories",
+                model: args.model,
+                fallbackModels: args.fallbackModels,
+                timeoutMs: sliceMs,
+                signal,
+                parse: (text) =>
+                    validateMapMemoriesManifest(text, new Set(batch.map((memory) => memory.id))),
+            });
+            recordInvocation(args, startedAt, {
+                status: "completed",
+                messages: run.completion.messages ?? [],
+            });
+            const outcome = await applyParsedBatchMappings(args, batch, run.validated);
+            const returnedIds = new Set(run.validated.map((entry) => entry.id));
+            return { ...outcome, requeue: batch.filter((memory) => !returnedIds.has(memory.id)) };
+        }
+        const client = args.client;
+        if (!client)
+            throw new Error("map-memories requires a client or hidden completion executor");
         const createResponse = await createChildSessionWithFence({
-            client: args.client,
+            client,
             db: args.db,
             parentSessionId: args.parentSessionId,
             title: "magic-context-dream-map-memories",
@@ -345,9 +377,8 @@ async function mapOneBatch(
         agentSessionId = typeof created?.id === "string" ? created.id : null;
         if (!agentSessionId) throw new Error("Could not create map-memories session.");
 
-        const prompt = buildMapMemoriesPrompt(args.projectIdentity, batch);
         const run = await shared.promptSyncWithValidatedOutputRetry(
-            args.client,
+            client,
             {
                 path: { id: agentSessionId },
                 query: { directory: args.sessionDirectory },
@@ -364,7 +395,7 @@ async function mapOneBatch(
                 fallbackModels: args.fallbackModels,
                 callContext: "dreamer:map-memories",
                 fetchOutput: async () => {
-                    const messagesResponse = await args.client.session.messages({
+                    const messagesResponse = await client.session.messages({
                         path: { id: agentSessionId as string },
                         query: { directory: args.sessionDirectory, limit: 100 },
                     });
@@ -418,15 +449,16 @@ async function mapOneBatch(
             },
         };
     } finally {
-        await teardownChildSession({
-            client: args.client,
-            sessionId: agentSessionId,
-            sessionDirectory: args.sessionDirectory,
-            promptSettled,
-            privacySensitive: true,
-            context: "[dreamer] map-memories",
-            log,
-        });
+        if (agentSessionId && args.client)
+            await teardownChildSession({
+                client: args.client,
+                sessionId: agentSessionId,
+                sessionDirectory: args.sessionDirectory,
+                promptSettled,
+                privacySensitive: true,
+                context: "[dreamer] map-memories",
+                log,
+            });
     }
 }
 

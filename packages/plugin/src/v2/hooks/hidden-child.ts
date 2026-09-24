@@ -1,4 +1,10 @@
-import { DREAMER_AGENT } from "../../agents/dreamer";
+import {
+    DREAMER_AGENT,
+    DREAMER_DOCS_AGENT,
+    DREAMER_MEMORY_MAPPER_AGENT,
+    DREAMER_PRIMER_INVESTIGATOR_AGENT,
+    DREAMER_RETROSPECTIVE_AGENT,
+} from "../../agents/dreamer";
 import {
     HiddenCompletionRefusal,
     type HiddenRunIdentity,
@@ -11,11 +17,42 @@ export const HIDDEN_HISTORIAN_AGENT = "historian";
 export const HIDDEN_DREAMER_AGENT = "dreamer-classifier";
 export const HIDDEN_CURATE_AGENT = DREAMER_AGENT;
 
+const READ_TOOLS = ["read", "grep", "glob"] as const;
+const AGENT_TOOLS: Record<string, readonly string[]> = {
+    [HIDDEN_HISTORIAN_AGENT]: [],
+    [HIDDEN_DREAMER_AGENT]: [],
+    [HIDDEN_CURATE_AGENT]: ["ctx_memory", "ctx_memory_list"],
+    [DREAMER_MEMORY_MAPPER_AGENT]: READ_TOOLS,
+    [DREAMER_PRIMER_INVESTIGATOR_AGENT]: [...READ_TOOLS, "ctx_search"],
+    [DREAMER_RETROSPECTIVE_AGENT]: ["ctx_search"],
+};
+const AGENT_STEPS: Record<string, number> = {
+    [HIDDEN_CURATE_AGENT]: 150,
+    [DREAMER_MEMORY_MAPPER_AGENT]: 60,
+    [DREAMER_DOCS_AGENT]: 60,
+    [DREAMER_PRIMER_INVESTIGATOR_AGENT]: 40,
+    [DREAMER_RETROSPECTIVE_AGENT]: 40,
+};
+
+export function hiddenAgentFor(identity: HiddenRunIdentity): string {
+    if (identity.kind === "dreamer-task" && identity.agent === DREAMER_DOCS_AGENT)
+        return DREAMER_MEMORY_MAPPER_AGENT;
+    return identity.kind === "dreamer-task" && AGENT_TOOLS[identity.agent]
+        ? identity.agent
+        : identity.kind === "dreamer-task"
+          ? HIDDEN_DREAMER_AGENT
+          : HIDDEN_HISTORIAN_AGENT;
+}
+
+export function hiddenToolLoop(identity: HiddenRunIdentity): boolean {
+    return identity.kind === "dreamer-task" && AGENT_STEPS[identity.agent] !== undefined;
+}
+
 export async function registerHiddenChildAgents(
     agent: Pick<V2AgentDomain, "transform">,
 ): Promise<void> {
     await agent.transform((editor) => {
-        for (const id of [HIDDEN_HISTORIAN_AGENT, HIDDEN_DREAMER_AGENT, HIDDEN_CURATE_AGENT]) {
+        for (const id of Object.keys(AGENT_TOOLS)) {
             editor.update(id, (config) => {
                 config.system = "Magic Context hidden completion carrier.";
                 config.description = "Internal Magic Context hidden completion carrier.";
@@ -24,18 +61,17 @@ export async function registerHiddenChildAgents(
                 config.request.settings = {};
                 config.request.headers = {};
                 config.request.body = {};
+                config.steps = AGENT_STEPS[id];
+                // OpenCode 2.0.15's tool permission action is the tool id, not "tool".
+                // See @opencode/schema/dist/permission.d.ts (Request.action/resources)
+                // and the host's session request tool filtering; resource is "*".
                 config.permissions = [
                     { action: "*", resource: "*", effect: "deny" },
-                    ...(id === HIDDEN_CURATE_AGENT
-                        ? [
-                              { action: "tool", resource: "ctx_memory", effect: "allow" as const },
-                              {
-                                  action: "tool",
-                                  resource: "ctx_memory_list",
-                                  effect: "allow" as const,
-                              },
-                          ]
-                        : []),
+                    ...(AGENT_TOOLS[id] ?? []).map((tool) => ({
+                        action: tool,
+                        resource: "*",
+                        effect: "allow" as const,
+                    })),
                 ];
             });
         }
@@ -47,6 +83,9 @@ export interface HiddenChildAttempt {
     identity: HiddenRunIdentity;
     request: PromptArgs;
     shaped: boolean;
+    steps?: number;
+    observedMessages?: SessionContext["messages"];
+    marker?: string;
 }
 
 /** Last user text on a context draft. 2.0.5 may use a string body, extra parts, or input_text. */
@@ -131,6 +170,7 @@ function calibratedParts(attempt: HiddenChildAttempt): Array<{ type: "text"; tex
 export class HiddenChildHook {
     private readonly childIDs = new Set<string>();
     private readonly attempts = new Map<string, HiddenChildAttempt>();
+    private readonly active = new Map<string, HiddenChildAttempt>();
 
     registerChild(sessionID: string): void {
         this.childIDs.add(sessionID);
@@ -138,11 +178,16 @@ export class HiddenChildHook {
 
     registerAttempt(marker: string, attempt: HiddenChildAttempt): void {
         this.registerChild(attempt.childSessionId);
+        attempt.marker = marker;
         this.attempts.set(marker, attempt);
     }
 
     releaseAttempt(marker: string): void {
+        const attempt = this.attempts.get(marker);
         this.attempts.delete(marker);
+        if (attempt && this.active.get(attempt.childSessionId) === attempt) {
+            this.active.delete(attempt.childSessionId);
+        }
     }
 
     owns(sessionID: string): boolean {
@@ -158,36 +203,71 @@ export class HiddenChildHook {
         const attempt =
             (raw !== undefined ? this.attempts.get(raw) : undefined) ??
             (stripped && stripped !== raw ? this.attempts.get(stripped) : undefined);
-        if (!attempt || attempt.childSessionId !== draft.sessionID) {
+        const current = this.active.get(draft.sessionID);
+        const selected = attempt ?? current;
+        if (
+            !selected ||
+            selected.childSessionId !== draft.sessionID ||
+            (attempt && current && current !== attempt)
+        ) {
             throw new HiddenCompletionRefusal(
                 "hidden_prompt_unrecognized",
                 "Refusing an unregistered prompt on a Magic Context hidden-run session",
                 true,
             );
         }
-        if (attempt.request.signal?.aborted) {
+        if (selected.request.signal?.aborted) {
             throw new Error("Hidden completion prompt aborted");
         }
 
+        if (!selected.shaped) {
+            if (!attempt)
+                throw new HiddenCompletionRefusal(
+                    "hidden_prompt_unrecognized",
+                    "Hidden child first step requires a registered marker",
+                    true,
+                );
+            this.active.set(draft.sessionID, selected);
+        }
+        const steps = (selected.steps ?? 0) + 1;
+        const cap = AGENT_STEPS[selected.identity.agent];
+        if (cap !== undefined && steps > cap) {
+            throw new Error(`Hidden agent exceeded its ${cap}-step limit`);
+        }
+        selected.steps = steps;
         const system =
-            typeof attempt.request.body.system === "string"
-                ? attempt.request.body.system
-                : attempt.identity.system;
+            typeof selected.request.body.system === "string"
+                ? selected.request.body.system
+                : selected.identity.system;
         draft.system = [{ type: "text", text: system }];
-        draft.messages = [{ role: "user", content: calibratedParts(attempt) }];
+        if (!selected.shaped) {
+            draft.messages = [{ role: "user", content: calibratedParts(selected) }];
+        } else {
+            const first = draft.messages[0];
+            const firstText = first && newestUserText({ ...draft, messages: [first] });
+            const normalized =
+                firstText === undefined ? undefined : stripWellFormedLeadingTagPrefix(firstText);
+            if (normalized !== selected.marker) {
+                throw new HiddenCompletionRefusal(
+                    "hidden_prompt_unrecognized",
+                    "Hidden child history does not begin with this run's registered marker",
+                    true,
+                );
+            }
+            // The host saves the placeholder user prompt rather than the calibrated
+            // text sent on step one. Replace only that placeholder, preserving all
+            // assistant tool calls and tool results.
+            draft.messages[0] = { ...first, content: calibratedParts(selected) };
+        }
         // Replaced wholesale, never merged: the carrier sends exactly the
         // authored options and never inherits the host's own generation defaults.
-        draft.options = authoredOptions(attempt);
-        const dreamerTools =
-            attempt.identity.agent === DREAMER_AGENT
-                ? Object.fromEntries(
-                      ["ctx_memory", "ctx_memory_list"].flatMap((id) =>
-                          draft.tools[id] ? [[id, draft.tools[id]]] : [],
-                      ),
-                  )
-                : {};
-        draft.tools = dreamerTools;
-        attempt.shaped = true;
+        draft.options = authoredOptions(selected);
+        const allowed = AGENT_TOOLS[hiddenAgentFor(selected.identity)] ?? [];
+        draft.tools = Object.fromEntries(
+            allowed.flatMap((id) => (draft.tools[id] ? [[id, draft.tools[id]]] : [])),
+        );
+        selected.observedMessages = draft.messages;
+        selected.shaped = true;
         return true;
     }
 }
