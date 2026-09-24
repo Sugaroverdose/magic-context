@@ -62,6 +62,7 @@ import type { WindowGeometryResult } from "../../shared/window-geometry";
 import {
     cachedToolPermissionDenied,
     resolveCtxReduceAvailability,
+    resolveCtxReduceAvailabilityFromMessages,
     resolveTodowriteAvailability,
     resolveTodowriteAvailabilityFromMessages,
     type ToolAvailabilityVerdict,
@@ -2554,6 +2555,10 @@ export function createRustModeTransform(
         }
         timings.preflight = performance.now() - passStartedAt;
 
+        // The first user prompt is available before OpenCode saves its tools map. Check that
+        // prompt for ctx_reduce permission first; otherwise an unknown verdict sends the first
+        // subagent request without tags even though the model can call ctx_reduce.
+        resolveCtxReduceAvailabilityFromMessages(sessionId, messages);
         const reduceAvailability = resolveCtxReduceAvailability(sessionId);
         // Freeze the native todo-tool map verdict before state sync reads it, then combine it
         // with OpenCode's live permission decision. The module receives one authoritative bool;

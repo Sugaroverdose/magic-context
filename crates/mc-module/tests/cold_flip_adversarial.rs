@@ -124,42 +124,36 @@ fn dormant_flip_readd_and_restart_are_single_hard() {
 }
 
 #[test]
-fn subagent_flip_records_action_and_stable_tagged_replay() {
+fn subagent_flip_defers_served_tags_and_tags_new_tail_on_first_sight() {
     let dir = tempfile::tempdir().unwrap();
     let store = McStore::open(&descriptor(dir.path())).unwrap();
     let mut request = request("opencode-aisdk");
     request.is_subagent = true;
     let before = run(&store, &request);
-    println!(
-        "subagent initialized={} latch={} config={}",
-        store.load("review").unwrap().meta.initialized,
-        store.load("review").unwrap().meta.tagging_surface_active,
-        store.load("review").unwrap().meta.last_render_config
-    );
     request.tool_present = true;
     let transition = run(&store, &request);
-    let replay = run(&store, &request);
-    println!(
-        "subagent: before={} transition={} replay={}, tags={}/{}/{}, bytes={}/{}/{}",
-        before.action,
-        transition.action,
-        replay.action,
-        tagged(&before),
-        tagged(&transition),
-        tagged(&replay),
-        bytes(&before).len(),
-        bytes(&transition).len(),
-        bytes(&replay).len()
-    );
-    // This subagent never sets the store's initialized flag or commits a render
-    // identity. Its SOFT+ label therefore does not mean it replayed a frozen prefix.
+    // The surface flip spends one intentional Soft pass tagging previously served
+    // content; a new tail message is still tagged on first sight on a later defer.
+    let mut raw = serde_json::to_value(&request).unwrap();
+    raw["messages"].as_array_mut().unwrap().push(json!({
+        "mid": "m9", "ordinal": 9,
+        "ck": { "role": "user", "content": [{"kind": {"type": "text", "text": "new tail"}}],
+            "meta": {"harness_id": "m9", "created_at_ms": 5_400_000}}
+    }));
+    let grown: TransformRequest = serde_json::from_value(raw).unwrap();
+    let first_sight = run(&store, &grown);
+    let replay = run(&store, &grown);
     assert!(!store.load("review").unwrap().meta.initialized);
     assert_eq!(before.action, "SOFT+");
-    assert_eq!(transition.action, "SOFT+");
+    assert_eq!(transition.action, "SOFT");
     assert!(!tagged(&before));
     assert!(tagged(&transition));
-    assert_eq!(bytes(&transition), bytes(&replay));
-    assert_ne!(replay.action, "HARD");
+    assert_eq!(first_sight.action, "SOFT+");
+    let wire = String::from_utf8(bytes(&first_sight)).unwrap();
+    assert!(wire.contains("§9§ <!-- +10m -->"));
+    assert!(wire.contains("§1§ message 1"));
+    assert_eq!(replay.action, "SOFT+");
+    assert_eq!(bytes(&first_sight), bytes(&replay));
 }
 
 #[test]

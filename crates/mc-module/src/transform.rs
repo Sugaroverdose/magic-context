@@ -3617,8 +3617,8 @@ fn apply_once(
         fold_mural_content_identity(&effective_render_config_base, &persisted_mural_hash);
     // The store namespace exists before snapshots and tags load, so tag decisions can commit
     // atomically with cache state. New and previously inactive sessions therefore emit their full
-    // requested tag surface during the HARD that changes render configuration. Subagents use the
-    // same first-render path because they do not emit a module-composed provider prefix.
+    // requested tag surface during the HARD that changes render configuration. Subagents instead
+    // select a Soft pass for a surface flip, without a module-composed prefix.
     let bootstrap_tagging_active = !loaded.meta.initialized;
     let suppress_bootstrap_reduction_tag_overlay = bootstrap_tagging_active
         && serializer_profile == Some(SerializerProfile::ClaudeCodeAnthropic);
@@ -4565,10 +4565,16 @@ fn apply_once(
     }
     timings.decide += elapsed_ms(classify_started_at);
     if req.is_subagent {
-        plan = if matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer) {
-            PassPlan::Defer
-        } else {
+        // Activating or disabling the tag surface changes the render identity itself.
+        // Spend that one intentional rewrite now, so old blocks do not acquire tags
+        // piecemeal during later defers. Ordinary late mints still wait for an
+        // independent Soft pass selected by the scheduler.
+        plan = if surface_transition
+            || !matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer)
+        {
             PassPlan::Soft
+        } else {
+            PassPlan::Defer
         };
     } else if lineage_state.force_hard {
         plan = PassPlan::Hard;
@@ -4714,18 +4720,11 @@ fn apply_once(
         PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
     );
     let is_bust_pass = !req.is_subagent && is_provider_prefix_mutation_pass;
-    // The gate question every hold below asks: does this pass have to reproduce a provider
-    // prefix that was already served, byte for byte?
-    //
-    // Deferring a late tag protects a provider prefix that has already been served and
-    // must be replayed byte for byte. A subagent has no such prefix: it is never charged
-    // for a cache bust and recomposes its served array on every pass, so a tag first
-    // minted there is safe to render at once and would otherwise stay hidden forever —
-    // no later pass on that session can ever release it. `is_bust_pass` is the wrong
-    // question here precisely because it already answers "is this session paying for a
-    // bust", which a subagent never is: a hold keyed on it is held on every subagent pass
-    // forever, and "withheld forever" is not the deferral the hold was written to express.
-    let prefix_replay_must_be_preserved = !req.is_subagent && !is_provider_prefix_mutation_pass;
+    // A defer replays previously served provider bytes even in a subagent: its tool loop
+    // has an Anthropic cached prefix too. Hold overlays first discovered on served blocks
+    // until the scheduler selects a prefix mutation pass. Use the plan, not `is_bust_pass`,
+    // because subagent execute passes are Soft even though they are not billed as a module bust.
+    let prefix_replay_must_be_preserved = !is_provider_prefix_mutation_pass;
     if !prefix_replay_must_be_preserved {
         meta.pending_tag_block_ids.clear();
     } else if serializer_profile == Some(SerializerProfile::OpencodeAiSdk) {
@@ -6131,12 +6130,11 @@ fn apply_once(
             serde_json::to_string(divergence).expect("divergence is serializable")
         }
     });
-    // Pinning the baseline is itself a hold, and it is the one hold that can never expire on
-    // its own: the pinned fingerprint is only released by a pass that reprices the prefix.
-    // Gate it on the same question every other hold asks, so a session that has no served
-    // prefix to preserve keeps its baseline moving instead of re-reporting one stale mismatch
-    // on every later pass.
-    let deferred_frozen_prefix_divergence = prefix_replay_must_be_preserved
+    // A subagent serves ordinary message bytes, but never a composed m0/m1 frame. Do not pin
+    // its baseline on a stale synthetic-frame fingerprint: no frame pass will release that pin.
+    // Other deferred sessions must retain their last served frame until a prefix mutation pass.
+    let deferred_frozen_prefix_divergence = !req.is_subagent
+        && prefix_replay_must_be_preserved
         && matches!(plan, PassPlan::Defer)
         && first_divergence.as_ref().is_some_and(|divergence| {
             matches!(
@@ -17297,10 +17295,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// Pinning the served baseline is a hold that only a repricing pass releases. A subagent
-    /// never gets one, so the pin must not engage there at all: one stale mismatch would
-    /// otherwise be re-reported on every later pass for the life of the session. A session
-    /// that does replay a served prefix keeps the pin.
+    /// A subagent has a cached provider conversation but no composed m0/m1 frame. Pinning a
+    /// stale frame fingerprint there would re-report the mismatch forever; regular sessions
+    /// retain the frame pin until a prefix mutation pass.
     #[test]
     fn only_a_session_replaying_a_served_prefix_pins_its_baseline() {
         let stale_frame_block = || ServedBlockFingerprint {
@@ -29892,6 +29889,145 @@ pub(crate) mod tests {
             .meta
             .pending_tag_block_ids
             .contains("target#1"));
+    }
+
+    #[test]
+    fn subagent_surface_activation_tags_served_tool_result_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut request = opencode_req(
+            "subagent-late-tool-result",
+            "cfg0",
+            vec![
+                wire_tool_call("call", 1, "call_result"),
+                wire_tool_result(
+                    "result",
+                    2,
+                    json!({ "kind": { "type": "text", "text": "served tool output" } }),
+                ),
+            ],
+        );
+        request.is_subagent = true;
+        let first = run(&s, &request, &spine());
+        let served = serde_json::to_vec(first.messages()).unwrap();
+        request.tool_present = true;
+        let activation = run(&s, &request, &spine());
+        assert_eq!(activation.action, "SOFT");
+        assert_ne!(serde_json::to_vec(activation.messages()).unwrap(), served);
+        assert!(serde_json::to_string(activation.messages())
+            .unwrap()
+            .contains("§1§ served tool output"));
+        assert!(s
+            .load("subagent-late-tool-result")
+            .unwrap()
+            .meta
+            .pending_tag_block_ids
+            .is_empty());
+        let replay = run(&s, &request, &spine());
+        assert_eq!(replay.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_vec(replay.messages()).unwrap(),
+            serde_json::to_vec(activation.messages()).unwrap()
+        );
+    }
+
+    #[test]
+    fn subagent_defer_replays_served_bytes_and_execute_releases_late_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut request = active_opencode_req(
+            "subagent-late-tag",
+            "cfg0",
+            vec![
+                wire_item("user", "prompt", 1, &["inspect tests"]),
+                reasoning_item("target", 2, "first thought", "completed answer"),
+            ],
+        );
+        request.is_subagent = true;
+        request.provider_id = Some("anthropic".to_string());
+        request.mid_turn = true;
+        request = with_usage(request, 1, 100);
+
+        let first = run(&s, &request, &spine());
+        let served_prefix = serde_json::to_vec(first.messages()).unwrap();
+        let served = first
+            .messages()
+            .iter()
+            .find(|message| message.meta.harness_id.as_deref() == Some("target"))
+            .unwrap()
+            .canonical_bytes()
+            .to_vec();
+        assert_eq!(
+            first_block_text(
+                &first
+                    .messages()
+                    .iter()
+                    .find(|message| message.meta.harness_id.as_deref() == Some("target"))
+                    .unwrap()
+                    .content[1]
+            ),
+            Some("completed answer")
+        );
+
+        for ordinal in 3..65 {
+            request.messages.push(wire_item(
+                "user",
+                &format!("history-{ordinal}"),
+                ordinal,
+                &["completed work"],
+            ));
+        }
+        request
+            .messages
+            .push(reasoning_item("newer", 65, "next thought", "new answer"));
+        let defer = run(&s, &request, &spine());
+        assert_eq!(defer.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_vec(&defer.messages()[..first.messages().len()]).unwrap(),
+            served_prefix,
+            "the entire previously served subagent prefix must replay byte-identically"
+        );
+        assert_eq!(
+            defer
+                .messages()
+                .iter()
+                .find(|message| message.meta.harness_id.as_deref() == Some("target"))
+                .unwrap()
+                .canonical_bytes(),
+            served.as_slice(),
+            "a subagent defer must replay the already-served provider bytes"
+        );
+        assert!(s
+            .load("subagent-late-tag")
+            .unwrap()
+            .meta
+            .pending_tag_block_ids
+            .contains("target#1"));
+
+        s.append_pending_agent_drops("subagent-late-tag", &["prompt#0".to_string()], 1)
+            .unwrap();
+        request = with_usage(request, 96, 100);
+        let execute = run(&s, &request, &spine());
+        assert_eq!(execute.action, "SOFT");
+        assert!(first_block_text(
+            &execute
+                .messages()
+                .iter()
+                .find(|message| message.meta.harness_id.as_deref() == Some("target"))
+                .unwrap()
+                .content[1]
+        )
+        .is_some_and(|text| text.starts_with('§')));
+        assert!(s
+            .load("subagent-late-tag")
+            .unwrap()
+            .meta
+            .pending_tag_block_ids
+            .is_empty());
+        assert!(s
+            .load_pending_agent_drops("subagent-late-tag")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

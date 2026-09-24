@@ -2793,6 +2793,33 @@ describe("Rust mode authority adapter", () => {
         expect(requestBodies[0]?.todo_tool_present).toBe(false);
     });
 
+    it("resolves the first user prompt's ctx_reduce verdict before its DB row exists", async () => {
+        for (const [tools, expected] of [
+            [{}, true],
+            [{ "*": false, read: true }, false],
+        ] as const) {
+            const sessionId = `rust-first-prompt-availability-${expected}-${Date.now()}`;
+            sessions.push(sessionId);
+            installAvailabilityDb(sessionId);
+            const db = makeDb();
+            installRawProvider(sessionId);
+            let requestBody: Record<string, unknown> | undefined;
+            const moduleClient: RustModeModuleClient = {
+                call: async ({ method, body }) => {
+                    if (method === "transform") requestBody = body as Record<string, unknown>;
+                    return method === "transform"
+                        ? { decision: "SOFT+", native_messages: [] }
+                        : { ok: true };
+                },
+            };
+            const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+            const messages = makeMessages(sessionId);
+            messages[0]!.info.tools = tools;
+            await transform.run(sessionId, messages, { messages: messages as unknown[] }, makeMeta(db, sessionId));
+            expect(requestBody?.tool_present).toBe(expected);
+        }
+    });
+
     it("sends a frozen disabled todowrite verdict on the transform wire", async () => {
         const sessionId = `rust-todo-disabled-${Date.now()}`;
         sessions.push(sessionId);
