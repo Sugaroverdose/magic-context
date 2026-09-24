@@ -167,6 +167,29 @@ it("unsupported nontext parts never produce a trusted fit estimate", () => {
     expect(result.trusted).toBe(false);
     expect(result.completeness).toBe("partial");
 });
+it("an inline image (like the memory mural in m[0]) keeps the estimate trusted", () => {
+    const result = estimate([
+        {
+            info: { id: "m0", role: "user" },
+            parts: [
+                { type: "text", text: "<memory-mural>" },
+                { type: "file", mime: "image/png", url: "data:image/png;base64,iVBORw0KGgo=" },
+            ],
+        } as unknown as MessageLike,
+    ]);
+    expect(result.trusted).toBe(true);
+});
+
+it("a non-image attachment still leaves the estimate untrusted", () => {
+    const result = estimate([
+        {
+            info: { id: "m", role: "user" },
+            parts: [{ type: "file", mime: "application/pdf", url: "file:///tmp/spec.pdf" }],
+        } as unknown as MessageLike,
+    ]);
+    expect(result.trusted).toBe(false);
+});
+
 it("nonfinite system mass cannot be trusted even with known tool definitions", () => {
     estimate([]);
     const result = estimateFinalWireInputTokens({

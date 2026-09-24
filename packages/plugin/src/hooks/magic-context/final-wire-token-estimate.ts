@@ -273,6 +273,13 @@ function hasCountableParts(message: MessageLike): boolean {
             case "step-start":
             case "step-finish":
                 return true;
+            case "file":
+                // An inline image is counted from its pixel dimensions, and that count
+                // is capped per image, so it is a bounded estimate. Every session with a
+                // memory mural carries one in m[0]; leaving it uncountable made every
+                // fit check on those sessions untrusted, so last-known-good replay was
+                // refused on every engine blip. Other attachments stay uncountable.
+                return typeof p.url === "string" && p.url.startsWith("data:image/");
             default:
                 return false;
         }
