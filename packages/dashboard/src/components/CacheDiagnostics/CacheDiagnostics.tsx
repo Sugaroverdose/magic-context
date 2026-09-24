@@ -17,7 +17,35 @@ import HarnessBadge from "../HarnessBadge";
 import CacheTimeline from "../shared/CacheTimeline";
 import FilterSelect from "../shared/FilterSelect";
 
-type HarnessFilter = "all" | Harness;
+export type HarnessFilter = "all" | Harness;
+
+export const cacheHarnessOptions: { value: HarnessFilter; label: string }[] = [
+  { value: "all", label: "Harness: All" },
+  { value: "opencode", label: "OpenCode" },
+  { value: "opencode2", label: "OpenCode 2" },
+  { value: "pi", label: "Pi" },
+  { value: "omp", label: "OMP" },
+  { value: "broca", label: "Broca" },
+  { value: "claude_code", label: "Claude Code" },
+  { value: "codex", label: "Codex" },
+];
+
+export function cacheSessionTitle(row: SessionCacheStats): string {
+  return row.title || truncate(row.session_id, 16);
+}
+
+export function cacheSessionVisible(
+  row: SessionCacheStats,
+  harness: HarnessFilter,
+  showUnmanaged: boolean,
+  hideSubagents: boolean,
+): boolean {
+  return (
+    (harness === "all" || row.harness === harness) &&
+    (!isManagedFilterableHarness(row.harness) || showUnmanaged || row.managed) &&
+    (!hideSubagents || !row.is_subagent)
+  );
+}
 type CacheSessionStats = SessionCacheStats;
 type SelectedSession = { harness: Harness; sessionId: string };
 
@@ -54,7 +82,7 @@ function loadShowUnmanagedPreference(): boolean {
 }
 
 function isManagedFilterableHarness(harness: Harness): boolean {
-  return harness === "claude_code" || harness === "codex";
+  return harness === "claude_code" || harness === "codex" || harness === "broca";
 }
 
 export default function CacheDiagnostics() {
@@ -354,8 +382,7 @@ export default function CacheDiagnostics() {
     const harness = harnessFilter();
     const rows: CacheSessionStats[] = [];
     for (const s of cachedSessions) {
-      if (harness !== "all" && s.harness !== harness) continue;
-      if (hideSubagents() && s.is_subagent) continue;
+      if (!cacheSessionVisible(s, harness, showUnmanagedSessions(), hideSubagents())) continue;
       const win = cachedWindows.get(windowKey(s.harness, s.session_id));
       if (!win) continue;
       let read = 0;
@@ -549,14 +576,7 @@ export default function CacheDiagnostics() {
               void reconcile();
             }}
             placeholder="Harness"
-            options={[
-              { value: "all", label: "Harness: All" },
-              { value: "opencode", label: "OpenCode" },
-              { value: "pi", label: "Pi" },
-              { value: "omp", label: "OMP" },
-              { value: "claude_code", label: "Claude Code" },
-              { value: "codex", label: "Codex" },
-            ]}
+            options={cacheHarnessOptions}
           />
           {/* padding matches .fsel-trigger (6px 10px) so the buttons and the two
               pickers render at identical heights in this toolbar. */}
@@ -666,7 +686,7 @@ export default function CacheDiagnostics() {
                             Managed
                           </span>
                         </Show>
-                        <span>{resolveTitle(stat.harness, stat.session_id)}</span>
+                        <span>{cacheSessionTitle(stat)}</span>
                       </span>
                     </div>
                     <div
