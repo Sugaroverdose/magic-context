@@ -294,6 +294,21 @@ describe("adaptPayload", () => {
             expect(mediaOf(context)).toBeInstanceOf(HostAsset);
         });
 
+        it("#then the adapted draft already holds the instance, and a pipeline edit to the part keeps it", () => {
+            const context = draft(attachmentTurn());
+            const payload = adaptPayload(context);
+            const adapted = payload.messages[0].parts[1] as { media: unknown; filename: string };
+            expect(adapted.media).toBeInstanceOf(HostAsset);
+            // An edited part no longer matches the host's original, so commit() cannot swap
+            // the original back in; only the adapted copy can carry the instance through.
+            adapted.filename = "renamed.png";
+            payload.commit();
+
+            const media = context.messages[0]?.content[1];
+            expect(media?.filename).toBe("renamed.png");
+            expect(media?.media).toBeInstanceOf(HostAsset);
+        });
+
         it("#then an unchanged part copied by a later pipeline stage still gets the instance back", () => {
             const context = draft(attachmentTurn());
             const payload = adaptPayload(context);
