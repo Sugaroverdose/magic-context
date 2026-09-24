@@ -3769,6 +3769,36 @@ describe("registerPiContextHandler", () => {
 						shouldFire: true,
 						reason: "projected_headroom",
 					});
+					for (let tag = 1; tag <= 15; tag++)
+						queuePendingOp(db, sessionId, tag, "drop");
+					const rideDecision = (explicitFlush: boolean) =>
+						checkCompartmentTrigger(
+							db,
+							sessionId,
+							sessionMeta,
+							{ percentage: 64, inputTokens: 64_000 },
+							0,
+							executeThresholdPercentage,
+							triggerBudget,
+							undefined,
+							{ enabled: false, min_clusters: 3 },
+							undefined,
+							contextLimit,
+							undefined,
+							undefined,
+							{ canClearReasoning: true },
+							{
+								hardFold: false,
+								force: false,
+								explicitFlush,
+								publishedHistory: false,
+							},
+						);
+					expect(rideDecision(false)).toMatchObject({
+						shouldFire: true,
+						reason: "projected_headroom",
+					});
+					expect(rideDecision(true)).toEqual({ shouldFire: false });
 				},
 			);
 		} finally {
