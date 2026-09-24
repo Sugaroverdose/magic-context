@@ -672,14 +672,10 @@ const STRICT_TOOL_ALLOWLIST_ENTRIES: readonly (readonly [
 	// — these tasks read local code, not cross-session recall. The host applies the
 	// manifest's DB writes, so no ctx_memory is needed.
 	["dreamer-memory-mapper", [...PI_READ_ONLY_BUILTINS, ...PI_AFT_READ_TOOLS]],
-	// maintain-docs: explores the codebase and writes ARCHITECTURE.md/STRUCTURE.md.
-	// All 7 Pi built-ins (read/grep/find/ls + bash/write/edit; git runs via bash),
-	// plus optional AFT read navigation. Deliberately NO ctx_memory/ctx_search — it
-	// edits docs, never the memory store. Not in any *_SUBAGENT_TOOL_AGENTS set, so
-	// the lean extension is never loaded and ctx_memory cannot leak in.
+	// Docs proposals use read-only source investigation; the host handles validation.
 	[
 		"dreamer-docs",
-		[...PI_READ_ONLY_BUILTINS, "bash", "write", "edit", ...PI_AFT_READ_TOOLS],
+		[...PI_READ_ONLY_BUILTINS, ...PI_AFT_READ_TOOLS],
 	],
 	// curate (base `dreamer`): memory-pool hygiene via ctx_memory ONLY. It is in
 	// DREAMER_ACTION_AGENTS so the lean extension registers ctx_memory; this

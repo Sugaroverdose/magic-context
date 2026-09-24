@@ -33,22 +33,14 @@ export const DREAMER_MEMORY_MAPPER_ALLOWED_TOOLS = [
 // needs no tools at all. Locked so a user override can't grant any.
 export const DREAMER_CLASSIFIER_AGENT = "dreamer-classifier";
 
-// Docs maintainer for the maintain-docs task: explores the codebase and writes
-// ARCHITECTURE.md / STRUCTURE.md. Needs file read + write/edit + bash (git log,
-// find) + aft navigation, but deliberately NO ctx_memory/ctx_search/ctx_note —
-// it touches docs, never the memory store. Locked so a user override can't add
-// the memory surface back.
+// Docs proposal investigator: read-only source tools; the host validates its final text.
 export const DREAMER_DOCS_AGENT = "dreamer-docs";
 
-/** Codebase-read + doc-write tool profile for the docs maintainer. No memory
- *  tools (it edits docs, not the memory store). */
+/** Read-only source investigation for docs proposals. */
 export const DREAMER_DOCS_ALLOWED_TOOLS = [
     "read",
     "grep",
     "glob",
-    "bash",
-    "write",
-    "edit",
     "aft_outline",
     "aft_zoom",
     "aft_search",

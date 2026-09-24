@@ -46,6 +46,7 @@ export interface DreamTaskRuntimeConfig {
     promotionThreshold?: number;
     /** retrospective source lookback; old rows are skipped by advancing its content watermark. */
     retrospectiveRecencyDays?: number;
+    docsMaxTokens?: number;
 }
 
 export interface TaskExecOutcome {

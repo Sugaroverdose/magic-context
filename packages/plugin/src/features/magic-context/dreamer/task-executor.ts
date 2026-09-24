@@ -59,10 +59,8 @@ import {
     runLeaseGuardedWrite,
     startLeaseHeartbeat,
 } from "./lease";
-import {
-    enforceMaintainDocsProtectedRegions,
-    snapshotMaintainDocsFiles,
-} from "./maintain-docs-protected-enforcement";
+import { docsBaseHashes, docsChangeSet, hasCurrentDocsProposal, writeDocsProposal } from "./docs-proposals";
+import { snapshotMaintainDocsFiles } from "./maintain-docs-protected-enforcement";
 import { mapMemories } from "./map-memories";
 import {
     DreamerModuleFailureError,
@@ -1536,6 +1534,11 @@ async function runAgenticTask(
 
     const maintainDocsSnapshot =
         task === "maintain-docs" ? snapshotMaintainDocsFiles(docsDir) : undefined;
+    const docsHashes = task === "maintain-docs" ? docsBaseHashes(docsDir) : undefined;
+    const storedAnchor = getTaskScheduleState(db, projectIdentity, config.task)?.taskStateJson;
+    let anchor: string | undefined;
+    try { anchor = JSON.parse(storedAnchor ?? "null")?.head; } catch { /* legacy task state */ }
+    const changes = task === "maintain-docs" ? docsChangeSet(docsDir, anchor) : null;
     const existingDocs =
         task === "maintain-docs"
             ? {
@@ -1599,10 +1602,19 @@ async function runAgenticTask(
             }
         }
 
+        if (task === "maintain-docs" && (hasCurrentDocsProposal(docsDir) || !changes)) {
+            const reason = hasCurrentDocsProposal(docsDir) ? "pending proposal matches current docs" : "no relevant commits or no git repository";
+            log(`[dreamer] maintain-docs skipped: ${reason}`);
+            helpers.recordRun("completed", null, { progress: reason });
+            return { status: "completed", detail: reason };
+        }
         const taskPrompt = buildDreamTaskPrompt(task, {
             projectPath: projectIdentity,
             lastDreamAt: lastRunAt ? String(lastRunAt) : null,
             existingDocs,
+            docsChangeSet: changes?.text,
+            docsBudget: config.docsMaxTokens ?? 12000,
+            docsCurrentTokens: maintainDocsSnapshot ? Math.ceil([...maintainDocsSnapshot.values()].join("").length / 3.5) : 0,
             curate:
                 curateMemories && curateCategory
                     ? { category: curateCategory, memories: curateMemories }
@@ -1636,8 +1648,7 @@ async function runAgenticTask(
                     // Each agentic task gets its OWN scoped agent + system prompt so
                     // it never sees another task's tools/rules: curate runs on the
                     // base `dreamer` (ctx_memory only, no codebase tools);
-                    // maintain-docs runs on `dreamer-docs` (file read/write/bash, no
-                    // memory machinery).
+                    // maintain-docs uses a locked read-only agent; the host validates final text.
                     agent: task === "maintain-docs" ? DREAMER_DOCS_AGENT : DREAMER_AGENT,
                     system:
                         task === "maintain-docs"
@@ -1714,11 +1725,20 @@ async function runAgenticTask(
             });
         }
 
-        if (task === "maintain-docs" && maintainDocsSnapshot && maintainDocsSnapshot.size > 0) {
+        if (task === "maintain-docs" && docsHashes && changes) {
             try {
-                enforceMaintainDocsProtectedRegions({ docsDir, snapshot: maintainDocsSnapshot });
-            } catch (e) {
-                log(`[dreamer] maintain-docs protected-region enforcement failed: ${e}`);
+                if (run.validated === "[]") {
+                    helpers.recordRun("completed", null, { progress: "no corrections proposed" });
+                    return { status: "completed", detail: "no corrections proposed" };
+                }
+                const path = writeDocsProposal(docsDir, String(run.validated), config.docsMaxTokens ?? 12000, docsHashes, changes.head);
+                helpers.recordRun("completed", null, { progress: `proposal: ${path}` });
+                return { status: "completed", detail: `proposal: ${path}`, schedulePatch: { taskStateJson: JSON.stringify({ head: changes.head }) } };
+            } catch (error) {
+                const reason = `maintain-docs failed validation: ${String(error)}`;
+                log(`[dreamer] ${reason}`);
+                helpers.recordRun("failed", reason);
+                return { status: "failed", error: reason };
             }
         }
 
