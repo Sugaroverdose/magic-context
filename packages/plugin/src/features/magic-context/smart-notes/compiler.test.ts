@@ -104,13 +104,14 @@ describe("smart-note compiler runtime boundary", () => {
 
 describe("smart-note compiler output bounds", () => {
     test("rejects impossible cron expressions within the scheduling ceiling", () => {
-        // Bound the work, not the wall clock: CPU time spent by this process is
-        // unaffected by other load on the machine, which made a wall-time bound
-        // fail under a busy release gate (72 ms) while the search itself was fine.
-        const cpuBefore = process.cpuUsage();
         expect(() => normalizeCron("0 0 31 2 *")).toThrow(/scheduling ceiling/);
-        const cpu = process.cpuUsage(cpuBefore);
-        expect((cpu.user + cpu.system) / 1000).toBeLessThan(50);
+        // Proves the search stops at the smart-note ceiling (24 h) rather than at the
+        // cron scanner's own, much longer default horizon: a schedule whose next run
+        // is two days out is real, so only the ceiling can refuse it. This replaces a
+        // millisecond timing bound that measured machine load instead of the search.
+        const twoDaysOut = new Date(Date.now() + 48 * 60 * 60 * 1000);
+        const once = `${twoDaysOut.getMinutes()} ${twoDaysOut.getHours()} ${twoDaysOut.getDate()} ${twoDaysOut.getMonth() + 1} *`;
+        expect(() => normalizeCron(once)).toThrow(/scheduling ceiling/);
     });
 
     test("bounds compiler output, source, manifest entries, and cron length", () => {
