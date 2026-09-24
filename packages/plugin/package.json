@@ -73,9 +73,9 @@
     "sharp": "^0.35.0"
   },
   "devDependencies": {
-    "@opencode/plugin": "2.0.12",
-    "@opencode/cli": "2.0.12",
-    "@opencode/client": "2.0.12",
+    "@opencode/plugin": "2.0.15",
+    "@opencode/cli": "2.0.15",
+    "@opencode/client": "2.0.15",
     "effect": "4.0.0-rc.112",
     "@ai-sdk/anthropic": "3.0.82",
     "@huggingface/transformers": "^4.3.0",

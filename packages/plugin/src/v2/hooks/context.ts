@@ -76,6 +76,7 @@ import { pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
 import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-descriptions";
+import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/host-media";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
@@ -777,6 +778,9 @@ export async function registerContext(context: V2Context) {
             }
         });
     await context.session.hook("context", async (draft) => {
+        // Learn the host's message and attachment classes, so attachments on rows restored
+        // after a host checkpoint can be rebuilt in the host's own shape.
+        rememberHostMedia(draft.messages);
         if (hiddenChildHook.apply(draft)) return;
         removeDreamerOnlyTools(draft);
         // A deletion that races an in-flight pass must not let that pass rebuild
@@ -1011,7 +1015,22 @@ export async function registerContext(context: V2Context) {
                     const restored = reader
                         .range(draft.sessionID, boundary, cut.seq)
                         .filter((row) => !present.has(row.id))
-                        .flatMap((row) => restoreRow(row, draft.model));
+                        .flatMap((row) =>
+                            restoreRow(
+                                row,
+                                draft.model,
+                                hostUsesMediaAssets()
+                                    ? {
+                                          asset: hostMediaAsset,
+                                          unavailable: (detail) =>
+                                              sessionLog(
+                                                  draft.sessionID,
+                                                  `v2 restore: attachment replaced by a note row=${detail.rowID} name=${JSON.stringify(detail.name ?? null)} mediaType=${detail.mediaType} reason=${JSON.stringify(detail.reason)}`,
+                                              ),
+                                      }
+                                    : undefined,
+                            ),
+                        );
                     draft.messages.splice(
                         0,
                         draft.messages.length,

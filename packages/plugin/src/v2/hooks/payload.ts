@@ -11,6 +11,57 @@ interface ToolBridge {
     resultMessage?: V2Message;
 }
 
+/** True for an object structuredClone would flatten: anything other than a plain object or
+ * array. OpenCode 2.0.15 puts an attachment's bytes in a `Media.Asset` class instance, and
+ * the host's schema accepts only a real instance when it rebuilds the draft after the hook. */
+function isHostInstance(value: unknown): value is object {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype !== Object.prototype && prototype !== null;
+}
+
+function containsHostInstance(value: unknown): boolean {
+    if (isHostInstance(value)) return true;
+    if (Array.isArray(value)) return value.some(containsHostInstance);
+    if (value && typeof value === "object") return Object.values(value).some(containsHostInstance);
+    return false;
+}
+
+/** Deep copy that keeps class instances by reference, so a pipeline edit to the copy cannot
+ * reach the host's draft while the host's own objects survive the round trip. */
+function clonePreservingInstances<T>(value: T): T {
+    if (isHostInstance(value)) return value;
+    if (Array.isArray(value)) return value.map(clonePreservingInstances) as T;
+    if (value && typeof value === "object") {
+        const copy: Part = {};
+        for (const [key, entry] of Object.entries(value))
+            copy[key] = clonePreservingInstances(entry);
+        return copy as T;
+    }
+    return value;
+}
+
+/** Content key that ignores prototypes and toJSON, so a part and its structuredClone agree. */
+function contentKey(value: unknown): string {
+    const plain = (entry: unknown): unknown => {
+        if (ArrayBuffer.isView(entry)) {
+            return {
+                bytes: Buffer.from(entry.buffer, entry.byteOffset, entry.byteLength).toString(
+                    "base64",
+                ),
+            };
+        }
+        if (Array.isArray(entry)) return entry.map(plain);
+        if (entry && typeof entry === "object") {
+            return Object.fromEntries(
+                Object.entries(entry).map(([key, nested]) => [key, plain(nested)]),
+            );
+        }
+        return entry;
+    };
+    return JSON.stringify(plain(value));
+}
+
 function toolStateContent(state: Part): string {
     if (typeof state.output === "string") return state.output;
     if (typeof state.content === "string") return state.content;
@@ -38,8 +89,23 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
     );
     const source = draft.messages.filter((m) => !existingHeads.has(m.id));
     const results = new Map<string, Array<{ part: Part; message: V2Message }>>();
+    // Host parts that hold class instances, keyed by content. Some pipeline stages swap a
+    // structuredClone of a message's parts into place; commit() hands the host its original
+    // object back for any such part the pipeline left unchanged.
+    const hostParts = new Map<string, Part>();
+    const hostPartTypes = new Set<unknown>();
     for (const message of source) {
         for (const part of message.content) {
+            if (
+                part.type !== "tool-call" &&
+                part.type !== "tool-result" &&
+                part.type !== "tool" &&
+                containsHostInstance(part)
+            ) {
+                const key = contentKey(part);
+                if (!hostParts.has(key)) hostParts.set(key, part);
+                hostPartTypes.add(part.type);
+            }
             if (part.type === "tool-result" && typeof part.id === "string") {
                 const queue = results.get(part.id) ?? [];
                 queue.push({ part, message });
@@ -118,7 +184,7 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                 callParts.get(content) ??
                 (content.type === "tool-result"
                     ? nativeTool(undefined, { part: content, message })
-                    : structuredClone(content));
+                    : clonePreservingInstances(content));
             if (message.id && admittedIDs.has(message.id)) part.synthetic = true;
             parts.push(part);
         }
@@ -173,7 +239,11 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                             : undefined);
                     if (!bridge) {
                         const { synthetic: _synthetic, ...clean } = part;
-                        content.push(clean);
+                        const original =
+                            hostPartTypes.has(clean.type) && !containsHostInstance(clean)
+                                ? hostParts.get(contentKey(clean))
+                                : undefined;
+                        content.push(original ?? clean);
                         continue;
                     }
                     const state = part.state as Part;

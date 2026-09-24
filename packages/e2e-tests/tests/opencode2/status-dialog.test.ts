@@ -96,7 +96,7 @@ async function captureStatusDialog(themeMode: "dark" | "light") {
 }
 
 for (const themeMode of ["dark", "light"] as const) {
-	test(`the /ctx-status dialog component paints on the real 2.0.12 dialog surface (${themeMode} theme)`, async () => {
+	test(`the /ctx-status dialog component paints on the real 2.0.15 dialog surface (${themeMode} theme)`, async () => {
 		// A missing PTY allocator or keyboard means the claim cannot be checked at
 		// all, so say that rather than passing on an unrun assertion.
 		expect({ pty: ptyCaptureAvailable(), keyboard: ptyInputAvailable() }).toEqual({

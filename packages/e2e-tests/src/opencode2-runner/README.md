@@ -1,15 +1,27 @@
 # OpenCode 2 runner
 
-Run `bun install`, initialize the pinned CLI if Bun blocked its postinstall (`cd packages/plugin/node_modules/@opencode/cli && node postinstall.mjs`), and run `bun run --cwd packages/plugin build` (2.0.12 loads `index.js` then `dist/index.js`). Then:
+Run `bun install`, initialize the pinned CLI if Bun blocked its postinstall (`cd packages/plugin/node_modules/@opencode/cli && node postinstall.mjs`), and run `bun run --cwd packages/plugin build` (the host loads `index.js` then `dist/index.js`). Then:
 
 ```sh
-bun test packages/e2e-tests/tests/opencode2
+PATH="$HOME/.opencode/bin:$PATH" MC_E2E_OPENCODE1_CLI="$HOME/.opencode/bin/opencode" bun test packages/e2e-tests/tests/opencode2
 packages/plugin/node_modules/.bin/tsc -p packages/e2e-tests/src/opencode2-runner/tsconfig.json
 ```
 
 The runner never uses the operator's config or provider credentials. The mock binds explicitly to 127.0.0.1. Every server has a fresh HOME and all four XDG roots, an allowlisted environment, a detached process group, and bounded event-driven startup. `lsof` and `ps` are required, not optional. At handoff and teardown the whole process group is checked for forbidden open paths, and lsof's inode must match the expected private database. These are samples, not continuous kernel-level monitoring. Exit/signal handlers reap live v2 groups. Teardown kills the entire group even if safety inspection fails.
 
 The runner never reads the operator's live database or configuration for a snapshot. It checks private DB placement by inode and lsof, inspects writable descriptors, and fences protected directory metadata. Mapped read-only libraries (including temporary `.so` files) and TUI source files are not writable host output. Finder's `.DS_Store` does not fail the directory fence.
+
+The lane is pinned to OpenCode 2.0.15 (`@opencode/cli`, `@opencode/plugin` and `@opencode/client` in `packages/plugin`, `@opencode/client` in `packages/e2e-tests`, and the Docker lane under `tests/docker/opencode2`). `MC_E2E_OPENCODE2_CLI` points the lane at another installed build without touching `node_modules`. The OpenCode 1 arms (conversion and mixed-generation tests) need the v1 CLI on `PATH` and in `MC_E2E_OPENCODE1_CLI`.
+
+## 2.0.15 lane run
+
+The whole lane on 2.0.15 with the OpenCode 1 arms enabled (v1 CLI 1.18.30): 89 of 90 tests passed.
+
+| Test | Class | Evidence | Correction |
+| --- | --- | --- | --- |
+| `store-generation-conversion` "doctor reports the pending flip the next open would perform" | (c) environment/load | In the full run, doctor printed "OpenCode reported no version" on both of the test's probes. That version probe runs against the OpenCode 1 CLI, not the 2.0.15 host. The same file passed 13/13 on its own, on 2.0.15 and on 2.0.12. | None. It is load-sensitive; the test already retries the probe once. |
+
+2.0.15 changed one host contract the plugin depends on: an attachment's bytes now sit in a `Media.Asset` class instance, and after the context hook the host rebuilds each message with `Message.make`, whose schema checks `instanceof`. `image-attachment.test.ts` covers a user image, the turns after it, and an image restored from before a host compaction checkpoint (in the same process and after a host restart).
 
 ## 2.0.12 failure adjudication
 
@@ -25,7 +37,7 @@ The runner never reads the operator's live database or configuration for a snaps
 | `status-dialog` (dark, light) | (c) environment guard | macOS Finder writes `.DS_Store`, and lsof lists read-only `/private` and TUI source files. | Ignore Finder metadata, classify open paths by database/config risk and writable mode. |
 | `store-generation-conversion` (Linux CI) | (c) environment guard | CI 35914546734 mapped `/tmp/.bcd9cd1efcadb2fc-00000007.so`, a temporary shared library, not a store. | Allow mapped libraries; unit-test that exact path and refuse an outside `.db` and `.db-wal`. |
 
-This lane targets 2.0.12; the 2.0.5 provider-mode `recent` assertion is intentionally retired rather than treating an obsolete host representation as the product contract. The installed 2.0.12 `@opencode/plugin` `dist/promise/{session,command}.d.ts` still exposes a compaction summary result and server command registration, just as the 2.0.5 declarations do; the assertions above distinguish that stable plugin API from changes observed in the real host's persisted rows and pass scheduling.
+When the lane targeted 2.0.12, the 2.0.5 provider-mode `recent` assertion is intentionally retired rather than treating an obsolete host representation as the product contract. The installed 2.0.12 `@opencode/plugin` `dist/promise/{session,command}.d.ts` still exposes a compaction summary result and server command registration, just as the 2.0.5 declarations do; the assertions above distinguish that stable plugin API from changes observed in the real host's persisted rows and pass scheduling.
 
 ## Observed GA corrections
 
