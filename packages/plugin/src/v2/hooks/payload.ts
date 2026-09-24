@@ -248,20 +248,22 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                     }
                     const state = part.state as Part;
                     if (bridge.native) {
-                        const sourceState =
-                            bridge.native.state && typeof bridge.native.state === "object"
-                                ? (bridge.native.state as Part)
-                                : {};
-                        const nextState: Part = { ...sourceState, input: state.input };
-                        if (sourceState.content !== undefined) {
-                            nextState.content =
-                                state.output === bridge.output
-                                    ? sourceState.content
-                                    : [{ type: "text", text: state.output }];
-                        } else {
-                            nextState.output = state.output;
+                        // Converted OpenCode 1 store rows still carry `type: "tool"`. That is a
+                        // session-store part, not an LLM content part; a surviving skeleton must
+                        // become the same call/result pair as a native OpenCode 2 tool arc.
+                        const native = bridge.native;
+                        const callID = String(native.id ?? native.callID ?? part.callID);
+                        const name = String(native.name ?? native.tool ?? part.tool);
+                        content.push({ type: "tool-call", id: callID, name, input: state.input });
+                        if (state.status === "completed" || state.status === "error") {
+                            following.push({
+                                role: "tool",
+                                content: [{
+                                    type: "tool-result", id: callID, name,
+                                    result: { type: "text", value: state.output },
+                                }],
+                            });
                         }
-                        content.push({ ...bridge.native, state: nextState });
                         continue;
                     }
                     if (bridge.call) content.push({ ...bridge.call, input: state.input });

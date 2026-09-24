@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
+import { Message } from "@opencode/ai/schema/messages";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import {
     createToolDropTarget,
@@ -100,6 +101,7 @@ describe("adaptPayload", () => {
             payload.commit();
 
             expect(nonV2Parts(context.messages)).toEqual([]);
+            for (const message of context.messages) expect(() => Message.make(message)).not.toThrow();
             const { calls, results } = callsAndResults(context.messages);
             expect(calls).toEqual([
                 {
@@ -136,6 +138,7 @@ describe("adaptPayload", () => {
             payload.commit();
 
             expect(nonV2Parts(context.messages)).toEqual([]);
+            for (const message of context.messages) expect(() => Message.make(message)).not.toThrow();
             const { results } = callsAndResults(context.messages);
             expect(results[0]).toMatchObject({ result: { type: "text", value: "[dropped §9§]" } });
         });
@@ -161,6 +164,7 @@ describe("adaptPayload", () => {
             payload.commit();
 
             expect(nonV2Parts(context.messages)).toEqual([]);
+            for (const message of context.messages) expect(() => Message.make(message)).not.toThrow();
             const { calls } = callsAndResults(context.messages);
             expect(calls.map((call) => [call.name, call.input])).toEqual([
                 ["first_tool", { dropped: "[dropped §3§]" }],
@@ -188,6 +192,7 @@ describe("adaptPayload", () => {
             payload.commit();
 
             expect(nonV2Parts(context.messages)).toEqual([]);
+            for (const message of context.messages) expect(() => Message.make(message)).not.toThrow();
             expect(context.messages.map((message) => [message.id, message.role])).toEqual([
                 ["msg-1", "assistant"],
                 [undefined, "tool"],
@@ -236,13 +241,60 @@ describe("adaptPayload", () => {
             payload.commit();
 
             expect(context.messages[0]?.content[0]).toMatchObject({
-                type: "tool",
-                id: "call-converted",
-                state: {
-                    input: { dropped: "[dropped §11§]" },
-                    content: [{ type: "text", text: "[dropped §11§]" }],
-                },
+                type: "tool-call", id: "call-converted", name: "read",
+                input: { dropped: "[dropped §11§]" },
             });
+            expect(context.messages[1]?.content[0]).toMatchObject({
+                type: "tool-result", id: "call-converted", name: "read",
+                result: { type: "text", value: "[dropped §11§]" },
+            });
+            for (const message of context.messages) expect(() => Message.make(message)).not.toThrow();
+        });
+    });
+
+    describe("#given a migrated OpenCode 1 assistant row with a surviving tool skeleton", () => {
+        it("#then the returned draft passes the OpenCode 2.0.15 LLM message schema", () => {
+            const context = draft([{
+                id: "msg-converted",
+                role: "assistant",
+                content: [
+                    { type: "text", text: "before" },
+                    { type: "reasoning", text: "thinking" },
+                    {
+                        type: "tool", id: "call-converted", name: "read",
+                        state: { status: "completed", input: { path: "large.log" },
+                            content: [{ type: "text", text: "converted output".repeat(100) }] },
+                    },
+                ],
+            }]);
+            const payload = adaptPayload(context);
+            const target = createToolDropTarget(
+                "call-converted", [], indexMessage(payload.messages[0]),
+                new ToolMutationBatch(payload.messages), 11,
+            );
+            expect(target.truncate()).toBe("truncated");
+            payload.commit();
+            for (const message of context.messages) expect(() => Message.make(message)).not.toThrow();
+        });
+    });
+
+    describe("#given an injected system row removed alongside a fully dropped tool arc", () => {
+        it("#then commit() leaves only host-schema-valid content", () => {
+            const context = draft([
+                { id: "msg-injection", role: "system", content: [{ type: "text", text: "temporary" }] },
+                ...toolTurn("msg-old", "call-old", "read", "old output"),
+                { id: "msg-user", role: "user", content: [{ type: "text", text: "continue" }] },
+            ]);
+            const payload = adaptPayload(context);
+            const owner = payload.messages[1];
+            const batch = new ToolMutationBatch(payload.messages);
+            const target = createToolDropTarget("call-old", [], indexMessage(owner), batch, 4);
+            expect(target.drop()).toBe("removed");
+            batch.finalize();
+            payload.messages.splice(0, 1);
+            payload.commit();
+            for (const message of context.messages) expect(() => Message.make(message)).not.toThrow();
+            expect(context.messages.some((message) => message.id === "msg-injection")).toBe(false);
         });
     });
 
