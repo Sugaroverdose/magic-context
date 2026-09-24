@@ -14,6 +14,7 @@ import type { ContextUsage, SessionMeta, TagEntry } from "../../features/magic-c
 import { escalationBands } from "../../shared/escalation-bands";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import { hasReclaimRide, type ReclaimRideSignals, reclaimRideLabel } from "./cache-busting-signals";
 import {
     createDefaultBoundarySnapshotForTests,
     getRawHistoryEligibility,
@@ -438,6 +439,7 @@ export function checkCompartmentTrigger(
     inMemoryTail?: InMemoryTailSource | LazyInMemoryTailSource,
     taggerFloorOverride?: number,
     reasoningProjection?: ReasoningProjectionCapability,
+    reclaimRide?: ReclaimRideSignals,
 ): CompartmentTriggerResult {
     if (sessionMeta.compartmentInProgress) {
         sessionLog(
@@ -629,6 +631,10 @@ export function checkCompartmentTrigger(
         canClearReasoning,
     );
     const relativePostDropTarget = executeThresholdPercentage * POST_DROP_TARGET_RATIO;
+    // Queued drops need an existing cache-busting event to apply. A future history
+    // publication cannot justify skipping the historian that would produce it.
+    const rideLabel = reclaimRide ? reclaimRideLabel(reclaimRide) : "ride=none";
+    const dropsCanLand = reclaimRide !== undefined && hasReclaimRide(reclaimRide);
 
     const forceMaterializationPercentage = escalationBands(
         executeThresholdPercentage,
@@ -636,12 +642,13 @@ export function checkCompartmentTrigger(
     // Force only at the threshold-derived band; below it the proactive path retains precedence.
     if (usage.percentage >= forceMaterializationPercentage) {
         if (
+            dropsCanLand &&
             projectedPostDropPercentage !== null &&
             projectedPostDropPercentage <= relativePostDropTarget
         ) {
             sessionLog(
                 sessionId,
-                `historian redundancy skip: summarizer not needed this pass — force band is ${forceMaterializationPercentage}%; queued/automatic drops are projected to reclaim to ${projectedPostDropPercentage.toFixed(1)}% (target ${relativePostDropTarget.toFixed(1)}%) on the next eligible execute pass`,
+                `historian redundancy skip: summarizer not needed this pass — force band is ${forceMaterializationPercentage}%; queued/automatic drops are projected to reclaim to ${projectedPostDropPercentage.toFixed(1)}% (target ${relativePostDropTarget.toFixed(1)}%) on this pass (${rideLabel})`,
             );
             return { shouldFire: false };
         }
@@ -755,12 +762,13 @@ export function checkCompartmentTrigger(
     }
 
     if (
+        dropsCanLand &&
         projectedPostDropPercentage !== null &&
         projectedPostDropPercentage <= relativePostDropTarget
     ) {
         sessionLog(
             sessionId,
-            `historian redundancy skip: summarizer not needed this pass — usage is ${usage.percentage.toFixed(1)}%; queued/automatic drops are projected to reclaim to ${projectedPostDropPercentage.toFixed(1)}% (target ${relativePostDropTarget.toFixed(1)}%) on the next eligible execute pass`,
+            `historian redundancy skip: summarizer not needed this pass — usage is ${usage.percentage.toFixed(1)}%; queued/automatic drops are projected to reclaim to ${projectedPostDropPercentage.toFixed(1)}% (target ${relativePostDropTarget.toFixed(1)}%) on this pass (${rideLabel})`,
         );
         return { shouldFire: false };
     }

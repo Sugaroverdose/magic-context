@@ -3361,6 +3361,7 @@ export function registerPiContextHandler(
 					piUsage,
 					minimumPercentage: usagePercentage,
 					historianStateSnapshot: historianStateForPass,
+					publishedHistoryRide: isCacheBusting,
 				});
 			}
 			logTransformTiming(
@@ -4343,6 +4344,7 @@ function maybeFireHistorian(args: {
 		| undefined;
 	minimumPercentage: number;
 	historianStateSnapshot: PiHistorianStateSnapshot;
+	publishedHistoryRide: boolean;
 }): void {
 	const {
 		ctx,
@@ -4612,6 +4614,15 @@ function maybeFireHistorian(args: {
 			},
 			args.taggerFloor,
 			{ canClearReasoning: true },
+			{
+				hardFold: false,
+				force:
+					usage.percentage >= historianForceMaterializationPercentage &&
+					(usage.percentage >= 95 ||
+						getEmergencyInputSample(db, sessionId) === 0),
+				explicitFlush: hasPendingMaterialization(sessionId),
+				publishedHistory: args.publishedHistoryRide,
+			},
 		);
 
 		if (!trigger.shouldFire) {
