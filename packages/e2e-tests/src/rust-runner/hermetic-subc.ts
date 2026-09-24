@@ -986,13 +986,24 @@ export class HermeticSubcStack {
         }
     }
 
-    /** Best-effort read of the module log (diagnostics on failure). */
+    /** Read the module's dated file sink and its separately captured stderr. */
     moduleLog(): string {
-        try {
-            return readFileSync(this.moduleLogPath, "utf8");
-        } catch {
-            return "";
+        const logDir = join(this.dataDir, "cortexkit", "magic-context", "logs");
+        const segments = existsSync(logDir)
+            ? readdirSync(logDir)
+                  .filter((name) => name.startsWith("magic-context.") && name.endsWith(".log"))
+                  .sort()
+                  .map((name) => join(logDir, name))
+            : [];
+        let output = "";
+        for (const path of [...segments, this.moduleLogPath]) {
+            try {
+                output += readFileSync(path, "utf8");
+            } catch {
+                // A module that died before creating its sink can still have stderr.
+            }
         }
+        return output;
     }
 
     /** Hard teardown. Safe to call more than once; never throws. */
