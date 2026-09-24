@@ -71,6 +71,7 @@ describe.skipIf(!rustPrereqs.ok)("rust restart variant double HARD", () => {
             });
             const steady = await h.waitForRustPasses(2);
             expect(steady.at(-1)?.decision).toBe("SOFT+");
+            expect(steady.at(-1)?.wireMessages).toBeLessThanOrEqual(4);
             const steadyIdentity = persistedRenderIdentity(h, sessionId);
             // Without the variant in the identity this fixture cannot observe the defect.
             expect(steadyIdentity).toContain(`variant:${VARIANT}`);
@@ -99,6 +100,7 @@ describe.skipIf(!rustPrereqs.ok)("rust restart variant double HARD", () => {
             // The re-seed must go through the full-array retry the live sessions took.
             expect(tail).toContain("need_full_sync retry=full");
             expect(after.every((pass) => pass.applied)).toBe(true);
+            expect(after.map((pass) => pass.decision)).toEqual(Array(PASSES_AFTER_RESTART).fill("SOFT+"));
             // The identity the re-seed pass records is the one every later pass keeps.
             expect(identities).toEqual(identities.map(() => steadyIdentity));
             // Compare full lines so a failure names each HARD's reason and identity_delta.
