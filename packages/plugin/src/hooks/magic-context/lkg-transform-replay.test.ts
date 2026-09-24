@@ -14,6 +14,7 @@ import {
     captureSlot,
     getSlot,
     lkgContentDigest,
+    messageContentFields,
     noteEntry,
     resetLkgSlotsForTest,
 } from "./lkg-slot";
@@ -135,6 +136,40 @@ describe("LKG transform replay", () => {
             expect(replay.messages[2]).toEqual(originalTail?.[0]);
             expect(new Set(replay.messages.map((message) => message.info.id)).size).toBe(4);
         }
+    });
+
+    test("accepts an empty host diff summary added after capture without masking real changes", () => {
+        resetLkgSlotsForTest();
+        const input = [user("u0", 1), user("u1", 2)];
+        expect(
+            captureLkgSlot({
+                sessionId: "late-empty-summary",
+                input,
+                output: structuredClone(input),
+                modelKey: "test/model",
+                providerKey: "test",
+            }),
+        ).toBe(true);
+        const current = [...structuredClone(input), user("u2", 3)] as MessageLike[];
+        (current[1]!.info as Record<string, unknown>).summary = { diffs: [] };
+        expect(messageContentFields(current[1]!)).toEqual(messageContentFields(input[1]!));
+        expect(
+            replayLkg({
+                sessionId: "late-empty-summary",
+                messages: current,
+                modelKey: "test/model",
+                providerKey: "test",
+            }).ok,
+        ).toBe(true);
+        (current[1]!.parts[0] as { text: string }).text = "edited despite stable id";
+        expect(
+            replayLkg({
+                sessionId: "late-empty-summary",
+                messages: current,
+                modelKey: "test/model",
+                providerKey: "test",
+            }),
+        ).toEqual({ ok: false, reason: "lkg_content_mismatch" });
     });
 
     test("declines replay when stable-id content changes through the anchor", () => {
