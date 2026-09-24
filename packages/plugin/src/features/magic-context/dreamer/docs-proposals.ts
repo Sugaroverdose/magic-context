@@ -181,6 +181,8 @@ export function validateDocsProposal(
     if (!Array.isArray(parsed)) throw new Error("proposal must be a JSON array");
     const changes = parsed as DocsSectionChange[];
     if (!changes.length) throw new Error("empty proposal");
+    if (changes.some((item) => !item || !FILES.includes(item.file)))
+        throw new Error("unknown proposal file");
     let tokens = 0;
     let diffs = "";
     for (const file of FILES) {
@@ -193,10 +195,11 @@ export function validateDocsProposal(
             if (
                 !(["replace", "add", "remove"] as unknown[]).includes(change.action) ||
                 typeof change.heading !== "string" ||
-                !/^#{1,6} \S/.test(change.heading) ||
+                !/^#{1,6} [^\r\n]+$/.test(change.heading) ||
                 typeof change.text !== "string" ||
                 typeof change.reason !== "string" ||
                 !change.reason.trim() ||
+                /[\r\n]/.test(change.reason) ||
                 seen.has(change.heading)
             )
                 throw new Error(`invalid section change in ${file}`);
