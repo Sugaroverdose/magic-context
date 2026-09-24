@@ -3996,6 +3996,11 @@ const TERMINAL_WRAPUP_FAILURE_PREFIX: &str = "mc-terminal-wrapup-failure:";
 enum RetryableWrapupReason {
     BackoffActive,
     SnapshotUnavailable,
+    /// No full transform pass has been observed for the session since its route bound
+    /// (a rebind drops the snapshot, and so can cache eviction). Retrying alone never
+    /// clears this: only a new transform pass, i.e. a message in the session, does.
+    /// Kept distinct from `SnapshotUnavailable`, whose causes a retry can clear.
+    TransformNotObserved,
     SnapshotStale,
     BudgetExhausted,
 }
@@ -4005,6 +4010,7 @@ impl RetryableWrapupReason {
         match self {
             Self::BackoffActive => "backoff_active",
             Self::SnapshotUnavailable => "snapshot_unavailable",
+            Self::TransformNotObserved => "transform_not_observed",
             Self::SnapshotStale => "snapshot_stale",
             Self::BudgetExhausted => "budget_exhausted",
         }
@@ -7971,10 +7977,18 @@ impl McHandler {
                     "too many concurrent wrapups",
                 );
             }
-            TransformSnapshotLookup::Missing | TransformSnapshotLookup::InFlight => {
+            TransformSnapshotLookup::Missing => {
+                return Self::retryable_wrapup_response(
+                    RetryableWrapupReason::TransformNotObserved,
+                    "wrapup unavailable until a full session transform has been observed",
+                );
+            }
+            // A transform pass is running and will leave a snapshot when it finishes,
+            // so a plain retry clears this one.
+            TransformSnapshotLookup::InFlight => {
                 return Self::retryable_wrapup_response(
                     RetryableWrapupReason::SnapshotUnavailable,
-                    "wrapup unavailable until a full session transform has been observed",
+                    "wrapup unavailable while a session transform is in progress",
                 );
             }
         };
@@ -33677,6 +33691,44 @@ mod tests {
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
     }
 
+    /// A route rebind (for example after a host restart) drops the session's transform
+    /// snapshot, and only a new transform pass restores it. Wrapup must say so with its
+    /// own reason rather than the generic `snapshot_unavailable`, because the host tells
+    /// the user to send a message first for this reason and to retry for the others.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wrapup_after_route_rebind_reports_transform_not_observed() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        cache_wrapup_messages(&handler, wrapup_messages(20, 40));
+        handler.unbind_route(7);
+        handler.bind_route(7, binding(project.to_str().unwrap(), "ses"));
+
+        let body = tool_body(
+            handler
+                .dispatch_value(
+                    7,
+                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
+        assert_eq!(body["disposition"], json!("retryable"), "{body}");
+        assert_eq!(body["reason"], json!("transform_not_observed"));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+
+        // One transform pass after the rebind is what unblocks it.
+        cache_wrapup_messages(&handler, wrapup_messages(20, 40));
+        let retry = tool_body(
+            handler
+                .dispatch_value(
+                    7,
+                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
+        assert_eq!(retry["disposition"], json!("nothing_to_compact"), "{retry}");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn retryable_snapshot_conditions_do_not_poison_command_ids() {
         let producer = Arc::new(ProducerState::default());
@@ -33690,7 +33742,7 @@ mod tests {
         });
         let missing = tool_body(handler.dispatch_value(7, missing_request.clone()).await);
         assert_eq!(missing["disposition"], json!("retryable"));
-        assert_eq!(missing["reason"], json!("snapshot_unavailable"));
+        assert_eq!(missing["reason"], json!("transform_not_observed"));
         assert!(store
             .load_wrapup_command("ses", "missing-retry")
             .unwrap()
@@ -35167,7 +35219,7 @@ mod tests {
         assert_eq!(body["reason"], json!("snapshot_unavailable"));
         assert_eq!(
             body["summary"],
-            "wrapup unavailable until a full session transform has been observed"
+            "wrapup unavailable while a session transform is in progress"
         );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
@@ -35242,7 +35294,7 @@ mod tests {
                 .await,
         );
         assert_eq!(evicted["disposition"], json!("retryable"));
-        assert_eq!(evicted["reason"], json!("snapshot_unavailable"));
+        assert_eq!(evicted["reason"], json!("transform_not_observed"));
         assert_eq!(
             evicted["summary"],
             "wrapup unavailable until a full session transform has been observed"

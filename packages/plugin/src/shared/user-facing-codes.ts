@@ -183,6 +183,11 @@ export const USER_FACING_FAILURES = {
         sentence: "History compression is paused while the engine syncs.",
         action: "Retry in a moment.",
     },
+    history_compression_needs_message: {
+        code: "MC-C12",
+        sentence: "History compression has not seen this session since Magic Context reconnected.",
+        action: "Send a message in this session first, then run /ctx-wrapup again.",
+    },
     context_service_unavailable: {
         code: "MC-C10",
         sentence: "Magic Context is temporarily unavailable.",
