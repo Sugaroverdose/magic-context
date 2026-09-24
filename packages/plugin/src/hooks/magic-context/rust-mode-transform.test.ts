@@ -6397,11 +6397,17 @@ describe("Rust stalled transform probe", () => {
                 };
             },
         };
+        // Only the stall probe's timer may fire here. The module and probe-reply
+        // budgets are far larger than any runner delay, so the order "probe fires
+        // while the transform is in flight" holds by construction; the mock
+        // answers the moment the probe is seen, so the test still finishes in
+        // milliseconds. With a 100 ms module timeout a slow CI runner timed the
+        // transform out before the 10 ms probe ran (healthProbes 0, 2026-09-24).
         const transform = createRustModeTransform(makeDeps(db, moduleClient), {
             moduleClient,
-            moduleTimeoutMs: 100,
+            moduleTimeoutMs: 30_000,
             stallProbeAfterMsForTests: 10,
-            healthProbeTimeoutMsForTests: 20,
+            healthProbeTimeoutMsForTests: 30_000,
         });
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
         try {
@@ -6463,11 +6469,15 @@ describe("Rust stalled transform probe", () => {
             "test-provider/test-model",
             "provider_overflow",
         );
+        // The probe (0 ms) must fire before the module timeout produces the
+        // refusal. Two real timers race here because the transform has no clock
+        // seam, so the margin between them is what keeps the order: 50 ms was
+        // thin enough for a loaded runner to lose; 2 s is not.
         const transform = createRustModeTransform(deps, {
             moduleClient,
-            moduleTimeoutMs: 50,
+            moduleTimeoutMs: 2_000,
             stallProbeAfterMsForTests: 0,
-            healthProbeTimeoutMsForTests: 20,
+            healthProbeTimeoutMsForTests: 1_000,
         });
 
         const run = transform.run(
