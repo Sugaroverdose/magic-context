@@ -469,7 +469,7 @@
                 "ts": false,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: a user image attached inline or by file URI, and the turns after it, must reach the provider with Magic Context loaded; OpenCode 2.0.15 rebuilds the context draft with a schema that accepts only its own Media.Asset instance, so a plain-object copy of the attachment fails the turn with 'Schema validation failed'. The pinned lane host predates that schema; run it with MC_E2E_OPENCODE2_CLI pointing at 2.0.15 or later to exercise the instance check. The v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "rationale": "OpenCode v2 lane: a user image attached inline or by file URI, and the turns after it, must reach the provider with Magic Context loaded; OpenCode 2.0.15 rebuilds the context draft with a schema that accepts only its own Media.Asset instance, so a plain-object copy of the attachment fails the turn with 'Schema validation failed'. It also covers an image restored from before a host compaction checkpoint, in the same process and after a host restart, which must reach the provider byte-identical to the host's own rendering. The v2 lane runs from its own invocation (bun test tests/opencode2)",
             "contract_refs": [
                 "OC2-S1"
             ],
