@@ -1,3 +1,4 @@
+import { log } from "../shared/logger";
 import { loadPluginConfigDetailed, type MagicContextPluginConfig } from "./index";
 import { LiveConfigReader } from "./live-snapshot";
 import { LIVE_RELOAD_CONFIG_PATHS, type MagicContextConfig } from "./schema/magic-context";
@@ -63,7 +64,9 @@ export function pluginConfigReader(directory: string, boot: MagicContextPluginCo
                 }
                 return loaded.config;
             },
-            console.warn,
+            // Into our own log file: console output lands in the host's stdout/stderr
+            // (for `opencode serve`, the terminal or service log the user reads).
+            (message) => log(`[config] ${message}`),
             changedLiveKeys,
         );
         reader.poll();

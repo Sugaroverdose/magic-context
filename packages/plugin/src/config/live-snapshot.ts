@@ -40,7 +40,9 @@ export class LiveConfigReader<T> {
         private readonly directory: string,
         initial: T,
         private readonly load: () => T,
-        private readonly onLog: (message: string) => void = console.warn,
+        // Callers pass the host's log sink; the default is silent so a caller that
+        // forgets never writes into the host process's stderr.
+        private readonly onLog: (message: string) => void = () => {},
         private readonly changedKeys: (previous: T, next: T) => readonly string[] = (
             previous,
             next,
@@ -168,7 +170,13 @@ export class LiveConfigReader<T> {
                 adoptedAt: Date.now(),
                 effective,
             };
-            this.onLog(`config reloaded gen=${this.snapshot.generation} keys=[${keys.join(",")}]`);
+            // A file can change (a save, a comment edit) without any setting changing;
+            // only a real change is worth a line.
+            if (keys.length > 0) {
+                this.onLog(
+                    `config reloaded gen=${this.snapshot.generation} keys=[${keys.join(",")}]`,
+                );
+            }
         }
         return this.snapshot;
     }
