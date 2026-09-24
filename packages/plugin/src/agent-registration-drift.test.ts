@@ -283,7 +283,7 @@ describe("hidden-agent registration drift guard", () => {
         expect(byId(DREAMER_AGENT)?.maxSteps).toBe(150);
     });
 
-    test("dreamer-docs inline allow-list matches canonical (file read/write/bash, no memory) and is locked", () => {
+    test("dreamer-docs inline allow-list matches read-only canonical tools and is locked", () => {
         expect(byId(DREAMER_DOCS_AGENT)?.allowedTools).toEqual([...DREAMER_DOCS_ALLOWED_TOOLS]);
         const tools = byId(DREAMER_DOCS_AGENT)?.allowedTools ?? [];
         for (const denied of ["ctx_memory", "ctx_search", "ctx_note", "task"]) {

@@ -673,10 +673,7 @@ const STRICT_TOOL_ALLOWLIST_ENTRIES: readonly (readonly [
 	// manifest's DB writes, so no ctx_memory is needed.
 	["dreamer-memory-mapper", [...PI_READ_ONLY_BUILTINS, ...PI_AFT_READ_TOOLS]],
 	// Docs proposals use read-only source investigation; the host handles validation.
-	[
-		"dreamer-docs",
-		[...PI_READ_ONLY_BUILTINS, ...PI_AFT_READ_TOOLS],
-	],
+	["dreamer-docs", [...PI_READ_ONLY_BUILTINS, ...PI_AFT_READ_TOOLS]],
 	// curate (base `dreamer`): memory-pool hygiene via ctx_memory ONLY. It is in
 	// DREAMER_ACTION_AGENTS so the lean extension registers ctx_memory; this
 	// allow-list then strips ALL 7 built-ins, leaving only the extension-provided

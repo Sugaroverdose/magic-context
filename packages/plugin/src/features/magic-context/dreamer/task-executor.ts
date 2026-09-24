@@ -50,6 +50,12 @@ import {
     curateTaskStateAfterSuccess,
 } from "./curate-category-rotation";
 import { takeCurateSafetyRefusalCount } from "./curate-memory-safety";
+import {
+    docsBaseHashes,
+    docsChangeSet,
+    hasCurrentDocsProposal,
+    writeDocsProposal,
+} from "./docs-proposals";
 import { evaluateSmartNotes } from "./evaluate-smart-notes";
 import { archiveExpiredMemories } from "./expire-memories";
 import {
@@ -59,7 +65,6 @@ import {
     runLeaseGuardedWrite,
     startLeaseHeartbeat,
 } from "./lease";
-import { docsBaseHashes, docsChangeSet, hasCurrentDocsProposal, writeDocsProposal } from "./docs-proposals";
 import { snapshotMaintainDocsFiles } from "./maintain-docs-protected-enforcement";
 import { mapMemories } from "./map-memories";
 import {
@@ -1537,7 +1542,11 @@ async function runAgenticTask(
     const docsHashes = task === "maintain-docs" ? docsBaseHashes(docsDir) : undefined;
     const storedAnchor = getTaskScheduleState(db, projectIdentity, config.task)?.taskStateJson;
     let anchor: string | undefined;
-    try { anchor = JSON.parse(storedAnchor ?? "null")?.head; } catch { /* legacy task state */ }
+    try {
+        anchor = JSON.parse(storedAnchor ?? "null")?.head;
+    } catch {
+        /* legacy task state */
+    }
     const changes = task === "maintain-docs" ? docsChangeSet(docsDir, anchor) : null;
     const existingDocs =
         task === "maintain-docs"
@@ -1603,7 +1612,9 @@ async function runAgenticTask(
         }
 
         if (task === "maintain-docs" && (hasCurrentDocsProposal(docsDir) || !changes)) {
-            const reason = hasCurrentDocsProposal(docsDir) ? "pending proposal matches current docs" : "no relevant commits or no git repository";
+            const reason = hasCurrentDocsProposal(docsDir)
+                ? "pending proposal matches current docs"
+                : "no relevant commits or no git repository";
             log(`[dreamer] maintain-docs skipped: ${reason}`);
             helpers.recordRun("completed", null, { progress: reason });
             return { status: "completed", detail: reason };
@@ -1614,7 +1625,9 @@ async function runAgenticTask(
             existingDocs,
             docsChangeSet: changes?.text,
             docsBudget: config.docsMaxTokens ?? 12000,
-            docsCurrentTokens: maintainDocsSnapshot ? Math.ceil([...maintainDocsSnapshot.values()].join("").length / 3.5) : 0,
+            docsCurrentTokens: maintainDocsSnapshot
+                ? Math.ceil([...maintainDocsSnapshot.values()].join("").length / 3.5)
+                : 0,
             curate:
                 curateMemories && curateCategory
                     ? { category: curateCategory, memories: curateMemories }
@@ -1731,9 +1744,19 @@ async function runAgenticTask(
                     helpers.recordRun("completed", null, { progress: "no corrections proposed" });
                     return { status: "completed", detail: "no corrections proposed" };
                 }
-                const path = writeDocsProposal(docsDir, String(run.validated), config.docsMaxTokens ?? 12000, docsHashes, changes.head);
+                const path = writeDocsProposal(
+                    docsDir,
+                    String(run.validated),
+                    config.docsMaxTokens ?? 12000,
+                    docsHashes,
+                    changes.head,
+                );
                 helpers.recordRun("completed", null, { progress: `proposal: ${path}` });
-                return { status: "completed", detail: `proposal: ${path}`, schedulePatch: { taskStateJson: JSON.stringify({ head: changes.head }) } };
+                return {
+                    status: "completed",
+                    detail: `proposal: ${path}`,
+                    schedulePatch: { taskStateJson: JSON.stringify({ head: changes.head }) },
+                };
             } catch (error) {
                 const reason = `maintain-docs failed validation: ${String(error)}`;
                 log(`[dreamer] ${reason}`);

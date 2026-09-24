@@ -579,8 +579,18 @@ export const DreamTasksSchema = z
             RetrospectiveTaskConfigSchema.parse(defaultTaskConfig("retrospective")),
         ),
         "maintain-docs": DreamTaskBaseConfigSchema.extend({
-            max_tokens: z.number().int().positive().default(12000).describe("Maximum combined token count of proposed ARCHITECTURE.md and STRUCTURE.md"),
-        }).default(() => ({ ...DreamTaskBaseConfigSchema.parse(defaultTaskConfig("maintain-docs")), max_tokens: 12000 })),
+            max_tokens: z
+                .number()
+                .int()
+                .positive()
+                .default(12000)
+                .describe(
+                    "Maximum combined token count of proposed ARCHITECTURE.md and STRUCTURE.md",
+                ),
+        }).default(() => ({
+            ...DreamTaskBaseConfigSchema.parse(defaultTaskConfig("maintain-docs")),
+            max_tokens: 12000,
+        })),
         "evaluate-smart-notes": DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("evaluate-smart-notes")),
         ),

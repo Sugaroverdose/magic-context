@@ -150,24 +150,22 @@ describe("DREAMER_CURATE_ALLOWED_TOOLS (base dreamer = curate only)", () => {
 });
 
 describe("DREAMER_DOCS_ALLOWED_TOOLS (maintain-docs)", () => {
-    it("includes read/grep/glob/bash + write/edit + aft for doc maintenance", () => {
-        for (const tool of [
-            "read",
-            "grep",
-            "glob",
-            "bash",
-            "write",
-            "edit",
-            "aft_outline",
-            "aft_zoom",
-            "aft_search",
-        ]) {
+    it("includes read-only source investigation tools for doc proposals", () => {
+        for (const tool of ["read", "grep", "glob", "aft_outline", "aft_zoom", "aft_search"]) {
             expect(DREAMER_DOCS_ALLOWED_TOOLS).toContain(tool);
         }
     });
 
-    it("does NOT include memory tools (it edits docs, not the memory store)", () => {
-        for (const denied of ["ctx_memory", "ctx_search", "ctx_note", "task"]) {
+    it("denies write, shell and memory tools", () => {
+        for (const denied of [
+            "bash",
+            "write",
+            "edit",
+            "ctx_memory",
+            "ctx_search",
+            "ctx_note",
+            "task",
+        ]) {
             expect(DREAMER_DOCS_ALLOWED_TOOLS).not.toContain(denied);
         }
     });
@@ -194,16 +192,13 @@ describe("integration: full hidden-agent permission shape", () => {
         });
     });
 
-    it("dreamer-docs permission object: `*` denied + repo-exploration + write/edit + aft_* (no memory)", () => {
+    it("dreamer-docs permission object denies writes and allows read-only source tools", () => {
         const perm = buildAllowOnlyPermission(DREAMER_DOCS_ALLOWED_TOOLS);
         expect(perm).toEqual({
             "*": "deny",
             read: "allow",
             grep: "allow",
             glob: "allow",
-            bash: "allow",
-            write: "allow",
-            edit: "allow",
             aft_outline: "allow",
             aft_zoom: "allow",
             aft_search: "allow",

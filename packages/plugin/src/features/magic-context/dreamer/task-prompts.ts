@@ -222,7 +222,6 @@ Read the docs and relevant source with read-only tools. These files are short ma
 Return ONLY a JSON array (or []), with each entry {"file":"ARCHITECTURE.md"|"STRUCTURE.md","action":"replace"|"add"|"remove","heading":"## Exact section heading","text":"## Full replacement section including heading and body (empty for remove)","reason":"one-line reason"}. A replacement includes the entire section, including its heading. Additions are appended at the end of the file. Do not include any unmodified sections. No file writes.`;
 }
 
-
 export function buildDreamTaskPrompt(
     task: DreamingTask,
     args: {
