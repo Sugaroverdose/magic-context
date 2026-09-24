@@ -28,23 +28,26 @@ export interface HiddenSingleShotArgs<T> {
     signal?: AbortSignal;
     metadata?: Record<string, unknown>;
     privacySensitive?: boolean;
+    /** The curation task can finish after completed memory updates without a final text response. */
+    allowEmpty?: boolean;
     /**
      * Turn the complete assistant text into the caller's result. Throwing here
      * rejects this model's answer and advances to the next configured fallback.
      */
-    parse: (text: string) => T;
+    parse: (text: string, completion: HiddenCompletion) => T;
 }
 
 export interface HiddenSingleShotResult<T> {
     validated: T;
     completion: HiddenCompletion;
+    childSessionId: string;
 }
 
 /**
- * Run ONE no-tool Dreamer prompt through a hidden completion carrier and hand
- * the caller the parsed answer.
+ * Run one Dreamer prompt through a hidden completion carrier and hand the
+ * caller the parsed answer. The carrier owns any tool steps for its agent.
  *
- * Every task routed through here answers with a single self-contained document
+ * Every task routed through here answers with one self-contained document
  * (a JSON object or an XML manifest), so a partial answer is never safe to
  * apply. Two guards make that fail closed, matching what the memory classifier
  * already does on this same transport:
@@ -104,13 +107,14 @@ export async function runHiddenSingleShotPrompt<T>(
                         throw new Error(`${args.callContext} returned length-capped output`);
                     }
                     const text = completion.text;
-                    if (!text) throw new Error(`${args.callContext} returned no output`);
-                    return args.parse(text);
+                    if (!text && !args.allowEmpty)
+                        throw new Error(`${args.callContext} returned no output`);
+                    return args.parse(text ?? "", completion);
                 },
             },
         );
         promptSettled = true;
-        return { validated: run.validated, completion: run.output };
+        return { validated: run.validated, completion: run.output, childSessionId: handle.id };
     } finally {
         await args.executor.close(handle, {
             promptSettled,

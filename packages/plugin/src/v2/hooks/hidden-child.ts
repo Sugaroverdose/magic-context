@@ -23,7 +23,6 @@ const AGENT_TOOLS: Record<string, readonly string[]> = {
     [HIDDEN_DREAMER_AGENT]: [],
     [HIDDEN_CURATE_AGENT]: ["ctx_memory", "ctx_memory_list"],
     [DREAMER_MEMORY_MAPPER_AGENT]: READ_TOOLS,
-    [DREAMER_DOCS_AGENT]: READ_TOOLS,
     [DREAMER_PRIMER_INVESTIGATOR_AGENT]: [...READ_TOOLS, "ctx_search"],
     [DREAMER_RETROSPECTIVE_AGENT]: ["ctx_search"],
 };
@@ -36,6 +35,8 @@ const AGENT_STEPS: Record<string, number> = {
 };
 
 export function hiddenAgentFor(identity: HiddenRunIdentity): string {
+    if (identity.kind === "dreamer-task" && identity.agent === DREAMER_DOCS_AGENT)
+        return DREAMER_MEMORY_MAPPER_AGENT;
     return identity.kind === "dreamer-task" && AGENT_TOOLS[identity.agent]
         ? identity.agent
         : identity.kind === "dreamer-task"
@@ -83,6 +84,8 @@ export interface HiddenChildAttempt {
     request: PromptArgs;
     shaped: boolean;
     steps?: number;
+    observedMessages?: SessionContext["messages"];
+    marker?: string;
 }
 
 /** Last user text on a context draft. 2.0.5 may use a string body, extra parts, or input_text. */
@@ -175,6 +178,7 @@ export class HiddenChildHook {
 
     registerAttempt(marker: string, attempt: HiddenChildAttempt): void {
         this.registerChild(attempt.childSessionId);
+        attempt.marker = marker;
         this.attempts.set(marker, attempt);
     }
 
@@ -236,8 +240,25 @@ export class HiddenChildHook {
                 ? selected.request.body.system
                 : selected.identity.system;
         draft.system = [{ type: "text", text: system }];
-        if (!selected.shaped)
+        if (!selected.shaped) {
             draft.messages = [{ role: "user", content: calibratedParts(selected) }];
+        } else {
+            const first = draft.messages[0];
+            const firstText = first && newestUserText({ ...draft, messages: [first] });
+            const normalized =
+                firstText === undefined ? undefined : stripWellFormedLeadingTagPrefix(firstText);
+            if (normalized !== selected.marker) {
+                throw new HiddenCompletionRefusal(
+                    "hidden_prompt_unrecognized",
+                    "Hidden child history does not begin with this run's registered marker",
+                    true,
+                );
+            }
+            // The host saves the placeholder user prompt rather than the calibrated
+            // text sent on step one. Replace only that placeholder, preserving all
+            // assistant tool calls and tool results.
+            draft.messages[0] = { ...first, content: calibratedParts(selected) };
+        }
         // Replaced wholesale, never merged: the carrier sends exactly the
         // authored options and never inherits the host's own generation defaults.
         draft.options = authoredOptions(selected);
@@ -245,6 +266,7 @@ export class HiddenChildHook {
         draft.tools = Object.fromEntries(
             allowed.flatMap((id) => (draft.tools[id] ? [[id, draft.tools[id]]] : [])),
         );
+        selected.observedMessages = draft.messages;
         selected.shaped = true;
         return true;
     }

@@ -425,6 +425,39 @@ function successfulReusableAssistant(row: StoreRow<"assistant"> | undefined): bo
     );
 }
 
+function toolLoopMessages(attempt: HiddenChildAttempt): unknown[] {
+    const messages = attempt.observedMessages ?? [];
+    const results = new Map<string, { status: string }>();
+    for (const message of messages) {
+        if (message.role !== "tool") continue;
+        for (const part of message.content) {
+            if (part.type !== "tool-result" || typeof part.id !== "string") continue;
+            const result = part.result as { type?: unknown } | undefined;
+            results.set(part.id, { status: result?.type === "error" ? "error" : "completed" });
+        }
+    }
+    return messages.flatMap((message) => {
+        if (message.role !== "assistant") return [];
+        const parts = message.content.flatMap((part) => {
+            if (
+                part.type !== "tool-call" ||
+                typeof part.id !== "string" ||
+                typeof part.name !== "string"
+            )
+                return [];
+            const result = results.get(part.id);
+            return [
+                {
+                    type: "tool",
+                    tool: part.name,
+                    state: { status: result?.status ?? "pending", input: part.input },
+                },
+            ];
+        });
+        return parts.length ? [{ info: { role: "assistant" }, parts }] : [];
+    });
+}
+
 function assistantText(row: StoreRow<"assistant">): string | null {
     const text = (row.data.content ?? [])
         .flatMap((part) =>
@@ -875,6 +908,7 @@ export async function createV2HiddenCompletionExecutor(
                 reader.latestSequence(run.child.id),
             );
             const marker = `mc:hidden:${crypto.randomUUID()}:${crypto.randomUUID()}`;
+            run.completion = undefined;
             const attempt: HiddenChildAttempt = {
                 childSessionId: run.child.id,
                 identity: run.identity,
@@ -961,6 +995,9 @@ export async function createV2HiddenCompletionExecutor(
                 }
                 run.completion = {
                     text,
+                    ...(hiddenToolLoop(run.identity)
+                        ? { messages: toolLoopMessages(attempt) }
+                        : {}),
                     reasoning: null,
                     // If either side is numeric, retain the provider's partial usage
                     // and floor omitted components to zero. With no numeric usage,

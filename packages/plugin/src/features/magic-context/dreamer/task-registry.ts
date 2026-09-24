@@ -89,7 +89,7 @@ export const DREAM_TASK_CAPABILITIES: Record<DreamTaskName, DreamTaskCapability>
     "maintain-docs": {
         requiresTools: true,
         transport: "tool-loop",
-        toolLoopPurpose: "needs file read and write tools to update project documentation",
+        toolLoopPurpose: "needs read-only file tools to investigate documentation corrections",
     },
     // The evaluator is a no-tool compiler plus a no-tool confirmation prompt; the
     // generated check runs in the local capability sandbox, never as model tools.

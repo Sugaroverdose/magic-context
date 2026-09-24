@@ -1229,7 +1229,6 @@ describe("OpenCode 2 hidden child completion", () => {
             HIDDEN_DREAMER_AGENT,
             HIDDEN_CURATE_AGENT,
             "dreamer-memory-mapper",
-            "dreamer-docs",
             "dreamer-primer-investigator",
             "dreamer-retrospective",
         ]);
@@ -1238,7 +1237,6 @@ describe("OpenCode 2 hidden child completion", () => {
             const tools: Record<string, string[]> = {
                 [HIDDEN_CURATE_AGENT]: ["ctx_memory", "ctx_memory_list"],
                 "dreamer-memory-mapper": ["read", "grep", "glob"],
-                "dreamer-docs": ["read", "grep", "glob"],
                 "dreamer-primer-investigator": ["read", "grep", "glob", "ctx_search"],
                 "dreamer-retrospective": ["ctx_search"],
             };

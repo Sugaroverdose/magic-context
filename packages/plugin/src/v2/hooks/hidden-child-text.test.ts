@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test";
-import { HiddenChildHook, newestUserText } from "./hidden-child";
+import { describe, expect, it, test } from "bun:test";
+import { HiddenChildHook, hiddenAgentFor, newestUserText } from "./hidden-child";
 import type { SessionContext } from "./types";
 
 function draft(message: SessionContext["messages"][number]): SessionContext {
@@ -13,6 +13,19 @@ function draft(message: SessionContext["messages"][number]): SessionContext {
         options: {},
     };
 }
+
+test("documentation proposals share the read-only mapper carrier", () => {
+    expect(
+        hiddenAgentFor({
+            agent: "dreamer-docs",
+            kind: "dreamer-task",
+            system: "docs",
+            timeoutMs: 1000,
+            title: "docs",
+            directory: "/tmp",
+        }),
+    ).toBe("dreamer-memory-mapper");
+});
 
 describe("newestUserText", () => {
     it("reads a single text part", () => {
@@ -132,15 +145,53 @@ it("keeps accumulated tool results on the second step and releases the session b
     const next = {
         ...first,
         messages: [
-            ...first.messages,
+            { role: "user", content: [{ type: "text", text: "mc:hidden:loop" }] },
             { role: "assistant", content: [{ type: "tool-call", name: "ctx_memory" }] },
             result,
         ],
         tools: { ...first.tools, read: { description: "read", input: {} } },
     };
     expect(hook.apply(next)).toBe(true);
+    expect(next.messages[0]?.content).toEqual([{ type: "text", text: "calibrated" }]);
     expect(next.messages.at(-1)).toBe(result);
     expect(Object.keys(next.tools)).toEqual(["ctx_memory"]);
+    const foreign = {
+        ...next,
+        messages: [
+            { role: "user", content: [{ type: "text", text: "another prompt" }] },
+            ...next.messages.slice(1),
+        ],
+    };
+    expect(() => hook.apply(foreign)).toThrow("hidden_prompt_unrecognized");
     hook.releaseAttempt("mc:hidden:loop");
     expect(() => hook.apply(next)).toThrow("hidden_prompt_unrecognized");
+});
+
+it("refuses a tool loop that exceeds its task's step budget", () => {
+    const hook = new HiddenChildHook();
+    hook.registerAttempt("mc:hidden:limit", {
+        childSessionId: "ses-child",
+        identity: {
+            directory: "/tmp",
+            agent: "dreamer-retrospective",
+            kind: "dreamer-task",
+            system: "sys",
+            timeoutMs: 1000,
+            title: "retrospective",
+        },
+        request: { body: { parts: [{ type: "text", text: "calibrated" }] } },
+        shaped: false,
+    });
+    for (let step = 1; step <= 40; step++) {
+        const candidate = {
+            ...draft({ role: "user", content: [{ type: "text", text: "mc:hidden:limit" }] }),
+            sessionID: "ses-child",
+        };
+        expect(hook.apply(candidate)).toBe(true);
+    }
+    const over = {
+        ...draft({ role: "user", content: [{ type: "text", text: "mc:hidden:limit" }] }),
+        sessionID: "ses-child",
+    };
+    expect(() => hook.apply(over)).toThrow("exceeded its 40-step limit");
 });

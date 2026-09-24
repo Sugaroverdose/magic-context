@@ -120,11 +120,11 @@ Conversion is finished when `SELECT value FROM kv WHERE key = 'migration.v1-v2';
 
 On OpenCode 2 each [historian](/concepts/historian/) run is one request with no tool calls. It runs on the historian's configured model, in a hidden session.
 
-The same limit applies to the [dreamer](/concepts/dreamer/). Tasks that need a tool loop cannot run on OpenCode 2: `map-memories`, `verify`, `verify-broad`, `curate`, `retrospective`, `maintain-docs`, and `refresh-primers`. `/ctx-dream` and `/ctx-status` name each skipped task with the code `MC-D08`. `evaluate-smart-notes`, `review-user-memories`, and `promote-primers` do run.
+The [dreamer](/concepts/dreamer/) also runs tool-loop tasks on OpenCode 2: `map-memories`, `verify`, `verify-broad`, `curate`, `retrospective`, `maintain-docs`, and `refresh-primers`. Each uses a task-scoped hidden agent with only its permitted tools. Single-shot and host-only tasks continue to run as before.
 
 ### Hidden sessions appear as top-level sessions
 
-OpenCode 2 gives plugins no way to attach a session to a parent. Magic Context keeps one reusable hidden session per project for the historian and one for the dreamer. They are titled `Magic Context historian` and `Magic Context dreamer`.
+OpenCode 2 gives plugins no way to attach a session to a parent. Magic Context keeps reusable hidden sessions for single-shot tasks. A tool-loop task gets a fresh hidden session for each run, so its tool history cannot leak into the next run. They are titled `Magic Context historian` and `Magic Context dreamer`.
 
 A session is retired when a run in it fails or is interrupted, or when a new OpenCode version replaces it.
 

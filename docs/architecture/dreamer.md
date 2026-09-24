@@ -46,7 +46,7 @@ Every task has a transport class (`DREAM_TASK_CAPABILITIES`):
 - **`single-shot`**: one or more tool-free completions. `compress-cues`, `classify-memories`, `evaluate-smart-notes`, `review-user-memories`.
 - **`host-only`**: no model call. `promote-primers`.
 
-Hosts without a tool loop (OpenCode 2's hidden-completion carrier) run only `single-shot` and `host-only` tasks and refuse each `tool-loop` task by name with `MC-D08` and the reason it needs tools.
+OpenCode 2 runs tool-loop tasks in fresh hidden agent sessions, with deny-all permissions followed by explicit task-specific tool allows. The hook restores the calibrated user prompt on each model step while preserving the host's accumulated tool calls and results. Single-shot tasks still use reusable children.
 
 Several tasks are **manifest tasks**: the host renders one prompt, a locked read-only or tool-free agent answers with a single XML manifest, and the host parses and applies it. Parsing fails closed: output without the expected root element is rejected, never applied as a truncated prefix.
 

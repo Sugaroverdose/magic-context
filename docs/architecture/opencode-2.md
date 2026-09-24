@@ -62,7 +62,7 @@ What runs through it:
 
 - **The historian**, whenever compaction is on, the executor exists and the historian is not disabled (`historianRunnable`).
 - **`/ctx-wrapup`** and manual `/ctx-dream` (`hooks/dream-manual.ts`).
-- **Scheduled dreamer tasks**, woken by execution events (`hooks/dream-trigger.ts`). Only `single-shot` and `host-only` tasks can run here; `tool-loop` tasks are refused one by one with `MC-D08` and the reason each needs a tool loop (see [dreamer.md](dreamer.md)).
+- **Scheduled dreamer tasks**, woken by execution events (`hooks/dream-trigger.ts`). `tool-loop` tasks run through fresh task-scoped hidden children; the host executes their permitted tools and the existing manifest parsers apply the result (see [dreamer.md](dreamer.md)).
 
 Retired hidden sessions are deleted through the host's own HTTP route (`DELETE /api/session/:id`), reached through the service registration discovered by `host-service.ts`. The child records which registration created it and is deleted only through that one. A child with no bound registration stays retriable and declares the `hidden_cleanup_unbound` limitation (`MC-H02`). `keep_subagents: true` keeps settled children.
 
