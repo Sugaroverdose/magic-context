@@ -230,6 +230,7 @@ export interface OpenCode2SpawnOptions {
 	includeMagicContext?: boolean;
 	modelContextLimit?: number;
 	modelOutputLimit?: number;
+	compactionAuto?: boolean;
 	existingIsolation?: OpenCode2Isolation;
 	existingMock?: { mock: MockProvider; baseURL: string };
 	/**
@@ -284,7 +285,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 				SCHEMA_GUARD,
 			],
 			model: `${providerID}/${defaultModelID}`,
-			compaction: { auto: true, buffer: 1024, keep: { tokens: 1024 } },
+			compaction: { auto: options.compactionAuto ?? true, buffer: 1024, keep: { tokens: 1024 } },
 			providers: {
 				[providerID]: {
 					settings: { baseURL: provider.baseURL, apiKey: "mock-key" },

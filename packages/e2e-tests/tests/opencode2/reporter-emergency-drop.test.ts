@@ -130,7 +130,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         fixture.env.MAGIC_CONTEXT_LOG_PATH = fixture.logPath("v2-reporter");
         v2 = await spawnOpencode2({ existingIsolation: fixture,
             existingMock: { mock, baseURL: provider.baseURL }, magicContextConfig,
-            modelContextLimit: CONTEXT_LIMIT, modelOutputLimit: 1_024 });
+            modelContextLimit: CONTEXT_LIMIT, modelOutputLimit: 1_024, compactionAuto: false });
         let client2 = OpenCode.make({ baseUrl: v2.url,
             headers: { authorization: `Basic ${btoa(`opencode:${v2.password}`)}` } });
         await waitForPluginActive(client2, fixture.cwd);
@@ -155,7 +155,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         } finally { contextDb.close(); }
         v2 = await spawnOpencode2({ existingIsolation: fixture,
             existingMock: { mock, baseURL: provider.baseURL }, magicContextConfig,
-            modelContextLimit: CONTEXT_LIMIT, modelOutputLimit: 1_024 });
+            modelContextLimit: CONTEXT_LIMIT, modelOutputLimit: 1_024, compactionAuto: false });
         client2 = OpenCode.make({ baseUrl: v2.url,
             headers: { authorization: `Basic ${btoa(`opencode:${v2.password}`)}` } });
         await waitForPluginActive(client2, fixture.cwd);
@@ -181,13 +181,16 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         await v2.stopHost();
         v2 = undefined;
         const log = readFileSync(fixture.logPath("v2-reporter"), "utf8");
+        const schemaPasses = readFileSync(join(fixture.root, "llm-schema-guard.jsonl"), "utf8")
+            .split("\n").filter((line) => line.startsWith(`PASS ${sessionID} `));
+        expect(schemaPasses.length).toBeGreaterThanOrEqual(2);
         const milestones = log.split("\n").filter((line) => /v2 usage:|emergency tiered drop:|heuristic cleanup:|pending ops WILL APPLY|prefix trim:|rematerialized=true/.test(line));
         expect(milestones.some((line) => /v2 usage: inputTokens=820000 .*percentage=109\./.test(line))).toBe(true);
         expect(milestones.some((line) => line.includes("pending ops WILL APPLY — reason=explicit_flush, pendingOps=46"))).toBe(true);
         expect(milestones.some((line) => line.includes("emergency tiered drop: tiered drop: 143 tags"))).toBe(true);
         expect(milestones.some((line) => /heuristic cleanup: dropped \d+ tool tags, deduplicated \d+ tool calls, dropped 5 system injections/.test(line))).toBe(true);
         expect(milestones.some((line) => /prefix trim: boundary .* absent from current messages; pass=priced; no in-pass trim applied/.test(line))).toBe(true);
-        expect(milestones.some((line) => line.includes("rematerialized=true, reason=system_hash"))).toBe(true);
+        expect(milestones.some((line) => line.includes("rematerialized=true, reason=render_config"))).toBe(true);
     } finally {
         if (v2) await v2.stopHost();
         if (v1) await v1.stop();

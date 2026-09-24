@@ -108,7 +108,7 @@ test("converted tool drop lands on ordinary pass and remains valid on replay", a
         v1 = undefined;
         fixture.env.MAGIC_CONTEXT_LOG_PATH = fixture.logPath("v2-bootstrap");
         v2 = await spawnOpencode2({ existingIsolation: fixture, existingMock: { mock, baseURL: provider.baseURL },
-            magicContextConfig: config, modelContextLimit: 750_000, modelOutputLimit: 1024 });
+            magicContextConfig: config, modelContextLimit: 750_000, modelOutputLimit: 1024, compactionAuto: false });
         let client = OpenCode.make({ baseUrl: v2.url,
             headers: { authorization: `Basic ${btoa(`opencode:${v2.password}`)}` } });
         await waitForPluginActive(client, fixture.cwd);
@@ -119,7 +119,7 @@ test("converted tool drop lands on ordinary pass and remains valid on replay", a
         seedRecentConvertedArcs(fixture.openCodeDbPath, sessionId);
         fixture.env.MAGIC_CONTEXT_LOG_PATH = fixture.logPath("v2-drop");
         v2 = await spawnOpencode2({ existingIsolation: fixture, existingMock: { mock, baseURL: provider.baseURL },
-            magicContextConfig: config, modelContextLimit: 750_000, modelOutputLimit: 1024 });
+            magicContextConfig: config, modelContextLimit: 750_000, modelOutputLimit: 1024, compactionAuto: false });
         client = OpenCode.make({ baseUrl: v2.url,
             headers: { authorization: `Basic ${btoa(`opencode:${v2.password}`)}` } });
         await waitForPluginActive(client, fixture.cwd);
@@ -148,7 +148,7 @@ test("converted tool drop lands on ordinary pass and remains valid on replay", a
         v2 = undefined;
         fixture.env.MAGIC_CONTEXT_LOG_PATH = fixture.logPath("v2-replay");
         v2 = await spawnOpencode2({ existingIsolation: fixture, existingMock: { mock, baseURL: provider.baseURL },
-            magicContextConfig: { ...config, memory: { enabled: true } }, modelContextLimit: 750_000, modelOutputLimit: 1024 });
+            magicContextConfig: { ...config, memory: { enabled: true } }, modelContextLimit: 750_000, modelOutputLimit: 1024, compactionAuto: false });
         client = OpenCode.make({ baseUrl: v2.url,
             headers: { authorization: `Basic ${btoa(`opencode:${v2.password}`)}` } });
         await waitForPluginActive(client, fixture.cwd);
@@ -166,6 +166,9 @@ test("converted tool drop lands on ordinary pass and remains valid on replay", a
         await v2.stopHost();
         v2 = undefined;
         const log = readFileSync(fixture.logPath("v2-replay"), "utf8");
+        const schemaPasses = readFileSync(join(fixture.root, "llm-schema-guard.jsonl"), "utf8")
+            .split("\n").filter((line) => line.startsWith(`PASS ${sessionId} `));
+        expect(schemaPasses.length).toBeGreaterThanOrEqual(3);
         expect(log).toContain("pending ops WILL APPLY");
         expect(log).not.toContain("emergency tiered drop:");
         const mockRequest = mock.requests().filter((request) => JSON.stringify(request.body).includes("retry with the persisted drop and cached prefix")).at(-1);
