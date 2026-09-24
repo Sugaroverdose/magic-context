@@ -637,10 +637,7 @@ fn ensure_context_store_uuid(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     let mut bytes = [0u8; 16];
     getrandom::getrandom(&mut bytes).map_err(|error| {
-        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            error.to_string(),
-        )))
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error.to_string())))
     })?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
