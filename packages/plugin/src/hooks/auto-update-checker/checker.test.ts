@@ -457,19 +457,17 @@ describe("auto-update-checker/checker", () => {
             const fetchMock = mock(async () =>
                 Response.json({ "dist-tags": { latest: "0.15.6", beta: "0.16.0-beta.1" } }),
             );
-            const originalFetch = globalThis.fetch;
-            globalThis.fetch = fetchMock;
             const { getLatestVersion } = await freshCheckerImport();
-
             expect(
-                await getLatestVersion("beta", { registryUrl: "https://registry.example.test" }),
+                await getLatestVersion("beta", {
+                    registryUrl: "https://registry.example.test",
+                    fetch: fetchMock,
+                }),
             ).toBe("0.16.0-beta.1");
             expect(fetchMock).toHaveBeenCalledWith(
                 "https://registry.example.test/%40cortexkit/opencode-magic-context",
                 expect.objectContaining({ headers: { Accept: "application/json" } }),
             );
-
-            globalThis.fetch = originalFetch;
         });
     });
 });

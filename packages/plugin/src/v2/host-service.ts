@@ -209,13 +209,17 @@ export async function removeHostSession(
     sessionID: string,
     owner: HostServiceOwner | undefined,
     env: NodeJS.ProcessEnv = process.env,
+    fetchSession: typeof fetch = fetch,
 ): Promise<void> {
     const service = resolveOwnerHostService(owner, env);
-    const response = await fetch(`${service.url}/api/session/${encodeURIComponent(sessionID)}`, {
-        method: "DELETE",
-        headers: service.headers,
-        signal: AbortSignal.timeout(60_000),
-    });
+    const response = await fetchSession(
+        `${service.url}/api/session/${encodeURIComponent(sessionID)}`,
+        {
+            method: "DELETE",
+            headers: service.headers,
+            signal: AbortSignal.timeout(60_000),
+        },
+    );
     // A session the owning host no longer has is the state the caller asked for. This is only
     // meaningful because the request went to the owner: the same 404 from any other service would
     // mean the session was never there.
