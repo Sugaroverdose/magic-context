@@ -12,6 +12,7 @@ import {
 	acquireLease,
 	releaseLease,
 } from "@magic-context/core/features/magic-context/dreamer/lease";
+import { getDreamRuns } from "@magic-context/core/features/magic-context/dreamer/storage-dream-runs";
 import { getTaskScheduleState } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
 import { leaseKeyFor } from "@magic-context/core/features/magic-context/dreamer/task-registry";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory";
@@ -153,6 +154,53 @@ afterEach(() => {
 });
 
 describe("Pi dreamer wiring", () => {
+	test("classifies a provider refusal surfaced by a Pi child runner", async () => {
+		db = createDb();
+		const projectIdentity = "git:pi-dreamer-provider-refusal";
+		const providerText =
+			"UnknownError: custody accounts exhausted: provider=synthetic accounts=main:cooldown";
+		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: mock(async () => ({
+						ok: false,
+						reason: "provider_error",
+						error: providerText,
+						transient: true,
+					})),
+				}) as never,
+		);
+		const opts = dreamerOptions({
+			database: db,
+			projectIdentity,
+			config: DreamerConfigSchema.parse({
+				model: "test/model",
+				tasks: { curate: { schedule: "0 4 * * *" } },
+			}),
+		});
+		insertMemory(db, {
+			projectPath: projectIdentity,
+			category: "PROJECT_RULES",
+			content: "Keep this rule intact.",
+		});
+		registerPiDreamerProject(opts);
+
+		await runPiDreamForProject(
+			projectIdentity,
+			"curate",
+			opts.registrationOwner,
+		);
+
+		const run = getDreamRuns(db, projectIdentity)[0];
+		const task = JSON.parse(run?.tasks_json ?? "[]")[0] as {
+			failure?: { failure_class: string; provider_error: string | null };
+		};
+		expect(task.failure?.failure_class).toBe("provider_error");
+		expect(task.failure?.provider_error).toContain(
+			"custody accounts exhausted",
+		);
+	});
 	test("disable=true config is a no-op", () => {
 		db = createDb();
 
