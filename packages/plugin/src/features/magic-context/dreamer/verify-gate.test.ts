@@ -18,6 +18,7 @@ import {
     recordMemoryMapping,
     recordMemoryVerifications,
 } from "../memory";
+import { resolveGitTopLevel } from "../memory/verification-paths";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { acquireLease } from "./lease";
@@ -84,6 +85,15 @@ afterEach(() => {
     __resetVerificationPathsForTests();
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
     dirs.length = 0;
+});
+
+test("git verification timeout reports the stalled command", async () => {
+    const dir = makeGitMetadataDirectory("mc-verify-git-timeout-");
+    const timeout = Object.assign(new Error("git exceeded its deadline"), { killed: true });
+    installGitScript(new Map([[gitCommand(["rev-parse", "--show-toplevel"]), timeout]]));
+    await expect(resolveGitTopLevel(dir)).rejects.toThrow(
+        "Git verification command timed out after 10000ms",
+    );
 });
 
 describe("partitionVerifyScope (per-memory verified_at gate)", () => {

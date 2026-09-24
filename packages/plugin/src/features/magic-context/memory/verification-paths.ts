@@ -47,7 +47,15 @@ async function runGit(cwd: string, args: readonly string[]): Promise<string | nu
             encoding: "utf8",
         });
         return String(result.stdout);
-    } catch {
+    } catch (error) {
+        if (
+            (error as { killed?: boolean }).killed ||
+            (error as NodeJS.ErrnoException).code === "ETIMEDOUT"
+        ) {
+            throw new Error(`Git verification command timed out after ${GIT_TIMEOUT_MS}ms`, {
+                cause: error,
+            });
+        }
         return null;
     }
 }
