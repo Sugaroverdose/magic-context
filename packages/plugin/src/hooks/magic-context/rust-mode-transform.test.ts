@@ -2815,7 +2815,12 @@ describe("Rust mode authority adapter", () => {
             const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
             const messages = makeMessages(sessionId);
             messages[0]!.info.tools = tools;
-            await transform.run(sessionId, messages, { messages: messages as unknown[] }, makeMeta(db, sessionId));
+            await transform.run(
+                sessionId,
+                messages,
+                { messages: messages as unknown[] },
+                makeMeta(db, sessionId),
+            );
             expect(requestBody?.tool_present).toBe(expected);
         }
     });
