@@ -445,13 +445,15 @@ export async function sendCommandResult(
     }
     const { isTuiConnected } = await import("../../shared/rpc-notifications");
     if (isTuiConnected(sessionId)) return sendIgnoredMessage(client, sessionId, text, params);
-    const session = (client as {
-        session?: {
-            get?: (input: unknown) => Promise<{ data?: { title?: string } }>;
-            update?: (input: unknown) => Promise<{ error?: unknown }>;
-            abort?: (input: unknown) => Promise<unknown>;
-        };
-    })?.session;
+    const session = (
+        client as {
+            session?: {
+                get?: (input: unknown) => Promise<{ data?: { title?: string } }>;
+                update?: (input: unknown) => Promise<{ error?: unknown }>;
+                abort?: (input: unknown) => Promise<unknown>;
+            };
+        }
+    )?.session;
     try {
         const title = (await session?.get?.({ path: { id: sessionId } }))?.data?.title;
         if (title && isDefaultSessionTitle(title)) {
@@ -459,7 +461,10 @@ export async function sendCommandResult(
             // shape). Give the otherwise empty session a title before appending it;
             // the host would not generate one after a second user row appears.
             if (!session?.update) return "failed";
-            const updated = await session.update({ path: { id: sessionId }, body: { title: "Magic Context" } });
+            const updated = await session.update({
+                path: { id: sessionId },
+                body: { title: "Magic Context" },
+            });
             if (updated.error) return "failed";
         }
         idleSessions.add(sessionId);
