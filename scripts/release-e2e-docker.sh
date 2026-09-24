@@ -10,6 +10,28 @@ REPO_ROOT=${MC_E2E_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/.." && pwd -P)}
 IMAGE=${MC_E2E_DOCKER_IMAGE:-mc-e2e-host}
 INNER=${MC_E2E_DOCKER_INNER:-0}
 
+# One host group per container; see the outer branch below for why.
+run_group_container() {
+    docker run --rm --init --read-only \
+        --mount "type=bind,src=$REPO_ROOT,dst=/repo,readonly" \
+        --tmpfs /workspace:rw,exec,size=8g \
+        --tmpfs /tmp:rw,exec,size=8g \
+        --tmpfs /run:rw,exec,size=64m \
+        --env MC_E2E_DOCKER_INNER=1 \
+        --env MC_E2E_REPO_ROOT=/workspace \
+        --env E2E_OC_FILES="${E2E_OC_FILES:-}" \
+        --env E2E_PI_FILES="${E2E_PI_FILES:-}" \
+        --env E2E_OC2_FILES="${E2E_OC2_FILES:-}" \
+        --env E2E_OMP_FILES="${E2E_OMP_FILES:-}" \
+        --env MC_E2E_GROUPS="$1" \
+        --env HOME=/tmp/mc-home \
+        --env XDG_CONFIG_HOME=/tmp/mc-config \
+        --env XDG_DATA_HOME=/tmp/mc-data \
+        --env XDG_CACHE_HOME=/tmp/mc-cache \
+        --env NODE_ENV= \
+        "$IMAGE" \
+        bash /repo/scripts/release-e2e-docker.sh --inside
+}
 if [[ "$INNER" != 1 ]]; then
     if ! command -v docker >/dev/null 2>&1; then
         echo "Error: docker is required for the containerized host e2e gate" >&2
@@ -25,26 +47,24 @@ if [[ "$INNER" != 1 ]]; then
     # The checkout stays read-only. /workspace is a tmpfs copy used for Bun's
     # workspace linker and for optional local dist builds; /tmp holds every
     # runtime cache and test sandbox. No host HOME or ~/.local/share is mounted.
-    exec docker run --rm --init --read-only \
-        --mount "type=bind,src=$REPO_ROOT,dst=/repo,readonly" \
-        --tmpfs /workspace:rw,exec,size=8g \
-        --tmpfs /tmp:rw,exec,size=8g \
-        --tmpfs /run:rw,exec,size=64m \
-        --env MC_E2E_DOCKER_INNER=1 \
-        --env MC_E2E_REPO_ROOT=/workspace \
-        --env E2E_OC_FILES="${E2E_OC_FILES:-}" \
-        --env E2E_PI_FILES="${E2E_PI_FILES:-}" \
-        --env E2E_OC2_FILES="${E2E_OC2_FILES:-}" \
-        --env E2E_OMP_FILES="${E2E_OMP_FILES:-}" \
-        --env MC_E2E_GROUPS="${MC_E2E_GROUPS:-}" \
-        --env HOME=/tmp/mc-home \
-        --env XDG_CONFIG_HOME=/tmp/mc-config \
-        --env XDG_DATA_HOME=/tmp/mc-data \
-        --env XDG_CACHE_HOME=/tmp/mc-cache \
-        --env NODE_ENV= \
-        "$IMAGE" \
-        bash /repo/scripts/release-e2e-docker.sh --inside
+    #
+    # Each host group runs in its own container so one group's test sandboxes
+    # cannot fill /tmp for the next (the OpenCode 2 group failed with "database
+    # or disk is full" after the OpenCode 1 and Pi groups had run in the same
+    # 8 GB tmpfs). This matches CI, which runs each lane as its own job.
+    outer_exit=0
+    for outer_group in ${MC_E2E_GROUPS:-opencode pi opencode2 omp}; do
+        echo "  [e2e:docker] group $outer_group in a fresh container..."
+        run_group_container "$outer_group" || outer_exit=1
+    done
+    if [[ "$outer_exit" -eq 0 ]]; then
+        echo "  ✓ Containerized host e2e checks passed"
+    else
+        echo "Error: one or more containerized host e2e groups failed"
+    fi
+    exit "$outer_exit"
 fi
+
 
 if [[ "${1:-}" != "--inside" ]]; then
     echo "Error: internal e2e runner invocation is missing --inside" >&2
@@ -113,6 +133,15 @@ fi
 if [[ ! -f packages/pi-plugin/dist/index.js ]]; then
     echo "  [e2e:docker] Pi dist missing; building in tmpfs..."
     bun run --cwd packages/pi-plugin build
+fi
+
+# The hoisted install resolves @earendil-works/pi-coding-agent to the Pi plugin's
+# older devDependency, while CI's isolated install falls through to the newest Pi
+# in the store. Point the Pi lane at the newest supported Pi explicitly, the
+# alias the Pi plugin installs for its host lane, so both gates test the same host.
+if [[ -z "${MC_E2E_PI_PACKAGE_JSON:-}" && -f "$REPO_ROOT/node_modules/pi-coding-agent-087/package.json" ]]; then
+    export MC_E2E_PI_PACKAGE_JSON="$REPO_ROOT/node_modules/pi-coding-agent-087/package.json"
+    echo "  [e2e:docker] Pi host: $(bun -e "console.log(require('$MC_E2E_PI_PACKAGE_JSON').version)")"
 fi
 
 run_e2e_group() {

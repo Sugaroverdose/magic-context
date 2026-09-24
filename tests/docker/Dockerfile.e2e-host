@@ -6,7 +6,10 @@
 # No --platform flag is used: Docker builds and runs this image for its native
 # architecture (including linux/arm64 on Apple silicon).
 
-FROM oven/bun:1.3.14-debian
+# Keep in step with package.json's packageManager (and engines.bun >= 1.4.0): Pi
+# 0.87's bundled undici needs Bun 1.4's webidl, and on 1.3.14 every Pi process
+# exited at startup (markAsUncloneable is not a function).
+FROM oven/bun:1.4.2-debian
 
 ENV DEBIAN_FRONTEND=noninteractive
 
