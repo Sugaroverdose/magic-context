@@ -44,6 +44,7 @@ import {
     clearThinkingBindingRecoveryIf,
     getChannel1NudgeState,
     getChannel2NudgeState,
+    getEmergencyInputSample,
     getHistorianFailureState,
     getLastNudgeUndropped,
     getOverflowState,
@@ -1921,6 +1922,15 @@ export function createTransform(deps: TransformDeps) {
                     inMemoryTail,
                     taggerFloor,
                     { providerID: resolvedProviderID },
+                    {
+                        hardFold: false,
+                        force:
+                            contextUsageEarly.percentage >= forceMaterializationPercentage &&
+                            (contextUsageEarly.percentage >= 95 ||
+                                getEmergencyInputSample(db, sessionId) === 0),
+                        explicitFlush: deps.pendingMaterializationSessions.has(sessionId),
+                        publishedHistory: isCacheBusting,
+                    },
                 );
                 if (triggerResult.shouldFire) {
                     sessionLog(

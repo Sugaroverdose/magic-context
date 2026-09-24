@@ -119,6 +119,20 @@
             "behavior": true
         },
         {
+            "path": "tests/desktop-command-first-session.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Desktop command API on a new or existing OpenCode 1 session must publish an ignored result and idle without a model turn",
+            "contract_refs": ["TS-HARNESS"],
+            "hosts": ["opencode"],
+            "behavior": true,
+            "divergences": [
+                { "host": "opencode2", "reason": "OpenCode 2 has a native command carrier rather than the 1.18.x command.execute.before suppression hook", "contract_ref": "packages/plugin/PARITY.md#other-existing-host-carrier-exclusions" },
+                { "host": "pi", "reason": "Pi commands use native command registrations and UI notifications, not the OpenCode Desktop HTTP command endpoint", "contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only" },
+                { "host": "omp", "reason": "OMP uses the Pi-compatible command surface, not the OpenCode Desktop HTTP command endpoint", "contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only" }
+            ]
+        },
+        {
             "path": "tests/deferred-compaction-marker.test.ts",
             "tier": "ts-only",
             "invocation": {

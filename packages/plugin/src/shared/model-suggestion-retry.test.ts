@@ -393,6 +393,49 @@ describe("promptSyncWithModelSuggestionRetry", () => {
 });
 
 describe("promptSyncWithValidatedOutputRetry", () => {
+    test("surfaces a host-recorded assistant refusal even when the row has no text", async () => {
+        const client = createClient(mock(async () => ({})));
+        const refusal =
+            "UnknownError: custody accounts exhausted: provider=synthetic accounts=main:cooldown";
+
+        await expect(
+            promptSyncWithValidatedOutputRetry(client, createArgs(), {
+                fetchOutput: async () => [
+                    {
+                        info: {
+                            role: "assistant",
+                            time: { created: 1 },
+                            finish: "stop",
+                            tokens: { output: 0 },
+                        },
+                        parts: [],
+                    },
+                    {
+                        info: { role: "assistant", time: { created: 2 }, error: refusal },
+                        parts: [],
+                    },
+                ],
+                validateOutput: () => {
+                    throw new Error("empty_completion");
+                },
+            }),
+        ).rejects.toMatchObject({
+            message: `Host recorded assistant error: ${refusal}`,
+            transient: true,
+        });
+    });
+
+    test("keeps a real empty completion without an assistant error on the normal validation path", async () => {
+        const client = createClient(mock(async () => ({})));
+        await expect(
+            promptSyncWithValidatedOutputRetry(client, createArgs(), {
+                fetchOutput: async () => [{ info: { role: "assistant" }, parts: [] }],
+                validateOutput: () => {
+                    throw new Error("empty_completion");
+                },
+            }),
+        ).rejects.toThrow("empty_completion");
+    });
     test("valid first model returns without trying fallbacks", async () => {
         const prompt = mock(async () => ({}));
         const messages = mock(async () => "primary-output");

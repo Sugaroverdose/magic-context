@@ -1,6 +1,10 @@
 import type { createOpencodeClient } from "@opencode-ai/sdk";
 
 import { detectOverflow } from "../features/magic-context/overflow-detection";
+import {
+    extractLatestAssistantFailure,
+    extractLatestAssistantText,
+} from "./assistant-message-extractor";
 import { log } from "./logger";
 import type { ModelInput } from "./model-resolution";
 import { sanitizeDiagnosticText } from "./redaction";
@@ -599,6 +603,19 @@ async function attemptAndValidate<TOutput, TValidated>(
     }
 
     try {
+        if (!extractLatestAssistantText(output)) {
+            const assistantFailure = extractLatestAssistantFailure(output);
+            if (assistantFailure) {
+                const error = new Error(
+                    `Host recorded assistant error: ${String(assistantFailure.error)}`,
+                );
+                Object.assign(error, {
+                    name: "DreamerProviderOutputFailureError",
+                    transient: true,
+                });
+                throw error;
+            }
+        }
         const validated = await options.validateOutput(output, attempt);
         return { output, validated, attempt };
     } catch (error) {

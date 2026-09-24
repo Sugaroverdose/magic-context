@@ -3896,6 +3896,7 @@ struct HistorianPrepareContext<'a> {
     /// Final immutable tag rows validated by the transform's generation/count/max identity.
     /// Early pass-through paths leave this absent and retain the legacy store fallback.
     tag_snapshot: Option<Arc<Vec<McTagRow>>>,
+    reclaim_ride_available: bool,
     timings: &'a mut HistorianTriggerTimings,
 }
 
@@ -5594,6 +5595,7 @@ impl McHandler {
             now,
             snapshot_generation,
             tag_snapshot,
+            reclaim_ride_available,
             timings,
         } = prepare;
         let trigger_timer = HistorianTriggerTimer {
@@ -5803,6 +5805,7 @@ impl McHandler {
                         fold_is_only_reclaim,
                     },
                     projected_post_drop_percentage,
+                    reclaim_ride_available,
                     compartment_in_progress: loaded.meta.historian.state != HistorianPhase::Idle,
                     commit_cluster_trigger_enabled: DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED,
                     min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS,
@@ -9829,6 +9832,7 @@ impl McHandler {
                     now: pass_now,
                     snapshot_generation,
                     tag_snapshot: result.historian_tags.clone(),
+                    reclaim_ride_available: result.reclaim_ride_available,
                     timings: &mut trigger_timings,
                 },
             ) {
@@ -9860,6 +9864,7 @@ impl McHandler {
                                 now: pass_now,
                                 snapshot_generation,
                                 tag_snapshot: result.historian_tags.clone(),
+                                reclaim_ride_available: result.reclaim_ride_available,
                                 timings: &mut trigger_timings,
                             },
                         ) {
@@ -9932,6 +9937,7 @@ impl McHandler {
                     now: pass_now,
                     snapshot_generation,
                     tag_snapshot: result.historian_tags.clone(),
+                    reclaim_ride_available: result.reclaim_ride_available,
                     timings: &mut trigger_timings,
                 },
             ) {
@@ -18778,6 +18784,7 @@ mod tests {
                         fold_is_only_reclaim: false,
                     },
                     projected_post_drop_percentage: optimized_projection,
+                    reclaim_ride_available: true,
                     compartment_in_progress: false,
                     commit_cluster_trigger_enabled: true,
                     min_commit_clusters: 2,
@@ -18852,6 +18859,7 @@ mod tests {
                 fold_is_only_reclaim: false,
             },
             projected_post_drop_percentage: Some(50.0),
+            reclaim_ride_available: true,
             compartment_in_progress: false,
             commit_cluster_trigger_enabled: true,
             min_commit_clusters: 2,
@@ -19047,6 +19055,7 @@ mod tests {
         let mut context = TriggerContext {
             boundary,
             projected_post_drop_percentage: None,
+            reclaim_ride_available: true,
             compartment_in_progress: false,
             commit_cluster_trigger_enabled: false,
             min_commit_clusters: 2,
