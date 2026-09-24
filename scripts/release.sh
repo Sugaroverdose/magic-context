@@ -77,7 +77,7 @@ fi
 TAG="v$VERSION"
 
 if [[ "$SKIP_RUST_E2E" -eq 1 ]]; then
-  SKIP_VAR=$(gh variable get RELEASE_SKIP_RUST_E2E 2>/dev/null || true)
+  SKIP_VAR=$(gh api repos/cortexkit/magic-context/actions/variables/RELEASE_SKIP_RUST_E2E -q .value 2>/dev/null || true)
   if [[ "$SKIP_VAR" != "$TAG" ]]; then
     echo "Error: --skip-rust-e2e needs the repo variable RELEASE_SKIP_RUST_E2E set to '$TAG' (found '${SKIP_VAR}'),"
     echo "       so the tag workflow skips the same suite: gh variable set RELEASE_SKIP_RUST_E2E --body $TAG"
