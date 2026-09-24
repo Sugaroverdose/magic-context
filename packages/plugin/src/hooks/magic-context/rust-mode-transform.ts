@@ -100,6 +100,7 @@ import {
     type LkgSlot,
     type MessageContentSnapshot,
     messageContentFields,
+    contentSnapshotValue,
     messageContentSnapshot,
     noteEntry,
     signatureForFields,
@@ -583,7 +584,9 @@ function messageMatchesContentSnapshot(
     snapshot: Pick<MessageContentSnapshot, "fields">,
 ): boolean {
     let fieldIndex = 0;
-    const matched = visitMessageContentFields(message, {
+    // Compare the same provider-relevant shape captured by messageContentFields:
+    // OpenCode can add an empty user diff summary after the message was served.
+    const matched = visitMessageContentFields(contentSnapshotValue(message), {
         field(value) {
             if (!Object.is(value, snapshot.fields[fieldIndex])) return false;
             fieldIndex += 1;

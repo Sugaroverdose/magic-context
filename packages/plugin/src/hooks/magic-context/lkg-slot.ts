@@ -162,7 +162,7 @@ export function visitMessageContentFields(
     return visitor.field(LKG_SNAPSHOT_UNDEFINED);
 }
 
-function contentSnapshotValue(value: unknown): unknown {
+export function contentSnapshotValue(value: unknown): unknown {
     if (!value || typeof value !== "object") return value;
     const message = value as Partial<MessageLike>;
     const info = message.info as Record<string, unknown> | undefined;

@@ -6170,6 +6170,27 @@ describe("delta prefix-mutation guard", () => {
         expect(JSON.stringify(requestBodies[1]?.messages)).toContain('"query":"bravo"');
     });
 
+    it("ignores empty OpenCode user diff summaries but rejects substantive prefix changes", () => {
+        const original = {
+            info: { id: "user-1", role: "user" },
+            parts: [{ type: "text", text: "unchanged" }],
+        } as MessageLike;
+        const snapshot = __rustModeTransformTest.messageContentSnapshot(original);
+        const withEmptySummary = {
+            ...original,
+            info: { ...original.info, summary: { diffs: [] } },
+        } as MessageLike;
+        expect(__rustModeTransformTest.messageMatchesContentSnapshot(withEmptySummary, snapshot)).toBe(true);
+        expect(__rustModeTransformTest.messageMatchesContentSnapshot({
+            ...withEmptySummary,
+            info: { ...withEmptySummary.info, summary: { diffs: ["real-change"] } },
+        }, snapshot)).toBe(false);
+        expect(__rustModeTransformTest.messageMatchesContentSnapshot({
+            ...withEmptySummary,
+            parts: [{ type: "text", text: "changed" }],
+        }, snapshot)).toBe(false);
+    });
+
     it("matches the legacy snapshot comparator across 500 randomized deep mutations", () => {
         const random = seededRandom(0x5eed_c0de);
         for (let caseIndex = 0; caseIndex < 500; caseIndex += 1) {
