@@ -101,3 +101,46 @@ describe("newestUserText", () => {
         expect(shaped).toBe(true);
     });
 });
+
+it("keeps accumulated tool results on the second step and releases the session binding", () => {
+    const hook = new HiddenChildHook();
+    hook.registerAttempt("mc:hidden:loop", {
+        childSessionId: "ses-child",
+        identity: {
+            directory: "/tmp",
+            agent: "dreamer",
+            kind: "dreamer-task",
+            system: "sys",
+            timeoutMs: 1000,
+            title: "curate",
+        },
+        request: { body: { parts: [{ type: "text", text: "calibrated" }] } },
+        shaped: false,
+    });
+    const first = {
+        ...draft({ role: "user", content: [{ type: "text", text: "mc:hidden:loop" }] }),
+        sessionID: "ses-child",
+    };
+    first.tools = { ctx_memory: { description: "memory", input: {} } };
+    expect(hook.apply(first)).toBe(true);
+    const result = {
+        role: "tool",
+        content: [
+            { type: "tool-result", name: "ctx_memory", result: { type: "text", value: "proof" } },
+        ],
+    };
+    const next = {
+        ...first,
+        messages: [
+            ...first.messages,
+            { role: "assistant", content: [{ type: "tool-call", name: "ctx_memory" }] },
+            result,
+        ],
+        tools: { ...first.tools, read: { description: "read", input: {} } },
+    };
+    expect(hook.apply(next)).toBe(true);
+    expect(next.messages.at(-1)).toBe(result);
+    expect(Object.keys(next.tools)).toEqual(["ctx_memory"]);
+    hook.releaseAttempt("mc:hidden:loop");
+    expect(() => hook.apply(next)).toThrow("hidden_prompt_unrecognized");
+});

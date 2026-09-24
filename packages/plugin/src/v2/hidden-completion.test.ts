@@ -1228,22 +1228,28 @@ describe("OpenCode 2 hidden child completion", () => {
             HIDDEN_HISTORIAN_AGENT,
             HIDDEN_DREAMER_AGENT,
             HIDDEN_CURATE_AGENT,
+            "dreamer-memory-mapper",
+            "dreamer-docs",
+            "dreamer-primer-investigator",
+            "dreamer-retrospective",
         ]);
         for (const [id, agent] of agents) {
             expect(agent.hidden).toBe(true);
-            expect(agent.permissions).toEqual(
-                id === HIDDEN_CURATE_AGENT
-                    ? [
-                          { action: "*", resource: "*", effect: "deny" },
-                          { action: "tool", resource: "ctx_memory", effect: "allow" },
-                          {
-                              action: "tool",
-                              resource: "ctx_memory_list",
-                              effect: "allow",
-                          },
-                      ]
-                    : [{ action: "*", resource: "*", effect: "deny" }],
-            );
+            const tools: Record<string, string[]> = {
+                [HIDDEN_CURATE_AGENT]: ["ctx_memory", "ctx_memory_list"],
+                "dreamer-memory-mapper": ["read", "grep", "glob"],
+                "dreamer-docs": ["read", "grep", "glob"],
+                "dreamer-primer-investigator": ["read", "grep", "glob", "ctx_search"],
+                "dreamer-retrospective": ["ctx_search"],
+            };
+            expect(agent.permissions).toEqual([
+                { action: "*", resource: "*", effect: "deny" },
+                ...(tools[id] ?? []).map((tool) => ({
+                    action: tool,
+                    resource: "*",
+                    effect: "allow",
+                })),
+            ]);
         }
     });
 

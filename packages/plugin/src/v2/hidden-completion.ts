@@ -18,6 +18,8 @@ import {
     HIDDEN_HISTORIAN_AGENT,
     type HiddenChildAttempt,
     type HiddenChildHook,
+    hiddenAgentFor,
+    hiddenToolLoop,
 } from "./hooks/hidden-child";
 import { type HostServiceOwner, HostServiceUnavailable, hostServiceOwner } from "./host-service";
 import type { StoreRow } from "./store-reader";
@@ -767,7 +769,7 @@ export async function createV2HiddenCompletionExecutor(
     };
 
     return {
-        capabilities: { tools: false, harness: "opencode2" },
+        capabilities: { tools: true, harness: "opencode2" },
         async open(identity) {
             const role = roleFor(identity);
             const releaseRole = await acquireRole(role);
@@ -776,6 +778,10 @@ export async function createV2HiddenCompletionExecutor(
                 await options.ensureAgent?.();
                 const head = await resolveHead(identity);
                 let active = store.read().active[role];
+                if (active && hiddenToolLoop(identity)) {
+                    retireChild(active, "fresh-tool-loop-run");
+                    active = undefined;
+                }
                 if (active && active.generation !== generation) {
                     retireChild(active, "host-generation-changed");
                     active = undefined;
@@ -805,7 +811,9 @@ export async function createV2HiddenCompletionExecutor(
                     const title = roleTitle(role);
                     const created = await host.create({
                         title,
-                        agent: roleAgent(role),
+                        agent: hiddenToolLoop(identity)
+                            ? hiddenAgentFor(identity)
+                            : roleAgent(role),
                         model: {
                             providerID: head.providerID,
                             id: head.modelID,
@@ -1009,7 +1017,16 @@ export async function createV2HiddenCompletionExecutor(
                 // attempt, so it cannot tell this case apart; the run's own record of every failure
                 // being a persisted provider error row (the child is idle) is what decides.
                 const reusable = run.failed && !run.unsettledFailure;
-                if (!run.completion && (run.failed || !settlement.promptSettled) && !reusable) {
+                if (hiddenToolLoop(run.identity)) {
+                    retire(
+                        run,
+                        settlement.promptSettled ? "tool-loop-settled" : "tool-loop-failed",
+                    );
+                } else if (
+                    !run.completion &&
+                    (run.failed || !settlement.promptSettled) &&
+                    !reusable
+                ) {
                     retire(run, "hidden-run-failed");
                 }
             } finally {
