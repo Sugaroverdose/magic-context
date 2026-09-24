@@ -254,4 +254,61 @@ describe("adaptPayload", () => {
             expect(context.messages).toEqual(original);
         });
     });
+
+    // OpenCode 2.0.15 carries an attachment's bytes in a `Media.Asset` class instance, and
+    // after the context hook the host rebuilds each message with Message.make, whose schema
+    // accepts only a real instance. A plain-object copy fails with "Schema validation failed"
+    // and the turn never reaches the provider.
+    describe("#given a user attachment whose media payload is a host class instance", () => {
+        class HostAsset {
+            constructor(
+                readonly source: { type: string; data: string; mediaType: string },
+                readonly mediaType: string,
+            ) {}
+        }
+        const attachmentTurn = (): V2Message[] => [
+            {
+                id: "msg-image",
+                role: "user",
+                content: [
+                    { type: "text", text: "what is in this image?" },
+                    {
+                        type: "media",
+                        media: new HostAsset(
+                            { type: "base64", data: "iVBORw0KGgo=", mediaType: "image/png" },
+                            "image/png",
+                        ),
+                        filename: "pixel.png",
+                    },
+                ],
+            },
+        ];
+        const mediaOf = (context: SessionContext) =>
+            context.messages[0]?.content.find((part) => part.type === "media")?.media;
+
+        it("#then commit() hands the host back the same class instance", () => {
+            const context = draft(attachmentTurn());
+            const payload = adaptPayload(context);
+            payload.commit();
+
+            expect(mediaOf(context)).toBeInstanceOf(HostAsset);
+        });
+
+        it("#then an unchanged part copied by a later pipeline stage still gets the instance back", () => {
+            const context = draft(attachmentTurn());
+            const payload = adaptPayload(context);
+            // Some pipeline stages swap a structuredClone of a message's parts into place,
+            // which flattens any class instance into a plain object.
+            const owner = payload.messages[0];
+            owner.parts = structuredClone(owner.parts);
+            (owner.parts[0] as { text: string }).text = "§1§ what is in this image?";
+            payload.commit();
+
+            expect(mediaOf(context)).toBeInstanceOf(HostAsset);
+            expect(context.messages[0]?.content[0]).toEqual({
+                type: "text",
+                text: "§1§ what is in this image?",
+            });
+        });
+    });
 });
