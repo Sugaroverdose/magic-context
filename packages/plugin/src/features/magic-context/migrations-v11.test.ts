@@ -4,7 +4,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
+import { runMigrations } from "./migrations";
 import { closeDatabase, openDatabase } from "./storage";
+import { initializeDatabase } from "./storage-db";
 import {
     clearPersistedTodoSyntheticAnchor,
     getPersistedTodoSyntheticAnchor,
@@ -42,12 +46,19 @@ afterEach(() => {
 
 describe("migration v11 — todo state synthesis schema", () => {
     test("fresh database has all three todo columns", () => {
-        useTempDataHome("v11-fresh-");
-        const db = openDatabase();
-        const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name: string }>;
-        const names = new Set(cols.map((c) => c.name));
-        for (const col of TODO_COLUMNS) {
-            expect(names.has(col)).toBe(true);
+        const db = new Database(":memory:");
+        try {
+            initializeDatabase(db);
+            runMigrations(db);
+            const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
+                name: string;
+            }>;
+            const names = new Set(cols.map((c) => c.name));
+            for (const col of TODO_COLUMNS) {
+                expect(names.has(col)).toBe(true);
+            }
+        } finally {
+            closeQuietly(db);
         }
     });
 

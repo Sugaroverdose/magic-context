@@ -104,6 +104,7 @@ export interface VerifyArgs {
     language?: string;
     moduleRoute?: DreamerModuleRoute;
     onProgress?: (processed: number, refused: number) => void;
+    normalizeFiles?: (files: readonly string[]) => Promise<string[]>;
 }
 
 export interface VerifyResult extends VerifyVerdictCounts {
@@ -600,6 +601,7 @@ async function applyParsedVerifyManifest(
 
 async function normalizeFiles(args: VerifyArgs, rawFiles: readonly string[]): Promise<string[]> {
     if (rawFiles.length === 0) return [];
+    if (args.normalizeFiles) return args.normalizeFiles(rawFiles);
     const normalized = await normalizeVerificationFiles({
         cwd: args.sessionDirectory,
         files: rawFiles,

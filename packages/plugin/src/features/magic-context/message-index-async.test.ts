@@ -378,11 +378,11 @@ describe("message-index-async", () => {
         scheduleIncrementalIndex(db, "ses-out-of-order", "m-3", history[2]!);
         scheduleIncrementalIndex(db, "ses-out-of-order", "m-1", history[0]!);
         scheduleIncrementalIndex(db, "ses-out-of-order", "m-2", history[1]!);
-        await wait(140);
+        await waitUntil(() => countMessageRows(db, "ses-out-of-order", "m-2") === 1);
 
         expect(countMessageRows(db, "ses-out-of-order", "m-3")).toBe(0);
         scheduleReconciliation(db, "ses-out-of-order", () => history);
-        await wait(20);
+        await waitUntil(() => isSessionReconciled("ses-out-of-order"));
 
         expect(countRows(db, "ses-out-of-order")).toBe(3);
         expect(isSessionReconciled("ses-out-of-order")).toBe(true);

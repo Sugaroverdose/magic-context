@@ -55,22 +55,24 @@ interface Seen {
     authorization: string | null;
 }
 
-async function withStub(status: number, body: (url: string) => Promise<void>): Promise<Seen[]> {
+async function withStub(
+    status: number,
+    body: (url: string, fetchSession: typeof fetch) => Promise<void>,
+): Promise<Seen[]> {
     const seen: Seen[] = [];
-    const server = Bun.serve({
-        port: 0,
-        fetch(request) {
-            const url = new URL(request.url);
-            seen.push({
-                method: request.method,
-                path: url.pathname,
-                authorization: request.headers.get("authorization"),
-            });
-            return new Response(null, { status });
-        },
-    });
+    const handle = (request: Request) => {
+        const url = new URL(request.url);
+        seen.push({
+            method: request.method,
+            path: url.pathname,
+            authorization: request.headers.get("authorization"),
+        });
+        return new Response(null, { status });
+    };
+    const server = Bun.serve({ port: 0, fetch: handle });
     try {
-        await body(`http://127.0.0.1:${server.port}`);
+        await body(`http://127.0.0.1:${server.port}`, ((input, init) =>
+            Promise.resolve(handle(new Request(input, init)))) as typeof fetch);
     } finally {
         server.stop(true);
     }
@@ -253,7 +255,7 @@ describe("OpenCode 2 owner-bound route resolution", () => {
 
 describe("OpenCode 2 host session removal", () => {
     test("deletes through the owner's route with that registration's credentials", async () => {
-        const seen = await withStub(204, async (url) => {
+        const seen = await withStub(204, async (url, fetchSession) => {
             const { env, dir, cleanup } = stateHome([
                 { channel: "local", id: "ours", url, pid: process.pid, password: "s3cret" },
             ]);
@@ -266,6 +268,7 @@ describe("OpenCode 2 host session removal", () => {
                         pid: process.pid,
                     },
                     env,
+                    fetchSession,
                 );
             } finally {
                 cleanup();
@@ -281,7 +284,7 @@ describe("OpenCode 2 host session removal", () => {
     });
 
     test("treats an already-deleted session as done when the owner answers 404", async () => {
-        await withStub(404, async (url) => {
+        await withStub(404, async (url, fetchSession) => {
             const { env, dir, cleanup } = stateHome([{ channel: "latest", url, pid: process.pid }]);
             try {
                 await expect(
@@ -289,6 +292,7 @@ describe("OpenCode 2 host session removal", () => {
                         "ses_gone",
                         { registration: join(dir, "service.json"), pid: process.pid },
                         env,
+                        fetchSession,
                     ),
                 ).resolves.toBeUndefined();
             } finally {
@@ -298,7 +302,7 @@ describe("OpenCode 2 host session removal", () => {
     });
 
     test("reports a refusal so the caller can leave the entry for a later sweep", async () => {
-        await withStub(401, async (url) => {
+        await withStub(401, async (url, fetchSession) => {
             const { env, dir, cleanup } = stateHome([{ channel: "latest", url, pid: process.pid }]);
             try {
                 await expect(
@@ -306,6 +310,7 @@ describe("OpenCode 2 host session removal", () => {
                         "ses_abc",
                         { registration: join(dir, "service.json"), pid: process.pid },
                         env,
+                        fetchSession,
                     ),
                 ).rejects.toThrow("401");
             } finally {
@@ -315,7 +320,7 @@ describe("OpenCode 2 host session removal", () => {
     });
 
     test("never issues a request when only an unrelated service is registered", async () => {
-        const seen = await withStub(404, async (url) => {
+        const seen = await withStub(404, async (url, fetchSession) => {
             const { env, dir, cleanup } = stateHome([
                 // The default channel's service is live and this process owns it...
                 { channel: "latest", id: "unrelated-default", url, pid: process.pid },
@@ -328,6 +333,7 @@ describe("OpenCode 2 host session removal", () => {
                         "ses_abc",
                         { registration: join(dir, "service-local.json"), pid: 4242 },
                         env,
+                        fetchSession,
                     ),
                 ).rejects.toThrow(HostServiceUnavailable);
             } finally {

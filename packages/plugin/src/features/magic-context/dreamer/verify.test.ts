@@ -235,6 +235,7 @@ describe("verify authority applier", () => {
             ).run(projectIdentity, memory.category, memory.normalizedHash);
             const calls: Array<{ method: string; body: unknown }> = [];
             const args = verifyArgs(db, dir, projectIdentity);
+            args.normalizeFiles = async (files) => [...files];
             args.moduleRoute = {
                 moduleClient: {
                     call: async (request) => {
