@@ -1781,6 +1781,8 @@ pub struct TransformWithProjection {
     /// Publication floor from the state accepted by this transform. Emergency follow-up uses it
     /// as the pre-wait comparison point, then performs one fresh read after asynchronous work.
     pub(crate) publication_floor_ordinal: Option<u64>,
+    /// Whether this transform pass already has a cache-busting event that can apply pending drops.
+    pub(crate) reclaim_ride_available: bool,
     pub scheduler_pass: scheduler::PassDecision,
     pub scheduler_defer_reason: Option<scheduler::SchedulerDeferReason>,
     pub scheduler_drain_latch_active: bool,
@@ -2654,6 +2656,7 @@ fn lineage_protocol_passthrough(
         historian_tags: None,
         tag_numbers: BTreeMap::new(),
         publication_floor_ordinal: None,
+        reclaim_ride_available: false,
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
         scheduler_defer_reason: Some(scheduler::SchedulerDeferReason::SchedulerDefer),
@@ -3250,6 +3253,7 @@ fn apply_additive_only(
         historian_tags: None,
         tag_numbers: BTreeMap::new(),
         publication_floor_ordinal: meta.publication_floor_ordinal,
+        reclaim_ride_available: false,
         projection,
         scheduler_pass: scheduler_outcome.pass,
         scheduler_defer_reason: scheduler_outcome.defer_reason,
@@ -6307,6 +6311,7 @@ fn apply_once(
         historian_tags: Some(tag_rows),
         tag_numbers,
         publication_floor_ordinal: meta.publication_floor_ordinal,
+        reclaim_ride_available: pass_already_busting,
         projection,
         scheduler_pass: scheduler_outcome.pass,
         scheduler_defer_reason: scheduler_outcome.defer_reason,
@@ -8488,6 +8493,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         historian_tags: Some(historian_tags),
         tag_numbers,
         publication_floor_ordinal,
+        reclaim_ride_available: false,
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
         scheduler_defer_reason: Some(scheduler::SchedulerDeferReason::SchedulerDefer),
