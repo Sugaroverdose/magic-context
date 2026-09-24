@@ -380,6 +380,8 @@ function rustWireCacheEstimatedBytes(cache: RustWireCache): number {
 
 interface RustSessionState extends ModuleStateSyncState {
     initialized: boolean;
+    /** Preserve an empty first-render hash until the host's recorded system prompt changes. */
+    baselineSystemHashOmitted: boolean;
     todoProbeIdentity?: string;
     todoProbeNextPass?: boolean;
     lastAppliedAtMs?: number;
@@ -1033,6 +1035,7 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
     if (!state) {
         state = {
             initialized: false,
+            baselineSystemHashOmitted: false,
             consecutiveFailures: 0,
             passCount: 0,
             parked: false,
@@ -2684,6 +2687,16 @@ export function createRustModeTransform(
             }
             const effectiveFloor = protectionFloorResolution.floor;
             const historianRun = deps.resolveHistorianRun?.();
+            // OpenCode can run the messages hook before the system hook on the first turn.
+            // The latter records the exact hash of the system text already served on that
+            // turn. Keep the module's provisional empty identity until that text changes;
+            // otherwise its first steady defer would pay a spurious HARD.
+            const observedSystemHash = sessionMeta.systemPromptHash ?? "";
+            const rustSystemHash =
+                state.baselineSystemHashOmitted &&
+                sessionMeta.cachedM0SystemHash === observedSystemHash
+                    ? ""
+                    : observedSystemHash;
             const passInputs: Record<string, unknown> = {
                 now_ms: requestObservedAtMs,
                 model_key: modelKey,
@@ -2709,7 +2722,7 @@ export function createRustModeTransform(
                 caveman_min_chars: deps.cavemanTextCompression?.minChars ?? 500,
                 cache_ttl: sessionMeta.cacheTtl,
                 is_subagent: sessionMeta.isSubagent,
-                system_prompt_hash: sessionMeta.systemPromptHash ?? "",
+                system_prompt_hash: rustSystemHash,
                 upgrade_state: readUpgradeState(deps.db, sessionId),
                 tool_present: toolPresent,
                 todo_tool_present: false,
@@ -3108,7 +3121,7 @@ export function createRustModeTransform(
                 modelKey: modelKey ?? null,
                 providerId: model?.providerID ?? null,
                 variant: deps.variantBySession?.get(sessionId),
-                systemPromptHash: sessionMeta.systemPromptHash ?? "",
+                systemPromptHash: rustSystemHash,
                 upgradeState: String(passInputs.upgrade_state ?? ""),
             };
             let body = buildTransformBody({
@@ -3767,6 +3780,9 @@ export function createRustModeTransform(
                 state.ordinalContinuationBase = ordinalContinuationBase;
             }
             if (!stateSyncRetryBusy) {
+                if (!state.initialized && !observedSystemHash) {
+                    state.baselineSystemHashOmitted = true;
+                }
                 state.initialized = true;
                 state.seedPassPending = false;
             }
