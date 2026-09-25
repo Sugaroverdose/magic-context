@@ -316,7 +316,9 @@ test("the first priced pass reclaims an over-window converted-store tail", async
             "SELECT message_id AS messageId, drop_mode AS dropMode FROM tags WHERE session_id = ? AND type = 'tool' AND message_id IN (?, ?, ?)",
             sessionId, ...callIds,
         );
-        expect(dropModes.find((row) => row.messageId === callIds[0])?.dropMode).toBe("truncated");
+        // A dropped call in the newest 20 with small input keeps its real arguments and only
+        // its result becomes the drop placeholder, so the pair is still served.
+        expect(dropModes.find((row) => row.messageId === callIds[0])?.dropMode).toBe("skeleton_real");
 
         await v2.stopHost();
         v2 = undefined;
