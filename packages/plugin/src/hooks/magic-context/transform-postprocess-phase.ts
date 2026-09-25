@@ -1526,8 +1526,10 @@ export async function runPostTransformPhase(
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
     const isCacheBustingPass = publishedWorkDrainAllowed;
-    // ctx_reduce stays frozen for prompt-hash stability, but observe the live
-    // permission signal on the same busts so an operator knows guidance may be
+    // A permission deny known before the first freeze already made the verdict
+    // "unavailable" (see primeCtxReduceSpawnPermission). A deny added after the
+    // freeze cannot flip it without rewriting the cached prefix, so observe the
+    // live permission signal on the same busts and only log that guidance may be
     // stale until the session restarts. This log never changes the wire.
     if (
         isCacheBustingPass &&

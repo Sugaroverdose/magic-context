@@ -82,8 +82,10 @@ import { getActiveCompartmentRun, startCompartmentAgent } from "./compartment-ru
 import { buildTriggerInMemoryTail, checkCompartmentTrigger } from "./compartment-trigger";
 import {
     type CtxReduceAvailabilityVerdict,
+    primeCtxReduceSpawnPermission,
     resolveCtxReduceAvailabilityFromMessages,
     resolveTodowriteAvailabilityFromMessages,
+    spawnAgentFromMessages,
     type ToolAvailabilityVerdict,
 } from "./ctx-reduce-availability";
 import {
@@ -1064,6 +1066,20 @@ export function createTransform(deps: TransformDeps) {
         } catch (error) {
             passOutcome.record("compaction-mode-transition-failure");
             sessionLog(sessionId, "compaction mode transition failed (retrying next pass):", error);
+        }
+
+        // Read the agent and session permissions for ctx_reduce before either
+        // renderer freezes the ctx_reduce verdict below. OpenCode keeps those
+        // permissions off the first user message's tools map, so without this
+        // read a session whose agent denies ctx_reduce would still get §N§ tags,
+        // reduce guidance, and nudges. This is a no-op once the verdict froze,
+        // so a later permission change never flips provider-visible bytes.
+        if (deps.client !== undefined && !compactionOff) {
+            await primeCtxReduceSpawnPermission(
+                deps.client,
+                sessionId,
+                spawnAgentFromMessages(messages),
+            );
         }
 
         // Rust mode is an authority adapter, not a second implementation of the

@@ -81,6 +81,21 @@
             ]
         },
         {
+            "path": "tests/ctx-reduce-permission-deny.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "an OpenCode agent permission denying ctx_reduce must remove tags and reduce guidance before the availability verdict freezes; agent and session permissions are an OpenCode 1 host concept, the OpenCode 2 lane passes no SDK client to read them, and Pi has no per-agent permission model",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/conflict-disable.test.ts",
             "tier": "ts-only",
             "invocation": {

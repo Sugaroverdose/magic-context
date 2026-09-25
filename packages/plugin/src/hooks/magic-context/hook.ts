@@ -1130,6 +1130,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             "<!-- magic-context: skip -->",
         ],
         internalChildSessions,
+        client: deps.client,
         experimentalUserMemories: userMemoryCollectionEnabled(deps.config.dreamer),
         experimentalTemporalAwareness: deps.config.temporal_awareness === true,
         // Mirror the primary-session caveman opt-in so the agent knows older

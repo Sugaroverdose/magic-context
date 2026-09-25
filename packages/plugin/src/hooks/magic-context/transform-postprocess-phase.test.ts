@@ -2639,6 +2639,93 @@ describe("two-pass tool reclaim", () => {
     });
 });
 
+// A session whose permissions deny ctx_reduce freezes callable=false, so the
+// model can never reduce by hand. Automatic reclaim (heuristic drops on an
+// execute pass and the emergency tool floor) is then its only relief, so both
+// must behave identically whatever the ctx_reduce verdict says.
+describe("automatic reclaim ignores the ctx_reduce verdict", () => {
+    const verdicts = [
+        { callable: true, frozen: true },
+        { callable: false, frozen: true },
+    ] as const;
+
+    async function emergencyOutcome(callable: boolean) {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = `ses-verdict-emergency-${callable}`;
+        const messages = [1, 2, 3, 4].map((tag) => makeToolMessage(`tool-${tag}`));
+        const targets = new Map<number, TagTarget>();
+        for (let tag = 1; tag <= 4; tag++) {
+            insertTag(db, sessionId, `tool-${tag}`, "tool", 8000, tag, 0, "bash");
+            targets.set(tag, makeDropTarget(messages[tag - 1]!));
+        }
+        const result = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                tags: getActiveTagsBySession(db, sessionId),
+                targets,
+                contextUsage: { percentage: 110, inputTokens: 20_000 },
+                emergencyCeilingTokens: 10_000,
+                currentTurnId: "turn-verdict-emergency",
+                ctxReduceAvailability: { callable, frozen: true },
+            }),
+        );
+        return {
+            emergency: result.emergency,
+            droppedTokens: result.droppedTokens,
+            emergencyReclaimedTokens: result.emergencyReclaimedTokens,
+            statuses: getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
+        };
+    }
+
+    async function executeReclaimOutcome(callable: boolean) {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = `ses-verdict-reclaim-${callable}`;
+        const first = makeToolMessage("tool-1");
+        const second = makeToolMessage("tool-2");
+        insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
+        insertTag(db, sessionId, "tool-2", "tool", 4000, 2, 0, "read");
+        queuePendingOp(db, sessionId, 1, "drop", 1);
+        advanceToolReclaimWatermark(db, sessionId, 2);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, [first, second], {
+                schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
+                tags: getActiveTagsBySession(db, sessionId),
+                targets: new Map([
+                    [1, makeDropTarget(first)],
+                    [2, makeDropTarget(second)],
+                ]),
+                sessionMeta: getOrCreateSessionMeta(db, sessionId),
+                ctxReduceAvailability: { callable, frozen: true },
+            }),
+        );
+        return getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]);
+    }
+
+    it("drops the emergency tool floor identically for callable and uncallable ctx_reduce", async () => {
+        const [callable, uncallable] = [
+            await emergencyOutcome(verdicts[0].callable),
+            await emergencyOutcome(verdicts[1].callable),
+        ];
+        expect(uncallable.emergency).toBe(true);
+        expect(uncallable.emergencyReclaimedTokens).toBeGreaterThan(0);
+        expect(uncallable).toEqual(callable);
+    });
+
+    it("runs execute-pass heuristic reclaim identically for callable and uncallable ctx_reduce", async () => {
+        const [callable, uncallable] = [
+            await executeReclaimOutcome(verdicts[0].callable),
+            await executeReclaimOutcome(verdicts[1].callable),
+        ];
+        expect(uncallable).toEqual([
+            [1, "dropped"],
+            [2, "dropped"],
+        ]);
+        expect(uncallable).toEqual(callable);
+    });
+});
+
 describe("issue #386 sustained execute-pressure batching", () => {
     it("keeps caveman bytes stable on consecutive force passes after this turn already ran", async () => {
         db = new Database(":memory:");
