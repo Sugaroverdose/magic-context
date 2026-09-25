@@ -3742,6 +3742,101 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         expect(firstDiff?.id).toBe("m-small");
     });
 
+    it("ADV: same-pass re-clamp: parallel legacy calls in one message plus a pending drop drained on the HARD pass", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-adv-parallel-reclamp";
+        materializeBaseline(sessionId);
+        const part = (callID: string, input: unknown) => ({
+            type: "tool",
+            tool: "bash",
+            callID,
+            state: { status: "completed", input, output: `${callID} output` },
+        });
+        const build = (newer: boolean) =>
+            [
+                { info: { id: "m-u0", role: "user", sessionID: sessionId }, parts: [{ type: "text", text: "go" }] },
+                {
+                    info: { id: "m-par", role: "assistant", sessionID: sessionId },
+                    parts: [
+                        { type: "text", text: "three at once" },
+                        part("p-small", { command: "ls" }),
+                        part("p-large", { command: "L".repeat(3000) }),
+                        part("p-new", { command: "N".repeat(2000) }),
+                        part("p-keep", { command: "pwd" }),
+                    ],
+                },
+                { info: { id: "m-next", role: "user", sessionID: sessionId }, parts: [{ type: "text", text: "next" }] },
+                ...(newer
+                    ? [{ info: { id: "m-newer", role: "user", sessionID: sessionId }, parts: [{ type: "text", text: "newer" }] }]
+                    : []),
+            ] as unknown as MessageLike[];
+        const pass = async (hard: M0HardSignals, newer: boolean) => {
+            const messages = build(newer);
+            const tagger = createTagger();
+            tagger.initFromDb(sessionId, db);
+            const tagged = tagMessages(sessionId, messages, tagger, db);
+            const replayed = applyFlushedStatuses(sessionId, db, tagged.targets);
+            tagged.batch.finalize();
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    tagger,
+                    targets: tagged.targets,
+                    reasoningByMessage: tagged.reasoningByMessage,
+                    messageTagNumbers: tagged.messageTagNumbers,
+                    batch: tagged.batch,
+                    didMutateFromFlushedStatuses: replayed,
+                    schedulerDecision: "defer",
+                    contextUsage: { percentage: 40, inputTokens: 4000 },
+                    m0M1: {
+                        projectPath: FOLD_PROJECT,
+                        projectDirectory: FOLD_PROJECT,
+                        historyBudgetTokens: 98_000,
+                        hardSignals: hard,
+                    },
+                }),
+            );
+            return { messages, result };
+        };
+        const seedTagger = createTagger();
+        tagMessages(sessionId, build(false), seedTagger, db);
+        const tagOf = (call: string) => seedTagger.getToolTag(sessionId, call, "m-par")!;
+        for (const call of ["p-small", "p-large"]) {
+            updateTagStatus(db, sessionId, tagOf(call), "dropped");
+            updateTagDropMode(db, sessionId, tagOf(call), "truncated");
+        }
+        const defer = await pass(BASE_HARD, false);
+        queuePendingOp(db, sessionId, tagOf("p-new"), "drop");
+        const hardSignals = { ...BASE_HARD, modelKey: "anthropic/sonnet" };
+        const hard = await pass(hardSignals, false);
+        const after = await pass(hardSignals, true);
+        const par = (messages: MessageLike[]) =>
+            JSON.stringify(messages.find((m) => m.info.id === "m-par")?.parts);
+        const modes = Object.fromEntries(
+            ["p-small", "p-large", "p-new", "p-keep"].map((call) => [
+                call,
+                getTagsBySession(db, sessionId).find((t) => t.tagNumber === tagOf(call))?.dropMode +
+                    "/" +
+                    getTagsBySession(db, sessionId).find((t) => t.tagNumber === tagOf(call))?.status,
+            ]),
+        );
+        console.log(
+            "ADV_PARALLEL",
+            JSON.stringify({
+                hardMaterialized: hard.result.materialized,
+                modes,
+                deferPar: par(defer.messages).slice(0, 400),
+                hardPar: par(hard.messages),
+                afterEqualsHard: par(after.messages) === par(hard.messages),
+                prefixShaEqual:
+                    advSha(after.messages.slice(0, hard.messages.length)) === advSha(hard.messages),
+            }),
+        );
+        expect(hard.result.materialized).toBe(true);
+        expect(par(hard.messages)).not.toContain('"dropped":');
+        expect(advSha(after.messages.slice(0, hard.messages.length))).toBe(advSha(hard.messages));
+    });
+
     for (const trigger of ADV_TRIGGERS) {
         it(`ADV: legacy markers replay on defer, convert on a HARD fold from ${trigger.name}, then replay byte-identically with newer messages`, async () => {
             db = new Database(":memory:");
