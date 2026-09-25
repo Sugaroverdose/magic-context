@@ -23,6 +23,17 @@ const contentMemo = new Map<
 	{ hash: string; tokens: number | undefined; keyBytes: number }
 >();
 let contentMemoBytes = 0;
+
+/**
+ * Forget every memoized token count. The memo is process-global, so a test that
+ * stubs the token estimator must clear it first, or it reads counts an earlier
+ * test cached with the real estimator for the same content.
+ */
+export function clearPiTailHygieneContentMemo(): void {
+	contentMemo.clear();
+	contentMemoBytes = 0;
+}
+
 const FNV1A_32_OFFSET = 0x811c9dc5;
 const FNV1A_32_PRIME = 0x01000193;
 

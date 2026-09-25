@@ -21,6 +21,7 @@ import * as formattingModule from "@magic-context/core/hooks/magic-context/read-
 import { PI_CTX_REDUCE_KEEP } from "./heuristic-cleanup-pi";
 import {
 	assertPiTailHygieneContentUnchanged,
+	clearPiTailHygieneContentMemo,
 	effectivePiTailHygiene,
 	measurePiTailHygiene,
 	refreshPiTailHygieneBaseline,
@@ -125,6 +126,10 @@ describe("Pi rendered-tail hygiene walk", () => {
 		).mockImplementation((content) =>
 			content.startsWith("fable-output-") ? 10_000 : 0,
 		);
+		// The walk memoizes token counts process-wide. Another test file in the same
+		// process can cache the real count for the same content (`{}` tool input),
+		// which would bypass this stub.
+		clearPiTailHygieneContentMemo();
 		try {
 			const messages: object[] = [];
 			const ids: string[] = [];
