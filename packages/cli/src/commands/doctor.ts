@@ -13,7 +13,7 @@ import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { getInstalledAdapters } from "../adapters";
-import type { HarnessAdapter } from "../adapters/types";
+import type { HarnessAdapter, PluginCacheClearResult } from "../adapters/types";
 import {
     openExistingContextDatabase,
     openExistingContextDatabaseForMutation,
@@ -167,11 +167,24 @@ async function runClear(): Promise<number> {
         return 0;
     }
 
-    const items: { adapter: HarnessAdapter; path: string; sizeBytes: number }[] = [];
+    const items: {
+        adapter: HarnessAdapter;
+        path: string;
+        sizeBytes: number;
+        label?: string;
+        clear?: () => PluginCacheClearResult;
+    }[] = [];
     for (const adapter of installed) {
-        const cache = adapter.getPluginCacheInfo();
-        if (cache.path && cache.exists) {
-            items.push({ adapter, path: cache.path, sizeBytes: cache.sizeBytes });
+        for (const cache of adapter.getPluginCacheInfo()) {
+            if (cache.path && cache.exists) {
+                items.push({
+                    adapter,
+                    path: cache.path,
+                    sizeBytes: cache.sizeBytes,
+                    label: cache.label,
+                    clear: cache.clear,
+                });
+            }
         }
     }
 
@@ -184,7 +197,7 @@ async function runClear(): Promise<number> {
     const picks = await selectMany(
         "Select caches to clear:",
         items.map((item, idx) => ({
-            label: `${item.adapter.displayName}: ${formatSize(item.sizeBytes)} — ${item.path}`,
+            label: `${item.adapter.displayName}${item.label ? ` (${item.label})` : ""}: ${formatSize(item.sizeBytes)} — ${item.path}`,
             value: String(idx),
         })),
     );
@@ -213,7 +226,17 @@ async function runClear(): Promise<number> {
         const s = spinner();
         s.start(`Clearing ${item.path}`);
         try {
-            if (existsSync(item.path)) {
+            if (item.clear) {
+                // The adapter's own removal carries its guard (for OpenCode 2,
+                // never while OpenCode may be using the slot).
+                const result = item.clear();
+                if (!result.cleared) {
+                    s.stop(`Left in place: ${item.path}`);
+                    log.warn(result.reason);
+                    failed += 1;
+                    continue;
+                }
+            } else if (existsSync(item.path)) {
                 rmSync(item.path, { recursive: true, force: true });
             }
             s.stop(`Cleared ${item.path}`);

@@ -123,7 +123,12 @@ import {
     isPinnedOpenCodePluginSpecifier,
     withPluginEntrySpecifier,
 } from "./doctor-opencode-plugin-entry";
-import { checkOpenCodeV2PluginCache, reportOpenCodeV2PluginCache } from "./doctor-opencode2-cache";
+import {
+    checkOpenCodeV2PluginCache,
+    configuredOpenCodeV2DistTag,
+    openCodeHostDatabaseFiles,
+    reportOpenCodeV2PluginCache,
+} from "./doctor-opencode2-cache";
 import {
     countPendingCoordinateRebases,
     formatPendingCoordinateRebases,
@@ -398,18 +403,25 @@ export function checkUserMemoriesDreamerCompatibility(
 }
 
 /**
- * Fetch the latest version of an npm package from the registry. Returns null
- * on any error so the doctor can report "check unavailable" rather than fail.
+ * Fetch the version an npm dist-tag (`latest` by default) points at. Returns
+ * null on any error so the doctor can report "check unavailable" rather than fail.
  */
-async function fetchNpmLatest(pkg: string, timeoutMs = 5000): Promise<string | null> {
+async function fetchNpmLatest(
+    pkg: string,
+    distTag = "latest",
+    timeoutMs = 5000,
+): Promise<string | null> {
     try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
-            const res = await fetch(`${resolveNpmRegistryUrl()}/${pkg}/latest`, {
-                signal: controller.signal,
-                headers: { Accept: "application/json" },
-            });
+            const res = await fetch(
+                `${resolveNpmRegistryUrl()}/${pkg}/${encodeURIComponent(distTag)}`,
+                {
+                    signal: controller.signal,
+                    headers: { Accept: "application/json" },
+                },
+            );
             if (!res.ok) return null;
             const body = (await res.json()) as { version?: unknown };
             return typeof body.version === "string" ? body.version : null;
@@ -1816,16 +1828,29 @@ export async function runDoctor(
     }
 
     // 8b. OpenCode 2 caches plugins under `npm/<name>@<spec>/<generation>/` and
-    // never replaces an `@latest` install on its own.
+    // never replaces an `@latest` install on its own. An entry that follows
+    // another dist-tag (`@beta`, `@next`) loads from that tag's slot, which is
+    // stale against the tag's current version, not against `latest`. The config
+    // is read again here because the entry check above may have rewritten it.
+    let v2DistTag: string | undefined;
+    if (paths.opencodeConfigFormat !== "none") {
+        try {
+            v2DistTag = configuredOpenCodeV2DistTag(
+                parse(readFileSync(paths.opencodeConfig, "utf-8")) as Record<string, unknown>,
+            );
+        } catch {
+            // An unreadable config was already reported; check the `@latest` slot.
+        }
+    }
     const v2Cache = reportOpenCodeV2PluginCache(
         checkOpenCodeV2PluginCache({
             fix: options.fix,
             force: options.force,
-            latestVersion: pluginNpmLatest,
-            hostFiles:
-                openCodeDbResolution.path === ":memory:"
-                    ? []
-                    : ["", "-wal", "-shm"].map((suffix) => `${openCodeDbResolution.path}${suffix}`),
+            latestVersion: v2DistTag
+                ? await fetchNpmLatest(PLUGIN_NAME, v2DistTag)
+                : pluginNpmLatest,
+            distTag: v2DistTag,
+            hostFiles: openCodeHostDatabaseFiles([openCodeDbResolution.path]),
         }),
         { pass, warn, info: (message) => log.info(message) },
         { reportMissing: hostGeneration === "v2" },
