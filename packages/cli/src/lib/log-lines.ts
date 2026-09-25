@@ -15,7 +15,8 @@ export type LogLevel = "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR";
  */
 export type LogGrammar = "fleet-r2" | "fleet-r1" | "legacy";
 export type DetectedLogGrammar = LogGrammar | "mixed" | "unknown";
-export type LogHarness = "opencode" | "pi" | "omp";
+/** `opencode2` is the OpenCode 2 plugin, which logs under its own temp subtree. */
+export type LogHarness = "opencode" | "opencode2" | "pi" | "omp";
 
 export interface LogLineRecord {
     ts: string;

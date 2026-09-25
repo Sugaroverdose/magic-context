@@ -3,7 +3,7 @@ import { Database } from "@magic-context/core/shared/sqlite";
 import {
     checkOpenCodeCompactionMarkerConversion,
     formatOpenCodeCompactionMarkerConversion,
-    formatOpenCodeV2ReconversionRecipe,
+    formatOpenCodeV2MissingMarkerNotice,
 } from "./doctor-compaction-markers";
 
 function convertedStoreFixture(): Database {
@@ -23,6 +23,7 @@ function convertedStoreFixture(): Database {
             session_id TEXT NOT NULL,
             type TEXT NOT NULL,
             seq INTEGER NOT NULL,
+            time_created INTEGER,
             data TEXT NOT NULL
         );
         CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -84,7 +85,8 @@ describe("doctor OpenCode compaction-marker conversion check", () => {
                 migrationCompleted: true,
                 migratedV2Schema: true,
                 unmatchedConvertedMarkers: 1,
-                recoveryRequired: true,
+                postConversionMessages: 0,
+                postConversionSessions: 0,
             });
             expect(formatOpenCodeCompactionMarkerConversion(before)).toContain(
                 "before=1 missing time.completed; after=1",
@@ -108,21 +110,64 @@ describe("doctor OpenCode compaction-marker conversion check", () => {
             ).run();
             const converted = checkOpenCodeCompactionMarkerConversion(db);
             expect(converted.unmatchedConvertedMarkers).toBe(0);
-            expect(converted.recoveryRequired).toBe(false);
         } finally {
             db.close();
         }
     });
 
-    it("documents manual reconversion without proposing v2 table edits", () => {
-        const recipe = formatOpenCodeV2ReconversionRecipe("/tmp/opencode-channel.db").join("\n");
-        expect(recipe).toContain("every OpenCode host stopped");
-        expect(recipe).toContain("clear only the kv.migration.v1-v2 marker");
-        expect(recipe).toContain("DELETE FROM kv WHERE key = 'migration.v1-v2'");
-        expect(recipe).toContain("opencode serve --port N");
-        expect(recipe).toContain('{"phase":"completed"}');
-        // User-facing copy must not cite internal session notes.
-        expect(recipe).not.toMatch(/note #\d+/);
-        expect(recipe).not.toContain("INSERT INTO session_message");
+    it("never offers reconversion when OpenCode 2 added messages after the conversion", () => {
+        const db = convertedStoreFixture();
+        try {
+            // OpenCode 2's converter rebuilds every OpenCode 1 session from its v1 rows
+            // and deletes the session's session_message rows first, so a row that only
+            // exists in v2 would be lost. Converted rows keep their v1 time_created.
+            db.exec(`
+                CREATE TABLE session (id TEXT PRIMARY KEY);
+                INSERT INTO session (id) VALUES ('ses-1'), ('ses-untouched');
+                INSERT INTO message (id, session_id, time_created, time_updated, data)
+                    VALUES ('v1-user', 'ses-untouched', 7, 7, '{"role":"user"}');
+                INSERT INTO session_message (id, session_id, type, seq, time_created, data) VALUES
+                    ('mc-summary', 'ses-1', 'assistant', 0, 1, '{}'),
+                    ('v1-user', 'ses-untouched', 'user', 0, 7, '{}'),
+                    ('v2-user', 'ses-1', 'user', 1, 5000, '{}'),
+                    ('v2-assistant', 'ses-1', 'assistant', 2, 5001, '{}');
+            `);
+            const report = checkOpenCodeCompactionMarkerConversion(db);
+            expect(report.unmatchedConvertedMarkers).toBe(1);
+            expect(report.postConversionMessages).toBe(2);
+            expect(report.postConversionSessions).toBe(1);
+
+            const notice = formatOpenCodeV2MissingMarkerNotice(report)?.join("\n") ?? "";
+            expect(notice).toContain("No action is needed");
+            expect(notice).toContain("Do not clear kv.migration.v1-v2");
+            expect(notice).toContain("delete the 2 message(s)");
+            expect(notice).not.toContain("DELETE FROM kv");
+        } finally {
+            db.close();
+        }
+    });
+
+    it("reports a missing converted marker as informational and never prints a reconversion command", () => {
+        const db = convertedStoreFixture();
+        try {
+            const report = checkOpenCodeCompactionMarkerConversion(db);
+            expect(report.postConversionMessages).toBe(0);
+            const notice = formatOpenCodeV2MissingMarkerNotice(report)?.join("\n") ?? "";
+            expect(notice).toContain("did not carry over 1 Magic Context compaction marker(s)");
+            expect(notice).toContain("No action is needed");
+            expect(notice).toContain("Do not clear kv.migration.v1-v2");
+            expect(notice).not.toContain("DELETE FROM kv");
+            expect(notice).not.toContain("opencode serve");
+            expect(notice).not.toContain("INSERT INTO session_message");
+
+            db.prepare(
+                "INSERT INTO session_message (id, session_id, type, seq, data) VALUES ('mc-boundary', 'ses-1', 'compaction', 0, '{}')",
+            ).run();
+            expect(
+                formatOpenCodeV2MissingMarkerNotice(checkOpenCodeCompactionMarkerConversion(db)),
+            ).toBeNull();
+        } finally {
+            db.close();
+        }
     });
 });
