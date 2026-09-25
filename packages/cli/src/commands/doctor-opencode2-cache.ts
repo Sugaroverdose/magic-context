@@ -219,7 +219,9 @@ export function reportOpenCodeV2PluginCache(
             report.info(
                 "  or quit OpenCode (including `opencode service stop`) and run `magic-context doctor --fix`.",
             );
-            return { fixed: false, issue: true };
+            // An available update is advice, not a broken install: OpenCode's own
+            // plugins dialog shows it the same way, so doctor warns without failing.
+            return { fixed: false, issue: false };
         case "in_use":
             report.warn(
                 `Outdated Magic Context in the OpenCode 2 plugin cache (${versions}) was not cleared: OpenCode is running (pid ${result.pids?.join(", ")})`,
@@ -228,7 +230,7 @@ export function reportOpenCodeV2PluginCache(
                 `  Quit OpenCode (and \`opencode service stop\`) and rerun doctor --fix, or ${OPENCODE_V2_PLUGIN_UPDATE_HINT}.`,
             );
             report.info(`  ${result.slot}`);
-            return { fixed: false, issue: true };
+            return { fixed: false, issue: false };
         case "in_use_unknown":
             report.warn(
                 `Outdated Magic Context in the OpenCode 2 plugin cache (${versions}) was not cleared: ${result.reason ?? "could not tell whether OpenCode is running"}`,
@@ -236,7 +238,7 @@ export function reportOpenCodeV2PluginCache(
             report.info(
                 `  Quit OpenCode and delete ${result.slot} by hand, or ${OPENCODE_V2_PLUGIN_UPDATE_HINT}.`,
             );
-            return { fixed: false, issue: true };
+            return { fixed: false, issue: false };
         case "cleared":
             report.pass(
                 `Cleared ${result.forced ? "" : "outdated "}Magic Context from the OpenCode 2 plugin cache (${versions}${result.forced ? ", --force" : ""}) — OpenCode installs the latest on next start`,

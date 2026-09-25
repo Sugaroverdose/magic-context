@@ -169,7 +169,9 @@ describe("doctor OpenCode 2 plugin cache check", () => {
             },
             { reportMissing: true },
         );
-        expect(outcome).toEqual({ fixed: false, issue: true });
+        // An available update warns but doesn't fail doctor: it isn't a broken install.
+        expect(outcome).toEqual({ fixed: false, issue: false });
+        expect(lines.some((line) => line.startsWith("warn "))).toBe(true);
         expect(lines.join("\n")).toContain("cached: 0.42.6, latest: 0.43.1");
         expect(lines.join("\n")).toContain("ctrl+u");
         expect(lines.join("\n")).toContain("`opencode plugin update`");
