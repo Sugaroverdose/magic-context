@@ -23,8 +23,10 @@ import { openCodeDbExists, withReadOnlySessionDb } from "./read-session-db";
  * OpenCode does not write agent or session permissions into the first user
  * message's tools map, so a session whose agent config (or session permission
  * overlay) denies ctx_reduce would otherwise freeze as "callable". To cover it,
- * the transform reads those permissions ONCE, before the ctx_reduce verdict
- * first freezes (see primeCtxReduceSpawnPermission). A deny recorded there makes
+ * whichever hook runs first on a session (the messages transform or the
+ * system-prompt hook; OpenCode may run either first) reads those permissions
+ * ONCE, before the ctx_reduce verdict first freezes (see
+ * primeCtxReduceSpawnPermission). A deny recorded there makes
  * the frozen verdict "unavailable" from the session's first pass, so no
  * provider-visible byte ever flips.
  *

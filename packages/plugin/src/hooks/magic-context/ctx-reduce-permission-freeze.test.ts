@@ -4,7 +4,7 @@
  * OpenCode keeps agent and session permissions off the first user message's
  * tools map, so the ctx_reduce verdict has to read them before it freezes.
  * These tests drive the real TypeScript transform and system-prompt handler
- * through three sessions shapes and compare what each serves:
+ * through three session shapes and compare what each serves:
  *   - permissions allow ctx_reduce: bytes match a pass that never reads
  *     permissions (the behavior before permissions were considered);
  *   - permissions deny ctx_reduce from the first pass: no §N§ tags, no reduce
