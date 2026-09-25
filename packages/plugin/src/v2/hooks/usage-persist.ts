@@ -1,7 +1,6 @@
 import { type ContextDatabase, updateSessionMeta } from "../../features/magic-context/storage";
 import type { TransformDeps } from "../../hooks/magic-context/transform";
 import { sessionLog } from "../../shared/logger";
-import { refusesBeforeProvider } from "./provider-admission";
 import { type UsageReading, usageReadingMatchesDraft } from "./usage-reading";
 
 export interface PersistV2UsageReadingArgs {
@@ -9,32 +8,29 @@ export interface PersistV2UsageReadingArgs {
     sessionID: string;
     draftModel: { providerID: string; id: string };
     reading: UsageReading;
-    /** Raw (unreserved) context window of the draft model, for provider admission. */
-    rawContextLimit?: number;
-    /** A host compaction landed after the reply that produced this reading. */
-    hostCompactionReducedUsage: boolean;
     contextUsageMap: TransformDeps["contextUsageMap"];
 }
 
 /**
- * Record the usage OpenCode stored for the latest completed reply and decide
- * whether the next request must be refused before it reaches the provider.
- * Returns true when the request is unsafe to send.
+ * Record the usage OpenCode stored for the latest completed reply.
  *
  * The reading is the prompt size of a request the provider accepted, so it is
  * real pressure at any size. It is never compared with the configured window:
  * that window can be smaller than what the model actually serves, and a reading
  * past it is real overflow of the user's limit for the scheduler to handle.
+ *
+ * A reading never refuses the next request by itself. However high it is, the
+ * next transform pass has to run, because that pass is the only thing that can
+ * shrink the session (the force band's queued drops and emergency reclaim, the
+ * historian, a fold). Refusing on the reading would leave it unchanged and
+ * refuse again on every later turn. The transform refuses only after its own
+ * pass, and only when the provider has rejected the request as too large and
+ * that pass folded nothing, the same rule OpenCode 1 and Pi follow.
  */
-export function persistV2UsageReading(args: PersistV2UsageReadingArgs): boolean {
+export function persistV2UsageReading(args: PersistV2UsageReadingArgs): void {
     const { db, sessionID, draftModel, reading } = args;
     const draftModelKey = `${draftModel.providerID}/${draftModel.id}`;
     const readingMatchesDraft = usageReadingMatchesDraft(reading, draftModel);
-    const unsafe = refusesBeforeProvider({
-        inputTokens: reading.inputTokens,
-        rawContextLimit: args.rawContextLimit,
-        hostCompactionReducedUsage: args.hostCompactionReducedUsage,
-    });
     if (reading.completed !== undefined)
         updateSessionMeta(db, sessionID, { lastResponseTime: reading.completed });
     const percentage = (reading.inputTokens / reading.limit) * 100;
@@ -57,5 +53,4 @@ export function persistV2UsageReading(args: PersistV2UsageReadingArgs): boolean 
     } else {
         args.contextUsageMap.delete(sessionID);
     }
-    return unsafe;
 }

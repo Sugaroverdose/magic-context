@@ -578,6 +578,11 @@ export async function registerContext(context: V2Context) {
     const systemPromptRefreshSessions = new Set<string>();
     const tagger = createTagger();
     const deletedSessions = new DeletedSessionTombstones();
+    /**
+     * Record the provider's usage for the session's latest reply. Returns true only
+     * when that could not be done safely (the context database is not durable, or a
+     * store could not be read); the usage figure itself never makes a turn unsafe.
+     */
     const recordUsage = async (
         draft: Pick<SessionContext, "sessionID" | "model">,
     ): Promise<boolean> => {
@@ -591,7 +596,6 @@ export async function registerContext(context: V2Context) {
             );
             try {
                 const latest = reader.latestAssistant(draft.sessionID);
-                const latestCompaction = reader.latestCompaction(draft.sessionID);
                 const draftModelKey = `${draft.model.providerID}/${draft.model.id}`;
                 if (!queriedModels.has(draftModelKey)) {
                     const catalog = await Promise.resolve(context.model.list());
@@ -644,16 +648,11 @@ export async function registerContext(context: V2Context) {
                     limitFor,
                 });
                 if (reading) {
-                    unsafe = persistV2UsageReading({
+                    persistV2UsageReading({
                         db: usageDb,
                         sessionID: draft.sessionID,
                         draftModel: draft.model,
                         reading,
-                        rawContextLimit: rawLimits.get(draftModelKey)?.context,
-                        hostCompactionReducedUsage:
-                            latestCompaction !== undefined &&
-                            latest !== undefined &&
-                            latestCompaction.seq >= latest.seq,
                         contextUsageMap: usage,
                     });
                 }
@@ -840,8 +839,12 @@ export async function registerContext(context: V2Context) {
         recordV2ToolDefinitions(draft);
         let postFold = false;
         try {
+            // Only a failure to read or record usage refuses here. A high reading is
+            // left to the transform below: its force band and emergency path are what
+            // reduce an over-limit session, and refusing ahead of them would refuse
+            // the same stored reading again on every later turn.
             if ((await recordUsage(draft)) && !compactionOff) {
-                await refuseBeforeProvider(context.session, draft.sessionID, "usage-admission");
+                await refuseBeforeProvider(context.session, draft.sessionID, "usage-unavailable");
                 return;
             }
             if (!db) return;
