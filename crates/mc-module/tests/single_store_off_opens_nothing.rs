@@ -37,7 +37,13 @@ const O_NONBLOCK: i32 = 0x0004;
 const O_NONBLOCK: i32 = 0o4000;
 
 /// Keep trying a non-blocking write-open of the FIFO; count the times it succeeded.
-fn start_probe(path: PathBuf) -> (Arc<AtomicBool>, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+fn start_probe(
+    path: PathBuf,
+) -> (
+    Arc<AtomicBool>,
+    Arc<AtomicUsize>,
+    std::thread::JoinHandle<()>,
+) {
     let stop = Arc::new(AtomicBool::new(false));
     let hits = Arc::new(AtomicUsize::new(0));
     let (stop_probe, hits_probe) = (Arc::clone(&stop), Arc::clone(&hits));
@@ -91,7 +97,10 @@ fn exercise(mode: SingleStoreMode, path: &Path) -> usize {
     std::thread::sleep(Duration::from_millis(100));
     stop.store(true, Ordering::Relaxed);
     probe.join().expect("probe thread");
-    eprintln!("mode={mode:?} probe_hits={} status={status}", hits.load(Ordering::Relaxed));
+    eprintln!(
+        "mode={mode:?} probe_hits={} status={status}",
+        hits.load(Ordering::Relaxed)
+    );
     hits.load(Ordering::Relaxed)
 }
 

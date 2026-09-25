@@ -63,17 +63,27 @@ fn a_copy_of_a_real_store_migrates_to_this_build_and_passes_quick_check() {
     let elapsed = started.elapsed();
     drop(store);
     let after = recorded_versions(&working);
-    let applied: Vec<i64> = after.iter().copied().filter(|v| !before.contains(v)).collect();
+    let applied: Vec<i64> = after
+        .iter()
+        .copied()
+        .filter(|v| !before.contains(v))
+        .collect();
 
     let conn = Connection::open(&working).unwrap();
     let quick_check: String = conn
         .query_row("PRAGMA quick_check", [], |row| row.get(0))
         .unwrap();
     let pending_rows: i64 = conn
-        .query_row("SELECT COUNT(*) FROM mc_historian_pending_run", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM mc_historian_pending_run", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     let single_store: i64 = conn
-        .query_row("SELECT COALESCE(MAX(single_store), 0) FROM mc_privilege_state", [], |row| row.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(single_store), 0) FROM mc_privilege_state",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     eprintln!(
         "real store copy: before max={:?} applied={applied:?} elapsed_ms={} quick_check={quick_check} pending_runs={pending_rows} single_store={single_store} working={}",
@@ -81,13 +91,22 @@ fn a_copy_of_a_real_store_migrates_to_this_build_and_passes_quick_check() {
         elapsed.as_millis(),
         working.display()
     );
-    assert_eq!(after.last().copied(), Some(i64::from(LATEST_MIGRATION_VERSION)));
+    assert_eq!(
+        after.last().copied(),
+        Some(i64::from(LATEST_MIGRATION_VERSION))
+    );
     assert_eq!(quick_check, "ok");
-    assert_eq!(single_store, 0, "no migration may set the single-store marker");
+    assert_eq!(
+        single_store, 0,
+        "no migration may set the single-store marker"
+    );
     // A second open is a no-op on an already-migrated store.
     let started = Instant::now();
     drop(McStore::open(&descriptor(&working)).unwrap());
-    eprintln!("real store copy: reopen elapsed_ms={}", started.elapsed().as_millis());
+    eprintln!(
+        "real store copy: reopen elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     if std::env::var_os("MC_REAL_STORE_KEEP").is_none() {
         std::fs::remove_file(&working).ok();
     }
