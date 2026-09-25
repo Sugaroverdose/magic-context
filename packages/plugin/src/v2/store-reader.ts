@@ -518,6 +518,34 @@ export class V2StoreReader {
         );
     }
 
+    /**
+     * One stamp per row with `after < seq <= through`, keyed by seq, built without
+     * decoding any row: the row id, its update time and the byte length of its data.
+     * A row deleted, added, or rewritten in place to a different size or with a new
+     * update time changes its stamp; comparing stamps row by row, not an aggregate,
+     * means two such changes cannot cancel out.
+     */
+    spanRowStamps(sessionID: string, after: number, through: number): Map<number, string> {
+        if (!Number.isSafeInteger(after) || !Number.isSafeInteger(through))
+            throw new Error("Invalid seq span");
+        const rows = this.db
+            .prepare(
+                `SELECT seq, id, time_updated AS updated, length(CAST(data AS BLOB)) AS bytes
+                 FROM session_message WHERE session_id = ? AND seq > ? AND seq <= ?
+                 ORDER BY seq ASC`,
+            )
+            .all(sessionID, after, through) as Array<{
+            seq: number;
+            id: string;
+            updated: number | null;
+            bytes: number | null;
+        }>;
+        const stamps = new Map<number, string>();
+        for (const row of rows)
+            stamps.set(row.seq, `${row.id}\u0000${row.updated ?? ""}\u0000${row.bytes ?? ""}`);
+        return stamps;
+    }
+
     /** Conversational rows at or before `throughSeq`, newest first. */
     rawRowsThrough(sessionID: string, throughSeq: number, limit: number): StoreRow[] {
         return trackDecodeOperation("rawRowsThrough", () => {
