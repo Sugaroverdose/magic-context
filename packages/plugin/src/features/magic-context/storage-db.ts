@@ -104,7 +104,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastMigrationOnOpenRefusal = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 90;
+export const LATEST_SUPPORTED_VERSION = 91;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1482,6 +1482,15 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     INSERT OR IGNORE INTO message_time_backfill_state
       (id, cursor_session_id, cursor_ordinal, completed, updated_at)
     VALUES (1, '', 0, 0, 0);
+
+    -- Highest memory id another writer (the Rust module in single-store mode) put
+    -- into memories for a project, and how far this host has embedded. Migration v91.
+    CREATE TABLE IF NOT EXISTS memory_embedding_watermarks (
+      project_path TEXT PRIMARY KEY,
+      written_memory_id INTEGER NOT NULL DEFAULT 0,
+      embedded_memory_id INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL DEFAULT 0
+    );
 
     CREATE TABLE IF NOT EXISTS message_history_index (
       session_id TEXT PRIMARY KEY,

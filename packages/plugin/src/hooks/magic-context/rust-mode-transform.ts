@@ -19,6 +19,7 @@ import {
     resolveProjectIdentity,
     resolveProjectIdentityForSession,
 } from "../../features/magic-context/memory/project-identity";
+import { drainSingleStoreEmbeddingWatermarks } from "../../features/magic-context/memory/single-store-embedding-drain";
 import { getMemoryVerifications } from "../../features/magic-context/memory/storage-memory-verifications";
 import {
     modelKeyAcceptsImages,
@@ -3966,6 +3967,10 @@ export function createRustModeTransform(
                             if (mirrorDrain.rowsApplied > 0) {
                                 await reembedMirrorInvalidatedMemories(deps.db);
                             }
+                            // Memories the module wrote straight into context.db never
+                            // pass through the mirror, so the invalidation set above
+                            // cannot know about them. Their high-water mark can.
+                            await drainSingleStoreEmbeddingWatermarks(deps.db);
                             if (mirrorDrain.complete) {
                                 state.memoryMirrorProjectionKey = projectionKey;
                             } else if (mirrorDrain.budgetExhausted) {

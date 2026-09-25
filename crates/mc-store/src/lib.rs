@@ -3011,6 +3011,23 @@ const MIGRATIONS: &[Migration] = &[
     ",
     },
     Migration {
+        version: 59,
+        // How long a fold publish holds its write transaction.
+        //
+        // Sizing the module's context.db write chunks needs a measured publish duration,
+        // and nothing recorded one: the pass trace covered receive, complete and reject
+        // but never the publish itself. These three columns are that measurement, kept on
+        // the row the publish already touches rather than in a new table.
+        //
+        // Microseconds, because a small publish on a warm page cache finishes well inside
+        // one millisecond and a millisecond column would round most of them to zero.
+        statements: "
+        ALTER TABLE mc_pass_trace ADD COLUMN last_publish_duration_us INTEGER NULL;
+        ALTER TABLE mc_pass_trace ADD COLUMN max_publish_duration_us INTEGER NULL;
+        ALTER TABLE mc_pass_trace ADD COLUMN publish_sample_count INTEGER NOT NULL DEFAULT 0;
+    ",
+    },
+    Migration {
         version: 60,
         // Where a claimant's terminal report is kept when the task that queued the
         // run is no longer in this process.
@@ -3031,8 +3048,6 @@ const MIGRATIONS: &[Migration] = &[
         // that reaches a store before this one does — the same numeric-order rule
         // 57 and 58 already state between themselves.
         //
-        // 59 is reserved for the pass-trace publish durations that ship on their own
-        // branch; this is the next free version after it.
         statements: "
         ALTER TABLE mc_historian_pending_run ADD COLUMN report_kind TEXT;
         ALTER TABLE mc_historian_pending_run ADD COLUMN report_text TEXT;
@@ -3771,6 +3786,18 @@ fn mutate_pass_request_history(
         params![session_id, meta],
     )?;
     Ok(())
+}
+
+/// Durable publish-transaction timing for one session, in microseconds.
+///
+/// Separate from `PassTrace` on purpose: the pass trace's serialized shape is read by
+/// existing status consumers, and publish timing answers a different question (how long
+/// the module holds a write transaction) that only the single-store chunk budget needs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishTiming {
+    pub last_publish_duration_us: Option<i64>,
+    pub max_publish_duration_us: Option<i64>,
+    pub publish_sample_count: u64,
 }
 
 /// Durable receive/complete/reject breadcrumbs for one session's transform passes.
@@ -8857,6 +8884,65 @@ impl McStore {
             Ok(snapshot)
         })?;
         Ok(snapshot)
+    }
+
+    /// Record how long one fold publish held its write transaction.
+    ///
+    /// Kept out of the publish transaction itself: the number describes that transaction,
+    /// and measuring it from inside would fold the measurement's own write into what it
+    /// measures. Callers pass the elapsed time of the committed transaction.
+    pub fn record_publish_duration(
+        &self,
+        session_id: &str,
+        duration_us: i64,
+    ) -> Result<(), McStoreError> {
+        let duration_us = duration_us.max(0);
+        self.inner.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO mc_pass_trace (
+                     session_id,
+                     last_received_at_ms,
+                     last_completed_at_ms,
+                     last_publish_duration_us,
+                     max_publish_duration_us,
+                     publish_sample_count
+                 ) VALUES (?1, 0, 0, ?2, ?2, 1)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                     last_publish_duration_us = excluded.last_publish_duration_us,
+                     max_publish_duration_us = MAX(
+                         COALESCE(mc_pass_trace.max_publish_duration_us, 0),
+                         excluded.max_publish_duration_us
+                     ),
+                     publish_sample_count = mc_pass_trace.publish_sample_count + 1",
+                params![session_id, duration_us],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Read the durable publish-transaction timing for one session, if any publish has
+    /// been measured.
+    pub fn load_publish_timing(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<PublishTiming>, McStoreError> {
+        Ok(self.inner.with_conn(|conn| {
+            conn.query_row(
+                "SELECT last_publish_duration_us, max_publish_duration_us, publish_sample_count
+                   FROM mc_pass_trace
+                  WHERE session_id = ?1",
+                params![session_id],
+                |row| {
+                    Ok(PublishTiming {
+                        last_publish_duration_us: row.get(0)?,
+                        max_publish_duration_us: row.get(1)?,
+                        publish_sample_count: row.get::<_, i64>(2)?.max(0) as u64,
+                    })
+                },
+            )
+            .optional()
+        })?)
     }
 
     /// Record that the module accepted a transform request for this session. The count and
@@ -23442,6 +23528,41 @@ mod tests {
     }
 
     #[test]
+    fn publish_duration_keeps_the_last_and_the_largest_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        assert_eq!(store.load_publish_timing("session").unwrap(), None);
+
+        store.record_publish_duration("session", 4_200).unwrap();
+        store.record_publish_duration("session", 19_500).unwrap();
+        // A later, faster publish must not erase the worst one the budget is sized against.
+        store.record_publish_duration("session", 900).unwrap();
+
+        assert_eq!(
+            store.load_publish_timing("session").unwrap(),
+            Some(PublishTiming {
+                last_publish_duration_us: Some(900),
+                max_publish_duration_us: Some(19_500),
+                publish_sample_count: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn publish_duration_does_not_disturb_the_pass_trace_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .trace_pass_received("session", "attempt", 1_700)
+            .unwrap();
+        store.record_publish_duration("session", 5_000).unwrap();
+
+        let trace = store.load_pass_trace("session").unwrap().unwrap();
+        assert_eq!(trace.last_received_at_ms, 1_700);
+        assert_eq!(trace.receive_count, 1);
+    }
+
+    #[test]
     fn fresh_and_migrated_stores_have_latest_schema() {
         let fresh_dir = tempfile::tempdir().unwrap();
         let fresh = McStore::open(&descriptor(fresh_dir.path())).unwrap();
@@ -24319,46 +24440,22 @@ mod tests {
             .contains("note ownership insert is outside the caller project"));
     }
 
-    /// The one version this branch deliberately does not carry.
-    ///
-    /// It belongs to a change that is still on its own branch. A version has to be
-    /// picked before the branch that uses it merges, because two branches that pick
-    /// the same number produce two different migrations claiming one version and the
-    /// store applies whichever build it meets first.
-    const RESERVED_UNMERGED_MIGRATION_VERSION: i64 = 59;
-
-    /// The chain has no hole except the one reserved version, and no version is claimed twice.
+    /// The chain has no hole and no version is claimed twice.
     ///
     /// Other tests compare the versions a store applied against the bundled chain, which cannot
     /// notice a hole because the hole is in the chain they compare against. A hole matters: a
     /// store that recorded a later version never goes back for the missing one, so the migration
     /// that fills the hole would reach fresh stores only. This is the test that fails when a
     /// version goes missing.
-    ///
-    /// The reserved version is excluded by name rather than by widening the check, so a hole
-    /// anywhere else is still a failure. The exclusion retires itself: once the reserved version
-    /// is in the chain the first assertion below fails, and whoever merges it deletes the
-    /// constant and this paragraph with it.
     #[test]
-    fn the_migration_chain_has_no_hole_except_the_one_reserved_version() {
+    fn the_migration_chain_is_contiguous_and_claims_each_version_once() {
         let bundled = bundled_migration_versions();
 
-        assert!(
-            !bundled.contains(&RESERVED_UNMERGED_MIGRATION_VERSION),
-            "version {RESERVED_UNMERGED_MIGRATION_VERSION} is in the chain now, so it is no \
-             longer reserved: delete the constant and the exclusion below"
-        );
-
         let missing: Vec<i64> = (1..=i64::from(LATEST_MIGRATION_VERSION))
-            .filter(|version| *version != RESERVED_UNMERGED_MIGRATION_VERSION)
             .filter(|version| !bundled.contains(version))
             .collect();
 
-        assert_eq!(
-            missing,
-            Vec::<i64>::new(),
-            "the chain must have no holes other than the reserved version"
-        );
+        assert_eq!(missing, Vec::<i64>::new(), "the chain must have no holes");
         assert_eq!(
             bundled.len(),
             bundled

@@ -213,6 +213,109 @@ fn to_stored_compartment(
 /// Project a validated fact candidate onto the store's promotion input. Historian facts
 /// have no importance or expiry at publish time, but retain the source session so later
 /// maintenance can relate them to the publication that created them.
+/// Project one validated publish onto the shape the single-store writers take.
+///
+/// Built from the rows that are already on their way into the module's own store, so the
+/// two writers are handed the same publish rather than two independently derived ones.
+///
+/// The harness label is `module` here because that is what the module stamps on its own
+/// rows and nothing on this path carries the route's harness. A host-written row carries
+/// the host's label instead, so shadow verification reports `harness` as diverging; the
+/// slice that turns the writers on has to thread the route's real label through this
+/// request before that column can agree.
+fn fold_publish_view(
+    request: &ValidatedPublishRequest<'_>,
+    compartments: &[StoredCompartment],
+    facts: &[FactCandidate],
+    events: &[HistorianEventCandidate],
+    primer_candidates: &[HistorianPrimerCandidate],
+    user_memory_candidates: &[HistorianUserMemoryCandidate],
+) -> crate::host_store::FoldPublish {
+    use crate::host_store as single_store;
+
+    single_store::FoldPublish {
+        session_id: request.session_id.to_string(),
+        project_path: request.project_path.to_string(),
+        harness: "module".to_string(),
+        now_ms: request.created_at_ms,
+        compartments: compartments
+            .iter()
+            .map(|compartment| single_store::HostCompartment {
+                sequence: compartment.sequence,
+                start_message: compartment.start_message,
+                end_message: compartment.end_message,
+                start_message_id: compartment.start_message_id.clone(),
+                end_message_id: compartment.end_message_id.clone(),
+                title: compartment.title.clone(),
+                content: compartment.content.clone(),
+                p1: compartment.p1.clone(),
+                p2: compartment.p2.clone(),
+                p3: compartment.p3.clone(),
+                p4: compartment.p4.clone(),
+                importance: Some(i64::from(compartment.importance)),
+                episode_type: compartment.episode_type.clone(),
+                created_at: compartment.created_at,
+            })
+            .collect(),
+        facts: facts
+            .iter()
+            .map(|fact| single_store::HostSessionFact {
+                category: fact.category.clone(),
+                content: fact.content.clone(),
+            })
+            .collect(),
+        events: events
+            .iter()
+            .map(|event| single_store::HostCompartmentEvent {
+                kind: event.kind.clone(),
+                at_compartment: event.at_compartment.map(|value| value as i64),
+                fields_json: event.fields_json.clone(),
+            })
+            .collect(),
+        memories: facts
+            .iter()
+            .map(|fact| single_store::HostMemory {
+                category: fact.category.clone(),
+                content: fact.content.clone(),
+                importance: fact.importance.map(i64::from),
+                source_session_id: fact.source_session_id.clone(),
+                expires_at: fact.expires_at,
+                metadata_json: None,
+            })
+            .collect(),
+        notes: Vec::new(),
+        primer_candidates: primer_candidates
+            .iter()
+            .map(|candidate| single_store::HostPrimerCandidate {
+                question: candidate.question.clone(),
+                source_compartment_start: candidate
+                    .source_compartment_start
+                    .map(|value| value as i64),
+                source_compartment_end: candidate.source_compartment_end.map(|value| value as i64),
+                source_start_message_id: candidate.source_start_message_id.clone(),
+                source_end_message_id: candidate.source_end_message_id.clone(),
+                source_message_time: candidate.source_message_time,
+                created_at: candidate.created_at,
+            })
+            .collect(),
+        user_observations: user_memory_candidates
+            .iter()
+            .map(|candidate| single_store::HostUserObservation {
+                content: candidate.content.clone(),
+                source_compartment_start: candidate
+                    .source_compartment_start
+                    .map(|value| value as i64),
+                source_compartment_end: candidate.source_compartment_end.map(|value| value as i64),
+                created_at: candidate.created_at,
+            })
+            .collect(),
+        user_memories: Vec::new(),
+        // The module has already applied the privacy gate: an empty candidate list means
+        // collection is off, and re-deriving the gate here could disagree with it.
+        user_memory_collection_enabled: !user_memory_candidates.is_empty(),
+    }
+}
+
 fn to_store_fact(
     f: &crate::historian_validate::FactCandidate,
     source_session_id: &str,
@@ -894,12 +997,42 @@ pub fn publish_validated_chunk(
         chunk_transcript: Some(request.chunk_transcript),
         raw_chunk_messages: Some(request.raw_chunk_messages),
     };
+    let publish_started_at = std::time::Instant::now();
     let publish_result = match request.publication_fence {
         Some(fence) => fence.publish(store, publish_request),
         None => store.publish_historian_chunk(publish_request),
     };
+    let publish_elapsed_us =
+        i64::try_from(publish_started_at.elapsed().as_micros()).unwrap_or(i64::MAX);
     match publish_result {
-        Ok(result) => Ok(result),
+        Ok(result) => {
+            // How long the largest write in the system holds its transaction. Recorded
+            // only for a publish that committed, because an aborted one is not the write
+            // a concurrent reader would have been waiting behind. Failing to record it
+            // must not fail the publish: this is a measurement, not a guarantee.
+            if let Err(error) =
+                store.record_publish_duration(request.session_id, publish_elapsed_us)
+            {
+                eprintln!(
+                    "[magic-context] could not record publish duration for {}: {error}",
+                    request.session_id
+                );
+            }
+            // Shadow verification, when configured. Off by default and inert then.
+            if let Some(report) = crate::host_store::verify_publish_in_shadow(&fold_publish_view(
+                &request,
+                &compartments,
+                &facts,
+                &events,
+                &primer_candidates,
+                &user_memory_candidates,
+            )) {
+                if !report.divergences.is_empty() {
+                    eprintln!("[magic-context] {}", report.summary());
+                }
+            }
+            Ok(result)
+        }
         Err(HistorianPublishError::FenceRejected { reason }) => {
             // A fence rejection is a fast local race (the caller's snapshot was
             // retired mid-round), not a producer failure: return the run to Idle

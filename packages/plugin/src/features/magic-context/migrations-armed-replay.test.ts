@@ -438,6 +438,31 @@ function assertV88CoordinateArm(db: DatabaseType): void {
     ).toEqual({ generation: null });
 }
 
+function assertV91EmbeddingWatermarkArm(db: DatabaseType): void {
+    // The mark starts empty on an upgraded install: no other writer has produced a
+    // memory yet, so there is no backlog to claim. It must also accept a row — an
+    // upgrade that created an unusable table would look identical until the first
+    // module-written memory arrived.
+    expect(db.prepare("SELECT COUNT(*) AS count FROM memory_embedding_watermarks").get()).toEqual({
+        count: 0,
+    });
+    db.prepare(
+        `INSERT INTO memory_embedding_watermarks
+            (project_path, written_memory_id, embedded_memory_id, updated_at)
+         VALUES ('git:armed-replay', 9, 4, 1)`,
+    ).run();
+    expect(
+        db
+            .prepare(
+                "SELECT written_memory_id, embedded_memory_id FROM memory_embedding_watermarks WHERE project_path = 'git:armed-replay'",
+            )
+            .get(),
+    ).toEqual({ written_memory_id: 9, embedded_memory_id: 4 });
+    db.prepare(
+        "DELETE FROM memory_embedding_watermarks WHERE project_path = 'git:armed-replay'",
+    ).run();
+}
+
 function populateModuleOwnedRows(db: DatabaseType, version: number, state: ReplayState): void {
     if (!state.contextStoreUuid) throw new Error("armed replay has no context store identity");
 
@@ -663,6 +688,11 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
                     }>
                 ).map((column) => column.name),
             ).toContain("owner_pid");
+            populateModuleOwnedRows(db, version, state);
+            return;
+        case 91:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            assertV91EmbeddingWatermarkArm(db);
             populateModuleOwnedRows(db, version, state);
             return;
         default:
