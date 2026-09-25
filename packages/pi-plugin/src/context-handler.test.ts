@@ -4555,6 +4555,132 @@ describe("registerPiContextHandler", () => {
 			}
 		});
 
+		it("replays legacy marker skeletons on defer passes and converts them only on an executed HARD fold", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-legacy-skeleton";
+			const largeContent = "L".repeat(2000);
+			const ids = ["e-1", "e-2", "e-3", "e-4", "e-5", "e-6"];
+			const build = () =>
+				[
+					userMessage("start", 1),
+					assistantToolCall("call-small", "bash", { command: "ls -la" }, 2),
+					{
+						...toolResultMessage("call-small", "small output", 3),
+						toolName: "bash",
+					},
+					assistantToolCall(
+						"call-large",
+						"write",
+						{ filePath: "/tmp/a.txt", content: largeContent },
+						4,
+					),
+					{
+						...toolResultMessage("call-large", "wrote file", 5),
+						toolName: "write",
+					},
+					userMessage("next prompt", 6),
+				] as never[];
+			try {
+				updateSessionMeta(db, sessionId, {
+					piStableIdScheme: 1,
+					systemPromptHash: BASE_SYSTEM_HASH,
+				});
+				recordPiLiveModel(sessionId, BASE_MODEL);
+				const fake = createFakePi();
+				registerPiContextHandler(fake.pi as never, {
+					db,
+					protectedTags: 0,
+					heuristics: {},
+					injection: { injectionBudgetTokens: 10_000, muralEnabled: true },
+					scheduler: { executeThresholdPercentage: 80 },
+				});
+				const handler = fake.handlers.get("context") as (
+					event: { messages: never[] },
+					ctx: never,
+				) => Promise<{ messages: never[] }>;
+				const pass = async () => {
+					const messages = build();
+					const out = await handler({ messages }, {
+						...fakeContext(sessionId, process.cwd(), ids, messages),
+						getContextUsage: () => ({
+							tokens: 4_000,
+							percent: 4,
+							contextWindow: 100_000,
+						}),
+					} as never);
+					return JSON.stringify(out.messages);
+				};
+				const modeOf = (tag: number) =>
+					getTagsBySession(db, sessionId).find((t) => t.tagNumber === tag)
+						?.dropMode;
+
+				await pass();
+				const toolTags = getTagsBySession(db, sessionId)
+					.filter((tag) => tag.type === "tool")
+					.sort((a, b) => a.tagNumber - b.tagNumber);
+				expect(toolTags).toHaveLength(2);
+				const [small, large] = toolTags.map((tag) => tag.tagNumber) as [
+					number,
+					number,
+				];
+				for (const tag of [small, large]) {
+					updateTagStatus(db, sessionId, tag, "dropped");
+					updateTagDropMode(db, sessionId, tag, "truncated");
+				}
+				updateSessionMeta(db, sessionId, {
+					lastResponseTime: Date.now(),
+					cacheTtl: "59m",
+					lastContextPercentage: 40,
+					lastInputTokens: 4_000,
+				});
+
+				// Defer passes replay the legacy marker byte-identically.
+				const deferA = await pass();
+				const deferB = await pass();
+				expect(deferA).toContain(`{"dropped":"[dropped §${small}§]"}`);
+				expect(deferA).toContain(`{"dropped":"[dropped §${large}§]"}`);
+				expect(deferB).toBe(deferA);
+				expect(modeOf(small)).toBe("truncated");
+
+				// A HARD fold that re-renders m[0]/m[1] byte-identically (a stale
+				// mutation cursor with no content change) keeps the cached prefix, so
+				// it must not convert: the conversion would be the only byte change.
+				db.prepare(
+					"UPDATE session_meta SET cached_m0_max_mutation_id = 424242 WHERE session_id = ?",
+				).run(sessionId);
+				const identicalFold = await pass();
+				expect(
+					(
+						db
+							.prepare(
+								"SELECT cached_m0_max_mutation_id AS id FROM session_meta WHERE session_id = ?",
+							)
+							.get(sessionId) as { id: number }
+					).id,
+				).not.toBe(424242);
+				expect(identicalFold).toBe(deferA);
+				expect(modeOf(small)).toBe("truncated");
+				expect(modeOf(large)).toBe("truncated");
+
+				// The executed HARD fold converts them to real-or-absent.
+				recordPiLiveModel(sessionId, HARD_MODEL);
+				const hard = await pass();
+				expect(modeOf(small)).toBe("skeleton_real");
+				expect(modeOf(large)).toBe("full");
+				expect(hard).not.toContain('"dropped":');
+				expect(hard).toContain('"arguments":{"command":"ls -la"}');
+				expect(hard).toContain(`[dropped §${small}§]`);
+				expect(hard).not.toContain("call-large");
+
+				// The following defer pass replays the converted bytes identically.
+				updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
+				expect(await pass()).toBe(hard);
+			} finally {
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
 		it("Pi competing persisted pair cannot replace the pass-start prefix snapshot", async () => {
 			const db = createTestDb();
 			const sessionId = "ses-pi-competing-prefix";

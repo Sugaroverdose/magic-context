@@ -102,7 +102,7 @@ export function registerTerminalToolArcTests(
                     const newest = getTagsBySession(db, sessionId).find(
                         (tag) => tag.type === "tool" && tag.messageId.includes("call-8"),
                     );
-                    if (newest?.status === "dropped") expect(newest.dropMode).toBe("truncated");
+                    if (newest?.status === "dropped") expect(newest.dropMode).toBe("skeleton_real");
                 } finally {
                     closeQuietly(db);
                 }

@@ -207,7 +207,7 @@ test("Q5 99 percent emergency skeletonizes signed arc and replay is byte stable"
 		expect(
 			getTagsBySession(db, "emergency").find((t) => t.type === "tool")
 				?.dropMode,
-		).toBe("truncated");
+		).toBe("skeleton_real");
 		expect(JSON.stringify(serve(true))).toBe(JSON.stringify(initial));
 		expect(JSON.stringify(serve(true))).toBe(JSON.stringify(initial));
 	} finally {

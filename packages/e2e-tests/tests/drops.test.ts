@@ -106,8 +106,8 @@ forEachHost(import.meta.url, "drops", (host) => {
                 );
 
                 // Several arcs in one turn: the drop target has to stay inside the recent
-                // tool-skeleton window to be TRUNCATED rather than removed outright, and only
-                // the truncate path rewrites a clone.
+                // tool-skeleton window (with its small input) to be kept as a skeleton rather
+                // than removed outright, and only the skeleton path rewrites a clone.
                 v2.mock.reset();
                 let step = 0;
                 v2.mock.addMatcher(() => {
@@ -175,7 +175,7 @@ forEachHost(import.meta.url, "drops", (host) => {
                 });
                 await v2.sendPrompt(sessionId, "turn after the drop", { timeoutMs: 120_000 });
 
-                // Non-vacuity, part one: the arc must actually have been TRUNCATED. A tool tag
+                // Non-vacuity, part one: the arc must actually have been kept as a skeleton. A tool tag
                 // reclaimed by removal, or not reclaimed at all, never produces the part this
                 // guards, and everything below would then hold for the wrong reason.
                 expect(
@@ -185,7 +185,7 @@ forEachHost(import.meta.url, "drops", (host) => {
                             "SELECT status, drop_mode FROM tags WHERE session_id = ? AND harness = ? AND tag_number = ?",
                         )
                         .get(sessionId, v2.harnessId, toolTag.tag_number),
-                ).toEqual({ status: "dropped", drop_mode: "truncated" });
+                ).toEqual({ status: "dropped", drop_mode: "skeleton_real" });
 
                 const records = probe.records().filter((record) => record.sessionID === sessionId);
                 expect(records.length).toBeGreaterThan(0);

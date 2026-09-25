@@ -935,6 +935,18 @@ export interface M0M1RenderOptions {
     hardSignals?: M0HardSignals;
     workspaceIdentitySet?: WorkspaceIdentitySet;
     beforePhase3ForTest?: () => void;
+    /**
+     * Runs inside the transaction that records a HARD fold, just before it
+     * commits (and again on each contention retry, whose earlier attempt rolled
+     * back). Writes that must land only together with an executed fold, such as
+     * converting legacy dropped-tool skeletons, go here. `rendered` carries the
+     * bytes this fold is about to persist, so the caller can tell whether the
+     * fold changes the served prefix or re-renders it byte-identically.
+     */
+    onFoldCommit?: (
+        db: Database,
+        rendered: { m0Bytes: Buffer; m1Bytes: Buffer; muralDataUrl: string | null },
+    ) => void;
 }
 
 export interface MaterializeDecision {
@@ -2593,6 +2605,12 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
                 "UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
             )
             .run(baselineEndMessageId, options.sessionId);
+
+        options.onFoldCommit?.(options.db, {
+            m0Bytes,
+            m1Bytes,
+            muralDataUrl: frozenMuralDataUrl ?? null,
+        });
 
         options.db.exec("COMMIT");
         logSlowWriteTransaction("opencode_materialize_cache", transactionStartedAt);

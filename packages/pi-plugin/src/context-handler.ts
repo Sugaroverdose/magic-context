@@ -136,6 +136,9 @@ import { computePiWorkMetrics } from "@magic-context/core/features/magic-context
 import {
 	applyFlushedStatuses,
 	applyPendingOperations,
+	CACHE_LOSING_FOLD_REASONS,
+	convertLegacyToolSkeletons,
+	foldChangesServedPrefix,
 	RECENT_TOOL_SKELETON_WINDOW,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
 import {
@@ -5259,6 +5262,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			injectionPassSnapshot.cachedRow.cached_m1_bytes
 		);
 	let foldExecutedThisPass = false;
+	// True only when this pass's executed fold also loses the provider's cached
+	// prefix: its trigger evicts it (model, system prompt, idle TTL) or it changes
+	// the m[0]/m[1] bytes served ahead of the tail. Legacy skeleton conversion
+	// rides only such a fold, never one that re-renders the prefix identically.
+	let foldBustsServedPrefixThisPass = false;
 	let publishedM1RefreshedThisPass = false;
 	let prefixPreflightContended = false;
 	const softRefreshOpportunity = args.schedulerDecision === "execute";
@@ -5305,6 +5313,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				foldDueDecision.value || softRefreshOpportunity,
 				preFoldInjectionResult.m0Materialized === true,
 			);
+			if (foldExecutedThisPass) {
+				const afterFold = getOrCreateSessionMeta(args.db, args.sessionId);
+				foldBustsServedPrefixThisPass =
+					CACHE_LOSING_FOLD_REASONS.has(foldDueDecision.reason ?? "") ||
+					foldChangesServedPrefix(
+						{
+							m0Bytes: persistedM0BeforeFold.cachedM0Bytes ?? null,
+							m1Bytes: persistedM0BeforeFold.cachedM1Bytes ?? null,
+						},
+						{
+							m0Bytes: afterFold.cachedM0Bytes ?? null,
+							m1Bytes: afterFold.cachedM1Bytes ?? null,
+						},
+					);
+			}
 			if (preFoldInjectionResult.m0Materialized) {
 				injectionPassSnapshot = createPiM0M1PassSnapshot({
 					db: args.db,
@@ -5495,6 +5518,41 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		},
 	);
 	logTransformTiming(args.sessionId, "tagMessages", tTag);
+
+	// Legacy dropped-tool skeletons (argument marker) convert to the
+	// real-or-absent rule only on a pass whose HARD fold executed and loses the
+	// cached prefix anyway (foldBustsServedPrefixThisPass), so the byte change
+	// rides that fold's cache bust. The fold committed before tagging
+	// built the targets the decision needs, so this is its own transaction
+	// right after it; the status replay below then renders the new modes. A
+	// crash between the two leaves the tags legacy until the next HARD fold.
+	// Either way the next served request already carries the fold's new cached
+	// prefix, so it is a cache bust regardless of the tool bytes.
+	if (foldBustsServedPrefixThisPass) {
+		try {
+			let converted = 0;
+			args.db
+				.transaction(() => {
+					converted = convertLegacyToolSkeletons(
+						args.db,
+						args.sessionId,
+						targets,
+					).size;
+				})
+				.immediate();
+			if (converted > 0) {
+				sessionLog(
+					args.sessionId,
+					`pi HARD fold converted ${converted} legacy dropped-tool skeleton(s) to real-or-absent`,
+				);
+			}
+		} catch (error) {
+			sessionLog(
+				args.sessionId,
+				`pi legacy dropped-tool skeleton conversion failed (kept legacy bytes): ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
 
 	// 1b. Note-nudge `commit_detected` trigger. Mirrors OpenCode's logic
 	// in `tag-messages.ts` + `transform.ts:677-690`: only fire on the

@@ -143,8 +143,9 @@ describe("apply operations for tool drops", () => {
         const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant");
         expect(toolTagId).toBeDefined();
 
-        // No padding: the tool is within the newest-20 window, so the agent
-        // drop keeps the structural skeleton (anti-hallucination anchor).
+        // No padding: the tool is within the newest-20 window and its input is
+        // small, so the agent drop keeps the structural skeleton with its real
+        // arguments (anti-hallucination anchor).
         queuePendingOp(db, "ses-1", toolTagId!, "drop");
         const didMutate = applyPendingOperations("ses-1", db, targets, new Set());
         batch.finalize();
@@ -157,7 +158,7 @@ describe("apply operations for tool drops", () => {
         expect(toolPart.state.output).toBe(`[dropped \u00a7${toolTagId}\u00a7]`);
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         expect(getTagById(db, "ses-1", toolTagId!)?.status).toBe("dropped");
-        expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("truncated");
+        expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("skeleton_real");
     });
 
     it("defers a pending/running task part and keeps its long prompt byte-identical (#250 open arc)", () => {
@@ -233,22 +234,23 @@ describe("apply operations for tool drops", () => {
         // further — this is the byte-identity we assert.
         const pristine = JSON.stringify(taskPart);
 
-        // Within the skeleton window → truncate (skeleton) path, as before.
+        // Within the skeleton window with a small input → real-argument skeleton.
         queuePendingOp(db, "ses-1", toolTagId!, "drop");
         const didMutate = applyPendingOperations("ses-1", db, targets, new Set());
         batch.finalize();
 
-        // No reclaim regression: the completed arc still clamps.
+        // No reclaim regression: the completed arc's output is still reclaimed.
         expect(didMutate).toBe(true);
-        expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("truncated");
+        expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("skeleton_real");
 
-        // The wire copy now in the array is clamped + sentinelled...
+        // The wire copy now in the array keeps the real arguments and carries
+        // the sentinel output...
         const wire = messages[0]?.parts[0] as {
             state: { input: Record<string, unknown>; output: string };
         };
         expect(wire).not.toBe(taskPart);
         expect(wire.state.output).toBe(`[dropped \u00a7${toolTagId}\u00a7]`);
-        expect(wire.state.input).toEqual({ dropped: `[dropped §${toolTagId}§]` });
+        expect(wire.state.input).toEqual({ prompt: longPrompt, subagent_type: "mason" });
 
         // ...but the LIVE object OpenCode still holds is byte-identical (the long
         // prompt is intact), so a background child spawning from it is unharmed.

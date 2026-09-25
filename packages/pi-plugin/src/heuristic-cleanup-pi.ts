@@ -44,6 +44,10 @@ import {
 import { getEmergencyInputSample } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import type { TagEntry } from "@magic-context/core/features/magic-context/types";
 import {
+	applyNewToolDrop,
+	hasSmallToolInput,
+} from "@magic-context/core/hooks/magic-context/apply-operations";
+import {
 	applyCavemanCleanup,
 	type CavemanCleanupConfig,
 } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
@@ -378,7 +382,8 @@ export function applyPiHeuristicCleanup(
 					calibration,
 					targets.get(tag.tagNumber)?.requiresToolArcSkeleton === true ||
 						((emergency.usagePercentage ?? 0) < 95 &&
-							recentTags.has(tag.tagNumber)),
+							recentTags.has(tag.tagNumber) &&
+							hasSmallToolInput(targets.get(tag.tagNumber))),
 				),
 			);
 		const byTag = new Map(activeTags.map((tag) => [tag.tagNumber, tag]));
@@ -415,28 +420,22 @@ export function applyPiHeuristicCleanup(
 						(emergency.usagePercentage ?? 0) < 95 &&
 						newestEmergencyTags.has(tag.tagNumber);
 					// Removing the result separator beside native reasoning lets Anthropic
-					// merge signed assistant turns, so this safety case always keeps the pair.
-					const reasoningSafeSkeleton =
-						target?.requiresToolArcSkeleton === true;
-					const skeleton = recent || reasoningSafeSkeleton;
-					const result = reasoningSafeSkeleton
-						? (target?.truncate?.() ?? "absent")
-						: recent
-							? (target?.truncate?.() ?? target?.drop?.() ?? "absent")
-							: (target?.drop?.() ?? "absent");
+					// merge signed assistant turns, so this safety case always keeps the
+					// pair, with its real arguments.
+					const { result, mode } = applyNewToolDrop(target, {
+						inWindow: recent,
+						keepSkeleton: target?.requiresToolArcSkeleton === true,
+					});
 					if (result === "removed" || result === "truncated") {
-						// drop() keeps a skeleton instead of removing the last tool
-						// result the request ends with (removing it would end the
-						// request on an assistant turn), so persist the mode applied.
-						const appliedMode =
-							skeleton || result === "truncated" ? "truncated" : "full";
+						// Persist the mode applied (including drop() keeping the
+						// call whose result ends the request) so replays match.
 						updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
-						updateTagDropMode(db, sessionId, tag.tagNumber, appliedMode);
+						updateTagDropMode(db, sessionId, tag.tagNumber, mode);
 						droppedTools++;
 						emergencyDroppedTools++;
 						droppedTokenReductions.push({
 							tagNumber: tag.tagNumber,
-							mode: appliedMode,
+							mode: mode === "full" ? "full" : "truncated",
 						});
 					}
 				}
@@ -479,14 +478,9 @@ export function applyPiHeuristicCleanup(
 					: staleReduce.bareCallIds.has(tag.messageId);
 				if (!matched) continue;
 				const target = targets.get(tag.tagNumber);
-				const result = target?.drop?.() ?? "absent";
+				const { result, mode } = applyNewToolDrop(target, { inWindow: false });
 				if (result === "incomplete") continue;
-				updateTagDropMode(
-					db,
-					sessionId,
-					tag.tagNumber,
-					result === "truncated" ? "truncated" : "full",
-				);
+				updateTagDropMode(db, sessionId, tag.tagNumber, mode);
 				updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
 				if (result === "removed" || result === "truncated") {
 					droppedStaleReduceCalls++;
@@ -587,17 +581,19 @@ export function applyPiHeuristicCleanup(
 				for (let i = 0; i < group.length - 1; i++) {
 					const tag = group[i];
 					const target = targets.get(tag.tagNumber);
-					// Deduplication stays full-drop; only emergency recent arcs keep skeletons.
-					const result = target?.drop?.() ?? "absent";
+					// Deduplication stays full-drop; only emergency recent arcs keep
+					// skeletons. A call that cannot be removed keeps real arguments.
+					const { result, mode } = applyNewToolDrop(target, {
+						inWindow: false,
+					});
 					if (result === "incomplete") continue;
-					const appliedMode = result === "truncated" ? "truncated" : "full";
-					updateTagDropMode(db, sessionId, tag.tagNumber, appliedMode);
+					updateTagDropMode(db, sessionId, tag.tagNumber, mode);
 					updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
 					if (result === "removed" || result === "truncated") {
 						deduplicatedTools++;
 						droppedTokenReductions.push({
 							tagNumber: tag.tagNumber,
-							mode: appliedMode,
+							mode: mode === "full" ? "full" : "truncated",
 						});
 					}
 				}

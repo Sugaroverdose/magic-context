@@ -26,7 +26,7 @@
 //! - **deterministic merge**: exactly one decision per target; `drop` beats
 //!   `edit_marker`; stable output order.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::transform::{utf16_len, utf16_prefix, ReductionDecision};
 
@@ -103,13 +103,42 @@ const T2_TOOLS: &[&str] = &["edit", "write", "apply_patch", "grep", "glob", "aft
 /// reduce the call block. The skeleton-vs-full choice is frozen at freeze time.
 pub(crate) const RECENT_TOOL_SKELETON_WINDOW: usize = 20;
 
+/// The largest dropped-call input, measured by [`tool_input_string_bytes`], that keeps
+/// its real arguments inside the newest-call window. Larger inputs are removed.
+pub(crate) const SKELETON_REAL_INPUT_MAX_BYTES: usize = 1024;
+
+/// Size of a tool call's input for the real-or-absent rule: the total UTF-8 byte
+/// length of every string value, recursively through objects and arrays. Keys,
+/// numbers, booleans and nulls do not count. Defined on string leaves so the
+/// TypeScript, Pi and Rust lanes compute the same number from the same input
+/// regardless of JSON serialization; `tests/fixtures/tool-input-string-bytes.json`
+/// pins it across all three.
+pub(crate) fn tool_input_string_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(text) => text.len(),
+        serde_json::Value::Array(items) => items.iter().map(tool_input_string_bytes).sum(),
+        serde_json::Value::Object(map) => map.values().map(tool_input_string_bytes).sum(),
+        _ => 0,
+    }
+}
+
+fn is_small_tool_input(value: &serde_json::Value) -> bool {
+    tool_input_string_bytes(value) <= SKELETON_REAL_INPUT_MAX_BYTES
+}
+
 /// The reduction kind emitted per block. `drop` = `[dropped]` placeholder;
-/// `skeleton` = a name-preserving ToolCall shell (newest window, pairing context);
+/// `skeleton_real` = the ToolCall kept exactly as the host sent it (real arguments),
+/// its paired results reduced to the placeholder (newest window with a small input,
+/// the call whose result ends the request, or reasoning adjacency);
 /// `edit_marker` = filePath verbatim + region-hinted diff for a superseded edit.
+///
+/// The legacy `skeleton` kind (arguments replaced by `{"dropped": …}`) is no longer
+/// selected. Frozen legacy units keep replaying until a HARD fold converts them
+/// (see [`legacy_skeleton_conversions`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RedKind {
     Drop,
-    Skeleton,
+    SkeletonReal,
     EditMarker,
 }
 
@@ -117,7 +146,7 @@ impl RedKind {
     fn as_str(self) -> &'static str {
         match self {
             RedKind::Drop => "drop",
-            RedKind::Skeleton => "skeleton",
+            RedKind::SkeletonReal => "skeleton_real",
             RedKind::EditMarker => "edit_marker",
         }
     }
@@ -673,8 +702,8 @@ struct ArcIntent {
 /// Selection modes an arc's ToolCall block can freeze into.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ArcShape {
-    /// In the newest skeleton window: keep a name-preserving call skeleton.
-    Skeleton,
+    /// Keep the call with its real arguments; only the results are reduced.
+    SkeletonReal,
     /// Older than the window: fully drop the call block.
     FullDrop,
     /// TS duplicate-tool cleanup always fully drops older calls. It bypasses the ordinary
@@ -684,9 +713,10 @@ enum ArcShape {
     EditMarker,
 }
 
-/// Build the only model-visible input for a dropped ToolCall shell. The tagged
-/// form is a pure function of the durable tag id; selection freezes the untagged
-/// form and the renderer fills in the tag from its durable overlay.
+/// The legacy model-visible input of a frozen `skeleton` ToolCall shell. Only replayed
+/// for units frozen before the real-or-absent rule, until a HARD fold converts them.
+/// The tagged form is a pure function of the durable tag id; the renderer fills in
+/// the tag from its durable overlay.
 pub(crate) fn dropped_input_payload(tag_id: Option<i64>) -> String {
     let sentinel = tag_id.map_or_else(
         || DROPPED_PLACEHOLDER.to_string(),
@@ -695,8 +725,132 @@ pub(crate) fn dropped_input_payload(tag_id: Option<i64>) -> String {
     canonical_json(&serde_json::json!({ "dropped": sentinel }))
 }
 
-fn skeleton_payload(_input: &serde_json::Value) -> String {
-    dropped_input_payload(None)
+/// When removing every arc in `removed_arcs` would leave the request's final message
+/// without the content that makes it a valid request end, return the arc to keep (as a
+/// real-argument skeleton) instead: the newest removed arc in that message.
+///
+/// The final message is the newest non-system message in `items`. An assistant final
+/// message must keep at least one tool result (it is what closes the conversation with a
+/// user turn); any other role must keep some non-reasoning block. Frozen blocks are not
+/// counted as survivors, which can only keep an extra skeleton, never remove one.
+/// Anthropic models without assistant prefill reject a request that ends on assistant
+/// text, so this mirrors the TypeScript `wouldStrandConversationEnd` rule.
+fn request_end_arc_to_keep(
+    items: &[SelItem],
+    removed_arcs: &HashSet<String>,
+    frozen: &HashSet<String>,
+) -> Option<String> {
+    let end = items
+        .iter()
+        .filter(|item| item.message_role != SelMessageRole::System)
+        .max_by_key(|item| item.ordinal)?;
+    let end_mid = item_message_id(end)?;
+    let end_role = end.message_role;
+    let in_end = items
+        .iter()
+        .filter(|item| item_message_id(item) == Some(end_mid))
+        .collect::<Vec<_>>();
+    let removed_here = in_end
+        .iter()
+        .filter_map(|item| item.arc_id.as_deref())
+        .filter(|arc_id| removed_arcs.contains(*arc_id))
+        .collect::<BTreeSet<_>>();
+    if removed_here.is_empty() {
+        return None;
+    }
+    let survives = |item: &&&SelItem| {
+        item.arc_id
+            .as_deref()
+            .is_none_or(|arc_id| !removed_arcs.contains(arc_id))
+            && !frozen.contains(&item.id)
+            && !matches!(item.kind, SelKind::Reasoning | SelKind::RedactedReasoning)
+    };
+    let strands = if end_role == SelMessageRole::Assistant {
+        !in_end
+            .iter()
+            .filter(survives)
+            .any(|item| matches!(item.kind, SelKind::ToolResult { .. }))
+    } else {
+        !in_end.iter().any(|item| survives(&item))
+    };
+    if !strands {
+        return None;
+    }
+    in_end
+        .iter()
+        .filter(|item| {
+            item.arc_id
+                .as_deref()
+                .is_some_and(|arc_id| removed_here.contains(arc_id))
+        })
+        .max_by(|left, right| {
+            let index = |item: &SelItem| {
+                item.id
+                    .rsplit_once('#')
+                    .and_then(|(_, index)| index.parse::<usize>().ok())
+                    .unwrap_or(0)
+            };
+            index(left)
+                .cmp(&index(right))
+                .then_with(|| left.arc_id.cmp(&right.arc_id))
+        })
+        .and_then(|item| item.arc_id.clone())
+}
+
+/// Re-decide legacy `skeleton` call units (arguments replaced by the `{"dropped": …}`
+/// marker) under the real-or-absent rule. Called ONLY while a HARD fold rebuilds the
+/// frozen unit set, so the byte change rides that fold's cache bust; every other pass
+/// keeps replaying the legacy bytes.
+///
+/// `legacy_call_ids` are the call block ids of the legacy units; `removed_call_ids` are
+/// call blocks already reduced to `drop` in the same rebuild (they count as removed for
+/// the request-end check). Returns the new kind per legacy call present in `items`:
+/// `skeleton_real` for a small input, a reasoning-adjacent arc, or the call whose result
+/// ends the request; `drop` otherwise. The legacy marker was only written inside the
+/// newest-call window or where removal was unsafe, so each is re-decided as a window drop.
+pub(crate) fn legacy_skeleton_conversions(
+    items: &[SelItem],
+    legacy_call_ids: &BTreeSet<String>,
+    removed_call_ids: &HashSet<String>,
+    frozen: &HashSet<String>,
+) -> BTreeMap<String, &'static str> {
+    let reasoning_adjacency = reasoning_adjacency_collapse_arc_ids(items);
+    let mut kinds = BTreeMap::new();
+    let mut candidates = HashSet::new();
+    let mut removed_arcs = HashSet::new();
+    for item in items {
+        let (SelKind::ToolCall { input, .. }, Some(arc_id)) = (&item.kind, &item.arc_id) else {
+            continue;
+        };
+        if removed_call_ids.contains(&item.id) {
+            removed_arcs.insert(arc_id.clone());
+        }
+        if !legacy_call_ids.contains(&item.id) {
+            continue;
+        }
+        if is_small_tool_input(input) || reasoning_adjacency.contains(arc_id) {
+            kinds.insert(item.id.clone(), "skeleton_real");
+        } else {
+            kinds.insert(item.id.clone(), "drop");
+            candidates.insert(arc_id.clone());
+            removed_arcs.insert(arc_id.clone());
+        }
+    }
+    // The request end may also be closed by frozen results the legacy arcs still carry;
+    // those stop surviving once their call is removed, so do not count them.
+    if let Some(keep) = request_end_arc_to_keep(items, &removed_arcs, frozen) {
+        if candidates.contains(&keep) {
+            for item in items {
+                if item.arc_id.as_deref() == Some(keep.as_str())
+                    && matches!(item.kind, SelKind::ToolCall { .. })
+                    && kinds.contains_key(&item.id)
+                {
+                    kinds.insert(item.id.clone(), "skeleton_real");
+                }
+            }
+        }
+    }
+    kinds
 }
 
 /// Expand a reduced arc into its per-block [`ReductionDecision`]s: the ToolCall block
@@ -712,7 +866,7 @@ fn expand_arc(
     for (call_id, input) in &arc.call_inputs {
         if !frozen.contains(call_id) {
             let (kind, payload) = match shape {
-                ArcShape::Skeleton => (RedKind::Skeleton, skeleton_payload(input)),
+                ArcShape::SkeletonReal => (RedKind::SkeletonReal, DROPPED_PLACEHOLDER.to_string()),
                 ArcShape::FullDrop | ArcShape::DedupFullDrop => {
                     (RedKind::Drop, DROPPED_PLACEHOLDER.to_string())
                 }
@@ -1348,15 +1502,28 @@ pub(crate) fn select_reductions_with_outcome(
                         })
                         .sum::<f64>();
                     let skeleton = (!ctx.emergency_window_yields
-                        && recent.contains(arc.arc_id.as_str()))
+                        && recent.contains(arc.arc_id.as_str())
+                        && is_small_tool_input(&arc.input))
                         || reasoning_adjacency_collapse_arcs.contains(&arc.arc_id);
-                    // Include a conservative tag-overlay allowance because tag ids are installed by the renderer.
+                    // A kept call keeps its real arguments, so its call blocks reclaim
+                    // nothing; only the results shrink to the placeholder. Include a
+                    // conservative tag-overlay allowance because tag ids are installed
+                    // by the renderer.
                     let after = if skeleton {
-                        (arc.call_inputs.len()
-                            * (mc_tokenizer::estimate_tokens(&dropped_input_payload(None)) + 32)
-                            + arc.result_ids.len()
+                        let call_tokens = items
+                            .iter()
+                            .filter(|item| {
+                                item.arc_id.as_deref() == Some(arc.arc_id.as_str())
+                                    && matches!(item.kind, SelKind::ToolCall { .. })
+                            })
+                            .map(|item| {
+                                item.served_token_count.or(item.token_count).unwrap_or(0) as f64
+                            })
+                            .sum::<f64>();
+                        call_tokens
+                            + (arc.result_ids.len()
                                 * (mc_tokenizer::estimate_tokens(DROPPED_PLACEHOLDER) + 32))
-                            as f64
+                                as f64
                     } else {
                         0.0
                     };
@@ -1484,10 +1651,11 @@ pub(crate) fn select_reductions_with_outcome(
     let supersession_arcs_with_exempt_message_protection =
         protected_supersession_arcs(&ctx.exempt_message_protected_block_ids);
 
-    // Resolve fresh full-drop intents to a skeleton when either recency or removal safety
-    // requires a result shell. Decided ONCE here (freeze-time): frozen_keys excludes replayed
-    // arcs, so neither an aging window nor a newly detected adjacency can change frozen bytes.
-    // EditMarker is window-independent.
+    // Resolve fresh full-drop intents to a real-argument skeleton when recency (with a small
+    // input) or removal safety requires a result shell; a large input in the window is
+    // removed like an older one. Decided ONCE here (freeze-time): frozen_keys excludes
+    // replayed arcs, so neither an aging window nor a newly detected adjacency can change
+    // frozen bytes. EditMarker is window-independent.
     let mut newest_arcs: Vec<&&ToolArc> = active_arcs.iter().collect();
     newest_arcs.sort_by(|a, b| {
         b.ordinal
@@ -1500,7 +1668,7 @@ pub(crate) fn select_reductions_with_outcome(
         .map(|a| a.arc_id.clone())
         .collect();
 
-    let mut out: Vec<ReductionDecision> = Vec::new();
+    let mut resolved_shapes: Vec<(&ToolArc, ArcShape)> = Vec::new();
     for (arc_id, shape) in &arc_shapes {
         let Some(arc) = arc_by_id.get(arc_id.as_str()) else {
             continue;
@@ -1516,20 +1684,37 @@ pub(crate) fn select_reductions_with_outcome(
         }
         let resolved = match shape {
             ArcShape::EditMarker => ArcShape::EditMarker,
-            ArcShape::Skeleton => ArcShape::Skeleton,
+            ArcShape::SkeletonReal => ArcShape::SkeletonReal,
             ArcShape::FullDrop
                 if reasoning_adjacency_collapse_arcs.contains(arc_id)
-                    || skeleton_window.contains(arc_id) =>
+                    || (skeleton_window.contains(arc_id) && is_small_tool_input(&arc.input)) =>
             {
-                ArcShape::Skeleton
+                ArcShape::SkeletonReal
             }
             ArcShape::DedupFullDrop if reasoning_adjacency_collapse_arcs.contains(arc_id) => {
-                ArcShape::Skeleton
+                ArcShape::SkeletonReal
             }
             ArcShape::FullDrop => ArcShape::FullDrop,
             ArcShape::DedupFullDrop => ArcShape::DedupFullDrop,
         };
-        expand_arc(arc, resolved, frozen_keys, &mut out);
+        resolved_shapes.push((arc, resolved));
+    }
+    // Never remove the tool result the request ends with: keep that call with its real
+    // arguments instead (see request_end_arc_to_keep).
+    let removed_arcs = resolved_shapes
+        .iter()
+        .filter(|(_, shape)| matches!(shape, ArcShape::FullDrop | ArcShape::DedupFullDrop))
+        .map(|(arc, _)| arc.arc_id.clone())
+        .collect::<HashSet<_>>();
+    let keep_request_end = request_end_arc_to_keep(items, &removed_arcs, frozen_keys);
+    let mut out: Vec<ReductionDecision> = Vec::new();
+    for (arc, shape) in resolved_shapes {
+        let shape = if keep_request_end.as_deref() == Some(arc.arc_id.as_str()) {
+            ArcShape::SkeletonReal
+        } else {
+            shape
+        };
+        expand_arc(arc, shape, frozen_keys, &mut out);
     }
 
     // ctx_reduce agent drops stay block-granular, but pass-through carriers are absent
@@ -1593,7 +1778,7 @@ fn dedupe_and_sort(decisions: Vec<ReductionDecision>) -> Vec<ReductionDecision> 
         match kind {
             "drop" => 3,
             "edit_marker" => 2,
-            "skeleton" => 1,
+            "skeleton" | "skeleton_real" => 1,
             _ => 0,
         }
     }
@@ -1820,7 +2005,7 @@ mod tests {
             .iter()
             .find(|d| d.target_id == call_block_id("c8"))
             .expect("the newest arc is selected at window yield");
-        assert_eq!(newest_call.kind, "skeleton");
+        assert_eq!(newest_call.kind, "skeleton_real");
         let newest_result = decisions
             .iter()
             .find(|d| d.target_id == result_block_id("c8"))
@@ -2229,7 +2414,7 @@ mod tests {
             );
         }
 
-        for kind in ["drop", "skeleton", "edit_marker"] {
+        for kind in ["drop", "skeleton_real", "edit_marker"] {
             assert!(
                 seen_reduction_kinds.contains(kind),
                 "selection golden stopped exercising reduction kind '{kind}'"
@@ -2245,6 +2430,9 @@ mod tests {
     struct DroppedInputMarkerGoldenCase {
         label: String,
         tag_id: i64,
+        // The legacy marker never depended on the call's input; the field stays so the
+        // shared golden keeps parsing.
+        #[allow(dead_code)]
         input: serde_json::Value,
         expected_frozen: serde_json::Value,
         expected_tagged: serde_json::Value,
@@ -2257,7 +2445,7 @@ mod tests {
                 .expect("parse dropped-input-marker-golden.json");
         assert!(!cases.is_empty(), "empty dropped-input marker golden");
         for case in cases {
-            let frozen = skeleton_payload(&case.input);
+            let frozen = dropped_input_payload(None);
             let tagged = dropped_input_payload(Some(case.tag_id));
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&frozen).unwrap(),
@@ -3271,7 +3459,7 @@ mod tests {
         let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
         assert!(
             out.iter().any(|decision| {
-                decision.target_id == target_arc && decision.kind == "skeleton"
+                decision.target_id == target_arc && decision.kind == "skeleton_real"
             }),
             "the durable text sibling keeps the arc reclaimable while its result separates reasoning-bearing assistants: {out:?}"
         );
@@ -3375,10 +3563,377 @@ mod tests {
         };
         assert_eq!(call_kind("c1"), "drop", "oldest arc full-drops the call");
         assert_eq!(call_kind("c2"), "drop", "2nd oldest full-drops");
-        assert_eq!(call_kind("c22"), "skeleton", "newest keeps a skeleton call");
-        assert_eq!(call_kind("c3"), "skeleton", "inside the window → skeleton");
+        assert_eq!(
+            call_kind("c22"),
+            "skeleton_real",
+            "newest keeps a real-argument skeleton call"
+        );
+        assert_eq!(
+            call_kind("c3"),
+            "skeleton_real",
+            "inside the window with a small input → real-argument skeleton"
+        );
     }
 
+    #[derive(Deserialize)]
+    struct ToolInputSizeFixture {
+        max_small_bytes: usize,
+        cases: Vec<ToolInputSizeCase>,
+    }
+
+    #[derive(Deserialize)]
+    struct ToolInputSizeCase {
+        name: String,
+        input: serde_json::Value,
+        expected_bytes: usize,
+        expected_small: bool,
+    }
+
+    #[test]
+    fn tool_input_string_bytes_matches_the_shared_cross_lane_fixture() {
+        let fixture: ToolInputSizeFixture = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/tool-input-string-bytes.json"
+        ))
+        .expect("parse tool-input-string-bytes.json");
+        assert_eq!(fixture.max_small_bytes, SKELETON_REAL_INPUT_MAX_BYTES);
+        assert!(!fixture.cases.is_empty());
+        for case in fixture.cases {
+            assert_eq!(
+                tool_input_string_bytes(&case.input),
+                case.expected_bytes,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                is_small_tool_input(&case.input),
+                case.expected_small,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    fn user_text(mid: &str, ordinal: u64) -> SelItem {
+        SelItem {
+            served_token_count: None,
+            id: format!("{mid}#0"),
+            ordinal,
+            message_role: SelMessageRole::NonAssistant,
+            kind: SelKind::Text,
+            provider_executed: false,
+            byte_size: 10,
+            token_count: None,
+            arc_id: None,
+        }
+    }
+
+    fn two_pass_kinds(items: &[SelItem], last_ordinal: u64) -> HashMap<String, String> {
+        let mut ctx = base_ctx(PassClass::Execute);
+        ctx.last_execute_ordinal = last_ordinal;
+        ctx.pass_already_busting = true;
+        select_reductions(items, &HashSet::new(), &ctx, &SelectionConfig::default())
+            .into_iter()
+            .map(|decision| (decision.target_id, decision.kind))
+            .collect()
+    }
+
+    #[test]
+    fn window_drop_keeps_real_arguments_at_1024_bytes_and_removes_at_1025() {
+        let items = vec![
+            tool_call(
+                "at",
+                1,
+                "bash",
+                serde_json::json!({ "content": "a".repeat(1024) }),
+                1100,
+            ),
+            tool_result("at", 1, "bash", 5000),
+            tool_call(
+                "over",
+                2,
+                "bash",
+                serde_json::json!({ "content": "a".repeat(1025) }),
+                1100,
+            ),
+            tool_result("over", 2, "bash", 5000),
+            user_text("next", 3),
+        ];
+        let kinds = two_pass_kinds(&items, 3);
+        assert_eq!(
+            kinds.get(&call_block_id("at")).map(String::as_str),
+            Some("skeleton_real")
+        );
+        assert_eq!(
+            kinds.get(&result_block_id("at")).map(String::as_str),
+            Some("drop")
+        );
+        assert_eq!(
+            kinds.get(&call_block_id("over")).map(String::as_str),
+            Some("drop")
+        );
+        assert_eq!(
+            kinds.get(&result_block_id("over")).map(String::as_str),
+            Some("drop")
+        );
+    }
+
+    #[test]
+    fn window_drop_keeps_the_call_whose_result_ends_the_request() {
+        let items = vec![
+            user_text("start", 1),
+            tool_call(
+                "end",
+                2,
+                "write",
+                serde_json::json!({ "content": "b".repeat(5000) }),
+                5100,
+            ),
+            tool_result("end", 2, "write", 5000),
+        ];
+        let kinds = two_pass_kinds(&items, 2);
+        assert_eq!(
+            kinds.get(&call_block_id("end")).map(String::as_str),
+            Some("skeleton_real"),
+            "a large input is kept, with real arguments, when its result ends the request"
+        );
+        assert_eq!(
+            kinds.get(&result_block_id("end")).map(String::as_str),
+            Some("drop")
+        );
+    }
+
+    #[test]
+    fn legacy_skeletons_convert_to_real_or_absent() {
+        let items = vec![
+            user_text("start", 1),
+            tool_call(
+                "small",
+                2,
+                "bash",
+                serde_json::json!({ "command": "ls -la" }),
+                20,
+            ),
+            tool_result("small", 2, "bash", 500),
+            tool_call(
+                "large",
+                3,
+                "write",
+                serde_json::json!({ "content": "c".repeat(2000) }),
+                2100,
+            ),
+            tool_result("large", 3, "write", 500),
+            tool_call(
+                "end",
+                4,
+                "write",
+                serde_json::json!({ "content": "d".repeat(2000) }),
+                2100,
+            ),
+            tool_result("end", 4, "write", 500),
+        ];
+        let legacy = ["small", "large", "end"]
+            .iter()
+            .map(|mid| call_block_id(mid))
+            .collect::<BTreeSet<_>>();
+        let frozen = legacy
+            .iter()
+            .cloned()
+            .chain(
+                ["small", "large", "end"]
+                    .iter()
+                    .map(|mid| result_block_id(mid)),
+            )
+            .collect::<HashSet<_>>();
+        let kinds = legacy_skeleton_conversions(&items, &legacy, &HashSet::new(), &frozen);
+        assert_eq!(
+            kinds.get(&call_block_id("small")).copied(),
+            Some("skeleton_real")
+        );
+        assert_eq!(kinds.get(&call_block_id("large")).copied(), Some("drop"));
+        assert_eq!(
+            kinds.get(&call_block_id("end")).copied(),
+            Some("skeleton_real"),
+            "the request-ending call keeps real arguments"
+        );
+    }
+
+    // Adversarial gate reproductions: request-end protection when the tool result
+    // lives in a separate tool-role message, and when every block of an OpenCode
+    // assistant message (text, call, result) carries the assistant role.
+    fn adv_item(
+        id: &str,
+        ordinal: u64,
+        role: SelMessageRole,
+        kind: SelKind,
+        arc: Option<&str>,
+    ) -> SelItem {
+        SelItem {
+            served_token_count: None,
+            id: id.to_string(),
+            ordinal,
+            message_role: role,
+            kind,
+            provider_executed: false,
+            byte_size: 5000,
+            token_count: None,
+            arc_id: arc.map(str::to_string),
+        }
+    }
+
+    fn adv_call(input: serde_json::Value) -> SelKind {
+        SelKind::ToolCall {
+            name: "write".to_string(),
+            input,
+        }
+    }
+
+    fn adv_result() -> SelKind {
+        SelKind::ToolResult {
+            tool_name: "write".to_string(),
+        }
+    }
+
+    /// assistant `a` = [text, call(large)], tool-role `t` = [result]; the request ends
+    /// on `t`. Removing the arc would leave assistant text as the request end.
+    fn adv_separate_tool_message_items() -> Vec<SelItem> {
+        let large = serde_json::json!({ "content": "z".repeat(5000) });
+        vec![
+            adv_item("u#0", 1, SelMessageRole::NonAssistant, SelKind::Text, None),
+            adv_item("a#0", 2, SelMessageRole::Assistant, SelKind::Text, None),
+            adv_item(
+                "a#1",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large),
+                Some("a#1"),
+            ),
+            adv_item(
+                "t#0",
+                3,
+                SelMessageRole::NonAssistant,
+                adv_result(),
+                Some("a#1"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn adv_request_end_in_separate_tool_role_message_keeps_real_arguments() {
+        let items = adv_separate_tool_message_items();
+        let kinds = two_pass_kinds(&items, 3);
+        eprintln!("ADV_RUST_SEPARATE_TOOL_MSG new-drop kinds={kinds:?}");
+        assert_eq!(kinds.get("a#1").map(String::as_str), Some("skeleton_real"));
+        assert_eq!(kinds.get("t#0").map(String::as_str), Some("drop"));
+
+        let legacy = BTreeSet::from(["a#1".to_string()]);
+        let frozen = HashSet::from(["a#1".to_string(), "t#0".to_string()]);
+        let converted = legacy_skeleton_conversions(&items, &legacy, &HashSet::new(), &frozen);
+        eprintln!("ADV_RUST_SEPARATE_TOOL_MSG legacy conversion={converted:?}");
+        assert_eq!(converted.get("a#1").copied(), Some("skeleton_real"));
+    }
+
+    #[test]
+    fn adv_request_end_parallel_results_in_two_tool_role_messages() {
+        // assistant a = [text, call1(large), call2(large)], t1 = [result1], t2 = [result2].
+        let large = || serde_json::json!({ "content": "z".repeat(5000) });
+        let items = vec![
+            adv_item("u#0", 1, SelMessageRole::NonAssistant, SelKind::Text, None),
+            adv_item("a#0", 2, SelMessageRole::Assistant, SelKind::Text, None),
+            adv_item(
+                "a#1",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large()),
+                Some("a#1"),
+            ),
+            adv_item(
+                "a#2",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large()),
+                Some("a#2"),
+            ),
+            adv_item(
+                "t1#0",
+                3,
+                SelMessageRole::NonAssistant,
+                adv_result(),
+                Some("a#1"),
+            ),
+            adv_item(
+                "t2#0",
+                4,
+                SelMessageRole::NonAssistant,
+                adv_result(),
+                Some("a#2"),
+            ),
+        ];
+        let kinds = two_pass_kinds(&items, 4);
+        eprintln!("ADV_RUST_PARALLEL_TOOL_MSGS kinds={kinds:?}");
+        // At least one result must survive at the request end.
+        let kept = ["a#1", "a#2"]
+            .iter()
+            .filter(|id| kinds.get(**id).map(String::as_str) == Some("skeleton_real"))
+            .count();
+        assert!(kept >= 1, "{kinds:?}");
+        assert_eq!(kinds.get("a#2").map(String::as_str), Some("skeleton_real"));
+    }
+
+    #[test]
+    fn adv_request_end_opencode_single_assistant_message_all_blocks_assistant_role() {
+        // The OpenCode projection: text, call and result blocks share one assistant
+        // message and the assistant role. Removing the arc strands the assistant text.
+        let large = serde_json::json!({ "content": "z".repeat(5000) });
+        let items = vec![
+            adv_item("u#0", 1, SelMessageRole::NonAssistant, SelKind::Text, None),
+            adv_item("a#0", 2, SelMessageRole::Assistant, SelKind::Text, None),
+            adv_item(
+                "a#1",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large),
+                Some("a#1"),
+            ),
+            adv_item(
+                "a#2",
+                2,
+                SelMessageRole::Assistant,
+                adv_result(),
+                Some("a#1"),
+            ),
+        ];
+        let kinds = two_pass_kinds(&items, 2);
+        eprintln!("ADV_RUST_OPENCODE_ASSISTANT_END kinds={kinds:?}");
+        assert_eq!(kinds.get("a#1").map(String::as_str), Some("skeleton_real"));
+    }
+
+    #[test]
+    fn adv_request_end_result_then_trailing_system_item() {
+        // A trailing system block must not be taken as the request end.
+        let large = serde_json::json!({ "content": "z".repeat(5000) });
+        let items = vec![
+            adv_item("u#0", 1, SelMessageRole::NonAssistant, SelKind::Text, None),
+            adv_item("a#0", 2, SelMessageRole::Assistant, SelKind::Text, None),
+            adv_item(
+                "a#1",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large),
+                Some("a#1"),
+            ),
+            adv_item(
+                "t#0",
+                3,
+                SelMessageRole::NonAssistant,
+                adv_result(),
+                Some("a#1"),
+            ),
+            adv_item("s#0", 4, SelMessageRole::System, SelKind::Text, None),
+        ];
+        let kinds = two_pass_kinds(&items, 4);
+        eprintln!("ADV_RUST_TRAILING_SYSTEM kinds={kinds:?}");
+        assert_eq!(kinds.get("a#1").map(String::as_str), Some("skeleton_real"));
+    }
     #[test]
     fn drop_wins_over_edit_marker() {
         // c1 is an older edit to a.ts (edit_marker candidate) AND under the two-pass
@@ -3416,9 +3971,9 @@ mod tests {
             .map(|d| d.kind.clone());
         // Drop wins: the arc is on the DROP path (skeleton in-window, or full-drop
         // older), NEVER edit_marker. With only 2 arcs c1 is in the skeleton window, so
-        // the winning drop shapes to "skeleton" — a drop variant, not an edit_marker.
+        // the winning drop shapes to "skeleton_real" — a drop variant, not an edit_marker.
         assert!(
-            matches!(c1_call.as_deref(), Some("drop") | Some("skeleton")),
+            matches!(c1_call.as_deref(), Some("drop") | Some("skeleton_real")),
             "drop beats edit_marker for c1 (got {c1_call:?})"
         );
         assert_ne!(
@@ -3918,7 +4473,7 @@ mod tests {
             out.iter()
                 .find(|decision| decision.target_id == "left#2")
                 .map(|decision| decision.kind.as_str()),
-            Some("skeleton"),
+            Some("skeleton_real"),
             "the dedup full drop must take the same reasoning-adjacency safety demotion: {out:?}"
         );
         assert_eq!(

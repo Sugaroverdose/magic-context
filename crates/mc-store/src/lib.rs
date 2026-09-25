@@ -7523,7 +7523,11 @@ fn seeded_drop_unit(
     let (kind, frozen_payload) = if related || drop_mode == "full" {
         ("drop", "[dropped]".to_string())
     } else if drop_mode == "truncated" || drop_mode == "skeleton" {
+        // Legacy marker skeleton; the module converts it on its next HARD fold.
         ("skeleton", "[dropped]".to_string())
+    } else if drop_mode == "skeleton_real" {
+        // The call keeps its real arguments; only its paired results are reduced.
+        ("skeleton_real", "[dropped]".to_string())
     } else if drop_mode == "edit_marker" {
         ("edit_marker", payload.unwrap_or("[dropped]").to_string())
     } else {
