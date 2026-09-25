@@ -2766,7 +2766,8 @@ fn load_broca_cache_events_from_conn(
                     MAX(json_extract(segment_json, '$.model')) AS model,
                     MAX(json_extract(segment_json, '$.usage.cached_input_tokens') IS NOT NULL
                         OR json_extract(segment_json, '$.usage.cache_write_tokens') IS NOT NULL) AS cache_reported,
-                    MAX(json_extract(segment_json, '$.usage.cache_write_tokens') IS NOT NULL) AS write_reported
+                    MAX(json_extract(segment_json, '$.usage.cache_write_tokens') IS NOT NULL) AS write_reported,
+                    MAX(json_extract(segment_json, '$.terminal_reason')) AS terminal_reason
              FROM export_facts
              WHERE json_extract(segment_json, '$.session') = ?1
              GROUP BY run_id HAVING activity IS NOT NULL
@@ -2775,7 +2776,7 @@ fn load_broca_cache_events_from_conn(
              SELECT *, ROW_NUMBER() OVER (ORDER BY activity, run_id) AS ordinal FROM runs
          )
          SELECT run_id, activity, input, read, write, output, provider, model,
-                cache_reported, write_reported, ordinal
+                cache_reported, write_reported, ordinal, terminal_reason
          FROM ranked
          WHERE ?3 IS NULL OR activity >= ?3
          ORDER BY activity DESC, run_id DESC LIMIT ?2",
@@ -2810,7 +2811,10 @@ fn load_broca_cache_events_from_conn(
                     .get::<_, Option<String>>(6)?
                     .zip(row.get::<_, Option<String>>(7)?)
                     .map(|(provider, model)| format!("{provider}/{model}")),
-                finish: None,
+                // Only a run's final segment carries its terminal reason
+                // (completed, error, cancelled, ...), so an errored run is
+                // labelled as such rather than looking like a normal one.
+                finish: row.get::<_, Option<String>>(11)?,
                 native_turn_id: Some(run_id),
                 context_limit: None,
                 cache_reported: row.get::<_, i64>(8)? != 0,
@@ -11026,6 +11030,36 @@ mod broca_cache_tests {
         assert_eq!(events[0].cache_write, 12_000);
         assert!(!events[1].cache_write_reported);
         assert_eq!(events[1].cache_write, 0);
+    }
+
+    #[test]
+    fn errored_run_fact_is_listed_with_its_terminal_reason() {
+        // Shaped like the live alfonso:bg_711008a6a7a365d1 fact: one
+        // segment, terminal_reason "error", full usage recorded.
+        let conn = store();
+        let id = identity("alfonso:bg_errored");
+        let segment = serde_json::json!({
+            "run_id": "r1", "session": id, "provider": "anthropic", "model": "claude",
+            "occurred_at_ms": 1_000, "terminal_reason": "error",
+            "usage": {"input_tokens": 208, "cached_input_tokens": 17_508_236,
+                      "cache_write_tokens": 446_973, "output_tokens": 43_166},
+        });
+        conn.execute(
+            "INSERT INTO export_facts (fact_id, run_id, segment_json) VALUES ('f1', 'r1', ?1)",
+            params![segment.to_string()],
+        )
+        .unwrap();
+        let sessions = load_broca_cache_sessions_from_conn(&conn, 10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title.as_deref(), Some("alfonso:bg_errored"));
+        let events = build_db_cache_events(
+            load_broca_cache_events_from_conn(&conn, &sessions[0].session_id, None, None).unwrap(),
+            false,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].finish.as_deref(), Some("error"));
+        assert_eq!(events[0].severity, "aggregate");
+        assert!(events[0].cold_start);
     }
 
     #[test]

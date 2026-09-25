@@ -189,6 +189,8 @@ describe("cache row labels", () => {
     expect(cacheEventLabel(run)).toBe("RUN TOTAL");
     expect(cacheEventColorClass(run)).toBe("gray");
     expect(cacheEventLabel({ ...run, cold_start: true })).toBe("COLD START · RUN TOTAL");
+    expect(cacheEventLabel({ ...run, finish: "completed" })).toBe("RUN TOTAL");
+    expect(cacheEventLabel({ ...run, finish: "error" })).toBe("RUN TOTAL · ERROR");
   });
 
   it("keeps real busts red", () => {

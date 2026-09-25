@@ -49,7 +49,7 @@ export function severityColorClass(severity: string): string {
   }
 }
 
-type CacheLabelFields = Pick<DbCacheEvent, "severity" | "cold_start" | "aggregate">;
+type CacheLabelFields = Pick<DbCacheEvent, "severity" | "cold_start" | "aggregate" | "finish">;
 
 /**
  * Pill text for one cache row. A session's first row is a cold start: its
@@ -58,7 +58,15 @@ type CacheLabelFields = Pick<DbCacheEvent, "severity" | "cold_start" | "aggregat
  * no health verdict, so it is labelled as a total rather than STABLE/BUST.
  */
 export function cacheEventLabel(event: CacheLabelFields): string {
-  if (event.aggregate) return event.cold_start ? "COLD START · RUN TOTAL" : "RUN TOTAL";
+  if (event.aggregate) {
+    const base = event.cold_start ? "COLD START · RUN TOTAL" : "RUN TOTAL";
+    // A run that ended any way other than normally (error, cancelled, max
+    // steps, ...) still billed its requests; name the ending so it is not
+    // mistaken for a completed run.
+    return event.finish && event.finish !== "completed"
+      ? `${base} · ${event.finish.toUpperCase()}`
+      : base;
+  }
   if (event.cold_start || event.severity === "info") return "COLD START";
   if (event.severity === "full_bust") return "FULL BUST";
   if (event.severity === "unknown") return "NO CACHE DATA";
