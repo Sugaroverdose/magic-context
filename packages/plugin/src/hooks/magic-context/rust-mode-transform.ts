@@ -1747,6 +1747,10 @@ export function createRustModeTransform(
     getHeapStats: () => RustWireCacheHeapStats;
 } {
     const states = new Map<string, RustSessionState>();
+    // The model this pass resolves when the messages carry none. OpenCode 1 reads it
+    // back out of the host's own database; hosts that keep no such database supply
+    // the draft's model through this seam instead.
+    const hostModelFallback = deps.hostModelFallback ?? findLastAssistantModelFromOpenCodeDb;
     const heapHolder = new MagicContextRustHeapHolder();
     const promptSurfaceGuidanceEpochs = deps.promptSurfaceRuntime
         ? createPromptSurfaceGuidanceEpochCache(deps.promptSurfaceRuntime)
@@ -2049,7 +2053,7 @@ export function createRustModeTransform(
         const replayModel =
             modelFromMessages(currentMessages) ??
             deps.liveModelBySession?.get(sessionId) ??
-            findLastAssistantModelFromOpenCodeDb(sessionId);
+            hostModelFallback(sessionId);
         replayRustModeBindingMismatchStrips({
             db: deps.db,
             sessionId,
@@ -2270,7 +2274,7 @@ export function createRustModeTransform(
         let model = modelFromMessages(messages) ?? deps.liveModelBySession?.get(sessionId);
         if (!model) {
             try {
-                model = findLastAssistantModelFromOpenCodeDb(sessionId) ?? undefined;
+                model = hostModelFallback(sessionId) ?? undefined;
             } catch (error) {
                 preflightError = error;
             }
@@ -3586,6 +3590,7 @@ export function createRustModeTransform(
                         projectPath: memoryProjectPath,
                         sessionDirectory: directory,
                         materializedBoundary,
+                        compactionMarkerStrategy: deps.compactionMarkerStrategy,
                         fullFeatureMode: !sessionMeta.isSubagent,
                         compactionOff: deps.compactionOff,
                         resolvedProviderID: model?.providerID,

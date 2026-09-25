@@ -149,6 +149,31 @@ export function servedBoundaryRow(
     }
 }
 
+/**
+ * The nearest user turn at or before `endMessageID`, read backward from the
+ * store a page at a time instead of from the whole session. Same rule as
+ * `resolveBoundaryUserMessage` over the full projection: an end id that is not
+ * a conversational row yields null, and so does an end with no user turn before
+ * it.
+ */
+export function resolveV2BoundaryUserMessage(
+    reader: Pick<V2StoreReader, "messageById" | "rawRowsThrough">,
+    sessionID: string,
+    endMessageID: string,
+): RawMessage | null {
+    const end = reader.messageById(sessionID, endMessageID);
+    if (!end || !isRawRow(end)) return null;
+    let through = end.seq;
+    for (;;) {
+        const rows = reader.rawRowsThrough(sessionID, through, SERVED_BOUNDARY_PAGE);
+        const user = rows.find((row) => row.type !== "assistant");
+        if (user) return rawMessagePage([user], 0)[0] ?? null;
+        const oldest = rows.at(-1);
+        if (rows.length < SERVED_BOUNDARY_PAGE || !oldest) return null;
+        through = oldest.seq - 1;
+    }
+}
+
 /** The only V2 full-history reader: store-generation conversion must inspect every part. */
 export function readAllV2RawMessagesForConversion(
     openReader: () => V2StoreReader,

@@ -140,7 +140,7 @@ npx @cortexkit/magic-context@latest doctor list-hidden-sessions
 
 - **Command output** from the `/ctx-*` commands appears only in a connected terminal UI. The commands themselves run from any client.
 - **The sidebar is hidden by default.** Toggle it with `ctrl+x b`.
-- **`transform_mode: "rust"` is not available.** Magic Context runs the TypeScript transform instead, logs one warning, and shows `MC-S06` in `/ctx-status`.
+- **`transform_mode: "rust"` runs the Rust module here too.** OpenCode 2 has no compaction row for Magic Context to write, so the module's fold boundary is recorded in Magic Context's own store and the host's compaction request is answered from the module's history.
 
 ## Where logs live
 

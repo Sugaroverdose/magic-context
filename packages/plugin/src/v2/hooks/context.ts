@@ -24,6 +24,7 @@ import {
     recordOverflowDetected,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
 import { rebaseSessionCoordinates } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
 import {
@@ -48,16 +49,17 @@ import {
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
+import { createModuleToolBackends } from "../../hooks/magic-context/module-tool-backends";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
 import { setBoundedRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
+import { servedModuleM0Text } from "../../hooks/magic-context/rust-served-m0";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
 import { detectConflicts } from "../../shared/conflict-detector";
 import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
 import { getErrorMessage } from "../../shared/error-message";
-import { declareHostLimitation } from "../../shared/host-limitations";
 import { sessionLog } from "../../shared/logger";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import {
@@ -76,6 +78,7 @@ import { pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
 import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-descriptions";
+import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
 import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/host-media";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
@@ -94,10 +97,12 @@ import { adaptPayload, HEAD_IDS } from "./payload";
 import { refusesBeforeProvider } from "./provider-admission";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
+import { createV2RustRefusalRecovery, resolveV2RustModeModuleClient } from "./rust-mode";
 import {
     createV2RawMessageProvider,
     createV2RawMessageReader,
     readAllV2RawMessagesForConversion,
+    resolveV2BoundaryUserMessage,
     servedBoundaryRow,
 } from "./store";
 import { registerTools } from "./tools";
@@ -292,27 +297,6 @@ export function applyV2PromptSurfaceTools(
 }
 
 /**
- * Experimental Rust mode is a v1-only route: the Rust transform reaches the module over a subc
- * transport that only the v1 server lane constructs, and nothing on this lane builds or owns one.
- * Rather than accepting the setting and quietly running something else, downgrade it here, once,
- * where every later reader of the config sees the mode that is actually running — including the
- * RPC status and sidebar handlers, which otherwise ask a Rust module that does not exist for the
- * session state and answer every status request with an error.
- *
- * The downgrade is announced twice on purpose: once in the log for whoever is reading it, and as a
- * named limitation that /ctx-status and the sidebar keep showing for as long as the process runs.
- */
-export function resolveV2TransformMode<T extends { transform_mode?: "ts" | "rust" }>(config: T): T {
-    if (config.transform_mode !== "rust") return config;
-    if (declareHostLimitation("rust_mode_unsupported")) {
-        console.warn(
-            `[magic-context] ${renderUserFacingFailure("rust_mode_unsupported", "plain")}`,
-        );
-    }
-    return { ...config, transform_mode: "ts" };
-}
-
-/**
  * Measure the tool definitions this request is actually going to send.
  *
  * OpenCode 1 measures the same thing through its `tool.definition` hook; OpenCode 2 has no such
@@ -344,7 +328,7 @@ export function recordV2ToolDefinitions(draft: SessionContext): void {
 
 export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
-    const config = resolveV2TransformMode(loadPluginConfigDetailed(directory).config);
+    const config = loadPluginConfigDetailed(directory).config;
     if (!config.enabled) return;
     const liveConfigReader = pluginConfigReader(directory, config);
     const compactionOff = !isCompactionEnabled(config);
@@ -377,8 +361,27 @@ export async function registerContext(context: V2Context) {
         // The primary context hook retains the existing fail-closed storage path.
         // Hidden work remains unavailable for this plugin instance when durable storage cannot open.
     }
+    // Rust mode reaches the `ck-mc` module over the same subc client the OpenCode 1
+    // lane builds. Building it is inert until a pass actually calls the module, so
+    // it is safe to hold one here for the whole process. It is resolved before the
+    // tools are registered because the tool facades are part of the same wiring:
+    // registering `ctx_note`/`ctx_memory` without them would let an agent's write
+    // land in the host read model alone, where the module never sees it.
+    const rustModeModuleClient = resolveV2RustModeModuleClient(config, directory);
+    const rustMemorySyncRequestedSessions = new Set<string>();
+    const moduleToolBackends =
+        db && isDatabasePersisted(db)
+            ? createModuleToolBackends({
+                  db,
+                  moduleClient: rustModeModuleClient,
+                  directory,
+                  memorySyncRequestedSessions: rustMemorySyncRequestedSessions,
+              })
+            : undefined;
     const tools =
-        db && isDatabasePersisted(db) ? await registerTools(context, db, config) : undefined;
+        db && isDatabasePersisted(db)
+            ? await registerTools(context, db, config, moduleToolBackends?.backends)
+            : undefined;
     const usage: TransformDeps["contextUsageMap"] = new Map();
     await context.session.hook("http.response", async (draft) => {
         if (!db || draft.kind !== "primary" || draft.response.ok) return;
@@ -550,6 +553,25 @@ export async function registerContext(context: V2Context) {
     const pagedRead = createV2RawMessageReader(openStoreReader);
     const readAllForConversion = (sessionID: string) =>
         readAllV2RawMessagesForConversion(openStoreReader, sessionID);
+    // Refusal recovery only needs to know whether a user turn followed the refused
+    // one, so it reads the rows from that message onward, never the whole session.
+    const readRowsFrom = (sessionID: string, messageID: string) => {
+        const reader = openStoreReader();
+        try {
+            const seq = reader.sequenceForId(sessionID, messageID);
+            if (seq === undefined) return [];
+            return reader.range(sessionID, seq - 1, reader.latestSequence(sessionID));
+        } finally {
+            reader.close();
+        }
+    };
+    const rustRefusalRecovery = rustModeModuleClient
+        ? createV2RustRefusalRecovery({
+              context,
+              moduleClient: rustModeModuleClient,
+              readRowsFrom,
+          })
+        : undefined;
     let transform: ReturnType<typeof createTransform> | undefined;
     let systemPrompt: ReturnType<typeof createSystemPromptHashHandler> | undefined;
     const systemPromptRefreshSessions = new Set<string>();
@@ -753,12 +775,44 @@ export async function registerContext(context: V2Context) {
                     draft.messages.flatMap((message) => (message.id ? [message.id] : [])),
                 );
                 const running = reader.latestRunningCompaction(draft.sessionID);
+                // In Rust mode the module composes m[0] and the host renders none, so the
+                // checkpoint has to be the module's own baseline. Composing a TypeScript one
+                // here would give the session two different histories: the one the host
+                // stores in its checkpoint and the one the module keeps serving.
+                const moduleBaseline = rustModeModuleClient
+                    ? servedModuleM0Text(draft.sessionID)
+                    : undefined;
+                // This hook ALWAYS answers, and leaving `result` unset is not an option.
+                // On GA 2.0.5 an unanswered request is not a polite decline: the host
+                // summarizes with its own model and, when that answer is not in the
+                // template it requires, records a `compaction.failed` row and ends the
+                // turn with idle outcome=failed. Measured on the real host, a session
+                // whose hook declined produced a failed compaction and no provider
+                // request at all on every turn after the first. When the module has
+                // served nothing yet there is no module baseline to answer with, so the
+                // TypeScript one is supplied instead: still Magic Context's own account
+                // of the session, rather than a host-composed summary of history the
+                // module never served, or a dead turn.
+                const source = !rustModeModuleClient
+                    ? "typescript"
+                    : moduleBaseline === null
+                      ? "typescript_fallback"
+                      : "module";
                 const fold = await folds.supply({
                     sessionID: draft.sessionID,
                     watermark,
                     runningCut: running?.seq,
-                    materialize: () => materialize(draft),
+                    // Kept lazy for the TypeScript lane: materializing writes cache state and
+                    // must only happen when the fold identity is actually new.
+                    materialize: () => moduleBaseline ?? materialize(draft),
                 });
+                // One line per request with the baseline it was answered from. The
+                // host's rate and ours are separate facts, and only reading both
+                // explains a session's checkpoint cadence.
+                sessionLog(
+                    draft.sessionID,
+                    `v2 compaction hook: fired answered=true source=${source}`,
+                );
                 draft.result = { summary: fold.submitted };
             } catch (cause) {
                 await refuseBeforeProvider(
@@ -946,7 +1000,44 @@ export async function registerContext(context: V2Context) {
                 // its own default, so no fallback belongs here.
                 historianMaxOutputTokens: config.historian?.maxTokens,
                 historianTwoPass: config.historian?.two_pass,
-                compactionMarkerStrategy: v2CompactionMarkerStrategy,
+                // TypeScript mode folds on the host's own compaction rows, so its marker
+                // carrier stays inert. Rust mode has no such row to write: the module's
+                // materialized boundary is recorded in the marker columns instead, and
+                // the compaction hook above answers the host from it.
+                compactionMarkerStrategy: rustModeModuleClient
+                    ? createV2RustCompactionMarkerStrategy((sessionID, endMessageID) => {
+                          const reader = openStoreReader();
+                          try {
+                              return resolveV2BoundaryUserMessage(reader, sessionID, endMessageID);
+                          } finally {
+                              reader.close();
+                          }
+                      })
+                    : v2CompactionMarkerStrategy,
+                transformMode: config.transform_mode,
+                rustModeModuleClient,
+                rustModeProjectRoot: directory,
+                rustMemorySyncRequestedSessions,
+                // OpenCode 1 puts this on the host's toast surface through its SDK
+                // client. This host exposes no such client to a plugin, so it goes
+                // out on the notification socket the TUI already reads — the same
+                // carrier a finished dream reports on. Without it a parked module
+                // is invisible: the session keeps answering from the last good
+                // output and nothing says why it stopped moving.
+                onRustModeParked: (sessionId, message) =>
+                    pushNotification(
+                        "toast",
+                        { message: `Rust Magic Context paused: ${message}`, variant: "warning" },
+                        sessionId,
+                    ),
+                // A session can resolve a project other than the launch directory,
+                // so the note-evaluation bridge is ensured per prepared project
+                // rather than once at setup.
+                onRustModeProjectPrepared: (projectPath) =>
+                    moduleToolBackends?.ensureNoteEvaluationBridge(projectPath),
+                promptSurface: config.prompt_surface,
+                promptSurfaceRuntime,
+                onRustEngineReconnectRefusal: (refusal) => rustRefusalRecovery?.arm(refusal),
                 memoryConfig: {
                     enabled: config.memory.enabled,
                     injectionBudgetTokens: config.memory.injection_budget_tokens,
@@ -988,6 +1079,17 @@ export async function registerContext(context: V2Context) {
                     submitted = identity.rendered
                         ? (identity.renderedSummary ?? identity.submitted)
                         : (cut.data.summary ?? "");
+                    // Rust mode restores against the boundary the module itself published and
+                    // keeps that boundary row, because the array handed to the module has to
+                    // begin there — exactly where an OpenCode 1 compaction row would have made
+                    // the host begin it. TypeScript mode restores after its own m0 baseline.
+                    const moduleBoundaryID = rustModeModuleClient
+                        ? (getPersistedCompactionMarkerState(db, draft.sessionID)
+                              ?.boundaryMessageId ?? null)
+                        : null;
+                    const moduleBoundarySeq = moduleBoundaryID
+                        ? reader.sequenceForId(draft.sessionID, moduleBoundaryID)
+                        : undefined;
                     const boundaryID = (
                         db
                             .prepare(
@@ -1008,6 +1110,7 @@ export async function registerContext(context: V2Context) {
                         ? servedBoundaryRow(reader, draft.sessionID, boundaryID)
                         : null;
                     const boundary =
+                        (moduleBoundarySeq !== undefined ? moduleBoundarySeq - 1 : undefined) ??
                         servedBoundary?.seq ??
                         reader.sequenceForId(draft.sessionID, boundaryID) ??
                         (reader.earliestSequence(draft.sessionID) ?? 0) - 1;
@@ -1040,6 +1143,19 @@ export async function registerContext(context: V2Context) {
                 }
             } finally {
                 reader.close();
+            }
+            // On a turn the host did not compact, the array still starts at the top
+            // of the conversation, and the module would be handed the whole history
+            // again — the cost the fold exists to remove. On a turn it did compact,
+            // the boundary message is already gone from the array and this is a
+            // no-op. Both happen in an ordinary session.
+            if (rustModeModuleClient && db) {
+                const dropped = trimToRecordedBoundary(db, draft.sessionID, draft.messages);
+                if (dropped > 0)
+                    sessionLog(
+                        draft.sessionID,
+                        `v2 boundary trim: dropped ${dropped} messages before the module boundary`,
+                    );
             }
             const mapped = adaptPayload(draft, admitted);
             await transform({}, mapped);
@@ -1135,7 +1251,7 @@ export async function registerContext(context: V2Context) {
         config,
         client: undefined,
         liveSessionState: rpcLiveSessionState,
-        rustModeModuleClient: undefined,
+        rustModeModuleClient,
         hiddenCompletionExecutor,
         storageDir,
     });

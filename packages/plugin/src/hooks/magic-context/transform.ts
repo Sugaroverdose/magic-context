@@ -55,7 +55,10 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-project-state";
 import type { CoordinateGeneration } from "../../features/magic-context/store-generation-rebase";
-import { rebaseSessionCoordinates } from "../../features/magic-context/store-generation-rebase";
+import {
+    readCoordinateGeneration,
+    rebaseSessionCoordinates,
+} from "../../features/magic-context/store-generation-rebase";
 import type { Tagger } from "../../features/magic-context/tagger";
 import {
     clearOpenCodePendingTransformDecision,
@@ -157,6 +160,7 @@ import {
 import {
     abortSessionFailClosed,
     type CompactionMarkerStrategy,
+    clearRustModeBoundaryRecord,
     defaultCompactionMarkerStrategy,
     evaluateEmergencyFailClosed,
     runPostTransformPhase,
@@ -901,6 +905,24 @@ export function createTransform(deps: TransformDeps) {
         // generation stamp is only written on success, so the next pass retries.
         if (deps.storeGeneration !== undefined) {
             try {
+                // The module keeps its own copy of this conversation, keyed on the
+                // numbering the previous host served. Nothing re-derives that copy,
+                // so it is deleted before the host rows are renumbered and re-seeded
+                // cold from the rebased rows on this same pass. Doing it first is
+                // what makes a failure recoverable: the generation stamp is written
+                // by the rebase below, so throwing here leaves the session on its old
+                // generation and the next pass tries the whole sequence again.
+                if (
+                    rustModeTransform &&
+                    readCoordinateGeneration(db, sessionId) !== deps.storeGeneration
+                ) {
+                    clearRustModeBoundaryRecord(db, sessionId);
+                    await rustModeTransform.clearSession(sessionId);
+                    sessionLog(
+                        sessionId,
+                        `rust module session deleted before the store projection rebase to ${deps.storeGeneration}; the next serve seeds cold`,
+                    );
+                }
                 rebaseSessionCoordinates({
                     db,
                     sessionId,

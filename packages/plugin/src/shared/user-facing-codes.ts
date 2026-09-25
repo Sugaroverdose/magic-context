@@ -209,11 +209,6 @@ export const USER_FACING_FAILURES = {
         sentence: "Memory authority is inconsistent between the host and module.",
         action: "Run `ck doctor drain-authority` before changing Rust mode.",
     },
-    rust_mode_unsupported: {
-        code: "MC-S06",
-        sentence: "Experimental Rust transform mode is not available on this OpenCode host.",
-        action: 'Magic Context is running its TypeScript mode instead; set `transform_mode` to "ts" to stop requesting Rust.',
-    },
     dreamer_task_failing: {
         code: "MC-S05",
         sentence: "A background maintenance task keeps failing on its schedule.",

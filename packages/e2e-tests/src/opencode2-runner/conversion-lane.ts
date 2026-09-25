@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, statSync, writeFileSy
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { pinMockAgents } from "../mock-routing";
-import type { MockProvider } from "../mock-provider/server";
+import type { MockProvider, MockResponse } from "../mock-provider/server";
 import { waitForReady } from "../opencode-runner/spawn";
 import { prepareContextDatabase } from "../prepare-context-db";
 import { isolateStoreDirectories } from "./store-directories";
@@ -406,6 +406,70 @@ export async function spawnOpencode1(
 		await stop().catch(() => undefined);
 		throw error;
 	}
+}
+
+/** One ordinary prompt on whichever host generation the caller holds. */
+export interface PromptDriver {
+	(text: string, extraParts?: Array<Record<string, unknown>>): Promise<void>;
+}
+
+export interface DriveHistorianOptions {
+	/** Sends one prompt and does not resolve until that turn is finished. */
+	prompt: PromptDriver;
+	/** The shared mock provider, so the pressure answer can be armed and disarmed. */
+	mock: MockProvider;
+	/** The answer that carries enough reported usage to reach the force band. */
+	pressure: MockResponse;
+	/** The answer restored afterwards, so later phases are not still under pressure. */
+	quiet: MockResponse;
+	/** Named in the failure message when the rounds run out. */
+	label: string;
+	/** Read after every round; true ends the loop. */
+	satisfied: () => boolean;
+	rounds?: number;
+	/** How long each round waits for the background publication to land. */
+	settleMs?: number;
+	/** Text of round `round` (zero-based), for a fixture that needs real prose mass. */
+	text?: (round: number) => string;
+}
+
+/**
+ * Drive pressure turns until the historian has published what the caller needs.
+ *
+ * Pressure is what makes the historian run at all, and it is also what lets it
+ * run more than once inside its ten-minute drain window: at the force band the
+ * drain budget is deliberately bypassed. Each round is one ordinary turn, so
+ * nothing is reached into — the loop just keeps asking until the durable state
+ * the caller depends on exists.
+ *
+ * The settle wait after each prompt is the part that matters on OpenCode 2: the
+ * publication lands in the background after the turn's response, so a loop that
+ * fires prompts back to back finishes its rounds before the first one has
+ * produced anything.
+ *
+ * Returns the number of rounds driven.
+ */
+export async function driveHistorian(options: DriveHistorianOptions): Promise<number> {
+	const rounds = options.rounds ?? 12;
+	const settleMs = options.settleMs ?? 4_000;
+	const text = options.text ?? ((round: number) => `pressure round ${round}: keep the historian draining.`);
+	options.mock.setDefault(options.pressure);
+	let driven = 0;
+	try {
+		for (let round = 0; round < rounds; round += 1) {
+			await options.prompt(text(round));
+			driven += 1;
+			const deadline = Date.now() + settleMs;
+			while (Date.now() < deadline) {
+				if (options.satisfied()) return driven;
+				await Bun.sleep(200);
+			}
+		}
+	} finally {
+		options.mock.setDefault(options.quiet);
+	}
+	if (!options.satisfied()) throw new Error(`the historian never produced ${options.label}`);
+	return driven;
 }
 
 /** Fail a fixture build loudly rather than silently proving nothing about an unconverted store. */

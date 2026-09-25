@@ -16,20 +16,31 @@ async function eventually<T>(read: () => T | undefined, timeoutMs = 20_000): Pro
 }
 
 /**
- * Issue 492 finding 6: `transform_mode: "rust"` has no wiring on OpenCode 2 — the subc transport
- * the Rust transform needs is built only by the v1 server lane. It used to be accepted and
- * silently ignored, which also broke every status read (the RPC handlers asked a Rust module that
- * was never constructed for the session state). The ruling for this task is to keep running
- * TypeScript mode, but loudly: one warning line, and a named limitation on every status surface.
+ * Issue 492 finding 6 used to be a declared limitation: `transform_mode: "rust"` had no wiring on
+ * OpenCode 2, so the adapter downgraded it to TypeScript and named `MC-S06` on every status
+ * surface for the life of the process. OpenCode 2 now builds the same subc module client the
+ * OpenCode 1 lane builds, so the setting is honoured and the limitation is retired.
+ *
+ * What this test pins is the retirement, with the module deliberately unreachable: the mode is not
+ * downgraded, `MC-S06` is never printed, and neither status surface names a limitation this host no
+ * longer has. The surfaces instead report that the module could not be read, which is what OpenCode
+ * 1 already does in the same situation — `loadRustSessionStatus` and the guard that turns a missing
+ * read into that message are shared by both lanes, and the module is the authority for canonical
+ * session state. Answering with host-side numbers would state a session state that contradicts the
+ * bytes actually being served.
+ *
+ * That the module DOES serve the transform when one is running is proven against a live module by
+ * `rust-mode-module-served.test.ts`.
  */
-test("v2 runs TypeScript mode and names the limitation when Rust mode is configured", async () => {
+test("v2 accepts Rust mode without naming a host limitation", async () => {
     const host = await spawnOpencode2({
         magicContextConfig: {
             transform_mode: "rust",
             // `resolveTransformMode` downgrades Rust to TypeScript before the adapter ever sees it
             // unless user-tier subc routing is configured, and the fixture config file IS the user
-            // tier. Without this the config loader answers the question and finding 6's path is
-            // never reached.
+            // tier. Without this the config loader answers the question and the adapter's own
+            // handling of Rust mode is never exercised. The file is deliberately absent: what this
+            // test checks is the status surfaces, not a live module.
             subc: { connection_file: "/tmp/mc-e2e-subc-that-is-never-dialled.json" },
             memory: { enabled: false },
             historian: { disable: true },
@@ -83,23 +94,28 @@ test("v2 runs TypeScript mode and names the limitation when Rust mode is configu
             return (await response.json()) as Record<string, unknown>;
         };
 
-        // Before this fix the Rust branch answered every status read with
-        // "Rust module status unavailable", because no module client exists on this lane.
+        // Rust mode is running, so the module owns canonical session state. With no
+        // module reachable, both surfaces say exactly that rather than inventing one.
+        // Reaching this branch at all is itself the proof that the configured mode
+        // survived setup: a downgraded session takes the TypeScript branch, which
+        // never consults a module and never produces this message.
         const snapshot = await rpc("sidebar-snapshot");
-        expect(snapshot.error).toBeUndefined();
-        expect(snapshot.hostLimitations).toEqual(["rust_mode_unsupported"]);
-        expect(snapshot.inputTokens).toBeGreaterThan(0);
+        expect(snapshot.error).toBe(
+            "Rust module status unavailable; canonical session state was not read",
+        );
+        expect(JSON.stringify(snapshot)).not.toContain("rust_mode_unsupported");
 
         const detail = await rpc("status-detail");
-        expect(detail.error).toBeUndefined();
-        expect(detail.hostLimitations).toEqual(["rust_mode_unsupported"]);
+        expect(detail.error).toBe(
+            "Rust module status unavailable; canonical session state was not read",
+        );
+        expect(JSON.stringify(detail)).not.toContain("rust_mode_unsupported");
 
-        // Exactly one warning line for the whole process, carrying the user-facing code.
+        // The retired code must not be printed at all: it no longer describes this host.
         const logged = `${host.stdout()}\n${host.stderr()}`
             .split("\n")
             .filter((line) => line.includes("MC-S06"));
-        expect(logged).toHaveLength(1);
-        expect(logged[0]).toContain("Rust transform mode is not available");
+        expect(logged).toEqual([]);
     } catch (error) {
         console.error(host.stdout(), host.stderr());
         throw error;
