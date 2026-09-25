@@ -224,11 +224,15 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                 id: message.id,
                 sessionID: draft.sessionID,
                 role: message.role,
+                // No `tools`: on this host `draft.tools` is the full definition of every
+                // tool, not the per-message on/off map an OpenCode 1 message carries, so
+                // no reader of `info.tools` can learn anything from it. Copied onto each
+                // message it was tens of kilobytes per message, which made a
+                // 10,000-message session a 200 MB module request that never answered.
                 ...{
                     providerID: draft.model.providerID,
                     modelID: draft.model.id,
                     agent: draft.agent,
-                    tools: draft.tools,
                 },
             },
             parts,

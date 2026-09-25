@@ -1920,7 +1920,7 @@
                 "ts": false,
                 "rust": false
             },
-            "rationale": "Adversarial gate reproduction, run on demand: a Rust-mode fold on the GA host across a host restart, over a 10,000-row session by default (GATE_SEEDED_ROWS=0 runs the unseeded fold/restart/fold), with the v2 reader's decode counters and lsof on the module",
+            "rationale": "Adversarial gate reproduction, run on demand: a Rust-mode fold on the GA host across a host restart, over a 10,000-row session by default (GATE_SEEDED_ROWS=0 runs the unseeded fold/restart/fold; GATE_SEED_SHAPE=arcs seeds cloned user/tool/assistant turns instead of one-line user rows), with the v2 reader's decode counters and lsof on the module",
             "contract_refs": [
                 "OC2-S1",
                 "RUST-E2E"

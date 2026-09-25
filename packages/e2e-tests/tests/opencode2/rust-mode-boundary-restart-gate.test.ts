@@ -38,6 +38,13 @@ import {
 
 const prereqs = detectRustModePrereqs();
 const SEEDED_ROWS = Number(process.env.GATE_SEEDED_ROWS ?? 10_000);
+/**
+ * `user` (the default) seeds one-line user rows. `arcs` seeds realistic turns cloned
+ * from a real one the host recorded: a user prompt, an assistant step that called the
+ * read tool and got its output back, and the assistant's closing text.
+ */
+const SEED_SHAPE = (process.env.GATE_SEED_SHAPE ?? "user") as "user" | "arcs";
+const ARC_TEMPLATE_PROMPT = "tool arc template: read the notes file";
 
 function field(body: string, name: string): string {
 	return new RegExp(`\\b${name}=([^\\s]+)`).exec(body)?.[1] ?? "";
@@ -58,6 +65,24 @@ function readCoverage(
 		ocInput: Number(field(body, "oc_input") || "0"),
 		markerAt: field(body, "marker_at"),
 	}));
+}
+
+/**
+ * Every boundary written to context.db so far, by the module's fold or by the seed for a
+ * long session: the boundary message id each "recorded" or "seeded" line names.
+ */
+function readRecordedBoundaries(logPath: string): Set<string> {
+	return new Set(
+		[
+			...logLines(logPath, "v2 boundary recorded at "),
+			...logLines(logPath, "v2 boundary seeded at "),
+		].map((line) => /boundary message ([^\s:]+)/.exec(line)?.[1] ?? ""),
+	);
+}
+
+/** Passes that put back history from the recorded module boundary after a host checkpoint. */
+function readBoundaryRestores(logPath: string): string[] {
+	return logLines(logPath, "v2 restore: from the module boundary ");
 }
 
 function readTrims(logPath: string): number[] {
@@ -119,7 +144,7 @@ export default { id: "boundary-gate-reader-observer", async setup(context) {
     globalThis[key] = { decodedRows: 0, operations: {}, openReaders: 0, maxOpenReaders: 0, readersOpened: 0, readersClosed: 0 };
     await context.session.hook("context", async draft => {
         await new Promise(resolve => setTimeout(resolve, 0));
-        appendFileSync(${JSON.stringify(trace)}, JSON.stringify({ sessionID: draft.sessionID, at: Date.now(), counters: globalThis[key] }) + "\\n");
+        appendFileSync(${JSON.stringify(trace)}, JSON.stringify({ sessionID: draft.sessionID, pid: process.pid, at: Date.now(), counters: globalThis[key] }) + "\\n");
     });
 }};`,
 	);
@@ -135,6 +160,7 @@ export default { id: "boundary-gate-reader-observer", async setup(context) {
 						JSON.parse(line) as {
 							sessionID: string;
 							at: number;
+							pid: number;
 							counters: V2StoreReaderDebugCounters;
 						},
 				),
@@ -212,6 +238,36 @@ describe.skipIf(!prereqs.ok)(
 				startProducer: true,
 			});
 			host = await spawnOpencode2(spawnOptions());
+			// For the realistic seed, one real tool arc is recorded first and cloned. The
+			// template turn reads a file, then answers; every other request is left to the next matcher.
+			let arcSteps = 0;
+			host.mock.addMatcher((body) => {
+				if (SEED_SHAPE !== "arcs" || body.model !== "mock-model") return null;
+				if (!JSON.stringify(body.input ?? []).includes(ARC_TEMPLATE_PROMPT))
+					return null;
+				arcSteps += 1;
+				if (arcSteps === 1)
+					return {
+						openaiOutput: [
+							{
+								type: "function_call",
+								id: "fc_arc_template",
+								call_id: "call_arc_template",
+								name: "read",
+								arguments: JSON.stringify({
+									path: join(host.cwd, "arc-notes.txt"),
+								}),
+							},
+						],
+						usage: { input_tokens: 200, output_tokens: 10 },
+					};
+				if (arcSteps === 2)
+					return {
+						text: "Read the notes; nothing else to do.",
+						usage: { input_tokens: 400, output_tokens: 12 },
+					};
+				return null;
+			});
 			host.mock.addMatcher((body) => ({
 				text: "ok",
 				usage: { input_tokens: usageForBody(body), output_tokens: 20 },
@@ -249,6 +305,20 @@ describe.skipIf(!prereqs.ok)(
 				"opencode",
 				"opencode2.db",
 			);
+			if (SEED_SHAPE === "arcs") {
+				writeFileSync(
+					join(host.cwd, "arc-notes.txt"),
+					`${ballast(400)}\n`,
+				);
+				await client.session.prompt({
+					sessionID: session.id,
+					text: ARC_TEMPLATE_PROMPT,
+				});
+				await client.session.wait(
+					{ sessionID: session.id },
+					{ signal: AbortSignal.timeout(120_000) },
+				);
+			}
 			// Seed the long history into the host store while the host is down, so the
 			// restarted host numbers its own next rows after it, exactly as it would for
 			// a long session a user reopens.
@@ -263,22 +333,48 @@ describe.skipIf(!prereqs.ok)(
 					.get(session.id) as { seq: number | null };
 				const firstSeq = (latest.seq ?? -1) + 1;
 				const insert = store.prepare(
-					"INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, 'user', ?, ?, ?, ?)",
+					"INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
 				);
 				const now = Date.now() - SEEDED_ROWS * 1_000;
+				// The rows each seeded turn is cloned from: the template turn's user,
+				// tool-call and reply rows for `arcs`; none (a one-line user row) otherwise.
+				const template = (() => {
+					if (SEED_SHAPE !== "arcs") return null;
+					const rows = store
+						.prepare(
+							"SELECT type, data FROM session_message WHERE session_id = ? AND type IN ('user','assistant') ORDER BY seq",
+						)
+						.all(session.id) as Array<{ type: string; data: string }>;
+					const user = rows.find((row) => row.data.includes(ARC_TEMPLATE_PROMPT));
+					const tool = rows.find(
+						(row) => row.type === "assistant" && row.data.includes('"type":"tool"'),
+					);
+					const reply = rows.find(
+						(row) => row.type === "assistant" && row.data.includes("nothing else to do"),
+					);
+					if (!user || !tool || !reply)
+						throw new Error("the template tool arc was not recorded");
+					return [user, tool, reply];
+				})();
 				store.transaction(() => {
 					for (let index = 0; index < SEEDED_ROWS; index += 1) {
-						insert.run(
-							`msg_gate_seed_${String(index).padStart(5, "0")}`,
-							session.id,
-							firstSeq + index,
-							now + index,
-							now + index,
-							JSON.stringify({
-								text: `seed ${index}`,
-								time: { created: now + index },
-							}),
-						);
+						const id = `msg_gate_seed_${String(index).padStart(5, "0")}`;
+						const seq = firstSeq + index;
+						if (!template) {
+							insert.run(id, session.id, "user", seq, now + index, now + index,
+								JSON.stringify({ text: `seed ${index}`, time: { created: now + index } }));
+							continue;
+						}
+						const source = template[index % template.length]!;
+						const data = JSON.parse(source.data) as Record<string, unknown>;
+						// Clones carry no provider usage, so the pressure reading still
+						// comes from the live turns.
+						delete data.tokens;
+						if (source.type === "user") data.text = `seeded turn ${index}: ${ARC_TEMPLATE_PROMPT}`;
+						for (const part of (data.content as Array<Record<string, unknown>> | undefined) ?? [])
+							if (part.type === "tool") part.id = `call_gate_seed_${index}`;
+						insert.run(id, session.id, source.type, seq, now + index, now + index,
+							JSON.stringify(data));
 					}
 				})();
 				// The host numbers new rows from its per-session event sequence, not
@@ -358,6 +454,10 @@ describe.skipIf(!prereqs.ok)(
 			// ── 2. restart the host; the recorded boundary must survive it ─────────
 			const restartedFrom = readCoverage(logPath).length;
 			const trimsBeforeRestart = readTrims(logPath).length;
+			const restoresBeforeRestart = readBoundaryRestores(logPath).length;
+			// A fold that lands on the last pass before the restart is recorded then, but
+			// no coverage line names it until the next pass, so the record is read here.
+			const recordedBeforeRestart = readRecordedBoundaries(logPath);
 			await host.stopHost();
 			host = await spawnOpencode2({
 				...spawnOptions(),
@@ -383,6 +483,8 @@ describe.skipIf(!prereqs.ok)(
 				}
 			})();
 			const trimsAfterFirst = readTrims(logPath).slice(trimsBeforeRestart);
+			const restoresAfterFirst =
+				readBoundaryRestores(logPath).slice(restoresBeforeRestart);
 			console.log(
 				`first pass after restart: coverage=${JSON.stringify(firstAfter)} trims=${trimsAfterFirst.join(" ")}`,
 			);
@@ -424,13 +526,25 @@ describe.skipIf(!prereqs.ok)(
 			);
 			// Cumulative counters reset when the host restarts, so per-pass cost is the
 			// difference between consecutive frames within one process.
-			const perPass = (frames: typeof allFrames) =>
-				frames.map(
-					(frame, index) =>
+			// Counters are per host process, so a pass's cost is the difference from the
+			// previous frame of the SAME process; the first frame of each process is its
+			// own cold pass.
+			const perProcess = (frames: typeof allFrames) => {
+				const byPid = new Map<number, number[]>();
+				let previous: (typeof frames)[number] | undefined;
+				for (const frame of frames) {
+					const costs = byPid.get(frame.pid) ?? [];
+					costs.push(
 						frame.counters.decodedRows -
-						(index === 0 ? 0 : frames[index - 1]!.counters.decodedRows),
-				);
-			const passCosts = [...perPass(beforeFrames), ...perPass(afterFrames)];
+							(previous?.pid === frame.pid ? previous.counters.decodedRows : 0),
+					);
+					byPid.set(frame.pid, costs);
+					previous = frame;
+				}
+				return [...byPid.values()];
+			};
+			const perPass = (frames: typeof allFrames) => perProcess(frames).flat();
+			const passCosts = perPass(afterFrames);
 			console.log(`decoded rows per pass: ${passCosts.join(" ")}`);
 			console.log(
 				`module .db files seen by lsof: ${[...modulePathsSeen].join(" ")}`,
@@ -445,17 +559,21 @@ describe.skipIf(!prereqs.ok)(
 					(path) => path.endsWith("context.db") || path.includes("context.db-"),
 				),
 			).toEqual([]);
-			// The recorded boundary survives the restart: the first pass after it is
-			// trimmed, not handed the whole 10,000-row history again.
-			expect(trimsAfterFirst.length).toBeGreaterThan(0);
+			// The recorded boundary survives the restart: the first pass after it starts
+			// there, not at the top of the 10,000-row history. Without a host checkpoint
+			// the array is trimmed to it; after one, the history put back behind the
+			// checkpoint starts at it. Either way it is read back from context.db.
+			expect(trimsAfterFirst.length + restoresAfterFirst.length).toBeGreaterThan(0);
 			console.log(
 				`first pass after restart handed ${firstAfter[0]?.ocInput} of ${conversationalRows} conversational rows to the module`,
 			);
-			// ...and it is trimmed to the boundary recorded before the restart, not to
-			// nothing and not to one the restarted process invented.
-			expect(beforeBoundaries.has(firstAfter[0]?.markerAt ?? "none")).toBe(
-				true,
-			);
+			// ...and that first pass starts at the boundary recorded before the restart, not at nothing
+			// and not at one the restarted process invented. The restore line names the
+			// boundary the pass started from; the coverage line names the boundary after
+			// the pass, which is a newer one when a fold lands on that very pass.
+			const startedFrom =
+				restoresAfterFirst[0]?.split(" ")[0] ?? firstAfter[0]?.markerAt ?? "none";
+			expect(recordedBeforeRestart.has(startedFrom)).toBe(true);
 			expect(firstAfter[0]?.ocInput ?? Number.POSITIVE_INFINITY).toBeLessThan(
 				conversationalRows,
 			);
@@ -468,10 +586,7 @@ describe.skipIf(!prereqs.ok)(
 				expect(max).toBeLessThanOrEqual(100);
 			// Skip each process's first pass: a cold seed of a new session is allowed to
 			// walk its tail. Every later pass must stay within a handful of pages.
-			const steady = [
-				...perPass(beforeFrames).slice(1),
-				...perPass(afterFrames).slice(1),
-			];
+			const steady = perProcess(afterFrames).flatMap((costs) => costs.slice(1));
 			for (const cost of steady) expect(cost).toBeLessThanOrEqual(1_000);
 		}, 2_400_000);
 	},

@@ -102,6 +102,7 @@ import {
     type LkgEntryNote,
     type LkgInputSnapshot,
     type LkgSlot,
+    lkgSlotRejection,
     type MessageContentSnapshot,
     messageContentFields,
     messageContentSnapshot,
@@ -2255,8 +2256,12 @@ export function createRustModeTransform(
             rowVersion: plan.rowVersion,
             captureSequence: plan.captureSequence,
         };
-        const captured = captureSlot(plan.sessionId, slot);
-        if (!captured) throw new Error("LKG slot rejected the prepared snapshot");
+        const rejection = lkgSlotRejection(plan.sessionId, slot);
+        const captured = rejection === null && captureSlot(plan.sessionId, slot);
+        if (!captured)
+            throw new Error(
+                `LKG slot rejected the prepared snapshot: ${rejection ?? "over the LKG heap budget"}`,
+            );
         state.lkgAcceptedCapture = {
             inputs,
             captureSequence: plan.captureSequence,
