@@ -4730,7 +4730,8 @@ describe("registerPiContextHandler", () => {
 				expect(getPendingOps(db, sessionId)).toHaveLength(1);
 				expect(sha(hard.messages)).toBe(sha(defer.messages));
 
-				// The following defer pass replays the same bytes.
+				// The next defer pass replays the same message bytes as the defer
+				// pass before the fold.
 				const afterMessages = buildMessages();
 				const after = await handler(
 					{ messages: afterMessages },
