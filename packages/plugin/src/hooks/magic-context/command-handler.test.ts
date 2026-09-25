@@ -1199,7 +1199,11 @@ describe("createMagicContextCommandHandler", () => {
                 "Send a message in this session first, then run /ctx-wrapup again. (MC-C12)";
             const retry = "Retry in a moment. (MC-C09)";
             const cases = [
-                { reason: "transform_not_observed", summary: "anything", expected: sendMessageFirst },
+                {
+                    reason: "transform_not_observed",
+                    summary: "anything",
+                    expected: sendMessageFirst,
+                },
                 // A module that predates `transform_not_observed` reports the missing
                 // snapshot under the generic reason with this summary.
                 {
