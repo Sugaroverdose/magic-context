@@ -120,7 +120,7 @@ The background agent that condenses old conversation into compact history.
 | `historian.omp.model` **Live** | string \| object | — | Primary OMP model entry. |
 | `historian.omp.fallback_models` **Live** | string \| object[] | — | Ordered fallback OMP entries. |
 | `historian.omp.thinking_level` **Live** | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` \| `"inherit"` \| `"auto"` | — | OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
-| `historian.runner` | `"broca"` \| `"host"` | — | Which side runs the historian completion in Rust transform mode: "broca" routes it to the Broca module (default), "host" queues it for this process to run on the configured historian model. User-level config only — it decides whose provider account pays for the call. |
+| `historian.runner` | `"broca"` \| `"host"` | — | Which side runs the historian completion in Rust transform mode: "host" queues it for this process to run on the configured historian model, "broca" routes it to the Broca module. When unset the harness decides: OpenCode 1 and OpenCode 2 use "host", Claude Code (through the Thalamus gateway, which has no host to run a completion) uses "broca". User-level config only — it decides whose provider account pays for the call. |
 | `historian.host_runner` | object | — | Controls for this process's historian pull loop, which answers runs queued by `historian.runner: "host"`. User-level config only — it decides whether this machine's provider account is spent on folds. |
 | `historian.host_runner.enabled` | boolean | — | Whether this process answers historian runs queued for a claimant (default true). Setting it to false stops the pull loop without changing historian.runner, so an operator can take one machine out of the lane and leave the queued runs for another claimant or for the runner setting to be changed deliberately. |
 | `historian.two_pass` **Live** | boolean | `false` | Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false) |
@@ -187,6 +187,7 @@ Off-hours maintenance through Dreamer.
 | `dreamer.permission.doom_loop` | `"ask"` \| `"allow"` \| `"deny"` | — |  |
 | `dreamer.permission.external_directory` | `"ask"` \| `"allow"` \| `"deny"` | — |  |
 | `dreamer.maxTokens` | number | — | Maximum output tokens |
+| `dreamer.runner` | `"broca"` \| `"host"` | — | Which side runs the dreamer completions the Rust module routes (classify-memories) in Rust transform mode: "host" runs them on this process's carrier, "broca" routes them to the Broca module. When unset, historian.runner applies, and when that is unset too the harness decides the same way it does for the historian. User-level config only. |
 | `dreamer.opencode` | object | — | Strict OpenCode dreamer model-resolution block. It accepts no Pi vocabulary. |
 | `dreamer.opencode.model` **Live** | string \| object | — | Primary OpenCode model entry. |
 | `dreamer.opencode.fallback_models` **Live** | string \| object[] | — | Ordered fallback OpenCode entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array. |
