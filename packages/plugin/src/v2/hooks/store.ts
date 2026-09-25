@@ -150,11 +150,11 @@ export function servedBoundaryRow(
 }
 
 /**
- * The nearest user turn at or before `endMessageID`, read backward from the
- * store a page at a time instead of from the whole session. Same rule as
- * `resolveBoundaryUserMessage` over the full projection: an end id that is not
- * a conversational row yields null, and so does an end with no user turn before
- * it.
+ * The nearest user message at or before `endMessageID`, searched backward
+ * through the store a page at a time rather than by reading the whole session.
+ * Returns null when the id is absent, is not a conversational row, or has no
+ * user message at or before it (the rule `resolveBoundaryUserMessage` applies
+ * to an in-memory history).
  */
 export function resolveV2BoundaryUserMessage(
     reader: Pick<V2StoreReader, "messageById" | "rawRowsThrough">,

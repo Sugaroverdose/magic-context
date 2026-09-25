@@ -1,7 +1,8 @@
-//! With single-store off (the default this build ships), the module must not touch
-//! the host's `context.db` at all: not its bytes, and not its journal. A WAL-mode
-//! database grows `-wal` and `-shm` siblings the moment any connection opens it, so an
-//! unchanged directory listing is the proof that nothing opened the file.
+//! With single-store off (the default this build ships), the module must not change
+//! the host's `context.db`: not its bytes, and not its journal. The SHA-256 of the file
+//! shows nothing was written to it, and an unchanged directory listing shows no `-wal`
+//! or `-shm` sibling was left behind. Neither can see a read-only open that closes
+//! cleanly; the `mode` assertion is what pins that the module stayed off.
 //!
 //! The file is found the way the module finds it in production, from the process
 //! environment, so this test is ignored by default and run on its own with that
