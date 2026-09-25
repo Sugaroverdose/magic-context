@@ -493,7 +493,11 @@ if (singleRef) {
 		);
 		process.exit(2);
 	}
-	const sharedRoot = mkdtempSync(join(REPO_ROOT, ".pure-replay-differential-"));
+	// One fixed parent for every run's scratch tree, so a file watcher can exclude a
+	// single path; macOS watch exclusions are fixed paths, not globs.
+	const scratchParent = join(REPO_ROOT, ".pure-replay-differential");
+	mkdirSync(scratchParent, { recursive: true });
+	const sharedRoot = mkdtempSync(join(scratchParent, "run-"));
 	try {
 		const left = captureRef(refs[0], "left", sharedRoot);
 		const right = captureRef(refs[1], "right", sharedRoot);
