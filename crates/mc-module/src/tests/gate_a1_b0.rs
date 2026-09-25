@@ -78,6 +78,7 @@ fn queue_run_for(
             user_prompt: user_prompt.to_string(),
             model_chain: vec!["test/first".to_string()],
             await_budget_ms: GATE_AWAIT_BUDGET_MS,
+            historian_timeout_ms: None,
             now_ms,
         })
         .unwrap();

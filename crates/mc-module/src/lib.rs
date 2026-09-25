@@ -7782,7 +7782,8 @@ impl McHandler {
             Err(outcome) => return outcome,
         };
         match store.claim_historian_run(&project_path, &run_id, &claimant, now_ms()) {
-            Ok(mc_store::HistorianClaimOutcome::Claimed(claim)) => respond(json!({
+            Ok(mc_store::HistorianClaimOutcome::Claimed(claim)) => {
+                let mut body = json!({
                 "ok": true,
                 "run_id": claim.run_id,
                 "session_id": claim.session_id,
@@ -7796,7 +7797,15 @@ impl McHandler {
                 "await_budget_ms": claim.await_budget_ms,
                 "claim_deadline_ms": claim.claim_deadline_ms,
                 "heartbeat_interval_ms": mc_store::HISTORIAN_HEARTBEAT_INTERVAL_MS,
-            })),
+                });
+                // The queuing request's per-attempt timeout. A claimant times each model
+                // with it instead of its own configuration; one that predates the field
+                // ignores it and keeps its own.
+                if let Some(timeout) = claim.historian_timeout_ms {
+                    body["historian_timeout_ms"] = json!(timeout);
+                }
+                respond(body)
+            }
             Ok(mc_store::HistorianClaimOutcome::Refused(refusal)) => {
                 respond(json!({ "ok": false, "refusal": refusal.as_wire_str() }))
             }
@@ -41407,6 +41416,7 @@ mod tests {
                 user_prompt: CLAIM_USER_PROMPT.to_string(),
                 model_chain: vec!["test/first".to_string(), "test/second".to_string()],
                 await_budget_ms: CLAIM_AWAIT_BUDGET_MS,
+                historian_timeout_ms: Some(600_000),
                 now_ms,
             })
             .unwrap();

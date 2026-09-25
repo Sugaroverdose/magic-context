@@ -85,6 +85,10 @@ pub struct NewHistorianPendingRun {
     pub user_prompt: String,
     pub model_chain: Vec<String>,
     pub await_budget_ms: i64,
+    /// The queuing request's own per-attempt timeout: how long the module's lane
+    /// would give each model in the chain. Handed to the claimant so every host
+    /// attempts the run the same way. `None` when the queuer had none to give.
+    pub historian_timeout_ms: Option<i64>,
     pub now_ms: i64,
 }
 
@@ -99,6 +103,9 @@ pub struct HistorianClaim {
     pub user_prompt: String,
     pub model_chain: Vec<String>,
     pub await_budget_ms: i64,
+    /// Per-attempt timeout the claimant uses for each model, taken from the queuing
+    /// request rather than from the claimant's own configuration.
+    pub historian_timeout_ms: Option<i64>,
     pub claim_deadline_ms: i64,
 }
 
@@ -359,8 +366,9 @@ impl McStore {
                      run_id, session_id, project_path, firing_seq, chunk_fingerprint,
                      phase, attempt, claimant_instance_id, coordinator_token,
                      claim_deadline_ms, lease_ms, deadline_ms, system_prompt, user_prompt,
-                     model_chain, await_budget_ms, created_at_ms, updated_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, NULL, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+                     model_chain, await_budget_ms, historian_timeout_ms, created_at_ms,
+                     updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, NULL, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?14, ?13, ?13)",
                 params![
                     run.run_id,
                     run.session_id,
@@ -375,6 +383,7 @@ impl McStore {
                     model_chain,
                     run.await_budget_ms,
                     run.now_ms,
+                    run.historian_timeout_ms,
                 ],
             )?;
             Ok(Some(next))
@@ -463,7 +472,8 @@ impl McStore {
             let row = tx
                 .query_row(
                     "SELECT session_id, phase, attempt, claim_deadline_ms, lease_ms,
-                            deadline_ms, system_prompt, user_prompt, model_chain, await_budget_ms
+                            deadline_ms, system_prompt, user_prompt, model_chain, await_budget_ms,
+                            historian_timeout_ms
                        FROM mc_historian_pending_run
                       WHERE run_id = ?1 AND project_path = ?2",
                     params![run_id, project_path],
@@ -479,6 +489,7 @@ impl McStore {
                             row.get::<_, String>(7)?,
                             row.get::<_, String>(8)?,
                             row.get::<_, i64>(9)?,
+                            row.get::<_, Option<i64>>(10)?,
                         ))
                     },
                 )
@@ -494,6 +505,7 @@ impl McStore {
                 user_prompt,
                 model_chain,
                 await_budget_ms,
+                historian_timeout_ms,
             )) = row
             else {
                 return Ok(HistorianClaimOutcome::Refused(
@@ -576,6 +588,7 @@ impl McStore {
                 user_prompt,
                 model_chain,
                 await_budget_ms,
+                historian_timeout_ms,
                 claim_deadline_ms,
             })))
         })?;
@@ -1144,6 +1157,7 @@ mod tests {
                 user_prompt: "user".to_string(),
                 model_chain: vec!["test/model".to_string()],
                 await_budget_ms: AWAIT_BUDGET_MS,
+                historian_timeout_ms: None,
                 now_ms,
             })
             .unwrap();
@@ -1171,6 +1185,7 @@ mod tests {
                 user_prompt: "user".to_string(),
                 model_chain: vec!["test/model".to_string()],
                 await_budget_ms: AWAIT_BUDGET_MS,
+                historian_timeout_ms: None,
                 now_ms,
             })
             .unwrap();
@@ -1611,6 +1626,7 @@ mod tests {
                 user_prompt: "user".to_string(),
                 model_chain: vec!["test/model".to_string()],
                 await_budget_ms: AWAIT_BUDGET_MS,
+                historian_timeout_ms: None,
                 now_ms: 1_000,
             })
             .expect_err("an idle session has no run to queue");

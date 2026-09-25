@@ -68,6 +68,7 @@
         },
         "model_chain": ["test/first", "test/second"],
         "await_budget_ms": 660000,
+        "historian_timeout_ms": 600000,
         "claim_deadline_ms": "<volatile>",
         "heartbeat_interval_ms": 30000
       }

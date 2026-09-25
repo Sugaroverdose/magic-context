@@ -153,6 +153,7 @@ fn gate_the_claim_queue_then_the_marker_land_in_order_on_a_populated_store() {
             user_prompt: "user".to_string(),
             model_chain: vec!["test/model".to_string()],
             await_budget_ms: 660_000,
+            historian_timeout_ms: None,
             now_ms: 1_000,
         })
         .unwrap();
@@ -429,6 +430,7 @@ fn gate_queue_run(
             user_prompt: "user".to_string(),
             model_chain: vec!["test/model".to_string()],
             await_budget_ms,
+            historian_timeout_ms: None,
             now_ms,
         })
         .unwrap();

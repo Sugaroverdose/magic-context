@@ -2571,6 +2571,11 @@ pub async fn run_historian_firing_on_host(
             user_prompt: request.prompt.to_string(),
             model_chain: request.model_chain.to_vec(),
             await_budget_ms: await_budget.as_millis().min(i64::MAX as u128) as i64,
+            // The same per-attempt timeout the module's own lane would give each model,
+            // so the run is attempted alike whichever host claims it.
+            historian_timeout_ms: Some(
+                request.await_timeout.as_millis().min(i64::MAX as u128) as i64
+            ),
             now_ms: request.now_ms,
         });
     if let Err(error) = queued {
@@ -7100,6 +7105,12 @@ mod tests {
                 else {
                     panic!("the only claimant must win");
                 };
+                // The claim carries the queuing request's own per-attempt timeout, so
+                // the claimant times each model the way this module's lane would.
+                assert_eq!(
+                    claim.historian_timeout_ms,
+                    Some(historian_await_timeout(None).as_millis() as i64)
+                );
                 assert_eq!(
                     store
                         .authorize_historian_report(FIRE_PROJECT, &claim.run_id, &claim.token)
@@ -7262,6 +7273,7 @@ mod tests {
                 user_prompt: "prompt".to_string(),
                 model_chain: vec!["prov/model-a".to_string()],
                 await_budget_ms: 600_000,
+                historian_timeout_ms: None,
                 now_ms: 123,
             })
             .unwrap();

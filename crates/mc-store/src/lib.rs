@@ -2939,6 +2939,10 @@ const MIGRATIONS: &[Migration] = &[
         // has. Second, it holds the request bytes (system prompt, user prompt, model
         // chain) a claimant needs and the session row has no reason to carry.
         //
+        // `historian_timeout_ms` is the queuing request's per-attempt timeout, handed
+        // to the claimant so each model is given the same time whichever host claims
+        // the run. NULL means the queuer supplied none and the claimant uses its own.
+        //
         // `phase` and `attempt` are the claim's own copy of the pair the session
         // state carries, so a claim resolves in one row read and CASes in one row
         // write. They are written in the same transaction as the session state,
@@ -2973,6 +2977,7 @@ const MIGRATIONS: &[Migration] = &[
             user_prompt          TEXT NOT NULL,
             model_chain          TEXT NOT NULL,
             await_budget_ms      INTEGER NOT NULL,
+            historian_timeout_ms INTEGER,
             created_at_ms        INTEGER NOT NULL,
             updated_at_ms        INTEGER NOT NULL
         );

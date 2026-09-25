@@ -95,6 +95,7 @@ fn a2_queue_run(
             user_prompt: user_prompt.to_string(),
             model_chain: vec!["test/first".to_string()],
             await_budget_ms: A2_AWAIT_BUDGET_MS,
+            historian_timeout_ms: None,
             now_ms,
         })
         .unwrap();

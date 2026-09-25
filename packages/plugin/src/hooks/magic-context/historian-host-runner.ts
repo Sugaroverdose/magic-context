@@ -77,6 +77,13 @@ export interface HistorianHostClaim {
     user: string;
     modelChain: string[];
     awaitBudgetMs: number;
+    /**
+     * The queuing request's per-attempt timeout, when the module sent one. Each model
+     * gets this long, so the run is attempted the same way whichever host claims it.
+     * A module that predates the field sends none, and the host's own
+     * `attemptTimeoutMs` applies instead.
+     */
+    historianTimeoutMs?: number;
     claimDeadlineMs: number;
     heartbeatIntervalMs: number;
 }
@@ -109,10 +116,11 @@ export interface HistorianHostRunnerDeps {
     /** Output cap the user configured for the historian, when they configured one. */
     maxOutputTokens?: number;
     /**
-     * The host's own `historian_timeout_ms`, sampled per claim: each model in the
-     * chain gets this long before the next one is tried, exactly as the host's own
-     * historian runs. The claim's await budget still bounds the run as a whole.
-     * Absent means each attempt may use the whole budget.
+     * The host's own `historian_timeout_ms`, sampled per claim. Used only when the
+     * claim carries no per-attempt timeout of its own (a module that predates that
+     * field): each model in the chain then gets this long before the next one is
+     * tried. The claim's await budget still bounds the run as a whole. Absent on
+     * both sides means each attempt may use the whole budget.
      */
     attemptTimeoutMs?(): number | undefined;
     now?(): number;
@@ -210,6 +218,11 @@ function readClaim(response: unknown): HistorianHostClaim | null {
         user,
         modelChain,
         awaitBudgetMs: typeof response.await_budget_ms === "number" ? response.await_budget_ms : 0,
+        ...(typeof response.historian_timeout_ms === "number" &&
+        Number.isFinite(response.historian_timeout_ms) &&
+        response.historian_timeout_ms > 0
+            ? { historianTimeoutMs: response.historian_timeout_ms }
+            : {}),
         claimDeadlineMs:
             typeof response.claim_deadline_ms === "number" ? response.claim_deadline_ms : 0,
         heartbeatIntervalMs:
@@ -217,6 +230,42 @@ function readClaim(response: unknown): HistorianHostClaim | null {
                 ? response.heartbeat_interval_ms
                 : 30_000,
     };
+}
+
+/**
+ * Settle with `work`, or fail once `remainingMs` runs out or `signal` aborts. The
+ * failures carry the retry helper's own timeout and abort messages, so it treats
+ * them exactly as it treats the carrier's `attempt` call running out of time or
+ * being aborted.
+ */
+async function withinAttempt<T>(
+    work: Promise<T>,
+    remainingMs: number,
+    attemptMs: number,
+    signal: AbortSignal,
+): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const expired = new Promise<never>((_, reject) => {
+        const fail = () =>
+            reject(
+                signal.aborted
+                    ? new Error("prompt aborted by external signal")
+                    : new Error(`prompt timed out after ${attemptMs}ms`),
+            );
+        if (signal.aborted) return fail();
+        timer = setTimeout(fail, Math.max(0, remainingMs));
+        onAbort = fail;
+        signal.addEventListener("abort", onAbort, { once: true });
+    });
+    // A late rejection from the abandoned carrier call has nobody left to observe it.
+    work.catch(() => {});
+    try {
+        return await Promise.race([work, expired]);
+    } finally {
+        if (timer) clearTimeout(timer);
+        if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
 }
 
 function describeError(error: unknown): string {
@@ -538,7 +587,7 @@ export class HistorianHostRunner {
         }
         const { executor, sessionDirectory } = binding;
         const [head, ...rest] = claim.modelChain;
-        const configuredAttemptMs = this.deps.attemptTimeoutMs?.();
+        const configuredAttemptMs = claim.historianTimeoutMs ?? this.deps.attemptTimeoutMs?.();
         const attemptMs =
             typeof configuredAttemptMs === "number" && configuredAttemptMs > 0
                 ? Math.min(budgetMs, configuredAttemptMs)
@@ -558,6 +607,11 @@ export class HistorianHostRunner {
             directory: sessionDirectory,
         });
         let promptSettled = false;
+        // When the current model's attempt started. The retry helper times the
+        // carrier's `attempt` call; a carrier that returns from `attempt` at once and
+        // waits inside `collect` would escape that timeout, so `collect` is held to
+        // whatever is left of the same per-attempt window.
+        let attemptStartedAt = Date.now();
         try {
             if (!handle.id) throw new Error("hidden completion carrier returned no session id");
             const run = await promptSyncWithValidatedOutputRetry(
@@ -576,15 +630,23 @@ export class HistorianHostRunner {
                 },
                 {
                     transport: Object.assign(
-                        (request: Parameters<typeof executor.attempt>[1]) =>
-                            executor.attempt(handle, request),
+                        (request: Parameters<typeof executor.attempt>[1]) => {
+                            attemptStartedAt = Date.now();
+                            return executor.attempt(handle, request);
+                        },
                         { childSessionId: handle.childSessionId },
                     ),
                     timeoutMs: attemptMs,
                     signal,
                     fallbackModels: rest,
                     callContext: `historian-host:${claim.runId}`,
-                    fetchOutput: () => executor.collect(handle, 50),
+                    fetchOutput: () =>
+                        withinAttempt(
+                            executor.collect(handle, 50),
+                            attemptStartedAt + attemptMs - Date.now(),
+                            attemptMs,
+                            signal,
+                        ),
                     validateOutput: (completion) => {
                         const text = completion.text;
                         // A model that answered with nothing has failed, so the next
