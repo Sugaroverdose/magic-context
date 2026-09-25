@@ -1014,14 +1014,14 @@ dependencies = [
 
 [[package]]
 name = "subc-cgroup"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "subc-client-rs"
-version = "0.19.4"
+version = "0.19.5"
 dependencies = [
  "async-trait",
  "serde",
@@ -1044,7 +1044,7 @@ dependencies = [
 
 [[package]]
 name = "subc-core"
-version = "0.20.31"
+version = "0.20.33"
 dependencies = [
  "base64",
  "cortexkit-log 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1069,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "subc-daemon"
-version = "0.21.12"
+version = "0.21.13"
 dependencies = [
  "cortexkit-log 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "cortexkit-paths",
@@ -1095,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "subc-jobobject"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tokio",
  "windows-sys",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "subc-transport"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "getrandom 0.2.17",
  "hmac",
