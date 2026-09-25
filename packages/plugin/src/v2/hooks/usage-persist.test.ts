@@ -9,6 +9,7 @@ import {
     getOrCreateSessionMeta,
     openDatabase,
 } from "../../features/magic-context/storage";
+import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import type { TransformDeps } from "../../hooks/magic-context/transform";
 import { ABSOLUTE_EMERGENCY_PERCENTAGE } from "../../shared/escalation-bands";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
@@ -101,8 +102,6 @@ describe("persistV2UsageReading", () => {
                     admissionLimit: 240_000,
                     modelKey: "test-provider/test-model",
                 },
-                rawContextLimit: 272_000,
-                hostCompactionReducedUsage: false,
                 contextUsageMap,
             });
 
@@ -111,7 +110,7 @@ describe("persistV2UsageReading", () => {
 
         // The provider accepted a 300K request on a model configured at 272K:
         // that is the real prompt size, so it becomes the pressure reading.
-        expect(persist(300_000)).toBe(false);
+        persist(300_000);
         let meta = getOrCreateSessionMeta(db, sessionID);
         expect(meta.lastInputTokens).toBe(300_000);
         expect(meta.lastContextPercentage).toBeGreaterThanOrEqual(ABSOLUTE_EMERGENCY_PERCENTAGE);
@@ -125,5 +124,65 @@ describe("persistV2UsageReading", () => {
         expect(contextUsageMap.get(sessionID)?.usage.percentage).toBeGreaterThanOrEqual(
             ABSOLUTE_EMERGENCY_PERCENTAGE,
         );
+    });
+
+    // The numbers reported on issue 493: a 1,000,000-token model whose reply
+    // reserve is capped at a quarter of the window (a 750,000-token usable window),
+    // and a provider-accepted request of 962,842 tokens. That request fits the
+    // model's own window, so it says nothing about the window being wrong; it is
+    // pressure against the usable part and must not raise the usable limit.
+    it("counts a reading past the usable window as pressure without widening that window", async () => {
+        process.env.XDG_DATA_HOME = makeTempDir("v2-usage-persist-");
+        await refreshModelLimitsFromApi({
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            {
+                                id: "deepseek",
+                                models: {
+                                    "deepseek-flash": {
+                                        limit: { context: 1_000_000, output: 384_000 },
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                }),
+            },
+        });
+        const db = openDatabase();
+        const sessionID = "ses-v2-over-usable";
+        const contextUsageMap: TransformDeps["contextUsageMap"] = new Map();
+        const limit = resolveContextLimit("deepseek", "deepseek-flash", { db, sessionID });
+        expect(limit).toBe(750_000);
+        expect(
+            resolveContextLimit("deepseek", "deepseek-flash", {
+                db,
+                sessionID,
+                reservation: "none",
+            }),
+        ).toBe(1_000_000);
+
+        for (let reading = 0; reading < 2; reading++) {
+            persistV2UsageReading({
+                db,
+                sessionID,
+                draftModel: { providerID: "deepseek", id: "deepseek-flash" },
+                reading: {
+                    inputTokens: 962_842,
+                    limit,
+                    admissionLimit: limit,
+                    modelKey: "deepseek/deepseek-flash",
+                },
+                contextUsageMap,
+            });
+            // Every repeat of the reading reaches the transform as emergency-band
+            // pressure, which is what runs the reclaim on the next pass.
+            const percentage = contextUsageMap.get(sessionID)?.usage.percentage ?? 0;
+            expect(percentage).toBeCloseTo(128.38, 1);
+            expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(962_842);
+        }
+        expect(resolveContextLimit("deepseek", "deepseek-flash", { db, sessionID })).toBe(750_000);
     });
 });

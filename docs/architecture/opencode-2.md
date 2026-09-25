@@ -12,7 +12,8 @@ Paths are relative to `packages/plugin/`.
 - `src/v2/store-reader.ts`, `src/v2/hooks/store.ts`: read raw history from the OpenCode 2 database.
 - `src/v2/fold/owner.ts`, `fold/restore.ts`, `fold/host-media.ts`, `fold/markers.ts`: fold ownership and restoring history around host checkpoints.
 - `src/v2/hidden-completion.ts`, `src/v2/hooks/hidden-child.ts`, `src/v2/host-service.ts`: hidden model calls and cleanup of their sessions.
-- `src/v2/hooks/refusal.ts`, `hooks/provider-admission.ts`: refusing a turn before it reaches the provider.
+- `src/v2/hooks/refusal.ts`: refusing a turn before it reaches the provider.
+- `src/v2/hooks/usage-reading.ts`, `hooks/usage-persist.ts`: reading and recording the provider's usage for the latest reply.
 - `src/v2/hooks/channel2.ts`, `hooks/commands.ts`, `hooks/tools.ts`, `hooks/dream-trigger.ts`, `hooks/dream-manual.ts`, `hooks/update-check.ts`.
 - `src/v2/tui/`: the TUI seam. `src/tui/entry.mjs` serves both TUI loaders.
 - `src/shared/host-limitations.ts`: named capabilities a host lacks.
@@ -29,7 +30,7 @@ The package's default export carries both host shapes: `{ id, server }` for Open
 1. Records host media classes (for restoring attachments later), lets hidden-child sessions short-circuit, and removes dreamer-only tools from primary drafts.
 2. Reads the model, variant and agent from the draft itself. The draft is authoritative; nothing is reconstructed from message events.
 3. Rewrites `ctx_*` tool descriptions for this draft's model (`applyV2PromptSurfaceTools`) and records the tool-definition size. Descriptions are changed on the draft only; the host keeps every `tool.transform` registration for the life of the process, so registration happens once in `tools.ts`.
-4. Checks admission (below), rebases session coordinates if the session came from the other store generation, runs the system-prompt handler on `draft.system`, and runs the shared per-message duties.
+4. Records the latest reply's usage (below), rebases session coordinates if the session came from the other store generation, runs the system-prompt handler on `draft.system`, and runs the shared per-message duties.
 5. Restores history around a host checkpoint (see Fold ownership), projects the draft with `adaptPayload`, runs the shared transform, commits, and delivers any pending Channel 2 nudge.
 
 The shared transform is created with `storeGeneration: "v2"` and with `v2CompactionMarkerStrategy`, whose operations are all inert: OpenCode 2 owns its checkpoint rows, so the v1 synthetic marker writes never happen here.
@@ -38,7 +39,7 @@ The shared transform is created with `storeGeneration: "v2"` and with `v2Compact
 
 A turn is refused before the provider with `session.interrupt`; the host records it as an interrupted turn with no error text, so every refusal is also logged to `magic-context.log` with its arm and cause. The arms are:
 
-- **Usage admission** (`refusesBeforeProvider`): refuses only when the last measured input is at or above 95% of the provider's raw context window. Pressure below that is admitted because the work that relieves it runs later in the same pass. Input already past the window is admitted too, so the provider's overflow error can report the real limit. A reading taken before a host compaction is stale and is admitted.
+- **Usage unavailable**: the latest reply's usage could not be read or recorded (the context database is not durable, or a store read failed). A usage figure never refuses a turn by itself, however high it is: the shared transform's force band and emergency reclaim, the historian and folds all run inside the pass, and a refusal ahead of them would leave the stored reading unchanged and refuse every later turn (issue 493). Like OpenCode 1 and Pi, the turn is refused for pressure only by the shared transform after its pass, when the provider has rejected the request as too large and the pass folded nothing; that refusal posts "Context full — /ctx-flush or /clear to continue." before interrupting.
 - **Blocking transform errors**: when the shared transform cannot prove a safe prompt (for example fail-closed storage), the hook interrupts and throws `V2ContextRefusal`. With compaction off, native compaction owns recovery and the pass passes the input through.
 - **Post-fold restore failure** and **compaction-fold failure**: if history around a host checkpoint cannot be restored, or the fold cannot be supplied, the turn is refused rather than sent with history missing.
 
