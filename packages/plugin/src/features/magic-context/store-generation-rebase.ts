@@ -22,12 +22,16 @@ export interface StoreGenerationRebaseOutcome {
      * `stamped` — the projection was recorded for the first time (or changed) but
      * no saved coordinate actually moved, so only the stamp was written.
      * `rebased` — coordinates moved and were re-derived.
+     * `repaired` — the projection already matched, but unresolved compartments
+     * left behind by an older build were placed from their neighbours.
      */
-    status: "unchanged" | "stamped" | "rebased";
+    status: "unchanged" | "stamped" | "rebased" | "repaired";
     generation: CoordinateGeneration;
     previousGeneration: CoordinateGeneration | null;
     compartmentsRebased: number;
     compartmentsUnresolved: number;
+    /** Compartments placed `ok` with at least one end taken from a neighbour. */
+    compartmentsDerived: number;
     compartmentsResolvedAgain: number;
     recompCompartmentsRebased: number;
     recompCompartmentsUnresolved: number;
@@ -63,6 +67,26 @@ export interface CoordinateRebaseNotice {
     droppedDepthRows: number;
     healedGaps: number;
     narrativeGaps: number;
+    /**
+     * Compartments that lost an anchor message but took the missing end from
+     * the neighbouring compartments, with the range they now cover.
+     */
+    derivedCompartments: CompartmentRangeNote[];
+    /** Compartments that could not be placed even from their neighbours. */
+    unresolvedCompartmentRanges: CompartmentRangeNote[];
+    /**
+     * When neighbour recovery last ran over this session's compartments (ms),
+     * or null if it never has. Its presence is what keeps the one-time repair
+     * of sessions stamped by an older build from running again.
+     */
+    neighbourRecoveryAt: number | null;
+}
+
+/** One compartment named in the rebase notice: its sequence and message range. */
+export interface CompartmentRangeNote {
+    sequence: number;
+    start: number;
+    end: number;
 }
 
 function emptyOutcome(
@@ -76,6 +100,7 @@ function emptyOutcome(
         previousGeneration,
         compartmentsRebased: 0,
         compartmentsUnresolved: 0,
+        compartmentsDerived: 0,
         compartmentsResolvedAgain: 0,
         recompCompartmentsRebased: 0,
         recompCompartmentsUnresolved: 0,
@@ -162,6 +187,18 @@ export function readCoordinateRebaseNotice(
         if (record.generation !== "v1" && record.generation !== "v2") return null;
         const count = (value: unknown): number =>
             typeof value === "number" && Number.isFinite(value) ? value : 0;
+        const ranges = (value: unknown): CompartmentRangeNote[] =>
+            Array.isArray(value)
+                ? value.flatMap((entry) => {
+                      if (!entry || typeof entry !== "object") return [];
+                      const { sequence, start, end } = entry as Record<string, unknown>;
+                      return typeof sequence === "number" &&
+                          typeof start === "number" &&
+                          typeof end === "number"
+                          ? [{ sequence, start, end }]
+                          : [];
+                  })
+                : [];
         return {
             generation: record.generation,
             previousGeneration:
@@ -174,6 +211,13 @@ export function readCoordinateRebaseNotice(
             droppedDepthRows: count(record.droppedDepthRows),
             healedGaps: count(record.healedGaps),
             narrativeGaps: count(record.narrativeGaps),
+            derivedCompartments: ranges(record.derivedCompartments),
+            unresolvedCompartmentRanges: ranges(record.unresolvedCompartmentRanges),
+            neighbourRecoveryAt:
+                typeof record.neighbourRecoveryAt === "number" &&
+                Number.isFinite(record.neighbourRecoveryAt)
+                    ? record.neighbourRecoveryAt
+                    : null,
         };
     } catch {
         return null;
@@ -191,9 +235,19 @@ export function formatCoordinateRebaseNotice(notice: CoordinateRebaseNotice): st
             `${notice.discardedReductions} queued reduction${notice.discardedReductions === 1 ? " was" : "s were"} discarded because their targets merged in the host's store conversion`,
         );
     }
-    if (notice.unresolvedCompartments > 0) {
+    if (notice.derivedCompartments.length > 0) {
+        const count = notice.derivedCompartments.length;
         parts.push(
-            `${notice.unresolvedCompartments} compartment${notice.unresolvedCompartments === 1 ? "" : "s"} could not be re-anchored and are excluded from range recovery`,
+            `${count} compartment${count === 1 ? " was" : "s were"} re-anchored from the compartments around ${count === 1 ? "it" : "them"} (${formatRangeNotes(notice.derivedCompartments)})`,
+        );
+    }
+    if (notice.unresolvedCompartments > 0) {
+        const listed =
+            notice.unresolvedCompartmentRanges.length > 0
+                ? ` (${formatRangeNotes(notice.unresolvedCompartmentRanges)})`
+                : "";
+        parts.push(
+            `${notice.unresolvedCompartments} compartment${notice.unresolvedCompartments === 1 ? "" : "s"} could not be re-anchored and are excluded from range recovery${listed}`,
         );
     }
     if (notice.droppedDepthRows > 0) {
@@ -210,6 +264,10 @@ export function formatCoordinateRebaseNotice(notice: CoordinateRebaseNotice): st
         );
     }
     return parts.length === 0 ? null : parts.join("; ");
+}
+
+function formatRangeNotes(notes: readonly CompartmentRangeNote[]): string {
+    return notes.map((note) => `messages ${note.start}-${note.end}`).join(", ");
 }
 
 interface CompartmentCoordinateRow {
@@ -236,6 +294,9 @@ function isCompartmentCoordinateRow(row: unknown): row is CompartmentCoordinateR
 interface PlannedCompartment {
     table: "compartments" | "recomp_compartments";
     id: number;
+    sequence: number;
+    /** At least one end came from a neighbouring compartment rather than the row's own anchor. */
+    derived: boolean;
     previousStart: number;
     previousEnd: number;
     start: number;
@@ -300,43 +361,117 @@ function readCompartmentRows(
         .filter(isCompartmentCoordinateRow);
 }
 
+/**
+ * Where the running projection places each end of a compartment, when it can.
+ * `undefined` means that end has no position of its own: its anchor message is
+ * gone, or the row never recorded one.
+ */
+interface KnownEnds {
+    start: number | undefined;
+    end: number | undefined;
+}
+
+function resolveAnchor(
+    messageId: string | null,
+    resolveOrdinal: (messageId: string) => number | undefined,
+): number | undefined {
+    return messageId && messageId.length > 0 ? resolveOrdinal(messageId) : undefined;
+}
+
 function planCompartments(
     rows: readonly CompartmentCoordinateRow[],
     table: "compartments" | "recomp_compartments",
     projection: Projection,
 ): PlannedCompartment[] {
-    return rows.map((row) => {
-        const previousStatus = row.rebase_status === "unresolved" ? "unresolved" : "ok";
-        const startId = row.start_message_id ?? "";
-        const endId = row.end_message_id ?? "";
-        const start = startId.length > 0 ? projection.ordinalById.get(startId) : undefined;
-        const end = endId.length > 0 ? projection.ordinalById.get(endId) : undefined;
-        // Both endpoints must name a message this host actually serves. A legacy
-        // row that never stored its endpoint ids has nothing to re-derive from,
-        // which is the same situation as an endpoint the host dropped.
-        if (start === undefined || end === undefined) {
+    const resolveOrdinal = (messageId: string) => projection.ordinalById.get(messageId);
+    return recoverFromNeighbours(
+        rows,
+        table,
+        rows.map((row) => ({
+            start: resolveAnchor(row.start_message_id, resolveOrdinal),
+            end: resolveAnchor(row.end_message_id, resolveOrdinal),
+        })),
+    );
+}
+
+/**
+ * Place every compartment from the ends that are known, filling a missing end
+ * from the compartment next to it.
+ *
+ * Compartments tile the history with no gaps and no overlaps, so the message
+ * after one compartment's end is where the next one starts. When a row lost an
+ * anchor (typically because the host's store conversion removed that message,
+ * as it does to the boundary row of a completed native compaction), the
+ * neighbouring anchor on the far side of that shared boundary still says where
+ * the boundary is:
+ *
+ * - a known end always wins;
+ * - a missing start is the previous compartment's known end + 1, or 1 for the
+ *   first compartment;
+ * - a missing end is the next compartment's known start - 1.
+ *
+ * A row is `ok` only when both ends come from its own anchors or from such a
+ * neighbour. Anything else stays `unresolved`: the ends that are known are
+ * used, the rest keep their stored value (for a trailing compartment with no
+ * end anchor that is the end the store recorded), and the range is then
+ * clamped so it never overlaps a neighbour that is `ok`. Nothing is guessed:
+ * a boundary with no anchor on either side, or a derived range that is empty
+ * or inverted, leaves the row unresolved.
+ */
+function recoverFromNeighbours(
+    rows: readonly CompartmentCoordinateRow[],
+    table: "compartments" | "recomp_compartments",
+    known: readonly KnownEnds[],
+): PlannedCompartment[] {
+    const plans = rows.map((row, index): PlannedCompartment => {
+        const own = known[index] ?? { start: undefined, end: undefined };
+        const previousEnd = index === 0 ? 0 : known[index - 1]?.end;
+        const nextStart = index === rows.length - 1 ? undefined : known[index + 1]?.start;
+        const start = own.start ?? (previousEnd === undefined ? undefined : previousEnd + 1);
+        const end = own.end ?? (nextStart === undefined ? undefined : nextStart - 1);
+        const base = {
+            table,
+            id: row.id,
+            sequence: row.sequence,
+            previousStart: row.start_message,
+            previousEnd: row.end_message,
+            previousStatus:
+                row.rebase_status === "unresolved" ? ("unresolved" as const) : ("ok" as const),
+        };
+        if (start !== undefined && end !== undefined && start <= end) {
             return {
-                table,
-                id: row.id,
-                previousStart: row.start_message,
-                previousEnd: row.end_message,
-                start: row.start_message,
-                end: row.end_message,
-                status: "unresolved" as const,
-                previousStatus,
+                ...base,
+                start,
+                end,
+                status: "ok",
+                derived: own.start === undefined || own.end === undefined,
             };
         }
         return {
-            table,
-            id: row.id,
-            previousStart: row.start_message,
-            previousEnd: row.end_message,
-            start,
-            end,
-            status: "ok" as const,
-            previousStatus,
+            ...base,
+            start: start ?? row.start_message,
+            end: end ?? row.end_message,
+            status: "unresolved",
+            derived: false,
         };
     });
+
+    // An unresolved row's stored ordinals belong to the projection it was
+    // written against. Left overlapping an `ok` neighbour, they make the stored
+    // history fail validation and stop the historian from ever running again.
+    for (let index = 0; index < plans.length; index += 1) {
+        const plan = plans[index];
+        if (plan?.status !== "unresolved") continue;
+        const previous = plans[index - 1];
+        const next = plans[index + 1];
+        if (previous?.status === "ok" && plan.start <= previous.end) {
+            plan.start = previous.end + 1;
+        }
+        if (next?.status === "ok" && plan.end >= next.start) {
+            plan.end = next.start - 1;
+        }
+    }
+    return plans;
 }
 
 function healNonNarrativeCompartmentGaps(
@@ -373,9 +508,18 @@ function healNonNarrativeCompartmentGaps(
 function compartmentPlanChanges(plan: PlannedCompartment): boolean {
     return (
         plan.status !== plan.previousStatus ||
-        (plan.status === "ok" &&
-            (plan.start !== plan.previousStart || plan.end !== plan.previousEnd))
+        plan.start !== plan.previousStart ||
+        plan.end !== plan.previousEnd
     );
+}
+
+function rangeNotes(
+    plans: readonly PlannedCompartment[],
+    predicate: (plan: PlannedCompartment) => boolean,
+): CompartmentRangeNote[] {
+    return plans
+        .filter((plan) => plan.table === "compartments" && predicate(plan))
+        .map((plan) => ({ sequence: plan.sequence, start: plan.start, end: plan.end }));
 }
 
 function planNotes(db: Database, sessionId: string, projection: Projection): PlannedNote[] {
@@ -524,7 +668,14 @@ export function rebaseSessionCoordinates(
     }
     const previousGeneration = readCoordinateGeneration(db, sessionId);
     if (previousGeneration === generation) {
-        return emptyOutcome("unchanged", generation, previousGeneration);
+        const outcome = emptyOutcome("unchanged", generation, previousGeneration);
+        const repair = repairStampedSessionOnce(db, sessionId, args.readMessages);
+        if (repair !== null && repair.rowsRewritten > 0) {
+            outcome.status = "repaired";
+            outcome.compartmentsDerived = repair.derived.length;
+            outcome.compartmentsUnresolved = repair.unresolved.length;
+        }
+        return outcome;
     }
 
     // A session seen for the first time by a generation-aware build carries no
@@ -644,6 +795,7 @@ export function rebaseSessionCoordinates(
             if (plan.table === "compartments") {
                 outcome.compartmentsRebased += rebased;
                 outcome.compartmentsUnresolved += unresolved;
+                if (rebased === 1 && plan.derived) outcome.compartmentsDerived += 1;
                 if (rebased === 1 && plan.previousStatus === "unresolved")
                     outcome.compartmentsResolvedAgain += 1;
             } else {
@@ -731,6 +883,17 @@ export function rebaseSessionCoordinates(
             droppedDepthRows: outcome.compressionDepthRowsDropped,
             healedGaps: outcome.healedGaps,
             narrativeGaps: outcome.narrativeGaps,
+            derivedCompartments: rangeNotes(
+                compartmentPlans,
+                (plan) => plan.status === "ok" && plan.derived,
+            ),
+            unresolvedCompartmentRanges: rangeNotes(
+                compartmentPlans,
+                (plan) => plan.status === "unresolved",
+            ),
+            // This rebase already filled every anchor its neighbours determine,
+            // so the one-time repair for older stamped sessions has nothing to add.
+            neighbourRecoveryAt: Date.now(),
         });
         db.exec("COMMIT");
         committed = true;
@@ -763,6 +926,199 @@ export function rebaseSessionCoordinates(
     return outcome;
 }
 
+export interface NeighbourRecoveryResult {
+    /** Compartment rows whose coordinates or status were rewritten. */
+    rowsRewritten: number;
+    /** Rows placed `ok` from a neighbour, with their new ranges. */
+    derived: CompartmentRangeNote[];
+    /** Rows that are still unresolved after recovery, with their clamped ranges. */
+    unresolved: CompartmentRangeNote[];
+}
+
+export interface RecoverUnresolvedCompartmentsArgs {
+    db: Database;
+    sessionId: string;
+    /**
+     * The ordinal the running host serves a message id at, or undefined when it
+     * serves no such message. Only called for the anchors of unresolved rows.
+     */
+    resolveOrdinal: (messageId: string) => number | undefined;
+    /** Names the caller in the log line. */
+    reason: string;
+}
+
+/**
+ * Place the session's unresolved compartments from their neighbours, without a
+ * projection change.
+ *
+ * Rows marked `ok` are trusted exactly as stored: their ordinals already
+ * describe the projection this session is stamped with, and re-deriving them
+ * from anchors here would turn every compartment whose raw rows the host has
+ * since pruned into an unresolved one. Only unresolved rows are re-examined,
+ * with the same rules the rebase uses (see `recoverFromNeighbours`), so a row
+ * whose missing anchor its neighbours determine becomes `ok` and one they do
+ * not is clamped off its `ok` neighbours.
+ *
+ * The cached m0/m1 render is deliberately left in place. Rewriting a
+ * compartment row changes what the next render produces, and that change must
+ * reach the provider on a pass that is already rebuilding the prefix (the
+ * historian's next publish is one), never on a pass that replays the cached
+ * bytes.
+ */
+export function recoverUnresolvedCompartments(
+    args: RecoverUnresolvedCompartmentsArgs,
+): NeighbourRecoveryResult {
+    const { db, sessionId } = args;
+    const rows = readCompartmentRows(db, "compartments", sessionId);
+    const result: NeighbourRecoveryResult = { rowsRewritten: 0, derived: [], unresolved: [] };
+    if (!rows.some((row) => row.rebase_status === "unresolved")) return result;
+
+    const known = rows.map((row): KnownEnds => {
+        if (row.rebase_status !== "unresolved") {
+            return { start: row.start_message, end: row.end_message };
+        }
+        return {
+            start: resolveAnchor(row.start_message_id, args.resolveOrdinal),
+            end: resolveAnchor(row.end_message_id, args.resolveOrdinal),
+        };
+    });
+    const plans = recoverFromNeighbours(rows, "compartments", known);
+    const wasUnresolved = (plan: PlannedCompartment) => plan.previousStatus === "unresolved";
+    result.derived = rangeNotes(
+        plans,
+        (plan) => wasUnresolved(plan) && plan.status === "ok" && plan.derived,
+    );
+    result.unresolved = rangeNotes(plans, (plan) => plan.status === "unresolved");
+    const changed = plans.filter(compartmentPlanChanges);
+
+    const now = Date.now();
+    db.exec("BEGIN IMMEDIATE");
+    let committed = false;
+    try {
+        for (const plan of changed) {
+            db.prepare(
+                "UPDATE compartments SET start_message = ?, end_message = ?, rebase_status = ? WHERE id = ?",
+            ).run(plan.start, plan.end, plan.status, plan.id);
+        }
+        // The recovery is recorded in the existing rebase notice, keeping what
+        // the last rebase reported. The generation stamp itself is not touched:
+        // nothing about the projection changed.
+        const previous = readCoordinateRebaseNotice(db, sessionId);
+        const generation = previous?.generation ?? readCoordinateGeneration(db, sessionId);
+        if (generation !== null) {
+            const derivedSequences = new Set(result.derived.map((note) => note.sequence));
+            const notice: CoordinateRebaseNotice = {
+                generation,
+                previousGeneration: previous?.previousGeneration ?? null,
+                at: previous?.at ?? now,
+                unresolvedCompartments: result.unresolved.length,
+                discardedReductions: previous?.discardedReductions ?? 0,
+                droppedDepthRows: previous?.droppedDepthRows ?? 0,
+                healedGaps: previous?.healedGaps ?? 0,
+                narrativeGaps: previous?.narrativeGaps ?? 0,
+                derivedCompartments: [
+                    ...(previous?.derivedCompartments ?? []).filter(
+                        (note) => !derivedSequences.has(note.sequence),
+                    ),
+                    ...result.derived,
+                ],
+                unresolvedCompartmentRanges: result.unresolved,
+                neighbourRecoveryAt: now,
+            };
+            ensureSessionMetaRow(db, sessionId);
+            db.prepare(
+                "UPDATE session_meta SET coordinate_rebase_notice = ? WHERE session_id = ?",
+            ).run(JSON.stringify(notice), sessionId);
+        }
+        db.exec("COMMIT");
+        committed = true;
+    } finally {
+        if (!committed) {
+            try {
+                db.exec("ROLLBACK");
+            } catch {
+                // Already rolled back by the failure that brought us here.
+            }
+        }
+    }
+    result.rowsRewritten = changed.length;
+    sessionLog(
+        sessionId,
+        `INFO compartment neighbour recovery (${args.reason}) rows_rewritten=${changed.length} ` +
+            `derived=${result.derived.map((note) => `${note.start}-${note.end}`).join(",") || "none"} ` +
+            `unresolved=${result.unresolved.map((note) => `${note.start}-${note.end}`).join(",") || "none"}`,
+    );
+    return result;
+}
+
+/**
+ * Sessions whose stored compartments this process has already checked for the
+ * one-time repair, per database handle, so later passes pay nothing.
+ */
+const repairCheckedSessions = new WeakMap<Database, Set<string>>();
+
+/**
+ * Whether an unresolved row is what breaks the stored tiling: the first
+ * compartment not starting at 1, a gap, an overlap or an inverted range at a
+ * boundary that touches an unresolved row. This is the shape that makes the
+ * historian's check on its stored compartments fail before every run.
+ */
+function unresolvedRowBreaksTiling(rows: readonly CompartmentCoordinateRow[]): boolean {
+    let expectedStart = 1;
+    for (let index = 0; index < rows.length; index += 1) {
+        const row = rows[index];
+        if (!row) continue;
+        const broken = row.start_message !== expectedStart || row.end_message < row.start_message;
+        const touchesUnresolved =
+            row.rebase_status === "unresolved" || rows[index - 1]?.rebase_status === "unresolved";
+        if (broken && touchesUnresolved) return true;
+        expectedStart = row.end_message + 1;
+    }
+    return false;
+}
+
+/**
+ * Repair a session an older build stamped while leaving an unresolved
+ * compartment overlapping its neighbour.
+ *
+ * Builds before neighbour recovery kept an unresolved row's stale ordinals,
+ * which could overlap the next compartment and make every historian run fail
+ * its check on the stored compartments. Those sessions already carry the
+ * running generation's stamp, so no projection change will come to rebase them
+ * again. This runs the recovery once for them: only when an unresolved row is
+ * what breaks the stored tiling, and only if the rebase notice records no
+ * earlier recovery.
+ */
+function repairStampedSessionOnce(
+    db: Database,
+    sessionId: string,
+    readMessages: (sessionId: string) => RawMessage[],
+): NeighbourRecoveryResult | null {
+    let checked = repairCheckedSessions.get(db);
+    if (!checked) {
+        checked = new Set();
+        repairCheckedSessions.set(db, checked);
+    }
+    if (checked.has(sessionId)) return null;
+    checked.add(sessionId);
+
+    const rows = readCompartmentRows(db, "compartments", sessionId);
+    if (!rows.some((row) => row.rebase_status === "unresolved")) return null;
+    if (readCoordinateRebaseNotice(db, sessionId)?.neighbourRecoveryAt != null) return null;
+    if (!unresolvedRowBreaksTiling(rows)) return null;
+
+    let ordinalById: Map<string, number> | null = null;
+    return recoverUnresolvedCompartments({
+        db,
+        sessionId,
+        resolveOrdinal: (messageId) => {
+            ordinalById ??= buildProjection(readMessages(sessionId)).ordinalById;
+            return ordinalById.get(messageId);
+        },
+        reason: "stamped-session repair",
+    });
+}
+
 /** Single-line summary of one session's rebase, in the order an operator reads it. */
 export function formatRebaseLogLine(
     outcome: StoreGenerationRebaseOutcome,
@@ -778,7 +1134,7 @@ export function formatRebaseLogLine(
     const unresolved = outcome.compartmentsUnresolved + outcome.recompCompartmentsUnresolved;
     return (
         `INFO store-generation-rebase ${outcome.previousGeneration ?? "unrecorded"}->${outcome.generation} ` +
-        `rows_rewritten=${rowsRewritten} unresolved=${unresolved} ` +
+        `rows_rewritten=${rowsRewritten} unresolved=${unresolved} derived=${outcome.compartmentsDerived} ` +
         `index_rows_rebuilt=${outcome.indexRowsRebuilt} drops_discarded=${outcome.queuedReductionsDiscarded} ` +
         `healed_gaps=${outcome.healedGaps} narrative_gaps=${outcome.narrativeGaps} ` +
         `ms=${Math.round(elapsedMs)} ` +

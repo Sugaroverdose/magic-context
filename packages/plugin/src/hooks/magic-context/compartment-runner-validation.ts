@@ -247,6 +247,20 @@ export function buildHistorianFailureNotice(failureCount: number, _lastError: st
     return [heading, "", renderUserFacingFailure("historian_unavailable")].join("\n");
 }
 
+/**
+ * User-facing notice for stored compartments that fail validation before the
+ * historian can run. Unlike a model failure this cannot clear on its own: the
+ * saved rows stay invalid until they are rebuilt, so the notice names the
+ * rebuild instead of promising an automatic retry.
+ */
+export function buildStoredCompartmentsInvalidNotice(): string {
+    return [
+        "## Magic Context — History compression",
+        "",
+        renderUserFacingFailure("historian_saved_history_misaligned"),
+    ].join("\n");
+}
+
 export function buildHistorianRepairPrompt(
     originalPrompt: string,
     previousOutput: string,

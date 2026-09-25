@@ -12,6 +12,12 @@ export const USER_FACING_FAILURES = {
         sentence: "Some finished background sessions could not be removed from this host.",
         action: "They are removed automatically the next time Magic Context runs inside a registered OpenCode service.",
     },
+    historian_saved_history_misaligned: {
+        code: "MC-H03",
+        sentence:
+            "History compression is paused because this session's saved summaries no longer line up with its messages.",
+        action: "Run /ctx-recomp to rebuild them.",
+    },
     recomp_unavailable: {
         code: "MC-R01",
         sentence: "History compression could not be rebuilt.",

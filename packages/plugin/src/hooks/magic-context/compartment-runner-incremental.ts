@@ -4,7 +4,10 @@ import {
     appendCompartments,
     getCompartments,
 } from "../../features/magic-context/compartment-storage";
-import { readCoordinateRebaseNotice } from "../../features/magic-context/store-generation-rebase";
+import {
+    readCoordinateRebaseNotice,
+    recoverUnresolvedCompartments,
+} from "../../features/magic-context/store-generation-rebase";
 // Re-export the historian-state-file helpers so existing callers
 // (compartment-runner-recomp.ts, compartment-runner.ts, tests) keep working
 // unchanged. The implementation moved to ./historian-state-file.ts so Pi
@@ -38,9 +41,11 @@ import {
     clearHistorianDrainFailure,
     clearHistorianFailureState,
     describeProtectedTailDrainBudgetSkip,
+    getHistorianFailureState,
     getOverflowState,
     incrementHistorianFailure,
     isWrapupInProgress,
+    loadProtectedTailMeta,
     recordHistorianDrainFailure,
     recordProtectedTailPublicationFloor,
     reserveProtectedTailDrainTokens,
@@ -75,6 +80,7 @@ import { runValidatedHistorianPass } from "./compartment-runner-historian";
 import type { HiddenCompartmentRunnerDeps } from "./compartment-runner-types";
 import {
     buildHistorianFailureNotice,
+    buildStoredCompartmentsInvalidNotice,
     HISTORIAN_BOUNDARY_HEALING_SLACK,
     shouldDiscardLastHistorianCompartment,
     validateChunkCoverage,
@@ -103,6 +109,7 @@ import {
     getRawSessionTagKeysThrough,
     hasRawMessageProvider,
     hasRawSessionMessageById,
+    readRawSessionMessageOrdinalById,
     readRawSessionMessageRange,
     readSessionChunk,
 } from "./read-session-chunk";
@@ -154,6 +161,26 @@ export function v2NonNarrativeStoredGapRanges(
     return safeRanges;
 }
 const lastHistorianAlertBySession = new Map<string, number>();
+
+/**
+ * How long the historian waits before re-checking stored compartments that
+ * failed validation with the same error. Those rows only change through a
+ * rebuild or a repair, so retrying on every trigger could never succeed.
+ */
+export const STORED_COMPARTMENT_FAILURE_BACKOFF_MS = 30 * 60 * 1000;
+
+function storedCompartmentFailureBackingOff(
+    db: HiddenCompartmentRunnerDeps["db"],
+    sessionId: string,
+    validationError: string,
+    now: number = Date.now(),
+): boolean {
+    if (getHistorianFailureState(db, sessionId).lastError !== validationError) return false;
+    const failedAt = loadProtectedTailMeta(db, sessionId).historianDrainFailureAt;
+    return (
+        failedAt > 0 && failedAt <= now && now - failedAt < STORED_COMPARTMENT_FAILURE_BACKOFF_MS
+    );
+}
 
 function shouldSuppressHistorianAlert(sessionId: string): boolean {
     const lastAlert = lastHistorianAlertBySession.get(sessionId);
@@ -320,14 +347,52 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             }
             return;
         }
-        const priorCompartments = getCompartments(db, sessionId);
+        let priorCompartments = getCompartments(db, sessionId);
         // v2: session facts are no longer read here — the unbounded existing_state
         // dump is gone. Facts dedup against <project-memory> in the prompt instead.
 
-        const existingValidationError = validateStoredCompartments(
+        let existingValidationError = validateStoredCompartments(
             priorCompartments,
             v2NonNarrativeStoredGapRanges(db, sessionId, priorCompartments),
         );
+        if (
+            existingValidationError &&
+            storedCompartmentFailureBackingOff(db, sessionId, existingValidationError)
+        ) {
+            // The same stored rows already failed this check recently. Nothing
+            // but a rebuild changes them, so re-running now would only repeat
+            // the failure and its notice.
+            sessionLog(
+                sessionId,
+                `historian no-op: stored compartments still invalid ("${existingValidationError}"); backing off`,
+            );
+            telemetry.status = "noop";
+            telemetry.failureReason = `existing-validation backoff: ${existingValidationError}`;
+            return;
+        }
+        if (
+            existingValidationError &&
+            priorCompartments.some((compartment) => compartment.rebaseStatus === "unresolved")
+        ) {
+            // A compartment left unresolved by a store-projection rebase keeps
+            // stale ordinals that can overlap its neighbour. Its neighbours
+            // usually still say where it belongs, so place it from them before
+            // giving up on the run.
+            const recovery = recoverUnresolvedCompartments({
+                db,
+                sessionId,
+                resolveOrdinal: (messageId) =>
+                    readRawSessionMessageOrdinalById(sessionId, messageId) ?? undefined,
+                reason: `historian pre-run check failed: ${existingValidationError}`,
+            });
+            if (recovery.rowsRewritten > 0) {
+                priorCompartments = getCompartments(db, sessionId);
+                existingValidationError = validateStoredCompartments(
+                    priorCompartments,
+                    v2NonNarrativeStoredGapRanges(db, sessionId, priorCompartments),
+                );
+            }
+        }
         if (existingValidationError) {
             sessionLog(
                 sessionId,
@@ -335,11 +400,12 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             );
             // This is a real failure (stored compartments are corrupt) — record
             // it so `doctor --issue` and the >=95% abort path can see it.
-            const failCount = incrementHistorianFailure(db, sessionId, existingValidationError);
+            incrementHistorianFailure(db, sessionId, existingValidationError);
             telemetry.failureReason = `existing-validation: ${existingValidationError}`;
-            await notifyHistorianIssue(
-                buildHistorianFailureNotice(failCount, existingValidationError),
-            );
+            // Record the failure time like any other permanent historian failure,
+            // which is also what the backoff above measures from.
+            retainDrainReservationForRetryThrottle = true;
+            await notifyHistorianIssue(buildStoredCompartmentsInvalidNotice());
             return;
         }
 
