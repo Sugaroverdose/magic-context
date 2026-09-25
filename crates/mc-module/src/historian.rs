@@ -345,6 +345,9 @@ pub enum HistorianNoFireCause {
     EmptyFilteredChunk,
     InvalidChunkCoverage,
     NoModels,
+    /// The request carried no model chain at all. The host resolves the chain and must
+    /// send one (possibly empty) with every request; the module does not guess.
+    ModelChainMissing,
     CredentialUnavailable,
     ProviderUnknown,
     ModelUnknown,
@@ -383,6 +386,7 @@ impl HistorianNoFireCause {
             Self::EmptyFilteredChunk => "EmptyFilteredChunk",
             Self::InvalidChunkCoverage => "InvalidChunkCoverage",
             Self::NoModels => "NoModels",
+            Self::ModelChainMissing => "ModelChainMissing",
             Self::CredentialUnavailable => "CredentialUnavailable",
             Self::ProviderUnknown => "ProviderUnknown",
             Self::ModelUnknown => "ModelUnknown",
@@ -423,6 +427,7 @@ impl HistorianNoFireCause {
             Self::InvalidChunkCoverage => "invalid_chunk_coverage",
             Self::BelowProactiveFloor => "below_proactive_floor",
             Self::NoModels => "no_models",
+            Self::ModelChainMissing => "model_chain_missing",
             Self::CredentialUnavailable => "credential_unavailable",
             Self::ProviderUnknown => "provider_unknown",
             Self::ModelUnknown => "model_unknown",

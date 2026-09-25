@@ -424,6 +424,33 @@ describe("module-backed classification", () => {
         }
     });
 
+    test("always sends a model_chain, even an empty one", async () => {
+        const db = freshDb();
+        try {
+            const projectIdentity = "git:module-empty-chain";
+            const contextIds = addMemories(db, projectIdentity, 10);
+            for (const [offset, contextId] of contextIds.entries()) {
+                addMirrorMapping(db, projectIdentity, contextId, 9400 + offset, `e-${offset}`);
+            }
+            installAuthorityManagedMarker(db, projectIdentity, "store");
+            let taskBody: Record<string, unknown> | undefined;
+            await expect(
+                runClassify(
+                    moduleArgs(db, projectIdentity, (call) => {
+                        if (call.method === "dreamer.run_task") {
+                            taskBody = call.body as Record<string, unknown>;
+                            throw new Error("stop after capturing the request");
+                        }
+                        return { result: { accepted: [], rejected: [] } };
+                    }),
+                ),
+            ).rejects.toThrow("stop after capturing the request");
+            expect(taskBody?.model_chain).toEqual([]);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("records the module's usage and model on the invocation row", async () => {
         const cases = [
             {

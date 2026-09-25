@@ -523,7 +523,9 @@ async function runClassifyThroughModule(
                 .digest("hex")
                 .slice(0, 24)}`,
             authority_generation: args.moduleAuthorityGeneration,
-            ...(resolvedModelChain.length > 0 ? { model_chain: resolvedModelChain } : {}),
+            // Always sent, even when empty: the module has no chain of its own and
+            // refuses a request without one, while an empty chain reports "no models".
+            model_chain: resolvedModelChain,
             payload: {
                 prompt_body: prompt,
                 items: chunk.map((candidate) => ({
