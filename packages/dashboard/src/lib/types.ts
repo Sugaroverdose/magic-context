@@ -510,6 +510,10 @@ export interface DbCacheEvent {
   /** False when the source omitted the cache-write count, so `cache_write`
    *  is an absent value rather than a reported zero. */
   cache_write_reported: boolean;
+  /** Provider and model that served the request (for a Broca run total, the
+   *  run's last segment). Null when the source does not record them. */
+  provider: string | null;
+  model: string | null;
 }
 
 export interface SessionCacheStats {

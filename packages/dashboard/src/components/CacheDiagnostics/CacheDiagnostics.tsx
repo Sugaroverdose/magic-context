@@ -68,6 +68,159 @@ export function cacheSessionTitle(row: SessionCacheStats): string {
   return row.title || truncate(row.session_id, 16);
 }
 
+// Longest session name a card shows as-is. Longer names are shortened to
+// their last meaningful part so cards stay one line; the tooltip keeps the
+// full name.
+const CARD_TITLE_MAX = 20;
+
+/**
+ * Short card label for a session. Names like `alfonso:consult-<uuid>` share a
+ * long prefix and differ only at the end, so the label drops everything up to
+ * the last `:` and, if the rest is still long, keeps its first word plus its
+ * last 6 characters: `consult-…a1b2c3`.
+ */
+export function cacheCardTitle(row: SessionCacheStats): string {
+  const full = cacheSessionTitle(row);
+  if (full.length <= CARD_TITLE_MAX) return full;
+  const tail = full.slice(full.lastIndexOf(":") + 1);
+  if (tail.length <= CARD_TITLE_MAX) return tail;
+  const head = /^[^-_]+/.exec(tail)?.[0] ?? "";
+  if (head.length > 0 && head.length <= 12) return `${head}-…${tail.slice(-6)}`;
+  return `${tail.slice(0, 8)}…${tail.slice(-6)}`;
+}
+
+export interface CacheCardSummary {
+  text: string;
+  /** "ratio" colors the text by hit ratio; "neutral" renders it muted. */
+  tone: "ratio" | "neutral";
+  ratio: number;
+  title: string;
+}
+
+/**
+ * The headline of a session card. A red percentage is reserved for sessions
+ * that actually read from the cache and could have read more: a session whose
+ * requests report no cache reads at all, or whose window holds only its cold
+ * opening turn, is shown in a neutral color.
+ */
+export function cacheCardSummary(events: DbCacheEvent[]): CacheCardSummary {
+  const ratio = cacheSessionRatio(events);
+  if (ratio === null) {
+    return {
+      text: cachePercentage(null),
+      tone: "neutral",
+      ratio: 0,
+      title: "No request in this window reported cached tokens",
+    };
+  }
+  if (!events.some((event) => event.cache_reported && event.cache_read > 0)) {
+    return {
+      text: "no cache data",
+      tone: "neutral",
+      ratio,
+      title: "No request in this window read anything from the cache",
+    };
+  }
+  const turns = new Set(events.map((event) => event.turn_id));
+  if (turns.size === 1 && events.some((event) => event.cold_start)) {
+    return {
+      text: cachePercentage(ratio),
+      tone: "neutral",
+      ratio,
+      title: "Only the session's cold first run is loaded: nothing was cached before it",
+    };
+  }
+  return {
+    text: cachePercentage(ratio),
+    tone: "ratio",
+    ratio,
+    title: "Cache reads over total prompt tokens in this window",
+  };
+}
+
+/** "1 run" / "3 runs" when every row is a Broca run total, else events. */
+export function cacheCardCountLabel(events: DbCacheEvent[]): string {
+  const noun = events.length > 0 && events.every((event) => event.aggregate) ? "run" : "event";
+  return `${events.length} ${noun}${events.length === 1 ? "" : "s"}`;
+}
+
+export interface SessionModelSummary {
+  /** Model of the newest event that recorded one. */
+  model: string;
+  provider: string | null;
+  /** How many other models the loaded events used. */
+  others: number;
+  /** Every provider/model seen, most recently used first. */
+  all: string[];
+}
+
+function providerModelLabel(event: Pick<DbCacheEvent, "provider" | "model">): string {
+  return event.provider ? `${event.provider}/${event.model}` : (event.model ?? "");
+}
+
+export function sessionModelSummary(events: DbCacheEvent[]): SessionModelSummary | null {
+  const lastUsed = new Map<string, number>();
+  let latest: DbCacheEvent | null = null;
+  for (const event of events) {
+    if (!event.model) continue;
+    const label = providerModelLabel(event);
+    lastUsed.set(label, Math.max(lastUsed.get(label) ?? event.timestamp, event.timestamp));
+    if (!latest || event.timestamp >= latest.timestamp) latest = event;
+  }
+  if (!latest?.model) return null;
+  const all = [...lastUsed.entries()].sort((a, b) => b[1] - a[1]).map(([label]) => label);
+  return { model: latest.model, provider: latest.provider, others: all.length - 1, all };
+}
+
+/** `claude-opus-5-5`, or `claude-opus-5-5 (+1)` when the session mixed models. */
+export function sessionModelLabel(summary: SessionModelSummary): string {
+  return summary.others > 0 ? `${summary.model} (+${summary.others})` : summary.model;
+}
+
+export interface CacheSessionHeader {
+  /** The full session name, never truncated. */
+  name: string;
+  tooltip: string;
+  /** For Broca, the harness Broca ran the session for (from its identity). */
+  innerHarness: string | null;
+}
+
+/**
+ * Names the selected session above its timeline. A Broca session id is its
+ * JSON identity `{project_root, harness, session}`; the header shows the
+ * session name and inner harness and keeps the project root in the tooltip.
+ */
+export function cacheSessionHeader(
+  harness: Harness,
+  sessionId: string,
+  title: string | undefined,
+): CacheSessionHeader {
+  if (harness === "broca") {
+    try {
+      const identity = JSON.parse(sessionId) as {
+        project_root?: unknown;
+        harness?: unknown;
+        session?: unknown;
+      };
+      const name = typeof identity.session === "string" ? identity.session : title || sessionId;
+      const innerHarness = typeof identity.harness === "string" ? identity.harness : null;
+      const lines = [name];
+      if (innerHarness) lines.push(`harness: ${innerHarness}`);
+      if (typeof identity.project_root === "string")
+        lines.push(`project: ${identity.project_root}`);
+      return { name, tooltip: lines.join("\n"), innerHarness };
+    } catch {
+      // Not a JSON identity: fall through to the plain name.
+    }
+  }
+  const name = title || sessionId;
+  return {
+    name,
+    tooltip: name === sessionId ? name : `${name}\n${sessionId}`,
+    innerHarness: null,
+  };
+}
+
 export function cacheSessionVisible(
   row: SessionCacheStats,
   harness: HarnessFilter,
@@ -149,7 +302,7 @@ export default function CacheDiagnostics() {
   // How many cards fit is measured from the row's width against a min card width,
   // capped at the number of windows we keep — so the strip never wraps and never
   // shows a card narrower than CARD_MIN_WIDTH.
-  const CARD_MIN_WIDTH = 150;
+  const CARD_MIN_WIDTH = 180;
   const CARD_GAP = 8;
   const [cardRowWidth, setCardRowWidth] = createSignal(0);
   const visibleCardCount = createMemo(() => {
@@ -411,10 +564,11 @@ export default function CacheDiagnostics() {
   // Cards: per-session stats aggregated over each session's OWN window (never a
   // shared global pool), ordered by the cache stats recency. Reading
   // windowsVersion() makes this re-run when any window changes.
-  const filteredStats = (): (CacheSessionStats & { reportedRatio: number | null })[] => {
+  type CacheCardRow = CacheSessionStats & { summary: CacheCardSummary; countLabel: string };
+  const filteredStats = (): CacheCardRow[] => {
     windowsVersion();
     const harness = harnessFilter();
-    const rows: (CacheSessionStats & { reportedRatio: number | null })[] = [];
+    const rows: CacheCardRow[] = [];
     for (const s of cachedSessions) {
       if (!cacheSessionVisible(s, harness, showUnmanagedSessions(), hideSubagents())) continue;
       const win = cachedWindows.get(windowKey(s.harness, s.session_id));
@@ -431,7 +585,7 @@ export default function CacheDiagnostics() {
         if (e.severity === "bust" || e.severity === "full_bust") busts++;
         if (e.timestamp > lastTs) lastTs = e.timestamp;
       }
-      const reportedRatio = cacheSessionRatio(win.events);
+      const summary = cacheCardSummary(win.events);
       rows.push({
         harness: s.harness,
         session_id: s.session_id,
@@ -439,8 +593,9 @@ export default function CacheDiagnostics() {
         total_cache_read: read,
         total_cache_write: write,
         total_input: input,
-        hit_ratio: reportedRatio ?? 0,
-        reportedRatio,
+        hit_ratio: summary.ratio,
+        summary,
+        countLabel: cacheCardCountLabel(win.events),
         last_timestamp: new Date(lastTs).toISOString(),
         last_activity_ms: lastTs,
         bust_count: busts,
@@ -708,6 +863,7 @@ export default function CacheDiagnostics() {
                     }}
                   >
                     <div
+                      title={cacheSessionTitle(stat)}
                       style={{
                         "font-size": "11px",
                         color: "var(--text-muted)",
@@ -727,24 +883,25 @@ export default function CacheDiagnostics() {
                             Managed
                           </span>
                         </Show>
-                        <span>{cacheSessionTitle(stat)}</span>
+                        <span>{cacheCardTitle(stat)}</span>
                       </span>
                     </div>
                     <div
+                      title={stat.summary.title}
                       style={{
                         "font-size": "20px",
                         "font-weight": "700",
                         color:
-                          stat.reportedRatio === null
+                          stat.summary.tone === "neutral"
                             ? "var(--text-muted)"
-                            : hitColor(stat.hit_ratio),
+                            : hitColor(stat.summary.ratio),
                         "font-family": "var(--mono-font)",
                       }}
                     >
-                      {cachePercentage(stat.reportedRatio)}
+                      {stat.summary.text}
                     </div>
                     <div class="card-meta" style={{ "margin-top": "4px" }}>
-                      <span>{stat.event_count} events</span>
+                      <span>{stat.countLabel}</span>
                       <Show when={stat.bust_count > 0}>
                         <span style={{ color: "var(--red)" }}>{stat.bust_count} busts</span>
                       </Show>
@@ -782,6 +939,62 @@ export default function CacheDiagnostics() {
                   : `${timelineEvents().length} steps`}
               </span>
             </div>
+            {/* The session line sits on its own row under the title rather than
+                beside it: long names (Broca's especially) then wrap across the
+                chart's full width instead of squeezing the step count. */}
+            <Show when={selectedSession()}>
+              {(selected) => {
+                const header = () =>
+                  cacheSessionHeader(
+                    selected().harness,
+                    selected().sessionId,
+                    sessionNames()[windowKey(selected().harness, selected().sessionId)],
+                  );
+                const models = () => sessionModelSummary(filteredEvents());
+                return (
+                  <div
+                    style={{
+                      display: "flex",
+                      "flex-wrap": "wrap",
+                      "align-items": "baseline",
+                      gap: "4px 12px",
+                      "font-size": "12px",
+                      "margin-bottom": "8px",
+                    }}
+                  >
+                    <span
+                      class="mono"
+                      title={header().tooltip}
+                      style={{
+                        color: "var(--text-primary)",
+                        "font-weight": "600",
+                        "overflow-wrap": "anywhere",
+                        "min-width": "0",
+                      }}
+                    >
+                      {header().name}
+                    </span>
+                    <Show when={header().innerHarness}>
+                      {(inner) => (
+                        <span style={{ color: "var(--text-secondary)" }}>via {inner()}</span>
+                      )}
+                    </Show>
+                    <Show when={models()}>
+                      {(summary) => (
+                        <span
+                          class="mono"
+                          style={{ color: "var(--text-secondary)" }}
+                          title={summary().all.join("\n")}
+                        >
+                          {summary().provider ? `${summary().provider} · ` : ""}
+                          {sessionModelLabel(summary())}
+                        </span>
+                      )}
+                    </Show>
+                  </div>
+                );
+              }}
+            </Show>
             <CacheTimeline
               events={timelineEvents()}
               selectedStepId={selectedStepId()}

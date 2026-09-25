@@ -831,6 +831,13 @@ impl Harness {
     fn uses_codex_no_write_cache_model(self) -> bool {
         matches!(self, Self::Codex)
     }
+
+    /// The provider behind a JSONL harness's recorded model. Claude Code only
+    /// talks to Anthropic models; Codex can be pointed at other providers and
+    /// its events do not name one, so it reports the model alone.
+    fn jsonl_provider(self) -> Option<&'static str> {
+        matches!(self, Self::ClaudeCode).then_some("anthropic")
+    }
 }
 
 impl std::str::FromStr for Harness {
@@ -1263,6 +1270,11 @@ pub struct DbCacheEvent {
     // False when the source omitted the cache-write count altogether, so the
     // view can say "not reported" instead of showing a zero it never received.
     pub cache_write_reported: bool,
+    // The provider and model that served this request (or, for a Broca run
+    // aggregate, the run's last billing segment), when the source records
+    // them. The timeline header shows the session's latest model from these.
+    pub provider: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1299,26 +1311,32 @@ pub struct RawDbCacheEvent {
     /// message carries that user message's `parentID`.
     native_turn_id: Option<String>,
     context_limit: Option<i64>,
-    /// Set only for Broca rows, whose usage is a whole run's total rather than
-    /// one provider request. See `BrocaRunAggregate`.
-    broca_run: Option<BrocaRunAggregate>,
+    provider: Option<String>,
+    model: Option<String>,
+    /// Set only for Broca rows. See `BrocaRow`.
+    broca: Option<BrocaRow>,
 }
 
-/// What Broca's export facts say about one run beyond its summed usage.
+/// What Broca's run index says about one row beyond its usage.
 ///
-/// Broca's `export_facts.segment_json.usage` is the sum of every model step
-/// (provider request) in the run's agent loop; per-request usage is not
-/// exported. A run is therefore never comparable request-against-request, so
-/// the cache view shows it as one aggregate row instead of a STABLE/BUST step.
+/// A Broca row is either one model step (provider request) from the
+/// `export_steps` table, or, for runs exported before that table existed, the
+/// whole run from `export_facts`, whose `segment_json.usage` is the sum of
+/// every step in the run's agent loop. A run total is never comparable
+/// request-against-request, so the cache view shows it as one aggregate row
+/// instead of a STABLE/BUST step. Step rows are classified like OpenCode steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BrocaRunAggregate {
-    /// True when no earlier run of the same Broca session exists, so the run
-    /// began with a cold request that could not have read the cache.
+struct BrocaRow {
+    /// True for a whole-run total, false for one model step.
+    aggregate: bool,
+    /// True when the row opens its Broca session: the session's first run as a
+    /// total, or the first step of that first run. Its request could not have
+    /// read the cache.
     first_in_session: bool,
-    /// True when at least one of the run's facts carried `cache_write_tokens`.
-    /// Broca omits the key when the provider did not report cache writes
-    /// (measured in the live store on 2026-09-25: only Anthropic facts carried
-    /// it), which is different from a reported zero.
+    /// True when the row's usage carried `cache_write_tokens`. Broca omits the
+    /// key when the provider did not report cache writes (measured in the live
+    /// store on 2026-09-25: only Anthropic facts carried it), which is
+    /// different from a reported zero.
     cache_write_reported: bool,
 }
 
@@ -1679,7 +1697,9 @@ pub fn load_raw_db_cache_events(
             finish: row.get(8)?,
             native_turn_id: row.get(9)?,
             context_limit: None,
-            broca_run: None,
+            provider: None,
+            model: None,
+            broca: None,
             cache_reported: true,
         })
     })?;
@@ -1710,6 +1730,18 @@ pub fn load_raw_pi_cache_events(
     all_rows
 }
 
+/// Pi-compatible assistant messages carry the serving `provider` and `model`
+/// on the message object inside the JSONL entry.
+fn pi_message_provider_model(entry: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let field = |key: &str| {
+        entry["message"][key]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    (field("provider"), field("model"))
+}
+
 fn load_raw_pi_compatible_cache_events(
     harness: Harness,
     sessions: Vec<pi_sessions::PiSessionMeta>,
@@ -1732,6 +1764,7 @@ fn load_raw_pi_compatible_cache_events(
                 {
                     return None;
                 }
+                let (provider, model) = pi_message_provider_model(&message.raw_json);
                 Some(RawDbCacheEvent {
                     harness,
                     message_id: message.entry_id.clone(),
@@ -1745,7 +1778,9 @@ fn load_raw_pi_compatible_cache_events(
                     finish: message.stop_reason.clone(),
                     native_turn_id: None,
                     context_limit: None,
-                    broca_run: None,
+                    provider,
+                    model,
+                    broca: None,
                     cache_reported: true,
                 })
             })
@@ -1843,7 +1878,9 @@ fn load_raw_external_cache_events(
                     finish: event.finish.clone(),
                     native_turn_id: None,
                     context_limit: event.context_limit,
-                    broca_run: None,
+                    provider: harness.jsonl_provider().map(str::to_owned),
+                    model: event.model.clone(),
+                    broca: None,
                     cache_reported: true,
                 })
             })
@@ -2253,10 +2290,22 @@ fn build_db_cache_events_with_attribution(
         }
     }
 
+    // Broca knows from its own run index which step opens a session, so that
+    // step, when loaded, is the session's true first request.
+    let broca_true_first: Vec<(Harness, String)> = rows
+        .iter()
+        .filter(|row| {
+            row.broca
+                .is_some_and(|broca| !broca.aggregate && broca.first_in_session)
+        })
+        .map(|row| (row.harness, row.session_id.clone()))
+        .collect();
+
     let true_first_sessions: HashSet<(Harness, String)> = true_first_sessions
         .into_iter()
         .chain(pi_true_first)
         .chain(jsonl_true_first)
+        .chain(broca_true_first)
         .collect();
 
     // ── Pass 1: build chronological events (severity assigned in pass 2) ──
@@ -2299,9 +2348,11 @@ fn build_db_cache_events_with_attribution(
             context_limit: row.context_limit.unwrap_or(0),
             context_limit_estimated: false, // set with context_limit below
             is_drop: false,                 // computed in pass 2
-            aggregate: row.broca_run.is_some(),
-            cold_start: row.broca_run.is_some_and(|run| run.first_in_session),
-            cache_write_reported: row.broca_run.map_or(true, |run| run.cache_write_reported),
+            aggregate: row.broca.is_some_and(|broca| broca.aggregate),
+            cold_start: row.broca.is_some_and(|broca| broca.first_in_session),
+            cache_write_reported: row.broca.map_or(true, |broca| broca.cache_write_reported),
+            provider: row.provider,
+            model: row.model,
         });
     }
 
@@ -2577,7 +2628,11 @@ fn build_db_cache_events_with_attribution(
             chronological[i].hit_ratio = ret;
         }
 
-        if chronological[i].cache_reported {
+        if chronological[i].aggregate {
+            // A run total is no baseline for the next request: the step after
+            // it has nothing comparable to be measured against.
+            prev_event_idx_by_session.remove(&session_key);
+        } else if chronological[i].cache_reported {
             prev_event_idx_by_session.insert(session_key.clone(), i);
         }
         last_finish_by_session.insert(
@@ -2738,43 +2793,89 @@ fn get_broca_session_cache_events(
         .unwrap_or_default()
 }
 
-// One row per Broca run. An export fact is an immutable billing segment whose
-// `usage` is the SUM of every model step (provider request) in the run's agent
-// loop; a refrozen configuration can split one run across several facts, so
-// the facts are summed back to the run. Broca does not export per-request
-// usage, so these rows are run aggregates and `build_db_cache_events` never
-// compares one run against another.
+// Broca's `run-index.db` describes a session's usage in two tables:
 //
-// `ordinal` numbers the session's runs over ALL of its facts, before the
-// limit/since window is applied, so a run is marked as the session's first
-// only when it really is.
+// - `export_facts`: one row per billing segment of a run. Its
+//   `segment_json.usage` is the SUM of every model step (provider request) in
+//   the run's agent loop, and a refrozen configuration can split one run
+//   across several facts.
+// - `export_steps` (newer Broca releases): one row per model step, keyed
+//   `(run_id, step_id)`, with that step's own usage in `step_json`. Broca
+//   writes a run's steps together with its facts when the run ends and never
+//   backfills, so runs exported before the table existed have no step rows.
 //
-// `usage.cached_input_tokens` (reads) and `usage.cache_write_tokens` (writes)
-// are each absent, never 0, when the provider did not report them. The sums
-// below coalesce absent to 0 only for arithmetic; `cache_reported` (reads) and
-// `write_reported` (writes) record whether any segment carried the key, and
-// the view shows "not reported" rather than the 0 when it did not.
+// The loader lists the session's runs from `export_facts`, then replaces each
+// run that has step rows with one row per step. Those rows are classified
+// step against step exactly like OpenCode requests. A run without step rows
+// (an older run, or any run when the table does not exist) stays one
+// aggregate row, which `build_db_cache_events` never compares with another
+// row. One session can therefore mix both kinds on one timeline.
+//
+// `limit` and `since_timestamp` select runs, not steps: a run's steps are
+// always loaded together so a run is never cut in half.
 fn load_broca_cache_events_from_conn(
     conn: &Connection,
     session_id: &str,
     limit: Option<usize>,
     since_timestamp: Option<i64>,
 ) -> rusqlite::Result<Vec<RawDbCacheEvent>> {
+    let runs = load_broca_run_totals(conn, session_id, limit, since_timestamp)?;
+    // Detected by the table itself rather than a version number: a store
+    // written before Broca shipped per-step rows simply lacks it.
+    if !table_exists(conn, "export_steps") {
+        return Ok(runs);
+    }
+    let mut stmt = conn.prepare(BROCA_RUN_STEPS_SQL)?;
+    let mut rows = Vec::with_capacity(runs.len());
+    for run in runs {
+        let steps = load_broca_run_steps(&mut stmt, &run)?;
+        if steps.is_empty() {
+            rows.push(run);
+        } else {
+            rows.extend(steps);
+        }
+    }
+    Ok(rows)
+}
+
+// One row per Broca run, oldest first, summing the run's facts.
+//
+// `ordinal` numbers the session's runs over ALL of its facts, before the
+// limit/since window is applied, so a run is marked as the session's first
+// only when it really is. `provider` and `model` come from the run's last
+// fact, so a run that switched models reports the one it ended on.
+//
+// `usage.cached_input_tokens` (reads) and `usage.cache_write_tokens` (writes)
+// are each absent, never 0, when the provider did not report them. The sums
+// below coalesce absent to 0 only for arithmetic; `cache_reported` (reads) and
+// `write_reported` (writes) record whether any segment carried the key, and
+// the view shows "not reported" rather than the 0 when it did not.
+fn load_broca_run_totals(
+    conn: &Connection,
+    session_id: &str,
+    limit: Option<usize>,
+    since_timestamp: Option<i64>,
+) -> rusqlite::Result<Vec<RawDbCacheEvent>> {
     let mut stmt = conn.prepare(
-        "WITH runs AS (
+        "WITH facts AS (
+             SELECT run_id, segment_json,
+                    ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY export_seq DESC) AS newest
+             FROM export_facts
+             WHERE json_extract(segment_json, '$.session') = ?1
+         ),
+         runs AS (
              SELECT run_id,
                     MAX(CAST(json_extract(segment_json, '$.occurred_at_ms') AS INTEGER)) AS activity,
                     SUM(COALESCE(CAST(json_extract(segment_json, '$.usage.input_tokens') AS INTEGER), 0)) AS input,
                     SUM(COALESCE(CAST(json_extract(segment_json, '$.usage.cached_input_tokens') AS INTEGER), 0)) AS read,
                     SUM(COALESCE(CAST(json_extract(segment_json, '$.usage.cache_write_tokens') AS INTEGER), 0)) AS write,
                     SUM(COALESCE(CAST(json_extract(segment_json, '$.usage.output_tokens') AS INTEGER), 0)) AS output,
-                    MAX(json_extract(segment_json, '$.provider')) AS provider,
-                    MAX(json_extract(segment_json, '$.model')) AS model,
+                    MAX(CASE WHEN newest = 1 THEN json_extract(segment_json, '$.provider') END) AS provider,
+                    MAX(CASE WHEN newest = 1 THEN json_extract(segment_json, '$.model') END) AS model,
                     MAX(json_extract(segment_json, '$.usage.cached_input_tokens') IS NOT NULL) AS cache_reported,
                     MAX(json_extract(segment_json, '$.usage.cache_write_tokens') IS NOT NULL) AS write_reported,
                     MAX(json_extract(segment_json, '$.terminal_reason')) AS terminal_reason
-             FROM export_facts
-             WHERE json_extract(segment_json, '$.session') = ?1
+             FROM facts
              GROUP BY run_id HAVING activity IS NOT NULL
          ),
          ranked AS (
@@ -2803,6 +2904,8 @@ fn load_broca_cache_events_from_conn(
             let read: i64 = row.get(3)?;
             let write: i64 = row.get(4)?;
             let output: i64 = row.get(5)?;
+            let provider: Option<String> = row.get(6)?;
+            let model: Option<String> = row.get(7)?;
             Ok(RawDbCacheEvent {
                 harness: Harness::Broca,
                 message_id: run_id.clone(),
@@ -2812,10 +2915,7 @@ fn load_broca_cache_events_from_conn(
                 cache_read: read,
                 cache_write: write,
                 total_tokens: input + read + write + output,
-                agent: row
-                    .get::<_, Option<String>>(6)?
-                    .zip(row.get::<_, Option<String>>(7)?)
-                    .map(|(provider, model)| format!("{provider}/{model}")),
+                agent: provider_model_label(provider.as_deref(), model.as_deref()),
                 // Only a run's final segment carries its terminal reason
                 // (completed, error, cancelled, ...), so an errored run is
                 // labelled as such rather than looking like a normal one.
@@ -2823,7 +2923,10 @@ fn load_broca_cache_events_from_conn(
                 native_turn_id: Some(run_id),
                 context_limit: None,
                 cache_reported: row.get::<_, i64>(8)? != 0,
-                broca_run: Some(BrocaRunAggregate {
+                provider,
+                model,
+                broca: Some(BrocaRow {
+                    aggregate: true,
                     cache_write_reported: row.get::<_, i64>(9)? != 0,
                     first_in_session: row.get::<_, i64>(10)? == 1,
                 }),
@@ -2833,6 +2936,106 @@ fn load_broca_cache_events_from_conn(
     let mut rows: Vec<_> = rows.collect::<rusqlite::Result<_>>()?;
     rows.reverse();
     Ok(rows)
+}
+
+// A run's model steps in `step_id` order (strictly increasing within a run).
+// Usage keys are absent when the provider did not report them and are read as
+// NULL here, so an absent count stays distinguishable from a reported 0.
+const BROCA_RUN_STEPS_SQL: &str = "SELECT step_id,
+            CAST(json_extract(step_json, '$.ts_ms') AS INTEGER),
+            CAST(json_extract(step_json, '$.usage.input_tokens') AS INTEGER),
+            CAST(json_extract(step_json, '$.usage.cached_input_tokens') AS INTEGER),
+            CAST(json_extract(step_json, '$.usage.cache_write_tokens') AS INTEGER),
+            CAST(json_extract(step_json, '$.usage.output_tokens') AS INTEGER),
+            json_extract(step_json, '$.provider'),
+            json_extract(step_json, '$.model'),
+            json_extract(step_json, '$.finish_reason')
+     FROM export_steps
+     WHERE run_id = ?1
+     ORDER BY step_id";
+
+/// Expands one run total into its step rows; empty when the run has none.
+fn load_broca_run_steps(
+    stmt: &mut rusqlite::Statement<'_>,
+    run: &RawDbCacheEvent,
+) -> rusqlite::Result<Vec<RawDbCacheEvent>> {
+    struct Step {
+        step_id: i64,
+        ts_ms: Option<i64>,
+        input: Option<i64>,
+        read: Option<i64>,
+        write: Option<i64>,
+        output: Option<i64>,
+        provider: Option<String>,
+        model: Option<String>,
+        finish: Option<String>,
+    }
+    let steps: Vec<Step> = stmt
+        .query_map(params![run.message_id], |row| {
+            Ok(Step {
+                step_id: row.get(0)?,
+                ts_ms: row.get(1)?,
+                input: row.get(2)?,
+                read: row.get(3)?,
+                write: row.get(4)?,
+                output: row.get(5)?,
+                provider: row.get(6)?,
+                model: row.get(7)?,
+                finish: row.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let run_first_in_session = run.broca.is_some_and(|broca| broca.first_in_session);
+    // Broca omits `ts_ms` when the WAL held no attempt record for a step. Such
+    // a step takes the time of the step before it (or, leading the run, the
+    // run's first recorded step time, else the run's end). Times are then kept
+    // strictly increasing, nudging a tie by 1 ms, because the timeline orders
+    // rows by time alone and must not swap two steps of one run.
+    let first_known_ts = steps.iter().find_map(|step| step.ts_ms);
+    let mut previous_ts: Option<i64> = None;
+    let mut rows = Vec::with_capacity(steps.len());
+    for (index, step) in steps.into_iter().enumerate() {
+        let base = step
+            .ts_ms
+            .or(previous_ts)
+            .or(first_known_ts)
+            .unwrap_or(run.timestamp);
+        let timestamp = previous_ts.map_or(base, |previous| base.max(previous + 1));
+        previous_ts = Some(timestamp);
+        let input = step.input.unwrap_or(0);
+        let read = step.read.unwrap_or(0);
+        let write = step.write.unwrap_or(0);
+        rows.push(RawDbCacheEvent {
+            harness: Harness::Broca,
+            message_id: format!("{}#{}", run.message_id, step.step_id),
+            session_id: run.session_id.clone(),
+            timestamp,
+            input_tokens: input,
+            cache_read: read,
+            cache_write: write,
+            cache_reported: step.read.is_some(),
+            total_tokens: input + read + write + step.output.unwrap_or(0),
+            agent: provider_model_label(step.provider.as_deref(), step.model.as_deref()),
+            finish: step.finish,
+            // Every step of one run answers the same prompt, so the run is the turn.
+            native_turn_id: Some(run.message_id.clone()),
+            context_limit: None,
+            provider: step.provider,
+            model: step.model,
+            broca: Some(BrocaRow {
+                aggregate: false,
+                first_in_session: run_first_in_session && index == 0,
+                cache_write_reported: step.write.is_some(),
+            }),
+        });
+    }
+    Ok(rows)
+}
+
+fn provider_model_label(provider: Option<&str>, model: Option<&str>) -> Option<String> {
+    provider
+        .zip(model)
+        .map(|(provider, model)| format!("{provider}/{model}"))
 }
 
 const RECENT_OPENCODE_CACHE_SESSIONS_SQL: &str = "SELECT id, time_updated, NULLIF(title, '')
@@ -3506,7 +3709,9 @@ fn get_opencode_session_cache_events_from_conn(
                 COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0),
                 CAST(json_extract(data, '$.agent') AS TEXT),
                  CAST(json_extract(data, '$.finish') AS TEXT),
-                 CAST(json_extract(data, '$.parentID') AS TEXT)
+                 CAST(json_extract(data, '$.parentID') AS TEXT),
+                 CAST(COALESCE(json_extract(data, '$.providerID'), json_extract(data, '$.model.providerID')) AS TEXT),
+                 CAST(COALESCE(json_extract(data, '$.modelID'), json_extract(data, '$.model.modelID')) AS TEXT)
          FROM message
          WHERE session_id = ?1
            AND json_extract(data, '$.role') = 'assistant'
@@ -3520,7 +3725,9 @@ fn get_opencode_session_cache_events_from_conn(
                   + COALESCE(CAST(json_extract(data, '$.tokens.reasoning') AS INTEGER), 0)
                   + COALESCE(CAST(json_extract(data, '$.tokens.cache.read') AS INTEGER), 0)
                   + COALESCE(CAST(json_extract(data, '$.tokens.cache.write') AS INTEGER), 0),
-                CAST(json_extract(data, '$.agent') AS TEXT), NULL, NULL
+                CAST(json_extract(data, '$.agent') AS TEXT), NULL, NULL,
+                CAST(COALESCE(json_extract(data, '$.providerID'), json_extract(data, '$.model.providerID')) AS TEXT),
+                CAST(COALESCE(json_extract(data, '$.modelID'), json_extract(data, '$.model.modelID')) AS TEXT)
          FROM session_message
          WHERE session_id = ?1
            AND type = 'assistant'
@@ -3579,7 +3786,9 @@ fn get_opencode_session_cache_events_from_conn(
             finish: row.get(8)?,
             native_turn_id: row.get(9)?,
             context_limit: None,
-            broca_run: None,
+            provider: row.get(10)?,
+            model: row.get(11)?,
+            broca: None,
             cache_reported: true,
         })
     }) else {
@@ -3606,6 +3815,7 @@ fn get_pi_session_cache_events(
         .filter(|message| message.role == "assistant")
         .filter_map(|message| {
             let usage = message.usage?;
+            let (provider, model) = pi_message_provider_model(&message.raw_json);
             (usage.total > 0).then_some(RawDbCacheEvent {
                 harness,
                 message_id: message.entry_id,
@@ -3619,7 +3829,9 @@ fn get_pi_session_cache_events(
                 finish: message.stop_reason,
                 native_turn_id: None,
                 context_limit: None,
-                broca_run: None,
+                provider,
+                model,
+                broca: None,
                 cache_reported: true,
             })
         })
@@ -3710,7 +3922,9 @@ fn get_external_session_cache_events(
             finish: event.finish.clone(),
             native_turn_id: None,
             context_limit: event.context_limit,
-            broca_run: None,
+            provider: harness.jsonl_provider().map(str::to_owned),
+            model: event.model.clone(),
+            broca: None,
             cache_reported: true,
         })
         .collect();
@@ -8704,7 +8918,9 @@ mod cache_turn_tests {
             finish: finish.map(|s| s.to_string()),
             native_turn_id: None,
             context_limit: None,
-            broca_run: None,
+            provider: None,
+            model: None,
+            broca: None,
             cache_reported: true,
         }
     }
@@ -8801,6 +9017,47 @@ mod cache_turn_tests {
         assert!(events[0].is_turn_start);
         assert!(!events[1].is_turn_start);
         assert!(events.iter().all(|event| event.turn_id == "user-1"));
+    }
+
+    #[test]
+    fn opencode_and_pi_events_carry_their_provider_and_model() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                                   time_created INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES ('a1', 's1', 100, ?1)",
+            params![serde_json::json!({
+                "role": "assistant", "providerID": "anthropic", "modelID": "claude-opus-5",
+                "tokens": { "input": 10, "cache": { "read": 80, "write": 10 }, "total": 100 }
+            })
+            .to_string()],
+        )
+        .unwrap();
+        let events = get_opencode_session_cache_events_from_conn(
+            &conn,
+            OpenCodeStoreGeneration::V1,
+            "s1",
+            Some(10),
+            None,
+        );
+        assert_eq!(events[0].provider.as_deref(), Some("anthropic"));
+        assert_eq!(events[0].model.as_deref(), Some("claude-opus-5"));
+
+        let pi_entry = serde_json::json!({
+            "type": "message",
+            "message": {"role": "assistant", "provider": "openai", "model": "gpt-6"}
+        });
+        assert_eq!(
+            pi_message_provider_model(&pi_entry),
+            (Some("openai".to_string()), Some("gpt-6".to_string()))
+        );
+        assert_eq!(
+            pi_message_provider_model(&serde_json::json!({"message": {}})),
+            (None, None)
+        );
     }
 
     #[test]
@@ -10088,6 +10345,8 @@ mod get_session_cache_events_by_turn_count_tests {
             aggregate: false,
             cold_start: false,
             cache_write_reported: true,
+            provider: None,
+            model: None,
         }
     }
 
@@ -11131,7 +11390,9 @@ mod broca_cache_tests {
             finish: None,
             native_turn_id: None,
             context_limit: None,
-            broca_run: None,
+            provider: None,
+            model: None,
+            broca: None,
         };
         let events = build_db_cache_events(vec![event], false);
         assert!(events[0].cache_reported);
@@ -11155,6 +11416,317 @@ mod broca_cache_tests {
             .execute("INSERT INTO export_facts VALUES ('run')", [])
             .is_err());
         assert!(open_broca_store(&dir.path().join("missing.db")).is_err());
+    }
+
+    /// Adds Broca's per-step table with its production DDL.
+    fn add_steps_table(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE export_steps (
+                 run_id    TEXT NOT NULL,
+                 step_id   INTEGER NOT NULL,
+                 step_json TEXT NOT NULL,
+                 PRIMARY KEY (run_id, step_id)
+             );",
+        )
+        .unwrap();
+    }
+
+    /// One `export_steps` row in Broca's `step_json` shape. `ts_ms` and
+    /// `finish_reason` are omitted when `None`, as Broca omits them.
+    fn insert_step(
+        conn: &Connection,
+        run: &str,
+        step_id: i64,
+        identity: &serde_json::Value,
+        ts_ms: Option<i64>,
+        model: &str,
+        usage: serde_json::Value,
+    ) {
+        let mut step = serde_json::json!({
+            "run_id": run, "step_id": step_id, "session": identity,
+            "provider": "anthropic", "model": model, "auth_selection": "oauth:anthropic",
+            "usage": usage, "finish_reason": "tool_calls", "retries_used": 0,
+        });
+        if let Some(ts) = ts_ms {
+            step["ts_ms"] = serde_json::json!(ts);
+        }
+        conn.execute(
+            "INSERT INTO export_steps (run_id, step_id, step_json) VALUES (?1, ?2, ?3)",
+            params![run, step_id, step.to_string()],
+        )
+        .unwrap();
+    }
+
+    fn events_for(conn: &Connection, identity: &serde_json::Value) -> Vec<DbCacheEvent> {
+        build_db_cache_events(
+            load_broca_cache_events_from_conn(conn, &identity.to_string(), None, None).unwrap(),
+            false,
+        )
+    }
+
+    /// One four-step Anthropic run: a cold write, a warm-up, a steady step,
+    /// then a step that lost most of the cached prefix.
+    fn stepped_session() -> (Connection, serde_json::Value) {
+        let conn = store();
+        add_steps_table(&conn);
+        let id = identity("alfonso:bg_steps");
+        insert(
+            &conn,
+            "f1",
+            "r1",
+            &id,
+            1_100,
+            serde_json::json!({"input_tokens": 5_030, "cached_input_tokens": 9_300,
+                               "cache_write_tokens": 4_600, "output_tokens": 40}),
+        );
+        // (step_id, ts_ms, input, cached reads, cache writes)
+        for (step, ts, input, read, write) in [
+            (1, 1_010, 5_000, 0, 4_000),
+            (2, 1_020, 10, 4_000, 300),
+            (3, 1_030, 10, 4_300, 200),
+            (4, 1_040, 10, 1_000, 100),
+        ] {
+            let usage = serde_json::json!({"input_tokens": input, "cached_input_tokens": read,
+                                           "cache_write_tokens": write, "output_tokens": 10});
+            insert_step(&conn, "r1", step, &id, Some(ts), "claude-opus-5", usage);
+        }
+        (conn, id)
+    }
+
+    #[test]
+    fn step_rows_replace_the_run_total_and_are_classified_step_against_step() {
+        let (conn, id) = stepped_session();
+        let events = events_for(&conn, &id);
+        let ids: Vec<_> = events.iter().map(|e| e.message_id.as_str()).collect();
+        assert_eq!(ids, ["r1#1", "r1#2", "r1#3", "r1#4"]);
+        assert!(events.iter().all(|e| !e.aggregate && e.turn_id == "r1"));
+        let severities: Vec<_> = events.iter().map(|e| e.severity.as_str()).collect();
+        assert_eq!(severities, ["info", "stable", "stable", "bust"]);
+        assert!(events[0].cold_start);
+        assert!(events[1..].iter().all(|e| !e.cold_start));
+        // Step 4 read 1,000 of the 4,500 tokens step 3 left cached.
+        assert!((events[3].hit_ratio - 1_000.0 / 4_500.0).abs() < 1e-9);
+        assert_eq!(events[3].cache_read, 1_000);
+        assert_eq!(events[3].model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(events[3].provider.as_deref(), Some("anthropic"));
+        assert_eq!(events[3].finish.as_deref(), Some("tool_calls"));
+    }
+
+    #[test]
+    fn store_without_the_steps_table_falls_back_to_run_totals() {
+        let (conn, session) = two_run_session();
+        assert!(!table_exists(&conn, "export_steps"));
+        let events = build_db_cache_events(
+            load_broca_cache_events_from_conn(&conn, &session, None, None).unwrap(),
+            false,
+        );
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|e| e.aggregate && e.severity == "aggregate"));
+        assert_eq!(events[0].model.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn older_runs_without_steps_stay_totals_beside_stepped_runs() {
+        let conn = store();
+        add_steps_table(&conn);
+        let id = identity("alfonso:mixed");
+        // Exported before Broca wrote step rows: a total only.
+        insert(
+            &conn,
+            "f1",
+            "r1",
+            &id,
+            1_000,
+            serde_json::json!({"input_tokens": 100, "cached_input_tokens": 50_000,
+                               "cache_write_tokens": 900, "output_tokens": 10}),
+        );
+        insert(
+            &conn,
+            "f2",
+            "r2",
+            &id,
+            2_100,
+            serde_json::json!({"input_tokens": 20, "cached_input_tokens": 5_100,
+                               "cache_write_tokens": 200, "output_tokens": 20}),
+        );
+        insert_step(
+            &conn,
+            "r2",
+            1,
+            &id,
+            Some(2_010),
+            "claude-opus-5",
+            serde_json::json!({"input_tokens": 10, "cached_input_tokens": 5_000,
+                               "cache_write_tokens": 100, "output_tokens": 10}),
+        );
+        insert_step(
+            &conn,
+            "r2",
+            2,
+            &id,
+            Some(2_020),
+            "claude-opus-5",
+            serde_json::json!({"input_tokens": 10, "cached_input_tokens": 100,
+                               "cache_write_tokens": 100, "output_tokens": 10}),
+        );
+        let events = events_for(&conn, &id);
+        let ids: Vec<_> = events.iter().map(|e| e.message_id.as_str()).collect();
+        assert_eq!(ids, ["r1", "r2#1", "r2#2"]);
+        assert!(events[0].aggregate && events[0].cold_start);
+        assert_eq!(events[0].severity, "aggregate");
+        // The first step after a run total has no comparable predecessor, so
+        // it is not measured against the whole previous run.
+        assert!(!events[1].aggregate && !events[1].cold_start);
+        assert_eq!(events[1].severity, "stable");
+        // The second step is measured against the first.
+        assert_eq!(events[2].severity, "bust");
+        assert_eq!(events[1].turn_id, events[2].turn_id);
+        assert_ne!(events[0].turn_id, events[1].turn_id);
+    }
+
+    #[test]
+    fn a_run_total_between_stepped_runs_breaks_the_step_comparison() {
+        let (conn, id) = stepped_session();
+        let usage = serde_json::json!({"input_tokens": 10, "cached_input_tokens": 100,
+                                       "cache_write_tokens": 10, "output_tokens": 10});
+        // r2 has no step rows; r3 does.
+        insert(&conn, "f2", "r2", &id, 2_000, usage.clone());
+        insert(&conn, "f3", "r3", &id, 3_100, usage.clone());
+        insert_step(&conn, "r3", 1, &id, Some(3_010), "claude-opus-5", usage);
+        let events = events_for(&conn, &id);
+        let last = events.last().unwrap();
+        assert_eq!(last.message_id, "r3#1");
+        assert!(events[events.len() - 2].aggregate);
+        // Reading 100 tokens would be a bust against r1's last step, but a run
+        // total sits between them, so there is no step to compare with.
+        assert_eq!(last.severity, "stable");
+    }
+
+    #[test]
+    fn each_step_and_run_carries_the_model_that_served_it() {
+        let conn = store();
+        add_steps_table(&conn);
+        let id = identity("alfonso:models");
+        // A run total whose configuration was refrozen onto a second model:
+        // the run reports the model it ended on.
+        let usage = serde_json::json!({"input_tokens": 10, "cached_input_tokens": 10});
+        for (fact, model) in [("f1", "claude-sonnet-5"), ("f2", "claude-opus-5")] {
+            let segment = serde_json::json!({
+                "run_id": "r1", "session": id, "provider": "anthropic", "model": model,
+                "occurred_at_ms": 1_000, "usage": usage,
+            });
+            conn.execute(
+                "INSERT INTO export_facts (fact_id, run_id, segment_json) VALUES (?1, 'r1', ?2)",
+                params![fact, segment.to_string()],
+            )
+            .unwrap();
+        }
+        insert(&conn, "f3", "r2", &id, 2_100, usage.clone());
+        insert_step(
+            &conn,
+            "r2",
+            1,
+            &id,
+            Some(2_010),
+            "claude-sonnet-5",
+            usage.clone(),
+        );
+        insert_step(&conn, "r2", 2, &id, Some(2_020), "claude-opus-5-5", usage);
+        let events = events_for(&conn, &id);
+        let models: Vec<_> = events.iter().map(|e| e.model.as_deref()).collect();
+        assert_eq!(
+            models,
+            [
+                Some("claude-opus-5"),
+                Some("claude-sonnet-5"),
+                Some("claude-opus-5-5")
+            ]
+        );
+        assert_eq!(
+            events[2].agent.as_deref(),
+            Some("anthropic/claude-opus-5-5")
+        );
+    }
+
+    #[test]
+    fn a_step_without_reported_reads_is_unknown_and_not_a_baseline() {
+        let conn = store();
+        add_steps_table(&conn);
+        let id = identity("alfonso:reads");
+        insert(
+            &conn,
+            "f1",
+            "r1",
+            &id,
+            1_100,
+            serde_json::json!({"input_tokens": 30, "cached_input_tokens": 8_000}),
+        );
+        insert_step(
+            &conn,
+            "r1",
+            1,
+            &id,
+            Some(1_010),
+            "gpt-6",
+            serde_json::json!({"input_tokens": 10, "cached_input_tokens": 4_000,
+                               "output_tokens": 10}),
+        );
+        // Reads and writes both omitted: not reported, not zero.
+        insert_step(
+            &conn,
+            "r1",
+            2,
+            &id,
+            Some(1_020),
+            "gpt-6",
+            serde_json::json!({"input_tokens": 10}),
+        );
+        insert_step(
+            &conn,
+            "r1",
+            3,
+            &id,
+            Some(1_030),
+            "gpt-6",
+            serde_json::json!({"input_tokens": 10, "cached_input_tokens": 4_000,
+                               "output_tokens": 10}),
+        );
+        let events = events_for(&conn, &id);
+        assert!(!events[0].cache_write_reported);
+        assert!(!events[1].cache_reported);
+        assert!(!events[1].cache_write_reported);
+        assert_eq!(events[1].severity, "unknown");
+        // Step 3 is measured against step 1, the last step that reported
+        // reads: 4,000 of an expected 4,000 + 10 + 10.
+        assert_eq!(events[2].severity, "stable");
+        assert!((events[2].hit_ratio - 4_000.0 / 4_020.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn steps_without_a_time_keep_their_step_order() {
+        let conn = store();
+        add_steps_table(&conn);
+        let id = identity("alfonso:no-ts");
+        insert(
+            &conn,
+            "f1",
+            "r1",
+            &id,
+            1_100,
+            serde_json::json!({"input_tokens": 30}),
+        );
+        let usage = serde_json::json!({"input_tokens": 10});
+        insert_step(&conn, "r1", 1, &id, None, "m", usage.clone());
+        insert_step(&conn, "r1", 2, &id, Some(1_050), "m", usage.clone());
+        insert_step(&conn, "r1", 3, &id, None, "m", usage.clone());
+        insert_step(&conn, "r1", 4, &id, Some(1_050), "m", usage);
+        let events = events_for(&conn, &id);
+        let ids: Vec<_> = events.iter().map(|e| e.message_id.as_str()).collect();
+        assert_eq!(ids, ["r1#1", "r1#2", "r1#3", "r1#4"]);
+        let times: Vec<_> = events.iter().map(|e| e.timestamp).collect();
+        assert_eq!(times, [1_050, 1_051, 1_052, 1_053]);
     }
 
     #[test]
