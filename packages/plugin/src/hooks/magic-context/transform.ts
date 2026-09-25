@@ -57,7 +57,7 @@ import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-pro
 import type { CoordinateGeneration } from "../../features/magic-context/store-generation-rebase";
 import {
     readCoordinateGeneration,
-    rebaseSessionCoordinates,
+    rebaseSessionCoordinatesAsync,
 } from "../../features/magic-context/store-generation-rebase";
 import type { Tagger } from "../../features/magic-context/tagger";
 import {
@@ -937,7 +937,7 @@ export function createTransform(deps: TransformDeps) {
                         `rust module session deleted before the store projection rebase to ${deps.storeGeneration}; the next serve seeds cold`,
                     );
                 }
-                rebaseSessionCoordinates({
+                await rebaseSessionCoordinatesAsync({
                     db,
                     sessionId,
                     generation: deps.storeGeneration,

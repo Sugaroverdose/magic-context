@@ -4,7 +4,12 @@ import {
 } from "../../hooks/magic-context/read-session-raw";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
-import { clearIndexedMessagesInTransaction, ensureMessagesIndexed } from "./message-index";
+import {
+    clearIndexedMessagesInTransaction,
+    indexSourcesAfterOrdinal,
+    type MessageIndexSource,
+    toMessageIndexSource,
+} from "./message-index";
 import { clearCachedM0M1, ensureSessionMetaRow } from "./storage-meta-shared";
 import { foldShrunkPartTags, type ShrunkPartMessage } from "./storage-tags";
 
@@ -317,29 +322,72 @@ interface PlannedNote {
     previousOrdinal: number | null;
 }
 
+/**
+ * What the rebase keeps from the running host's projection of the session. The
+ * messages themselves are not kept: a long session's parts (tool output above
+ * all) are many times larger than these fields.
+ */
 interface Projection {
     ordinalById: Map<string, number>;
     partCountById: Map<string, number>;
     nonNarrativeOrdinals: Set<number>;
     messageCount: number;
+    /** What the search index files for each message, in ordinal order, when requested. */
+    indexSources: MessageIndexSource[];
 }
 
-function buildProjection(messages: readonly RawMessage[]): Projection {
-    const ordinalById = new Map<string, number>();
-    const partCountById = new Map<string, number>();
-    const nonNarrativeOrdinals = new Set<number>();
-    for (const message of messages) {
-        ordinalById.set(message.id, message.ordinal);
-        partCountById.set(message.id, Array.isArray(message.parts) ? message.parts.length : 0);
-        if (isStrictGapHealingMessage(message)) nonNarrativeOrdinals.add(message.ordinal);
-    }
+function emptyProjection(): Projection {
     return {
-        ordinalById,
-        partCountById,
-        nonNarrativeOrdinals,
-        messageCount: messages.length,
+        ordinalById: new Map(),
+        partCountById: new Map(),
+        nonNarrativeOrdinals: new Set(),
+        messageCount: 0,
+        indexSources: [],
     };
 }
+
+function addToProjection(
+    projection: Projection,
+    messages: readonly RawMessage[],
+    withIndexSources: boolean,
+): void {
+    for (const message of messages) {
+        projection.ordinalById.set(message.id, message.ordinal);
+        projection.partCountById.set(
+            message.id,
+            Array.isArray(message.parts) ? message.parts.length : 0,
+        );
+        if (isStrictGapHealingMessage(message))
+            projection.nonNarrativeOrdinals.add(message.ordinal);
+        if (withIndexSources) projection.indexSources.push(toMessageIndexSource(message));
+    }
+    projection.messageCount += messages.length;
+}
+
+/**
+ * The pages of the running projection, read exactly once: from the paged reader
+ * when the host supplies one, otherwise as the single page `readMessages` returns.
+ */
+function readProjectionPages(args: RebaseSessionCoordinatesArgs): Iterable<RawMessage[]> {
+    if (args.readMessagePages) return args.readMessagePages(args.sessionId);
+    return [args.readMessages(args.sessionId)];
+}
+
+/** Build the projection a page at a time, yielding between pages. */
+function* buildProjectionSteps(
+    args: RebaseSessionCoordinatesArgs,
+    withIndexSources: boolean,
+): Generator<void, Projection, void> {
+    const projection = emptyProjection();
+    for (const page of readProjectionPages(args)) {
+        addToProjection(projection, page, withIndexSources);
+        yield;
+    }
+    return projection;
+}
+
+/** Search-index documents written per transaction while the index is rebuilt. */
+const INDEX_REBUILD_CHUNK = 2000;
 
 /** The message id an anchor block id (`<messageId>#<block>`) names. */
 function messageIdFromAnchorBlockId(anchorBlockId: string): string {
@@ -586,13 +634,19 @@ function pruneShrunkPartEntries(
     } catch {
         return 0;
     }
-    const isStale = (candidate: string): boolean =>
-        shrunk.some(({ messageId, partCount }) => {
-            const prefix = `${messageId}:p`;
-            if (!candidate.startsWith(prefix)) return false;
-            const suffix = candidate.slice(prefix.length);
-            return /^\d+$/.test(suffix) && Number.parseInt(suffix, 10) >= partCount;
-        });
+    // Keyed lookup rather than a scan of every shrunk message per entry: these
+    // columns can hold tens of thousands of entries on a long session. An entry
+    // `<messageId>:p<digits>` names exactly one message id, everything before
+    // its last `:p`, because the digits cannot contain another `:p`.
+    const partCountByMessage = new Map(shrunk.map((entry) => [entry.messageId, entry.partCount]));
+    const isStale = (candidate: string): boolean => {
+        const marker = candidate.lastIndexOf(":p");
+        if (marker < 0) return false;
+        const suffix = candidate.slice(marker + 2);
+        if (!/^\d+$/.test(suffix)) return false;
+        const partCount = partCountByMessage.get(candidate.slice(0, marker));
+        return partCount !== undefined && Number.parseInt(suffix, 10) >= partCount;
+    };
 
     let dropped = 0;
     const pruneArray = (values: unknown[]): unknown[] =>
@@ -634,8 +688,17 @@ export interface RebaseSessionCoordinatesArgs {
     sessionId: string;
     /** Projection the running host serves for this session. */
     generation: CoordinateGeneration;
-    /** Reads that projection. Called at most once, and only when a change is possible. */
+    /**
+     * Reads that projection. Called at most once, and only when a change is
+     * possible; not called at all when `readMessagePages` is supplied.
+     */
     readMessages: (sessionId: string) => RawMessage[];
+    /**
+     * The same messages as `readMessages`, in ascending ordinal pages, so the
+     * whole history never has to be held at once. Preferred when present, and
+     * iterated at most once per call.
+     */
+    readMessagePages?: (sessionId: string) => Iterable<RawMessage[]>;
 }
 
 /**
@@ -657,10 +720,95 @@ export interface RebaseSessionCoordinatesArgs {
  * The row rewrites, the index clear and the generation stamp commit together, so
  * a crash leaves the session either fully rebased or untouched; an untouched
  * session still has the old stamp, so the next pass runs this again.
+ *
+ * This form runs to completion without giving up the thread. The request path
+ * uses `rebaseSessionCoordinatesAsync`, which does the same work but lets other
+ * work run between history pages and between index-rebuild chunks.
  */
 export function rebaseSessionCoordinates(
     args: RebaseSessionCoordinatesArgs,
 ): StoreGenerationRebaseOutcome {
+    const steps = rebaseSteps(args);
+    for (;;) {
+        const step = steps.next();
+        if (step.done) return step.value;
+    }
+}
+
+/** How long the async form may hold the thread before it lets other work run. */
+const REBASE_SLICE_MS = 20;
+
+const rebasesInFlight = new WeakMap<Database, Map<string, Promise<StoreGenerationRebaseOutcome>>>();
+
+/**
+ * `rebaseSessionCoordinates` for the request path: identical work and
+ * identical rows, but the thread is released every ~20 ms at the points where
+ * that is safe, so a long first reconciliation no longer freezes the host.
+ *
+ * It is released only outside write transactions: while the history is read
+ * (nothing written yet, and every saved row is read again after the read
+ * ends, so work done meanwhile is seen), and between the search-index rebuild
+ * chunks that follow the commit (each chunk is its own transaction and the
+ * index is designed to be caught up in pieces). The coordinate rewrite, the
+ * index clear and the generation stamp still commit as one transaction that
+ * nothing else runs inside, and the caller's promise settles only after the
+ * stamp has committed, so a prompt built after awaiting this never sees the old
+ * coordinates.
+ *
+ * Two calls for the same session on one connection do not run side by side:
+ * the second waits for the first and then finds the session already stamped.
+ */
+export async function rebaseSessionCoordinatesAsync(
+    args: RebaseSessionCoordinatesArgs,
+): Promise<StoreGenerationRebaseOutcome> {
+    let sessions = rebasesInFlight.get(args.db);
+    if (!sessions) {
+        sessions = new Map();
+        rebasesInFlight.set(args.db, sessions);
+    }
+    const earlier = sessions.get(args.sessionId);
+    if (earlier) await earlier.catch(() => undefined);
+
+    const run = runSliced(args);
+    sessions.set(args.sessionId, run);
+    try {
+        return await run;
+    } finally {
+        if (sessions.get(args.sessionId) === run) sessions.delete(args.sessionId);
+    }
+}
+
+async function runSliced(
+    args: RebaseSessionCoordinatesArgs,
+): Promise<StoreGenerationRebaseOutcome> {
+    const steps = rebaseSteps(args);
+    let finished = false;
+    try {
+        let sliceStartedAt = performance.now();
+        for (;;) {
+            const step = steps.next();
+            if (step.done) {
+                finished = true;
+                return step.value;
+            }
+            if (performance.now() - sliceStartedAt >= REBASE_SLICE_MS) {
+                await new Promise<void>((resolve) => setImmediate(resolve));
+                sliceStartedAt = performance.now();
+            }
+        }
+    } finally {
+        // Closes the history reader if a step threw before the read finished.
+        if (!finished) steps.return(emptyOutcome("unchanged", args.generation, null));
+    }
+}
+
+/**
+ * The rebase itself. Each `yield` marks a point where no write transaction is
+ * open and the caller may let other work run before continuing.
+ */
+function* rebaseSteps(
+    args: RebaseSessionCoordinatesArgs,
+): Generator<void, StoreGenerationRebaseOutcome, void> {
     const { db, sessionId, generation } = args;
     const startedAt = performance.now();
     if (!sessionIsOpenCodeOwned(db, sessionId)) {
@@ -669,7 +817,7 @@ export function rebaseSessionCoordinates(
     const previousGeneration = readCoordinateGeneration(db, sessionId);
     if (previousGeneration === generation) {
         const outcome = emptyOutcome("unchanged", generation, previousGeneration);
-        const repair = repairStampedSessionOnce(db, sessionId, args.readMessages);
+        const repair = repairStampedSessionOnce(db, sessionId, args);
         if (repair !== null && repair.rowsRewritten > 0) {
             outcome.status = "repaired";
             outcome.compartmentsDerived = repair.derived.length;
@@ -695,7 +843,9 @@ export function rebaseSessionCoordinates(
         return emptyOutcome("stamped", generation, previousGeneration);
     }
 
-    const projection = buildProjection(args.readMessages(sessionId));
+    // The only history read of the call. It also keeps what the search index
+    // needs, so the index rebuild after the commit does not read it again.
+    const projection = yield* buildProjectionSteps(args, true);
     // The outcome and its log line name the projection the rebase actually ran
     // from, which for an unstamped session is the harness-implied one.
     const outcome = emptyOutcome("rebased", generation, impliedGeneration);
@@ -712,13 +862,16 @@ export function rebaseSessionCoordinates(
     // rewrites a multi-part message into one joined text part leaves every tag
     // above the surviving index without a target.
     const shrunkMessages: ShrunkPartMessage[] = [];
-    const taggedMessageIds = (
-        db
-            .prepare(
-                "SELECT DISTINCT message_id FROM tags WHERE session_id = ? AND type = 'message'",
-            )
-            .all(sessionId) as Array<{ message_id?: unknown }>
-    ).flatMap((row) => (typeof row.message_id === "string" ? [row.message_id] : []));
+    // De-duplicated here rather than with SELECT DISTINCT, which makes SQLite
+    // walk the message-id index and fetch every tag row in index order: on a
+    // session with a few hundred thousand tags that was ten times slower.
+    const taggedMessageIds = new Set(
+        (
+            db
+                .prepare("SELECT message_id FROM tags WHERE session_id = ? AND type = 'message'")
+                .all(sessionId) as Array<{ message_id?: unknown }>
+        ).flatMap((row) => (typeof row.message_id === "string" ? [row.message_id] : [])),
+    );
     const highestTaggedPartIndex = new Map<string, number>();
     for (const contentId of taggedMessageIds) {
         const marker = contentId.lastIndexOf(":p");
@@ -783,13 +936,64 @@ export function rebaseSessionCoordinates(
     }
 
     db.exec("BEGIN IMMEDIATE");
-    let committed = false;
+    // True once the transaction has been closed here, by COMMIT or by the
+    // deliberate ROLLBACK below; the finally block rolls back anything else.
+    let closed = false;
     try {
+        // Another pass (this process's sync caller, or another process on the
+        // same database) may have rebased the session while the history was
+        // being read. Its stamp is authoritative; rewriting on top of it from
+        // the older rows read above would only repeat or undo its work.
+        if (readCoordinateGeneration(db, sessionId) !== previousGeneration) {
+            db.exec("ROLLBACK");
+            closed = true;
+            return emptyOutcome("unchanged", generation, readCoordinateGeneration(db, sessionId));
+        }
+
+        // Everything below commits together, so the order only matters for cost.
+        // Every tag write fires a trigger that rewrites this session's
+        // session_meta row, which on a long session carries megabytes of cached
+        // render and frozen-part lists. Shrinking that row first, and doing the
+        // tag writes before the index clear fills the page cache with deleted
+        // search documents, keeps each of those rewrites cheap.
+        //
+        // The cached prefix bytes contain the ranges corrected by this pass, so
+        // the next pass must regenerate those bytes instead of replaying the old
+        // render. Clear the previous host's system-prompt hash at the same time so
+        // the new host can establish its baseline without scheduling another HARD
+        // fold after this initial rebuild.
+        clearCachedM0M1(db, sessionId);
+        db.prepare("UPDATE session_meta SET system_prompt_hash = '' WHERE session_id = ?").run(
+            sessionId,
+        );
+        for (const column of [
+            "stripped_placeholder_ids",
+            "merged_reasoning_stripped_ids",
+            "trailing_blank_decisions",
+        ]) {
+            outcome.frozenPartEntriesDropped += pruneShrunkPartEntries(
+                db,
+                sessionId,
+                column,
+                shrunkMessages,
+            );
+        }
+        const fold = foldShrunkPartTags(db, sessionId, shrunkMessages);
+        outcome.partTagsFolded = fold.foldedTagNumbers.length;
+        outcome.partTagsRekeyed = fold.rekeyedTagNumbers.length;
+        outcome.queuedReductionsDiscarded = fold.discardedDropTagNumbers.length;
+
+        const updateCompartment = {
+            compartments: db.prepare(
+                "UPDATE compartments SET start_message = ?, end_message = ?, rebase_status = ? WHERE id = ?",
+            ),
+            recomp_compartments: db.prepare(
+                "UPDATE recomp_compartments SET start_message = ?, end_message = ?, rebase_status = ? WHERE id = ?",
+            ),
+        };
         for (const plan of [...compartmentPlans, ...recompPlans]) {
             if (!compartmentPlanChanges(plan)) continue;
-            db.prepare(
-                `UPDATE ${plan.table} SET start_message = ?, end_message = ?, rebase_status = ? WHERE id = ?`,
-            ).run(plan.start, plan.end, plan.status, plan.id);
+            updateCompartment[plan.table].run(plan.start, plan.end, plan.status, plan.id);
             const rebased = plan.status === "ok" ? 1 : 0;
             const unresolved = plan.status === "unresolved" ? 1 : 0;
             if (plan.table === "compartments") {
@@ -803,12 +1007,11 @@ export function rebaseSessionCoordinates(
                 outcome.recompCompartmentsUnresolved += unresolved;
             }
         }
+        const updateNote = db.prepare(
+            "UPDATE notes SET anchor_ordinal = ? WHERE id = ? AND session_id = ?",
+        );
         for (const plan of movedNotes) {
-            db.prepare("UPDATE notes SET anchor_ordinal = ? WHERE id = ? AND session_id = ?").run(
-                plan.ordinal,
-                plan.id,
-                sessionId,
-            );
+            updateNote.run(plan.ordinal, plan.id, sessionId);
             if (plan.ordinal === null) outcome.notesCleared += 1;
             else outcome.notesRebased += 1;
         }
@@ -847,32 +1050,6 @@ export function rebaseSessionCoordinates(
             outcome.lkgSlotsDropped = lkgSlotCount;
         }
 
-        const fold = foldShrunkPartTags(db, sessionId, shrunkMessages);
-        outcome.partTagsFolded = fold.foldedTagNumbers.length;
-        outcome.partTagsRekeyed = fold.rekeyedTagNumbers.length;
-        outcome.queuedReductionsDiscarded = fold.discardedDropTagNumbers.length;
-        for (const column of [
-            "stripped_placeholder_ids",
-            "merged_reasoning_stripped_ids",
-            "trailing_blank_decisions",
-        ]) {
-            outcome.frozenPartEntriesDropped += pruneShrunkPartEntries(
-                db,
-                sessionId,
-                column,
-                shrunkMessages,
-            );
-        }
-
-        // The cached prefix bytes contain the ranges corrected by this pass, so
-        // the next pass must regenerate those bytes instead of replaying the old
-        // render. Clear the previous host's system-prompt hash at the same time so
-        // the new host can establish its baseline without scheduling another HARD
-        // fold after this initial rebuild.
-        clearCachedM0M1(db, sessionId);
-        db.prepare("UPDATE session_meta SET system_prompt_hash = '' WHERE session_id = ?").run(
-            sessionId,
-        );
         stampGeneration(db, sessionId, generation, {
             generation,
             previousGeneration: impliedGeneration,
@@ -896,9 +1073,9 @@ export function rebaseSessionCoordinates(
             neighbourRecoveryAt: Date.now(),
         });
         db.exec("COMMIT");
-        committed = true;
+        closed = true;
     } finally {
-        if (!committed) {
+        if (!closed) {
             try {
                 db.exec("ROLLBACK");
             } catch {
@@ -910,9 +1087,21 @@ export function rebaseSessionCoordinates(
     // Repopulating the search index is idempotent catch-up from the authoritative
     // source, not part of the atomic state change: the committed transaction left
     // an empty index with a zero watermark, which every later pass heals the same
-    // way if this call does not get to run.
+    // way if this call does not get to run. It is written from the history read
+    // above, in bounded transactions; each one advances the watermark over the
+    // ordinals it covers, so stopping between them leaves a shorter but
+    // consistent index that the next reconciliation extends.
     if (outcome.indexRebuilt) {
-        ensureMessagesIndexed(db, sessionId, args.readMessages);
+        const sources = projection.indexSources;
+        for (let start = 0; start < sources.length; start += INDEX_REBUILD_CHUNK) {
+            indexSourcesAfterOrdinal(
+                db,
+                sessionId,
+                sources.slice(start, start + INDEX_REBUILD_CHUNK),
+                sources.length,
+            );
+            yield;
+        }
         outcome.indexRowsRebuilt = countRows(
             db,
             "SELECT COUNT(*) AS count FROM message_history_source WHERE session_id = ?",
@@ -1092,7 +1281,7 @@ function unresolvedRowBreaksTiling(rows: readonly CompartmentCoordinateRow[]): b
 function repairStampedSessionOnce(
     db: Database,
     sessionId: string,
-    readMessages: (sessionId: string) => RawMessage[],
+    readArgs: RebaseSessionCoordinatesArgs,
 ): NeighbourRecoveryResult | null {
     let checked = repairCheckedSessions.get(db);
     if (!checked) {
@@ -1112,7 +1301,13 @@ function repairStampedSessionOnce(
         db,
         sessionId,
         resolveOrdinal: (messageId) => {
-            ordinalById ??= buildProjection(readMessages(sessionId)).ordinalById;
+            if (ordinalById === null) {
+                const projection = emptyProjection();
+                for (const page of readProjectionPages(readArgs)) {
+                    addToProjection(projection, page, false);
+                }
+                ordinalById = projection.ordinalById;
+            }
             return ordinalById.get(messageId);
         },
         reason: "stamped-session repair",

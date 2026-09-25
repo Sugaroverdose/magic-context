@@ -318,21 +318,36 @@ function normalizeSourceVersion(version: RawMessage["version"]): string {
     return "null";
 }
 
-function getMessageSourceSnapshot(message: RawMessage): {
+/**
+ * Everything the search index keeps from one message. A caller that has to hold
+ * a whole session's worth of index input keeps these instead of the messages:
+ * the indexable text is a small fraction of a message's parts.
+ */
+export interface MessageIndexSource {
+    id: string;
     ordinal: number;
+    role: string;
+    createdAt: number | null | undefined;
     sourceVersion: string;
     contentHash: string;
-    role: string;
     content: string;
-} {
+}
+
+export function toMessageIndexSource(message: RawMessage): MessageIndexSource {
     const content = getIndexableContent(message.role, message.parts);
     return {
+        id: message.id,
         ordinal: message.ordinal,
+        role: message.role,
+        createdAt: message.createdAt,
         sourceVersion: normalizeSourceVersion(message.version),
         contentHash: createHash("sha256").update(content).digest("hex"),
-        role: message.role,
         content,
     };
+}
+
+function getMessageSourceSnapshot(message: RawMessage): MessageIndexSource {
+    return toMessageIndexSource(message);
 }
 
 export function getMessageIndexSourceIdentity(message: RawMessage): string {
@@ -370,10 +385,18 @@ function setMessageSource(
     message: RawMessage,
     now: number,
 ): string {
-    const source = getMessageSourceSnapshot(message);
+    return writeMessageSource(db, sessionId, getMessageSourceSnapshot(message), now);
+}
+
+function writeMessageSource(
+    db: Database,
+    sessionId: string,
+    source: MessageIndexSource,
+    now: number,
+): string {
     getUpsertMessageSourceStatement(db).run(
         sessionId,
-        message.id,
+        source.id,
         source.ordinal,
         source.sourceVersion,
         source.contentHash,
@@ -660,6 +683,32 @@ export function indexMessagesAfterOrdinal(
     _lastIndexedOrdinal: number,
     finalWatermark: number = messages.length,
 ): number {
+    return indexItemsAfterOrdinal(db, sessionId, messages, finalWatermark, toMessageIndexSource);
+}
+
+/**
+ * `indexMessagesAfterOrdinal` for input already reduced to index sources. The
+ * slice may be any contiguous part of the session: the watermark advances over
+ * the ordinals it covers and the first one it does not is left as the dirty
+ * floor, so consecutive slices, each in its own transaction, rebuild a session
+ * exactly as one call with every source would.
+ */
+export function indexSourcesAfterOrdinal(
+    db: Database,
+    sessionId: string,
+    sources: readonly MessageIndexSource[],
+    finalWatermark: number,
+): number {
+    return indexItemsAfterOrdinal(db, sessionId, sources, finalWatermark, (source) => source);
+}
+
+function indexItemsAfterOrdinal<T extends { ordinal: number }>(
+    db: Database,
+    sessionId: string,
+    items: readonly T[],
+    finalWatermark: number,
+    toSource: (item: T) => MessageIndexSource,
+): number {
     const now = Date.now();
     let inserted = 0;
 
@@ -703,23 +752,24 @@ export function indexMessagesAfterOrdinal(
             getDeleteMessageSourceRangeStatement(db).run(sessionId, dirtyFloor, finalWatermark);
         }
 
-        const messagesByOrdinal = new Map<number, RawMessage>();
-        for (const message of messages) {
-            if (message.ordinal > effectiveWatermark && message.ordinal <= finalWatermark) {
-                messagesByOrdinal.set(message.ordinal, message);
+        const itemsByOrdinal = new Map<number, T>();
+        for (const item of items) {
+            if (item.ordinal > effectiveWatermark && item.ordinal <= finalWatermark) {
+                itemsByOrdinal.set(item.ordinal, item);
             }
         }
 
         let coveredWatermark = effectiveWatermark;
-        while (coveredWatermark < finalWatermark && messagesByOrdinal.has(coveredWatermark + 1)) {
+        while (coveredWatermark < finalWatermark && itemsByOrdinal.has(coveredWatermark + 1)) {
             coveredWatermark += 1;
         }
 
         for (let ordinal = effectiveWatermark + 1; ordinal <= coveredWatermark; ordinal++) {
-            const message = messagesByOrdinal.get(ordinal);
-            if (!message) continue;
+            const item = itemsByOrdinal.get(ordinal);
+            if (!item) continue;
 
-            const content = setMessageSource(db, sessionId, message, now);
+            const message = toSource(item);
+            const content = writeMessageSource(db, sessionId, message, now);
             if (
                 content.length === 0 ||
                 (message.role !== "user" && message.role !== "assistant") ||
