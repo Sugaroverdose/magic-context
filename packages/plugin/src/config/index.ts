@@ -339,6 +339,45 @@ export function formatProtectedTokensBelowMinWarning(value: number): string {
     return `protected_tokens is a token floor (minimum ${PROTECTED_TOKENS_MIN}, default derived from the context window); ${value} looks like the old protected_tags count. Remove the key to use the default, or set a token count such as 16000.`;
 }
 
+/** The blocks `resolveHistorianModel` and `resolveDreamerTaskModel` actually read. */
+const MODEL_HARNESS_BLOCKS = ["opencode", "pi", "omp"] as const;
+
+/**
+ * Warn when an agent's model is configured somewhere the resolver never looks.
+ *
+ * Agent models are resolved per harness: `historian.opencode.model`,
+ * `historian.pi.model`, `historian.omp.model`. A bare `historian.model` is
+ * schema-valid and reads naturally, but nothing consumes it —
+ * `resolveHistorianModel({historian:{model}}, "opencode")` returns no models at
+ * all, and the only outward sign is a historian that silently never runs (the
+ * Rust module reports it as `historian_no_fire=no_models`). Saying so at load
+ * time is the difference between a five-minute fix and a subsystem that looks
+ * configured and is not.
+ */
+export function misplacedAgentModelWarnings(rawConfig: Record<string, unknown>): string[] {
+    const warnings: string[] = [];
+    for (const agent of ["historian", "dreamer"]) {
+        const block = rawConfig[agent];
+        if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+        const record = block as Record<string, unknown>;
+        if (!Object.hasOwn(record, "model")) continue;
+        const harnessWithModel = MODEL_HARNESS_BLOCKS.find((harness) => {
+            const sub = record[harness];
+            return (
+                sub !== null &&
+                typeof sub === "object" &&
+                !Array.isArray(sub) &&
+                Object.hasOwn(sub as Record<string, unknown>, "model")
+            );
+        });
+        if (harnessWithModel) continue;
+        warnings.push(
+            `${agent}.model is not read: the ${agent} model is resolved per harness, so it has to be ${agent}.opencode.model (OpenCode 1 and 2), ${agent}.pi.model, or ${agent}.omp.model. As written the ${agent} resolves to no models and never runs.`,
+        );
+    }
+    return warnings;
+}
+
 export function resetProtectedTagsDeprecationWarningForTest(): void {
     warnedProtectedTagsDeprecation = false;
 }
@@ -366,6 +405,7 @@ export function parsePluginConfig(
             "protected_tags is deprecated and ignored; use protected_tokens instead.",
         );
     }
+    preMigrationWarnings.push(...misplacedAgentModelWarnings(rawConfig));
     const migratedExperimental = migrateLegacyExperimental(
         configWithoutRemovedAgent,
         preMigrationWarnings,

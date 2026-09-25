@@ -49,6 +49,7 @@ import {
     type PostprocessReplaySnapshot,
     retireDeferredClearedCompactionMarkerState,
     setEmergencyDropSample,
+    setPersistedCompactionMarkerState,
     THINKING_BINDING_RECOVERY_FROZEN_PREFIX,
     thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
@@ -190,7 +191,7 @@ export type DeferredCompactionMarkerClearOutcome =
     | "cas-lost-newer-pending"
     | "cas-lost-already-cleared";
 
-function isSyntheticHeadMessage(message: MessageLike): boolean {
+export function isSyntheticHeadMessage(message: MessageLike): boolean {
     // Structural shape only — an ID-less user message whose every part is
     // marked synthetic. Persisted OpenCode rows always carry an id, so no
     // persisted or foreign row can satisfy this regardless of its metadata;
@@ -453,6 +454,12 @@ export function applyRustModeDeferredCompactionMarker(args: {
     sessionId: string;
     boundary?: RustMaterializedCompactionBoundary;
     sessionDirectory?: string;
+    /**
+     * How this host applies the boundary. The default writes a compaction row into
+     * OpenCode 1's own store; a host with no such row supplies a function that records
+     * the boundary instead.
+     */
+    applyDeferred?: CompactionMarkerStrategy["applyDeferred"];
 }): void {
     const { boundary } = args;
     if (boundary) {
@@ -508,7 +515,7 @@ export function applyRustModeDeferredCompactionMarker(args: {
                   endMessageId: boundary.endMessageId,
               }
             : undefined;
-    const outcome = applyDeferredCompactionMarker(
+    const outcome = (args.applyDeferred ?? applyDeferredCompactionMarker)(
         args.db,
         args.sessionId,
         pending,
@@ -545,6 +552,31 @@ export function applyRustModeDeferredCompactionMarker(args: {
     }
 }
 
+/**
+ * Forget a recorded module boundary whose coordinates no longer describe the host.
+ *
+ * A host that renumbers the conversation invalidates the boundary's ordinal along
+ * with every other saved position, and the module is about to be deleted and
+ * re-seeded, so the record has nothing left to point at. Clearing it lets the
+ * next serve send the full history and accept whatever boundary the re-seeded
+ * module publishes.
+ *
+ * Only a recorded boundary is cleared. A boundary backed by a real OpenCode 1
+ * compaction row is left alone: that row still exists in the host's own store,
+ * and dropping the local state would orphan it. Recorded boundaries are
+ * recognisable by their empty summary message id, which is what a host that
+ * writes no marker rows stores.
+ *
+ * Returns true when a record was cleared.
+ */
+export function clearRustModeBoundaryRecord(db: ContextDatabase, sessionId: string): boolean {
+    setPendingCompactionMarkerState(db, sessionId, null);
+    const state = getPersistedCompactionMarkerState(db, sessionId);
+    if (!state || state.summaryMessageId.length > 0) return false;
+    setPersistedCompactionMarkerState(db, sessionId, null);
+    return true;
+}
+
 export function runRustModePostprocess(args: {
     db: ContextDatabase;
     sessionId: string;
@@ -552,6 +584,7 @@ export function runRustModePostprocess(args: {
     projectPath?: string;
     sessionDirectory?: string;
     materializedBoundary?: RustMaterializedCompactionBoundary;
+    compactionMarkerStrategy?: CompactionMarkerStrategy;
     fullFeatureMode: boolean;
     compactionOff?: boolean;
     resolvedProviderID?: string;
@@ -581,12 +614,15 @@ export function runRustModePostprocess(args: {
         return { thinkingBindingRecovery: null, markerAt: null };
     }
     applyRustModeDeferredCompactionMarker({
+        ...(args.compactionMarkerStrategy
+            ? { applyDeferred: args.compactionMarkerStrategy.applyDeferred }
+            : {}),
         db: args.db,
         sessionId: args.sessionId,
         boundary: args.materializedBoundary,
         sessionDirectory: args.sessionDirectory,
     });
-    reconcileMarkerRepresentation(
+    (args.compactionMarkerStrategy?.reconcile ?? reconcileMarkerRepresentation)(
         args.messages,
         getPersistedCompactionMarkerState(args.db, args.sessionId),
         {

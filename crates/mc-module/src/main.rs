@@ -37,7 +37,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     };
     tracing::info!("mc-module: logger initialized");
     let connection_file = parse_subc_arg(std::env::args_os().skip(1))?;
-    let route_targets = RouteTargetConfig::default();
+    // `historian.runner` is user-tier only, so one resolution covers every project
+    // this process serves. The manifest's routes and self-signals follow it: a host
+    // runner opens no Broca route and so declares none.
+    let route_targets =
+        RouteTargetConfig::for_historian_runner(mc_module::config::user_historian_runner());
     subc_client_rs::serve_with(
         &connection_file,
         manifest_with_route_targets(&module_id, &route_targets),

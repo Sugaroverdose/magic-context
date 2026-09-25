@@ -1957,7 +1957,11 @@ export interface ModuleStateSyncClient {
             | "agent_drops.append"
             | "ctx_note"
             | "ctx_memory"
-            | "note.evaluate";
+            | "note.evaluate"
+            | "historian.pending"
+            | "historian.claim"
+            | "historian.heartbeat"
+            | "historian.complete";
         body: unknown;
         signal?: AbortSignal;
         generationSensitive?: boolean;

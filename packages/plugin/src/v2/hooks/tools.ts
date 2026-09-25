@@ -6,6 +6,7 @@ import { getProtectionWindowForSession } from "../../features/magic-context/prot
 import { getObservedEpochFloor } from "../../features/magic-context/storage-meta-persisted";
 import { setCtxReduceRegisteredGlobally } from "../../hooks/magic-context/ctx-reduce-availability";
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "../../plugin/embedding-bootstrap";
+import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import type { Database } from "../../shared/sqlite";
 import { createCtxExpandTools } from "../../tools/ctx-expand";
 import { createCtxMemoryListTools, createCtxMemoryTools } from "../../tools/ctx-memory";
@@ -14,11 +15,20 @@ import { createCtxReduceTools } from "../../tools/ctx-reduce";
 import { createCtxSearchTools } from "../../tools/ctx-search";
 import type { V2Context } from "./types";
 
-/** OpenCode 2 requires explicit tool-editor registration; it does not load the v1 tool map. */
+/**
+ * OpenCode 2 requires explicit tool-editor registration; it does not load the v1
+ * tool map.
+ *
+ * `rustToolBackends` is what routes a tool call through the module instead of
+ * writing only the host read model. Registering these tools without it in Rust
+ * mode would let an agent's note or memory land in `context.db` alone, where the
+ * module — the authority for both — would never see it.
+ */
 export async function registerTools(
     context: V2Context,
     db: Database,
     config: MagicContextPluginConfig,
+    rustToolBackends?: RustToolBackends,
 ) {
     const compaction = isCompactionEnabled(config);
     setCtxReduceRegisteredGlobally(compaction);
@@ -38,13 +48,27 @@ export async function registerTools(
                           sessionID,
                           getObservedEpochFloor(db, sessionID),
                       ),
+                  ...(rustToolBackends ? { rustToolBackends } : {}),
               })
             : {}),
         ...createCtxExpandTools({ db }),
-        ...createCtxNoteTools({ ...project, dreamerEnabled: isDreamerRunnable(config) }),
+        ...createCtxNoteTools({
+            ...project,
+            dreamerEnabled: isDreamerRunnable(config),
+            ...(rustToolBackends ? { rustToolBackends } : {}),
+        }),
         ...createCtxSearchTools(project),
         ...(config.memory.enabled
-            ? { ...createCtxMemoryTools(project), ...createCtxMemoryListTools(project) }
+            ? {
+                  ...createCtxMemoryTools({
+                      ...project,
+                      ...(rustToolBackends ? { rustToolBackends } : {}),
+                  }),
+                  ...createCtxMemoryListTools({
+                      ...project,
+                      ...(rustToolBackends ? { rustToolBackends } : {}),
+                  }),
+              }
             : {}),
     };
     const controller = new AbortController();

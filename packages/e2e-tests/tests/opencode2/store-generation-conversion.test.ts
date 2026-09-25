@@ -13,6 +13,8 @@ import { MockProvider } from "../../src/mock-provider/server";
 import {
     conversionFixture,
     type ConversionFixture,
+    driveHistorian as drivePressureTurns,
+    type PromptDriver,
     SHARED_MOCK_MODEL_ID,
     SHARED_MOCK_PROVIDER_ID,
     spawnOpencode1,
@@ -39,10 +41,6 @@ import { spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/
 const HISTORIAN_SYSTEM_MARKER = "the hippocampus of a long-running coding agent";
 const REBASE_LOG_MARKER = "store-generation-rebase";
 const CLI_ENTRY = resolve(import.meta.dir, "../../../cli/src/index.ts");
-
-interface PromptDriver {
-    (text: string, extraParts?: Array<Record<string, unknown>>): Promise<void>;
-}
 
 /** Every string value anywhere in a captured provider body, in traversal order. */
 function allStrings(value: unknown, sink: string[] = []): string[] {
@@ -591,35 +589,13 @@ beforeAll(async () => {
         };
     const promptV1 = promptOn(v1Client);
 
-    /**
-     * Drive pressure turns until the historian has published what the caller needs.
-     *
-     * Pressure is what makes the historian run at all here, and it is also what
-     * lets it run more than once inside its ten-minute drain window: at the force
-     * band the drain budget is deliberately bypassed. Each round is one ordinary
-     * turn, so nothing is reached into — the loop just keeps asking until the
-     * durable state the phase depends on exists.
-     */
     const driveHistorian = async (
         prompt: PromptDriver,
         label: string,
         satisfied: () => boolean,
         rounds = 12,
     ) => {
-        mock.setDefault(pressure);
-        try {
-            for (let round = 0; round < rounds; round += 1) {
-                await prompt(`pressure round ${round}: keep the historian draining.`);
-                const deadline = Date.now() + 4_000;
-                while (Date.now() < deadline) {
-                    if (satisfied()) return;
-                    await Bun.sleep(200);
-                }
-            }
-        } finally {
-            mock.setDefault(quiet);
-        }
-        if (!satisfied()) throw new Error(`the historian never produced ${label}`);
+        await drivePressureTurns({ prompt, mock, pressure, quiet, label, satisfied, rounds });
     };
 
     const CONTENT_TURNS = 10;

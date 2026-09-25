@@ -10,6 +10,23 @@ describe("mock child-agent routing", () => {
     });
   });
 
+  it("writes the OpenCode 2 host's model under the block the model resolver reads", () => {
+    // `opencode2` is a host, not a model harness: both OpenCode generations
+    // resolve agent models from `opencode`. Writing an `opencode2` block left
+    // the historian with no model at all on the v2 lane.
+    expect(pinMockAgents({ historian: {} }, "mock/main", "opencode2")).toMatchObject({
+      historian: { opencode: { model: "mock/main" } },
+    });
+    expect(
+      Object.keys(
+        (pinMockAgents({ historian: {} }, "mock/main", "opencode2").historian ?? {}) as Record<
+          string,
+          unknown
+        >,
+      ),
+    ).not.toContain("opencode2");
+  });
+
   it("rejects off-mock primary, harness-specific and fallback child models", () => {
     for (const historian of [
       { model: "anthropic/real" },

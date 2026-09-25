@@ -371,18 +371,26 @@ function touch(sessionId: string, entry: { slot: LkgSlot; bytes: number }): void
     lkgHeapHolder.entries.set(sessionId, entry);
 }
 
-export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
-    if (
-        slot.inputContentDigests.length !== slot.inputIdSeq.length ||
-        slot.inputContentDigests.some((digest) => digest.length === 0) ||
-        (slot.inputContentSignatures !== undefined &&
-            (slot.inputContentSignatures.length !== slot.inputIdSeq.length ||
-                slot.inputContentSignatures.some((signature) => signature.length === 0)))
-    ) {
-        return false;
+/**
+ * Why {@link captureSlot} would refuse `slot` for `sessionId`, or null when it would
+ * take it (subject only to the total heap budget). Kept next to the checks it names so
+ * a refusal can say which one fired.
+ */
+export function lkgSlotRejection(sessionId: string, slot: LkgSlot): string | null {
+    if (slot.inputContentDigests.length !== slot.inputIdSeq.length)
+        return `digest_count=${slot.inputContentDigests.length} inputs=${slot.inputIdSeq.length}`;
+    const emptyDigest = slot.inputContentDigests.findIndex((digest) => digest.length === 0);
+    if (emptyDigest >= 0) return `empty_digest_at=${emptyDigest}`;
+    if (slot.inputContentSignatures !== undefined) {
+        if (slot.inputContentSignatures.length !== slot.inputIdSeq.length)
+            return `signature_count=${slot.inputContentSignatures.length} inputs=${slot.inputIdSeq.length}`;
+        const emptySignature = slot.inputContentSignatures.findIndex(
+            (signature) => signature.length === 0,
+        );
+        if (emptySignature >= 0) return `empty_signature_at=${emptySignature}`;
     }
     const bytes = slotBytes(slot);
-    if (bytes > LKG_SINGLE_SLOT_BYTES) return false;
+    if (bytes > LKG_SINGLE_SLOT_BYTES) return `slot_bytes=${bytes}`;
     const prior = lkgHeapHolder.entries.get(sessionId);
     if (
         prior?.slot.rowVersion !== undefined &&
@@ -391,8 +399,15 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
             (slot.rowVersion === prior.slot.rowVersion &&
                 (slot.captureSequence ?? 0) < (prior.slot.captureSequence ?? 0)))
     ) {
-        return false;
+        return `stale row_version=${slot.rowVersion}/${prior.slot.rowVersion} capture_sequence=${slot.captureSequence ?? 0}/${prior.slot.captureSequence ?? 0}`;
     }
+    return null;
+}
+
+export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
+    if (lkgSlotRejection(sessionId, slot) !== null) return false;
+    const bytes = slotBytes(slot);
+    const prior = lkgHeapHolder.entries.get(sessionId);
     if (prior) totalBytes -= prior.bytes;
     lkgHeapHolder.entries.delete(sessionId);
     while (totalBytes + bytes > LKG_TOTAL_BYTES) {

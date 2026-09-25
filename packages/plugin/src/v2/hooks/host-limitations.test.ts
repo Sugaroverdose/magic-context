@@ -5,10 +5,15 @@ import {
     getMeasuredToolDefinitionTokens,
 } from "../../features/magic-context/tool-definition-tokens";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
-import { __resetHostLimitations, activeHostLimitations } from "../../shared/host-limitations";
+import {
+    __resetHostLimitations,
+    activeHostLimitations,
+    declareHostLimitation,
+} from "../../shared/host-limitations";
 import type { StatusDetail } from "../../shared/rpc-types";
 import { statusSummaryFromDetail } from "../../shared/status-summary";
-import { recordV2ToolDefinitions, resolveV2TransformMode } from "./context";
+import { recordV2ToolDefinitions } from "./context";
+import { resolveV2RustModeModuleClient } from "./rust-mode";
 import type { SessionContext } from "./types";
 
 function draft(overrides: Partial<SessionContext> = {}): SessionContext {
@@ -35,37 +40,49 @@ describe("v2 transform-mode resolution", () => {
         __resetHostLimitations();
     });
 
-    it("leaves the default TypeScript mode alone and declares nothing", () => {
-        const config = { enabled: true, transform_mode: "ts" as const };
-        expect(resolveV2TransformMode(config)).toBe(config);
-        expect(activeHostLimitations()).toEqual([]);
+    it("builds a module client for Rust mode and none for TypeScript mode", () => {
+        const directory = "/tmp/magic-context-v2-rust-mode";
+        expect(resolveV2RustModeModuleClient({ transform_mode: "ts" }, directory)).toBeUndefined();
+        expect(resolveV2RustModeModuleClient({}, directory)).toBeUndefined();
+        const client = resolveV2RustModeModuleClient({ transform_mode: "rust" }, directory);
+        expect(client).toBeDefined();
+        // Every method the RPC status handlers and the transform reach for must be
+        // present; a missing one reads as "Rust module status unavailable" at runtime.
+        for (const method of [
+            "call",
+            "stateSyncCapabilities",
+            "deleteSession",
+            "closeSession",
+            "authorityStatus",
+            "authorityPrepare",
+            "authoritySeed",
+            "authorityDrain",
+            "mirrorPull",
+            "mirrorMemory",
+            "memoryIdentityAck",
+            "getCompartmentsAfter",
+        ]) {
+            expect(typeof (client as unknown as Record<string, unknown>)[method]).toBe("function");
+        }
     });
 
-    it("runs TypeScript mode and names the limitation when Rust mode is configured", () => {
+    it("declares no limitation for a Rust-mode session", () => {
         const warnings: string[] = [];
         const original = console.warn;
         console.warn = (...args: unknown[]) => {
             warnings.push(args.map(String).join(" "));
         };
         try {
-            const configured = { enabled: true, transform_mode: "rust" as const };
-            expect(resolveV2TransformMode(configured).transform_mode).toBe("ts");
-            // The caller's object is left untouched; only the resolved copy is downgraded.
-            expect(configured.transform_mode).toBe("rust");
-            expect(activeHostLimitations()).toEqual(["rust_mode_unsupported"]);
-            // A second setup in the same process must not add a second warning line.
-            expect(resolveV2TransformMode({ transform_mode: "rust" as const }).transform_mode).toBe(
-                "ts",
-            );
-            expect(warnings).toHaveLength(1);
-            expect(warnings[0]).toContain("MC-S06");
+            resolveV2RustModeModuleClient({ transform_mode: "rust" }, "/tmp/magic-context-v2-rust");
+            expect(activeHostLimitations()).toEqual([]);
+            expect(warnings).toEqual([]);
         } finally {
             console.warn = original;
         }
     });
 
     it("shows a declared limitation as a status warning", () => {
-        resolveV2TransformMode({ transform_mode: "rust" as const });
+        declareHostLimitation("hidden_cleanup_unbound");
         const detail = {
             inputTokens: 0,
             contextLimit: 0,
@@ -76,7 +93,7 @@ describe("v2 transform-mode resolution", () => {
             executeThreshold: 65,
             hostLimitations: activeHostLimitations(),
         } as unknown as StatusDetail;
-        expect(statusSummaryFromDetail(detail).warnings).toEqual(["rust_mode_unsupported"]);
+        expect(statusSummaryFromDetail(detail).warnings).toEqual(["hidden_cleanup_unbound"]);
     });
 });
 

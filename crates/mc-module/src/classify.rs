@@ -62,6 +62,80 @@ pub fn has_manifest_envelope(text: &str) -> bool {
     text.contains("<classify>") && text.contains("</classify>")
 }
 
+/// `dreamer.run_task` code telling the host to run the classify completion itself.
+///
+/// Under `historian.runner = "host"` this module opens no route to a completion
+/// runner. The classify completion is then the host's to make, exactly as the
+/// historian's is: the host runs it on its own carrier and sends the text back in
+/// `host_completion`, and the module checks and records it as it would its own
+/// runner's output.
+pub const HOST_COMPLETION_REQUIRED: &str = "host_completion_required";
+
+/// A classify completion the host ran on its own carrier.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostClassifyCompletion {
+    pub text: String,
+    /// The `provider/model` the host's completion actually used.
+    pub model: String,
+    pub length_capped: bool,
+    pub usage: Option<crate::historian_producer::ProducerUsage>,
+}
+
+/// Read `host_completion` off a `dreamer.run_task` request. The text is bounded the
+/// same way the prompt is, and the model the same way a model chain entry is.
+pub fn parse_host_classify_completion(
+    value: &serde_json::Value,
+) -> Result<HostClassifyCompletion, String> {
+    let object = value
+        .as_object()
+        .ok_or("host_completion must be an object")?;
+    let text = object
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("host_completion requires text")?;
+    if text.len() > MAX_CLASSIFY_PROMPT_BYTES {
+        return Err(format!(
+            "host_completion text exceeds {MAX_CLASSIFY_PROMPT_BYTES} bytes"
+        ));
+    }
+    let model = object
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("host_completion requires model")?;
+    if model.trim().is_empty() || model.len() > 256 {
+        return Err("host_completion model must be 1-256 bytes".to_string());
+    }
+    let length_capped = match object.get("length_capped") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return Err("host_completion length_capped must be a boolean".to_string()),
+    };
+    let usage = match object.get("usage") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Object(usage)) => {
+            let count = |key: &str| {
+                usage
+                    .get(key)
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            };
+            Some(crate::historian_producer::ProducerUsage {
+                input: count("input"),
+                output: count("output"),
+                cache_read: count("cache_read"),
+                cache_write: count("cache_write"),
+            })
+        }
+        Some(_) => return Err("host_completion usage must be an object".to_string()),
+    };
+    Ok(HostClassifyCompletion {
+        text: text.to_string(),
+        model: model.to_string(),
+        length_capped,
+        usage,
+    })
+}
+
 /// Mint an opaque child id without exposing the command id or project path in
 /// provider/session diagnostics. The registry, rather than this prefix, is the
 /// transform exemption authority.

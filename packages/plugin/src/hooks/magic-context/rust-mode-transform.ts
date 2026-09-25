@@ -19,6 +19,7 @@ import {
     resolveProjectIdentity,
     resolveProjectIdentityForSession,
 } from "../../features/magic-context/memory/project-identity";
+import { drainSingleStoreEmbeddingWatermarks } from "../../features/magic-context/memory/single-store-embedding-drain";
 import { getMemoryVerifications } from "../../features/magic-context/memory/storage-memory-verifications";
 import {
     modelKeyAcceptsImages,
@@ -55,7 +56,7 @@ import {
 import { writeRustTransformDecision } from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { canonicalModelIdentity } from "../../shared/harness-provider-map";
-import { sessionLog } from "../../shared/logger";
+import { log, sessionLog } from "../../shared/logger";
 import { promptSurfaceConfigIdentity, resolvePromptSurface } from "../../shared/prompt-surface";
 import { createPromptSurfaceGuidanceEpochCache } from "../../shared/prompt-surface-runtime";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
@@ -80,6 +81,7 @@ import {
     resolveTrustedContextLimit,
 } from "./event-resolvers";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
+import { createHistorianHostRunner } from "./historian-host-runner";
 import { saveLkgSlotToDb } from "./lkg-persist";
 import { replayLkg, resolveLkgModelKeys } from "./lkg-replay";
 import {
@@ -100,6 +102,7 @@ import {
     type LkgEntryNote,
     type LkgInputSnapshot,
     type LkgSlot,
+    lkgSlotRejection,
     type MessageContentSnapshot,
     messageContentFields,
     messageContentSnapshot,
@@ -494,6 +497,17 @@ export interface RustModeTransformOptions {
     stallProbeAfterMsForTests?: number;
     /** Test-only override for the health-probe deadline. */
     healthProbeTimeoutMsForTests?: number;
+    /**
+     * Replaces the historian pull loop this transform would build for itself.
+     * Tests use it to drive the loop deterministically; production never sets it.
+     */
+    historianHostRunnerForTests?: HistorianHostRunnerSeam;
+}
+
+/** What the transform needs from the historian pull loop, and nothing more. */
+export interface HistorianHostRunnerSeam {
+    pump(routeSessionId: string): Promise<void>;
+    stop(): Promise<void>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -735,8 +749,16 @@ export function formatRustInputCoverageLog(args: {
     ocInput: number;
     markerAt: string | null;
     covered: number;
+    /**
+     * Raw-message ordinal of the first message handed to the module, when known. With
+     * `covered` it shows that nothing before the array was dropped unfolded: every
+     * ordinal below it has to be inside published compartments.
+     */
+    firstOrdinal?: number | null;
 }): string {
-    return `rust input coverage: oc_input=${args.ocInput} marker_at=${args.markerAt ?? "none"} covered=${args.covered}`;
+    const first =
+        args.firstOrdinal === undefined ? "" : ` first_ordinal=${args.firstOrdinal ?? "unknown"}`;
+    return `rust input coverage: oc_input=${args.ocInput} marker_at=${args.markerAt ?? "none"} covered=${args.covered}${first}`;
 }
 
 function materializedCompactionBoundary(
@@ -1743,10 +1765,15 @@ export function createRustModeTransform(
     ) => Promise<void>;
     clearSession: (sessionId: string) => Promise<void>;
     invalidateWireState: (sessionId: string) => void;
+    stopHostRunner: () => Promise<void>;
     getState: (sessionId: string) => Readonly<RustSessionState>;
     getHeapStats: () => RustWireCacheHeapStats;
 } {
     const states = new Map<string, RustSessionState>();
+    // The model this pass resolves when the messages carry none. OpenCode 1 reads it
+    // back out of the host's own database; hosts that keep no such database supply
+    // the draft's model through this seam instead.
+    const hostModelFallback = deps.hostModelFallback ?? findLastAssistantModelFromOpenCodeDb;
     const heapHolder = new MagicContextRustHeapHolder();
     const promptSurfaceGuidanceEpochs = deps.promptSurfaceRuntime
         ? createPromptSurfaceGuidanceEpochCache(deps.promptSurfaceRuntime)
@@ -1757,6 +1784,53 @@ export function createRustModeTransform(
     const rawFallbackEstimator =
         options.rawFallbackEstimatorForTests ?? estimateFinalWireInputTokens;
     const timeoutMs = Math.max(1, options.moduleTimeoutMs ?? RUST_SEND_TIMEOUT_MS);
+
+    // The pull loop only exists when the user put this process in the lane. Under
+    // the default runner nothing is ever queued for a claimant, so building the
+    // loop would only add a module round trip per pass to ask a question whose
+    // answer is always "nothing".
+    const hostRunnerWanted = deps.historianRunner === "host";
+    let hostRunner: HistorianHostRunnerSeam | undefined | null =
+        options.historianHostRunnerForTests ?? (hostRunnerWanted ? null : undefined);
+    const resolveHostRunner = (): HistorianHostRunnerSeam | undefined => {
+        if (hostRunner !== null) return hostRunner;
+        try {
+            hostRunner = createHistorianHostRunner({
+                call: (args) =>
+                    options.moduleClient.call({
+                        method: args.method,
+                        sessionId: args.sessionId,
+                        projectRoot: options.projectRoot ?? deps.directory ?? process.cwd(),
+                        body: args.body,
+                    }),
+                db: deps.db,
+                client: deps.client,
+                ...(deps.hiddenCompletionExecutor
+                    ? { hiddenCompletionExecutor: deps.hiddenCompletionExecutor }
+                    : {}),
+                sessionDirectory: (sessionId) =>
+                    deps.sessionDirectoryBySession?.get(sessionId) ??
+                    deps.directory ??
+                    process.cwd(),
+                // Read per poll, not captured: an operator turning the loop off must
+                // take effect on the next pass rather than at the next restart.
+                enabled: () => deps.historianHostRunnerEnabled !== false,
+                ...(deps.historianMaxOutputTokens !== undefined
+                    ? { maxOutputTokens: deps.historianMaxOutputTokens }
+                    : {}),
+                // Sampled per claim so a live edit of historian_timeout_ms applies to
+                // the next run, as it does for the host's own historian.
+                attemptTimeoutMs: () =>
+                    deps.resolveHistorianRun?.().timeoutMs ?? deps.historianTimeoutMs,
+            });
+        } catch (error) {
+            // A loop that cannot be built leaves the runs for another claimant rather
+            // than failing the pass that discovered it could not be built.
+            hostRunner = undefined;
+            log(`[magic-context] historian host runner unavailable: ${String(error)}`);
+        }
+        return hostRunner ?? undefined;
+    };
 
     const resolveMuralForPass = (
         state: RustSessionState,
@@ -2049,7 +2123,7 @@ export function createRustModeTransform(
         const replayModel =
             modelFromMessages(currentMessages) ??
             deps.liveModelBySession?.get(sessionId) ??
-            findLastAssistantModelFromOpenCodeDb(sessionId);
+            hostModelFallback(sessionId);
         replayRustModeBindingMismatchStrips({
             db: deps.db,
             sessionId,
@@ -2190,8 +2264,12 @@ export function createRustModeTransform(
             rowVersion: plan.rowVersion,
             captureSequence: plan.captureSequence,
         };
-        const captured = captureSlot(plan.sessionId, slot);
-        if (!captured) throw new Error("LKG slot rejected the prepared snapshot");
+        const rejection = lkgSlotRejection(plan.sessionId, slot);
+        const captured = rejection === null && captureSlot(plan.sessionId, slot);
+        if (!captured)
+            throw new Error(
+                `LKG slot rejected the prepared snapshot: ${rejection ?? "over the LKG heap budget"}`,
+            );
         state.lkgAcceptedCapture = {
             inputs,
             captureSequence: plan.captureSequence,
@@ -2247,6 +2325,7 @@ export function createRustModeTransform(
         let moduleElapsedMs = 0;
         let rowVersion = 0;
         let coveredOrdinal = 0;
+        let inputFirstOrdinal: number | null = null;
         let markerAt: string | null = null;
         // Read before this pass can advance the marker: the nudge arm below needs the
         // coverage a previous process already published.
@@ -2270,7 +2349,7 @@ export function createRustModeTransform(
         let model = modelFromMessages(messages) ?? deps.liveModelBySession?.get(sessionId);
         if (!model) {
             try {
-                model = findLastAssistantModelFromOpenCodeDb(sessionId) ?? undefined;
+                model = hostModelFallback(sessionId) ?? undefined;
             } catch (error) {
                 preflightError = error;
             }
@@ -2392,6 +2471,7 @@ export function createRustModeTransform(
                     ocInput: inputCount,
                     markerAt,
                     covered: coveredOrdinal,
+                    firstOrdinal: inputFirstOrdinal,
                 }),
             );
             sessionLog(
@@ -2895,6 +2975,10 @@ export function createRustModeTransform(
             state.ordinalMemoStoredCount = resolved.memoStoredCount;
             state.ordinalMemoCanonicalCount = resolved.memoCanonicalCount;
             state.ordinalMemoVerifyPending = false;
+            const firstInputId = messages[0] ? messageIdOf(messages[0]) : null;
+            inputFirstOrdinal = firstInputId
+                ? (state.idOrdinalMemo.get(firstInputId) ?? null)
+                : null;
 
             const syncPass = {
                 db: deps.db,
@@ -3586,6 +3670,7 @@ export function createRustModeTransform(
                         projectPath: memoryProjectPath,
                         sessionDirectory: directory,
                         materializedBoundary,
+                        compactionMarkerStrategy: deps.compactionMarkerStrategy,
                         fullFeatureMode: !sessionMeta.isSubagent,
                         compactionOff: deps.compactionOff,
                         resolvedProviderID: model?.providerID,
@@ -3901,6 +3986,10 @@ export function createRustModeTransform(
                             if (mirrorDrain.rowsApplied > 0) {
                                 await reembedMirrorInvalidatedMemories(deps.db);
                             }
+                            // Memories the module wrote straight into context.db never
+                            // pass through the mirror, so the invalidation set above
+                            // cannot know about them. Their high-water mark can.
+                            await drainSingleStoreEmbeddingWatermarks(deps.db);
                             if (mirrorDrain.complete) {
                                 state.memoryMirrorProjectionKey = projectionKey;
                             } else if (mirrorDrain.budgetExhausted) {
@@ -4033,7 +4122,22 @@ export function createRustModeTransform(
     };
 
     return {
-        run,
+        run: async (
+            sessionId: string,
+            messages: MessageLike[],
+            output: { messages: unknown[] },
+            sessionMeta: ReturnType<typeof getOrCreateSessionMeta>,
+        ): Promise<void> => {
+            try {
+                await run(sessionId, messages, output, sessionMeta);
+            } finally {
+                // The pass is the loop's clock. A run can only be queued by a pass, so
+                // looking right after one is when there is most likely something to
+                // take. Never awaited: the fold the loop picks up takes minutes and the
+                // response this pass just built is already correct without it.
+                void resolveHostRunner()?.pump(sessionId);
+            }
+        },
         async clearSession(sessionId: string): Promise<void> {
             const projectRoot =
                 states.get(sessionId)?.memoryAuthorityRoot ?? options.projectRoot ?? null;
@@ -4061,6 +4165,9 @@ export function createRustModeTransform(
             }
         },
         invalidateWireState,
+        async stopHostRunner(): Promise<void> {
+            await (hostRunner ?? undefined)?.stop();
+        },
         getState(sessionId: string): Readonly<RustSessionState> {
             return {
                 ...ensureState(states, sessionId),

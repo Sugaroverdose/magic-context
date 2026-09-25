@@ -820,13 +820,43 @@
             ]
         },
         {
+            "path": "tests/opencode2/rust-mode-fold-cadence.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "Boots the hermetic ck-subc daemon and ck-mc module behind the GA 2.0.5 host, so it only has meaning in the Rust invocation: it pins who decides when a Rust-mode session folds, by holding the usage the host measures fixed while the content the module measures changes",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/rust-mode-limitation.test.ts",
             "tier": "excluded",
             "invocation": {
                 "ts": false,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: transform_mode \"rust\" has no subc transport on OpenCode 2, so the host must keep running on the TS transform and say so rather than accepting the setting and silently ignoring it; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: transform_mode \"rust\" is accepted on OpenCode 2 without naming a host limitation, and with no module reachable the status surfaces report canonical session state as unavailable rather than answering with host-side numbers; it needs no Rust stack, so it runs from the v2 lane's own invocation (bun test tests/opencode2) rather than the mode-selected spawn seam",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/rust-mode-module-served.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "Boots the hermetic ck-subc daemon and ck-mc module behind the GA 2.0.5 host, so it only has meaning in the Rust invocation: it pins that the OpenCode 2 lane's transforms are module-served, byte-identical across defers, and that the status surfaces read module state",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1882,6 +1912,52 @@
                 "omp"
             ],
             "behavior": true
+        },
+        {
+            "path": "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Adversarial gate reproduction, run on demand: a Rust-mode fold on the GA host across a host restart, over a 10,000-row session by default (GATE_SEEDED_ROWS=0 runs the unseeded fold/restart/fold; GATE_SEED_SHAPE=arcs seeds cloned user/tool/assistant turns instead of one-line user rows), with the v2 reader's decode counters and lsof on the module",
+            "contract_refs": [
+                "OC2-S1",
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/ts-mode-on-migrated-real-store.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Inert unless MC_MIGRATED_CONTEXT_COPY names a disposable, already-migrated copy of a real context.db; runs a TypeScript-mode session on it and checks quick_check",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/rust-classify-host-runner.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Adversarial gate reproduction, run on demand: the classify dreamer task after the module restarts with historian.runner = host",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
         }
     ]
 }

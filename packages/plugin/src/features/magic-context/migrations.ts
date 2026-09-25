@@ -3124,6 +3124,32 @@ export const MIGRATIONS: Migration[] = [
             ensureColumn(db, "compartment_state_lease", "owner_pid", "INTEGER");
         },
     },
+    {
+        version: 91,
+        description: "per-project embedding high-water mark for memories written outside this host",
+        up(db: Database): void {
+            // Vectors are computed by host code, not by a database trigger: a memory
+            // row inserted by another writer arrives with no embedding and nothing
+            // asks for one. The Rust module writes project memories directly in
+            // single-store mode, so it records the highest memory id it wrote here
+            // and the host's ordinary backfill loop drains everything above the
+            // embedded mark. A high-water mark rather than a per-row column keeps
+            // the memories table untouched, so a row written by either writer is
+            // byte-identical.
+            //
+            // embedded_memory_id is what the host has already handed to the embedder;
+            // written_memory_id is what the other writer has produced. Equal values
+            // mean there is nothing to drain.
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS memory_embedding_watermarks (
+                    project_path TEXT PRIMARY KEY,
+                    written_memory_id INTEGER NOT NULL DEFAULT 0,
+                    embedded_memory_id INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0
+                );
+            `);
+        },
+    },
 ];
 
 /**

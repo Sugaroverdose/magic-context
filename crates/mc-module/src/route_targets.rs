@@ -8,6 +8,8 @@ use subc_protocol::manifest::{
 };
 use subc_protocol::RouteTarget;
 
+use crate::historian_runner::HistorianRunnerKind;
+
 pub const DEFAULT_THALAMUS_MODULE_ID: &str = "thalamus";
 pub const DEFAULT_RUNNER_MODULE_ID: &str = "broca";
 
@@ -34,6 +36,15 @@ impl RouteTargetConfig {
     pub fn host_runner() -> Self {
         Self {
             runner_module_id: None,
+        }
+    }
+
+    /// The route selection a resolved historian runner implies: Broca's route for
+    /// the Broca runner, no runner route at all for the host runner.
+    pub fn for_historian_runner(runner: HistorianRunnerKind) -> Self {
+        match runner {
+            HistorianRunnerKind::Broca => Self::default(),
+            HistorianRunnerKind::Host => Self::host_runner(),
         }
     }
 
@@ -186,6 +197,17 @@ mod tests {
 
     /// Drift guard: a route's behaviors are declared exactly while its target is
     /// declared consumed, and every declaration names the surface it shapes.
+    #[test]
+    fn a_host_runner_declares_no_runner_route_and_no_quota_signals() {
+        let hosted = RouteTargetConfig::for_historian_runner(HistorianRunnerKind::Host);
+        assert_eq!(hosted, RouteTargetConfig::host_runner());
+        assert!(self_signals(&hosted).is_empty());
+        assert!(!route_targets(&hosted).contains(&DEFAULT_RUNNER_MODULE_ID.to_string()));
+        let broca = RouteTargetConfig::for_historian_runner(HistorianRunnerKind::Broca);
+        assert_eq!(broca, RouteTargetConfig::default());
+        assert_eq!(self_signals(&broca).len(), 2);
+    }
+
     #[test]
     fn every_self_signal_rides_a_consumed_route() {
         for config in [

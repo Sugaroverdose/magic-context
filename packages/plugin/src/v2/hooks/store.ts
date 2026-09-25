@@ -149,6 +149,31 @@ export function servedBoundaryRow(
     }
 }
 
+/**
+ * The nearest user message at or before `endMessageID`, searched backward
+ * through the store a page at a time rather than by reading the whole session.
+ * Returns null when the id is absent, is not a conversational row, or has no
+ * user message at or before it (the rule `resolveBoundaryUserMessage` applies
+ * to an in-memory history).
+ */
+export function resolveV2BoundaryUserMessage(
+    reader: Pick<V2StoreReader, "messageById" | "rawRowsThrough">,
+    sessionID: string,
+    endMessageID: string,
+): RawMessage | null {
+    const end = reader.messageById(sessionID, endMessageID);
+    if (!end || !isRawRow(end)) return null;
+    let through = end.seq;
+    for (;;) {
+        const rows = reader.rawRowsThrough(sessionID, through, SERVED_BOUNDARY_PAGE);
+        const user = rows.find((row) => row.type !== "assistant");
+        if (user) return rawMessagePage([user], 0)[0] ?? null;
+        const oldest = rows.at(-1);
+        if (rows.length < SERVED_BOUNDARY_PAGE || !oldest) return null;
+        through = oldest.seq - 1;
+    }
+}
+
 /** The only V2 full-history reader: store-generation conversion must inspect every part. */
 export function readAllV2RawMessagesForConversion(
     openReader: () => V2StoreReader,

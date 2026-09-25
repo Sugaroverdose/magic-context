@@ -37,6 +37,10 @@ regex = "1"
 tokio = { workspace = true }
 sha2 = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# The single-store writer opens the host's context.db directly (src/host_store.rs).
+# Same pin as the workspace uses everywhere else so the Connection/Transaction types
+# unify with mc-store's and cortexkit-store's.
+rusqlite = { workspace = true }
 
 [features]
 # Joint CC rig-drive fault injection. DEFAULT OFF.

@@ -23,7 +23,17 @@ const HARNESS_KEYS = PER_HARNESS_MODEL_KEYS;
 /** Every historian model-resolution field, including per-harness qualifiers.
  *  Variant and thinking_level merge onto the user's historian model at resolve
  *  time, so leaving them would let a cloned repo force extra spend. */
-const HISTORIAN_USER_ONLY_FIELDS = PER_HARNESS_MIGRATION_INVENTORY.historian.migrated_execution;
+const HISTORIAN_USER_ONLY_FIELDS = [
+    ...PER_HARNESS_MIGRATION_INVENTORY.historian.migrated_execution,
+    // `runner` chooses which process and which provider account runs the hidden
+    // historian completion. A cloned repo redirecting it would move that spend and
+    // that prompt text somewhere the user never agreed to.
+    "runner",
+    // `host_runner` turns this machine's pull loop on and off. A cloned repo
+    // turning it ON would start spending the user's provider account on folds for
+    // every project this process serves, not just its own.
+    "host_runner",
+] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
 
 /**
@@ -348,10 +358,13 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  *    can opt its own runtime into the experimental Rust pipeline. The resolver
  *    requires trusted user-level `subc` configuration before Rust can activate.
  *  - historian model-resolution fields (model, fallback_models, variant,
- *    thinking_level), including both per-harness blocks — historian model
- *    spend is user-level only. Qualifiers merge onto the user's historian
+ *    thinking_level) and `runner`, including both per-harness blocks — historian
+ *    model spend is user-level only. Qualifiers merge onto the user's historian
  *    model at resolve time, so a cloned repo cannot force extra thinking or
- *    variant cost.
+ *    variant cost, and cannot move the completion to a different process or
+ *    provider account. `host_runner` is stripped for the same reason in the other
+ *    direction: a repo must not switch this machine's pull loop on and start
+ *    spending the user's provider account on folds.
  *  - `mural.model` at the top-level block, the legacy experimental spelling,
  *    and any nested `mural.model` under hidden agents — a cloned repo cannot
  *    choose where project memory is sent.

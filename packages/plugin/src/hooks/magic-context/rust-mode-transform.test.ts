@@ -780,8 +780,8 @@ describe("Rust mode authority adapter", () => {
                 message.startsWith("rust input coverage:"),
             );
             expect(coverageLines).toEqual([
-                "rust input coverage: oc_input=1 marker_at=none covered=0",
-                "rust input coverage: oc_input=1 marker_at=none covered=0",
+                "rust input coverage: oc_input=1 marker_at=none covered=0 first_ordinal=1",
+                "rust input coverage: oc_input=1 marker_at=none covered=0 first_ordinal=1",
             ]);
             const passLines = logged.filter((message) => message.startsWith("rust pass:"));
             expect(passLines).toHaveLength(2);
