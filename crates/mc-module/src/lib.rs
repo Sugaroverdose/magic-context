@@ -19303,6 +19303,7 @@ mod tests {
     // Adversarial gate over the host-runner slice and the single-store marker
     // slice merged together. Kept in its own files so the sequences it executes
     // read as one argument instead of being scattered through this module.
+    mod broca_contract;
     mod gate_a1_b0;
     mod gate_a1_b0_baseline_probe;
     mod gate_a2;
