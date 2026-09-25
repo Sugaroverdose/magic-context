@@ -13,6 +13,10 @@ test("v1_untouched and captured fixture bytes remain sha256 pinned", () => {
 			// v1 entry golden after removing only those three exact additions.
 			// The updated v1 entry records tool parameters when refusing input
 			// that was dropped; the v2 loader does not add this behavior.
+			// The pin was re-minted again when the v1 `chat.message` hook began
+			// measuring tool definitions under the "default" agent key when
+			// OpenCode 1 omits the agent (6a7158a407, "preserve LKG after host
+			// adds empty summaries"); that is a deliberate v1 change, not v2 leakage.
 			bytes = bytes
 				.replace('import { setup } from "./v2/server";\n', "")
 				.replace("PluginModule & { setup: typeof setup }", "PluginModule")
