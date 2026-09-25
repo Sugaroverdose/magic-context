@@ -222,7 +222,14 @@ fn gate_a_store_that_applied_58_first_never_gets_57() {
     let outcome = stalled
         .migrate(NS, &chain_up_to(SINGLE_STORE_MARKER_MIGRATION_VERSION))
         .unwrap();
-    assert_eq!(outcome.recorded, SINGLE_STORE_MARKER_MIGRATION_VERSION);
+    // The refused open above still applied every migration below the one that
+    // failed, so the recorded maximum can sit past the marker (59 applies before 60
+    // fails). What matters is only that it is at or past the marker.
+    assert!(
+        outcome.recorded >= SINGLE_STORE_MARKER_MIGRATION_VERSION,
+        "recorded {} is below the marker",
+        outcome.recorded
+    );
     assert!(
         !table_exists(&stalled, HISTORIAN_QUEUE_TABLE),
         "57 is permanently skipped once 58 is recorded"
@@ -687,4 +694,66 @@ fn gate_a_pending_poll_does_not_block_a_concurrent_transform_commit() {
         )
         .unwrap();
     assert!(row_version > 0);
+}
+
+/// Migration 59 (publish durations) lands on a store an older build left at 58 with
+/// a pass trace already recorded: the trace row keeps its counts, the new columns
+/// start empty, and the first publish after the upgrade is measured on that row.
+#[test]
+fn gate_the_publish_duration_columns_land_on_a_populated_store_at_58() {
+    let dir = tempfile::tempdir().unwrap();
+    let descriptor = descriptor(dir.path());
+
+    let older = open_sqlite(&descriptor).unwrap();
+    register_era_scope_functions(&older);
+    let at_58 = older.migrate(NS, &chain_up_to(58)).unwrap();
+    assert_eq!(at_58.recorded, 58);
+    // The row a build at 58 writes when a pass arrives, in that build's own shape.
+    older
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO mc_pass_trace
+                     (session_id, last_received_at_ms, last_completed_at_ms, reject_count, receive_count)
+                 VALUES ('ses', 1700, 1750, 0, 3)",
+                [],
+            )
+        })
+        .unwrap();
+    drop(older);
+
+    let migrated = McStore::open(&descriptor).unwrap();
+    assert_eq!(
+        migrated.module_store_schema_version().unwrap(),
+        crate::LATEST_MIGRATION_VERSION
+    );
+    let trace = migrated.load_pass_trace("ses").unwrap().unwrap();
+    assert_eq!(trace.last_received_at_ms, 1_700);
+    assert_eq!(trace.receive_count, 3);
+    assert_eq!(
+        migrated.load_publish_timing("ses").unwrap(),
+        Some(PublishTiming {
+            last_publish_duration_us: None,
+            max_publish_duration_us: None,
+            publish_sample_count: 0,
+        }),
+        "an upgraded row has no publish sample until a publish is measured"
+    );
+
+    migrated.record_publish_duration("ses", 2_500).unwrap();
+    assert_eq!(
+        migrated.load_publish_timing("ses").unwrap(),
+        Some(PublishTiming {
+            last_publish_duration_us: Some(2_500),
+            max_publish_duration_us: Some(2_500),
+            publish_sample_count: 1,
+        })
+    );
+    assert_eq!(
+        migrated
+            .load_pass_trace("ses")
+            .unwrap()
+            .unwrap()
+            .receive_count,
+        3
+    );
 }
