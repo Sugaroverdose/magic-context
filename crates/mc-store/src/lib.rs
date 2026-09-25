@@ -7781,6 +7781,16 @@ impl McStore {
             )
         })?;
         let migration = inner.migrate(NS, MIGRATIONS)?;
+        // Older note updates could park session notes with conditions that no evaluator claims.
+        // Restore their session visibility without changing project-scoped smart notes.
+        inner.with_conn(|conn| {
+            conn.execute(
+                "UPDATE mc_notes SET status = 'active', surface_condition = NULL, status_version = status_version + 1
+                 WHERE type = 'session' AND status = 'pending' AND surface_condition IS NOT NULL",
+                [],
+            )?;
+            Ok(())
+        })?;
         if migration.store_ahead() {
             // A store written by a longer chain than this binary carries is the
             // rollback shape (#7804 keeps an older ck-mc placeable on purpose), so
@@ -27520,6 +27530,45 @@ mod tests {
             .search_notes_like("git:other", "ses", "pagination")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn reopening_heals_pending_session_notes_with_orphaned_conditions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let note = store
+            .insert_note(NoteInput {
+                project_path: "git:proj",
+                route_project_root: None,
+                session_id: "ses",
+                content: "session note",
+                surface_condition: None,
+                anchor_block_id: None,
+                now_ms: 1,
+            })
+            .unwrap();
+        store.inner.with_conn(|conn| {
+            conn.execute("UPDATE mc_notes SET status = 'pending', surface_condition = 'orphan' WHERE id = ?1", [note.id])?;
+            Ok(())
+        }).unwrap();
+        drop(store);
+        let reopened = McStore::open(&descriptor(dir.path())).unwrap();
+        let healed = reopened
+            .get_note_by_id("git:proj", "ses", note.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(healed.status, "active");
+        assert!(healed.surface_condition.is_none());
+        drop(reopened);
+        let again = McStore::open(&descriptor(dir.path())).unwrap();
+        assert_eq!(
+            again
+                .get_note_by_id("git:proj", "ses", note.id)
+                .unwrap()
+                .unwrap()
+                .status_version,
+            healed.status_version
+        );
     }
 
     #[test]

@@ -385,6 +385,17 @@ export function createCtxNoteTool(
 					| Awaited<ReturnType<typeof compileSurfaceCondition>>
 					| undefined;
 				if (params.surface_condition?.trim()) {
+					const project = resolveProject(ctx.cwd);
+					const existing = project
+						? getNoteByIdInScope(deps.db, noteId, {
+								projectPath: project,
+								sessionId,
+							})
+						: null;
+					if (existing?.type === "session")
+						return err(
+							"Error: Only a note created with a condition can have one. Write a new note with surface_condition, and dismiss this one.",
+						);
 					const surfaceCondition = params.surface_condition.trim();
 					updates.surfaceCondition = surfaceCondition;
 					compilation = await compileSurfaceCondition(surfaceCondition, {

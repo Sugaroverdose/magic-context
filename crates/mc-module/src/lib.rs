@@ -14282,6 +14282,14 @@ impl McHandler {
                         "Error: Note #{note_id} not found in your session/project or has no compatible fields to update."
                     ));
                 };
+                if condition.is_some() && current.type_name != "smart" {
+                    return tool_error_result("Error: Only a note created with a condition can have one. Write a new note with surface_condition, and dismiss this one.");
+                }
+                if condition.is_some()
+                    && !self.note_evaluation_capability(Path::new(&facade_scope.route_project_root))
+                {
+                    return tool_error_result("Conditional notes are not available in the current mode. Save a regular note without a condition. (MC-C08)");
+                }
                 facade_command_outcome(
                     store.with_facade_command(
                         facade_scope.route_project_root.as_str(),
@@ -28094,6 +28102,24 @@ mod tests {
         )
         .await;
         assert!(!tool_is_error(plain));
+        let plain_id = store
+            .search_notes_like(project.to_str().unwrap(), "ses", "plain note is allowed")
+            .unwrap()[0]
+            .id;
+        let session_update = call_facade(
+            &handler,
+            "ctx_note",
+            json!({"action": "update", "note_ids": [plain_id], "surface_condition": "when evaluated"}),
+        ).await;
+        assert!(
+            tool_text(session_update).contains("Only a note created with a condition can have one")
+        );
+        let unchanged = store
+            .get_note_by_id(project.to_str().unwrap(), "ses", plain_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.status, "active");
+        assert!(unchanged.surface_condition.is_none());
 
         let state_sync = handler
             .dispatch_value(
