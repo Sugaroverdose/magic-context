@@ -3519,15 +3519,14 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
 
     // Adversarial gate reproductions for legacy marker conversion (real-or-absent).
     // Each trigger gets its own session so a conversion can only come from it.
-    const ADV_TRIGGERS: Array<{ name: string; signals: (base: M0HardSignals) => M0HardSignals }> =
-        [
-            { name: "model change", signals: (b) => ({ ...b, modelKey: "anthropic/sonnet" }) },
-            { name: "system hash", signals: (b) => ({ ...b, systemHash: "sys-v2" }) },
-            {
-                name: "TTL idle",
-                signals: (b) => ({ ...b, cacheExpired: true, lastResponseTime: Date.now() + 60_000 }),
-            },
-        ];
+    const ADV_TRIGGERS: Array<{ name: string; signals: (base: M0HardSignals) => M0HardSignals }> = [
+        { name: "model change", signals: (b) => ({ ...b, modelKey: "anthropic/sonnet" }) },
+        { name: "system hash", signals: (b) => ({ ...b, systemHash: "sys-v2" }) },
+        {
+            name: "TTL idle",
+            signals: (b) => ({ ...b, cacheExpired: true, lastResponseTime: Date.now() + 60_000 }),
+        },
+    ];
     function advTail(sessionId: string, newer: number): MessageLike[] {
         const tool = (id: string, callID: string, name: string, input: unknown) => ({
             info: { id, role: "assistant", sessionID: sessionId },
@@ -3550,7 +3549,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             // 512 x "é" = 1024 UTF-8 bytes: small; plus one byte: large.
             tool("m-mb1024", "c-mb1024", "write", { content: "\u00e9".repeat(512) }),
             tool("m-mb1025", "c-mb1025", "write", { content: `${"\u00e9".repeat(512)}a` }),
-            tool("m-a1024", "c-a1024", "write", { nested: [{ c: "a".repeat(1000) }, "b".repeat(24)] }),
+            tool("m-a1024", "c-a1024", "write", {
+                nested: [{ c: "a".repeat(1000) }, "b".repeat(24)],
+            }),
             tool("m-large", "c-large", "write", { content: "L".repeat(4000) }),
             user("m-next", "next prompt"),
             ...Array.from({ length: newer }, (_, i) => user(`m-newer-${i}`, `newer ${i}`)),
@@ -3643,7 +3644,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         );
         expect(soft.result.materialized).toBe(false);
         for (const mode of Object.values(advModes(sessionId, tags))) expect(mode).toBe("truncated");
-        expect(JSON.stringify(soft.messages.slice(-7))).toBe(JSON.stringify(defer.messages.slice(-7)));
+        expect(JSON.stringify(soft.messages.slice(-7))).toBe(
+            JSON.stringify(defer.messages.slice(-7)),
+        );
         expect(advSha(deferAgain.messages)).toBe(advSha(defer.messages));
     });
 
@@ -3663,9 +3666,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         });
         const tags = advSeedLegacy(sessionId);
         const d1 = await advPass(sessionId, { budget: 500 });
-        const { insertMemory } = await import(
-            "../../features/magic-context/memory/storage-memory"
-        );
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
         for (let i = 0; i < 45; i++) {
             insertMemory(db, {
                 projectPath: FOLD_PROJECT,
@@ -3685,7 +3686,11 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 d1EqD2Tail:
                     JSON.stringify(d1.messages.slice(-7)) === JSON.stringify(d2.messages.slice(-7)),
                 execMaterialized: exec.result.materialized,
-                execResult: Object.fromEntries(Object.entries(exec.result).filter(([k]) => /reason|decision|materializ/i.test(k))),
+                execResult: Object.fromEntries(
+                    Object.entries(exec.result).filter(([k]) =>
+                        /reason|decision|materializ/i.test(k),
+                    ),
+                ),
                 modes,
                 execSha: advSha(exec.messages),
                 afterSharedSha: advSha(shared),
@@ -3755,7 +3760,10 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         });
         const build = (newer: boolean) =>
             [
-                { info: { id: "m-u0", role: "user", sessionID: sessionId }, parts: [{ type: "text", text: "go" }] },
+                {
+                    info: { id: "m-u0", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "go" }],
+                },
                 {
                     info: { id: "m-par", role: "assistant", sessionID: sessionId },
                     parts: [
@@ -3766,9 +3774,17 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                         part("p-keep", { command: "pwd" }),
                     ],
                 },
-                { info: { id: "m-next", role: "user", sessionID: sessionId }, parts: [{ type: "text", text: "next" }] },
+                {
+                    info: { id: "m-next", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "next" }],
+                },
                 ...(newer
-                    ? [{ info: { id: "m-newer", role: "user", sessionID: sessionId }, parts: [{ type: "text", text: "newer" }] }]
+                    ? [
+                          {
+                              info: { id: "m-newer", role: "user", sessionID: sessionId },
+                              parts: [{ type: "text", text: "newer" }],
+                          },
+                      ]
                     : []),
             ] as unknown as MessageLike[];
         const pass = async (hard: M0HardSignals, newer: boolean) => {
@@ -3817,7 +3833,8 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 call,
                 getTagsBySession(db, sessionId).find((t) => t.tagNumber === tagOf(call))?.dropMode +
                     "/" +
-                    getTagsBySession(db, sessionId).find((t) => t.tagNumber === tagOf(call))?.status,
+                    getTagsBySession(db, sessionId).find((t) => t.tagNumber === tagOf(call))
+                        ?.status,
             ]),
         );
         console.log(

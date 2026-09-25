@@ -25,31 +25,42 @@ const BASE_SYSTEM_HASH = "sys-v1";
 async function harness(dbPath: string) {
 	const utils = await import("./test-utils.test");
 	const ch = await import("./context-handler");
-	const storage = await import("@magic-context/core/features/magic-context/storage");
+	const storage = await import(
+		"@magic-context/core/features/magic-context/storage"
+	);
 	const db = utils.createTestDb(dbPath);
 	const ids = ["e-1", "e-2", "e-3", "e-4", "e-5", "e-6"];
 	const build = () =>
 		[
 			utils.userMessage("start", 1),
 			utils.assistantToolCall("call-small", "bash", { command: "ls -la" }, 2),
-			{ ...utils.toolResultMessage("call-small", "small output", 3), toolName: "bash" },
+			{
+				...utils.toolResultMessage("call-small", "small output", 3),
+				toolName: "bash",
+			},
 			utils.assistantToolCall(
 				"call-large",
 				"write",
 				{ filePath: "/tmp/a.txt", content: "L".repeat(2000) },
 				4,
 			),
-			{ ...utils.toolResultMessage("call-large", "wrote file", 5), toolName: "write" },
+			{
+				...utils.toolResultMessage("call-large", "wrote file", 5),
+				toolName: "write",
+			},
 			utils.userMessage("next prompt", 6),
 		] as never[];
 	const fake = utils.createFakePi();
-	ch.registerPiContextHandler(fake.pi as never, {
-		db,
-		protectedTags: 0,
-		heuristics: {},
-		injection: { injectionBudgetTokens: 10_000, muralEnabled: true },
-		scheduler: { executeThresholdPercentage: 80 },
-	} as never);
+	ch.registerPiContextHandler(
+		fake.pi as never,
+		{
+			db,
+			protectedTags: 0,
+			heuristics: {},
+			injection: { injectionBudgetTokens: 10_000, muralEnabled: true },
+			scheduler: { executeThresholdPercentage: 80 },
+		} as never,
+	);
 	const handler = fake.handlers.get("context") as (
 		event: { messages: never[] },
 		ctx: never,
@@ -58,7 +69,11 @@ async function harness(dbPath: string) {
 		const messages = build();
 		const out = await handler({ messages }, {
 			...utils.fakeContext(SESSION, process.cwd(), ids, messages),
-			getContextUsage: () => ({ tokens: 4_000, percent: 4, contextWindow: 100_000 }),
+			getContextUsage: () => ({
+				tokens: 4_000,
+				percent: 4,
+				contextWindow: 100_000,
+			}),
 		} as never);
 		return JSON.stringify(out.messages);
 	};
@@ -76,21 +91,31 @@ describe("ADV Pi: SIGKILL between the HARD fold commit and legacy conversion", (
 	if (CHILD) {
 		it("child", async () => {
 			if (CHILD === "kill") {
-				const actual = await import("@magic-context/core/hooks/magic-context/apply-operations");
+				const actual = await import(
+					"@magic-context/core/hooks/magic-context/apply-operations"
+				);
 				const original = actual.convertLegacyToolSkeletons;
-				mock.module("@magic-context/core/hooks/magic-context/apply-operations", () => ({
-					...actual,
-					convertLegacyToolSkeletons: (...args: Parameters<typeof actual.convertLegacyToolSkeletons>) => {
-						if (!(globalThis as { __advArmKill?: boolean }).__advArmKill) {
-							return original(...args);
-						}
-						writeFileSync(`${OUT}.killpoint`, "reached conversion after fold commit\n");
-						process.kill(process.pid, "SIGKILL");
-						throw new Error("unreachable");
-					},
-				}));
+				mock.module(
+					"@magic-context/core/hooks/magic-context/apply-operations",
+					() => ({
+						...actual,
+						convertLegacyToolSkeletons: (
+							...args: Parameters<typeof actual.convertLegacyToolSkeletons>
+						) => {
+							if (!(globalThis as { __advArmKill?: boolean }).__advArmKill) {
+								return original(...args);
+							}
+							writeFileSync(
+								`${OUT}.killpoint`,
+								"reached conversion after fold commit\n",
+							);
+							process.kill(process.pid, "SIGKILL");
+							throw new Error("unreachable");
+						},
+					}),
+				);
 			}
-			const h = await harness(DB_PATH!);
+			const h = await harness(DB_PATH ?? "");
 			h.storage.updateSessionMeta(h.db, SESSION, {
 				piStableIdScheme: 1,
 				systemPromptHash: BASE_SYSTEM_HASH,
@@ -113,7 +138,10 @@ describe("ADV Pi: SIGKILL between the HARD fold commit and legacy conversion", (
 			});
 			const deferA = await h.pass();
 			const deferB = await h.pass();
-			writeFileSync(`${OUT}.defer`, JSON.stringify({ deferA, deferB, modes: h.modes() }));
+			writeFileSync(
+				`${OUT}.defer`,
+				JSON.stringify({ deferA, deferB, modes: h.modes() }),
+			);
 			h.ch.recordPiLiveModel(SESSION, HARD_MODEL);
 			(globalThis as { __advArmKill?: boolean }).__advArmKill = true;
 			const hard = await h.pass();
@@ -162,7 +190,9 @@ describe("ADV Pi: SIGKILL between the HARD fold commit and legacy conversion", (
 			const h = await harness(dbPath);
 			h.ch.recordPiLiveModel(SESSION, HARD_MODEL);
 			const modesBefore = h.modes();
-			h.storage.updateSessionMeta(h.db, SESSION, { lastResponseTime: Date.now() });
+			h.storage.updateSessionMeta(h.db, SESSION, {
+				lastResponseTime: Date.now(),
+			});
 			const next1 = await h.pass();
 			const next2 = await h.pass();
 			const summary = {
@@ -172,7 +202,11 @@ describe("ADV Pi: SIGKILL between the HARD fold commit and legacy conversion", (
 				killpoint,
 				deferModes: deferRec?.modes,
 				deferIdentical: deferRec ? deferRec.deferA === deferRec.deferB : null,
-				childHardServed: hardRec ? hardRec.hard.includes('"dropped":') ? "legacy-marker" : "converted" : "never-served",
+				childHardServed: hardRec
+					? hardRec.hard.includes('"dropped":')
+						? "legacy-marker"
+						: "converted"
+					: "never-served",
 				modesAfterRestart: modesBefore,
 				modesAfterNext: h.modes(),
 				next1LegacyMarker: next1.includes('"dropped":'),
@@ -182,7 +216,10 @@ describe("ADV Pi: SIGKILL between the HARD fold commit and legacy conversion", (
 				next1Tail: next1.slice(-900),
 			};
 			console.log("ADV_PI_SIGKILL", JSON.stringify(summary, null, 1));
-			writeFileSync(join(root, "summary.json"), JSON.stringify(summary, null, 2));
+			writeFileSync(
+				join(root, "summary.json"),
+				JSON.stringify(summary, null, 2),
+			);
 			h.ch.clearContextHandlerSession(SESSION);
 			if (variant === "kill") {
 				expect(child.signal).toBe("SIGKILL");
