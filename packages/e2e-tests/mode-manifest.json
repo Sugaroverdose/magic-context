@@ -940,6 +940,22 @@
             ]
         },
         {
+            "path": "tests/opencode2/over-limit-recovery.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Seeds a converted session whose stored usage is over its usable window on a real OpenCode 2 host and proves the next turn runs a reducing pass and reaches the provider; the dedicated OC2 host step runs this sequentially",
+            "contract_refs": [
+                "S2-MIGRATION",
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/v1-v2-reconversion.test.ts",
             "tier": "excluded",
             "invocation": {
