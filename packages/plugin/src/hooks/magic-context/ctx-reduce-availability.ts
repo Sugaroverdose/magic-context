@@ -424,11 +424,7 @@ export function primeCtxReduceSpawnPermission(
     sessionId: string,
     spawnAgent?: string,
 ): Promise<void> {
-    if (!ctxReduceRegisteredGlobally) return Promise.resolve();
-    if (availabilityBySession.get(cacheKey(CTX_REDUCE_TOOL, sessionId)) !== undefined) {
-        return Promise.resolve();
-    }
-    if (ctxReduceSpawnPermissionDenied.get(sessionId) !== undefined) return Promise.resolve();
+    if (!ctxReduceSpawnPermissionReadNeeded(sessionId)) return Promise.resolve();
     const inFlight = ctxReduceSpawnPermissionReads.get(sessionId);
     if (inFlight) return inFlight;
     const read = (async () => {
@@ -460,6 +456,18 @@ export function primeCtxReduceSpawnPermission(
     return read;
 }
 
+/**
+ * Cheap check (no I/O) for whether a pre-freeze permission read would still do
+ * anything: false once the verdict froze or a read already recorded a result.
+ */
+export function ctxReduceSpawnPermissionReadNeeded(sessionId: string): boolean {
+    return (
+        ctxReduceRegisteredGlobally &&
+        availabilityBySession.get(cacheKey(CTX_REDUCE_TOOL, sessionId)) === undefined &&
+        ctxReduceSpawnPermissionDenied.get(sessionId) === undefined
+    );
+}
+
 /** Agent named on the session's first user message (the agent it was spawned with). */
 export function spawnAgentFromMessages(
     messages: ReadonlyArray<{ info?: { role?: string; agent?: unknown } }>,
@@ -470,6 +478,40 @@ export function spawnAgentFromMessages(
         return typeof agent === "string" && agent.length > 0 ? agent : undefined;
     }
     return undefined;
+}
+
+/**
+ * Spawn agent read from OpenCode's DB, for callers that run before the
+ * messages transform (OpenCode can run the system-prompt hook first).
+ * `persisted: false` means the session has no stored user message yet, so no
+ * verdict can freeze and no permission read should be recorded. A present
+ * message without an agent reports `agent: undefined`.
+ */
+export function spawnAgentFromOpenCodeDb(sessionId: string): {
+    persisted: boolean;
+    agent?: string;
+} {
+    if (!openCodeDbExists()) return { persisted: false };
+    try {
+        const row = withReadOnlySessionDb(
+            (db) =>
+                db
+                    .prepare(
+                        `SELECT json_extract(data, '$.agent') AS agent FROM message
+                          WHERE session_id = ? AND json_extract(data, '$.role') = 'user'
+                          ORDER BY time_created ASC LIMIT 1`,
+                    )
+                    .get(sessionId) as { agent: unknown } | undefined,
+        );
+        if (!row) return { persisted: false };
+        return {
+            persisted: true,
+            agent: typeof row.agent === "string" && row.agent.length > 0 ? row.agent : undefined,
+        };
+    } catch (error) {
+        sessionLog(sessionId, "ctx_reduce spawn agent read failed:", error);
+        return { persisted: false };
+    }
 }
 
 export function todowritePermissionDenied(

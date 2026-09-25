@@ -5,6 +5,7 @@ import {
     getOrCreateSessionMeta,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import type { PluginContext } from "../../plugin/types";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
@@ -14,7 +15,12 @@ import {
     createPromptSurfaceRuntime,
     promptSurfaceHashMaterial,
 } from "../../shared/prompt-surface-runtime";
-import { resolveCtxReduceAvailability } from "./ctx-reduce-availability";
+import {
+    ctxReduceSpawnPermissionReadNeeded,
+    primeCtxReduceSpawnPermission,
+    resolveCtxReduceAvailability,
+    spawnAgentFromOpenCodeDb,
+} from "./ctx-reduce-availability";
 
 import { estimateTokens } from "./read-session-formatting";
 
@@ -184,6 +190,14 @@ export function createSystemPromptHashHandler(deps: {
     experimentalPinKeyFilesTokenBudget?: number;
     /** When true, add a temporal-awareness guidance paragraph + surface compartment dates */
     experimentalTemporalAwareness?: boolean;
+    /**
+     * OpenCode SDK client used to read the agent and session permissions for
+     * ctx_reduce before the verdict freezes. OpenCode can run this hook before
+     * the messages transform, so this hook may be the one that freezes it.
+     * Absent (tests, hosts without the SDK): the verdict freezes from the
+     * tools map alone, as before permissions were considered.
+     */
+    client?: PluginContext["client"];
     /** When true, inject a "BEWARE: history compression is on" warning so the
      *  agent doesn't mimic its own caveman-compressed past output. */
     experimentalCavemanTextCompression?: boolean;
@@ -324,6 +338,15 @@ export function createSystemPromptHashHandler(deps: {
         // never persisted as the session's baseline — if the first user message
         // then denies the tool, the variant settles BEFORE any hash existed,
         // instead of flipping a persisted hash and busting the prompt cache.
+        // Read the agent and session permissions before this call can freeze
+        // the verdict. Only once the first user message is stored: before that
+        // the spawn agent is unknown and the verdict stays provisional anyway.
+        if (deps.client && ctxReduceSpawnPermissionReadNeeded(sessionId)) {
+            const spawn = spawnAgentFromOpenCodeDb(sessionId);
+            if (spawn.persisted) {
+                await primeCtxReduceSpawnPermission(deps.client, sessionId, spawn.agent);
+            }
+        }
         const availability = resolveCtxReduceAvailability(sessionId);
         const ctxReduceCallable = availability.callable;
         const subagentReduceMode = isSubagentSession && ctxReduceCallable;

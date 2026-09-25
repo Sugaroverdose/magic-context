@@ -14,7 +14,7 @@
  */
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Scheduler } from "../../features/magic-context/scheduler";
@@ -22,8 +22,11 @@ import { closeDatabase, openDatabase } from "../../features/magic-context/storag
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { clearCtxReduceAvailability } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
+import { closeReadOnlySessionDb } from "./read-session-db";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import { createTransform } from "./transform";
 
@@ -41,6 +44,7 @@ const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 
 afterEach(() => {
     closeDatabase();
+    closeReadOnlySessionDb();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
     if (originalXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
@@ -49,11 +53,40 @@ afterEach(() => {
     tempDirs.length = 0;
 });
 
-function useTempDataHome(): void {
+function useTempDataHome(): string {
     const dir = mkdtempSync(join(tmpdir(), "ctx-reduce-permission-freeze-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     process.env.XDG_CACHE_HOME = dir;
+    return dir;
+}
+
+/** Store the session's first user message in a throwaway OpenCode DB, as the host does before any hook runs. */
+function persistFirstUserMessage(dataHome: string, sessionId: string, agent: string): void {
+    const dbPath = join(dataHome, "opencode", "opencode.db");
+    mkdirSync(join(dataHome, "opencode"), { recursive: true });
+    const opencodeDb = new Database(dbPath);
+    opencodeDb.exec(`
+        CREATE TABLE IF NOT EXISTS message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data TEXT NOT NULL
+        );
+    `);
+    opencodeDb
+        .prepare(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(
+            `${sessionId}-m-user-1`,
+            sessionId,
+            1,
+            1,
+            JSON.stringify({ id: "m-user-1", role: "user", agent }),
+        );
+    closeQuietly(opencodeDb);
 }
 
 /**
@@ -128,25 +161,43 @@ function createHarness(sessionIds: string[], client: (sessionId: string) => unkn
             }),
         ]),
     );
-    const { handler: systemHandler } = createSystemPromptHashHandler({
-        db,
-        dreamerEnabled: false,
-        resolveModel: () => ({ providerID: "provider", modelID: "model" }),
-        historyRefreshSessions: new Set<string>(),
-        systemPromptRefreshSessions: new Set<string>(),
-        pendingMaterializationSessions: new Set<string>(),
-        lastHeuristicsTurnId: new Map<string, string>(),
-    });
+    // One system-prompt handler per session too, each with that session's client.
+    const systemHandlers = new Map(
+        sessionIds.map((sessionId) => [
+            sessionId,
+            createSystemPromptHashHandler({
+                db,
+                dreamerEnabled: false,
+                resolveModel: () => ({ providerID: "provider", modelID: "model" }),
+                historyRefreshSessions: new Set<string>(),
+                systemPromptRefreshSessions: new Set<string>(),
+                pendingMaterializationSessions: new Set<string>(),
+                lastHeuristicsTurnId: new Map<string, string>(),
+                client: client(sessionId) as PluginContext["client"],
+            }).handler,
+        ]),
+    );
 
-    /** Run one OpenCode turn (messages transform, then system transform) and return what it serves. */
-    async function pass(sessionId: string, turns: number) {
+    /**
+     * Run one OpenCode turn and return what it serves. OpenCode may run the
+     * system-prompt hook before or after the messages transform, so either
+     * hook can be the one that freezes the verdict.
+     */
+    async function pass(
+        sessionId: string,
+        turns: number,
+        order: "system-first" | "messages-first",
+    ) {
         const messages = conversation(sessionId, turns);
-        await transforms.get(sessionId)?.({}, { messages });
         const system = [HOST_PROMPT];
-        await systemHandler(
-            { sessionID: sessionId, model: { providerID: "provider", modelID: "model" } },
-            { system },
-        );
+        const runSystem = () =>
+            systemHandlers.get(sessionId)?.(
+                { sessionID: sessionId, model: { providerID: "provider", modelID: "model" } },
+                { system },
+            );
+        if (order === "system-first") await runSystem();
+        await transforms.get(sessionId)?.({}, { messages });
+        if (order === "messages-first") await runSystem();
         // Session ids differ between compared sessions; everything else must match byte for byte.
         const normalize = (value: string) => value.replaceAll(sessionId, "<session>");
         return {
@@ -161,74 +212,81 @@ function createHarness(sessionIds: string[], client: (sessionId: string) => unkn
 const TAG = /§\d+§/;
 const REDUCE_GUIDANCE = "`ctx_reduce` with its tag";
 
-describe("ctx_reduce verdict honours agent and session permissions before it freezes", () => {
-    it("a session whose permissions allow ctx_reduce serves the same bytes as one that never reads them", async () => {
-        useTempDataHome();
-        const allowed = "ses-freeze-allowed";
-        const unread = "ses-freeze-unread";
-        clearCtxReduceAvailability(allowed);
-        clearCtxReduceAvailability(unread);
-        const allowedHost = hostClient({ deny: false });
-        const unreadHost = hostClient({ deny: false, permissions: "unreadable" });
-        const { pass, channel1StateBySession } = createHarness([allowed, unread], (sessionId) =>
-            sessionId === allowed ? allowedHost.client : unreadHost.client,
-        );
-
-        for (let turns = 1; turns <= 3; turns += 1) {
-            const allowedServed = await pass(allowed, turns);
-            const unreadServed = await pass(unread, turns);
-            expect(allowedServed).toEqual(unreadServed);
-            expect(allowedServed.messages).toMatch(TAG);
-            expect(allowedServed.system).toContain(REDUCE_GUIDANCE);
+for (const order of ["messages-first", "system-first"] as const) {
+    describe(`ctx_reduce verdict honours agent and session permissions before it freezes (${order})`, () => {
+        /** Fresh throwaway stores holding each session's stored first user message. */
+        function setup(sessionIds: string[]): void {
+            const dataHome = useTempDataHome();
+            for (const sessionId of sessionIds) {
+                clearCtxReduceAvailability(sessionId);
+                persistFirstUserMessage(dataHome, sessionId, AGENT);
+            }
         }
-        // The callable session gets the Channel 1 baseline the denied session must not.
-        expect(channel1StateBySession.has(allowed)).toBe(true);
-        // computedAt is wall-clock time and differs between the two sessions.
-        expect({ ...channel1StateBySession.get(allowed), computedAt: 0 }).toEqual({
-            ...channel1StateBySession.get(unread),
-            computedAt: 0,
+
+        it("a session whose permissions allow ctx_reduce serves the same bytes as one that never reads them", async () => {
+            const allowed = `ses-freeze-allowed-${order}`;
+            const unread = `ses-freeze-unread-${order}`;
+            setup([allowed, unread]);
+            const allowedHost = hostClient({ deny: false });
+            const unreadHost = hostClient({ deny: false, permissions: "unreadable" });
+            const { pass, channel1StateBySession } = createHarness(
+                [allowed, unread],
+                (sessionId) => (sessionId === allowed ? allowedHost.client : unreadHost.client),
+            );
+
+            for (let turns = 1; turns <= 3; turns += 1) {
+                const allowedServed = await pass(allowed, turns, order);
+                const unreadServed = await pass(unread, turns, order);
+                expect(allowedServed).toEqual(unreadServed);
+                expect(allowedServed.messages).toMatch(TAG);
+                expect(allowedServed.system).toContain(REDUCE_GUIDANCE);
+            }
+            // The callable session gets the Channel 1 baseline the denied session must not.
+            expect(channel1StateBySession.has(allowed)).toBe(true);
+            // computedAt is wall-clock time and differs between the two sessions.
+            expect({ ...channel1StateBySession.get(allowed), computedAt: 0 }).toEqual({
+                ...channel1StateBySession.get(unread),
+                computedAt: 0,
+            });
+        });
+
+        it("a deny known on the first pass never serves tags, reduce guidance, or a Channel 1 baseline", async () => {
+            const denied = `ses-freeze-denied-${order}`;
+            setup([denied]);
+            const host = hostClient({ deny: true });
+            const { pass, channel1StateBySession } = createHarness([denied], () => host.client);
+
+            for (let turns = 1; turns <= 3; turns += 1) {
+                const served = await pass(denied, turns, order);
+                expect(served.messages).not.toMatch(TAG);
+                expect(served.system).toContain("## Magic Context");
+                expect(served.system).not.toContain(REDUCE_GUIDANCE);
+            }
+            expect(channel1StateBySession.has(denied)).toBe(false);
+        });
+
+        it("a deny added after the first pass changes nothing that is served", async () => {
+            const steady = `ses-freeze-steady-${order}`;
+            const flipped = `ses-freeze-flipped-${order}`;
+            setup([steady, flipped]);
+            const steadyState = { deny: false };
+            const flippedState = { deny: false };
+            const steadyHost = hostClient(steadyState);
+            const flippedHost = hostClient(flippedState);
+            const { pass } = createHarness([steady, flipped], (sessionId) =>
+                sessionId === steady ? steadyHost.client : flippedHost.client,
+            );
+
+            expect(await pass(flipped, 1, order)).toEqual(await pass(steady, 1, order));
+            flippedState.deny = true;
+            for (let turns = 2; turns <= 4; turns += 1) {
+                const flippedServed = await pass(flipped, turns, order);
+                expect(flippedServed).toEqual(await pass(steady, turns, order));
+                expect(flippedServed.messages).toMatch(TAG);
+                expect(flippedServed.system).toContain(REDUCE_GUIDANCE);
+            }
+            // Permissions were read once, before the freeze, and never again.
+            expect(flippedHost.reads.agents).toBe(1);
         });
     });
-
-    it("a deny known on the first pass never serves tags, reduce guidance, or a Channel 1 baseline", async () => {
-        useTempDataHome();
-        const denied = "ses-freeze-denied";
-        clearCtxReduceAvailability(denied);
-        const host = hostClient({ deny: true });
-        const { pass, channel1StateBySession } = createHarness([denied], () => host.client);
-
-        for (let turns = 1; turns <= 3; turns += 1) {
-            const served = await pass(denied, turns);
-            expect(served.messages).not.toMatch(TAG);
-            expect(served.system).toContain("## Magic Context");
-            expect(served.system).not.toContain(REDUCE_GUIDANCE);
-        }
-        expect(channel1StateBySession.has(denied)).toBe(false);
-    });
-
-    it("a deny added after the first pass changes nothing that is served", async () => {
-        useTempDataHome();
-        const steady = "ses-freeze-steady";
-        const flipped = "ses-freeze-flipped";
-        clearCtxReduceAvailability(steady);
-        clearCtxReduceAvailability(flipped);
-        const steadyState = { deny: false };
-        const flippedState = { deny: false };
-        const steadyHost = hostClient(steadyState);
-        const flippedHost = hostClient(flippedState);
-        const { pass } = createHarness([steady, flipped], (sessionId) =>
-            sessionId === steady ? steadyHost.client : flippedHost.client,
-        );
-
-        expect(await pass(flipped, 1)).toEqual(await pass(steady, 1));
-        flippedState.deny = true;
-        for (let turns = 2; turns <= 4; turns += 1) {
-            const flippedServed = await pass(flipped, turns);
-            expect(flippedServed).toEqual(await pass(steady, turns));
-            expect(flippedServed.messages).toMatch(TAG);
-            expect(flippedServed.system).toContain(REDUCE_GUIDANCE);
-        }
-        // Permissions were read once, before the freeze, and never again.
-        expect(flippedHost.reads.agents).toBe(1);
-    });
-});
+}
