@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -22,6 +22,7 @@ import {
     getMemoryVerifications,
     recordMemoryVerifications,
 } from "../memory/storage-memory-verifications";
+import { normalizeVerificationFiles } from "../memory/verification-paths";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { acquireLease } from "./lease";
@@ -49,8 +50,8 @@ function tempProject(): string {
 
 function gitProject(): string {
     const dir = tempProject();
-    execFileSync("git", ["init", "--quiet"], { cwd: dir });
-    execFileSync("git", ["add", "."], { cwd: dir });
+    execFileSync("git", ["init", "--quiet"], { cwd: dir, timeout: 10_000 });
+    execFileSync("git", ["add", "."], { cwd: dir, timeout: 10_000 });
     execFileSync(
         "git",
         [
@@ -65,6 +66,7 @@ function gitProject(): string {
         ],
         {
             cwd: dir,
+            timeout: 10_000,
             env: {
                 ...process.env,
                 GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
@@ -215,6 +217,16 @@ function addMappedMemories(db: Database, projectIdentity: string, count: number)
         recordMemoryVerifications(db, memory.id, ["src/old.ts"], 1_000);
     }
 }
+
+test("production verification paths normalize tracked files in a real git project", async () => {
+    const dir = gitProject();
+    const result = await normalizeVerificationFiles({
+        cwd: dir,
+        files: ["src/old.ts", "src/new.ts", "src/old.ts"],
+    });
+    expect(result.files).toEqual(["src/new.ts", "src/old.ts"]);
+    expect(result.gitRoot).toBe(realpathSync.native(dir));
+});
 
 describe("verify authority applier", () => {
     test("writes through memory.set_verification under MODULE authority without mutating the mirror", async () => {

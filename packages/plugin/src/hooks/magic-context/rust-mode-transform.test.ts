@@ -6454,6 +6454,46 @@ describe("delta prefix-mutation guard", () => {
 });
 
 describe("Rust stalled transform probe", () => {
+    function fakeClock() {
+        let now = 0;
+        let nextId = 0;
+        const timers = new Map<number, { at: number; callback: () => void }>();
+        return {
+            now: () => now,
+            setTimeout: ((callback: () => void, delay: number) => {
+                const id = ++nextId;
+                timers.set(id, { at: now + delay, callback });
+                return id as unknown as ReturnType<typeof setTimeout>;
+            }) as typeof setTimeout,
+            clearTimeout: ((id: ReturnType<typeof setTimeout>) => {
+                timers.delete(id as unknown as number);
+            }) as typeof clearTimeout,
+            hasDelay: (delay: number) =>
+                [...timers.values()].some((timer) => timer.at === now + delay),
+            async waitForDelay(delay: number) {
+                for (let turn = 0; turn < 1_000; turn++) {
+                    if (this.hasDelay(delay)) return;
+                    await Promise.resolve();
+                }
+                throw new Error(`Expected a ${delay}ms timer to be scheduled`);
+            },
+            async advance(ms: number) {
+                const until = now + ms;
+                while (true) {
+                    const next = [...timers.entries()]
+                        .filter(([, timer]) => timer.at <= until)
+                        .sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+                    if (!next) break;
+                    now = next[1].at;
+                    timers.delete(next[0]);
+                    next[1].callback();
+                    for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+                }
+                now = until;
+            },
+        };
+    }
+
     const abortableSilence = (signal?: AbortSignal): Promise<never> =>
         new Promise((_resolve, reject) => {
             signal?.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), {
@@ -6470,10 +6510,8 @@ describe("Rust stalled transform probe", () => {
         input[0]!.info.model = { providerID: "test-provider", modelID: "test-model" };
         const transformBodies: Record<string, unknown>[] = [];
         let healthProbes = 0;
-        // The original transform must still be in flight when the stall probe
-        // fires, so the mock holds its reply until the probe has been observed
-        // instead of sleeping a fixed interval: a fixed sleep raced the probe
-        // timer on a loaded runner and the probe was never reached (CI, 2026-09-21).
+        // Hold the original response until the probe answers so a duplicate
+        // transform request cannot hide behind an early completion.
         let releaseTransform: () => void = () => {};
         const probeObserved = new Promise<void>((resolve) => {
             releaseTransform = resolve;
@@ -6488,14 +6526,7 @@ describe("Rust stalled transform probe", () => {
                 if (method !== "transform") return { ok: true };
                 const request = body as Record<string, unknown>;
                 transformBodies.push(request);
-                await Promise.race([
-                    probeObserved,
-                    Bun.sleep(5_000).then(() => {
-                        throw new Error(
-                            "stall probe never fired while the transform was in flight",
-                        );
-                    }),
-                ]);
+                await probeObserved;
                 if (signal?.aborted) throw signal.reason ?? new Error("aborted");
                 return {
                     decision: "SOFT+",
@@ -6504,22 +6535,21 @@ describe("Rust stalled transform probe", () => {
                 };
             },
         };
-        // Only the stall probe's timer may fire here. The module and probe-reply
-        // budgets are far larger than any runner delay, so the order "probe fires
-        // while the transform is in flight" holds by construction; the mock
-        // answers the moment the probe is seen, so the test still finishes in
-        // milliseconds. With a 100 ms module timeout a slow CI runner timed the
-        // transform out before the 10 ms probe ran (healthProbes 0, 2026-09-24).
+        const clock = fakeClock();
         const transform = createRustModeTransform(makeDeps(db, moduleClient), {
             moduleClient,
-            moduleTimeoutMs: 30_000,
+            clockForTests: clock,
+            moduleTimeoutMs: 100,
             stallProbeAfterMsForTests: 10,
-            healthProbeTimeoutMsForTests: 30_000,
+            healthProbeTimeoutMsForTests: 50,
         });
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
         try {
             const output = { messages: [...input] as unknown[] };
-            await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+            const run = transform.run(sessionId, input, output, makeMeta(db, sessionId));
+            await clock.waitForDelay(10);
+            await clock.advance(10);
+            await run;
 
             expect(output.messages).toEqual(input);
             expect(healthProbes).toBe(1);
@@ -6576,15 +6606,13 @@ describe("Rust stalled transform probe", () => {
             "test-provider/test-model",
             "provider_overflow",
         );
-        // The probe (0 ms) must fire before the module timeout produces the
-        // refusal. Two real timers race here because the transform has no clock
-        // seam, so the margin between them is what keeps the order: 50 ms was
-        // thin enough for a loaded runner to lose; 2 s is not.
+        const clock = fakeClock();
         const transform = createRustModeTransform(deps, {
             moduleClient,
-            moduleTimeoutMs: 2_000,
+            clockForTests: clock,
+            moduleTimeoutMs: 50,
             stallProbeAfterMsForTests: 0,
-            healthProbeTimeoutMsForTests: 1_000,
+            healthProbeTimeoutMsForTests: 25,
         });
 
         const run = transform.run(
@@ -6593,22 +6621,31 @@ describe("Rust stalled transform probe", () => {
             { messages: [...input] as unknown[] },
             makeMeta(db, sessionId),
         );
-        const refusal = expect(run).rejects.toEqual(
+        let settled = false;
+        const refusal = run
+            .then(
+                () => {
+                    throw new Error("Expected an emergency refusal");
+                },
+                (error: unknown) => error,
+            )
+            .then((result) => {
+                settled = true;
+                return result;
+            });
+        await clock.waitForDelay(0);
+        await clock.advance(0);
+        await probeObserved;
+        for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+        expect(healthProbes).toBe(1);
+        expect(settled).toBe(false);
+        await clock.advance(50);
+        expect(await refusal).toEqual(
             expect.objectContaining({
                 name: "EmergencyFailClosedError",
                 message: ENGINE_RECONNECTING_USER_MESSAGE,
             }),
         );
-        expect(
-            await Promise.race([
-                probeObserved.then(() => true),
-                run.then(
-                    () => false,
-                    () => false,
-                ),
-            ]),
-        ).toBe(true);
-        await refusal;
         expect(healthProbes).toBe(1);
         expect(transformCalls).toBe(1);
     });

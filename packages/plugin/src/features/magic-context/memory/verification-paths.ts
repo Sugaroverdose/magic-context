@@ -52,9 +52,12 @@ async function runGit(cwd: string, args: readonly string[]): Promise<string | nu
             (error as { killed?: boolean }).killed ||
             (error as NodeJS.ErrnoException).code === "ETIMEDOUT"
         ) {
-            throw new Error(`Git verification command timed out after ${GIT_TIMEOUT_MS}ms`, {
-                cause: error,
-            });
+            throw new Error(
+                `Git verification command git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`,
+                {
+                    cause: error,
+                },
+            );
         }
         return null;
     }

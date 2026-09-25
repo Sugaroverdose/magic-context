@@ -495,6 +495,12 @@ export interface RustModeTransformOptions {
     onLkgCaptureForTests?: (reusedPrefix: number) => void;
     /** Test-only override for the stalled-request health-probe threshold. */
     stallProbeAfterMsForTests?: number;
+    /** Test-only clock for the module deadline and stalled-transform probe. */
+    clockForTests?: {
+        setTimeout: typeof setTimeout;
+        clearTimeout: typeof clearTimeout;
+        now: () => number;
+    };
     /** Test-only override for the health-probe deadline. */
     healthProbeTimeoutMsForTests?: number;
     /**
@@ -1770,6 +1776,7 @@ export function createRustModeTransform(
     getHeapStats: () => RustWireCacheHeapStats;
 } {
     const states = new Map<string, RustSessionState>();
+    const clock = options.clockForTests ?? { setTimeout, clearTimeout, now: Date.now };
     // The model this pass resolves when the messages carry none. OpenCode 1 reads it
     // back out of the host's own database; hosts that keep no such database supply
     // the draft's model through this seam instead.
@@ -1918,7 +1925,7 @@ export function createRustModeTransform(
                       },
                   )
                 : new Error("rust module request timed out");
-        const timer = setTimeout(() => controller.abort(timeoutError), attemptTimeoutMs);
+        const timer = clock.setTimeout(() => controller.abort(timeoutError), attemptTimeoutMs);
         try {
             return await options.moduleClient.call({
                 ...args,
@@ -1929,7 +1936,7 @@ export function createRustModeTransform(
             if (controller.signal.aborted) throw timeoutError;
             throw error;
         } finally {
-            clearTimeout(timer);
+            clock.clearTimeout(timer);
         }
     };
 
@@ -1937,7 +1944,7 @@ export function createRustModeTransform(
         args: Parameters<RustModeModuleClient["call"]>[0],
         attemptTimeoutMs: number,
     ): Promise<unknown> => {
-        const startedAtMs = Date.now();
+        const startedAtMs = clock.now();
         const deadlineMs = startedAtMs + attemptTimeoutMs;
         const probeAfterMs = options.stallProbeAfterMsForTests ?? RUST_STALL_PROBE_AFTER_MS;
         const probeTimeoutMs = options.healthProbeTimeoutMsForTests ?? RUST_HEALTH_PROBE_TIMEOUT_MS;
@@ -1955,14 +1962,14 @@ export function createRustModeTransform(
                 (error) => ({ kind: "error" as const, error }),
             ),
             new Promise<{ kind: "stalled" }>((resolve) => {
-                stallTimer = setTimeout(() => resolve({ kind: "stalled" }), probeAfterMs);
+                stallTimer = clock.setTimeout(() => resolve({ kind: "stalled" }), probeAfterMs);
             }),
         ]);
-        if (first.kind !== "stalled") clearTimeout(stallTimer);
+        if (first.kind !== "stalled") clock.clearTimeout(stallTimer);
         if (first.kind === "response") return first.response;
         if (first.kind === "error") throw first.error;
 
-        const probeBudgetMs = Math.min(probeTimeoutMs, Math.max(0, deadlineMs - Date.now()));
+        const probeBudgetMs = Math.min(probeTimeoutMs, Math.max(0, deadlineMs - clock.now()));
         if (probeBudgetMs <= 0) return original;
         try {
             await callModule(
@@ -1987,7 +1994,7 @@ export function createRustModeTransform(
 
         sessionLog(
             args.sessionId,
-            `rust transform still pending after healthy probe original_attempt=${originalAttemptId} stall_ms=${Date.now() - startedAtMs}; duplicate resend suppressed`,
+            `rust transform still pending after healthy probe original_attempt=${originalAttemptId} stall_ms=${clock.now() - startedAtMs}; duplicate resend suppressed`,
         );
         // A healthy status response does not prove the original mutating transform stopped.
         // Keep its single deadline instead of overlapping a second request against stale state.

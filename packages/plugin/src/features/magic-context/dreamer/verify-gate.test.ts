@@ -92,7 +92,7 @@ test("git verification timeout reports the stalled command", async () => {
     const timeout = Object.assign(new Error("git exceeded its deadline"), { killed: true });
     installGitScript(new Map([[gitCommand(["rev-parse", "--show-toplevel"]), timeout]]));
     await expect(resolveGitTopLevel(dir)).rejects.toThrow(
-        "Git verification command timed out after 10000ms",
+        "Git verification command git rev-parse --show-toplevel timed out after 10000ms",
     );
 });
 
