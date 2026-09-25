@@ -256,8 +256,7 @@
             ],
             "hosts": [
                 "opencode"
-            ],
-            "behavior": true
+            ]
         },
         {
             "path": "tests/drops.test.ts",
