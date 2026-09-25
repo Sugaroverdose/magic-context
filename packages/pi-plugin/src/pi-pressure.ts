@@ -330,9 +330,14 @@ export function noteRawBranchEstimateSetAside(
 }
 
 /**
- * `resolvePiPressureSnapshot` for the pressure decision: readings above the
- * model window are left out (so the previous trusted reading stands) and the
- * first one of an episode is logged with the raw figure and the window.
+ * `resolvePiPressureSnapshot` for the pressure decision. Two kinds of live
+ * figure are left out so the previous trusted reading stands:
+ * - any reading above the model window (no accepted request can be that big);
+ * - Pi's raw-branch estimate (see isPiLiveUsageRawBranchEstimate), at any
+ *   size, because it ignores everything Magic Context removed from the served
+ *   request.
+ * The first set-aside figure of an episode is logged with the raw number and
+ * the reason.
  */
 export function resolvePiPressureSnapshotWithWindowGuard(
 	args: ResolvePiPressureSnapshotArgs & {
@@ -340,6 +345,12 @@ export function resolvePiPressureSnapshotWithWindowGuard(
 		source: string;
 		/** Pi's live figure is a raw-branch estimate (see isPiLiveUsageRawBranchEstimate). */
 		liveIsRawBranchEstimate?: boolean;
+		/**
+		 * `persistedInputTokens` is itself Pi's live figure (the caller had no
+		 * persisted provider reading and fell back to `getContextUsage()`), so
+		 * it is set aside together with the live figure.
+		 */
+		persistedFromLive?: boolean;
 	},
 ): PiPressureSnapshot {
 	const live =
@@ -347,15 +358,17 @@ export function resolvePiPressureSnapshotWithWindowGuard(
 		Number.isFinite(args.liveInputTokens)
 			? args.liveInputTokens
 			: 0;
-	// A raw-branch estimate is blind to the reductions in the served request,
-	// so it may not raise pressure above the last provider-proven reading. It
-	// still stands in when there is no provider reading at all.
-	const setAsideEstimate =
-		args.liveIsRawBranchEstimate === true &&
-		args.persistedInputTokens > 0 &&
-		live > args.persistedInputTokens;
+	const setAsideEstimate = args.liveIsRawBranchEstimate === true && live > 0;
 	const snapshot = resolvePiPressureSnapshot(
-		setAsideEstimate ? { ...args, liveInputTokens: undefined } : args,
+		setAsideEstimate
+			? {
+					...args,
+					liveInputTokens: undefined,
+					...(args.persistedFromLive
+						? { persistedInputTokens: 0, persistedPercentage: 0 }
+						: {}),
+				}
+			: args,
 	);
 	if (
 		snapshot.ignoredReading !== undefined &&

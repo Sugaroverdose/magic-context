@@ -2406,7 +2406,7 @@ export function registerPiContextHandler(
 			const branchEntries = readPiBranchEntriesForContext(ctx, sessionId);
 			// Pi's live usage figure is a whole-raw-branch estimate while a context
 			// edit or compaction follows the last recorded usage (e.g. after a
-			// retried request); it must not raise provider-proven pressure.
+			// retried request); such a figure is never used as pressure.
 			const piLiveUsageIsRawBranchEstimate =
 				isPiLiveUsageRawBranchEstimate(branchEntries);
 			schedulePiTransformDecisionResolve({
@@ -2947,6 +2947,7 @@ export function registerPiContextHandler(
 					sessionId,
 					source: "transform",
 					liveIsRawBranchEstimate: piLiveUsageIsRawBranchEstimate,
+					persistedFromLive: !usedPersistedUsage,
 					persistedPercentage: usagePercentage,
 					persistedInputTokens: usageInputTokens,
 					liveInputTokens: piUsage?.tokens,
@@ -4482,6 +4483,7 @@ function maybeFireHistorian(args: {
 			sessionId,
 			source: "historian trigger",
 			liveIsRawBranchEstimate: args.liveIsRawBranchEstimate,
+			persistedFromLive: usageSource === "piUsage fallback",
 			persistedPercentage: usage.percentage,
 			persistedInputTokens: usage.inputTokens,
 			liveInputTokens: piUsage?.tokens,

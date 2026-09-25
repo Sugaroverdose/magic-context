@@ -662,11 +662,11 @@ export async function registerContext(context: V2Context) {
                 const [measuredProviderID, measuredModelID] = reading?.modelKey
                     ? splitModelKey(reading.modelKey)
                     : [draft.model.providerID, draft.model.id];
+                // No session context: the wall must be the model's own window,
+                // not a limit learned from an earlier overflow error, which a
+                // later successful reading is allowed to disprove.
                 const measuredGeometry = reading
-                    ? resolveContextWindowGeometry(measuredProviderID, measuredModelID, {
-                          db: usageDb,
-                          sessionID: draft.sessionID,
-                      })
+                    ? resolveContextWindowGeometry(measuredProviderID, measuredModelID)
                     : undefined;
                 // A completed reply whose prompt is larger than a trusted
                 // provider window is broken accounting: no request that large

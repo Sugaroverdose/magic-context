@@ -832,13 +832,9 @@ export async function persistPiPressureFromMessageEnd(args: {
 				modelWindowTokens as number,
 				"message_end estimate",
 			);
-		} else if (
-			args.piTokensIsRawBranchEstimate === true &&
-			meta.lastInputTokens > 0 &&
-			args.piTokens > meta.lastInputTokens
-		) {
+		} else if (args.piTokensIsRawBranchEstimate === true) {
 			// Same estimate below the window: still blind to the reductions in the
-			// served request, so it may not raise the last provider-proven reading.
+			// served request, so it never replaces the last provider-proven reading.
 			noteRawBranchEstimateSetAside(
 				args.sessionId,
 				args.piTokens,

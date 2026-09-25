@@ -91,9 +91,11 @@ function setup(sessionId: string) {
 		{ length: buildMessages().length },
 		(_, index) => `entry-${index + 1}`,
 	);
-	// When `retried` is set, the branch ends with the `context_edit` Pi appends
-	// to hide a failed attempt before retrying; Pi's live figure is then a
-	// chars/4 estimate of the whole raw branch.
+	// When `retried` is set, the branch ends the way the reporter's session
+	// file did: the attempt that died on WebSocket close 1012 (zero usage,
+	// stopReason "error") followed by the `context_edit` Pi appends to remove
+	// it before retrying. With no usage entry newer than that edit, Pi's live
+	// figure is a chars/4 estimate of the whole raw branch.
 	const contextFor = (messages: never[], tokens: number, retried = false) => {
 		const base = fakeContext(sessionId, process.cwd(), entryIds, messages);
 		return {
@@ -102,9 +104,7 @@ function setup(sessionId: string) {
 				...base.sessionManager,
 				getBranch: () => [
 					...base.sessionManager.getBranch(),
-					...(retried
-						? [{ type: "context_edit", id: "edit-1", targetId: "failed" }]
-						: []),
+					...(retried ? websocketRetryEntries() : []),
 				],
 			},
 			model: MODEL,
@@ -137,6 +137,57 @@ function setup(sessionId: string) {
 			(tag) => tag.type === "tool" && tag.status === "dropped",
 		).length;
 	return { db, runner, runPass, messageEnd, droppedToolCount };
+}
+
+// The two entries from the reporter's session file (trimmed): the failed
+// attempt and the context_edit that removes it.
+function websocketRetryEntries() {
+	return [
+		{
+			type: "message",
+			id: "0491be9e",
+			parentId: "3befc372",
+			timestamp: "2026-09-25T12:18:55.369Z",
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "**Reviewing recent work context**" },
+				],
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				model: "gpt-6-sol",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+				},
+				stopReason: "error",
+				errorMessage: "WebSocket closed 1012",
+				diagnostics: [
+					{
+						type: "provider_transport_failure",
+						error: { name: "WebSocketCloseError", code: 1012 },
+						details: {
+							configuredTransport: "auto",
+							eventsEmitted: true,
+							phase: "after_message_stream_start",
+							requestBytes: 919_772,
+						},
+					},
+				],
+			},
+		},
+		{
+			type: "context_edit",
+			id: "22dc871c",
+			parentId: "0491be9e",
+			timestamp: "2026-09-25T12:18:55.373Z",
+			targetId: "0491be9e",
+			replacement: null,
+		},
+	];
 }
 
 function codexUsage(promptTokens: number) {
@@ -184,13 +235,14 @@ describe("Pi usage readings above the model window (issue 534 replay)", () => {
 			await runPass(147_839);
 			expect(droppedToolCount()).toBe(0);
 
-			// The WebSocket 1012 retry: Pi's live estimate reports 425,334.
-			await messageEnd(userMessage("tool result", 92), 425_334);
+			// The WebSocket 1012 retry: after the context_edit Pi's live estimate
+			// of the raw branch reports 425,334.
+			await messageEnd(userMessage("tool result", 92), 425_334, true);
 			expect(getOrCreateSessionMeta(db, sessionId).lastInputTokens).toBe(
 				147_839,
 			);
-			await runPass(425_334);
-			await runPass(425_334);
+			await runPass(425_334, true);
+			await runPass(425_334, true);
 			await awaitInFlightHistorians();
 
 			expect(droppedToolCount()).toBe(0);
@@ -339,6 +391,20 @@ describe("isPiLiveUsageRawBranchEstimate", () => {
 		expect(
 			isPiLiveUsageRawBranchEstimate([assistant(100), { type: "compaction" }]),
 		).toBe(true);
+		// The reporter's sequence: failed attempt, context_edit, then our own
+		// compaction marker; still an estimate until the retried reply lands.
+		const reporterBranch = [
+			assistant(147_839),
+			...websocketRetryEntries(),
+			{ type: "compaction", id: "7cc5da33", fromHook: true },
+		];
+		expect(isPiLiveUsageRawBranchEstimate(reporterBranch.slice(0, 3))).toBe(
+			true,
+		);
+		expect(isPiLiveUsageRawBranchEstimate(reporterBranch)).toBe(true);
+		expect(
+			isPiLiveUsageRawBranchEstimate([...reporterBranch, assistant(31_700)]),
+		).toBe(false);
 		// The retried reply lands after the edit: Pi trusts its usage again.
 		expect(
 			isPiLiveUsageRawBranchEstimate([
@@ -348,6 +414,40 @@ describe("isPiLiveUsageRawBranchEstimate", () => {
 			]),
 		).toBe(false);
 		expect(isPiLiveUsageRawBranchEstimate(null)).toBe(false);
+	});
+
+	it("never uses the raw-branch estimate as pressure, even with no provider reading", async () => {
+		const { resolvePiPressureSnapshotWithWindowGuard } = await import(
+			"./pi-pressure"
+		);
+		const base = {
+			sessionId: "ses-issue-534-guard",
+			source: "test",
+			usableContextLimit: 206_464,
+			modelWindowTokens: 272_000,
+			liveIsRawBranchEstimate: true,
+		};
+		// A persisted provider reading stands; the estimate is ignored even
+		// when it is smaller.
+		expect(
+			resolvePiPressureSnapshotWithWindowGuard({
+				...base,
+				persistedInputTokens: 147_839,
+				persistedPercentage: 71.6,
+				liveInputTokens: 190_000,
+			}).inputTokens,
+		).toBe(147_839);
+		// Without one, the caller's fallback (which is the same live figure) is
+		// set aside too, leaving pressure unknown rather than inflated.
+		expect(
+			resolvePiPressureSnapshotWithWindowGuard({
+				...base,
+				persistedFromLive: true,
+				persistedInputTokens: 190_000,
+				persistedPercentage: 92,
+				liveInputTokens: 190_000,
+			}).inputTokens,
+		).toBe(0);
 	});
 });
 
