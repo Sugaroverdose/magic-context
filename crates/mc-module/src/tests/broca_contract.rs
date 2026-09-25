@@ -666,8 +666,8 @@ async fn owned_broca_retained_messages_keep_their_harness_id_and_ordinal() {
     };
     assert_eq!(
         by_id("call-6")["content"][0]["kind"]["input"],
-        json!({ "dropped": "[dropped]" }),
-        "the dropped result's call input is skeletonized"
+        json!({ "command": "printf output" }),
+        "a small dropped call keeps its real arguments; only its output is replaced"
     );
     let caveman_text = text_of(&by_id("m5"));
     assert!(
