@@ -3698,6 +3698,50 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         expect(advSha(shared)).toBe(advSha(exec.messages));
     });
 
+    it("ADV: a project_memory_epoch HARD fold with byte-identical m[0] makes the conversion the only byte change", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-adv-epoch-identical";
+        materializeBaseline(sessionId);
+        const tags = advSeedLegacy(sessionId);
+        const defer = await advPass(sessionId, {});
+        const { bumpEpochsForWorkspaceMembers } = await import(
+            "../../features/magic-context/workspaces"
+        );
+        // An epoch bump with no memory content change (e.g. an external write that
+        // does not alter the rendered m[0]).
+        bumpEpochsForWorkspaceMembers(db, FOLD_PROJECT);
+        const hard = await advPass(sessionId, {});
+        const firstDiff = (() => {
+            const n = Math.min(defer.messages.length, hard.messages.length);
+            for (let i = 0; i < n; i++) {
+                if (JSON.stringify(defer.messages[i]) !== JSON.stringify(hard.messages[i])) {
+                    return { index: i, id: hard.messages[i]?.info.id ?? null };
+                }
+            }
+            return null;
+        })();
+        console.log(
+            "ADV_EPOCH_IDENTICAL",
+            JSON.stringify({
+                hardMaterialized: hard.result.materialized,
+                reason: (hard.result as { materializeReason?: unknown }).materializeReason,
+                modes: advModes(sessionId, tags),
+                m0m1Identical:
+                    JSON.stringify(defer.messages.slice(0, 2)) ===
+                    JSON.stringify(hard.messages.slice(0, 2)),
+                firstDiff,
+            }),
+        );
+        expect(hard.result.materialized).toBe(true);
+        // Documented expectation of the rule: the conversion only rides a bust that
+        // already rewrites the prefix. Here the prefix (m[0]/m[1]) is unchanged.
+        expect(JSON.stringify(hard.messages.slice(0, 2))).toBe(
+            JSON.stringify(defer.messages.slice(0, 2)),
+        );
+        expect(firstDiff?.id).toBe("m-small");
+    });
+
     for (const trigger of ADV_TRIGGERS) {
         it(`ADV: legacy markers replay on defer, convert on a HARD fold from ${trigger.name}, then replay byte-identically with newer messages`, async () => {
             db = new Database(":memory:");
