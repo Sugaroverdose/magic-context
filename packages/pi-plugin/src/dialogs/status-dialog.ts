@@ -80,7 +80,10 @@ import packageJson from "../../package.json";
 import { resolveSessionId } from "../commands/pi-command-utils";
 import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
 import { resolvePiWindowGeometry } from "../pi-context-limit";
-import { resolvePiPressureSnapshot } from "../pi-pressure";
+import {
+	resolvePiModelWindowTokens,
+	resolvePiPressureSnapshot,
+} from "../pi-pressure";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
 
 /** Refresh cadence while dialog is open. */
@@ -647,6 +650,13 @@ export function buildPiStatusDetail(
 		persistedInputTokens: meta.lastInputTokens,
 		liveInputTokens: usage?.tokens,
 		usableContextLimit: windowGeometry?.usableSoft,
+		// Match the transform: a live estimate above the model window is not a
+		// real prompt size, so the dialog keeps the last trusted reading.
+		modelWindowTokens: resolvePiModelWindowTokens({
+			reportedWindow: usage?.contextWindow,
+			modelWindow: ctx.model?.contextWindow,
+			observedSafeInputTokens: meta.observedSafeInputTokens,
+		}),
 	});
 	const inputTokens = pressure.inputTokens;
 	const contextLimit = pressure.contextLimit ?? 0;

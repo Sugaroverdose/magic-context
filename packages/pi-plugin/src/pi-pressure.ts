@@ -28,7 +28,11 @@
  * OpenCode's `resolveContextLimit()` path.
  */
 
-import { MIN_PLAUSIBLE_CONTEXT_LIMIT } from "@magic-context/core/shared/window-geometry";
+import { sessionLog } from "@magic-context/core/shared/logger";
+import {
+	isUsageReadingAboveModelWindow,
+	MIN_PLAUSIBLE_CONTEXT_LIMIT,
+} from "@magic-context/core/shared/window-geometry";
 
 export interface PiAssistantUsage {
 	input?: number;
@@ -122,6 +126,8 @@ export function computePiPressure(
 export interface PiPressureSnapshot extends PiPressure {
 	/** Usable prompt-token denominator used for both percentage and display. */
 	contextLimit?: number;
+	/** Largest reading left out because it exceeded the model window. */
+	ignoredReading?: number;
 }
 
 export interface ResolvePiPressureSnapshotArgs {
@@ -131,6 +137,12 @@ export interface ResolvePiPressureSnapshotArgs {
 	usableContextLimit?: number;
 	/** Scheduler recovery latch, used for historian admission, never a display denominator. */
 	minimumPercentage?: number;
+	/**
+	 * The model's full context window (not the reduced usable limit). A reading
+	 * above it cannot be a prompt the provider accepted, so it is left out of the
+	 * snapshot. Omit to keep every reading.
+	 */
+	modelWindowTokens?: number;
 }
 
 /**
@@ -145,17 +157,28 @@ export interface ResolvePiPressureSnapshotArgs {
 export function resolvePiPressureSnapshot(
 	args: ResolvePiPressureSnapshotArgs,
 ): PiPressureSnapshot {
-	const persistedInputTokens =
+	let ignoredReading: number | undefined;
+	const plausible = (value: number): number => {
+		if (!isUsageReadingAboveModelWindow(value, args.modelWindowTokens))
+			return value;
+		ignoredReading = Math.max(ignoredReading ?? 0, value);
+		return 0;
+	};
+	const persistedInputTokens = plausible(
 		Number.isFinite(args.persistedInputTokens) && args.persistedInputTokens > 0
 			? args.persistedInputTokens
-			: 0;
-	const liveInputTokens =
+			: 0,
+	);
+	const liveInputTokens = plausible(
 		typeof args.liveInputTokens === "number" &&
-		Number.isFinite(args.liveInputTokens) &&
-		args.liveInputTokens > 0
+			Number.isFinite(args.liveInputTokens) &&
+			args.liveInputTokens > 0
 			? args.liveInputTokens
-			: 0;
+			: 0,
+	);
 	const inputTokens = Math.max(persistedInputTokens, liveInputTokens);
+	const ignored =
+		ignoredReading === undefined ? {} : { ignoredReading: ignoredReading };
 	const contextLimit =
 		typeof args.usableContextLimit === "number" &&
 		Number.isFinite(args.usableContextLimit) &&
@@ -173,6 +196,7 @@ export function resolvePiPressureSnapshot(
 					: 0,
 			),
 			contextLimit,
+			...ignored,
 		};
 	}
 
@@ -184,7 +208,180 @@ export function resolvePiPressureSnapshot(
 		inputTokens,
 		percentage: validInferredLimit ? (inputTokens / inferredLimit) * 100 : 0,
 		...(validInferredLimit ? { contextLimit: inferredLimit } : {}),
+		...ignored,
 	};
+}
+
+/**
+ * The window a Pi usage reading is checked against: the model's full context
+ * window as Pi reports it, raised to any prompt size this session has already
+ * had accepted (a wrong-small catalog window must not hide real readings).
+ */
+export function resolvePiModelWindowTokens(args: {
+	reportedWindow?: number | null;
+	modelWindow?: number | null;
+	observedSafeInputTokens?: number | null;
+}): number | undefined {
+	const candidates = [
+		args.reportedWindow,
+		args.modelWindow,
+		args.observedSafeInputTokens,
+	].filter(
+		(value): value is number =>
+			typeof value === "number" &&
+			Number.isFinite(value) &&
+			value >= MIN_PLAUSIBLE_CONTEXT_LIMIT,
+	);
+	return candidates.length > 0 ? Math.max(...candidates) : undefined;
+}
+
+// Sessions whose current impossible-reading episode has already been logged.
+// Cleared when a plausible reading arrives, so each episode logs exactly once.
+const impossibleReadingLogged = new Set<string>();
+
+/** Log an ignored above-window reading once per episode for the session. */
+export function noteImpossiblePiUsageReading(
+	sessionId: string,
+	reading: number,
+	modelWindowTokens: number,
+	source: string,
+): void {
+	if (impossibleReadingLogged.has(sessionId)) return;
+	impossibleReadingLogged.add(sessionId);
+	sessionLog(
+		sessionId,
+		`usage reading ${reading} exceeds model window ${modelWindowTokens} (${source}); no request that large can have been accepted, keeping the previous reading until a plausible one arrives`,
+	);
+}
+
+/** A plausible reading ends the impossible-reading episode for the session. */
+export function notePlausiblePiUsageReading(sessionId: string): void {
+	impossibleReadingLogged.delete(sessionId);
+}
+
+function entryUsageTokens(usage: unknown): number {
+	if (!usage || typeof usage !== "object") return 0;
+	const u = usage as Record<string, unknown>;
+	const n = (value: unknown) =>
+		typeof value === "number" && Number.isFinite(value) ? value : 0;
+	return (
+		n(u.totalTokens) ||
+		n(u.input) + n(u.output) + n(u.cacheRead) + n(u.cacheWrite)
+	);
+}
+
+/**
+ * Whether Pi's `getContextUsage().tokens` is currently a character-count
+ * estimate of the whole raw session branch rather than a figure anchored on
+ * recorded provider usage.
+ *
+ * Pi (0.87, `estimateProjectedContextTokens`) trusts the last assistant usage
+ * only while no `context_edit` or `compaction` entry follows it. When one does
+ * (Pi appends a `context_edit` to hide a failed attempt before an automatic
+ * retry, e.g. after a WebSocket close), it re-estimates every message on the
+ * branch at chars/4. Pi's branch is the unreduced session file, so that figure
+ * ignores everything Magic Context removed from the served request and says
+ * nothing about what the provider actually receives.
+ *
+ * Mirrors Pi's rule on the raw branch: the newest assistant entry with usable
+ * usage (not aborted or errored, non-zero) against the newest invalidating
+ * entry.
+ */
+export function isPiLiveUsageRawBranchEstimate(
+	branchEntries: readonly unknown[] | null | undefined,
+): boolean {
+	if (!branchEntries) return false;
+	for (let index = branchEntries.length - 1; index >= 0; index -= 1) {
+		const entry = branchEntries[index] as
+			| { type?: unknown; message?: unknown }
+			| null
+			| undefined;
+		if (!entry || typeof entry !== "object") continue;
+		if (entry.type === "context_edit" || entry.type === "compaction")
+			return true;
+		if (entry.type !== "message") continue;
+		const message = entry.message as
+			| { role?: unknown; stopReason?: unknown; usage?: unknown }
+			| undefined;
+		if (
+			message?.role === "assistant" &&
+			message.stopReason !== "aborted" &&
+			message.stopReason !== "error" &&
+			entryUsageTokens(message.usage) > 0
+		) {
+			return false;
+		}
+	}
+	return false;
+}
+
+/** Log a set-aside raw-branch estimate once per episode for the session. */
+export function noteRawBranchEstimateSetAside(
+	sessionId: string,
+	reading: number,
+	source: string,
+): void {
+	if (impossibleReadingLogged.has(sessionId)) return;
+	impossibleReadingLogged.add(sessionId);
+	sessionLog(
+		sessionId,
+		`usage reading ${reading} set aside (${source}): Pi re-estimated its whole unreduced session branch because a context edit or compaction follows the last recorded usage (for example after a retried request); keeping the previous reading until provider usage arrives`,
+	);
+}
+
+/**
+ * `resolvePiPressureSnapshot` for the pressure decision: readings above the
+ * model window are left out (so the previous trusted reading stands) and the
+ * first one of an episode is logged with the raw figure and the window.
+ */
+export function resolvePiPressureSnapshotWithWindowGuard(
+	args: ResolvePiPressureSnapshotArgs & {
+		sessionId: string;
+		source: string;
+		/** Pi's live figure is a raw-branch estimate (see isPiLiveUsageRawBranchEstimate). */
+		liveIsRawBranchEstimate?: boolean;
+	},
+): PiPressureSnapshot {
+	const live =
+		typeof args.liveInputTokens === "number" &&
+		Number.isFinite(args.liveInputTokens)
+			? args.liveInputTokens
+			: 0;
+	// A raw-branch estimate is blind to the reductions in the served request,
+	// so it may not raise pressure above the last provider-proven reading. It
+	// still stands in when there is no provider reading at all.
+	const setAsideEstimate =
+		args.liveIsRawBranchEstimate === true &&
+		args.persistedInputTokens > 0 &&
+		live > args.persistedInputTokens;
+	const snapshot = resolvePiPressureSnapshot(
+		setAsideEstimate ? { ...args, liveInputTokens: undefined } : args,
+	);
+	if (
+		snapshot.ignoredReading !== undefined &&
+		args.modelWindowTokens !== undefined
+	) {
+		noteImpossiblePiUsageReading(
+			args.sessionId,
+			snapshot.ignoredReading,
+			args.modelWindowTokens,
+			args.source,
+		);
+	} else if (setAsideEstimate) {
+		if (isUsageReadingAboveModelWindow(live, args.modelWindowTokens)) {
+			noteImpossiblePiUsageReading(
+				args.sessionId,
+				live,
+				args.modelWindowTokens as number,
+				args.source,
+			);
+		} else {
+			noteRawBranchEstimateSetAside(args.sessionId, live, args.source);
+		}
+	} else if (snapshot.inputTokens > 0) {
+		notePlausiblePiUsageReading(args.sessionId);
+	}
+	return snapshot;
 }
 
 export function formatPiPressureForLog(snapshot: PiPressureSnapshot): string {

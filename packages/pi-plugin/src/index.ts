@@ -114,6 +114,7 @@ import {
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
 import {
 	hasTrustedAbsoluteWall,
+	isUsageReadingAboveModelWindow,
 	reloadWindowOverlay,
 } from "@magic-context/core/shared/window-geometry";
 
@@ -176,7 +177,15 @@ import {
 	type PiHarnessKind,
 	resolvePiHarnessDetection,
 } from "./pi-harness-kind";
-import { computePiPressure, extractAssistantUsage } from "./pi-pressure";
+import {
+	computePiPressure,
+	extractAssistantUsage,
+	isPiLiveUsageRawBranchEstimate,
+	noteImpossiblePiUsageReading,
+	notePlausiblePiUsageReading,
+	noteRawBranchEstimateSetAside,
+	resolvePiModelWindowTokens,
+} from "./pi-pressure";
 import { abortInFlightRecomps, awaitInFlightRecomps } from "./pi-recomp-runner";
 import { handlePiProviderFailure } from "./provider-error-recovery-pi";
 import { readPiSessionMessages } from "./read-session-pi";
@@ -620,8 +629,15 @@ export async function persistPiPressureFromMessageEnd(args: {
 	message: unknown;
 	piContextWindow: number;
 	piContextWindowSource?: "observed" | "catalog";
-	piModel?: { provider?: string; id?: string; maxTokens?: number };
+	piModel?: {
+		provider?: string;
+		id?: string;
+		maxTokens?: number;
+		contextWindow?: number;
+	};
 	piTokens?: number;
+	/** `piTokens` is Pi's raw-branch estimate (see isPiLiveUsageRawBranchEstimate). */
+	piTokensIsRawBranchEstimate?: boolean;
 	notifyIssue?: (message: string) => unknown | Promise<unknown>;
 }): Promise<void> {
 	const { provider, model } = getPiMessageModel(args.message);
@@ -646,19 +662,6 @@ export async function persistPiPressureFromMessageEnd(args: {
 		args.piContextWindow,
 		trustedAbsoluteWall,
 	);
-	if (
-		unboundedPressure &&
-		trustedAbsoluteWall !== undefined &&
-		unboundedPressure.inputTokens > trustedAbsoluteWall
-	) {
-		logPiUsageBoundOnce(
-			args.sessionId,
-			unboundedPressure.inputTokens,
-			trustedAbsoluteWall,
-			"current reading",
-		);
-	}
-
 	const msg =
 		args.message && typeof args.message === "object"
 			? (args.message as { errorMessage?: unknown })
@@ -666,6 +669,32 @@ export async function persistPiPressureFromMessageEnd(args: {
 	const messageHadOverflowError =
 		typeof msg?.errorMessage === "string" &&
 		detectOverflow(msg.errorMessage).isOverflow;
+	const readingAboveTrustedWall =
+		unboundedPressure !== null &&
+		trustedAbsoluteWall !== undefined &&
+		unboundedPressure.inputTokens > trustedAbsoluteWall;
+	// On a request the provider accepted, a prompt larger than the trusted
+	// window is broken accounting, not pressure: keep the previous reading.
+	// After an overflow error the clamped wall still drives recovery.
+	const discardImpossibleReading =
+		readingAboveTrustedWall && !messageHadOverflowError;
+	if (readingAboveTrustedWall && unboundedPressure && trustedAbsoluteWall) {
+		if (discardImpossibleReading) {
+			noteImpossiblePiUsageReading(
+				args.sessionId,
+				unboundedPressure.inputTokens,
+				trustedAbsoluteWall,
+				"message_end provider usage",
+			);
+		} else {
+			logPiUsageBoundOnce(
+				args.sessionId,
+				unboundedPressure.inputTokens,
+				trustedAbsoluteWall,
+				"current reading",
+			);
+		}
+	}
 	// A bounded provider sample proves pressure, not that the impossible request fit.
 	const requestSucceeded =
 		!messageHadOverflowError &&
@@ -741,7 +770,8 @@ export async function persistPiPressureFromMessageEnd(args: {
 		trustedAbsoluteWall,
 	);
 
-	if (pressure) {
+	if (pressure && !discardImpossibleReading) {
+		notePlausiblePiUsageReading(args.sessionId);
 		const provenSafeInputTokens = requestSucceeded
 			? Math.max(observedSafeInputTokens, pressure.inputTokens)
 			: observedSafeInputTokens;
@@ -779,15 +809,49 @@ export async function persistPiPressureFromMessageEnd(args: {
 			updates.observedSafeInputTokens = provenSafeInputTokens;
 		}
 	} else if (
+		!discardImpossibleReading &&
 		usage === null &&
 		typeof args.piTokens === "number" &&
 		(trustedAbsoluteWall === undefined || args.piTokens <= trustedAbsoluteWall)
 	) {
-		updates.lastInputTokens = args.piTokens;
-		if (effectiveContextLimit > 0) {
-			updates.lastContextPercentage =
-				(args.piTokens / effectiveContextLimit) * 100;
-			updates.lastUsageContextLimit = effectiveContextLimit;
+		// Non-assistant message_end events (tool results, user messages) carry
+		// no provider usage, so Pi's own estimate stands in. That estimate is
+		// computed client-side over Pi's session branch; after a retried
+		// request it re-estimates the whole raw, unreduced branch and can exceed
+		// the model window. A figure no accepted request can reach must not
+		// replace the last trusted reading.
+		const modelWindowTokens = resolvePiModelWindowTokens({
+			reportedWindow: args.piContextWindow,
+			modelWindow: args.piModel?.contextWindow,
+			observedSafeInputTokens,
+		});
+		if (isUsageReadingAboveModelWindow(args.piTokens, modelWindowTokens)) {
+			noteImpossiblePiUsageReading(
+				args.sessionId,
+				args.piTokens,
+				modelWindowTokens as number,
+				"message_end estimate",
+			);
+		} else if (
+			args.piTokensIsRawBranchEstimate === true &&
+			meta.lastInputTokens > 0 &&
+			args.piTokens > meta.lastInputTokens
+		) {
+			// Same estimate below the window: still blind to the reductions in the
+			// served request, so it may not raise the last provider-proven reading.
+			noteRawBranchEstimateSetAside(
+				args.sessionId,
+				args.piTokens,
+				"message_end estimate",
+			);
+		} else {
+			notePlausiblePiUsageReading(args.sessionId);
+			updates.lastInputTokens = args.piTokens;
+			if (effectiveContextLimit > 0) {
+				updates.lastContextPercentage =
+					(args.piTokens / effectiveContextLimit) * 100;
+				updates.lastUsageContextLimit = effectiveContextLimit;
+			}
 		}
 	}
 
@@ -2430,6 +2494,16 @@ async function startPiMagicContextRuntime(
 					piUsage && typeof piUsage.tokens === "number"
 						? piUsage.tokens
 						: undefined,
+				piTokensIsRawBranchEstimate: (() => {
+					try {
+						const branch = (
+							ctx.sessionManager as { getBranch?: () => unknown[] }
+						).getBranch?.();
+						return isPiLiveUsageRawBranchEstimate(branch);
+					} catch {
+						return false;
+					}
+				})(),
 				notifyIssue: async (message) => {
 					const uiNotify = (
 						ctx as { ui?: { notify?: (message: string) => unknown } }

@@ -651,28 +651,32 @@ describe("createEventHandler", () => {
         const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
         const deps = createDeps(contextUsageMap);
         const handler = createEventHandler(deps);
-
-        await handler({
-            event: {
-                type: "message.updated",
-                properties: {
-                    info: {
-                        role: "assistant",
-                        finish: "stop",
-                        sessionID: "ses-impossible-usage",
-                        providerID: "test-provider",
-                        modelID: "test-model",
-                        tokens: { input: 585_397, cache: { read: 8_320, write: 0 } },
+        const reading = (input: number, read: number) =>
+            handler({
+                event: {
+                    type: "message.updated",
+                    properties: {
+                        info: {
+                            role: "assistant",
+                            finish: "stop",
+                            sessionID: "ses-impossible-usage",
+                            providerID: "test-provider",
+                            modelID: "test-model",
+                            tokens: { input, cache: { read, write: 0 } },
+                        },
                     },
                 },
-            },
-        });
+            });
 
+        await reading(147_839, 0);
+        await reading(585_397, 8_320);
+
+        // The impossible reading is refused and the previous trusted reading stays.
         const meta = getOrCreateSessionMeta(deps.db, "ses-impossible-usage");
-        expect(meta.observedSafeInputTokens).toBe(0);
-        expect(meta.lastInputTokens).toBe(0);
+        expect(meta.observedSafeInputTokens).toBe(147_839);
+        expect(meta.lastInputTokens).toBe(147_839);
         expect(meta.lastUsageContextLimit).toBe(240_000);
-        expect(contextUsageMap.get("ses-impossible-usage")?.usage.inputTokens).toBe(0);
+        expect(contextUsageMap.get("ses-impossible-usage")?.usage.inputTokens).toBe(147_839);
     });
 
     it("clears a stale unkeyed detected limit on the first successful event after restart", async () => {

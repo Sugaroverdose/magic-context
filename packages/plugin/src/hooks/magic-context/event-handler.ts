@@ -46,7 +46,10 @@ import {
     refreshModelLimitsAfterAuthOnce,
     refreshModelLimitsFromApi,
 } from "../../shared/models-dev-cache";
-import { hasTrustedAbsoluteWall } from "../../shared/window-geometry";
+import {
+    hasTrustedAbsoluteWall,
+    isUsageReadingAboveModelWindow,
+} from "../../shared/window-geometry";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import {
@@ -643,33 +646,39 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     updates.cacheTtl = resolveCacheTtl(deps.config.cache_ttl, modelKey);
                 }
 
-                if (hasUsageTokens) {
-                    const totalInputTokens =
-                        (info.tokens?.input ?? 0) +
-                        (info.tokens?.cache?.read ?? 0) +
-                        (info.tokens?.cache?.write ?? 0);
-                    const baseGeometry = resolveContextWindowGeometry(
-                        info.providerID,
-                        info.modelID,
-                    );
-                    const trustedAbsoluteWall =
-                        baseGeometry && hasTrustedAbsoluteWall(baseGeometry)
-                            ? baseGeometry.derivation.absoluteWall
-                            : undefined;
-                    const usageReadingValid =
-                        trustedAbsoluteWall === undefined ||
-                        totalInputTokens <= trustedAbsoluteWall;
-                    if (!usageReadingValid && trustedAbsoluteWall !== undefined) {
-                        const refusalKey = `${info.sessionID}|${modelKey ?? "unknown"}`;
-                        if (!usageRefusalLogSeen.has(refusalKey)) {
-                            usageRefusalLogSeen.add(refusalKey);
-                            sessionLog(
-                                info.sessionID,
-                                `usage accounting refused reading ${totalInputTokens} above trusted absolute wall ${trustedAbsoluteWall}; sample ignored`,
-                            );
-                        }
+                const totalInputTokens =
+                    (info.tokens?.input ?? 0) +
+                    (info.tokens?.cache?.read ?? 0) +
+                    (info.tokens?.cache?.write ?? 0);
+                const baseGeometry = hasUsageTokens
+                    ? resolveContextWindowGeometry(info.providerID, info.modelID)
+                    : undefined;
+                const trustedAbsoluteWall =
+                    baseGeometry && hasTrustedAbsoluteWall(baseGeometry)
+                        ? baseGeometry.derivation.absoluteWall
+                        : undefined;
+                const usageReadingValid = !isUsageReadingAboveModelWindow(
+                    totalInputTokens,
+                    trustedAbsoluteWall,
+                );
+                const refusalKey = `${info.sessionID}|${modelKey ?? "unknown"}`;
+                if (hasUsageTokens && !usageReadingValid) {
+                    // No request larger than the trusted window can have been
+                    // accepted, so this is broken accounting. The previous
+                    // pressure (in memory and persisted) stays as it is, so the
+                    // figure cannot drive the emergency band, a forced
+                    // historian, or refusal. Logged once per run of such
+                    // readings; a plausible reading re-arms the log.
+                    if (!usageRefusalLogSeen.has(refusalKey)) {
+                        usageRefusalLogSeen.add(refusalKey);
+                        sessionLog(
+                            info.sessionID,
+                            `usage reading ${totalInputTokens} exceeds model window ${trustedAbsoluteWall}; no request that large can have been accepted, keeping the previous reading until a plausible one arrives`,
+                        );
                     }
-                    const pressureInputTokens = usageReadingValid ? totalInputTokens : 0;
+                } else if (hasUsageTokens) {
+                    usageRefusalLogSeen.delete(refusalKey);
+                    const pressureInputTokens = totalInputTokens;
                     // Auth is provably live now (a request returned usage), so
                     // re-warm the model-limit cache once per process to overwrite
                     // any stale pre-auth limit (e.g. gpt-5.5 cached at the raw
