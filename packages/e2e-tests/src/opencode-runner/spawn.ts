@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { hostExtractCache } from '../host-extract-cache';
 import { prepareContextDatabase } from "../prepare-context-db";
 import { assertMockEndpoint, assertMockProviders, pinMockAgents } from "../mock-routing";
 import {
@@ -692,6 +693,7 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
     for (const [key, value] of Object.entries(resolvedOpts.extraEnv ?? {})) {
         childEnv[key] = value;
     }
+    childEnv.TMPDIR = hostExtractCache();
     const pluginLogPath =
         childEnv.MAGIC_CONTEXT_LOG_PATH?.trim() ||
         join(env.dataDir, "cortexkit", "magic-context-e2e.log");

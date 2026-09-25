@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { hostExtractCache } from '../host-extract-cache';
 import { pinMockAgents } from "../mock-routing";
 import { prepareContextDatabase } from "../prepare-context-db";
 import { pinnedOpenCode2Version, resolveOpenCode2CLI, sharedOpenCode2Root } from "./cli-resolution";
@@ -102,6 +103,7 @@ export function isolation(): OpenCode2Isolation {
 	const env: NodeJS.ProcessEnv = {
 		PATH: process.env.PATH,
 		OPENCODE_DB: "opencode2.db",
+		TMPDIR: hostExtractCache(),
 		OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
 	};
 	for (const key of ROOT_KEYS) {

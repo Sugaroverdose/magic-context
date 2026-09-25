@@ -126,6 +126,9 @@ export interface OpenCodeCacheBustAnalysisOptions {
     decisions?: readonly CacheBustDecisionAttribution[];
     /** Use scheduler lines when a pass has no DB row; null disables this additional evidence source. */
     mcLogPath?: string | null;
+    scanCursor?: string;
+    scanDeadlineMs?: number;
+    scanNow?: () => number;
 }
 
 interface DumpCandidate {
@@ -473,11 +476,11 @@ function discoverDumpCandidates(opts: Args): DumpCandidate[] {
     );
 }
 
-function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args): Snapshot[] {
+function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args, selectedFiles?: readonly string[]): Snapshot[] {
     const since = resolveTimeBound(opts.since);
     const until = resolveTimeBound(opts.until);
     const snapshots: Snapshot[] = [];
-    for (const metaFile of readdirSync(candidate.source.dir).filter((file) =>
+    for (const metaFile of selectedFiles ?? readdirSync(candidate.source.dir).filter((file) =>
         file.endsWith(".meta.json"),
     )) {
         const dumpName = parseDumpFilename(metaFile);
@@ -579,7 +582,7 @@ function openCodeAnalyzerCommand(
 /** Analyze one exact OpenCode session without printing or mutating any source store. */
 export function analyzeOpenCodeCacheBustSession(
     options: OpenCodeCacheBustAnalysisOptions,
-): CacheBustSessionAnalysis {
+): CacheBustSessionAnalysis & { filesExamined: number; scanBounded: boolean; scanCursor?: string } {
     const sources: DumpSource[] = [
         {
             provider: "anthropic",
@@ -606,18 +609,57 @@ export function analyzeOpenCodeCacheBustSession(
         allRows: true,
         help: false,
     };
-    const snapshots = discoverDumpCandidates(args)
-        .filter((candidate) => candidate.session === options.sessionId)
-        .flatMap((candidate) => loadCandidateSnapshots(candidate, args));
+    const scanNow = options.scanNow ?? Date.now;
+    let filesExamined = 0;
+    let nextCursor: string | undefined;
+    let scanBounded = false;
+    const snapshots = options.scanDeadlineMs === undefined
+        ? discoverDumpCandidates(args)
+            .filter((candidate) => candidate.session === options.sessionId)
+            .flatMap((candidate) => loadCandidateSnapshots(candidate, args))
+        : (() => {
+            // Filenames carry session and request time; only open new files and two
+            // preceding requests needed for the first comparison in the batch.
+            const indexed = sources.flatMap((source) => existsSync(source.dir)
+                ? readdirSync(source.dir).flatMap((file) => {
+                    if (!file.endsWith(".meta.json")) return [];
+                    const parsed = parseDumpFilename(file);
+                    if (!parsed || parsed.session !== options.sessionId) return [];
+                    return [{ source, file, timestamp: Date.parse(parsed.createdAt), sequence: parsed.sequence }];
+                }) : []);
+            indexed.sort((a, b) => a.timestamp - b.timestamp || a.sequence - b.sequence ||
+                a.file.localeCompare(b.file) || a.source.provider.localeCompare(b.source.provider));
+            const key = (entry: typeof indexed[number]) => `${String(entry.timestamp).padStart(16, "0")}:${String(entry.sequence).padStart(8, "0")}:${entry.file}:${entry.source.provider}`;
+            const pending = indexed.filter((entry) => entry.timestamp <= (options.untilInclusiveMs ?? Infinity) &&
+                (options.scanCursor ? key(entry) > options.scanCursor : entry.timestamp > (options.sinceExclusiveMs ?? -Infinity)));
+            const chosen: typeof indexed = [];
+            for (const entry of pending) {
+                if (chosen.length && (chosen.length >= 32 || scanNow() >= options.scanDeadlineMs!)) {
+                    scanBounded = true;
+                    break;
+                }
+                chosen.push(entry);
+            }
+            filesExamined = chosen.length;
+            if (chosen.length) nextCursor = key(chosen.at(-1)!);
+            const first = indexed.indexOf(chosen[0]);
+            const selected = first < 0 ? [] : [...indexed.slice(Math.max(0, first - 2), first), ...chosen];
+            return sources.flatMap((source) => loadCandidateSnapshots(
+                { source, session: options.sessionId, latestMtimeMs: 0, totalBytes: 0, dumpCount: 0 },
+                args, selected.filter((entry) => entry.source === source).map((entry) => entry.file),
+            ));
+        })();
     snapshots.sort(
         (left, right) =>
             left.orderCreatedAt.localeCompare(right.orderCreatedAt) ||
             left.sequence - right.sequence ||
             left.file.localeCompare(right.file),
     );
-    const inWindow = (timestampMs: number): boolean =>
-        (options.sinceExclusiveMs === undefined || timestampMs > options.sinceExclusiveMs) &&
-        (options.untilInclusiveMs === undefined || timestampMs <= options.untilInclusiveMs);
+    const inWindow = (snapshot: Snapshot): boolean =>
+        (options.scanCursor
+            ? `${String(Date.parse(snapshot.createdAt)).padStart(16, "0")}:${String(snapshot.sequence).padStart(8, "0")}:${snapshot.file}:${sources.find((source) => source.dir === snapshot.sourceDir)?.provider}` > options.scanCursor
+            : options.sinceExclusiveMs === undefined || Date.parse(snapshot.createdAt) > options.sinceExclusiveMs) &&
+        (options.untilInclusiveMs === undefined || Date.parse(snapshot.createdAt) <= options.untilInclusiveMs);
     const boundedSnapshots = snapshots.filter((snapshot) => {
         const timestampMs = Date.parse(snapshot.createdAt);
         return (
@@ -626,7 +668,7 @@ export function analyzeOpenCodeCacheBustSession(
         );
     });
     const firstNewIndex = boundedSnapshots.findIndex((snapshot) =>
-        inWindow(Date.parse(snapshot.createdAt)),
+        inWindow(snapshot),
     );
     const analysisSnapshots =
         firstNewIndex < 0
@@ -637,7 +679,7 @@ export function analyzeOpenCodeCacheBustSession(
     const rows = analyzeSnapshots(analysisSnapshots, withSchedulerLogFallback(options.decisions ?? [], options.sessionId, options.mcLogPath));
     const requests: AnalyzedCacheRequest[] = rows.flatMap((row) => {
         const timestampMs = Date.parse(row.current.createdAt);
-        if (!Number.isFinite(timestampMs) || !inWindow(timestampMs)) return [];
+            if (!Number.isFinite(timestampMs) || !inWindow(row.current)) return [];
         const segment =
             row.divergenceIndex < 0
                 ? undefined
@@ -664,12 +706,15 @@ export function analyzeOpenCodeCacheBustSession(
     });
     const analyzedRequestTimestamps = boundedSnapshots
         .filter((snapshot) => !isUsageMissing(snapshot))
-        .map((snapshot) => Date.parse(snapshot.createdAt))
-        .filter(inWindow);
+        .filter(inWindow)
+        .map((snapshot) => Date.parse(snapshot.createdAt));
     return {
         requests,
         highWaterMarkMs:
             analyzedRequestTimestamps.length > 0 ? Math.max(...analyzedRequestTimestamps) : null,
+        filesExamined,
+        scanBounded,
+        scanCursor: scanBounded ? nextCursor : undefined,
     };
 }
 
