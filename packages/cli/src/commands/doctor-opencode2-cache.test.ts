@@ -9,6 +9,7 @@ import {
 } from "../lib/opencode-plugin-cache";
 import {
     checkOpenCodeV2PluginCache,
+    configuredOpenCodeV2DistTag,
     type HostUseProbe,
     probeHostProcessesUsing,
     reportOpenCodeV2PluginCache,
@@ -176,6 +177,76 @@ describe("doctor OpenCode 2 plugin cache check", () => {
         expect(lines.join("\n")).toContain("ctrl+u");
         expect(lines.join("\n")).toContain("`opencode plugin update`");
         expect(lines.join("\n")).toContain("doctor --fix");
+    });
+});
+
+describe("doctor OpenCode 2 plugin cache check for dist-tag entries", () => {
+    it("reads which dist-tag a config entry follows", () => {
+        const tagOf = (entry: unknown) => configuredOpenCodeV2DistTag({ plugins: [entry] });
+        expect(tagOf(`${OPENCODE_PLUGIN_NAME}@beta`)).toBe("beta");
+        expect(tagOf([`${OPENCODE_PLUGIN_NAME}@next`, {}])).toBe("next");
+        expect(tagOf({ package: `${OPENCODE_PLUGIN_NAME}@beta` })).toBe("beta");
+        expect(tagOf(`${OPENCODE_PLUGIN_NAME}@latest`)).toBeUndefined();
+        expect(tagOf(OPENCODE_PLUGIN_NAME)).toBeUndefined();
+        expect(tagOf(`${OPENCODE_PLUGIN_NAME}@0.42.6`)).toBeUndefined();
+        expect(tagOf(`${OPENCODE_PLUGIN_NAME}@^0.42.0`)).toBeUndefined();
+        expect(configuredOpenCodeV2DistTag({ plugin: ["other-plugin@beta"] })).toBeUndefined();
+    });
+
+    it("checks the @beta slot against beta's version, not latest's", () => {
+        const { npm } = makeNpmCache("0.43.1");
+        const betaSlot = getOpenCodeV2PluginCacheSlot(npm, "beta");
+        writeGeneration(betaSlot, "1790000000000", OPENCODE_PLUGIN_NAME, "0.44.0-beta.1");
+        const previous = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = join(npm, "..", "..");
+        try {
+            // Older than beta's current version: stale, even though it is ahead of latest.
+            expect(
+                checkOpenCodeV2PluginCache({
+                    latestVersion: "0.44.0-beta.3",
+                    distTag: "beta",
+                    hostFiles: [],
+                }),
+            ).toEqual({
+                action: "stale",
+                slot: betaSlot,
+                cached: "0.44.0-beta.1",
+                latest: "0.44.0-beta.3",
+                distTag: "beta",
+            });
+            expect(
+                checkOpenCodeV2PluginCache({
+                    latestVersion: "0.44.0-beta.1",
+                    distTag: "beta",
+                    hostFiles: [],
+                }).action,
+            ).toBe("up_to_date");
+        } finally {
+            if (previous === undefined) delete process.env.XDG_CACHE_HOME;
+            else process.env.XDG_CACHE_HOME = previous;
+        }
+    });
+
+    it("clears only the @beta slot under --fix and names the tag", () => {
+        const { npm, slot: latestSlot } = makeNpmCache("0.43.1");
+        const betaSlot = getOpenCodeV2PluginCacheSlot(npm, "beta");
+        writeGeneration(betaSlot, "1790000000000", OPENCODE_PLUGIN_NAME, "0.44.0-beta.1");
+        const result = checkOpenCodeV2PluginCache(
+            { fix: true, latestVersion: "0.44.0-beta.3", distTag: "beta", hostFiles: [] },
+            { slot: betaSlot, probe: free },
+        );
+        expect(result).toMatchObject({ action: "cleared", distTag: "beta" });
+        expect(existsSync(betaSlot)).toBe(false);
+        expect(existsSync(latestSlot)).toBe(true);
+
+        const lines: string[] = [];
+        reportOpenCodeV2PluginCache(
+            result,
+            { pass: (m) => lines.push(m), warn: (m) => lines.push(m), info: (m) => lines.push(m) },
+            { reportMissing: true },
+        );
+        expect(lines.join("\n")).toContain("cached: 0.44.0-beta.1, beta: 0.44.0-beta.3");
+        expect(lines.join("\n")).toContain("@beta");
     });
 });
 

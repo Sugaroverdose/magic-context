@@ -16,7 +16,9 @@
  * and, under `doctor --fix` (or `--force`), removes Magic Context's own slot so
  * the next OpenCode start installs the current release. Only that one slot is
  * ever removed: other packages' slots and version-pinned Magic Context slots
- * are left alone.
+ * are left alone. When the config entry follows another dist-tag (`@beta`,
+ * `@next`), the slot checked and cleared is that tag's, compared against the
+ * tag's current version.
  *
  * The slot is never removed while an OpenCode process may be using it. A
  * running host keeps no file inside the slot open once the plugin is loaded
@@ -32,6 +34,8 @@ import { existsSync, rmSync } from "node:fs";
 import { compareSemverCore } from "@magic-context/core/hooks/auto-update-checker/semver";
 import {
     getOpenCodeV2PluginCacheSlot,
+    isOpenCodePluginDistTag,
+    readConfiguredOpenCodePluginSpec,
     readOpenCodeV2CachedPluginVersion,
 } from "../lib/opencode-plugin-cache";
 
@@ -110,6 +114,42 @@ export interface OpenCodeV2CacheResult {
     error?: string;
     /** Cleared only because of `--force`: the install was not known to be outdated. */
     forced?: boolean;
+    /**
+     * Set when the slot follows a dist-tag other than `latest`; `latest` then
+     * holds that tag's current version.
+     */
+    distTag?: string;
+}
+
+/**
+ * Semver precedence of two prerelease strings (`beta.1` vs `beta.3`), where an
+ * empty string is a release and ranks above any prerelease of the same core.
+ */
+function comparePrerelease(a: string, b: string): number {
+    if (a === b) return 0;
+    if (a === "") return 1;
+    if (b === "") return -1;
+    const left = a.split(".");
+    const right = b.split(".");
+    for (let i = 0; i < Math.max(left.length, right.length); i++) {
+        const x = left[i];
+        const y = right[i];
+        if (x === undefined) return -1;
+        if (y === undefined) return 1;
+        if (x === y) continue;
+        const xNumeric = /^\d+$/.test(x);
+        const yNumeric = /^\d+$/.test(y);
+        if (xNumeric && yNumeric) return Number(x) - Number(y);
+        if (xNumeric !== yNumeric) return xNumeric ? -1 : 1;
+        return x < y ? -1 : 1;
+    }
+    return 0;
+}
+
+function prereleaseOf(version: string): string {
+    const withoutBuild = version.split("+", 1)[0] ?? "";
+    const dash = withoutBuild.indexOf("-");
+    return dash === -1 ? "" : withoutBuild.slice(dash + 1);
 }
 
 /** True when the cached install is older than `latest` or unreadable. */
@@ -119,56 +159,122 @@ function isStale(cached: string | undefined, latest: string): boolean {
     const comparison = compareSemverCore(cached, latest);
     // Unparseable versions that differ are treated as stale; a newer cached
     // build (for example a prerelease ahead of `latest`) is left alone.
-    return comparison === null ? true : comparison < 0;
+    if (comparison === null) return true;
+    if (comparison !== 0) return comparison < 0;
+    // Same core: prerelease order decides, which matters for a `@beta` or
+    // `@next` slot (0.44.0-beta.1 is older than 0.44.0-beta.3).
+    return comparePrerelease(prereleaseOf(cached), prereleaseOf(latest)) < 0;
 }
 
-export function checkOpenCodeV2PluginCache(
-    options: {
-        fix?: boolean;
-        force?: boolean;
-        latestVersion: string | null;
-        /** Files a running host holds open, normally the resolved OpenCode database. */
-        hostFiles: string[];
-    },
-    deps: {
-        slot?: string;
-        probe?: (targets: HostUseProbeTargets) => HostUseProbe;
-        remove?: (path: string) => void;
-    } = {},
-): OpenCodeV2CacheResult {
-    const slot = deps.slot ?? getOpenCodeV2PluginCacheSlot();
-    if (!existsSync(slot)) return { action: "not_found", slot };
+export interface OpenCodeV2SlotRemovalDeps {
+    probe?: (targets: HostUseProbeTargets) => HostUseProbe;
+    remove?: (path: string) => void;
+}
 
-    const cached = readOpenCodeV2CachedPluginVersion(slot);
-    const latest = options.latestVersion ?? undefined;
-    const force = options.force === true;
+export type OpenCodeV2SlotRemoval =
+    | { action: "cleared" }
+    | { action: "in_use"; pids: number[] }
+    | { action: "in_use_unknown"; reason: string }
+    | { action: "error"; error: string };
 
-    if (latest === undefined && !force) return { action: "check_unavailable", slot, cached };
-    const stale = latest !== undefined && isStale(cached, latest);
-    if (!stale && !force) return { action: "up_to_date", slot, cached, latest };
-    if (!force && options.fix !== true) return { action: "stale", slot, cached, latest };
-
+/**
+ * Remove one OpenCode 2 cache slot unless an OpenCode process may be using it:
+ * any process holding one of `hostFiles` (the session database) or any file in
+ * the slot keeps it in place, and so does a probe that cannot tell. Shared by
+ * `doctor --fix` and `doctor --clear` so both apply the same guard.
+ */
+export function removeOpenCodeV2PluginCacheSlot(
+    slot: string,
+    hostFiles: string[],
+    deps: OpenCodeV2SlotRemovalDeps = {},
+): OpenCodeV2SlotRemoval {
     const probe = deps.probe ?? probeHostProcessesUsing;
-    const use = probe({ files: options.hostFiles, directories: [slot] });
-    if (use.status === "in_use") return { action: "in_use", slot, cached, latest, pids: use.pids };
-    if (use.status === "unknown") {
-        return { action: "in_use_unknown", slot, cached, latest, reason: use.reason };
-    }
+    const use = probe({ files: hostFiles, directories: [slot] });
+    if (use.status === "in_use") return { action: "in_use", pids: use.pids };
+    if (use.status === "unknown") return { action: "in_use_unknown", reason: use.reason };
 
     const remove =
         deps.remove ?? ((path: string) => rmSync(path, { recursive: true, force: true }));
     try {
         remove(slot);
     } catch (err) {
-        return {
-            action: "error",
-            slot,
-            cached,
-            latest,
-            error: err instanceof Error ? err.message : String(err),
-        };
+        return { action: "error", error: err instanceof Error ? err.message : String(err) };
     }
-    return { action: "cleared", slot, cached, latest, forced: !stale };
+    return { action: "cleared" };
+}
+
+/** The session database files a running OpenCode host keeps open. */
+export function openCodeHostDatabaseFiles(databasePaths: string[]): string[] {
+    return databasePaths
+        .filter((path) => path !== ":memory:")
+        .flatMap((path) => ["", "-wal", "-shm"].map((suffix) => `${path}${suffix}`));
+}
+
+/**
+ * The dist-tag other than `latest` that the configured Magic Context entry
+ * follows (`beta` for `@cortexkit/opencode-magic-context@beta`), or undefined
+ * for a bare, `@latest` or version-pinned entry.
+ */
+export function configuredOpenCodeV2DistTag(
+    config: Record<string, unknown> | null | undefined,
+): string | undefined {
+    const spec = readConfiguredOpenCodePluginSpec(config);
+    return spec !== "latest" && isOpenCodePluginDistTag(spec) ? spec : undefined;
+}
+
+export function checkOpenCodeV2PluginCache(
+    options: {
+        fix?: boolean;
+        force?: boolean;
+        /** Current version of the dist-tag the slot follows (`latest` unless `distTag` says otherwise). */
+        latestVersion: string | null;
+        /** Files a running host holds open, normally the resolved OpenCode database. */
+        hostFiles: string[];
+        /**
+         * The dist-tag the configured entry follows when it is not `latest`
+         * (for example `beta`). The slot checked is that tag's slot, and
+         * `latestVersion` must be that tag's current version.
+         */
+        distTag?: string;
+    },
+    deps: OpenCodeV2SlotRemovalDeps & { slot?: string } = {},
+): OpenCodeV2CacheResult {
+    const distTag = options.distTag && options.distTag !== "latest" ? options.distTag : undefined;
+    const slot = deps.slot ?? getOpenCodeV2PluginCacheSlot(undefined, distTag ?? "latest");
+    const tagged = distTag ? { distTag } : {};
+    if (!existsSync(slot)) return { action: "not_found", slot, ...tagged };
+
+    const cached = readOpenCodeV2CachedPluginVersion(slot);
+    const latest = options.latestVersion ?? undefined;
+    const force = options.force === true;
+
+    if (latest === undefined && !force) {
+        return { action: "check_unavailable", slot, cached, ...tagged };
+    }
+    const stale = latest !== undefined && isStale(cached, latest);
+    if (!stale && !force) return { action: "up_to_date", slot, cached, latest, ...tagged };
+    if (!force && options.fix !== true) {
+        return { action: "stale", slot, cached, latest, ...tagged };
+    }
+
+    const removal = removeOpenCodeV2PluginCacheSlot(slot, options.hostFiles, deps);
+    switch (removal.action) {
+        case "in_use":
+            return { action: "in_use", slot, cached, latest, pids: removal.pids, ...tagged };
+        case "in_use_unknown":
+            return {
+                action: "in_use_unknown",
+                slot,
+                cached,
+                latest,
+                reason: removal.reason,
+                ...tagged,
+            };
+        case "error":
+            return { action: "error", slot, cached, latest, error: removal.error, ...tagged };
+        case "cleared":
+            return { action: "cleared", slot, cached, latest, forced: !stale, ...tagged };
+    }
 }
 
 /**
@@ -194,26 +300,29 @@ export function reportOpenCodeV2PluginCache(
     report: OpenCodeV2CacheReporter,
     options: { reportMissing: boolean },
 ): { fixed: boolean; issue: boolean } {
-    const versions = `cached: ${result.cached ?? "unreadable"}${result.latest ? `, latest: ${result.latest}` : ""}`;
+    const tag = result.distTag ?? "latest";
+    const versions = `cached: ${result.cached ?? "unreadable"}${result.latest ? `, ${tag}: ${result.latest}` : ""}`;
+    // Name the slot only when it is not the default one, so `@latest` output is unchanged.
+    const slotName = result.distTag ? ` @${result.distTag}` : "";
     switch (result.action) {
         case "not_found":
             if (options.reportMissing) {
                 report.pass(
-                    "OpenCode 2 plugin cache has no Magic Context install yet (OpenCode installs it on next start)",
+                    `OpenCode 2 plugin cache has no Magic Context${slotName} install yet (OpenCode installs it on next start)`,
                 );
             }
             return { fixed: false, issue: false };
         case "up_to_date":
-            report.pass(`OpenCode 2 plugin cache up to date (v${result.cached})`);
+            report.pass(`OpenCode 2 plugin cache${slotName} up to date (v${result.cached})`);
             return { fixed: false, issue: false };
         case "check_unavailable":
             report.warn(
-                `OpenCode 2 plugin cache version check unavailable; preserving cached plugin${result.cached ? ` (cached: ${result.cached})` : ""}. Use doctor --force to reinstall it.`,
+                `OpenCode 2 plugin cache${slotName} version check unavailable; preserving cached plugin${result.cached ? ` (cached: ${result.cached})` : ""}. Use doctor --force to reinstall it.`,
             );
             return { fixed: false, issue: false };
         case "stale":
             report.warn(
-                `OpenCode 2 is running an outdated Magic Context (${versions}); OpenCode does not install new releases on its own`,
+                `OpenCode 2 is running an outdated Magic Context${slotName} (${versions}); OpenCode does not install new releases on its own`,
             );
             report.info(`  To upgrade, ${OPENCODE_V2_PLUGIN_UPDATE_HINT},`);
             report.info(
@@ -241,7 +350,7 @@ export function reportOpenCodeV2PluginCache(
             return { fixed: false, issue: false };
         case "cleared":
             report.pass(
-                `Cleared ${result.forced ? "" : "outdated "}Magic Context from the OpenCode 2 plugin cache (${versions}${result.forced ? ", --force" : ""}) — OpenCode installs the latest on next start`,
+                `Cleared ${result.forced ? "" : "outdated "}Magic Context${slotName} from the OpenCode 2 plugin cache (${versions}${result.forced ? ", --force" : ""}) — OpenCode installs the ${result.distTag ? `current ${tag} release` : "latest"} on next start`,
             );
             report.info(`  ${result.slot}`);
             return { fixed: true, issue: false };
