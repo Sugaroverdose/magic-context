@@ -63,6 +63,7 @@ import { Database, withPrivilegedWriter } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { deriveWindowGeometry } from "../../shared/window-geometry";
 import { createCtxSearchTools } from "../../tools/ctx-search/tools";
+import { primeCtxReduceSpawnPermission } from "./ctx-reduce-availability";
 import {
     EmergencyFailClosedError,
     ENGINE_RECONNECTING_USER_MESSAGE,
@@ -1792,6 +1793,47 @@ describe("Rust mode authority adapter", () => {
         expect(output.messages).toBe(input);
         expect(output.messages[0]).toEqual(input[0]);
         expect(transform.getState(sessionId).failureCount).toBe(1);
+    });
+
+    it("sends tool_present=false when agent permissions denied ctx_reduce before the verdict froze", async () => {
+        const sessionId = `rust-permission-deny-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installAvailabilityDb(sessionId, {});
+        installRawProvider(sessionId);
+        let transformRequest: Record<string, unknown> | undefined;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method === "transform") transformRequest = body as Record<string, unknown>;
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: [] }
+                    : { ok: true };
+            },
+        };
+        // The shared transform entry point awaits this read before dispatching to
+        // the Rust facade; the facade then freezes the verdict it forwards.
+        await primeCtxReduceSpawnPermission(
+            {
+                app: {
+                    agents: async () => ({
+                        data: [{ name: "reviewer", permission: { ctx_reduce: "deny" } }],
+                    }),
+                },
+                session: { get: async () => ({ data: {} }) },
+            } as never,
+            sessionId,
+            "reviewer",
+        );
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const messages = makeMessages(sessionId);
+
+        await transform.run(
+            sessionId,
+            messages,
+            { messages: messages as unknown[] },
+            makeMeta(db, sessionId),
+        );
+        expect(transformRequest?.tool_present).toBe(false);
     });
 
     it("seeds before the first transform and applies native output verbatim", async () => {
