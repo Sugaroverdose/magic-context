@@ -93,6 +93,7 @@ import { modelLimitCacheWarm, warmModelLimitCacheFromCatalog } from "./model-lim
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { refusesBeforeProvider } from "./provider-admission";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
+import { RestoredRowCache } from "./restore-rows";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import {
     createV2RawMessageProvider,
@@ -514,6 +515,7 @@ export async function registerContext(context: V2Context) {
     const historyRefreshSessions = new Set<string>();
     const pendingMaterializationSessions = new Set<string>();
     const lastHeuristicsTurnId = new Map<string, string>();
+    const restoredRows = new RestoredRowCache();
     const rawProviders = new Map<string, () => void>();
     let passDuties: ReturnType<typeof createChatMessageHook> | undefined;
     let toolDuties: ReturnType<typeof createToolExecuteAfterHook> | undefined;
@@ -696,6 +698,7 @@ export async function registerContext(context: V2Context) {
                     historyRefreshSessions.delete(sessionID);
                     pendingMaterializationSessions.delete(sessionID);
                     lastHeuristicsTurnId.delete(sessionID);
+                    restoredRows.forget(sessionID);
                     systemPromptRefreshSessions.delete(sessionID);
                     systemPrompt?.clearSession(sessionID);
                     tagger.cleanup(sessionID);
@@ -1012,8 +1015,8 @@ export async function registerContext(context: V2Context) {
                         reader.sequenceForId(draft.sessionID, boundaryID) ??
                         (reader.earliestSequence(draft.sessionID) ?? 0) - 1;
                     const present = new Set(draft.messages.map((message) => message.id));
-                    const restored = reader
-                        .range(draft.sessionID, boundary, cut.seq)
+                    const restored = restoredRows
+                        .rows(reader, draft.sessionID, boundary, cut.seq)
                         .filter((row) => !present.has(row.id))
                         .flatMap((row) =>
                             restoreRow(
@@ -1258,6 +1261,7 @@ export async function registerContext(context: V2Context) {
             await dreamTrigger?.dispose();
             for (const release of rawProviders.values()) release();
             rawProviders.clear();
+            restoredRows.clear();
         },
     };
 }

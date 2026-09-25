@@ -518,6 +518,24 @@ export class V2StoreReader {
         );
     }
 
+    /**
+     * A summary of every row with `after < seq <= through` that decodes no row data: the
+     * row count, the seq sum and the newest update time. A row deleted, added or rewritten
+     * inside the span changes it.
+     */
+    spanFingerprint(sessionID: string, after: number, through: number): string {
+        if (!Number.isSafeInteger(after) || !Number.isSafeInteger(through))
+            throw new Error("Invalid seq span");
+        const row = this.db
+            .prepare(
+                `SELECT COUNT(*) AS count, COALESCE(SUM(seq), 0) AS seqs,
+                        COALESCE(MAX(time_updated), 0) AS updated
+                 FROM session_message WHERE session_id = ? AND seq > ? AND seq <= ?`,
+            )
+            .get(sessionID, after, through) as { count: number; seqs: number; updated: number };
+        return `${row.count}:${row.seqs}:${row.updated}`;
+    }
+
     /** Conversational rows at or before `throughSeq`, newest first. */
     rawRowsThrough(sessionID: string, throughSeq: number, limit: number): StoreRow[] {
         return trackDecodeOperation("rawRowsThrough", () => {
