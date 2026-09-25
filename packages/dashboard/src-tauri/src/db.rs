@@ -2748,6 +2748,12 @@ fn get_broca_session_cache_events(
 // `ordinal` numbers the session's runs over ALL of its facts, before the
 // limit/since window is applied, so a run is marked as the session's first
 // only when it really is.
+//
+// `usage.cached_input_tokens` (reads) and `usage.cache_write_tokens` (writes)
+// are each absent, never 0, when the provider did not report them. The sums
+// below coalesce absent to 0 only for arithmetic; `cache_reported` (reads) and
+// `write_reported` (writes) record whether any segment carried the key, and
+// the view shows "not reported" rather than the 0 when it did not.
 fn load_broca_cache_events_from_conn(
     conn: &Connection,
     session_id: &str,
@@ -2764,8 +2770,7 @@ fn load_broca_cache_events_from_conn(
                     SUM(COALESCE(CAST(json_extract(segment_json, '$.usage.output_tokens') AS INTEGER), 0)) AS output,
                     MAX(json_extract(segment_json, '$.provider')) AS provider,
                     MAX(json_extract(segment_json, '$.model')) AS model,
-                    MAX(json_extract(segment_json, '$.usage.cached_input_tokens') IS NOT NULL
-                        OR json_extract(segment_json, '$.usage.cache_write_tokens') IS NOT NULL) AS cache_reported,
+                    MAX(json_extract(segment_json, '$.usage.cached_input_tokens') IS NOT NULL) AS cache_reported,
                     MAX(json_extract(segment_json, '$.usage.cache_write_tokens') IS NOT NULL) AS write_reported,
                     MAX(json_extract(segment_json, '$.terminal_reason')) AS terminal_reason
              FROM export_facts
@@ -11060,6 +11065,40 @@ mod broca_cache_tests {
         assert_eq!(events[0].finish.as_deref(), Some("error"));
         assert_eq!(events[0].severity, "aggregate");
         assert!(events[0].cold_start);
+    }
+
+    #[test]
+    fn cache_reads_and_writes_are_reported_independently() {
+        // Reads absent, writes present: the reads must read as unreported
+        // even though the write key exists, and the reverse for writes.
+        let conn = store();
+        let id = identity("alfonso:keys");
+        insert(
+            &conn,
+            "f1",
+            "r1",
+            &id,
+            1_000,
+            serde_json::json!({"input_tokens": 10, "cache_write_tokens": 7}),
+        );
+        insert(
+            &conn,
+            "f2",
+            "r2",
+            &id,
+            2_000,
+            serde_json::json!({"input_tokens": 10, "cached_input_tokens": 90}),
+        );
+        let events = build_db_cache_events(
+            load_broca_cache_events_from_conn(&conn, &id.to_string(), None, None).unwrap(),
+            false,
+        );
+        assert!(!events[0].cache_reported);
+        assert!(events[0].cache_write_reported);
+        assert_eq!(events[0].cache_write, 7);
+        assert!(events[1].cache_reported);
+        assert!(!events[1].cache_write_reported);
+        assert_eq!(events[1].cache_read, 90);
     }
 
     #[test]

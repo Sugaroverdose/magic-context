@@ -80,6 +80,14 @@ export function cacheEventColorClass(event: CacheLabelFields): string {
 }
 
 /**
+ * The `cached=` value for one row. A missing cache-read count means the
+ * provider did not report reads, which is not the same as reading nothing.
+ */
+export function cacheReadLabel(event: Pick<DbCacheEvent, "cache_read" | "cache_reported">): string {
+  return event.cache_reported ? event.cache_read.toLocaleString() : "not reported";
+}
+
+/**
  * The `new=` value for a set of rows (one step, or every step of a turn).
  * Several providers never report cache writes, and Broca then omits the
  * field; a missing count must read as "not reported", not as zero writes.

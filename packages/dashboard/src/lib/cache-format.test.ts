@@ -4,6 +4,7 @@ import {
   cacheCauseLabel,
   cacheEventColorClass,
   cacheEventLabel,
+  cacheReadLabel,
   cacheWriteLabel,
   normalizeEstimatedContextLimits,
   selectWorstCacheEvent,
@@ -222,5 +223,13 @@ describe("cacheWriteLabel", () => {
         ev({ cache_write: 0, cache_write_reported: false }),
       ]),
     ).toBe("5 (partial)");
+  });
+});
+
+describe("cacheReadLabel", () => {
+  it("shows reads when reported and 'not reported' when the key was absent", () => {
+    expect(cacheReadLabel(ev({ cache_read: 90 }))).toBe((90).toLocaleString());
+    expect(cacheReadLabel(ev({ cache_read: 0 }))).toBe("0");
+    expect(cacheReadLabel(ev({ cache_read: 0, cache_reported: false }))).toBe("not reported");
   });
 });

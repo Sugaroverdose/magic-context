@@ -11,6 +11,7 @@ import {
   cacheCauseTooltip,
   cacheEventColorClass,
   cacheEventLabel,
+  cacheReadLabel,
   cacheWriteLabel,
   selectWorstCacheEvent,
 } from "../../lib/cache-format";
@@ -915,7 +916,7 @@ export default function CacheDiagnostics() {
                           </span>
                         </Show>
                         <span class="mono">prompt={totalPrompt.toLocaleString()}</span>
-                        <span class="mono">cached={last.cache_read.toLocaleString()}</span>
+                        <span class="mono">cached={cacheReadLabel(last)}</span>
                         <span class="mono">new={cacheWriteLabel(turn.events)}</span>
                         <div class="cache-bar">
                           <div
@@ -999,7 +1000,7 @@ export default function CacheDiagnostics() {
                                       prompt={evTotalPrompt.toLocaleString()}
                                     </span>
                                     <span class="mono">
-                                      cached={event.cache_read.toLocaleString()}
+                                      cached={cacheReadLabel(event)}
                                     </span>
                                     <span class="mono">new={cacheWriteLabel([event])}</span>
                                     <div class="cache-bar">
