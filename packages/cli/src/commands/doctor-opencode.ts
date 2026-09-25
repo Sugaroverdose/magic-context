@@ -116,6 +116,7 @@ import {
     checkOpenCodeCompactionMarkerConversion,
     formatOpenCodeCompactionMarkerConversion,
     formatOpenCodeV2ReconversionRecipe,
+    formatOpenCodeV2ReconversionRefusal,
 } from "./doctor-compaction-markers";
 import {
     formatDanglingCompartmentBoundary,
@@ -1056,7 +1057,12 @@ export async function runDoctor(
                 warn(`${summary}; run \`magic-context doctor --fix\` before upgrading OpenCode`);
             }
 
-            if (report.recoveryRequired) {
+            const refusal = formatOpenCodeV2ReconversionRefusal(report);
+            if (refusal) {
+                const [heading, ...details] = refusal;
+                warn(heading ?? "OpenCode 2 conversion markers are missing");
+                for (const detail of details) log.warn(`  ${detail}`);
+            } else if (report.recoveryRequired) {
                 const [heading, ...details] = formatOpenCodeV2ReconversionRecipe(
                     openCodeDbResolution.path,
                 );

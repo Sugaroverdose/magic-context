@@ -4,6 +4,7 @@ import {
     checkOpenCodeCompactionMarkerConversion,
     formatOpenCodeCompactionMarkerConversion,
     formatOpenCodeV2ReconversionRecipe,
+    formatOpenCodeV2ReconversionRefusal,
 } from "./doctor-compaction-markers";
 
 function convertedStoreFixture(): Database {
@@ -23,6 +24,7 @@ function convertedStoreFixture(): Database {
             session_id TEXT NOT NULL,
             type TEXT NOT NULL,
             seq INTEGER NOT NULL,
+            time_created INTEGER,
             data TEXT NOT NULL
         );
         CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -84,6 +86,8 @@ describe("doctor OpenCode compaction-marker conversion check", () => {
                 migrationCompleted: true,
                 migratedV2Schema: true,
                 unmatchedConvertedMarkers: 1,
+                postConversionMessages: 0,
+                postConversionSessions: 0,
                 recoveryRequired: true,
             });
             expect(formatOpenCodeCompactionMarkerConversion(before)).toContain(
@@ -109,6 +113,38 @@ describe("doctor OpenCode compaction-marker conversion check", () => {
             const converted = checkOpenCodeCompactionMarkerConversion(db);
             expect(converted.unmatchedConvertedMarkers).toBe(0);
             expect(converted.recoveryRequired).toBe(false);
+        } finally {
+            db.close();
+        }
+    });
+
+    it("never offers reconversion when OpenCode 2 added messages after the conversion", () => {
+        const db = convertedStoreFixture();
+        try {
+            // OpenCode 2's converter rebuilds every OpenCode 1 session from its v1 rows
+            // and deletes the session's session_message rows first, so a row that only
+            // exists in v2 would be lost. Converted rows keep their v1 time_created.
+            db.exec(`
+                CREATE TABLE session (id TEXT PRIMARY KEY);
+                INSERT INTO session (id) VALUES ('ses-1'), ('ses-untouched');
+                INSERT INTO message (id, session_id, time_created, time_updated, data)
+                    VALUES ('v1-user', 'ses-untouched', 7, 7, '{"role":"user"}');
+                INSERT INTO session_message (id, session_id, type, seq, time_created, data) VALUES
+                    ('mc-summary', 'ses-1', 'assistant', 0, 1, '{}'),
+                    ('v1-user', 'ses-untouched', 'user', 0, 7, '{}'),
+                    ('v2-user', 'ses-1', 'user', 1, 5000, '{}'),
+                    ('v2-assistant', 'ses-1', 'assistant', 2, 5001, '{}');
+            `);
+            const report = checkOpenCodeCompactionMarkerConversion(db);
+            expect(report.unmatchedConvertedMarkers).toBe(1);
+            expect(report.postConversionMessages).toBe(2);
+            expect(report.postConversionSessions).toBe(1);
+            expect(report.recoveryRequired).toBe(false);
+
+            const refusal = formatOpenCodeV2ReconversionRefusal(report)?.join("\n") ?? "";
+            expect(refusal).toContain("Do not clear kv.migration.v1-v2");
+            expect(refusal).toContain("delete the 2 message(s)");
+            expect(refusal).not.toContain("DELETE FROM kv");
         } finally {
             db.close();
         }

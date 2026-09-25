@@ -67,26 +67,9 @@ OpenCode 2 drops an OpenCode 1 compaction record whose summary has no completion
 
 ### If OpenCode 2 already converted the store
 
-Run `doctor` (without `--fix`). If it reports that Magic Context markers are missing from the converted store, ask OpenCode 2 to convert again:
+Do not clear `kv.migration.v1-v2` to make OpenCode 2 convert again. An earlier version of this page recommended that, and it was wrong. The conversion rebuilds each OpenCode 1 session from its OpenCode 1 rows and deletes that session's OpenCode 2 messages first, so every message added on OpenCode 2 after the first conversion is lost.
 
-1. Stop every OpenCode process.
-2. Open the database path `doctor` prints in `sqlite3` and clear only the conversion marker:
-
-   ```sql
-   DELETE FROM kv WHERE key = 'migration.v1-v2';
-   ```
-
-3. Start the server by hand on any free port, not with `opencode service start` (see [the note below](#a-first-start-can-be-killed-mid-conversion)):
-
-   ```bash
-   opencode serve --port 4096
-   ```
-
-4. Leave it running until this query returns `{"phase":"completed"}`:
-
-   ```sql
-   SELECT value FROM kv WHERE key = 'migration.v1-v2';
-   ```
+If you already did it, restore `opencode.db` (with its `-wal` and `-shm` files) from a backup taken before the reconversion.
 
 Do not edit the `session_v2` or `session_message` tables directly.
 
