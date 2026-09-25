@@ -244,6 +244,22 @@
             ]
         },
         {
+            "path": "tests/real-or-absent-drops.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "real OpenCode host drive of the real-or-absent dropped tool call rule against an Anthropic-style pairing and prefill validator",
+            "contract_refs": [
+                "PI-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ],
+            "behavior": true
+        },
+        {
             "path": "tests/drops.test.ts",
             "tier": "ts-only",
             "invocation": {
@@ -1206,6 +1222,22 @@
                 "rust": true
             },
             "rationale": "cold TS-to-Rust restart reproduces a frozen dropped-tag seed before historian publication can supersede the sentinel",
+            "contract_refs": [
+                "RUST-E2E",
+                "COLD-START-DROP-SEED"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-real-or-absent-drops.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "TS-to-Rust restart serves seeded real-or-absent drops and converts a legacy marker skeleton on the first HARD fold, under an Anthropic pairing and prefill validator",
             "contract_refs": [
                 "RUST-E2E",
                 "COLD-START-DROP-SEED"

@@ -5475,8 +5475,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// change rides that fold's cache bust. The fold committed before tagging
 	// built the targets the decision needs, so this is its own transaction
 	// right after it; the status replay below then renders the new modes. A
-	// crash between the two leaves the tags legacy until the next HARD fold,
-	// and the next served pass carries the new m[0] (a bust) either way.
+	// crash between the two leaves the tags legacy until the next HARD fold.
+	// Either way the next served request already carries the fold's new cached
+	// prefix, so it is a cache bust regardless of the tool bytes.
 	if (foldExecutedThisPass) {
 		try {
 			let converted = 0;

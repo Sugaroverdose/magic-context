@@ -36954,8 +36954,8 @@ pub(crate) mod tests {
             red_unit("small-pair#1", "drop", "[dropped]"),
             red_unit("large-pair#0", "skeleton", "[dropped]"),
             red_unit("large-pair#1", "drop", "[dropped]"),
-            // A session serving these skeletons has already consumed every renderer
-            // transition, so their presence alone does not price a HARD.
+            // A session serving these skeletons has already applied every renderer
+            // transition, so their presence alone does not cause a HARD fold.
             transition_consumed_unit(
                 &[
                     RendererTransitionClass::PoisonedReasoning,
