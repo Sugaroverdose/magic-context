@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { openCodeHostGenerationFromVersion } from "@magic-context/core/shared/opencode-db-path";
 import { writeTestExecutable } from "@magic-context/core/shared/test-fake-executable";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import {
@@ -9,6 +10,7 @@ import {
     getOpenCodeCommandInvocation,
     getOpenCodeVersion,
     OPENCODE_VERSION_PROBE_TIMEOUT_MS,
+    selectOpenCodeStoreHost,
 } from "./opencode-helpers";
 
 // These assert that a RESOLVED absolute binary path is actually invoked (the
@@ -53,6 +55,59 @@ describe("OpenCode installation reports", () => {
             { path: homeBin, source: "home-bin", kind: "cli", version: "1.15.13", active: false },
         ]);
         expect(versionProbes).toEqual([pathBin, homeBin]);
+    });
+
+    it("checks the store against OpenChamber's OpenCode 2 when an OpenCode 1 is first on PATH", () => {
+        const pathBin = "/virtual/PATH/opencode";
+        const chamberBin = "/Applications/OpenChamber.app/Contents/Resources/opencode-cli/opencode";
+        const installations = detectOpenCodeInstallations({
+            exists: () => false,
+            isExecutable: (path) => path === pathBin || path === chamberBin,
+            home: "/virtual/home",
+            platform: "darwin",
+            env: {},
+            onPath: () => pathBin,
+            realpath: (path) => path,
+        });
+        const reports = describeOpenCodeInstallations(installations, {
+            getVersion: (path) => (path === pathBin ? "1.18.32" : "2.0.15"),
+        });
+        expect(reports.map((report) => [report.source, report.active])).toEqual([
+            ["PATH", true],
+            ["openchamber", false],
+        ]);
+
+        const selected = selectOpenCodeStoreHost(reports, openCodeHostGenerationFromVersion);
+        expect(selected?.shadowed).toBe(true);
+        expect(selected?.host.path).toBe(chamberBin);
+        expect(selected?.host.version).toBe("2.0.15");
+    });
+
+    it("keeps the active install for store checks when no OpenCode 2 CLI shadows it", () => {
+        const report = (path: string, version: string, active: boolean) => ({
+            path,
+            source: "PATH" as const,
+            kind: "cli" as const,
+            version,
+            active,
+        });
+        const v1Only = [
+            report("/a/opencode", "1.18.32", true),
+            report("/b/opencode", "1.15.0", false),
+        ];
+        expect(selectOpenCodeStoreHost(v1Only, openCodeHostGenerationFromVersion)).toEqual({
+            host: v1Only[0]!,
+            shadowed: false,
+        });
+        const v2First = [
+            report("/a/opencode", "2.0.16", true),
+            report("/b/opencode", "1.18.32", false),
+        ];
+        expect(selectOpenCodeStoreHost(v2First, openCodeHostGenerationFromVersion)).toEqual({
+            host: v2First[0]!,
+            shadowed: false,
+        });
+        expect(selectOpenCodeStoreHost([], openCodeHostGenerationFromVersion)).toBeNull();
     });
 });
 

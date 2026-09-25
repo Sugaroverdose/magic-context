@@ -101,6 +101,37 @@ export function describeOpenCodeInstallations(
     }));
 }
 
+/**
+ * Pick the install whose store checks should drive OpenCode 2 advice.
+ *
+ * The active install is whichever binary PATH resolves first, which is the right
+ * one for plugin registration. It is not always the host the user runs: OpenChamber
+ * bundles its own OpenCode 2 CLI, and an OpenCode 1 left on PATH shares the same
+ * data directory with it. Store-conversion checks answered for OpenCode 1 in that
+ * case describe a host that is not the one converting the store, so they are asked
+ * of the first OpenCode 2 CLI that was found instead.
+ *
+ * Returns the active install when it is already OpenCode 2, when it reported no
+ * version (Desktop), or when no OpenCode 2 CLI was found. `shadowed` is true only
+ * when a different install was picked.
+ */
+export function selectOpenCodeStoreHost(
+    reports: readonly OpenCodeInstallationReport[],
+    generationOf: (version: string) => "v1" | "v2",
+): { host: OpenCodeInstallationReport; shadowed: boolean } | null {
+    const active = reports[0];
+    if (!active) return null;
+    const hasVersion = (report: OpenCodeInstallationReport) => /\d/.test(report.version);
+    if (!hasVersion(active) || generationOf(active.version) === "v2") {
+        return { host: active, shadowed: false };
+    }
+    const v2 = reports.find(
+        (report) =>
+            report.kind === "cli" && hasVersion(report) && generationOf(report.version) === "v2",
+    );
+    return v2 ? { host: v2, shadowed: true } : { host: active, shadowed: false };
+}
+
 export function getAvailableModels(binary?: string | null): string[] {
     const output = runOpenCode(["models"], binary);
     if (output === null) return [];

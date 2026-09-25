@@ -84,6 +84,7 @@ import { detectOpenCodeInstallations } from "../lib/opencode-detect";
 import {
     describeOpenCodeInstallations,
     type OpenCodeInstallationReport,
+    selectOpenCodeStoreHost,
 } from "../lib/opencode-helpers";
 import {
     getOpenCodePluginCacheRoots,
@@ -1029,7 +1030,26 @@ export async function runDoctor(
     }
 
     const hostGeneration = openCodeHostGenerationFromVersion(activeInstallation.version);
-    const openCodeDbResolution = resolveOpenCodeDbPath(hostGeneration);
+    // Plugin registration follows the active (PATH) install; store checks follow the
+    // OpenCode 2 CLI when one is installed beside an OpenCode 1 that PATH resolves
+    // first, because that is the host converting and serving the store.
+    const storeHostSelection = selectOpenCodeStoreHost(
+        installationReports,
+        openCodeHostGenerationFromVersion,
+    );
+    const storeHost = storeHostSelection?.host ?? activeInstallation;
+    const storeGeneration = openCodeHostGenerationFromVersion(storeHost.version);
+    const openCodeDbResolution = resolveOpenCodeDbPath(storeGeneration);
+    if (storeHostSelection?.shadowed) {
+        const activeStore = resolveOpenCodeDbPath(hostGeneration).path;
+        const shared = activeStore === openCodeDbResolution.path;
+        warn(
+            `OpenCode ${activeInstallation.version} (${activeInstallation.path}) is first on PATH, and OpenCode ${storeHost.version} is also installed (${storeHost.path})${shared ? `; both use ${openCodeDbResolution.path}` : ""}.`,
+        );
+        log.warn(
+            `  Store and conversion checks below use OpenCode ${storeHost.version}. Plugin configuration checks use OpenCode ${activeInstallation.version}; to check OpenCode ${storeHost.version}'s configuration instead, put its binary first on PATH and run doctor again.`,
+        );
+    }
     const openCodeDbCheck = describeOpenCodeDatabaseDoctorCheck(openCodeDbResolution);
     if (openCodeDbCheck.ok) pass(openCodeDbCheck.message);
     else fail(openCodeDbCheck.message);
@@ -1088,11 +1108,23 @@ export async function runDoctor(
                 const dangling = listDanglingCompartmentBoundaries(
                     contextDb,
                     sessionDb,
-                    /\d/.test(activeInstallation.version) ? hostGeneration : undefined,
+                    /\d/.test(storeHost.version) ? storeGeneration : undefined,
                     (line) => log.info(line),
                 );
                 if (dangling.length === 0) {
                     pass("Compartment boundary ids resolve in the OpenCode session store");
+                } else if (storeGeneration === "v2" && /\d/.test(storeHost.version)) {
+                    // OpenCode 2's conversion drops some OpenCode 1 rows, such as the
+                    // summary half of a compaction pair or a compaction whose summary
+                    // never completed, so a compartment anchored there loses its id.
+                    // Magic Context places such a compartment from its neighbours; one
+                    // it cannot place is reported by the unresolved-compartment check.
+                    log.info(
+                        `${dangling.length} compartment(s) point at OpenCode message ids that are not in the OpenCode 2 store. Magic Context places these from the neighbouring compartments; any it cannot place are listed as excluded from range recovery below.`,
+                    );
+                    for (const boundary of dangling) {
+                        log.info(`  ${formatDanglingCompartmentBoundary(boundary)}`);
+                    }
                 } else {
                     warn(`${dangling.length} compartment(s) have dangling OpenCode boundary ids`);
                     for (const boundary of dangling) {
@@ -1107,15 +1139,18 @@ export async function runDoctor(
                     log.info(
                         "Store projection check: this context database predates the coordinate columns",
                     );
-                } else if (!/\d/.test(activeInstallation.version)) {
+                } else if (!/\d/.test(storeHost.version)) {
                     log.info(
                         "Store projection check: OpenCode reported no version, so the running projection is unknown",
                     );
                 } else {
-                    const pendingRebases = countPendingCoordinateRebases(contextDb, hostGeneration);
+                    const pendingRebases = countPendingCoordinateRebases(
+                        contextDb,
+                        storeGeneration,
+                    );
                     const pendingLine = formatPendingCoordinateRebases(
                         pendingRebases,
-                        hostGeneration,
+                        storeGeneration,
                     );
                     if (pendingRebases.changed + pendingRebases.unrecorded === 0) {
                         pass(pendingLine);
@@ -1908,7 +1943,15 @@ export async function runDoctor(
 
     // 10. Show diagnostics info (log file, historian dumps)
 
-    const logFiles = inspectMagicContextLogs("opencode");
+    // The OpenCode 2 plugin writes its own log (under the `opencode2` temp subtree),
+    // so a machine running both hosts needs both files read.
+    const logHarnesses: Array<"opencode" | "opencode2"> = [
+        ...(hostGeneration === "v1" ? ["opencode" as const] : []),
+        ...(hostGeneration === "v2" || storeGeneration === "v2" ? ["opencode2" as const] : []),
+    ];
+    const logFiles = logHarnesses
+        .flatMap((harness) => inspectMagicContextLogs(harness))
+        .filter((file, index, all) => all.findIndex((other) => other.path === file.path) === index);
     const existingLogFiles = logFiles.filter((file) => file.exists);
     if (existingLogFiles.length === 0) {
         log.info(
