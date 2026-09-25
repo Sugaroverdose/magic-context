@@ -127,8 +127,10 @@ function ensureSeeded(
  *  - persisted `schedule IS NULL` with a live `next_due_at` → legacy row written
  *    before the column existed; it was seeded from THIS config, so just backfill
  *    the string and keep its already-correct `next_due_at`.
- *  - otherwise (genuine change, or enabling) → recompute `next_due_at` from now,
- *    reset retry_count.
+ *  - otherwise (genuine change, or enabling) → compute the new slot from the
+ *    row's durable run anchor and keep the earlier of it and the slot already
+ *    held, then reset retry_count. A live worktree must never postpone a slot
+ *    another worktree already armed for the shared project identity.
  */
 function reconcileSchedule(
     db: Database,
@@ -150,10 +152,17 @@ function reconcileSchedule(
         writeTaskScheduleState(db, { ...stored, schedule: config.schedule });
         return;
     }
+    const nextDueAt = nextDueAtMs(config.schedule, stored.lastRunAt ?? now);
+    const reconciledNextDueAt =
+        stored.nextDueAt === null
+            ? nextDueAt
+            : nextDueAt === null
+              ? stored.nextDueAt
+              : Math.min(stored.nextDueAt, nextDueAt);
     writeTaskScheduleState(db, {
         ...stored,
         schedule: config.schedule,
-        nextDueAt: nextDueAtMs(config.schedule, now),
+        nextDueAt: reconciledNextDueAt,
         retryCount: 0,
     });
 }
