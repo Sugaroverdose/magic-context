@@ -2934,6 +2934,21 @@ function parseMemoryBlockIds(raw: string | null): number[] {
     }
 }
 
+/**
+ * Callers normally pass getOrCreateSessionMeta(), which already carries the
+ * persisted mural payload. A lean process-local state leaves it undefined; fill
+ * it from the persisted row, but only when that row holds the exact m[0] bytes
+ * the state holds, so a stale row can never pose as the served image.
+ */
+export function hydrateCachedM0Mural(db: Database, sessionId: string, state: M0M1State): void {
+    if (!state.cachedM0Bytes || state.cachedM0MuralDataUrl !== undefined) return;
+    const row = readCachedM0M1Row(db, sessionId);
+    if (row && bufferEqualsNullable(row.cached_m0_bytes, state.cachedM0Bytes)) {
+        state.cachedM0MuralDataUrl = row.cached_m0_mural_data_url ?? null;
+        state.cachedM0MuralHash = row.cached_m0_mural_hash ?? null;
+    }
+}
+
 function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | null {
     return db
         .prepare(
@@ -3546,16 +3561,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             prefixTrimStatus,
         };
     }
-    // Callers normally pass getOrCreateSessionMeta(), which already contains the
-    // persisted mural payload. Keep compatibility with lean process-local states
-    // by hydrating only from the exact cached row whose m0 bytes they hold.
-    if (options.state.cachedM0Bytes && options.state.cachedM0MuralDataUrl === undefined) {
-        const row = readCachedM0M1Row(options.db, options.sessionId);
-        if (row && bufferEqualsNullable(row.cached_m0_bytes, options.state.cachedM0Bytes)) {
-            options.state.cachedM0MuralDataUrl = row.cached_m0_mural_data_url ?? null;
-            options.state.cachedM0MuralHash = row.cached_m0_mural_hash ?? null;
-        }
-    }
+    hydrateCachedM0Mural(options.db, options.sessionId, options.state);
     if (!options.workspaceIdentitySet && options.projectPath) {
         options = {
             ...options,

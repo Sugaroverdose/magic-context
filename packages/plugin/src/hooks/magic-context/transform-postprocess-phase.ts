@@ -102,6 +102,7 @@ import {
     clearInjectionCache,
     getVisibleMemoryIds,
     hasCompleteCachedM0M1,
+    hydrateCachedM0Mural,
     type InjectM0M1Result,
     injectM0M1,
     type M0HardSignals,
@@ -1426,6 +1427,10 @@ export async function runPostTransformPhase(
     // across attempts is safe; the last attempt is the one that committed.
     const convertedToolSkeletons = new Map<number, ConvertedToolDropMode>();
     let convertedToolSkeletonsDidMutate = false;
+    // An unhydrated mural would read as "no image served" and make a fold that
+    // re-renders the same image look like a change, opening the lanes on a pass
+    // that keeps the provider cache.
+    hydrateCachedM0Mural(args.db, args.sessionId, args.sessionMeta as M0M1State);
     const servedPrefixBeforeFold = {
         m0Bytes: args.sessionMeta.cachedM0Bytes ?? null,
         m1Bytes: args.sessionMeta.cachedM1Bytes ?? null,

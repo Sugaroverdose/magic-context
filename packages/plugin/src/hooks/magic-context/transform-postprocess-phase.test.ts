@@ -4552,13 +4552,12 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         // Re-gate: an identical-bytes epoch HARD on a session that serves a mural
         // image. The fold re-renders the same text and the same image, so the
         // queued drop must stay held. The lean variant starts the pass from a
-        // state whose mural field was never loaded (undefined rather than null).
-        // It is marked failing: the pre-fold snapshot reads the missing field as
-        // "no image served", so the unchanged image counts as a change and the
-        // drop lands. It turns red (unexpected pass) once that snapshot loads the
-        // persisted image first.
+        // state whose mural field was never loaded (undefined rather than null):
+        // the pre-fold snapshot must load the persisted image first, or it reads
+        // the missing field as "no image served" and the unchanged image counts
+        // as a change.
         for (const lean of [false, true]) {
-            (lean ? it.failing : it)(`REGATE mural unchanged (${lean ? "lean" : "hydrated"} state): an identical-bytes epoch HARD holds the drop`, async () => {
+            it(`REGATE mural unchanged (${lean ? "lean" : "hydrated"} state): an identical-bytes epoch HARD holds the drop`, async () => {
                 const xdg = mkdtempSync(join(tmpdir(), "mc-regate-oc-mural-"));
                 tempDirs.push(xdg);
                 process.env.XDG_DATA_HOME = xdg;
