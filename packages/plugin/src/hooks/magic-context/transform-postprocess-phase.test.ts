@@ -4231,9 +4231,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             ).run(from, to, sessionId);
         };
 
-        // Each trigger arms exactly one HARD reason on a session whose rendered
-        // content did not change. `identical` records whether the fold's m[0]/m[1]
-        // reproduce the previously served pair byte for byte.
+        // Each HARD trigger listed below is armed alone on a session whose
+        // rendered content is unchanged; `identical` records whether the fold
+        // reproduces the previously served m[0]/m[1] bytes.
         const TRIGGERS: Array<{
             reason: string;
             arm: (sessionId: string) => Promise<M0HardSignals | undefined>;
