@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "bun ../../scripts/check-bun.mjs && bun test --timeout 120000",
+    "ensure-shared-opencode2": "bun scripts/ensure-shared-opencode2.ts",
+    "test:opencode2": "bun scripts/ensure-shared-opencode2.ts && bun test --timeout 120000",
     "test:validate-manifest": "bun test scripts/validate-mode-manifest.test.ts scripts/check-rust-prerequisites.test.ts",
     "validate-mode-manifest": "bun scripts/validate-mode-manifest.ts --mode ts",
     "adjudicate:thinking-block": "bash scripts/adjudicate-thinking-block.sh",

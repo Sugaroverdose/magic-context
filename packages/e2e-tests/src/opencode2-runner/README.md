@@ -3,9 +3,18 @@
 Run `bun install`, initialize the pinned CLI if Bun blocked its postinstall (`cd packages/plugin/node_modules/@opencode/cli && node postinstall.mjs`), and run `bun run --cwd packages/plugin build` (the host loads `index.js` then `dist/index.js`). Then:
 
 ```sh
+bun packages/e2e-tests/scripts/ensure-shared-opencode2.ts
 PATH="$HOME/.opencode/bin:$PATH" MC_E2E_OPENCODE1_CLI="$HOME/.opencode/bin/opencode" bun test packages/e2e-tests/tests/opencode2
 packages/plugin/node_modules/.bin/tsc -p packages/e2e-tests/src/opencode2-runner/tsconfig.json
 ```
+
+`bun run test:e2e-opencode2 tests/opencode2/<file>.test.ts` (from the repository root; paths are relative to `packages/e2e-tests`) does the first two steps in one go.
+
+### Shared CLI install
+
+Every worktree has its own copy of the pinned CLI binary in `node_modules`, and macOS runs a malware assessment (`syspolicyd`) the first time each new executable file runs. With many worktrees that is many assessments of the same binary. `scripts/ensure-shared-opencode2.ts` installs the pinned `@opencode/cli` version once per machine at `~/.local/share/cortexkit/magic-context/e2e-bin/opencode-cli/<version>/`, runs the CLI's postinstall if Bun skipped it, and checks that the binary answers `--version` with the pinned version. It installs into a temporary directory beside the target and renames it into place, so concurrent workers never see a half-finished install. The package script `test:opencode2` (and the root `test:e2e-opencode2`) call it before `bun test`; CI does not, because its runners are fresh machines.
+
+The runner resolves the CLI in this order: `MC_E2E_OPENCODE2_CLI` if set; the shared install for the pinned version, only if its `package.json` reports exactly that version; then `packages/plugin/node_modules/.bin/opencode2` or the root `node_modules/.bin/opencode2`. Bumping the pin therefore ignores the old shared install until the script installs the new one. The shared directory holds only the CLI package, never host data: every host still runs under its own throwaway root. To clear it, delete `~/.local/share/cortexkit/magic-context/e2e-bin/opencode-cli` (or one `<version>` directory under it); the next local run reinstalls, and in the meantime the lane falls back to `node_modules`.
 
 The runner never uses the operator's config or provider credentials. The mock binds explicitly to 127.0.0.1. Every server has a fresh HOME and all four XDG roots, an allowlisted environment, a detached process group, and bounded event-driven startup. `lsof` and `ps` are required, not optional. At handoff and teardown the whole process group is checked for forbidden open paths, and lsof's inode must match the expected private database. These are samples, not continuous kernel-level monitoring. Exit/signal handlers reap live v2 groups. Teardown kills the entire group even if safety inspection fails.
 
