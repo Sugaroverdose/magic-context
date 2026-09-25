@@ -1043,11 +1043,15 @@ export async function runDoctor(
     if (storeHostSelection?.shadowed) {
         const activeStore = resolveOpenCodeDbPath(hostGeneration).path;
         const shared = activeStore === openCodeDbResolution.path;
+        // OpenChamber's bundled CLI prints "opencode v2.0.16" rather than "2.0.16".
+        const versionLabel = (version: string) => version.replace(/^opencode\s+v?/i, "");
+        const activeVersion = versionLabel(activeInstallation.version);
+        const storeVersion = versionLabel(storeHost.version);
         warn(
-            `OpenCode ${activeInstallation.version} (${activeInstallation.path}) is first on PATH, and OpenCode ${storeHost.version} is also installed (${storeHost.path})${shared ? `; both use ${openCodeDbResolution.path}` : ""}.`,
+            `OpenCode ${activeVersion} (${activeInstallation.path}) is first on PATH, and OpenCode ${storeVersion} is also installed (${storeHost.path})${shared ? `; both use ${openCodeDbResolution.path}` : ""}.`,
         );
         log.warn(
-            `  Store and conversion checks below use OpenCode ${storeHost.version}. Plugin configuration checks use OpenCode ${activeInstallation.version}; to check OpenCode ${storeHost.version}'s configuration instead, put its binary first on PATH and run doctor again.`,
+            `  Store and conversion checks below use OpenCode ${storeVersion}. Plugin configuration checks use OpenCode ${activeVersion}; to check OpenCode ${storeVersion}'s configuration instead, put its binary first on PATH and run doctor again.`,
         );
     }
     const openCodeDbCheck = describeOpenCodeDatabaseDoctorCheck(openCodeDbResolution);
