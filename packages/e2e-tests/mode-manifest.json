@@ -655,6 +655,14 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/restart-system-prompt-change.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Restarts a real OpenCode 2 host with a config change that alters the system prompt and proves the change is folded exactly once, on the first pass after the restart, with a queued drop riding that fold and the following passes served from cache",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/reporter-emergency-drop.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
