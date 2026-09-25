@@ -4,6 +4,8 @@ import { expect, test } from "bun:test";
 import { Database } from "../../../shared/sqlite";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
+import { nextDueAtMs } from "./cron";
+import { getTaskScheduleState, writeTaskScheduleState } from "./storage-task-schedule";
 import { type DreamTaskRuntimeConfig, planDueTasks } from "./task-scheduler";
 
 function config(schedule: string): DreamTaskRuntimeConfig {
@@ -31,15 +33,26 @@ test("conflicting worktree schedules cannot continually postpone a shared slot",
         // dream-timer reconciles every live worktree against this shared row.
         for (let minute = 0; minute <= 180; minute += 15) {
             const now = start + minute * 60_000;
-            if (planDueTasks(db, projectIdentity, [worktreeA], now).length > 0) {
-                due.push({ minute, worktree: "A" });
-            }
-            if (planDueTasks(db, projectIdentity, [worktreeB], now).length > 0) {
-                due.push({ minute, worktree: "B" });
+            for (const [worktree, task] of [
+                ["A", worktreeA],
+                ["B", worktreeB],
+            ] as const) {
+                const planned = planDueTasks(db, projectIdentity, [task], now);
+                if (planned.length === 0) continue;
+                due.push({ minute, worktree });
+                const state = getTaskScheduleState(db, projectIdentity, task.task);
+                if (!state) throw new Error("missing schedule row");
+                // Model the durable advancement performed after a completed run.
+                writeTaskScheduleState(db, {
+                    ...state,
+                    lastRunAt: now,
+                    nextDueAt: nextDueAtMs(task.schedule, now, planned[0].scheduledAt),
+                    lastStatus: "completed",
+                });
             }
         }
 
-        expect(due.length).toBeGreaterThan(0);
+        expect(due.map(({ minute }) => minute)).toEqual([30, 60, 90, 120, 150, 180]);
     } finally {
         db.close();
     }

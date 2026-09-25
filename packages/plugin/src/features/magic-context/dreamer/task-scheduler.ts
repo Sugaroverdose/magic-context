@@ -113,24 +113,18 @@ function ensureSeeded(
 }
 
 /**
- * Make the CONFIG schedule authoritative every pass: seed the row if missing,
- * then — if the persisted `schedule` no longer matches the config — recompute
- * `next_due_at` so a disable / enable / cron change takes effect IMMEDIATELY
- * (not only after the stale slot fires once). Without this the stored
- * `next_due_at` is trusted forever: a task disabled after seeding would still
- * fire once at its old slot, and a task seeded `next_due_at = NULL` (e.g. it was
- * disabled when first seen) and later enabled would never become due.
+ * Reconcile enabled worktrees without postponing an already-armed shared slot.
+ * Disabled worktrees are filtered by the caller and never mutate shared state.
  *
  * Cases (config.schedule vs persisted `schedule`):
  *  - equal → in sync, no write.
- *  - config `""` (disabled) → force `next_due_at = NULL`.
  *  - persisted `schedule IS NULL` with a live `next_due_at` → legacy row written
  *    before the column existed; it was seeded from THIS config, so just backfill
  *    the string and keep its already-correct `next_due_at`.
  *  - otherwise (genuine change, or enabling) → compute the new slot from the
- *    row's durable run anchor and keep the earlier of it and the slot already
- *    held, then reset retry_count. A live worktree must never postpone a slot
- *    another worktree already armed for the shared project identity.
+ *    current time and keep the earlier of it and the slot already held. Preserve
+ *    retries when retaining that slot; a schedule edit must not restart retries
+ *    or use an old successful run to re-arm an already-consumed occurrence.
  */
 function reconcileSchedule(
     db: Database,
@@ -142,17 +136,13 @@ function reconcileSchedule(
     const stored = getTaskScheduleState(db, projectIdentity, config.task);
     if (!stored || stored.schedule === config.schedule) return;
 
-    if (config.schedule.trim() === "") {
-        writeTaskScheduleState(db, { ...stored, schedule: config.schedule, nextDueAt: null });
-        return;
-    }
     if (stored.schedule === null && stored.nextDueAt !== null) {
         // Legacy row seeded from this same config before the schedule column
         // existed: backfill the string, keep the already-correct next_due_at.
         writeTaskScheduleState(db, { ...stored, schedule: config.schedule });
         return;
     }
-    const nextDueAt = nextDueAtMs(config.schedule, stored.lastRunAt ?? now);
+    const nextDueAt = nextDueAtMs(config.schedule, now);
     const reconciledNextDueAt =
         stored.nextDueAt === null
             ? nextDueAt
@@ -163,7 +153,7 @@ function reconcileSchedule(
         ...stored,
         schedule: config.schedule,
         nextDueAt: reconciledNextDueAt,
-        retryCount: 0,
+        retryCount: reconciledNextDueAt === stored.nextDueAt ? stored.retryCount : 0,
     });
 }
 
@@ -193,9 +183,8 @@ export function planDueTasks(
 
     const due: DueTask[] = [];
     for (const config of tasks) {
-        // Reconcile (not just seed) so the live config schedule is authoritative:
-        // a disabled task's next_due_at is forced NULL, an enabled/changed task's
-        // is recomputed — before we read it below.
+        // Disabling is local to this worktree, not a cancellation of shared work.
+        if (config.schedule.trim() === "") continue;
         reconcileSchedule(db, projectIdentity, config, now);
         const state = getTaskScheduleState(db, projectIdentity, config.task);
         if (!state || state.nextDueAt === null) continue; // disabled / impossible cron
