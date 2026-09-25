@@ -1,8 +1,9 @@
 /**
  * Adversarial reproduction: a Pi HARD fold whose only served-prefix change is
- * the mural image. Pi serves the mural as an image part in m[0], but the Pi
- * bust predicate compares only the m[0]/m[1] text bytes, so this pass swaps the
- * image the provider sees while reporting that the fold kept the cached prefix.
+ * the mural image. Pi serves the mural as an image part in m[0], so the bust
+ * predicate must compare the image as well as the m[0]/m[1] text; otherwise the
+ * pass swaps the image the provider sees while reporting that the fold kept the
+ * cached prefix, and the queued drop is withheld.
  */
 import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -62,10 +63,7 @@ function imageOf(messages: unknown[]): string | null {
 }
 
 describe("ADV Pi: mural-only HARD fold and the shared bust permission", () => {
-	// Marked failing: on the gated branch the mural-only fold reports that it kept
-	// the cached prefix. The test turns red (unexpected pass) once Pi counts the
-	// mural in its bust predicate.
-	it.failing("a fold that swaps only the mural image opens the lanes", async () => {
+	it("a fold that swaps only the mural image opens the lanes", async () => {
 		const xdg = mkdtempSync(join(tmpdir(), "mc-adv-pi-mural-"));
 		const originalXdg = process.env.XDG_DATA_HOME;
 		process.env.XDG_DATA_HOME = xdg;

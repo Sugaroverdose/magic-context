@@ -4311,6 +4311,26 @@ fn apply_once(
                 &projection,
                 lineage_anchor_mid,
             ));
+    // Every trigger below asks for a HARD. Whether that HARD may also price automatic
+    // reductions and the other bust-only lanes depends on whether it can re-render the
+    // served prefix byte-identically:
+    // - reasoning_exemption_repair: the repair exists to change which reasoning blocks the
+    //   tail serves, so the pass changes provider-visible bytes by construction (in the
+    //   tail, which the m0/m1 head comparison would not see). It keeps pricing.
+    // - first_fold_due: folds the session's first compartment and mints the first
+    //   boundary, so m0 and the coverage anchor change by construction. It keeps pricing.
+    // - boundary_divergence_recut: re-cuts compartments to a new boundary, so coverage and
+    //   the served tail move by construction. It keeps pricing.
+    // - system_absorb_hard_due: fires only when new compartment coverage absorbs system
+    //   messages, so m0 grows and coverage moves. It keeps pricing.
+    // - idle TTL: the provider cache is already gone (hard_fold_loses_provider_cache).
+    // - pre_snapshot_inputs_changed, external_revision_changed and
+    //   project_memory_epoch_hard_due: none of them is an m0 compose input by itself, so the
+    //   fold CAN reproduce the frozen pair exactly. They go through
+    //   hard_fold_busts_served_prefix below (marker_hard_keeps_provider_cache).
+    // Reconcile (the boundary left the live array after a revert) and lineage descent (a new
+    // host conversation epoch) are separate HARD inputs below; both serve a different
+    // message array than the cached one, so they keep pricing too.
     let hard_fold_requested = reasoning_exemption_repair
         || pre_snapshot_inputs_changed
         || first_fold_due
@@ -4339,18 +4359,18 @@ fn apply_once(
             &loaded.meta.last_system_prompt_hash,
             Some(req.system_prompt_hash.as_str()),
         );
-    // A store-marker trigger (a project-memory epoch or an external memory revision) asks
-    // for a HARD because rendered content MAY have changed, not because the provider cache
-    // died. Such a HARD prices automatic reductions only when hard_fold_busts_served_prefix,
-    // the same predicate that gates legacy skeleton conversion in the HARD branch, says it
-    // busts the served prefix. Otherwise the provider's cached prefix survives the pass and
-    // a queued drop or heuristic riding it would originate the pass's only bust. The HARD
-    // itself still runs so its markers commit. Other HARD triggers change bytes by nature
-    // or were not measured, so they keep pricing reductions without a pre-render.
-    let store_marker_hard_keeps_provider_cache = prefix_materialization_enabled
-        && (external_revision_changed || project_memory_epoch_hard_due)
+    // A marker trigger (a project-memory epoch, an external memory revision, or changed
+    // protection-floor inputs) asks for a HARD because rendered content MAY have changed,
+    // not because the provider cache died. Such a HARD prices automatic reductions only when
+    // hard_fold_busts_served_prefix, the same predicate that gates legacy skeleton conversion
+    // in the HARD branch, says it busts the served prefix. Otherwise the provider's cached
+    // prefix survives the pass and a queued drop or heuristic riding it would originate the
+    // pass's only bust. The HARD itself still runs so its markers commit.
+    let marker_hard_keeps_provider_cache = prefix_materialization_enabled
+        && (external_revision_changed
+            || project_memory_epoch_hard_due
+            || pre_snapshot_inputs_changed)
         && !(reasoning_exemption_repair
-            || pre_snapshot_inputs_changed
             || first_fold_due
             || boundary_divergence_recut.is_some()
             || system_absorb_hard_due
@@ -4382,10 +4402,10 @@ fn apply_once(
                 hard_fold_loses_provider_cache,
             )
         });
-    let hard_fold_prices_mutations = hard_fold_requested && !store_marker_hard_keeps_provider_cache;
-    if store_marker_hard_keeps_provider_cache {
+    let hard_fold_prices_mutations = hard_fold_requested && !marker_hard_keeps_provider_cache;
+    if marker_hard_keeps_provider_cache {
         tracing::info!(
-            "mc-module: [{}] store-marker HARD keeps the provider's cached prefix; it does not price automatic reductions",
+            "mc-module: [{}] marker HARD keeps the provider's cached prefix; it does not price automatic reductions",
             req.session_id
         );
     }
@@ -4479,7 +4499,10 @@ fn apply_once(
         req.protected_tokens_effective,
         loaded.meta.protected_tokens_effective,
         ctx.protected_tokens_floor,
-        if pass_already_busting {
+        // The floor snapshot is decision metadata, not served bytes. A marker HARD that keeps
+        // the provider cache still snapshots it (changed floor inputs raise exactly such a
+        // HARD), while the lanes that would act on the new floor stay closed until a real bust.
+        if pass_already_busting || marker_hard_keeps_provider_cache {
             FloorPass::CacheBust
         } else {
             FloorPass::Defer
@@ -4832,10 +4855,18 @@ fn apply_once(
         materialize_reason = Some("lineage_anchor_mismatch".to_string());
     }
 
+    // A marker HARD that keeps the provider's cached prefix, with no other independent ride
+    // (force, emergency, explicit flush, published m1 work, or a pending reduction) on the
+    // pass, still runs as a HARD so its markers commit, but it serves the frozen bytes. Every
+    // lane that may only ride a real bust treats it as a defer: new strip and caveman units,
+    // reasoning clearing, synthetic todo capture, first tag-surface and user-hint overlays,
+    // transition consumption, guidance date, and the hygiene/calibration adoption below.
+    let marker_hard_serves_frozen_prefix =
+        marker_hard_keeps_provider_cache && !supersession_ride_available && !reductions_pending_now;
     let is_provider_prefix_mutation_pass = matches!(
         plan,
         PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
-    );
+    ) && !marker_hard_serves_frozen_prefix;
     let is_bust_pass = !req.is_subagent && is_provider_prefix_mutation_pass;
     // A defer replays previously served provider bytes even in a subagent: its tool loop
     // has an Anthropic cached prefix too. Hold overlays first discovered on served blocks
@@ -19493,7 +19524,6 @@ pub(crate) mod tests {
     /// pending todo must not ride that HARD: the provider cache survives it, so a
     /// changed synthetic pair would be the pass's only bust.
     #[test]
-    #[ignore = "reproduction: an identical-bytes store-marker HARD still recaptures the pending synthetic todo; run with --ignored"]
     fn adv_identical_bytes_epoch_hard_holds_pending_synthetic_todo() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -19599,6 +19629,55 @@ pub(crate) mod tests {
         assert_eq!(
             serde_json::to_vec(&hard.ck_messages).unwrap(),
             serde_json::to_vec(&baseline.ck_messages).unwrap()
+        );
+        let replay = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(replay.messages(), baseline.messages());
+    }
+
+    #[test]
+    fn identical_bytes_floor_input_hard_holds_pending_drop_and_snapshots_the_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses-floor", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let request = with_usage(
+            req(
+                "ses-floor",
+                "cfg0",
+                vec![item("a", 1, "raw"), item("tail", 2, "pending drop")],
+            ),
+            10,
+            100,
+        );
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        ctx.protected_tokens_floor = 4_000;
+        transform(&s, &request, &ctx).unwrap();
+        // A session with no floor snapshot yet: floor inputs are tracked in memory only.
+        let mut legacy = s.load("ses-floor").unwrap();
+        legacy.meta.protected_tokens_effective = None;
+        s.commit("ses-floor", legacy.row_version, &legacy.core, &legacy.meta)
+            .unwrap();
+        let baseline = transform(&s, &request, &ctx).unwrap();
+        assert_ne!(baseline.action, "HARD");
+        s.append_pending_agent_drops("ses-floor", &["tail#0".to_string()], 1)
+            .unwrap();
+
+        ctx.protected_tokens_floor = 8_000;
+        let hard = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(hard.action, "HARD");
+        assert_eq!(
+            hard.materialize_reason.as_deref(),
+            Some("protected_tokens_inputs_changed")
+        );
+        assert_eq!(m0_bytes(&hard), m0_bytes(&baseline));
+        assert_eq!(m1_bytes(&hard), m1_bytes(&baseline));
+        // The fold reproduced the served pair: the drop is held, the wire is unchanged,
+        // and the floor snapshot (metadata only) still lands.
+        assert_eq!(s.load_pending_agent_drops("ses-floor").unwrap().len(), 1);
+        assert_eq!(hard.messages(), baseline.messages());
+        assert_eq!(
+            s.load("ses-floor").unwrap().meta.protected_tokens_effective,
+            Some(8_000)
         );
         let replay = transform(&s, &request, &ctx).unwrap();
         assert_eq!(replay.messages(), baseline.messages());

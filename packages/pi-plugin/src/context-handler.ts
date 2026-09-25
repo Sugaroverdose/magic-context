@@ -5319,14 +5319,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				foldBustsServedPrefixThisPass = foldBustsServedPrefix(
 					foldDueDecision.reason,
 					{
-							m0Bytes: persistedM0BeforeFold.cachedM0Bytes ?? null,
-							m1Bytes: persistedM0BeforeFold.cachedM1Bytes ?? null,
-						},
-						{
-							m0Bytes: afterFold.cachedM0Bytes ?? null,
-							m1Bytes: afterFold.cachedM1Bytes ?? null,
-						},
-					);
+						m0Bytes: persistedM0BeforeFold.cachedM0Bytes ?? null,
+						m1Bytes: persistedM0BeforeFold.cachedM1Bytes ?? null,
+						muralDataUrl: persistedM0BeforeFold.cachedM0MuralDataUrl ?? null,
+					},
+					{
+						m0Bytes: afterFold.cachedM0Bytes ?? null,
+						m1Bytes: afterFold.cachedM1Bytes ?? null,
+						muralDataUrl: afterFold.cachedM0MuralDataUrl ?? null,
+					},
+				);
 			}
 			if (preFoldInjectionResult.m0Materialized) {
 				injectionPassSnapshot = createPiM0M1PassSnapshot({

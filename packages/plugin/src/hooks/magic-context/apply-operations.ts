@@ -117,11 +117,16 @@ export const CACHE_LOSING_FOLD_REASONS: ReadonlySet<string> = new Set([
     "ttl_idle",
 ]);
 
-/** The cached m[0]/m[1] bytes a pass serves ahead of the conversation tail. */
+/**
+ * The cached m[0]/m[1] bytes a pass serves ahead of the conversation tail, plus
+ * the mural image served with m[0] (null when no image is served). The mural is
+ * required so no caller can leave the image out of the comparison: a changed
+ * image is a changed served prefix even when the text is identical.
+ */
 export interface ServedPrefixBytes {
     m0Bytes: Uint8Array | null;
     m1Bytes: Uint8Array | null;
-    muralDataUrl?: string | null;
+    muralDataUrl: string | null;
 }
 
 function sameBytes(left: Uint8Array | null, right: Uint8Array | null): boolean {
@@ -131,10 +136,9 @@ function sameBytes(left: Uint8Array | null, right: Uint8Array | null): boolean {
 
 /**
  * Does a HARD fold change the prefix bytes served ahead of every tool call?
- * Legacy skeleton conversion may only ride a fold for which this is true: a
- * fold that re-renders m[0]/m[1] byte-identically keeps the provider's cached
- * prefix, and converting there would make the conversion itself the bust.
- * A mural change counts only when both sides report one (Pi does not).
+ * Any difference counts: m[0] text, m[1] text, or the mural image, including
+ * an image that appears or disappears. A fold that re-renders all of them
+ * byte-identically keeps the provider's cached prefix.
  */
 export function foldChangesServedPrefix(
     before: ServedPrefixBytes,
@@ -142,11 +146,7 @@ export function foldChangesServedPrefix(
 ): boolean {
     if (!sameBytes(before.m0Bytes, after.m0Bytes)) return true;
     if (!sameBytes(before.m1Bytes, after.m1Bytes)) return true;
-    return (
-        before.muralDataUrl !== undefined &&
-        after.muralDataUrl !== undefined &&
-        (before.muralDataUrl ?? null) !== (after.muralDataUrl ?? null)
-    );
+    return before.muralDataUrl !== after.muralDataUrl;
 }
 
 /**
