@@ -183,6 +183,68 @@ describe("OpenCode 2 restore of rows hidden by a host checkpoint", () => {
         store.close();
     });
 
+    it("rereads a row rewritten in place without a new update time, and only that row", () => {
+        const { path, store } = seedStore(500);
+        const cache = new RestoredRowCache();
+        const read = () => {
+            const reader = new V2StoreReader(path);
+            try {
+                return measure(() => cache.rows(reader, SESSION, -1, 400));
+            } finally {
+                reader.close();
+            }
+        };
+        read();
+        // The host rewrites a finished row in place (a tool part's state settling, say)
+        // through its own update, and nothing guarantees time_updated moves with it.
+        const before = store
+            .prepare("SELECT data, time_updated FROM session_message WHERE id = ?")
+            .get("msg-31") as { data: string; time_updated: number };
+        const rewritten = JSON.parse(before.data) as { content: Array<Record<string, unknown>> };
+        const tool = rewritten.content.find((part) => part.type === "tool")!;
+        tool.state = { status: "completed", input: {}, output: "rewritten output" };
+        store
+            .prepare("UPDATE session_message SET data = ? WHERE id = ?")
+            .run(JSON.stringify(rewritten), "msg-31");
+        const after = store
+            .prepare("SELECT time_updated FROM session_message WHERE id = ?")
+            .get("msg-31") as { time_updated: number };
+        expect(after.time_updated).toBe(before.time_updated);
+
+        const refreshed = read();
+        expect(refreshed.value).toEqual(fullRange(path, -1, 400));
+        // One changed row, one row decoded.
+        expect(refreshed.decoded).toBe(1);
+        // A time_updated bump at the same size is caught too.
+        store
+            .prepare("UPDATE session_message SET time_updated = time_updated + 1 WHERE id = ?")
+            .run("msg-60");
+        expect(read().decoded).toBe(1);
+        store.close();
+    });
+
+    it("costs one undecoded stamp read per pass on a 10,000-row span", () => {
+        const { path, store } = seedStore(10_000);
+        const cache = new RestoredRowCache();
+        const reader = new V2StoreReader(path);
+        try {
+            cache.rows(reader, SESSION, -1, 9_999);
+            const timings: number[] = [];
+            for (let pass = 0; pass < 5; pass++) {
+                const started = performance.now();
+                const { decoded } = measure(() => cache.rows(reader, SESSION, -1, 9_999));
+                timings.push(performance.now() - started);
+                expect(decoded).toBe(0);
+            }
+            console.log(
+                `steady restore pass over 10,000 rows (stamps plus copy): ${timings.map((ms) => ms.toFixed(1)).join(" ")} ms`,
+            );
+        } finally {
+            reader.close();
+            store.close();
+        }
+    });
+
     it("hands each pass its own copy, so the transform editing restored rows cannot leak into the next pass", () => {
         const { path, store } = seedStore(50);
         const cache = new RestoredRowCache();

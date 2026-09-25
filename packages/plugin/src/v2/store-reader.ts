@@ -519,21 +519,31 @@ export class V2StoreReader {
     }
 
     /**
-     * A summary of every row with `after < seq <= through` that decodes no row data: the
-     * row count, the seq sum and the newest update time. A row deleted, added or rewritten
-     * inside the span changes it.
+     * One stamp per row with `after < seq <= through`, keyed by seq, built without
+     * decoding any row: the row id, its update time and the byte length of its data.
+     * A row deleted, added, or rewritten in place to a different size or with a new
+     * update time changes its stamp; comparing stamps row by row, not an aggregate,
+     * means two such changes cannot cancel out.
      */
-    spanFingerprint(sessionID: string, after: number, through: number): string {
+    spanRowStamps(sessionID: string, after: number, through: number): Map<number, string> {
         if (!Number.isSafeInteger(after) || !Number.isSafeInteger(through))
             throw new Error("Invalid seq span");
-        const row = this.db
+        const rows = this.db
             .prepare(
-                `SELECT COUNT(*) AS count, COALESCE(SUM(seq), 0) AS seqs,
-                        COALESCE(MAX(time_updated), 0) AS updated
-                 FROM session_message WHERE session_id = ? AND seq > ? AND seq <= ?`,
+                `SELECT seq, id, time_updated AS updated, length(CAST(data AS BLOB)) AS bytes
+                 FROM session_message WHERE session_id = ? AND seq > ? AND seq <= ?
+                 ORDER BY seq ASC`,
             )
-            .get(sessionID, after, through) as { count: number; seqs: number; updated: number };
-        return `${row.count}:${row.seqs}:${row.updated}`;
+            .all(sessionID, after, through) as Array<{
+            seq: number;
+            id: string;
+            updated: number | null;
+            bytes: number | null;
+        }>;
+        const stamps = new Map<number, string>();
+        for (const row of rows)
+            stamps.set(row.seq, `${row.id}\u0000${row.updated ?? ""}\u0000${row.bytes ?? ""}`);
+        return stamps;
     }
 
     /** Conversational rows at or before `throughSeq`, newest first. */

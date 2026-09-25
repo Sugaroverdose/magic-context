@@ -1,13 +1,11 @@
 import type { StoreRow, V2StoreReader } from "../store-reader";
 
-/** The reader surface the restore needs: 100-row pages plus an undecoded span check. */
-export type RestoreRowReader = Pick<V2StoreReader, "page" | "spanFingerprint">;
+/** The reader surface the restore needs: 100-row pages plus undecoded per-row stamps. */
+export type RestoreRowReader = Pick<V2StoreReader, "page" | "spanRowStamps">;
 
-interface CachedSpan {
-    after: number;
-    through: number;
-    fingerprint: string;
-    rows: StoreRow[];
+interface KeptRow {
+    stamp: string;
+    row: StoreRow;
 }
 
 /**
@@ -18,50 +16,59 @@ interface CachedSpan {
  * back the rows between the last Magic Context boundary and the checkpoint. With no
  * boundary yet (a long session before its first compartment) that span is the whole
  * history before the checkpoint, and reading it again on every pass decoded the whole
- * session every turn. Rows before a completed checkpoint do not change once written,
- * so the decoded span is kept per session and only the part past the kept span is read,
- * one 100-row page at a time. Before reusing a kept span its row count, seq sum and
- * newest update time are checked with one aggregate query that decodes nothing; a host
- * revert or edit inside the span changes that fingerprint and forces a fresh read. The
- * rows handed back are the same rows a full read would return, so what the transform
- * serves does not change.
+ * session every turn. Instead each pass reads one stamp per row of the span, without
+ * decoding anything (id, update time and data size, see `spanRowStamps`), reuses every
+ * kept row whose stamp is unchanged, and decodes only the rows that are new or whose
+ * stamp changed, in 100-row pages. A row the host deleted is simply absent from the
+ * stamps, and a row it rewrote in place to a different size or with a new update time
+ * is read again, so the rows handed back are the rows a full read would return and what
+ * the transform serves does not change.
  */
 export class RestoredRowCache {
-    private readonly spans = new Map<string, CachedSpan>();
+    private readonly sessions = new Map<string, Map<number, KeptRow>>();
 
     constructor(private readonly capacity = 16) {}
 
     /** Rows with `after < seq <= through`, ascending by seq. */
     rows(reader: RestoreRowReader, sessionID: string, after: number, through: number): StoreRow[] {
         if (through <= after) return [];
-        const cached = this.spans.get(sessionID);
-        let rows: StoreRow[];
-        if (
-            cached &&
-            cached.after <= after &&
-            after <= cached.through &&
-            cached.fingerprint === reader.spanFingerprint(sessionID, cached.after, cached.through)
-        ) {
-            const kept = cached.rows.filter((row) => row.seq > after && row.seq <= through);
-            rows =
-                through > cached.through
-                    ? kept.concat(readPages(reader, sessionID, cached.through, through))
-                    : kept;
-        } else {
-            rows = readPages(reader, sessionID, after, through);
+        const kept = this.sessions.get(sessionID) ?? new Map<number, KeptRow>();
+        const stamps = reader.spanRowStamps(sessionID, after, through);
+        // Runs of consecutive span rows that must be decoded, each as the exclusive seq
+        // cursor before the run and the last seq in it.
+        const runs: Array<{ after: number; through: number }> = [];
+        let previous = after;
+        let open: { after: number; through: number } | undefined;
+        for (const [seq, stamp] of stamps) {
+            if (kept.get(seq)?.stamp === stamp) {
+                open = undefined;
+            } else if (open) {
+                open.through = seq;
+            } else {
+                open = { after: previous, through: seq };
+                runs.push(open);
+            }
+            previous = seq;
         }
-        this.spans.delete(sessionID);
-        this.spans.set(sessionID, {
-            after,
-            through,
-            fingerprint: reader.spanFingerprint(sessionID, after, through),
-            rows,
-        });
+        const fresh = new Map<number, StoreRow>();
+        for (const run of runs)
+            for (const row of readPages(reader, sessionID, run.after, run.through))
+                fresh.set(row.seq, row);
+        const next = new Map<number, KeptRow>();
+        const rows: StoreRow[] = [];
+        for (const [seq, stamp] of stamps) {
+            const row = fresh.get(seq) ?? kept.get(seq)?.row;
+            if (!row) continue;
+            next.set(seq, { stamp, row });
+            rows.push(row);
+        }
+        this.sessions.delete(sessionID);
+        this.sessions.set(sessionID, next);
         // Keep only the most recently restored sessions; an evicted one reads cold once.
-        while (this.spans.size > this.capacity) {
-            const oldest = this.spans.keys().next().value;
+        while (this.sessions.size > this.capacity) {
+            const oldest = this.sessions.keys().next().value;
             if (oldest === undefined) break;
-            this.spans.delete(oldest);
+            this.sessions.delete(oldest);
         }
         // Restored messages share objects with their row's data, and the transform edits
         // the messages it is handed, so each pass gets its own copy of the kept rows.
@@ -69,11 +76,11 @@ export class RestoredRowCache {
     }
 
     forget(sessionID: string): void {
-        this.spans.delete(sessionID);
+        this.sessions.delete(sessionID);
     }
 
     clear(): void {
-        this.spans.clear();
+        this.sessions.clear();
     }
 }
 
