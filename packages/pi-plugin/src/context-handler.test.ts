@@ -4641,6 +4641,26 @@ describe("registerPiContextHandler", () => {
 				expect(deferB).toBe(deferA);
 				expect(modeOf(small)).toBe("truncated");
 
+				// A HARD fold that re-renders m[0]/m[1] byte-identically (a stale
+				// mutation cursor with no content change) keeps the cached prefix, so
+				// it must not convert: the conversion would be the only byte change.
+				db.prepare(
+					"UPDATE session_meta SET cached_m0_max_mutation_id = 424242 WHERE session_id = ?",
+				).run(sessionId);
+				const identicalFold = await pass();
+				expect(
+					(
+						db
+							.prepare(
+								"SELECT cached_m0_max_mutation_id AS id FROM session_meta WHERE session_id = ?",
+							)
+							.get(sessionId) as { id: number }
+					).id,
+				).not.toBe(424242);
+				expect(identicalFold).toBe(deferA);
+				expect(modeOf(small)).toBe("truncated");
+				expect(modeOf(large)).toBe("truncated");
+
 				// The executed HARD fold converts them to real-or-absent.
 				recordPiLiveModel(sessionId, HARD_MODEL);
 				const hard = await pass();

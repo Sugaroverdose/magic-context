@@ -66,8 +66,10 @@ import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
 import {
+    CACHE_LOSING_FOLD_REASONS,
     type ConvertedToolDropMode,
     convertLegacyToolSkeletons,
+    foldChangesServedPrefix,
     renderConvertedToolSkeletons,
 } from "./apply-operations";
 import { runAutoSearchHint } from "./auto-search-runner";
@@ -1413,11 +1415,21 @@ export async function runPostTransformPhase(
     // to materialize, so a separate cache-busting pass can be attributed later.
     let m0ComparisonDecision: MaterializeDecision | null = foldDueDecision;
     // Legacy dropped-tool skeletons (argument marker) are converted to the
-    // real-or-absent rule only inside an executed HARD fold's transaction, so
-    // the byte change rides that fold's cache bust. Retries recompute the same
-    // decisions from the same wire, so collecting across attempts is safe.
+    // real-or-absent rule only inside an executed HARD fold's transaction, and
+    // only when the provider's cached prefix is lost anyway: the fold's trigger
+    // evicts it (model, system prompt, idle TTL) or the fold changes the
+    // m[0]/m[1] bytes it serves. A fold that re-renders the prefix
+    // byte-identically (e.g. a memory epoch bump with no content change) keeps
+    // the prefix cached; converting there would make the conversion the bust.
+    // Retries recompute the same decisions from the same wire, so collecting
+    // across attempts is safe.
     const convertedToolSkeletons = new Map<number, ConvertedToolDropMode>();
     let convertedToolSkeletonsDidMutate = false;
+    const servedPrefixBeforeFold = {
+        m0Bytes: args.sessionMeta.cachedM0Bytes ?? null,
+        m1Bytes: args.sessionMeta.cachedM1Bytes ?? null,
+        muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
+    };
     if ((foldDueDecision.value || softRefreshOpportunity) && m0M1EnabledForFold && args.m0M1) {
         try {
             const previousM1 = args.sessionMeta.cachedM1Bytes?.toString("utf8");
@@ -1440,7 +1452,13 @@ export async function runPostTransformPhase(
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,
                 compactionOff,
-                onFoldCommit: (db) => {
+                onFoldCommit: (db, rendered) => {
+                    if (
+                        !CACHE_LOSING_FOLD_REASONS.has(foldDueDecision.reason ?? "") &&
+                        !foldChangesServedPrefix(servedPrefixBeforeFold, rendered)
+                    ) {
+                        return;
+                    }
                     for (const [tagNumber, mode] of convertLegacyToolSkeletons(
                         db,
                         args.sessionId,

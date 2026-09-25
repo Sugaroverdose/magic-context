@@ -4581,6 +4581,19 @@ fn apply_once(
     }
     let profile_transition = !loaded.meta.last_serializer_profile.is_empty()
         && loaded.meta.last_serializer_profile != req.serializer_profile;
+    // A known previous identity that differs from this request means the provider's
+    // cached prefix is gone whatever bytes this pass serves.
+    let identity_changed = |last: &str, current: Option<&str>| {
+        !last.is_empty() && current.is_some_and(|current| current != last)
+    };
+    let hard_fold_loses_provider_cache = scheduler_outcome.idle_ttl_fired
+        || profile_transition
+        || identity_changed(&loaded.meta.last_provider_id, req.provider_id.as_deref())
+        || identity_changed(&loaded.meta.last_model_key, req.model_key.as_deref())
+        || identity_changed(
+            &loaded.meta.last_system_prompt_hash,
+            Some(req.system_prompt_hash.as_str()),
+        );
     let mut materialize_reason = classify_materialize_reason(MaterializeReasonInputs {
         plan,
         bootstrap_due: !loaded.meta.initialized || loaded.meta.bootstrap_seed_fold_pending,
@@ -5069,12 +5082,21 @@ fn apply_once(
                     &selected_reductions,
                     suppress_bootstrap_reduction_tag_overlay,
                 );
-                convert_legacy_skeleton_units(
-                    &mut effective,
-                    &tail_for_selection,
-                    &core,
-                    &req.session_id,
-                );
+                if hard_fold_busts_served_prefix(
+                    &loaded.core,
+                    &comp.m0_bytes,
+                    M1_PLACEHOLDER,
+                    comp.mural.as_ref(),
+                    loaded.meta.coverage_ordinal != comp.coverage_ordinal,
+                    hard_fold_loses_provider_cache,
+                ) {
+                    convert_legacy_skeleton_units(
+                        &mut effective,
+                        &tail_for_selection,
+                        &core,
+                        &req.session_id,
+                    );
+                }
                 let survivors = surviving_red_units(&effective, &live, comp.coverage_ordinal);
                 let channel1_survivors =
                     surviving_channel1_units(&core, &effective, &live, comp.coverage_ordinal);
@@ -5307,12 +5329,21 @@ fn apply_once(
                         &selected_reductions,
                         suppress_bootstrap_reduction_tag_overlay,
                     );
-                    convert_legacy_skeleton_units(
-                        &mut effective,
-                        &tail_for_selection,
-                        &core,
-                        &req.session_id,
-                    );
+                    if hard_fold_busts_served_prefix(
+                        &loaded.core,
+                        &comp.m0_bytes,
+                        M1_PLACEHOLDER,
+                        comp.mural.as_ref(),
+                        loaded.meta.coverage_ordinal != comp.coverage_ordinal,
+                        hard_fold_loses_provider_cache,
+                    ) {
+                        convert_legacy_skeleton_units(
+                            &mut effective,
+                            &tail_for_selection,
+                            &core,
+                            &req.session_id,
+                        );
+                    }
                     let survivors = surviving_red_units(&effective, &live, comp.coverage_ordinal);
                     let channel1_survivors =
                         surviving_channel1_units(&core, &effective, &live, comp.coverage_ordinal);
@@ -7965,6 +7996,31 @@ fn effective_reductions(
         });
     }
     eff
+}
+
+/// Does this HARD fold lose the provider's cached prefix anyway? True when the fold's
+/// trigger evicts it (idle TTL, a different provider or model, a changed system prompt,
+/// a serializer profile switch), when it moves the coverage boundary (the tail starts
+/// elsewhere), or when the m0/m1/mural bytes it serves differ from the ones frozen
+/// before it. A HARD that re-renders all of these byte-identically (for example a
+/// memory epoch bump with no content change) keeps the prefix cached, so work that
+/// only rides a bust, such as legacy skeleton conversion, must not run on it.
+fn hard_fold_busts_served_prefix(
+    loaded_core: &CoreState,
+    new_m0: &str,
+    new_m1: &str,
+    new_mural: Option<&crate::m0_compose::M0MuralBlock>,
+    coverage_changed: bool,
+    cache_lost: bool,
+) -> bool {
+    if cache_lost || coverage_changed {
+        return true;
+    }
+    let unit = |key: &str| loaded_core.frozen_units.iter().find(|unit| unit.key == key);
+    unit("m0").map(|unit| unit.frozen_payload.as_str()) != Some(new_m0)
+        || unit("m1").map(|unit| unit.frozen_payload.as_str()) != Some(new_m1)
+        || unit(M0_MURAL_KEY).map(|unit| (unit.frozen_payload.as_str(), unit.reset_rule.as_str()))
+            != new_mural.map(|mural| (mural.data_url.as_str(), mural.content_hash.as_str()))
 }
 
 /// Convert frozen legacy `skeleton` call units (arguments replaced by the
@@ -36826,8 +36882,9 @@ pub(crate) mod tests {
             s.load(&request.session_id).unwrap().meta.last_render_config,
             new_identity
         );
-        // The priced HARD also converts the legacy skeleton under the real-or-absent
-        // rule: its small input is served as the real arguments, never a marker.
+        // The epoch HARD re-renders m0/m1 byte-identically, so it does not lose the
+        // cached prefix and must not convert the legacy skeleton: the conversion would
+        // be the only byte change. The marker keeps replaying.
         let served_input = first
             .messages()
             .iter()
@@ -36844,7 +36901,7 @@ pub(crate) mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            vec!["path"]
+            vec!["dropped"]
         );
 
         let replay = run(&s, &request, &spine());
@@ -36916,7 +36973,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn legacy_marker_skeletons_replay_on_defer_and_convert_only_on_hard() {
+    fn legacy_marker_skeletons_replay_on_defer_and_convert_only_on_a_prefix_changing_hard() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let large = json!({ "filePath": "/tmp/a.txt", "content": "L".repeat(2000) });
@@ -37004,18 +37061,45 @@ pub(crate) mod tests {
             serde_json::to_vec(defer_b.messages()).unwrap()
         );
 
-        // A HARD fold converts them: small keeps its real arguments, large is removed.
-        let mut loaded = s.load(&request.session_id).unwrap();
-        loaded.meta.last_render_config = "stale-render-identity".to_string();
-        s.commit(
-            &request.session_id,
-            loaded.row_version,
-            &loaded.core,
-            &loaded.meta,
-        )
-        .unwrap();
+        let force_hard = |s: &McStore| {
+            let mut loaded = s.load(&request.session_id).unwrap();
+            loaded.meta.last_render_config = "stale-render-identity".to_string();
+            s.commit(
+                &request.session_id,
+                loaded.row_version,
+                &loaded.core,
+                &loaded.meta,
+            )
+            .unwrap();
+        };
+
+        // A HARD that re-renders m0/m1 byte-identically keeps the cached prefix, so it
+        // must not convert: the conversion would be the only byte change.
+        force_hard(&s);
+        let identical = run(&s, &request, &spine());
+        assert_eq!(identical.action, "HARD");
+        assert_eq!(
+            serde_json::to_vec(identical.messages()).unwrap(),
+            serde_json::to_vec(defer_a.messages()).unwrap()
+        );
+        assert_eq!(
+            marker_keys(served_call_input(&identical, "small-call")),
+            vec!["dropped"]
+        );
+
+        // A HARD that really changes m0 (a new project memory) converts them: small
+        // keeps its real arguments, large is removed.
+        s.seed_memory(1, "git:proj", "ARCHITECTURE", "a new architecture rule", 70)
+            .unwrap();
+        acknowledge_test_host_memory(&s, "git:proj", 1);
+        force_hard(&s);
         let hard = run(&s, &request, &spine());
         assert_eq!(hard.action, "HARD");
+        assert_ne!(
+            serde_json::to_vec(&hard.messages()[..1]).unwrap(),
+            serde_json::to_vec(&identical.messages()[..1]).unwrap(),
+            "the converting HARD must change m0"
+        );
         assert_eq!(
             served_call_input(&hard, "small-call"),
             Some(json!({ "command": "ls -la" }))
@@ -38709,13 +38793,10 @@ pub(crate) mod tests {
             .find(|message| message["info"]["id"] == "pair-message")
             .expect("salted pair remains in native output");
         assert_eq!(salted_pair["parts"].as_array().unwrap().len(), 1);
-        // The salted pass is a HARD fold, which converts the legacy marker skeleton to
-        // the real-or-absent rule: the small call keeps its real input. Everything else
-        // about the pair, including its native tool identity, is unchanged.
-        let mut expected_pair = old_pair.clone();
-        expected_pair["parts"][0]["state"]["input"] = json!({ "path": "pair.txt" });
+        // The salted HARD re-renders m0/m1 byte-identically, so it does not convert the
+        // legacy marker skeleton (the conversion would be the only byte change).
         assert_eq!(
-            salted_pair, &expected_pair,
+            salted_pair, old_pair,
             "the transition may persist compatibility state, but native tool identity is already valid"
         );
 

@@ -3517,6 +3517,405 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         expect(tailOnly(after.messages)).toBe(convertedWire);
     });
 
+    // Adversarial gate reproductions for legacy marker conversion (real-or-absent).
+    // Each trigger gets its own session so a conversion can only come from it.
+    const ADV_TRIGGERS: Array<{ name: string; signals: (base: M0HardSignals) => M0HardSignals }> = [
+        { name: "model change", signals: (b) => ({ ...b, modelKey: "anthropic/sonnet" }) },
+        { name: "system hash", signals: (b) => ({ ...b, systemHash: "sys-v2" }) },
+        {
+            name: "TTL idle",
+            signals: (b) => ({ ...b, cacheExpired: true, lastResponseTime: Date.now() + 60_000 }),
+        },
+    ];
+    function advTail(sessionId: string, newer: number): MessageLike[] {
+        const tool = (id: string, callID: string, name: string, input: unknown) => ({
+            info: { id, role: "assistant", sessionID: sessionId },
+            parts: [
+                {
+                    type: "tool",
+                    tool: name,
+                    callID,
+                    state: { status: "completed", input, output: `${id} output` },
+                },
+            ],
+        });
+        const user = (id: string, text: string) => ({
+            info: { id, role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text }],
+        });
+        return [
+            user("m-u0", "start"),
+            tool("m-small", "c-small", "bash", { command: "ls -la" }),
+            // 512 x "é" = 1024 UTF-8 bytes: small; plus one byte: large.
+            tool("m-mb1024", "c-mb1024", "write", { content: "\u00e9".repeat(512) }),
+            tool("m-mb1025", "c-mb1025", "write", { content: `${"\u00e9".repeat(512)}a` }),
+            tool("m-a1024", "c-a1024", "write", {
+                nested: [{ c: "a".repeat(1000) }, "b".repeat(24)],
+            }),
+            tool("m-large", "c-large", "write", { content: "L".repeat(4000) }),
+            user("m-next", "next prompt"),
+            ...Array.from({ length: newer }, (_, i) => user(`m-newer-${i}`, `newer ${i}`)),
+        ] as unknown as MessageLike[];
+    }
+    const ADV_CALLS: Array<[string, string]> = [
+        ["c-small", "m-small"],
+        ["c-mb1024", "m-mb1024"],
+        ["c-mb1025", "m-mb1025"],
+        ["c-a1024", "m-a1024"],
+        ["c-large", "m-large"],
+    ];
+    async function advPass(
+        sessionId: string,
+        opts: {
+            hard?: M0HardSignals;
+            newer?: number;
+            scheduler?: "defer" | "execute";
+            budget?: number;
+        },
+    ) {
+        const messages = advTail(sessionId, opts.newer ?? 0);
+        const tagger = createTagger();
+        tagger.initFromDb(sessionId, db);
+        const tagged = tagMessages(sessionId, messages, tagger, db);
+        const replayed = applyFlushedStatuses(sessionId, db, tagged.targets);
+        tagged.batch.finalize();
+        const result = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                tagger,
+                targets: tagged.targets,
+                reasoningByMessage: tagged.reasoningByMessage,
+                messageTagNumbers: tagged.messageTagNumbers,
+                batch: tagged.batch,
+                didMutateFromFlushedStatuses: replayed,
+                schedulerDecision: opts.scheduler ?? "defer",
+                contextUsage: { percentage: 40, inputTokens: 4000 },
+                m0M1: {
+                    projectPath: FOLD_PROJECT,
+                    projectDirectory: FOLD_PROJECT,
+                    historyBudgetTokens: opts.budget ?? 98_000,
+                    hardSignals: opts.hard ?? BASE_HARD,
+                },
+            }),
+        );
+        return { messages, result };
+    }
+    function advSeedLegacy(sessionId: string): Map<string, number> {
+        const tagger = createTagger();
+        tagMessages(sessionId, advTail(sessionId, 0), tagger, db);
+        const tags = new Map<string, number>();
+        for (const [call, owner] of ADV_CALLS) {
+            const tag = tagger.getToolTag(sessionId, call, owner)!;
+            tags.set(call, tag);
+            updateTagStatus(db, sessionId, tag, "dropped");
+            updateTagDropMode(db, sessionId, tag, "truncated");
+        }
+        return tags;
+    }
+    const advModes = (sessionId: string, tags: Map<string, number>) =>
+        Object.fromEntries(
+            [...tags].map(([call, tag]) => [
+                call,
+                getTagsBySession(db, sessionId).find((t) => t.tagNumber === tag)?.dropMode,
+            ]),
+        );
+    const advSha = (messages: MessageLike[]) =>
+        createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+
+    it("ADV: an execute (SOFT) pass without a HARD fold never converts legacy markers", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-adv-soft";
+        materializeBaseline(sessionId);
+        const tags = advSeedLegacy(sessionId);
+        const defer = await advPass(sessionId, {});
+        const soft = await advPass(sessionId, { scheduler: "execute" });
+        const deferAgain = await advPass(sessionId, {});
+        console.log(
+            "ADV_SOFT",
+            JSON.stringify({
+                softMaterialized: soft.result.materialized,
+                modes: advModes(sessionId, tags),
+                deferSha: advSha(defer.messages),
+                softTailEqualsDefer:
+                    JSON.stringify(soft.messages.slice(-7)) ===
+                    JSON.stringify(defer.messages.slice(-7)),
+                deferAgainSha: advSha(deferAgain.messages),
+            }),
+        );
+        expect(soft.result.materialized).toBe(false);
+        for (const mode of Object.values(advModes(sessionId, tags))) expect(mode).toBe("truncated");
+        expect(JSON.stringify(soft.messages.slice(-7))).toBe(
+            JSON.stringify(defer.messages.slice(-7)),
+        );
+        expect(advSha(deferAgain.messages)).toBe(advSha(defer.messages));
+    });
+
+    it("ADV: a pressure refold (memoryUpdateCount > 40 on an execute pass) converts legacy markers", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-adv-pressure";
+        injectM0M1({
+            db,
+            sessionId,
+            state: getOrCreateSessionMeta(db, sessionId),
+            projectPath: FOLD_PROJECT,
+            projectDirectory: FOLD_PROJECT,
+            historyBudgetTokens: 500,
+            isCacheBustingPass: true,
+            hardSignals: BASE_HARD,
+        });
+        const tags = advSeedLegacy(sessionId);
+        const d1 = await advPass(sessionId, { budget: 500 });
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
+        for (let i = 0; i < 45; i++) {
+            insertMemory(db, {
+                projectPath: FOLD_PROJECT,
+                category: "PROJECT_RULES",
+                content: `ADV_PRESSURE_MEMORY_${i}: rule ${i}.`,
+                importance: 50,
+            });
+        }
+        const d2 = await advPass(sessionId, { budget: 500 });
+        const exec = await advPass(sessionId, { scheduler: "execute", budget: 500 });
+        const modes = advModes(sessionId, tags);
+        const after = await advPass(sessionId, { newer: 1, budget: 500 });
+        const shared = after.messages.slice(0, exec.messages.length);
+        console.log(
+            "ADV_PRESSURE",
+            JSON.stringify({
+                d1EqD2Tail:
+                    JSON.stringify(d1.messages.slice(-7)) === JSON.stringify(d2.messages.slice(-7)),
+                execMaterialized: exec.result.materialized,
+                execResult: Object.fromEntries(
+                    Object.entries(exec.result).filter(([k]) =>
+                        /reason|decision|materializ/i.test(k),
+                    ),
+                ),
+                modes,
+                execSha: advSha(exec.messages),
+                afterSharedSha: advSha(shared),
+                oldMarkerLeft: JSON.stringify(exec.messages).includes('"dropped":'),
+            }),
+        );
+        expect(exec.result.materialized).toBe(true);
+        expect(modes["c-small"]).toBe("skeleton_real");
+        expect(modes["c-large"]).toBe("full");
+        expect(advSha(shared)).toBe(advSha(exec.messages));
+    });
+
+    it("ADV: a project_memory_epoch HARD fold with byte-identical m[0] does not convert legacy markers", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-adv-epoch-identical";
+        materializeBaseline(sessionId);
+        const tags = advSeedLegacy(sessionId);
+        const defer = await advPass(sessionId, {});
+        const { bumpEpochsForWorkspaceMembers } = await import(
+            "../../features/magic-context/workspaces"
+        );
+        // An epoch bump with no memory content change (e.g. an external write that
+        // does not alter the rendered m[0]).
+        bumpEpochsForWorkspaceMembers(db, FOLD_PROJECT);
+        const hard = await advPass(sessionId, {});
+        const firstDiff = (() => {
+            const n = Math.min(defer.messages.length, hard.messages.length);
+            for (let i = 0; i < n; i++) {
+                if (JSON.stringify(defer.messages[i]) !== JSON.stringify(hard.messages[i])) {
+                    return { index: i, id: hard.messages[i]?.info.id ?? null };
+                }
+            }
+            return null;
+        })();
+        console.log(
+            "ADV_EPOCH_IDENTICAL",
+            JSON.stringify({
+                hardMaterialized: hard.result.materialized,
+                reason: (hard.result as { materializeReason?: unknown }).materializeReason,
+                modes: advModes(sessionId, tags),
+                m0m1Identical:
+                    JSON.stringify(defer.messages.slice(0, 2)) ===
+                    JSON.stringify(hard.messages.slice(0, 2)),
+                firstDiff,
+            }),
+        );
+        expect(hard.result.materialized).toBe(true);
+        // The fold re-rendered m[0]/m[1] byte-identically, so the prefix stays
+        // cached. The conversion only rides a bust that already rewrites the
+        // prefix: here it must not happen, and the served bytes stay identical.
+        expect(JSON.stringify(hard.messages.slice(0, 2))).toBe(
+            JSON.stringify(defer.messages.slice(0, 2)),
+        );
+        expect(firstDiff).toBeNull();
+        expect(Object.values(advModes(sessionId, tags))).toEqual(
+            Array(ADV_CALLS.length).fill("truncated"),
+        );
+
+        // A later HARD whose trigger loses the provider cache (a model change)
+        // converts them.
+        const changed = await advPass(sessionId, {
+            hard: { ...BASE_HARD, modelKey: "anthropic/sonnet" },
+        });
+        expect(changed.result.materialized).toBe(true);
+        expect(advModes(sessionId, tags)["c-small"]).toBe("skeleton_real");
+        expect(advModes(sessionId, tags)["c-large"]).toBe("full");
+    });
+
+    it("ADV: same-pass re-clamp: parallel legacy calls in one message plus a pending drop drained on the HARD pass", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-adv-parallel-reclamp";
+        materializeBaseline(sessionId);
+        const part = (callID: string, input: unknown) => ({
+            type: "tool",
+            tool: "bash",
+            callID,
+            state: { status: "completed", input, output: `${callID} output` },
+        });
+        const build = (newer: boolean) =>
+            [
+                {
+                    info: { id: "m-u0", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "go" }],
+                },
+                {
+                    info: { id: "m-par", role: "assistant", sessionID: sessionId },
+                    parts: [
+                        { type: "text", text: "three at once" },
+                        part("p-small", { command: "ls" }),
+                        part("p-large", { command: "L".repeat(3000) }),
+                        part("p-new", { command: "N".repeat(2000) }),
+                        part("p-keep", { command: "pwd" }),
+                    ],
+                },
+                {
+                    info: { id: "m-next", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "next" }],
+                },
+                ...(newer
+                    ? [
+                          {
+                              info: { id: "m-newer", role: "user", sessionID: sessionId },
+                              parts: [{ type: "text", text: "newer" }],
+                          },
+                      ]
+                    : []),
+            ] as unknown as MessageLike[];
+        const pass = async (hard: M0HardSignals, newer: boolean) => {
+            const messages = build(newer);
+            const tagger = createTagger();
+            tagger.initFromDb(sessionId, db);
+            const tagged = tagMessages(sessionId, messages, tagger, db);
+            const replayed = applyFlushedStatuses(sessionId, db, tagged.targets);
+            tagged.batch.finalize();
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    tagger,
+                    targets: tagged.targets,
+                    reasoningByMessage: tagged.reasoningByMessage,
+                    messageTagNumbers: tagged.messageTagNumbers,
+                    batch: tagged.batch,
+                    didMutateFromFlushedStatuses: replayed,
+                    schedulerDecision: "defer",
+                    contextUsage: { percentage: 40, inputTokens: 4000 },
+                    m0M1: {
+                        projectPath: FOLD_PROJECT,
+                        projectDirectory: FOLD_PROJECT,
+                        historyBudgetTokens: 98_000,
+                        hardSignals: hard,
+                    },
+                }),
+            );
+            return { messages, result };
+        };
+        const seedTagger = createTagger();
+        tagMessages(sessionId, build(false), seedTagger, db);
+        const tagOf = (call: string) => seedTagger.getToolTag(sessionId, call, "m-par")!;
+        for (const call of ["p-small", "p-large"]) {
+            updateTagStatus(db, sessionId, tagOf(call), "dropped");
+            updateTagDropMode(db, sessionId, tagOf(call), "truncated");
+        }
+        const defer = await pass(BASE_HARD, false);
+        queuePendingOp(db, sessionId, tagOf("p-new"), "drop");
+        const hardSignals = { ...BASE_HARD, modelKey: "anthropic/sonnet" };
+        const hard = await pass(hardSignals, false);
+        const after = await pass(hardSignals, true);
+        const par = (messages: MessageLike[]) =>
+            JSON.stringify(messages.find((m) => m.info.id === "m-par")?.parts);
+        const modes = Object.fromEntries(
+            ["p-small", "p-large", "p-new", "p-keep"].map((call) => [
+                call,
+                getTagsBySession(db, sessionId).find((t) => t.tagNumber === tagOf(call))?.dropMode +
+                    "/" +
+                    getTagsBySession(db, sessionId).find((t) => t.tagNumber === tagOf(call))
+                        ?.status,
+            ]),
+        );
+        console.log(
+            "ADV_PARALLEL",
+            JSON.stringify({
+                hardMaterialized: hard.result.materialized,
+                modes,
+                deferPar: par(defer.messages).slice(0, 400),
+                hardPar: par(hard.messages),
+                afterEqualsHard: par(after.messages) === par(hard.messages),
+                prefixShaEqual:
+                    advSha(after.messages.slice(0, hard.messages.length)) === advSha(hard.messages),
+            }),
+        );
+        expect(hard.result.materialized).toBe(true);
+        expect(par(hard.messages)).not.toContain('"dropped":');
+        expect(advSha(after.messages.slice(0, hard.messages.length))).toBe(advSha(hard.messages));
+    });
+
+    for (const trigger of ADV_TRIGGERS) {
+        it(`ADV: legacy markers replay on defer, convert on a HARD fold from ${trigger.name}, then replay byte-identically with newer messages`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `ses-adv-${trigger.name.replace(/\W+/g, "-")}`;
+            materializeBaseline(sessionId);
+            const tags = advSeedLegacy(sessionId);
+            const d1 = await advPass(sessionId, {});
+            const d2 = await advPass(sessionId, {});
+            const d3 = await advPass(sessionId, {});
+            expect(advSha(d2.messages)).toBe(advSha(d1.messages));
+            expect(advSha(d3.messages)).toBe(advSha(d1.messages));
+            const hardSignals = trigger.signals(BASE_HARD);
+            const hard = await advPass(sessionId, { hard: hardSignals });
+            const modes = advModes(sessionId, tags);
+            const hardJson = JSON.stringify(hard.messages);
+            // Defer pass B: one newer message appended; compare over the shared prefix.
+            const after = await advPass(sessionId, {
+                hard: { ...hardSignals, cacheExpired: false },
+                newer: 1,
+            });
+            const shared = after.messages.slice(0, hard.messages.length);
+            console.log(
+                "ADV_HARD",
+                trigger.name,
+                JSON.stringify({
+                    hardMaterialized: hard.result.materialized,
+                    afterMaterialized: after.result.materialized,
+                    modes,
+                    hardSha: advSha(hard.messages),
+                    afterSharedSha: advSha(shared),
+                    lengths: [hard.messages.length, after.messages.length],
+                    oldMarkerLeft: hardJson.includes('"dropped":'),
+                }),
+            );
+            expect(hard.result.materialized).toBe(true);
+            expect(modes).toEqual({
+                "c-small": "skeleton_real",
+                "c-mb1024": "skeleton_real",
+                "c-mb1025": "full",
+                "c-a1024": "skeleton_real",
+                "c-large": "full",
+            });
+            expect(hardJson).not.toContain('"dropped":');
+            expect(after.result.materialized).toBe(false);
+            expect(after.messages.length).toBe(hard.messages.length + 1);
+            expect(advSha(shared)).toBe(advSha(hard.messages));
+        });
+    }
     it("drains queued pending ops on a DEFER scheduler pass when m[0] HARD-folds", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);

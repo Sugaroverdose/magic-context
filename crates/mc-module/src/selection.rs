@@ -3757,6 +3757,183 @@ mod tests {
         );
     }
 
+    // Adversarial gate reproductions: request-end protection when the tool result
+    // lives in a separate tool-role message, and when every block of an OpenCode
+    // assistant message (text, call, result) carries the assistant role.
+    fn adv_item(
+        id: &str,
+        ordinal: u64,
+        role: SelMessageRole,
+        kind: SelKind,
+        arc: Option<&str>,
+    ) -> SelItem {
+        SelItem {
+            served_token_count: None,
+            id: id.to_string(),
+            ordinal,
+            message_role: role,
+            kind,
+            provider_executed: false,
+            byte_size: 5000,
+            token_count: None,
+            arc_id: arc.map(str::to_string),
+        }
+    }
+
+    fn adv_call(input: serde_json::Value) -> SelKind {
+        SelKind::ToolCall {
+            name: "write".to_string(),
+            input,
+        }
+    }
+
+    fn adv_result() -> SelKind {
+        SelKind::ToolResult {
+            tool_name: "write".to_string(),
+        }
+    }
+
+    /// assistant `a` = [text, call(large)], tool-role `t` = [result]; the request ends
+    /// on `t`. Removing the arc would leave assistant text as the request end.
+    fn adv_separate_tool_message_items() -> Vec<SelItem> {
+        let large = serde_json::json!({ "content": "z".repeat(5000) });
+        vec![
+            adv_item("u#0", 1, SelMessageRole::NonAssistant, SelKind::Text, None),
+            adv_item("a#0", 2, SelMessageRole::Assistant, SelKind::Text, None),
+            adv_item(
+                "a#1",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large),
+                Some("a#1"),
+            ),
+            adv_item(
+                "t#0",
+                3,
+                SelMessageRole::NonAssistant,
+                adv_result(),
+                Some("a#1"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn adv_request_end_in_separate_tool_role_message_keeps_real_arguments() {
+        let items = adv_separate_tool_message_items();
+        let kinds = two_pass_kinds(&items, 3);
+        eprintln!("ADV_RUST_SEPARATE_TOOL_MSG new-drop kinds={kinds:?}");
+        assert_eq!(kinds.get("a#1").map(String::as_str), Some("skeleton_real"));
+        assert_eq!(kinds.get("t#0").map(String::as_str), Some("drop"));
+
+        let legacy = BTreeSet::from(["a#1".to_string()]);
+        let frozen = HashSet::from(["a#1".to_string(), "t#0".to_string()]);
+        let converted = legacy_skeleton_conversions(&items, &legacy, &HashSet::new(), &frozen);
+        eprintln!("ADV_RUST_SEPARATE_TOOL_MSG legacy conversion={converted:?}");
+        assert_eq!(converted.get("a#1").copied(), Some("skeleton_real"));
+    }
+
+    #[test]
+    fn adv_request_end_parallel_results_in_two_tool_role_messages() {
+        // assistant a = [text, call1(large), call2(large)], t1 = [result1], t2 = [result2].
+        let large = || serde_json::json!({ "content": "z".repeat(5000) });
+        let items = vec![
+            adv_item("u#0", 1, SelMessageRole::NonAssistant, SelKind::Text, None),
+            adv_item("a#0", 2, SelMessageRole::Assistant, SelKind::Text, None),
+            adv_item(
+                "a#1",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large()),
+                Some("a#1"),
+            ),
+            adv_item(
+                "a#2",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large()),
+                Some("a#2"),
+            ),
+            adv_item(
+                "t1#0",
+                3,
+                SelMessageRole::NonAssistant,
+                adv_result(),
+                Some("a#1"),
+            ),
+            adv_item(
+                "t2#0",
+                4,
+                SelMessageRole::NonAssistant,
+                adv_result(),
+                Some("a#2"),
+            ),
+        ];
+        let kinds = two_pass_kinds(&items, 4);
+        eprintln!("ADV_RUST_PARALLEL_TOOL_MSGS kinds={kinds:?}");
+        // At least one result must survive at the request end.
+        let kept = ["a#1", "a#2"]
+            .iter()
+            .filter(|id| kinds.get(**id).map(String::as_str) == Some("skeleton_real"))
+            .count();
+        assert!(kept >= 1, "{kinds:?}");
+        assert_eq!(kinds.get("a#2").map(String::as_str), Some("skeleton_real"));
+    }
+
+    #[test]
+    fn adv_request_end_opencode_single_assistant_message_all_blocks_assistant_role() {
+        // The OpenCode projection: text, call and result blocks share one assistant
+        // message and the assistant role. Removing the arc strands the assistant text.
+        let large = serde_json::json!({ "content": "z".repeat(5000) });
+        let items = vec![
+            adv_item("u#0", 1, SelMessageRole::NonAssistant, SelKind::Text, None),
+            adv_item("a#0", 2, SelMessageRole::Assistant, SelKind::Text, None),
+            adv_item(
+                "a#1",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large),
+                Some("a#1"),
+            ),
+            adv_item(
+                "a#2",
+                2,
+                SelMessageRole::Assistant,
+                adv_result(),
+                Some("a#1"),
+            ),
+        ];
+        let kinds = two_pass_kinds(&items, 2);
+        eprintln!("ADV_RUST_OPENCODE_ASSISTANT_END kinds={kinds:?}");
+        assert_eq!(kinds.get("a#1").map(String::as_str), Some("skeleton_real"));
+    }
+
+    #[test]
+    fn adv_request_end_result_then_trailing_system_item() {
+        // A trailing system block must not be taken as the request end.
+        let large = serde_json::json!({ "content": "z".repeat(5000) });
+        let items = vec![
+            adv_item("u#0", 1, SelMessageRole::NonAssistant, SelKind::Text, None),
+            adv_item("a#0", 2, SelMessageRole::Assistant, SelKind::Text, None),
+            adv_item(
+                "a#1",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large),
+                Some("a#1"),
+            ),
+            adv_item(
+                "t#0",
+                3,
+                SelMessageRole::NonAssistant,
+                adv_result(),
+                Some("a#1"),
+            ),
+            adv_item("s#0", 4, SelMessageRole::System, SelKind::Text, None),
+        ];
+        let kinds = two_pass_kinds(&items, 4);
+        eprintln!("ADV_RUST_TRAILING_SYSTEM kinds={kinds:?}");
+        assert_eq!(kinds.get("a#1").map(String::as_str), Some("skeleton_real"));
+    }
     #[test]
     fn drop_wins_over_edit_marker() {
         // c1 is an older edit to a.ts (edit_marker candidate) AND under the two-pass

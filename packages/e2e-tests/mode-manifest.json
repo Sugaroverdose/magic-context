@@ -244,6 +244,21 @@
             ]
         },
         {
+            "path": "tests/adv-real-or-absent-bytes.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "adversarial real OpenCode host drive: byte identity of real-or-absent drops from the bust pass through later defer passes over a mixed newest-call window, under an Anthropic pairing and prefill validator",
+            "contract_refs": [
+                "PI-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/real-or-absent-drops.test.ts",
             "tier": "ts-only",
             "invocation": {

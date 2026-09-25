@@ -105,6 +105,51 @@ export function hasSmallToolInput(target: TagTarget | undefined): boolean {
 export type ConvertedToolDropMode = "skeleton_real" | "full";
 
 /**
+ * HARD fold reasons whose trigger already loses the provider's cached prefix
+ * whatever bytes Magic Context serves: a different model has its own cache, a
+ * changed system prompt precedes every message, and an idle TTL expiry means
+ * the cache was evicted. Other reasons only bust when the fold changes the
+ * served bytes (see foldChangesServedPrefix).
+ */
+export const CACHE_LOSING_FOLD_REASONS: ReadonlySet<string> = new Set([
+    "model_change",
+    "system_hash",
+    "ttl_idle",
+]);
+
+/** The cached m[0]/m[1] bytes a pass serves ahead of the conversation tail. */
+export interface ServedPrefixBytes {
+    m0Bytes: Uint8Array | null;
+    m1Bytes: Uint8Array | null;
+    muralDataUrl?: string | null;
+}
+
+function sameBytes(left: Uint8Array | null, right: Uint8Array | null): boolean {
+    if (left === null || right === null) return left === right;
+    return Buffer.compare(Buffer.from(left), Buffer.from(right)) === 0;
+}
+
+/**
+ * Does a HARD fold change the prefix bytes served ahead of every tool call?
+ * Legacy skeleton conversion may only ride a fold for which this is true: a
+ * fold that re-renders m[0]/m[1] byte-identically keeps the provider's cached
+ * prefix, and converting there would make the conversion itself the bust.
+ * A mural change counts only when both sides report one (Pi does not).
+ */
+export function foldChangesServedPrefix(
+    before: ServedPrefixBytes,
+    after: ServedPrefixBytes,
+): boolean {
+    if (!sameBytes(before.m0Bytes, after.m0Bytes)) return true;
+    if (!sameBytes(before.m1Bytes, after.m1Bytes)) return true;
+    return (
+        before.muralDataUrl !== undefined &&
+        after.muralDataUrl !== undefined &&
+        (before.muralDataUrl ?? null) !== (after.muralDataUrl ?? null)
+    );
+}
+
+/**
  * Convert every dropped tool call that still serves the legacy
  * `{"dropped": "[dropped §N§]"}` argument marker to the real-or-absent rule,
  * persisting the new mode, and return the conversions so the caller can render
