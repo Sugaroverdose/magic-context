@@ -30,6 +30,7 @@ import {
     getCurrentToolSetHash,
     recordToolDefinition,
 } from "../../features/magic-context/tool-definition-tokens";
+import { resolveCtxReduceAvailabilityFromMessages } from "../../hooks/magic-context/ctx-reduce-availability";
 import {
     deriveHistorianChunkTokens,
     resolveHistorianContextLimit,
@@ -325,6 +326,56 @@ export function recordV2ToolDefinitions(draft: SessionContext): void {
             tool.input,
         );
     }
+}
+
+/**
+ * Run the system-prompt handler over one context draft and write its result back.
+ *
+ * The handler only compares and records the system-prompt hash once the session's
+ * ctx_reduce verdict is frozen, because that verdict chooses the guidance text.
+ * When nothing has frozen the verdict yet in this process, the handler falls
+ * back to reading the first user message from OpenCode 1's `message` table. On
+ * OpenCode 2 that read never succeeds (its store has a different schema), so
+ * without freezing the verdict here first, the first pass after every restart
+ * left the verdict provisional and skipped the hash comparison. A restart that changed the system
+ * prompt then sent the new prompt on that first pass (so the provider cache was
+ * lost there anyway) and only detected the change on the second pass, whose
+ * separate HARD fold rebuilt the cache a second time.
+ *
+ * The verdict is therefore frozen first, from this draft's messages, with the
+ * same resolver and the same message shape the message transform later in this
+ * pass freezes it from (the adapted messages carry no per-message tools map, see
+ * payload.ts), so it can only freeze to the value the transform would have
+ * frozen. A draft with no user message leaves the verdict provisional, as before.
+ * Any future read of OpenCode 2's ctx_reduce permissions has to run before this
+ * call: once frozen, the verdict never changes for the session.
+ */
+export async function applyV2SystemPrompt(
+    systemPrompt: Pick<ReturnType<typeof createSystemPromptHashHandler>, "handler">,
+    draft: Pick<SessionContext, "sessionID" | "model" | "messages" | "system">,
+): Promise<void> {
+    resolveCtxReduceAvailabilityFromMessages(
+        draft.sessionID,
+        draft.messages.map((message) => ({ info: { role: message.role } })),
+    );
+    const system = { system: draft.system.map((part) => String(part.text ?? "")) };
+    await systemPrompt.handler(
+        {
+            sessionID: draft.sessionID,
+            model: { providerID: draft.model.providerID, modelID: draft.model.id },
+        },
+        system,
+    );
+    const originals = [...draft.system];
+    draft.system.splice(
+        0,
+        draft.system.length,
+        ...system.system.map((text, index) => ({
+            ...originals[index],
+            type: "text",
+            text,
+        })),
+    );
 }
 
 export async function registerContext(context: V2Context) {
@@ -889,24 +940,7 @@ export async function registerContext(context: V2Context) {
                 injectionEnabled: config.system_prompt_injection.enabled,
                 injectionSkipSignatures: config.system_prompt_injection.skip_signatures,
             });
-            const system = { system: draft.system.map((part) => String(part.text ?? "")) };
-            await systemPrompt.handler(
-                {
-                    sessionID: draft.sessionID,
-                    model: { providerID: draft.model.providerID, modelID: draft.model.id },
-                },
-                system,
-            );
-            const originals = [...draft.system];
-            draft.system.splice(
-                0,
-                draft.system.length,
-                ...system.system.map((text, index) => ({
-                    ...originals[index],
-                    type: "text",
-                    text,
-                })),
-            );
+            await applyV2SystemPrompt(systemPrompt, draft);
             await preloadTokenizer();
             passDuties ??= createChatMessageHook({
                 db,

@@ -23,7 +23,7 @@ describe("mode manifest validator", () => {
         // list below and nothing else, because tier "excluded" never enters a TS or
         // Rust invocation list. A ts-only OpenCode 2 file also moves the TS and
         // opencode2 counts in the next test.
-        expect(validation.files.length).toBe(115);
+        expect(validation.files.length).toBe(116);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -84,6 +84,7 @@ describe("mode manifest validator", () => {
             "tests/opencode2/over-limit-recovery.test.ts",
             "tests/opencode2/probes.test.ts",
             "tests/opencode2/prompt-surface-s6.test.ts",
+            "tests/opencode2/restart-system-prompt-change.test.ts",
             "tests/opencode2/rpc-s2-listener.test.ts",
             "tests/opencode2/runner.test.ts",
             "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",
