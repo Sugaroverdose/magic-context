@@ -43,16 +43,16 @@ test("a real todowrite call projects a synthetic reminder on priced and cached O
     };`);
     let host: Awaited<ReturnType<typeof spawnOpencode2>> | undefined;
     try {
-        const options = {
+        host = await spawnOpencode2({
             existingIsolation: fixture,
             probePlugin: probe,
+            additionalModelIDs: ["mock-model-alt"],
             modelContextLimit: 100_000,
             modelOutputLimit: 1024,
             compactionAuto: false,
             magicContextConfig: { execute_threshold_percentage: 20, historian: { disable: true },
                 dreamer: { disable: true }, memory: { enabled: false } },
-        };
-        host = await spawnOpencode2(options);
+        });
         const mock = host.mock;
         mock.setDefault({ text: "ok", usage: { input_tokens: 1000, output_tokens: 20 } });
         let issued = false;
@@ -64,7 +64,7 @@ test("a real todowrite call projects a synthetic reminder on priced and cached O
                 name: "todowrite", arguments: JSON.stringify({ todos }) }],
                 usage: { input_tokens: 1000, output_tokens: 20 } };
         });
-        let client = OpenCode.make({ baseUrl: host.url,
+        const client = OpenCode.make({ baseUrl: host.url,
             headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
         const session = await client.session.create({ location: { directory: fixture.cwd },
             model: { providerID: "openai", id: "mock-model" } });
@@ -74,23 +74,16 @@ test("a real todowrite call projects a synthetic reminder on priced and cached O
         expect(issued).toBe(true);
         const contextPath = join(fixture.env.XDG_DATA_HOME!, "cortexkit", "magic-context", "context.db");
         await until(() => todoState(contextPath, session.id).includes("Finish the fixture"), "persisted todowrite state");
-        await host.stopHost();
-        host = undefined;
-        const stateDb = new Database(contextPath);
-        try {
-            const row = stateDb.prepare("SELECT cached_m0_upgrade_state AS upgrade FROM session_meta WHERE session_id = ?")
-                .get(session.id) as { upgrade: string | null } | undefined;
-            if (!row?.upgrade || !/\|mural-enabled:[01]/.test(row.upgrade))
-                throw new Error("initial fold did not persist a render configuration");
-            stateDb.prepare("UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?")
-                .run(row.upgrade.replace(/\|mural-enabled:([01])/, (_, value: string) =>
-                    `|mural-enabled:${value === "0" ? "1" : "0"}`), session.id);
-        } finally { stateDb.close(); }
-        host = await spawnOpencode2({ ...options,
-            magicContextConfig: { ...options.magicContextConfig, memory: { enabled: true } } });
-        client = OpenCode.make({ baseUrl: host.url,
-            headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
-        await waitForPluginActive(client, fixture.cwd);
+        // The priced pass must be one that really loses the provider's cached
+        // prefix. Switching the model does: the provider cache is per model, so
+        // the next pass runs a HARD fold for model_change and every mutation
+        // lane, the synthetic todo included, may ride it. A fold that only
+        // re-renders the prefix byte-identically (for example a render-config
+        // marker change with nothing new to render) keeps the cache alive and
+        // correctly withholds the synthetic todo, so it cannot serve as the
+        // priced pass here.
+        await client.session.switchModel({ sessionID: session.id,
+            model: { providerID: "openai", id: "mock-model-alt" } });
         await client.session.prompt({ sessionID: session.id, text: "use the todo reminder" });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
         let callID = "";
@@ -102,13 +95,31 @@ test("a real todowrite call projects a synthetic reminder on priced and cached O
                 return /^mc_synthetic_todo_[0-9a-f]{16}$/.test(callID);
             } finally { pricedDb.close(); }
         }, "persisted synthetic todo anchor on the priced pass");
+        // The log is flushed asynchronously, so wait for the priced pass's fold
+        // decision rather than reading the file once. The model switch also
+        // changes the system prompt hash, so either cache-losing reason may be
+        // the one the fold reports.
+        const pricedFold = /HARD fold decision: reason=(model_change|system_hash) executed=true bustsServedPrefix=true/;
+        let pricedLog = "";
+        await until(() => pricedFold.test(pricedLog = readFileSync(fixture.env.MAGIC_CONTEXT_LOG_PATH, "utf8")),
+            "a HARD fold that busts the served prefix on the priced pass");
         await client.session.prompt({ sessionID: session.id, text: "replay the todo reminder" });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
         const replayed = host.mock.requests().filter((request) =>
             JSON.stringify(request.body).includes(callID));
         expect(replayed.length).toBeGreaterThanOrEqual(2);
-        const log = readFileSync(fixture.env.MAGIC_CONTEXT_LOG_PATH, "utf8");
-        expect(log).toContain("rematerialized=false, reason=cache_hit");
+        // Every request that carries the anchor carries the same synthetic
+        // reminder bytes: the priced pass projects it once, later passes replay it.
+        const anchorItems = replayed.map((request) => {
+            const body = request.body as { input?: unknown[]; messages?: unknown[] };
+            const items = body.input ?? body.messages ?? [];
+            return JSON.stringify(items.filter((item) => JSON.stringify(item).includes(callID)));
+        });
+        expect(anchorItems[0]).not.toBe("[]");
+        expect(new Set(anchorItems).size).toBe(1);
+        // The replay pass after the priced pass must be served from cache.
+        await until(() => readFileSync(fixture.env.MAGIC_CONTEXT_LOG_PATH, "utf8").slice(pricedLog.length)
+            .includes("rematerialized=false, reason=cache_hit"), "a cache-hit replay pass after the priced pass");
         const schemaTrace = readFileSync(join(fixture.root, "llm-schema-guard.jsonl"), "utf8");
         expect(schemaTrace.split("\n").filter((line) => line.startsWith(`PASS ${session.id} `)).length).toBeGreaterThanOrEqual(3);
     } finally {
