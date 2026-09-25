@@ -5838,17 +5838,28 @@ fn apply_once(
             .retain(|unit| !unit.key.starts_with("strip:native_reasoning_keep:"));
     }
     if serializer_profile == Some(SerializerProfile::OpencodeAiSdk) && req.serve_native {
+        let mut keep_mids = Vec::new();
         if let Some(mid) = latest_assistant_reasoning_mutation_exempt_mid(&req.messages) {
             if req.messages.iter().any(|message| {
                 message.mid == mid
                     && !cleared_mids.contains(mid)
                     && message.ck.content.iter().any(is_reasoning_block)
             }) {
-                let key = format!("strip:native_reasoning_keep:{mid}");
-                if !core.frozen_units.iter().any(|unit| unit.key == key) {
-                    core.frozen_units
-                        .push(strip_unit("native_reasoning_keep", mid, ""));
-                }
+                keep_mids.push(mid.to_string());
+            }
+        }
+        if !is_provider_prefix_mutation_pass {
+            keep_mids.extend(unseen_demoted_reasoning_mids(
+                req,
+                &loaded.meta,
+                &cleared_mids,
+            ));
+        }
+        for mid in keep_mids {
+            let key = format!("strip:native_reasoning_keep:{mid}");
+            if !core.frozen_units.iter().any(|unit| unit.key == key) {
+                core.frozen_units
+                    .push(strip_unit("native_reasoning_keep", &mid, ""));
             }
         }
     }
@@ -9672,6 +9683,41 @@ fn overlay_target_was_served(
     served_output_fingerprint.iter().any(|served| {
         served.block_id == block_id || (block_index == 0 && served.block_id == message_id)
     })
+}
+
+/// Signed assistants that may have reached the provider without passing through a module
+/// response.
+///
+/// A keep for the newest signed assistant is normally registered on the pass where it is newest.
+/// When that pass fails, the host serves its last-known-good replay followed by the raw OpenCode
+/// tail, so the provider caches the assistant verbatim while the module never records it. On the
+/// next deferred pass it is already demoted; without a keep the module would re-encode it as a
+/// historical message (overlays applied, signed reasoning dropped) and rewrite cached bytes on a
+/// pass that is not allowed to reprice the prefix.
+///
+/// Only messages newer than the newest live ordinal of the previous module pass qualify: the
+/// module has never processed them. A message the module did process (including one that a
+/// transient subset request omitted and a later request restores) keeps its existing handling,
+/// and in a steady-state defer only the newest assistant is new, so this yields nothing extra.
+fn unseen_demoted_reasoning_mids(
+    req: &TransformRequest,
+    previous_meta: &ModuleMeta,
+    cleared_mids: &HashSet<String>,
+) -> Vec<String> {
+    if previous_meta.newest_live_block_id.is_none() {
+        return Vec::new();
+    }
+    req.messages
+        .iter()
+        .filter(|message| {
+            message.ordinal > previous_meta.newest_live_ordinal
+                && message.ck.role == "assistant"
+                && !message.ck.meta.synthetic
+                && !cleared_mids.contains(&message.mid)
+                && message.ck.content.iter().any(is_reasoning_block)
+        })
+        .map(|message| message.mid.clone())
+        .collect()
 }
 
 fn user_hint_target_was_served(meta: &ModuleMeta, block_id: &str) -> bool {

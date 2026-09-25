@@ -25223,6 +25223,90 @@ mod tests {
             .all(|block| block.synthetic));
     }
 
+    /// When a module call fails, the host serves its last-known-good replay followed by the raw
+    /// OpenCode tail. An assistant that was newest only on that failed pass therefore reached the
+    /// provider verbatim, signed reasoning included, but the module never saw it as newest and so
+    /// never registered a keep for it. The next deferred passes, where that assistant is already
+    /// demoted, must still replay the bytes the provider cached, until a priced pass.
+    #[tokio::test(flavor = "current_thread")]
+    async fn defer_after_failed_pass_holds_fallback_served_signed_reasoning_until_priced_pass() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let mut native = vec![
+            json!({"info":{"id":"user","role":"user"},"parts":[{"type":"text","text":"start"}]}),
+            json!({"info":{"id":"previous","role":"assistant"},"parts":[{"type":"text","text":"earlier step"}]}),
+        ];
+        let make_request = |native: &Vec<Value>| {
+            let decoded = codec::decode_opencode(native);
+            let mut req = request(decoded.messages);
+            req["serializer_profile"] = json!("opencode-aisdk");
+            req["serve_native"] = json!(true);
+            req["tool_present"] = json!(true);
+            req["provider_id"] = json!("anthropic");
+            req["model_key"] = json!("claude-fable-5-1");
+            req["mid_turn"] = json!(false);
+            req["native_messages"] = json!(native);
+            req
+        };
+        let step = |index: usize| {
+            json!({"info":{"id":format!("step-{index}"),"role":"assistant"},"parts":[
+                {"type":"reasoning","text":format!("adaptive step {index}"),"metadata":{"anthropic":{"signature":format!("signature-{index}")}}},
+                {"type":"tool","tool":"work","callID":format!("call-{index}"),"state":{"status":"completed","input":{"action":"show"},"output":format!("done {index}")}}
+            ]})
+        };
+        let warm = call_transform_request(&handler, make_request(&native)).await;
+        assert_eq!(warm["action"], "HARD");
+        // The failed pass: the module is never consulted, and the host serves the previous
+        // module output plus step-0 exactly as OpenCode stored it.
+        native.push(step(0));
+        let mut fallback_served = warm["native_messages"].as_array().unwrap().clone();
+        fallback_served.push(step(0));
+        let hash = |messages: &[Value]| -> String {
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(messages).unwrap())
+            )
+        };
+        let mut previous = fallback_served;
+        for index in 1..3 {
+            native.push(step(index));
+            let deferred = call_transform_request(&handler, make_request(&native)).await;
+            assert_eq!(deferred["action"], "SOFT+", "{deferred}");
+            let served = deferred["native_messages"].as_array().unwrap();
+            assert!(served.len() > previous.len());
+            assert_eq!(
+                hash(&served[..previous.len()]),
+                hash(&previous),
+                "a defer after a failed pass must not rewrite the fallback-served prefix: {:?}",
+                served
+                    .iter()
+                    .zip(&previous)
+                    .enumerate()
+                    .filter(|(_, (new, old))| new != old)
+                    .collect::<Vec<_>>()
+            );
+            previous = served.clone();
+        }
+        assert!(store
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "strip:native_reasoning_keep:step-0"));
+        let mut priced_request = make_request(&native);
+        priced_request["render_config"] = json!("independent-priced-config-change");
+        let priced = call_transform_request(&handler, priced_request).await;
+        assert_eq!(priced["action"], "HARD");
+        assert!(!store
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "strip:native_reasoning_keep:step-0"));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn post_hard_defer_preserves_demoted_native_thinking_until_priced_pass() {
         let producer = Arc::new(ProducerState::default());
