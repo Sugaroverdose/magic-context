@@ -3711,7 +3711,7 @@ fn get_opencode_session_cache_events_from_conn(
                  CAST(json_extract(data, '$.finish') AS TEXT),
                  CAST(json_extract(data, '$.parentID') AS TEXT),
                  CAST(COALESCE(json_extract(data, '$.providerID'), json_extract(data, '$.model.providerID')) AS TEXT),
-                 CAST(COALESCE(json_extract(data, '$.modelID'), json_extract(data, '$.model.modelID')) AS TEXT)
+                 CAST(COALESCE(json_extract(data, '$.modelID'), json_extract(data, '$.model.id')) AS TEXT)
          FROM message
          WHERE session_id = ?1
            AND json_extract(data, '$.role') = 'assistant'
@@ -3727,7 +3727,7 @@ fn get_opencode_session_cache_events_from_conn(
                   + COALESCE(CAST(json_extract(data, '$.tokens.cache.write') AS INTEGER), 0),
                 CAST(json_extract(data, '$.agent') AS TEXT), NULL, NULL,
                 CAST(COALESCE(json_extract(data, '$.providerID'), json_extract(data, '$.model.providerID')) AS TEXT),
-                CAST(COALESCE(json_extract(data, '$.modelID'), json_extract(data, '$.model.modelID')) AS TEXT)
+                CAST(COALESCE(json_extract(data, '$.modelID'), json_extract(data, '$.model.id')) AS TEXT)
          FROM session_message
          WHERE session_id = ?1
            AND type = 'assistant'
