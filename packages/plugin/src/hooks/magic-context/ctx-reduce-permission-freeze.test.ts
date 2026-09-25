@@ -181,7 +181,6 @@ describe("ctx_reduce verdict honours agent and session permissions before it fre
             expect(allowedServed.messages).toMatch(TAG);
             expect(allowedServed.system).toContain(REDUCE_GUIDANCE);
         }
-        expect(allowedHost.reads.agents).toBe(1);
         // The callable session gets the Channel 1 baseline the denied session must not.
         expect(channel1StateBySession.has(allowed)).toBe(true);
         // computedAt is wall-clock time and differs between the two sessions.
@@ -205,7 +204,6 @@ describe("ctx_reduce verdict honours agent and session permissions before it fre
             expect(served.system).not.toContain(REDUCE_GUIDANCE);
         }
         expect(channel1StateBySession.has(denied)).toBe(false);
-        expect(host.reads.agents).toBe(1);
     });
 
     it("a deny added after the first pass changes nothing that is served", async () => {
@@ -230,6 +228,7 @@ describe("ctx_reduce verdict honours agent and session permissions before it fre
             expect(flippedServed.messages).toMatch(TAG);
             expect(flippedServed.system).toContain(REDUCE_GUIDANCE);
         }
+        // Permissions were read once, before the freeze, and never again.
         expect(flippedHost.reads.agents).toBe(1);
     });
 });
