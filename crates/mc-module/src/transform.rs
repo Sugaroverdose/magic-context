@@ -4324,6 +4324,71 @@ fn apply_once(
     // Subagents execute a reductions-only branch, not the prefix plan. Inherited
     // HARD/reconcile advisories cannot price automatic reductions without a fold.
     let prefix_materialization_enabled = !req.is_subagent;
+    let profile_transition = !loaded.meta.last_serializer_profile.is_empty()
+        && loaded.meta.last_serializer_profile != req.serializer_profile;
+    // A known previous identity that differs from this request means the provider's
+    // cached prefix is gone whatever bytes this pass serves.
+    let identity_changed = |last: &str, current: Option<&str>| {
+        !last.is_empty() && current.is_some_and(|current| current != last)
+    };
+    let hard_fold_loses_provider_cache = scheduler_outcome.idle_ttl_fired
+        || profile_transition
+        || identity_changed(&loaded.meta.last_provider_id, req.provider_id.as_deref())
+        || identity_changed(&loaded.meta.last_model_key, req.model_key.as_deref())
+        || identity_changed(
+            &loaded.meta.last_system_prompt_hash,
+            Some(req.system_prompt_hash.as_str()),
+        );
+    // A store-marker trigger (a project-memory epoch or an external memory revision) asks
+    // for a HARD because rendered content MAY have changed, not because the provider cache
+    // died. Such a HARD prices automatic reductions only when hard_fold_busts_served_prefix,
+    // the same predicate that gates legacy skeleton conversion in the HARD branch, says it
+    // busts the served prefix. Otherwise the provider's cached prefix survives the pass and
+    // a queued drop or heuristic riding it would originate the pass's only bust. The HARD
+    // itself still runs so its markers commit. Other HARD triggers change bytes by nature
+    // or were not measured, so they keep pricing reductions without a pre-render.
+    let store_marker_hard_keeps_provider_cache = prefix_materialization_enabled
+        && (external_revision_changed || project_memory_epoch_hard_due)
+        && !(reasoning_exemption_repair
+            || pre_snapshot_inputs_changed
+            || first_fold_due
+            || boundary_divergence_recut.is_some()
+            || system_absorb_hard_due
+            || hard_fold_loses_provider_cache)
+        && loaded.meta.initialized
+        && !loaded.meta.bootstrap_seed_fold_pending
+        && !render_config_changed
+        && !reconcile_hard_due
+        && !lineage_state.force_hard
+        && !is_legacy_baseline(&loaded.core)
+        && valid_m0m1_shape(&loaded.core)
+        && !cached_m1_missing(&loaded.core)
+        && compose_hard_fold_m0(
+            store,
+            req,
+            ctx,
+            serializer_profile,
+            estimate_tokens,
+            incremental_history,
+            &mut timings.compose,
+        )
+        .is_some_and(|comp| {
+            !hard_fold_busts_served_prefix(
+                &loaded.core,
+                &comp.m0_bytes,
+                M1_PLACEHOLDER,
+                comp.mural.as_ref(),
+                loaded.meta.coverage_ordinal != comp.coverage_ordinal,
+                hard_fold_loses_provider_cache,
+            )
+        });
+    let hard_fold_prices_mutations = hard_fold_requested && !store_marker_hard_keeps_provider_cache;
+    if store_marker_hard_keeps_provider_cache {
+        tracing::info!(
+            "mc-module: [{}] store-marker HARD keeps the provider's cached prefix; it does not price automatic reductions",
+            req.session_id
+        );
+    }
     let force_band_active = usage_percentage
         >= scheduler::escalation_bands(ctx.execute_threshold_percentage)
             .force_materialize_percentage;
@@ -4332,7 +4397,7 @@ fn apply_once(
         && (!loaded.meta.initialized
             || render_config_changed
             || cached_m1_missing(&loaded.core)
-            || hard_fold_requested
+            || hard_fold_prices_mutations
             || reconcile_hard_due
             || lineage_state.force_hard
             || (scheduler_outcome.pass != scheduler::PassDecision::Defer
@@ -4377,7 +4442,7 @@ fn apply_once(
             !loaded.meta.initialized
                 || render_config_changed
                 || reconcile_hard_due
-                || hard_fold_requested
+                || hard_fold_prices_mutations
                 || cached_m1_missing_due,
         );
     // Keep selection deferred when the producer gate blocks it.
@@ -4633,21 +4698,6 @@ fn apply_once(
     } else if lineage_state.force_hard {
         plan = PassPlan::Hard;
     }
-    let profile_transition = !loaded.meta.last_serializer_profile.is_empty()
-        && loaded.meta.last_serializer_profile != req.serializer_profile;
-    // A known previous identity that differs from this request means the provider's
-    // cached prefix is gone whatever bytes this pass serves.
-    let identity_changed = |last: &str, current: Option<&str>| {
-        !last.is_empty() && current.is_some_and(|current| current != last)
-    };
-    let hard_fold_loses_provider_cache = scheduler_outcome.idle_ttl_fired
-        || profile_transition
-        || identity_changed(&loaded.meta.last_provider_id, req.provider_id.as_deref())
-        || identity_changed(&loaded.meta.last_model_key, req.model_key.as_deref())
-        || identity_changed(
-            &loaded.meta.last_system_prompt_hash,
-            Some(req.system_prompt_hash.as_str()),
-        );
     let mut materialize_reason = classify_materialize_reason(MaterializeReasonInputs {
         plan,
         bootstrap_due: !loaded.meta.initialized || loaded.meta.bootstrap_seed_fold_pending,
@@ -8063,7 +8113,10 @@ fn effective_reductions(
 /// elsewhere), or when the m0/m1/mural bytes it serves differ from the ones frozen
 /// before it. A HARD that re-renders all of these byte-identically (for example a
 /// memory epoch bump with no content change) keeps the prefix cached, so work that
-/// only rides a bust, such as legacy skeleton conversion, must not run on it.
+/// only rides a bust must not run on it. This is the one predicate for that decision:
+/// the HARD branch consults it before legacy skeleton conversion, and the pass planner
+/// consults it (on a pre-composed m0) before a store-marker HARD may price pending
+/// drops, heuristics, synthetic todo and other automatic reductions.
 fn hard_fold_busts_served_prefix(
     loaded_core: &CoreState,
     new_m0: &str,
@@ -8238,6 +8291,55 @@ fn render_mural_block(mural: &crate::m0_compose::M0MuralBlock) -> FrozenUnit {
         durability_class: mc_core::DurabilityClass::Lineage,
         reset_rule: mural.content_hash.clone(),
     }
+}
+
+/// Composes the m0 a HARD on this pass would render, with the same inputs the HARD
+/// branch uses, so a caller can ask hard_fold_busts_served_prefix before selection
+/// whether that fold would change the served prefix. A load or compose failure
+/// returns None, and the caller then keeps the permission every HARD had before.
+fn compose_hard_fold_m0(
+    store: &McStore,
+    req: &TransformRequest,
+    ctx: &ProducerContext<'_>,
+    serializer_profile: Option<SerializerProfile>,
+    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    incremental_history: bool,
+    timings: &mut crate::m0_compose::ComposeTimings,
+) -> Option<crate::m0_compose::M0Composition> {
+    let compartments = store.load_compartments(&req.session_id).ok()?;
+    let coverage_bounds = coverage_bounds_from_compartments(&compartments).ok()?;
+    let covered_system_messages = covered_system_messages_for_coverage(
+        req,
+        coverage_bounds.map(|(_, end)| end),
+        coverage_bounds.map(|(start, _)| start),
+        serializer_profile,
+    );
+    crate::m0_compose::compose_m0_from_store_timed(
+        store,
+        &crate::m0_compose::M0ComposeInputs {
+            session_id: &req.session_id,
+            project_path: ctx.project_path,
+            project_directory: ctx.project_directory,
+            now_ms: ctx.now_ms,
+            history_budget_tokens: crate::decay_render::history_local_budget(
+                ctx.history_budget_tokens,
+                req.model_key.as_deref(),
+            ),
+            covered_system_messages: &covered_system_messages,
+            memory_enabled: ctx.memory_enabled,
+            host_backed_memory_ids: serializer_profile
+                != Some(SerializerProfile::ClaudeCodeAnthropic),
+            memory_budget_tokens: ctx.memory_budget_tokens,
+            user_profile_budget_tokens: ctx.user_profile_budget_tokens,
+            inject_docs: ctx.inject_docs,
+            temporal_awareness: ctx.temporal_awareness,
+            mural: m0_mural_input(req, serializer_profile),
+        },
+        estimate_tokens,
+        incremental_history,
+        timings,
+    )
+    .ok()
 }
 
 /// The m1 placeholder unit (a HARD resets m1 to it; m1 is never fully empty).
@@ -19384,6 +19486,91 @@ pub(crate) mod tests {
             let replay = transform(&s, &request, &ctx).unwrap();
             assert_eq!(applied.messages(), replay.messages());
         }
+    }
+
+    #[test]
+    fn identical_bytes_epoch_hard_holds_pending_drop_and_serves_identical_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let request = with_usage(
+            req(
+                "ses",
+                "cfg0",
+                vec![item("a", 1, "raw"), item("tail", 2, "pending drop")],
+            ),
+            10,
+            100,
+        );
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        transform(&s, &request, &ctx).unwrap();
+        let baseline = transform(&s, &request, &ctx).unwrap();
+        assert_ne!(baseline.action, "HARD");
+        s.append_pending_agent_drops("ses", &["tail#0".to_string()], 1)
+            .unwrap();
+        let held = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(held.messages(), baseline.messages());
+
+        // A project-memory epoch change that alters no rendered content.
+        let mut loaded = s.load("ses").unwrap();
+        loaded.meta.project_memory_epoch_pending = true;
+        s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let hard = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(hard.action, "HARD");
+        assert_eq!(m0_bytes(&hard), m0_bytes(&baseline));
+        assert_eq!(m1_bytes(&hard), m1_bytes(&baseline));
+        assert!(!s.load("ses").unwrap().meta.project_memory_epoch_pending);
+        // The fold reproduced the served pair, so the queued drop must not ride it.
+        assert_eq!(
+            s.load_pending_agent_drops("ses").unwrap().len(),
+            1,
+            "an identical-bytes HARD must not consume the queued drop"
+        );
+        assert_eq!(
+            serde_json::to_vec(&hard.ck_messages).unwrap(),
+            serde_json::to_vec(&baseline.ck_messages).unwrap()
+        );
+        let replay = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(replay.messages(), baseline.messages());
+    }
+
+    #[test]
+    fn content_changing_epoch_hard_still_drains_pending_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let request = with_usage(
+            req(
+                "ses",
+                "cfg0",
+                vec![item("a", 1, "raw"), item("tail", 2, "pending drop")],
+            ),
+            10,
+            100,
+        );
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        transform(&s, &request, &ctx).unwrap();
+        let baseline = transform(&s, &request, &ctx).unwrap();
+        s.append_pending_agent_drops("ses", &["tail#0".to_string()], 1)
+            .unwrap();
+        // The compartment text changes without a new sequence, so only the HARD
+        // re-render can surface it.
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "REWRITTEN SUMMARY")])
+            .unwrap();
+        let mut loaded = s.load("ses").unwrap();
+        loaded.meta.project_memory_epoch_pending = true;
+        s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let hard = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(hard.action, "HARD");
+        assert_ne!(m0_bytes(&hard), m0_bytes(&baseline));
+        assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
+        assert!(frozen_red_payload(&s.load("ses").unwrap().core, "tail#0").is_some());
+        let replay = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(replay.messages(), hard.messages());
     }
 
     #[test]
