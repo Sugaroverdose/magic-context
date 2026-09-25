@@ -39,7 +39,11 @@ SYSTEM_REMINDER_FULL_PATTERN = re.compile(
 )
 CHANNEL_REMINDER_PATTERN = re.compile(
     r"(?P<reminder>(?:\n\n|^)<system-reminder>\n"
-    r"(?P<body>(?:Housekeeping(?::| backlog:)|Reminder:|Routine housekeeping:)[^\n]*"
+    # Older copy stays in captured wires because served reminders replay verbatim, so both the
+    # previous openers and the current ones (including bodies that open on the output summary)
+    # must be recognised.
+    r"(?P<body>(?:Housekeeping(?::| backlog:)|Reminder:|Routine housekeeping:"
+    r"|Still unstamped:|Your next step:|(?:\d+ )?spent tool outputs? \(~\d+k tokens\) are )[^\n]*"
     r"(?:\noldest reclaimable: [^\n]*)?)"
     r"\n</system-reminder>)$"
 )
@@ -732,22 +736,27 @@ def reminder_shape(value: str) -> tuple[str, str, str, bool, str] | None:
         return None
     body = match.group("body")
     first_line = body.splitlines()[0]
-    if first_line.startswith("Routine housekeeping:"):
+    if first_line.startswith(("Routine housekeeping:", "Your next step:")):
         channel = "channel2"
         band = "ceiling"
-    elif first_line.startswith("Reminder:"):
+    elif first_line.startswith(("Reminder:", "Still unstamped:")):
         channel = "channel1"
         band = "sticky"
-    elif first_line.startswith("Housekeeping backlog:"):
+    elif first_line.startswith("Housekeeping backlog:") or " are still unstamped." in first_line:
         channel = "channel1"
         band = "urgent"
-    elif "drop the ones" in first_line or "some earlier tool outputs" in first_line:
+    elif (
+        "drop the ones" in first_line
+        or "some earlier tool outputs" in first_line
+        or "Stamp each output" in first_line
+    ):
         channel = "channel1"
         band = "gentle"
     else:
         channel = "channel1"
         band = "firm"
-    version = "degauged" if " are reclaimable —" in first_line else "gauged"
+    # Only the oldest copy exposed a session-window gauge; every later copy is degauged.
+    version = "gauged" if "of this session" in first_line else "degauged"
     placement = "full" if match.start("reminder") == 0 else "suffix"
     return channel, band, version, "\noldest reclaimable:" in body, placement
 

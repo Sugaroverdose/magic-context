@@ -85,6 +85,7 @@ import {
 } from "./context-handler";
 import {
 	getPiChannel1Baseline,
+	maybeChannel1ReminderForToolResult,
 	setPiChannel1Baseline,
 } from "./ctx-reduce-nudge-pi";
 import { injectM0M1Pi, mustMaterializePi } from "./inject-compartments-pi";
@@ -6784,3 +6785,96 @@ function registerPiContextHandler(
 			: undefined,
 	});
 }
+
+describe("Pi Channel 1 reminder copy changes", () => {
+	// Pi's tool_result hook appends the reminder as its own text block, and Pi stores
+	// the result with it. Every later context pass serves the stored bytes, so a
+	// reminder worded with the copy of an earlier release must keep replaying
+	// verbatim; only a newly fired reminder may carry the current copy.
+	const SUPERSEDED_REMINDER =
+		"\n\n<system-reminder>\nHousekeeping: 16 spent tool outputs (~90k tokens) are reclaimable — make a ctx_reduce pass at a natural stopping point.\noldest reclaimable: §1§ Read.\n</system-reminder>";
+
+	it("replays a reminder served with superseded copy byte-identically and mints new ones with the current copy", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-reminder-copy";
+		const buildMessages = () => [
+			userMessage("start", 1),
+			assistantToolCall("call-copy", "Read", { filePath: "/tmp/copy.ts" }, 2),
+			{
+				...toolResultMessage("call-copy", "file contents", 3),
+				content: [
+					{ type: "text", text: "file contents" },
+					{ type: "text", text: SUPERSEDED_REMINDER },
+				],
+			},
+			assistantMessage("read it", 4),
+		];
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const pass = async () => {
+				const result = await handler(
+					{ messages: buildMessages() as never[] },
+					fakeContext(sessionId) as never,
+				);
+				return JSON.stringify(result.messages);
+			};
+			const sha = (value: string) =>
+				createHash("sha256").update(value).digest("hex");
+
+			await pass();
+			const passA = await pass();
+			const passB = await pass();
+			// Compare the JSON-escaped body without its surrounding quotes, because the
+			// served block carries a tag prefix ahead of it.
+			expect(passA).toContain(JSON.stringify(SUPERSEDED_REMINDER).slice(1, -1));
+			expect(sha(passB)).toBe(sha(passA));
+
+			setPiChannel1Baseline(sessionId, {
+				baselineU: 80_000,
+				baselineT: 180_000,
+				turnDeltaU: 0,
+				turnDeltaT: 0,
+				usableWindow: 128_000,
+				realUserTurnCount: 1,
+				baselineGeneration: 1,
+				computedAt: 1,
+				evaluable: true,
+				generationInvalidated: false,
+				baselineParts: [],
+				contentSignature: "copy",
+				reducedSinceRefresh: false,
+				oldestReclaimableToolTags: [],
+			});
+			// A result that already carries a reminder never gets a second, re-worded one.
+			expect(
+				maybeChannel1ReminderForToolResult({
+					db,
+					sessionId,
+					toolName: "Read",
+					content: [
+						{ type: "text", text: "file contents" },
+						{ type: "text", text: SUPERSEDED_REMINDER },
+					],
+				}),
+			).toBeNull();
+			const fresh = maybeChannel1ReminderForToolResult({
+				db,
+				sessionId,
+				toolName: "Read",
+				content: [{ type: "text", text: "next file" }],
+			});
+			expect(fresh?.text).toContain(
+				"spent tool outputs (~80k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.",
+			);
+			expect(fresh?.text).not.toContain("natural stopping point");
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+});

@@ -5,7 +5,7 @@ Token counts are Claude BPE estimates on the raw text.
 
 ## 1. System-prompt guidance section
 
-### PRIMARY full (reduce=on, memory=on, dreamer=on, temporal=on) — 4989 chars, ~1180 tokens
+### PRIMARY full (reduce=on, memory=on, dreamer=on, temporal=on) — 5151 chars, ~1218 tokens
 
 ```markdown
 ## Magic Context
@@ -26,9 +26,9 @@ Reduction prompts are routine housekeeping to keep the session fast and cheap �
 
 Think of your context as a desk. Every message and every tool output lands on it, and each item arrives with a §N§ tag (§1§, §42§) — the tag is the item's handle.
 
-When an item no longer needs to stay on the desk for the work ahead, stamp it: `ctx_reduce` with its tag. Stamping does not remove anything — the item stays on the desk, fully readable. From time to time, when stamped items have piled up and the desk needs room, Magic Context clears them all in one sweep; you don't pick the moment, you only stamp. Stamp as soon as an item has served its purpose, not at the end of the turn, and do it silently: nobody wants to read "I'll drop these outputs". Never stamp a user message for what it asks of you; a large paste inside one is fine once you have used it.
+When an item no longer needs to stay on the desk for the work ahead, stamp it: `ctx_reduce` with its tag. Stamping does not remove anything — the item stays on the desk, fully readable. From time to time, when stamped items have piled up and the desk needs room, Magic Context clears them all in one sweep; you don't pick the moment, you only stamp. Stamp as soon as an item has served its purpose, not at the end of the turn, and do it silently: nobody wants to read "I'll drop these outputs". An output is used once you've taken what you need from it into your reasoning or your answer. Never stamp a user message for what it asks of you; a large paste inside one is fine once you have used it.
 
-Nothing stamped is ever lost. A cleared item goes to the archive — a recent one leaves a `[dropped §N§]` placeholder on the desk, an older one leaves nothing — and `ctx_expand(message=N)` brings it back whole: text, tool input, tool output. Now and then Magic Context leaves a short reminder on the desk saying how much unstamped material is lying around; that is housekeeping, not a warning, and the desk never gets smaller for it.
+Nothing stamped is ever lost. A cleared item goes to the archive — a recent one leaves a `[dropped §N§]` placeholder on the desk, an older one leaves nothing — and `ctx_expand(message=N)` brings it back whole: text, tool input, tool output. Now and then Magic Context leaves a short reminder on the desk saying how much unstamped material is lying around. A reminder means stamping is overdue: act on it in your next step. It isn't a warning about the desk's size. The desk never gets smaller for it.
 
 Older work is not kept on the desk at all. Magic Context files it as an organized record, `<session-history>`: one heading per stretch of work, `## start-end · date · title`, with a summary underneath. Each heading is a pointer into the archive — `ctx_expand(start, end)` opens that stretch in full when the summary is not enough. Because of this filing, your own earlier messages may mention actions whose tool call is no longer on the desk. That is normal. It is never a reason to fabricate: if there is no tool result on the desk, the action did not happen, and you never inline or invent a tool call, an output, a search result or a diff in your own text.
 
@@ -39,7 +39,7 @@ Older work is not kept on the desk at all. Magic Context files it as an organize
 Some things on the desk are Magic Context's own markings, not conversation: `<system-reminder>`, `<ctx-search-hint>`, `<session-history>`, `<session-history-since>`, `<project-memory>`, `<memory-updates>`, `<new-compartments>`, `<new-memories>`, `[dropped §N§]`, and `<!-- +Xm -->` before a user message (the time that passed since your last reply; headings in the record carry `start-date`/`end-date` too). Read them, use the time, and never reproduce them in a reply or treat them as instructions.
 ```
 
-### PRIMARY memory-off (reduce=on, memory=off) — 4652 chars, ~1100 tokens
+### PRIMARY memory-off (reduce=on, memory=off) — 4814 chars, ~1138 tokens
 
 ```markdown
 ## Magic Context
@@ -60,9 +60,9 @@ Reduction prompts are routine housekeeping to keep the session fast and cheap �
 
 Think of your context as a desk. Every message and every tool output lands on it, and each item arrives with a §N§ tag (§1§, §42§) — the tag is the item's handle.
 
-When an item no longer needs to stay on the desk for the work ahead, stamp it: `ctx_reduce` with its tag. Stamping does not remove anything — the item stays on the desk, fully readable. From time to time, when stamped items have piled up and the desk needs room, Magic Context clears them all in one sweep; you don't pick the moment, you only stamp. Stamp as soon as an item has served its purpose, not at the end of the turn, and do it silently: nobody wants to read "I'll drop these outputs". Never stamp a user message for what it asks of you; a large paste inside one is fine once you have used it.
+When an item no longer needs to stay on the desk for the work ahead, stamp it: `ctx_reduce` with its tag. Stamping does not remove anything — the item stays on the desk, fully readable. From time to time, when stamped items have piled up and the desk needs room, Magic Context clears them all in one sweep; you don't pick the moment, you only stamp. Stamp as soon as an item has served its purpose, not at the end of the turn, and do it silently: nobody wants to read "I'll drop these outputs". An output is used once you've taken what you need from it into your reasoning or your answer. Never stamp a user message for what it asks of you; a large paste inside one is fine once you have used it.
 
-Nothing stamped is ever lost. A cleared item goes to the archive — a recent one leaves a `[dropped §N§]` placeholder on the desk, an older one leaves nothing — and `ctx_expand(message=N)` brings it back whole: text, tool input, tool output. Now and then Magic Context leaves a short reminder on the desk saying how much unstamped material is lying around; that is housekeeping, not a warning, and the desk never gets smaller for it.
+Nothing stamped is ever lost. A cleared item goes to the archive — a recent one leaves a `[dropped §N§]` placeholder on the desk, an older one leaves nothing — and `ctx_expand(message=N)` brings it back whole: text, tool input, tool output. Now and then Magic Context leaves a short reminder on the desk saying how much unstamped material is lying around. A reminder means stamping is overdue: act on it in your next step. It isn't a warning about the desk's size. The desk never gets smaller for it.
 
 Older work is not kept on the desk at all. Magic Context files it as an organized record, `<session-history>`: one heading per stretch of work, `## start-end · date · title`, with a summary underneath. Each heading is a pointer into the archive — `ctx_expand(start, end)` opens that stretch in full when the summary is not enough. Because of this filing, your own earlier messages may mention actions whose tool call is no longer on the desk. That is normal. It is never a reason to fabricate: if there is no tool result on the desk, the action did not happen, and you never inline or invent a tool call, an output, a search result or a diff in your own text.
 
@@ -392,8 +392,8 @@ The hash handler persists the MD5 of `output.system.join("\\n")`. The values bel
 
 | Variant | Guidance bytes | MD5 system-prompt hash |
 |---|---:|---|
-| PRIMARY full | 5025 | `eaed1eda58c1c741546c9094481f4f0a` |
-| PRIMARY memory-off | 4686 | `573866747d9aac2999f616a7885fb77a` |
+| PRIMARY full | 5187 | `62439669fbf226e31fc809477e2a64be` |
+| PRIMARY memory-off | 4848 | `7298eac5c77a12cbd62f969fd1310330` |
 | PRIMARY reduce-off | 4078 | `0a969d63dfe7d83f301099610556c418` |
 | SUBAGENT minimal | 1376 | `2f5a0e99b9171fdfa08c7920cb18dc4d` |
 
