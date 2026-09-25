@@ -355,7 +355,15 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             priorCompartments,
             v2NonNarrativeStoredGapRanges(db, sessionId, priorCompartments),
         );
+        // A compartment a store-projection rebase left unresolved keeps stale
+        // ordinals that can overlap its neighbour. Stored rows in that state do
+        // not change on their own, so this class of failure gets a repair
+        // attempt, a notice that names the rebuild, and a backoff.
+        const unresolvedInvolved =
+            existingValidationError !== null &&
+            priorCompartments.some((compartment) => compartment.rebaseStatus === "unresolved");
         if (
+            unresolvedInvolved &&
             existingValidationError &&
             storedCompartmentFailureBackingOff(db, sessionId, existingValidationError)
         ) {
@@ -370,14 +378,9 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             telemetry.failureReason = `existing-validation backoff: ${existingValidationError}`;
             return;
         }
-        if (
-            existingValidationError &&
-            priorCompartments.some((compartment) => compartment.rebaseStatus === "unresolved")
-        ) {
-            // A compartment left unresolved by a store-projection rebase keeps
-            // stale ordinals that can overlap its neighbour. Its neighbours
-            // usually still say where it belongs, so place it from them before
-            // giving up on the run.
+        if (unresolvedInvolved && existingValidationError) {
+            // The neighbours usually still say where the unresolved row belongs,
+            // so place it from them before giving up on the run.
             const recovery = recoverUnresolvedCompartments({
                 db,
                 sessionId,
@@ -400,12 +403,18 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             );
             // This is a real failure (stored compartments are corrupt) — record
             // it so `doctor --issue` and the >=95% abort path can see it.
-            incrementHistorianFailure(db, sessionId, existingValidationError);
+            const failCount = incrementHistorianFailure(db, sessionId, existingValidationError);
             telemetry.failureReason = `existing-validation: ${existingValidationError}`;
-            // Record the failure time like any other permanent historian failure,
-            // which is also what the backoff above measures from.
-            retainDrainReservationForRetryThrottle = true;
-            await notifyHistorianIssue(buildStoredCompartmentsInvalidNotice());
+            if (unresolvedInvolved) {
+                // Record the failure time like any other permanent historian
+                // failure, which is also what the backoff above measures from.
+                retainDrainReservationForRetryThrottle = true;
+                await notifyHistorianIssue(buildStoredCompartmentsInvalidNotice());
+            } else {
+                await notifyHistorianIssue(
+                    buildHistorianFailureNotice(failCount, existingValidationError),
+                );
+            }
             return;
         }
 
