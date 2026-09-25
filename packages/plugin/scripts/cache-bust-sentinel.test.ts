@@ -806,6 +806,30 @@ describe("agent.deliver contract", () => {
 });
 
 describe("cache-bust sentinel runs", () => {
+    test("resumes a timed-out pass and emits every window", async () => {
+        const directory = temporaryDirectory("cache-bust-sentinel-resume-");
+        const stateFile = join(directory, "state.json");
+        const sent: string[] = [];
+        let time = 1_000;
+        const sessions = ["ses_one", "ses_two"].map((sessionId) => ({ ...activeSession, sessionId }));
+        const deps = {
+            now: () => time,
+            listActiveSessions: (state: { sessions: Record<string, { lastAnalyzedRequestTimestampMs: number }> }) =>
+                sessions.filter((session) => (state.sessions[session.sessionId]?.lastAnalyzedRequestTimestampMs ?? 0) < 900),
+            loadDecisions: () => [],
+            analyzeSession: async (session: ActiveCacheBustSession) => {
+                time += 20;
+                return { requests: [{ ...request(900), session: session.sessionId }], highWaterMarkMs: 900 };
+            },
+            stdout: (line: string) => { sent.push(JSON.parse(line).session_id); },
+            stderr: () => {},
+        };
+        const runOptions = { ...options(stateFile), maxRunMs: 10 };
+        expect((await runSentinelOnce(runOptions, deps)).bounded).toBe(true);
+        expect(sent).toEqual(["ses_one"]);
+        expect((await runSentinelOnce(runOptions, deps)).bounded).toBe(true);
+        expect(sent).toEqual(["ses_one", "ses_two"]);
+    });
     test("persists and reuses the per-session request high-water mark", async () => {
         const directory = temporaryDirectory("cache-bust-sentinel-watermark-");
         const stateFile = join(directory, "state.json");

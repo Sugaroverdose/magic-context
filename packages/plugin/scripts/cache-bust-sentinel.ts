@@ -68,6 +68,7 @@ export interface CacheBustSentinelOptions {
     send: boolean;
     intervalMs: number;
     lookbackMs: number;
+    maxRunMs?: number;
     stateFile: string;
     databasePath: string;
     rustStorePath: string;
@@ -148,6 +149,7 @@ interface OpenBustWindowState {
 interface SessionWatermarkState {
     lastAnalyzedRequestTimestampMs: number;
     openWindow?: OpenBustWindowState;
+    scanCursor?: string;
 }
 
 interface SentWindowState {
@@ -186,6 +188,8 @@ export interface SentinelCounters {
     accepted: number;
     dedup: number;
     sendRefused: number;
+    filesExamined: number;
+    bounded: boolean;
 }
 
 interface SentinelRunDeps {
@@ -200,7 +204,7 @@ interface SentinelRunDeps {
         sinceExclusiveMs: number,
         decisions: readonly CacheBustDecisionAttribution[],
         options: CacheBustSentinelOptions,
-    ) => Promise<CacheBustSessionAnalysis>;
+    ) => Promise<CacheBustSessionAnalysis & { filesExamined?: number; scanBounded?: boolean; scanCursor?: string }>;
     loadDecisions?: (
         session: ActiveCacheBustSession,
         options: CacheBustSentinelOptions,
@@ -264,6 +268,7 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
             ...(open && startMs !== undefined && lastBustMs !== undefined
                 ? { openWindow: { startMs, lastBustMs } }
                 : {}),
+            ...(typeof row?.scanCursor === "string" ? { scanCursor: row.scanCursor } : {}),
         };
     }
     for (const [key, raw] of Object.entries(windows)) {
@@ -322,6 +327,7 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
     const valueFlags = new Set([
         "--interval-ms",
         "--lookback-ms",
+        "--max-run-ms",
         "--state-file",
         "--db",
         "--rust-store",
@@ -368,6 +374,9 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
         send: args.includes("--send"),
         intervalMs,
         lookbackMs,
+        maxRunMs: values.has("--max-run-ms")
+            ? parsePositiveInteger(values.get("--max-run-ms"), "--max-run-ms")
+            : 30_000,
         stateFile: values.get("--state-file") ?? join(storageDir, "cache-bust-sentinel-state.json"),
         databasePath: values.get("--db") ?? join(storageDir, "context.db"),
         rustStorePath: values.get("--rust-store") ?? join(storageDir, "store.db"),
@@ -424,7 +433,8 @@ export function enumerateActiveSessions(
             const since =
                 state.sessions[sessionId]?.lastAnalyzedRequestTimestampMs ??
                 nowMs - options.lookbackMs;
-            return activityMs > since ? [{ sessionId, harness, projectPath, activityMs }] : [];
+            return activityMs > since || state.sessions[sessionId]?.scanCursor
+                ? [{ sessionId, harness, projectPath, activityMs }] : [];
         });
     } finally {
         db.close(false);
@@ -696,13 +706,16 @@ async function analyzeActiveSession(
     session: ActiveCacheBustSession,
     sinceExclusiveMs: number,
     decisions: readonly CacheBustDecisionAttribution[],
-    options: CacheBustSentinelOptions,
-): Promise<CacheBustSessionAnalysis> {
+    options: CacheBustSentinelOptions & { scanCursor?: string; scanDeadlineMs?: number; scanNow?: () => number },
+): Promise<CacheBustSessionAnalysis & { filesExamined?: number; scanBounded?: boolean; scanCursor?: string }> {
     if (session.harness === "opencode") {
         const analysis = analyzeOpenCodeCacheBustSession({
             sessionId: session.sessionId,
             sinceExclusiveMs,
             untilInclusiveMs: Date.now(),
+            scanCursor: options.scanCursor,
+            scanDeadlineMs: options.scanDeadlineMs,
+            scanNow: options.scanNow,
             anthropicDir: options.anthropicDir,
             mcLogPath: options.mcLogPath,
             openaiDir: options.openaiDir,
@@ -1015,6 +1028,8 @@ function emptyCounters(): SentinelCounters {
         accepted: 0,
         dedup: 0,
         sendRefused: 0,
+        filesExamined: 0,
+        bounded: false,
     };
 }
 
@@ -1049,7 +1064,9 @@ export async function runSentinelOnce(
     options: CacheBustSentinelOptions,
     deps: SentinelRunDeps = {},
 ): Promise<SentinelCounters> {
-    const nowMs = (deps.now ?? Date.now)();
+    const clock = deps.now ?? Date.now;
+    const nowMs = clock();
+    const deadlineMs = nowMs + (options.maxRunMs ?? 30_000);
     const stdout = deps.stdout ?? console.log;
     const stderr = deps.stderr ?? console.error;
     const state = loadSentinelState(options.stateFile);
@@ -1057,6 +1074,7 @@ export async function runSentinelOnce(
     const sessions = listSessions(state, nowMs, options);
     const counters = emptyCounters();
     counters.sessions = sessions.length;
+    stderr(JSON.stringify({ kind: "cache_bust_sentinel_start", at: new Date(nowMs).toISOString() }));
     const transport = options.send
         ? (deps.transport ??
           new SubcWakeEventTransport(
@@ -1069,6 +1087,10 @@ export async function runSentinelOnce(
 
     try {
         for (const session of sessions) {
+            if (clock() >= deadlineMs) {
+                counters.bounded = true;
+                break;
+            }
             const priorSession = state.sessions[session.sessionId];
             const sinceExclusiveMs =
                 priorSession?.lastAnalyzedRequestTimestampMs ?? nowMs - options.lookbackMs;
@@ -1077,8 +1099,10 @@ export async function runSentinelOnce(
                 session,
                 sinceExclusiveMs,
                 decisions,
-                options,
+                { ...options, scanCursor: priorSession?.scanCursor, scanDeadlineMs: deadlineMs, scanNow: clock },
             );
+            counters.filesExamined += analysis.filesExamined ?? 0;
+            counters.bounded ||= analysis.scanBounded ?? false;
             const requests = analysis.requests.filter(
                 (request) =>
                     request.session === session.sessionId &&
@@ -1177,18 +1201,24 @@ export async function runSentinelOnce(
                     : requests.length > 0
                       ? Math.max(...requests.map((request) => request.timestampMs))
                       : null;
-            if (highWater !== null && highWater > sessionState.lastAnalyzedRequestTimestampMs) {
+            if (analysis.scanCursor) sessionState.scanCursor = analysis.scanCursor;
+            else delete sessionState.scanCursor;
+            if (!analysis.scanBounded && highWater !== null && highWater > sessionState.lastAnalyzedRequestTimestampMs) {
                 sessionState.lastAnalyzedRequestTimestampMs = highWater;
             }
             updateOpenWindowState(sessionState, requests, windows);
             state.sessions[session.sessionId] = sessionState;
             saveSentinelState(options.stateFile, state);
+            if (analysis.scanBounded || clock() >= deadlineMs) {
+                counters.bounded = true;
+                break;
+            }
         }
     } finally {
         await transport?.close?.();
     }
     saveSentinelState(options.stateFile, state);
-    stderr(JSON.stringify({ kind: "cache_bust_sentinel_summary", counters }));
+    stderr(JSON.stringify({ kind: "cache_bust_sentinel_summary", at: new Date(clock()).toISOString(), elapsedMs: clock() - nowMs, counters }));
     return counters;
 }
 

@@ -1075,3 +1075,39 @@ describe("analyze-cache-bust rotating billing header", () => {
         expect(describeBodyPair([previous], [current])).toBeUndefined();
     });
 });
+
+
+describe("bounded sentinel dump scans", () => {
+    test("skips 20,000 old files and resumes a bounded scan without losing requests", () => {
+        const dir = mkdtempSync(join(tmpdir(), "mc-sentinel-scan-"));
+        tempDirs.push(dir);
+        for (let i = 0; i < 20_000; i++) {
+            writeFileSync(join(dir, `dump-2026-09-23T00-00-00-000Z-${String(i).padStart(5, "0")}-ses_scanfixture.meta.json`), "{}");
+        }
+        const sessionId = "ses_scanfixture";
+        const base = Date.parse("2026-09-24T12:00:00.000Z");
+        for (let i = 0; i < 40; i++) {
+            const createdAt = new Date(base + i * 1_000).toISOString();
+            const stem = `dump-${createdAt.replace(/:(\d\d):(\d\d)\.(\d\d\d)Z$/, "-$1-$2-$3Z")}-${i}-ses_scanfixture`;
+            writeDump(dir, stem, createdAt, sessionId, bodyWithBreakpointMessage(`request ${i}`));
+        }
+        const scan = (sinceExclusiveMs: number, scanCursor?: string) => analyzeOpenCodeCacheBustSession({
+            sessionId,
+            anthropicDir: dir,
+            openaiDir: join(dir, "missing"),
+            sinceExclusiveMs,
+            scanCursor,
+            scanDeadlineMs: Date.now() + 60_000,
+        });
+        const first = scan(base - 1);
+        expect(first.filesExamined).toBe(32);
+        expect(first.scanBounded).toBe(true);
+        const second = scan(base - 1, first.scanCursor);
+        expect(second.filesExamined).toBe(8);
+        expect(second.scanBounded).toBe(false);
+        expect([...first.requests, ...second.requests].map((row) => row.timestampMs)).toEqual(
+            Array.from({ length: 40 }, (_, i) => base + i * 1_000),
+        );
+        expect(scan(base + 39_000).filesExamined).toBe(0);
+    }, 30_000);
+});
