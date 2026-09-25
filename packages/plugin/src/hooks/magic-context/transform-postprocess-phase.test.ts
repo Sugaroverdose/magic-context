@@ -4258,7 +4258,11 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             {
                 reason: "compartment_render_epoch",
                 arm: async (sessionId) => {
-                    setCachedUpgradeState(sessionId, "|compartment-render:cre", "|compartment-render:old");
+                    setCachedUpgradeState(
+                        sessionId,
+                        "|compartment-render:cre",
+                        "|compartment-render:old",
+                    );
                     return undefined;
                 },
                 identical: true,
@@ -4519,9 +4523,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                     schedulerDecision: opts.scheduler ?? "defer",
                     currentTurnId: opts.turn ?? null,
                     contextUsage: { percentage: pct, inputTokens: pct * 100 },
-                    pendingMaterializationSessions: opts.flush
-                        ? new Set([sessionId])
-                        : new Set(),
+                    pendingMaterializationSessions: opts.flush ? new Set([sessionId]) : new Set(),
                     m0M1: {
                         projectPath: FOLD_PROJECT,
                         projectDirectory: FOLD_PROJECT,
@@ -4586,7 +4588,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 // derived cue columns directly (the same columns setMuralCue writes).
                 const setCue = (id: number, cue: string, hash: string) =>
                     db
-                        .prepare("UPDATE memories SET mural_cue = ?, mural_cue_hash = ? WHERE id = ?")
+                        .prepare(
+                            "UPDATE memories SET mural_cue = ?, mural_cue_hash = ? WHERE id = ?",
+                        )
                         .run(cue, hash, id);
                 for (let i = 0; i < 24; i++) {
                     const content = `ADV_MURAL_MEMORY_${i}: ${"rule text ".repeat(20)}`;
@@ -4815,10 +4819,17 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                     `ADV_OPEN_AFTER reason=${trigger.reason} afterMaterialized=${after.result.materialized} afterReason=${after.result.materializeReason} identical=${sha(after.messages) === sha(hard.messages)}`,
                 );
                 if (sha(after.messages) !== sha(hard.messages)) {
-                    for (let i = 0; i < Math.max(after.messages.length, hard.messages.length); i++) {
+                    for (
+                        let i = 0;
+                        i < Math.max(after.messages.length, hard.messages.length);
+                        i++
+                    ) {
                         const a = JSON.stringify(hard.messages[i]);
                         const b = JSON.stringify(after.messages[i]);
-                        if (a !== b) console.log(`ADV_DIFF idx=${i}\n HARD =${a?.slice(0, 600)}\n AFTER=${b?.slice(0, 600)}`);
+                        if (a !== b)
+                            console.log(
+                                `ADV_DIFF idx=${i}\n HARD =${a?.slice(0, 600)}\n AFTER=${b?.slice(0, 600)}`,
+                            );
                     }
                 }
                 expect(sha(after.messages)).toBe(sha(hard.messages));

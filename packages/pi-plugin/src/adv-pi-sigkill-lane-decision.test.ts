@@ -40,13 +40,16 @@ async function harness(dbPath: string) {
 			utils.userMessage("next prompt", 4),
 		] as never[];
 	const fake = utils.createFakePi();
-	ch.registerPiContextHandler(fake.pi as never, {
-		db,
-		protectedTags: 0,
-		heuristics: {},
-		injection: { injectionBudgetTokens: 10_000, muralEnabled: true },
-		scheduler: { executeThresholdPercentage: 80 },
-	} as never);
+	ch.registerPiContextHandler(
+		fake.pi as never,
+		{
+			db,
+			protectedTags: 0,
+			heuristics: {},
+			injection: { injectionBudgetTokens: 10_000, muralEnabled: true },
+			scheduler: { executeThresholdPercentage: 80 },
+		} as never,
+	);
 	const handler = fake.handlers.get("context") as (
 		event: { messages: never[] },
 		ctx: never,
@@ -121,7 +124,10 @@ describe("ADV Pi: SIGKILL between the HARD fold commit and the lane decision", (
 				lastInputTokens: 4_000,
 			});
 			const defer = await h.pass();
-			writeFileSync(`${OUT}.defer`, JSON.stringify({ defer, state: h.state() }));
+			writeFileSync(
+				`${OUT}.defer`,
+				JSON.stringify({ defer, state: h.state() }),
+			);
 			if (trigger === "model") h.ch.recordPiLiveModel(SESSION, HARD_MODEL);
 			else
 				h.storage.queueM0Mutation(h.db, {
@@ -199,7 +205,10 @@ describe("ADV Pi: SIGKILL between the HARD fold commit and the lane decision", (
 						: null,
 				};
 				console.log("ADV_PI_LANE_SIGKILL", JSON.stringify(summary));
-				writeFileSync(join(root, "summary.json"), JSON.stringify(summary, null, 2));
+				writeFileSync(
+					join(root, "summary.json"),
+					JSON.stringify(summary, null, 2),
+				);
 				h.ch.clearContextHandlerSession(SESSION);
 				if (variant === "kill") {
 					expect(child.signal).toBe("SIGKILL");

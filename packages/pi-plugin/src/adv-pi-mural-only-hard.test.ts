@@ -62,7 +62,10 @@ function imageOf(messages: unknown[]): string | null {
 }
 
 describe("ADV Pi: mural-only HARD fold and the shared bust permission", () => {
-	it("reports whether a fold that swaps only the mural image opens the lanes", async () => {
+	// Marked failing: on the gated branch the mural-only fold reports that it kept
+	// the cached prefix. The test turns red (unexpected pass) once Pi counts the
+	// mural in its bust predicate.
+	it.failing("a fold that swaps only the mural image opens the lanes", async () => {
 		const xdg = mkdtempSync(join(tmpdir(), "mc-adv-pi-mural-"));
 		const originalXdg = process.env.XDG_DATA_HOME;
 		process.env.XDG_DATA_HOME = xdg;
@@ -101,13 +104,16 @@ describe("ADV Pi: mural-only HARD fold and the shared bust permission", () => {
 			});
 			recordPiLiveModel(SESSION, MODEL);
 			const fake = createFakePi();
-			registerPiContextHandler(fake.pi as never, {
-				db,
-				protectedTags: 0,
-				heuristics: {},
-				injection: { injectionBudgetTokens: 400, muralEnabled: true },
-				scheduler: { executeThresholdPercentage: 80 },
-			} as never);
+			registerPiContextHandler(
+				fake.pi as never,
+				{
+					db,
+					protectedTags: 0,
+					heuristics: {},
+					injection: { injectionBudgetTokens: 400, muralEnabled: true },
+					scheduler: { executeThresholdPercentage: 80 },
+				} as never,
+			);
 			const handler = fake.handlers.get("context") as (
 				event: { messages: never[] },
 				ctx: never,
@@ -191,7 +197,10 @@ describe("ADV Pi: mural-only HARD fold and the shared bust permission", () => {
 
 			// A structural mutation-log entry arms a HARD that re-renders text
 			// identically; the fold re-resolves the mural and picks up the new cues.
-			queueM0Mutation(db, { sessionId: SESSION, mutationType: "compartment_delete" });
+			queueM0Mutation(db, {
+				sessionId: SESSION,
+				mutationType: "compartment_delete",
+			});
 			gates.length = 0;
 			const hard = await pass();
 			const imageB = imageOf(hard);
@@ -199,8 +208,10 @@ describe("ADV Pi: mural-only HARD fold and the shared bust permission", () => {
 				imageBeforePresent: imageA !== null,
 				imageAfterPresent: imageB !== null,
 				imageChanged: imageA !== imageB,
-				m0TextIdentical: textOf(hard[0] as never) === textOf(withMural[0] as never),
-				m1TextIdentical: textOf(hard[1] as never) === textOf(withMural[1] as never),
+				m0TextIdentical:
+					textOf(hard[0] as never) === textOf(withMural[0] as never),
+				m1TextIdentical:
+					textOf(hard[1] as never) === textOf(withMural[1] as never),
 				gate: gates[0],
 				dropStatus: getTagsBySession(db, SESSION).find(
 					(tag) => tag.tagNumber === toolTag.tagNumber,

@@ -19488,6 +19488,74 @@ pub(crate) mod tests {
         }
     }
 
+    /// Adversarial gate reproduction: a newer todowrite call makes a synthetic todo
+    /// pending, then a store-marker HARD re-renders m0/m1 byte-identically. The
+    /// pending todo must not ride that HARD: the provider cache survives it, so a
+    /// changed synthetic pair would be the pass's only bust.
+    #[test]
+    #[ignore = "reproduction: an identical-bytes store-marker HARD still recaptures the pending synthetic todo; run with --ignored"]
+    fn adv_identical_bytes_epoch_hard_holds_pending_synthetic_todo() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let first = json!([{"content": "first", "status": "in_progress", "priority": "high"}]);
+        let second = json!([{"content": "second", "status": "in_progress", "priority": "high"}]);
+        let initial = with_usage(
+            req(
+                "ses",
+                "cfg0",
+                vec![
+                    item("a", 1, "raw"),
+                    todowrite_call("todo-a", 2, first),
+                    item("tail", 3, "tail text"),
+                ],
+            ),
+            10,
+            100,
+        );
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        transform(&s, &initial, &ctx).unwrap();
+        let baseline = transform(&s, &initial, &ctx).unwrap();
+        assert_ne!(baseline.action, "HARD");
+        let frozen_pair = synthetic_todo_pair_bytes(&baseline);
+
+        let mut newer = initial.clone();
+        newer.messages.push(todowrite_call("todo-b", 4, second));
+        let defer = transform(&s, &newer, &ctx).unwrap();
+        assert_eq!(
+            synthetic_todo_pair_bytes(&defer),
+            frozen_pair,
+            "a pending todo alone never busts"
+        );
+
+        let mut loaded = s.load("ses").unwrap();
+        loaded.meta.project_memory_epoch_pending = true;
+        s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let hard = transform(&s, &newer, &ctx).unwrap();
+        let hard_pair = synthetic_todo_pair_bytes(&hard);
+        let replay = transform(&s, &newer, &ctx).unwrap();
+        eprintln!(
+            "ADV_RUST_TODO action={} reason={:?} m0_identical={} m1_identical={} todo_pair_identical={} messages_identical={} replay_equals_hard={}",
+            hard.action,
+            hard.materialize_reason,
+            m0_bytes(&hard) == m0_bytes(&defer),
+            m1_bytes(&hard) == m1_bytes(&defer),
+            hard_pair == frozen_pair,
+            hard.messages() == defer.messages(),
+            replay.messages() == hard.messages(),
+        );
+        assert_eq!(hard.action, "HARD");
+        assert_eq!(m0_bytes(&hard), m0_bytes(&defer));
+        assert_eq!(m1_bytes(&hard), m1_bytes(&defer));
+        assert_eq!(
+            hard_pair, frozen_pair,
+            "an identical-bytes HARD must not carry the pending synthetic todo"
+        );
+        assert_eq!(hard.messages(), defer.messages());
+    }
+
     #[test]
     fn identical_bytes_epoch_hard_holds_pending_drop_and_serves_identical_bytes() {
         let dir = tempfile::tempdir().unwrap();
