@@ -645,6 +645,25 @@ export const HistorianConfigSchema = AgentMetadataSchema.extend({
     opencode: OpenCodeHarnessBlockSchema.optional(),
     pi: PiHarnessBlockSchema.optional(),
     omp: OmpHarnessBlockSchema.optional(),
+    runner: z
+        .enum(["broca", "host"])
+        .optional()
+        .describe(
+            'Which side runs the historian completion in Rust transform mode: "broca" routes it to the Broca module (default), "host" queues it for this process to run on the configured historian model. User-level config only — it decides whose provider account pays for the call.',
+        ),
+    host_runner: z
+        .object({
+            enabled: z
+                .boolean()
+                .optional()
+                .describe(
+                    "Whether this process answers historian runs queued for a claimant (default true). Setting it to false stops the pull loop without changing historian.runner, so an operator can take one machine out of the lane and leave the queued runs for another claimant or for the runner setting to be changed deliberately.",
+                ),
+        })
+        .optional()
+        .describe(
+            "Controls for this process's historian pull loop, which answers runs queued by `historian.runner: \"host\"`. User-level config only — it decides whether this machine's provider account is spent on folds.",
+        ),
     two_pass: z
         .boolean()
         .default(false)

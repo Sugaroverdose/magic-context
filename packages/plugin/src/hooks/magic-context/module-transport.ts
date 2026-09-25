@@ -488,7 +488,11 @@ export class SubcModuleTransport {
             | "ctx_memory"
             | "note.evaluate"
             | "dreamer.run_task"
-            | "memory.set_classification";
+            | "memory.set_classification"
+            | "historian.pending"
+            | "historian.claim"
+            | "historian.heartbeat"
+            | "historian.complete";
         body: unknown;
         /** Per-call durations; responseWait includes the client's opaque receive and decode. */
         onTimings?: (timings: ModuleCallTimings) => void;
@@ -542,7 +546,13 @@ export class SubcModuleTransport {
         const laneDeadlineMs = Date.now() + attemptTimeoutMs;
         let releaseLane: () => void = () => {};
         try {
-            if (!args.bypassSessionLane) {
+            // The historian claim ops are addressed by run id, not by a session's
+            // place in its message stream, so they have nothing to order against. They
+            // must also never queue behind a transform: a heartbeat that waited out a
+            // 15 s pass would let the lease lapse and hand a live run to a second
+            // claimant, which is the exact failure the lease exists to prevent.
+            const outsideSessionOrder = args.method.startsWith("historian.");
+            if (!args.bypassSessionLane && !outsideSessionOrder) {
                 releaseLane = await this.acquireCorrectnessLane(
                     args.sessionId,
                     args.signal,

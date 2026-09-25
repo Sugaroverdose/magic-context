@@ -14,6 +14,7 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 
+use crate::historian_runner::HistorianRunnerKind;
 use crate::scheduler::{self, ExecuteThresholdConfig};
 
 /// Default execute threshold percentage (65.0). The Rust module reads config without the
@@ -85,6 +86,10 @@ pub struct McModuleConfig {
     // module refuses a request that carries none rather than guessing from disk.
     /// Optional trusted user-configured sampling temperature for historian requests.
     pub historian_temperature: Option<f64>,
+    /// Which side runs the historian's completion. USER-tier only, for the same
+    /// reason the model is: it decides whose provider account and whose process
+    /// pays for the call, so a cloned repository must not be able to redirect it.
+    pub historian_runner: HistorianRunnerKind,
     /// Trusted user-configured language for hidden-agent prose. Project config is deliberately
     /// excluded because the language directive becomes provider-visible prompt text.
     pub language: Option<String>,
@@ -135,6 +140,7 @@ impl Default for McModuleConfig {
     fn default() -> Self {
         Self {
             historian_temperature: None,
+            historian_runner: HistorianRunnerKind::default(),
             language: None,
             execute_threshold_percentage: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
             execute_threshold_user_config: None,
@@ -345,6 +351,25 @@ impl ConfigCache {
     }
 }
 
+/// The historian runner the user tier selects.
+///
+/// `historian.runner` is read from the user tier only, so the answer is the same for
+/// every project this process serves. That is what lets the boot manifest declare
+/// its routes from it: a host runner opens no Broca route, so neither the route nor
+/// the provider-quota self-signals that ride it are declared.
+pub fn user_historian_runner() -> HistorianRunnerKind {
+    user_historian_runner_at(&user_config_path())
+}
+
+/// [`user_historian_runner`] against an explicit user config file.
+pub fn user_historian_runner_at(user_path: &Path) -> HistorianRunnerKind {
+    let mut tier = TierConfig::default();
+    let user = read_tier_cached(&mut tier, user_path.to_path_buf());
+    let (config, warnings) = merge_tiers_with_warnings(user.as_ref(), None);
+    emit_warnings(warnings);
+    config.historian_runner
+}
+
 fn user_config_path() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg)
@@ -488,6 +513,18 @@ fn merge_tiers_with_warnings(
         if let Some(temperature) = number_at(user, "/historian/temperature") {
             cfg.historian_temperature = Some(temperature);
         }
+        if let Some(runner) = user.pointer("/historian/runner").and_then(Value::as_str) {
+            match HistorianRunnerKind::parse(runner) {
+                Some(kind) => cfg.historian_runner = kind,
+                // An unreadable value keeps the default rather than refusing to fire.
+                // A typo then leaves folds running exactly where they ran before,
+                // instead of sending every completion somewhere the user never asked for.
+                None => warnings.push(format!(
+                    "ignoring historian.runner {runner:?}; expected one of {}",
+                    HistorianRunnerKind::ACCEPTED_VALUES.join(", ")
+                )),
+            }
+        }
         if let Some(language) = user
             .pointer("/language")
             .and_then(Value::as_str)
@@ -608,6 +645,7 @@ fn merge_tiers_with_warnings(
         warn_ignored_project_key(project, "/memory/budget_tokens", &mut warnings);
         warn_ignored_project_key(project, "/memory/user_profile_budget_tokens", &mut warnings);
         warn_ignored_project_key(project, "/historian/context_limit_tokens", &mut warnings);
+        warn_ignored_project_key(project, "/historian/runner", &mut warnings);
         if let Some(enabled) = project.pointer("/smart_drops").and_then(Value::as_bool) {
             cfg.smart_drops = enabled;
         }
@@ -950,6 +988,72 @@ mod cache_ttl_tests {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn the_completion_route_defaults_to_broca_and_only_the_user_may_move_it() {
+        assert_eq!(
+            merge_tiers(None, None).historian_runner,
+            HistorianRunnerKind::Broca,
+            "an unconfigured install keeps folding exactly where it always has"
+        );
+
+        let user = serde_json::json!({ "historian": { "runner": "host" } });
+        assert_eq!(
+            merge_tiers(Some(&user), None).historian_runner,
+            HistorianRunnerKind::Host
+        );
+
+        // A cloned repository must not be able to move the historian completion
+        // to a different process or provider account.
+        let project = serde_json::json!({ "historian": { "runner": "host" } });
+        assert_eq!(
+            merge_tiers(None, Some(&project)).historian_runner,
+            HistorianRunnerKind::Broca
+        );
+        assert_eq!(
+            merge_tiers(
+                Some(&user),
+                Some(&serde_json::json!({
+                    "historian": { "runner": "broca" }
+                }))
+            )
+            .historian_runner,
+            HistorianRunnerKind::Host,
+            "the project tier cannot move the runner in either direction"
+        );
+    }
+
+    #[test]
+    fn the_boot_runner_is_read_from_the_user_file_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("magic-context.jsonc");
+        assert_eq!(user_historian_runner_at(&path), HistorianRunnerKind::Broca);
+        std::fs::write(
+            &path,
+            r#"{ // user tier
+            "historian": { "runner": "host" } }"#,
+        )
+        .expect("write user config");
+        assert_eq!(user_historian_runner_at(&path), HistorianRunnerKind::Host);
+    }
+
+    #[test]
+    fn an_unreadable_runner_value_leaves_completions_where_they_were() {
+        for value in [serde_json::json!("hosted"), serde_json::json!("")] {
+            let user = serde_json::json!({ "historian": { "runner": value } });
+            assert_eq!(
+                merge_tiers(Some(&user), None).historian_runner,
+                HistorianRunnerKind::Broca,
+                "value {value}"
+            );
+        }
+        // A non-string is not a runner name at all and is ignored the same way.
+        let user = serde_json::json!({ "historian": { "runner": 7 } });
+        assert_eq!(
+            merge_tiers(Some(&user), None).historian_runner,
+            HistorianRunnerKind::Broca
+        );
+    }
 
     #[test]
     fn tier_policy_rejects_project_lowering() {

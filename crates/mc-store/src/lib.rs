@@ -13,6 +13,16 @@
 
 #![forbid(unsafe_code)]
 
+mod historian_claim;
+
+pub use historian_claim::{
+    historian_lease_ms, HistorianClaim, HistorianClaimOutcome, HistorianClaimRefusal,
+    HistorianHeartbeatOutcome, HistorianParkedRun, HistorianPendingRun, HistorianRecordOutcome,
+    HistorianReportAuthorization, HistorianReportOutcome, HistorianReportRefusal,
+    HistorianRunReport, HistorianSweepOutcome, NewHistorianPendingRun,
+    HISTORIAN_HEARTBEAT_INTERVAL_MS, HISTORIAN_LEASE_CEILING_MS,
+};
+
 use cortexkit_cache_core::{CoreState, DurabilityClass, FrozenUnit};
 use cortexkit_store::{open_sqlite, Migration, SqliteStore, StoreError};
 use cortexkit_store_types::StorageDescriptor;
@@ -2916,6 +2926,122 @@ const MIGRATIONS: &[Migration] = &[
         );
     ",
     },
+    Migration {
+        version: 57,
+        // The queue a historian run sits in while something outside this module runs
+        // its completion.
+        //
+        // The session's own durable state (inside `mc_cache_state.meta`) stays the
+        // authority on the firing: phase, chunk fingerprint, selected identities and
+        // the publish predicate all live there and are unchanged. This table exists
+        // for the two things that state cannot do. First, it is addressable by
+        // `run_id` without knowing which session owns it, which is all a claimant
+        // has. Second, it holds the request bytes (system prompt, user prompt, model
+        // chain) a claimant needs and the session row has no reason to carry.
+        //
+        // `phase` and `attempt` are the claim's own copy of the pair the session
+        // state carries, so a claim resolves in one row read and CASes in one row
+        // write. They are written in the same transaction as the session state,
+        // never independently.
+        //
+        // `phase` is one of four values. 'pending': waiting for a claimant.
+        // 'claimed': a claimant holds it until `claim_deadline_ms`. 'parked': the
+        // process that was waiting for the report restarted, so the row is kept for
+        // its chunk fingerprint and prompts but is never offered. 'reported': a
+        // claimant's terminal answer is stored on the row (in the columns migration
+        // 60 adds) and is waiting for the next pass to publish it.
+        //
+        // Rows are bounded by the number of concurrently folding sessions. A run
+        // that reaches a terminal outcome is deleted; a parked one is deleted by the
+        // claim sweep once the run's own deadline passes, so a restart cannot leave
+        // rows behind for the lifetime of the session.
+        statements: "
+        CREATE TABLE IF NOT EXISTS mc_historian_pending_run (
+            run_id               TEXT PRIMARY KEY,
+            session_id           TEXT NOT NULL,
+            project_path         TEXT NOT NULL,
+            firing_seq           INTEGER NOT NULL,
+            chunk_fingerprint    TEXT NOT NULL,
+            phase                TEXT NOT NULL,
+            attempt              INTEGER NOT NULL,
+            claimant_instance_id TEXT,
+            coordinator_token    TEXT,
+            claim_deadline_ms    INTEGER,
+            lease_ms             INTEGER NOT NULL,
+            deadline_ms          INTEGER NOT NULL,
+            system_prompt        TEXT NOT NULL,
+            user_prompt          TEXT NOT NULL,
+            model_chain          TEXT NOT NULL,
+            await_budget_ms      INTEGER NOT NULL,
+            created_at_ms        INTEGER NOT NULL,
+            updated_at_ms        INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS mc_historian_pending_run_session
+            ON mc_historian_pending_run(session_id);
+        CREATE INDEX IF NOT EXISTS mc_historian_pending_run_phase
+            ON mc_historian_pending_run(phase, claim_deadline_ms);
+    ",
+    },
+    Migration {
+        // 57 above and 58 here have to reach any given store in numeric order. Migrations run in
+        // ascending order and the migrator skips every version at or below the recorded MAXIMUM,
+        // so a store that applies 58 while 57 is not yet in the chain will never apply 57
+        // afterwards. That is why the two ship in one build.
+        version: 58,
+        // The single-store marker: the record that this store's project rows were moved into the
+        // host's own database and that this store is no longer the place they live.
+        //
+        // The code that performs that move does not exist yet, and nothing here sets the marker.
+        // The columns are added ahead of the move on purpose: a binary can only refuse a migrated
+        // store if the marker it looks for is already part of the schema it knows, so every build
+        // that could later meet a migrated store has to learn the marker before any store carries
+        // one. Without that ordering an older binary would open a migrated store and serve the
+        // stale rows left behind without ever saying so.
+        //
+        // `single_store_set_by` records the ck-mc build identity (the same `MC_BUILD_SHA` stamped
+        // into the module manifest) that performed the move, so the refusal can tell an operator
+        // which build to run instead of just saying no. Both stamp columns stay empty until the
+        // move writes them.
+        statements: "
+        ALTER TABLE mc_privilege_state
+            ADD COLUMN single_store INTEGER NOT NULL DEFAULT 0
+            CHECK (single_store IN (0, 1));
+        ALTER TABLE mc_privilege_state ADD COLUMN single_store_set_at_ms INTEGER;
+        ALTER TABLE mc_privilege_state ADD COLUMN single_store_set_by TEXT NOT NULL DEFAULT '';
+    ",
+    },
+    Migration {
+        version: 60,
+        // Where a claimant's terminal report is kept when the task that queued the
+        // run is no longer in this process.
+        //
+        // A fold legitimately takes minutes, so the module can be restarted while a
+        // host is still running the completion. Before these columns the report had
+        // nowhere to land: the queue row carried the request but not the answer, so
+        // a report that arrived after a bounce was refused and the provider call it
+        // paid for was thrown away. Recording it here lets the next transform pass
+        // for that session publish it through exactly the same code an in-process
+        // report goes through.
+        //
+        // A row only ever holds one report: the phase moves to `reported` when the
+        // first one is written, which stops the run being offered or claimed again,
+        // so a second report cannot overwrite the first.
+        //
+        // This alters the table migration 57 creates, so 57 has to be in the chain
+        // that reaches a store before this one does — the same numeric-order rule
+        // 57 and 58 already state between themselves.
+        //
+        // 59 is reserved for the pass-trace publish durations that ship on their own
+        // branch; this is the next free version after it.
+        statements: "
+        ALTER TABLE mc_historian_pending_run ADD COLUMN report_kind TEXT;
+        ALTER TABLE mc_historian_pending_run ADD COLUMN report_text TEXT;
+        ALTER TABLE mc_historian_pending_run ADD COLUMN report_length_capped INTEGER;
+        ALTER TABLE mc_historian_pending_run ADD COLUMN report_error_code TEXT;
+        ALTER TABLE mc_historian_pending_run ADD COLUMN report_error_message TEXT;
+        ALTER TABLE mc_historian_pending_run ADD COLUMN reported_at_ms INTEGER;
+    ",
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -2936,6 +3062,89 @@ pub const LATEST_MIGRATION_VERSION: u32 = {
     }
     latest
 };
+
+/// Whether this binary can serve a store whose project rows have been moved into the host's
+/// database ("single-store mode").
+///
+/// It is `false` here because the readers and writers for that layout are not built yet. A binary
+/// with this set to `false` must refuse a store that carries the marker instead of opening it:
+/// after the move, the rows this binary knows how to read are no longer the rows that matter, so
+/// serving them would answer every request with a stale copy of the truth and never say so.
+///
+/// The change that adds those readers and writers flips this to `true`, which is what stops the
+/// refusal below from firing on builds that can actually cope.
+pub const SINGLE_STORE_CAPABLE: bool = false;
+
+/// The migration that introduced the single-store marker columns. Named so the step-through test
+/// reads as one fact rather than two bare numbers.
+pub const SINGLE_STORE_MARKER_MIGRATION_VERSION: u32 = 58;
+
+/// The stable token a refusal carries when the store is in single-store mode and this binary is
+/// not. Health surfaces and logs are matched against this exact string, so it names the one
+/// situation rather than describing it: an operator who greps for it finds every occurrence, and
+/// a generic "open failed" cannot be mistaken for it.
+pub const SINGLE_STORE_MARKER_REFUSAL_REASON: &str = "single_store_marker";
+
+/// What the store records when its project rows were moved into the host's database.
+///
+/// Absent means the marker is unset, which is every store today.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SingleStoreMarker {
+    /// When the move ran, in milliseconds since the unix epoch. Absent on a marker written
+    /// without a stamp, which no supported writer does.
+    pub set_at_ms: Option<i64>,
+    /// The ck-mc build identity that ran the move, empty when the writer recorded none.
+    pub set_by: String,
+}
+
+impl SingleStoreMarker {
+    /// How the refusal names the build to run. A marker written without a build identity still
+    /// has to produce a sentence an operator can act on, so the unstamped case says plainly that
+    /// the build is unknown instead of rendering an empty name.
+    fn build_label(&self) -> String {
+        if self.set_by.trim().is_empty() {
+            "an unrecorded ck-mc build".to_string()
+        } else {
+            format!("ck-mc {}", self.set_by.trim())
+        }
+    }
+
+    /// The sentence that tells an operator what happened and what to do about it.
+    pub fn remediation(&self) -> String {
+        format!(
+            "this store was migrated to single-store mode by {}; run that build or newer",
+            self.build_label()
+        )
+    }
+}
+
+/// Read the single-store marker from the privilege singleton row.
+///
+/// Returns `None` both when the marker is unset and when the row is missing entirely: a store
+/// with no privilege row has certainly not been migrated, and refusing to open over a missing row
+/// would brick stores for a reason that has nothing to do with the migration.
+fn read_single_store_marker(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<Option<SingleStoreMarker>> {
+    conn.query_row(
+        "SELECT single_store, single_store_set_at_ms, single_store_set_by
+           FROM mc_privilege_state
+          WHERE id = 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .map(|row| {
+        row.filter(|(single_store, _, _)| *single_store != 0)
+            .map(|(_, set_at_ms, set_by)| SingleStoreMarker { set_at_ms, set_by })
+    })
+}
 
 /// Apply the route-to-identity vocabulary law inside the caller's fenced transaction.
 /// Deletes only content twins, then rekeys remaining route rows and their mutation/note
@@ -3118,6 +3327,15 @@ pub enum HistorianPhase {
     Idle,
     Firing,
     AwaitingProducer,
+    /// The run still exists and still owns its chunk, but nobody is producing for
+    /// it: the claimant's lease expired without a terminal report. The coordinator
+    /// token is cleared so a late report from the dead claimant is refused, while
+    /// `run_id`, the chunk fingerprint and `firing_seq` are kept so the next
+    /// claimant continues the SAME run under a fresh attempt instead of paying for
+    /// a whole new chunk. Without this phase the run sat in `AwaitingProducer`
+    /// until the producer await gave up, because no transition admitted a second
+    /// producer.
+    Reclaiming,
     Validating,
     Publishing,
 }
@@ -3128,6 +3346,7 @@ impl HistorianPhase {
             HistorianPhase::Idle => "idle",
             HistorianPhase::Firing => "firing",
             HistorianPhase::AwaitingProducer => "awaiting_producer",
+            HistorianPhase::Reclaiming => "reclaiming",
             HistorianPhase::Validating => "validating",
             HistorianPhase::Publishing => "publishing",
         }
@@ -3212,6 +3431,24 @@ pub struct HistorianDurableState {
     pub producer_session_id: Option<String>,
     #[serde(default)]
     pub producer_run_id: Option<String>,
+    /// Which try at `producer_run_id` this is. The run identity is the PAIR: a run
+    /// whose claimant died and was re-claimed keeps its `run_id` and advances this,
+    /// so a late report from the dead claimant names a run that still exists but an
+    /// attempt that no longer does, and is refused. Attempts are minted here, never
+    /// by whoever runs the completion. Rows written before attempts existed default
+    /// to 0, which is the attempt the first claimant gets.
+    #[serde(default)]
+    pub producer_attempt: u32,
+    /// The attempt-unique secret handed to the current claimant. `historian.complete`
+    /// and `historian.heartbeat` present it instead of an identity, so a report is
+    /// accepted on proof of holding the current claim rather than on who sent it.
+    /// Absent in every phase that has no live claimant, including `Reclaiming`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_token: Option<String>,
+    /// When the current claim stops being current. A claimant that has not reported
+    /// or heartbeated by this wall-clock time can be replaced under a new attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_deadline_ms: Option<i64>,
     #[serde(default)]
     pub fired_at_ms: Option<i64>,
     /// Session-level revert epoch observed when the chunk was assembled. It is copied
@@ -3259,6 +3496,9 @@ impl Default for HistorianDurableState {
             selected_range_identities: Vec::new(),
             producer_session_id: None,
             producer_run_id: None,
+            producer_attempt: 0,
+            coordinator_token: None,
+            claim_deadline_ms: None,
             fired_at_ms: None,
             expected_revert_epoch: 0,
             compartment_set_generation: CompartmentSetGeneration::default(),
@@ -3618,6 +3858,10 @@ pub struct PromotedRef {
 pub struct HistorianPublishPredicate {
     pub firing_seq: u64,
     pub producer_run_id: String,
+    /// The attempt half of the run identity. A report produced under an earlier
+    /// attempt of the same `producer_run_id` fails this predicate, which is what
+    /// stops a superseded claimant from publishing over the claimant that replaced it.
+    pub producer_attempt: u32,
     pub chunk_fingerprint: String,
     pub selected_range_identities: Vec<HistorianSelectedMessageIdentity>,
     /// Cheap generation of the complete compartment set captured when this firing
@@ -3756,8 +4000,12 @@ impl std::fmt::Display for HistorianPublishError {
             }
             HistorianPublishError::StateMismatch { expected, found } => write!(
                 f,
-                "historian publish state mismatch: expected seq {} run {} fingerprint {}, found {:?}",
-                expected.firing_seq, expected.producer_run_id, expected.chunk_fingerprint, found
+                "historian publish state mismatch: expected seq {} run {} attempt {} fingerprint {}, found {:?}",
+                expected.firing_seq,
+                expected.producer_run_id,
+                expected.producer_attempt,
+                expected.chunk_fingerprint,
+                found
             ),
             HistorianPublishError::InvalidState { state } => {
                 write!(f, "historian publish invalid state: {state}")
@@ -5624,6 +5872,14 @@ pub enum McStoreError {
         session_id: String,
         stored: usize,
     },
+    /// The store carries the single-store marker and this binary cannot serve that layout.
+    ///
+    /// Terminal on purpose: retrying changes nothing, and opening anyway would serve rows that
+    /// are no longer the ones being written. The only fix is a build that can read the migrated
+    /// layout, which is what the message says.
+    SingleStoreMarkerUnsupported {
+        marker: SingleStoreMarker,
+    },
 }
 
 impl std::fmt::Display for McStoreError {
@@ -5662,6 +5918,11 @@ impl std::fmt::Display for McStoreError {
             } => write!(
                 f,
                 "note {id} CAS conflict: expected {expected_status}@{expected_version}, found {found_status}@{found_version}"
+            ),
+            McStoreError::SingleStoreMarkerUnsupported { marker } => write!(
+                f,
+                "{SINGLE_STORE_MARKER_REFUSAL_REASON}: {}",
+                marker.remediation()
             ),
             McStoreError::NoteOwnershipMismatch { id, project } => {
                 write!(f, "note {id} is not owned by project {project}")
@@ -7416,6 +7677,25 @@ impl McStore {
     }
 
     pub fn open(descriptor: &StorageDescriptor) -> Result<Self, McStoreError> {
+        Self::open_with_single_store_capability(descriptor, SINGLE_STORE_CAPABLE)
+    }
+
+    /// `open`, with the single-store capability supplied instead of read from the build constant.
+    ///
+    /// Tests use this to exercise both sides of the refusal from one build; production always
+    /// goes through `open`, which passes [`SINGLE_STORE_CAPABLE`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_with_capability_for_test(
+        descriptor: &StorageDescriptor,
+        single_store_capable: bool,
+    ) -> Result<Self, McStoreError> {
+        Self::open_with_single_store_capability(descriptor, single_store_capable)
+    }
+
+    fn open_with_single_store_capability(
+        descriptor: &StorageDescriptor,
+        single_store_capable: bool,
+    ) -> Result<Self, McStoreError> {
         let inner = open_sqlite(descriptor)?;
         let note_caller_project = Arc::new(Mutex::new(None::<String>));
         let facade_authority_scope = Arc::new(Mutex::new(None::<FacadeAuthorityScope>));
@@ -7479,6 +7759,17 @@ impl McStore {
                 migration.recorded, migration.chain_max
             );
         }
+        // After migrating, before anything reads or writes rows: a store whose project rows live
+        // elsewhere must not be served by a binary that would read the copies left behind here.
+        if !single_store_capable {
+            if let Some(marker) = inner.with_conn(read_single_store_marker)? {
+                eprintln!(
+                    "mc-store: refusing to open: {SINGLE_STORE_MARKER_REFUSAL_REASON}: {}",
+                    marker.remediation()
+                );
+                return Err(McStoreError::SingleStoreMarkerUnsupported { marker });
+            }
+        }
         let store = McStore {
             inner: ScopedSqliteStore {
                 inner,
@@ -7513,6 +7804,42 @@ impl McStore {
         store.repair_migration_30_authority_routes()?;
         store.prune_transform_session_roots()?;
         Ok(store)
+    }
+
+    /// Read the single-store marker from an open store.
+    ///
+    /// A store that is open and not capable of single-store mode has already proven the marker is
+    /// unset, so this is only informative for a capable build.
+    pub fn single_store_marker(&self) -> Result<Option<SingleStoreMarker>, McStoreError> {
+        self.inner
+            .with_conn(read_single_store_marker)
+            .map_err(Into::into)
+    }
+
+    /// Stamp the single-store marker.
+    ///
+    /// Test-only. The production writer is the one-shot move itself, which does not exist yet and
+    /// will set the marker inside the same transaction that relocates the rows — a marker set
+    /// separately from the move could describe a move that never finished.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_single_store_marker_for_test(
+        &self,
+        set_at_ms: i64,
+        set_by: &str,
+    ) -> Result<(), McStoreError> {
+        self.inner
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE mc_privilege_state
+                        SET single_store = 1,
+                            single_store_set_at_ms = ?1,
+                            single_store_set_by = ?2
+                      WHERE id = 1",
+                    params![set_at_ms, set_by],
+                )?;
+                Ok(())
+            })
+            .map_err(Into::into)
     }
 
     fn prune_transform_session_roots(&self) -> Result<(), McStoreError> {
@@ -13212,6 +13539,7 @@ impl McStore {
             let historian = &meta.historian;
             let predicate_matches = historian.firing_seq == predicate.firing_seq
                 && historian.producer_run_id.as_deref() == Some(predicate.producer_run_id.as_str())
+                && historian.producer_attempt == predicate.producer_attempt
                 && historian.chunk_fingerprint == predicate.chunk_fingerprint
                 && historian.selected_range_identities == predicate.selected_range_identities
                 && historian.compartment_set_generation == predicate.compartment_set_generation;
@@ -13291,6 +13619,7 @@ impl McStore {
             let historian = &meta.historian;
             let predicate_matches = historian.firing_seq == predicate.firing_seq
                 && historian.producer_run_id.as_deref() == Some(predicate.producer_run_id.as_str())
+                && historian.producer_attempt == predicate.producer_attempt
                 && historian.chunk_fingerprint == predicate.chunk_fingerprint
                 && historian.selected_range_identities == predicate.selected_range_identities
                 && historian.compartment_set_generation == predicate.compartment_set_generation;
@@ -13373,6 +13702,7 @@ impl McStore {
             let predicate_matches = meta.historian.firing_seq == predicate.firing_seq
                 && meta.historian.producer_run_id.as_deref()
                     == Some(predicate.producer_run_id.as_str())
+                && meta.historian.producer_attempt == predicate.producer_attempt
                 && meta.historian.chunk_fingerprint == predicate.chunk_fingerprint
                 && meta.historian.selected_range_identities == predicate.selected_range_identities
                 && meta.historian.compartment_set_generation
@@ -19523,6 +19853,10 @@ mod tests {
     use super::*;
     use cortexkit_store_types::{Isolation, StorageBackend};
 
+    // Adversarial gate over the claim-lane migration and the single-store marker
+    // migration as one merged chain.
+    mod gate_a1_b0;
+
     fn descriptor(dir: &std::path::Path) -> StorageDescriptor {
         StorageDescriptor {
             module_id: "magic-context-test".to_string(),
@@ -23078,11 +23412,40 @@ mod tests {
         );
     }
 
+    /// The versions the bundled chain actually carries.
+    ///
+    /// Read off `MIGRATIONS` rather than synthesized as `1..=LATEST`: the chain is
+    /// extended on several branches at once, each reserving a number, so it holds a
+    /// gap until they all land. What must be true is that a store records exactly
+    /// the versions this binary ships and nothing else — which is what this reads.
+    pub(crate) fn bundled_migration_versions() -> Vec<i64> {
+        let mut versions: Vec<i64> = MIGRATIONS
+            .iter()
+            .map(|migration| i64::from(migration.version))
+            .collect();
+        versions.sort_unstable();
+        versions
+    }
+
+    #[test]
+    fn the_bundled_migration_chain_never_reuses_or_rewinds_a_version() {
+        let versions = bundled_migration_versions();
+        assert!(
+            versions.windows(2).all(|pair| pair[0] < pair[1]),
+            "two migrations may not share a version, and the chain may not go backwards: {versions:?}"
+        );
+        assert_eq!(
+            versions.last().copied(),
+            Some(i64::from(LATEST_MIGRATION_VERSION)),
+            "the reported ceiling must be the newest bundled migration"
+        );
+    }
+
     #[test]
     fn fresh_and_migrated_stores_have_latest_schema() {
         let fresh_dir = tempfile::tempdir().unwrap();
         let fresh = McStore::open(&descriptor(fresh_dir.path())).unwrap();
-        let expected_versions = (1_i64..=LATEST_MIGRATION_VERSION as i64).collect::<Vec<_>>();
+        let expected_versions = bundled_migration_versions();
         let fresh_versions = fresh
             .inner
             .with_conn(|conn| {
@@ -23954,6 +24317,332 @@ mod tests {
         assert!(rollback_error
             .to_string()
             .contains("note ownership insert is outside the caller project"));
+    }
+
+    /// The one version this branch deliberately does not carry.
+    ///
+    /// It belongs to a change that is still on its own branch. A version has to be
+    /// picked before the branch that uses it merges, because two branches that pick
+    /// the same number produce two different migrations claiming one version and the
+    /// store applies whichever build it meets first.
+    const RESERVED_UNMERGED_MIGRATION_VERSION: i64 = 59;
+
+    /// The chain has no hole except the one reserved version, and no version is claimed twice.
+    ///
+    /// Other tests compare the versions a store applied against the bundled chain, which cannot
+    /// notice a hole because the hole is in the chain they compare against. A hole matters: a
+    /// store that recorded a later version never goes back for the missing one, so the migration
+    /// that fills the hole would reach fresh stores only. This is the test that fails when a
+    /// version goes missing.
+    ///
+    /// The reserved version is excluded by name rather than by widening the check, so a hole
+    /// anywhere else is still a failure. The exclusion retires itself: once the reserved version
+    /// is in the chain the first assertion below fails, and whoever merges it deletes the
+    /// constant and this paragraph with it.
+    #[test]
+    fn the_migration_chain_has_no_hole_except_the_one_reserved_version() {
+        let bundled = bundled_migration_versions();
+
+        assert!(
+            !bundled.contains(&RESERVED_UNMERGED_MIGRATION_VERSION),
+            "version {RESERVED_UNMERGED_MIGRATION_VERSION} is in the chain now, so it is no \
+             longer reserved: delete the constant and the exclusion below"
+        );
+
+        let missing: Vec<i64> = (1..=i64::from(LATEST_MIGRATION_VERSION))
+            .filter(|version| *version != RESERVED_UNMERGED_MIGRATION_VERSION)
+            .filter(|version| !bundled.contains(version))
+            .collect();
+
+        assert_eq!(
+            missing,
+            Vec::<i64>::new(),
+            "the chain must have no holes other than the reserved version"
+        );
+        assert_eq!(
+            bundled.len(),
+            bundled
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            "two migrations must never claim the same version"
+        );
+    }
+
+    fn privilege_state_columns(store: &SqliteStore) -> Vec<String> {
+        store
+            .with_conn(|conn| {
+                let mut statement = conn.prepare("PRAGMA table_info(mc_privilege_state)")?;
+                let rows = statement
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap()
+    }
+
+    /// Step a populated store across the marker migration: it gains an unset marker and loses
+    /// nothing.
+    ///
+    /// The store is built by running the chain up to the migration before the marker one, then
+    /// filled with the row shapes the marker sits beside, then opened normally so the real open
+    /// path applies the remaining migration. Both halves matter: a marker that arrived already
+    /// set would refuse every store on the next boot, and an `ALTER TABLE` that rebuilt the
+    /// privilege table instead of extending it would silently drop the scope columns the write
+    /// guards read.
+    #[test]
+    fn the_marker_migration_lands_unset_on_a_populated_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor(dir.path());
+
+        let before_marker: Vec<Migration> = MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|migration| migration.version < SINGLE_STORE_MARKER_MIGRATION_VERSION)
+            .collect();
+        assert_eq!(
+            MIGRATIONS
+                .iter()
+                .map(|migration| migration.version)
+                .find(|version| *version >= SINGLE_STORE_MARKER_MIGRATION_VERSION),
+            Some(SINGLE_STORE_MARKER_MIGRATION_VERSION),
+            "the reopen below has to apply the marker migration first, otherwise this \
+             step-through crosses some other migration and proves nothing about the marker"
+        );
+
+        let earlier = open_sqlite(&descriptor).unwrap();
+        // Migrations below v53 install triggers that call these scope functions, so the
+        // connection replaying the historical chain has to provide them exactly as a binary of
+        // that era did.
+        earlier
+            .with_conn(|conn| {
+                for name in [
+                    "mc_note_caller_project",
+                    "mc_facade_authority_domain",
+                    "mc_facade_authority_route",
+                ] {
+                    conn.create_scalar_function(name, 0, FunctionFlags::SQLITE_UTF8, |_context| {
+                        Ok(String::new())
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let earlier_outcome = earlier.migrate(NS, &before_marker).unwrap();
+        assert_eq!(
+            earlier_outcome.recorded,
+            SINGLE_STORE_MARKER_MIGRATION_VERSION - 1,
+            "the chain is contiguous, so stopping below the marker migration must land on the \
+             version immediately before it"
+        );
+        assert!(
+            !privilege_state_columns(&earlier).contains(&"single_store".to_string()),
+            "the column must be absent before its migration, or this proves nothing"
+        );
+
+        earlier
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO mc_memories
+                       (id, project_path, category, content, normalized_hash, importance,
+                        scope, shareable, status, first_seen_at, created_at, updated_at,
+                        last_seen_at)
+                     VALUES (7, 'populated-project', 'ARCHITECTURE', 'kept across the migration',
+                             'h7', 3, 'project', 1, 'active', 0, 0, 0, 0)",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE mc_privilege_state SET note_caller_project = 'populated-project'
+                      WHERE id = 1",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO mc_notes(type, project_path, content, status)
+                     VALUES ('smart', 'populated-project', 'also kept', 'active')",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE mc_privilege_state SET note_caller_project = '' WHERE id = 1",
+                    [],
+                )
+            })
+            .unwrap();
+        drop(earlier);
+
+        // The reopen applies the marker migration and every migration after it, so the
+        // store lands on the binary's ceiling rather than on the marker's own version.
+        let migrated = McStore::open(&descriptor).unwrap();
+        assert_eq!(
+            migrated.module_store_schema_version().unwrap(),
+            LATEST_MIGRATION_VERSION
+        );
+        assert_eq!(
+            migrated.single_store_marker().unwrap(),
+            None,
+            "the migration only creates the marker; setting it belongs to the move itself"
+        );
+
+        let (single_store, set_at_ms, set_by, note_scope) = migrated
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT single_store, single_store_set_at_ms, single_store_set_by,
+                            note_caller_project
+                       FROM mc_privilege_state WHERE id = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+            })
+            .unwrap();
+        assert_eq!(single_store, 0);
+        assert_eq!(set_at_ms, None);
+        assert_eq!(set_by, "");
+        assert_eq!(
+            note_scope, "",
+            "the pre-existing scope columns must survive"
+        );
+
+        let (memory_content, note_content) = migrated
+            .inner
+            .with_conn(|conn| {
+                let memory =
+                    conn.query_row("SELECT content FROM mc_memories WHERE id = 7", [], |row| {
+                        row.get::<_, String>(0)
+                    })?;
+                let note = conn.query_row(
+                    "SELECT content FROM mc_notes WHERE project_path = 'populated-project'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?;
+                Ok((memory, note))
+            })
+            .unwrap();
+        assert_eq!(memory_content, "kept across the migration");
+        assert_eq!(note_content, "also kept");
+    }
+
+    /// The marker column rejects anything that is neither set nor unset, so no writer can leave a
+    /// third state behind for the open path to interpret.
+    #[test]
+    fn the_marker_column_admits_only_set_or_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+
+        let rejected = store
+            .inner
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE mc_privilege_state SET single_store = 2 WHERE id = 1",
+                    [],
+                )
+            })
+            .unwrap_err();
+
+        assert!(
+            rejected.to_string().to_lowercase().contains("constraint"),
+            "{rejected}"
+        );
+    }
+
+    /// A store carrying the marker is refused by this binary, by name, with a sentence naming the
+    /// build that moved it.
+    ///
+    /// The control in the same test is the capable open: the very same file opens when the
+    /// capability is present, which is what makes the refusal a statement about this binary
+    /// rather than about a damaged store.
+    #[test]
+    fn a_marked_store_is_refused_by_name_and_opens_for_a_capable_binary() {
+        // Checked at compile time: this build ships the refusal, not the readers it guards, and
+        // the refusal asserted below only happens while that capability is absent.
+        const { assert!(!SINGLE_STORE_CAPABLE) };
+        // Spelled out rather than compared against the constant: operators, log searches and the
+        // release note all quote this exact token, so a rename is a contract change and has to be
+        // made deliberately here rather than travelling silently through every assertion that
+        // reads the constant.
+        assert_eq!(SINGLE_STORE_MARKER_REFUSAL_REASON, "single_store_marker");
+        const SET_BY: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c";
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor(dir.path());
+
+        let unmarked = McStore::open(&descriptor).unwrap();
+        assert_eq!(unmarked.single_store_marker().unwrap(), None);
+        unmarked
+            .set_single_store_marker_for_test(1_758_000_000_000, SET_BY)
+            .unwrap();
+        drop(unmarked);
+
+        let Err(refusal) = McStore::open(&descriptor) else {
+            panic!("a marked store must not open for a binary without the readers for it");
+        };
+        let McStoreError::SingleStoreMarkerUnsupported { marker } = &refusal else {
+            panic!("expected the single-store refusal, got {refusal:?}");
+        };
+        assert_eq!(marker.set_at_ms, Some(1_758_000_000_000));
+        assert_eq!(marker.set_by, SET_BY);
+
+        let rendered = refusal.to_string();
+        assert!(
+            rendered.contains(SINGLE_STORE_MARKER_REFUSAL_REASON),
+            "the refusal must name itself so logs and health agree: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                "this store was migrated to single-store mode by ck-mc {SET_BY}; \
+                 run that build or newer"
+            )),
+            "the refusal must say which build to run: {rendered}"
+        );
+
+        let capable = McStore::open_with_capability_for_test(&descriptor, true).unwrap();
+        assert_eq!(
+            capable.single_store_marker().unwrap(),
+            Some(SingleStoreMarker {
+                set_at_ms: Some(1_758_000_000_000),
+                set_by: SET_BY.to_string(),
+            })
+        );
+    }
+
+    /// An unmarked store opens, reopens, and keeps opening. The refusal is conditioned on the
+    /// marker alone, so without it nothing about open behaviour changes.
+    #[test]
+    fn an_unmarked_store_still_opens_on_every_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor(dir.path());
+
+        let first = McStore::open(&descriptor).unwrap();
+        assert_eq!(first.single_store_marker().unwrap(), None);
+        drop(first);
+
+        let second = McStore::open(&descriptor).unwrap();
+        assert_eq!(second.single_store_marker().unwrap(), None);
+        assert_eq!(
+            second.module_store_schema_version().unwrap(),
+            LATEST_MIGRATION_VERSION
+        );
+    }
+
+    /// A marker with no recorded build still has to produce an actionable sentence rather than a
+    /// gap where the build name belongs.
+    #[test]
+    fn a_marker_without_a_build_identity_still_reads_as_a_sentence() {
+        let marker = SingleStoreMarker {
+            set_at_ms: Some(1),
+            set_by: String::new(),
+        };
+
+        assert_eq!(
+            marker.remediation(),
+            "this store was migrated to single-store mode by an unrecorded ck-mc build; \
+             run that build or newer"
+        );
     }
 
     #[test]
@@ -25818,6 +26507,9 @@ mod tests {
                 selected_range_identities,
                 producer_session_id: Some("producer-session".into()),
                 producer_run_id: Some("run-1".into()),
+                producer_attempt: 0,
+                coordinator_token: None,
+                claim_deadline_ms: None,
                 fired_at_ms: Some(123),
                 expected_revert_epoch: 0,
                 compartment_set_generation: CompartmentSetGeneration::default(),
@@ -25947,6 +26639,7 @@ mod tests {
         HistorianPublishPredicate {
             firing_seq: 7,
             producer_run_id: "run-1".into(),
+            producer_attempt: 0,
             chunk_fingerprint: "fp".into(),
             selected_range_identities: selected_range_identities(),
             compartment_set_generation: CompartmentSetGeneration::default(),
@@ -27534,10 +28227,7 @@ mod shadow_tests {
                 Ok(versions)
             })
             .unwrap();
-        assert_eq!(
-            versions,
-            (1_i64..=LATEST_MIGRATION_VERSION as i64).collect::<Vec<_>>()
-        );
+        assert_eq!(versions, crate::tests::bundled_migration_versions());
         assert_eq!(
             store
                 .get_note_by_id("git:identity", "session", 1)

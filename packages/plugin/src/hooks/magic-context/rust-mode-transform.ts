@@ -55,7 +55,7 @@ import {
 import { writeRustTransformDecision } from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { canonicalModelIdentity } from "../../shared/harness-provider-map";
-import { sessionLog } from "../../shared/logger";
+import { log, sessionLog } from "../../shared/logger";
 import { promptSurfaceConfigIdentity, resolvePromptSurface } from "../../shared/prompt-surface";
 import { createPromptSurfaceGuidanceEpochCache } from "../../shared/prompt-surface-runtime";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
@@ -80,6 +80,7 @@ import {
     resolveTrustedContextLimit,
 } from "./event-resolvers";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
+import { createHistorianHostRunner } from "./historian-host-runner";
 import { saveLkgSlotToDb } from "./lkg-persist";
 import { replayLkg, resolveLkgModelKeys } from "./lkg-replay";
 import {
@@ -494,6 +495,17 @@ export interface RustModeTransformOptions {
     stallProbeAfterMsForTests?: number;
     /** Test-only override for the health-probe deadline. */
     healthProbeTimeoutMsForTests?: number;
+    /**
+     * Replaces the historian pull loop this transform would build for itself.
+     * Tests use it to drive the loop deterministically; production never sets it.
+     */
+    historianHostRunnerForTests?: HistorianHostRunnerSeam;
+}
+
+/** What the transform needs from the historian pull loop, and nothing more. */
+export interface HistorianHostRunnerSeam {
+    pump(routeSessionId: string): Promise<void>;
+    stop(): Promise<void>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1743,6 +1755,7 @@ export function createRustModeTransform(
     ) => Promise<void>;
     clearSession: (sessionId: string) => Promise<void>;
     invalidateWireState: (sessionId: string) => void;
+    stopHostRunner: () => Promise<void>;
     getState: (sessionId: string) => Readonly<RustSessionState>;
     getHeapStats: () => RustWireCacheHeapStats;
 } {
@@ -1761,6 +1774,53 @@ export function createRustModeTransform(
     const rawFallbackEstimator =
         options.rawFallbackEstimatorForTests ?? estimateFinalWireInputTokens;
     const timeoutMs = Math.max(1, options.moduleTimeoutMs ?? RUST_SEND_TIMEOUT_MS);
+
+    // The pull loop only exists when the user put this process in the lane. Under
+    // the default runner nothing is ever queued for a claimant, so building the
+    // loop would only add a module round trip per pass to ask a question whose
+    // answer is always "nothing".
+    const hostRunnerWanted = deps.historianRunner === "host";
+    let hostRunner: HistorianHostRunnerSeam | undefined | null =
+        options.historianHostRunnerForTests ?? (hostRunnerWanted ? null : undefined);
+    const resolveHostRunner = (): HistorianHostRunnerSeam | undefined => {
+        if (hostRunner !== null) return hostRunner;
+        try {
+            hostRunner = createHistorianHostRunner({
+                call: (args) =>
+                    options.moduleClient.call({
+                        method: args.method,
+                        sessionId: args.sessionId,
+                        projectRoot: options.projectRoot ?? deps.directory ?? process.cwd(),
+                        body: args.body,
+                    }),
+                db: deps.db,
+                client: deps.client,
+                ...(deps.hiddenCompletionExecutor
+                    ? { hiddenCompletionExecutor: deps.hiddenCompletionExecutor }
+                    : {}),
+                sessionDirectory: (sessionId) =>
+                    deps.sessionDirectoryBySession?.get(sessionId) ??
+                    deps.directory ??
+                    process.cwd(),
+                // Read per poll, not captured: an operator turning the loop off must
+                // take effect on the next pass rather than at the next restart.
+                enabled: () => deps.historianHostRunnerEnabled !== false,
+                ...(deps.historianMaxOutputTokens !== undefined
+                    ? { maxOutputTokens: deps.historianMaxOutputTokens }
+                    : {}),
+                // Sampled per claim so a live edit of historian_timeout_ms applies to
+                // the next run, as it does for the host's own historian.
+                attemptTimeoutMs: () =>
+                    deps.resolveHistorianRun?.().timeoutMs ?? deps.historianTimeoutMs,
+            });
+        } catch (error) {
+            // A loop that cannot be built leaves the runs for another claimant rather
+            // than failing the pass that discovered it could not be built.
+            hostRunner = undefined;
+            log(`[magic-context] historian host runner unavailable: ${String(error)}`);
+        }
+        return hostRunner ?? undefined;
+    };
 
     const resolveMuralForPass = (
         state: RustSessionState,
@@ -4038,7 +4098,22 @@ export function createRustModeTransform(
     };
 
     return {
-        run,
+        run: async (
+            sessionId: string,
+            messages: MessageLike[],
+            output: { messages: unknown[] },
+            sessionMeta: ReturnType<typeof getOrCreateSessionMeta>,
+        ): Promise<void> => {
+            try {
+                await run(sessionId, messages, output, sessionMeta);
+            } finally {
+                // The pass is the loop's clock. A run can only be queued by a pass, so
+                // looking right after one is when there is most likely something to
+                // take. Never awaited: the fold the loop picks up takes minutes and the
+                // response this pass just built is already correct without it.
+                void resolveHostRunner()?.pump(sessionId);
+            }
+        },
         async clearSession(sessionId: string): Promise<void> {
             const projectRoot =
                 states.get(sessionId)?.memoryAuthorityRoot ?? options.projectRoot ?? null;
@@ -4066,6 +4141,9 @@ export function createRustModeTransform(
             }
         },
         invalidateWireState,
+        async stopHostRunner(): Promise<void> {
+            await (hostRunner ?? undefined)?.stop();
+        },
         getState(sessionId: string): Readonly<RustSessionState> {
             return {
                 ...ensureState(states, sessionId),

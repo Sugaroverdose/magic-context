@@ -1000,6 +1000,8 @@ export async function registerContext(context: V2Context) {
                 // its own default, so no fallback belongs here.
                 historianMaxOutputTokens: config.historian?.maxTokens,
                 historianTwoPass: config.historian?.two_pass,
+                historianRunner: config.historian?.runner,
+                historianHostRunnerEnabled: config.historian?.host_runner?.enabled,
                 // TypeScript mode folds on the host's own compaction rows, so its marker
                 // carrier stays inert. Rust mode has no such row to write: the module's
                 // materialized boundary is recorded in the marker columns instead, and

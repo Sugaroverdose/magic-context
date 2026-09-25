@@ -30,8 +30,10 @@ pub mod divergence;
 pub mod healing;
 pub mod historian;
 pub mod historian_chunk;
+pub mod historian_host;
 pub mod historian_producer;
 pub mod historian_prompt;
+pub mod historian_runner;
 pub mod historian_validate;
 pub mod injection;
 pub mod m0_compose;
@@ -80,6 +82,7 @@ use mc_store::{
     StateImportError, StateImportPreflight, StateImportValidationError, StoredChunkTranscript,
     StoredCompartment, StoredMemoryMutation, StoredNote, TodoStateSetOutcome, UserHintSeedRow,
     VerificationUpdate, WrapupCommandRecord, LATEST_MIGRATION_VERSION,
+    SINGLE_STORE_MARKER_REFUSAL_REASON,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -105,7 +108,9 @@ use historian_chunk::{
     assemble_historian_firing, AssembleHistorianFiringOutcome, AssembledHistorianFiring,
     HistorianAssemblerConfig,
 };
+use historian_host::{HostReportDeliveryError, HostRunLedger, HostRunReport};
 use historian_producer::{HistorianProducer, HistorianProducerConfig, HistorianProducerError};
+use historian_runner::HistorianRunnerKind;
 use prompt_surface::{PromptSurfacePreset, PromptSurfaceSelection};
 use route_targets::{route_targets, RouteTargetConfig};
 use scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT;
@@ -321,11 +326,29 @@ struct StoreOpenAttempt {
     origin: DescriptorOrigin,
 }
 
+/// The reason code a failed open carries when nothing more specific applies: the open failed for
+/// one of the many ordinary reasons a database open can fail, and the sentence beside it is the
+/// only description there is. Named arms exist only where a reader has to act differently.
+const STORE_OPEN_FAILURE_REASON_GENERIC: &str = "open_error";
+
+/// The stable reason code for an open that failed for a reason worth naming, or the generic code
+/// when there is none. Keeping this in one place means the health lane, the refusal message and
+/// the log line cannot drift into naming the same failure three different ways.
+fn store_open_failure_reason_code(error: &McStoreError) -> &'static str {
+    match error {
+        McStoreError::SingleStoreMarkerUnsupported { .. } => SINGLE_STORE_MARKER_REFUSAL_REASON,
+        _ => STORE_OPEN_FAILURE_REASON_GENERIC,
+    }
+}
+
 /// Why a store open ended for good. Recorded BEFORE the phase returns to idle so a request that
 /// observes an idle phase always finds the reason, instead of falling through to the
 /// "nothing was ever attempted" arm and blaming a missing ack that did arrive.
 #[derive(Clone, Debug)]
 struct StoreOpenFailure {
+    /// The stable token a reader matches on.
+    reason_code: String,
+    /// The human sentence, which may name paths, elapsed times and driver text.
     reason: String,
     origin: &'static str,
     descriptor: String,
@@ -354,6 +377,7 @@ enum StoreRefusal {
     /// The open ended and is not retried, so every later request refuses the same way until the
     /// module restarts.
     Failed {
+        reason_code: String,
         reason: String,
         origin: &'static str,
         descriptor: String,
@@ -396,11 +420,12 @@ impl StoreRefusal {
                 "storage single-writer lease is held by another live process: elapsed_ms={elapsed_ms} wait_window_ms={wait_window_ms} descriptor={descriptor} ({disposition})"
             ),
             Self::Failed {
+                reason_code,
                 reason,
                 origin,
                 descriptor,
             } => format!(
-                "storage open failed and is not retried before restart: reason={reason} descriptor_origin={origin} descriptor={descriptor} ({disposition})"
+                "storage open failed and is not retried before restart: reason_code={reason_code} reason={reason} descriptor_origin={origin} descriptor={descriptor} ({disposition})"
             ),
         }
     }
@@ -492,9 +517,10 @@ impl StoreOpenCoordinator {
 
     /// Record why the open ended, then release the phase. The order matters: a request that sees
     /// the idle phase must already be able to read the reason.
-    fn fail_and_idle(&self, reason: String, now_ms: u64) {
+    fn fail_and_idle(&self, reason_code: &str, reason: String, now_ms: u64) {
         let attempt = self.attempt_snapshot();
         *self.failure.lock().expect("store open failure mutex") = Some(StoreOpenFailure {
+            reason_code: reason_code.to_string(),
             reason,
             origin: attempt
                 .as_ref()
@@ -535,6 +561,7 @@ impl StoreOpenCoordinator {
             },
             _ => match self.failure_snapshot() {
                 Some(failure) => StoreRefusal::Failed {
+                    reason_code: failure.reason_code,
                     reason: failure.reason,
                     origin: failure.origin,
                     descriptor: failure.descriptor,
@@ -545,6 +572,7 @@ impl StoreOpenCoordinator {
                 // the open records one), and reported as a failed open rather than as a missing
                 // ack so a bookkeeping gap can never masquerade as "the daemon never acked".
                 None => StoreRefusal::Failed {
+                    reason_code: STORE_OPEN_FAILURE_REASON_GENERIC.to_string(),
                     reason: "store open ended without recording a reason".to_string(),
                     origin: self
                         .attempt_snapshot()
@@ -587,12 +615,13 @@ impl StoreOpenCoordinator {
         Some(HealthReport {
             status: HealthStatus::Failing,
             detail: Some(format!(
-                "storage open failed and is not retried: {} (descriptor {} from {}); requests refuse with store_open_failed until the module restarts",
-                failure.reason, failure.descriptor, failure.origin
+                "storage open failed and is not retried: {} ({}) (descriptor {} from {}); requests refuse with store_open_failed until the module restarts",
+                failure.reason_code, failure.reason, failure.descriptor, failure.origin
             )),
             metrics: Some(json!({
                 "lane": TRANSFORM_HEALTH_LANE,
                 "storage_state": "open_failed",
+                "storage_open_failure_reason_code": failure.reason_code,
                 "storage_open_failure_reason": failure.reason,
                 "storage_descriptor": failure.descriptor,
                 "storage_descriptor_origin": failure.origin,
@@ -3568,6 +3597,9 @@ pub struct McHandler {
     session_resolver: Arc<dyn SessionResolver>,
     config: Mutex<ConfigCache>,
     historian_runner_refusals: Arc<HistorianRunnerRefusalCache>,
+    /// Runs queued for a claimant that a firing task in this process is still
+    /// waiting on. Empty under the in-module runner.
+    host_runs: Arc<HostRunLedger>,
     #[cfg(test)]
     fixed_config: Option<McModuleConfig>,
     reattaching_sessions: Arc<Mutex<HashSet<String>>>,
@@ -4123,6 +4155,12 @@ struct HistorianFiringTask {
     project_root: PathBuf,
     project_slug: String,
     firing: AssembledHistorianFiring,
+    /// Which side runs the completion for this firing, resolved from config at
+    /// the moment the firing was prepared so a config edit mid-run cannot move a
+    /// firing already in flight to a different lane.
+    runner: HistorianRunnerKind,
+    /// Waiters for runs queued for a claimant. Unused by the in-module runner.
+    host_runs: Arc<HostRunLedger>,
     model_chain_generation: u64,
     runner_refusal_cache: Arc<HistorianRunnerRefusalCache>,
     live_guard: SessionSetGuard,
@@ -4186,6 +4224,7 @@ impl McHandler {
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
+            host_runs: Arc::new(HostRunLedger::new()),
             #[cfg(test)]
             fixed_config: None,
             reattaching_sessions: Arc::new(Mutex::new(HashSet::new())),
@@ -4296,6 +4335,7 @@ impl McHandler {
             Ok(opened) => {
                 if coordinator.cancelled.load(Ordering::Acquire) {
                     coordinator.fail_and_idle(
+                        STORE_OPEN_FAILURE_REASON_GENERIC,
                         "store open cancelled during shutdown".to_string(),
                         now_ms().max(0) as u64,
                     );
@@ -4308,7 +4348,11 @@ impl McHandler {
             Err(error) if store_open_error_is_live_lease(&error) => error,
             Err(error) => {
                 tracing::error!("mc-module: store open failed: {error}");
-                coordinator.fail_and_idle(error.to_string(), now_ms().max(0) as u64);
+                coordinator.fail_and_idle(
+                    store_open_failure_reason_code(&error),
+                    error.to_string(),
+                    now_ms().max(0) as u64,
+                );
                 return;
             }
         };
@@ -4337,6 +4381,7 @@ impl McHandler {
                     elapsed.as_secs_f64()
                 );
                 coordinator.fail_and_idle(
+                    STORE_OPEN_FAILURE_REASON_GENERIC,
                     format!(
                         "storage lease wait expired after {:.2}s: {last_lease_error}",
                         elapsed.as_secs_f64()
@@ -4387,7 +4432,11 @@ impl McHandler {
                         "mc-module: storage lease wait ended after {:.2}s; store open failed: {error}",
                         started.elapsed().as_secs_f64()
                     );
-                    coordinator.fail_and_idle(error.to_string(), now_ms().max(0) as u64);
+                    coordinator.fail_and_idle(
+                        store_open_failure_reason_code(&error),
+                        error.to_string(),
+                        now_ms().max(0) as u64,
+                    );
                     return;
                 }
             }
@@ -4402,6 +4451,7 @@ impl McHandler {
             elapsed.as_secs_f64()
         );
         coordinator.fail_and_idle(
+            STORE_OPEN_FAILURE_REASON_GENERIC,
             format!(
                 "storage lease wait cancelled during shutdown after {:.2}s",
                 elapsed.as_secs_f64()
@@ -4489,6 +4539,7 @@ impl McHandler {
             McModuleConfig {
                 cache_ttl_by_model: std::collections::BTreeMap::new(),
                 historian_temperature: None,
+                historian_runner: crate::historian_runner::HistorianRunnerKind::default(),
                 language: None,
                 execute_threshold_percentage: 65.0,
                 execute_threshold_user_config: None,
@@ -4541,6 +4592,7 @@ impl McHandler {
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
+            host_runs: Arc::new(HostRunLedger::new()),
             fixed_config: Some(config),
             reattaching_sessions: Arc::new(Mutex::new(HashSet::new())),
             live_historian_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -5476,6 +5528,7 @@ impl McHandler {
             return Some(match phase {
                 HistorianPhase::AwaitingProducer => "reattaching",
                 HistorianPhase::Firing
+                | HistorianPhase::Reclaiming
                 | HistorianPhase::Validating
                 | HistorianPhase::Publishing => "recovering",
                 HistorianPhase::Idle => "recovered",
@@ -5489,6 +5542,161 @@ impl McHandler {
             sessions: Arc::clone(&latch),
             session_id: session_id.clone(),
         };
+
+        // Restart recovery is where the claim queue's sweep belongs, and it is the
+        // only place that calls it: a row is parked by a restart, and a restart is
+        // what this function is handling. Without a caller a parked row past its own
+        // deadline would sit in the queue forever, because nothing else deletes it
+        // and nothing offers it either.
+        //
+        // The sweep covers the whole queue rather than this session, so a row left
+        // behind by a session that has since gone idle is reached by the next
+        // recovery on this module rather than waiting for its own session to fire
+        // again. It runs before the lookup below so a row that is already past its
+        // deadline is dropped here rather than adopted and then released.
+        match store.expire_historian_claims(now) {
+            Ok(sweep) => {
+                for run_id in &sweep.reclaimed {
+                    eprintln!(
+                        "mc-module: historian run {run_id} put back on offer: its claimant stopped reporting"
+                    );
+                }
+                for run_id in &sweep.dropped {
+                    eprintln!(
+                        "mc-module: historian run {run_id} dropped from the queue: parked with no report past its deadline"
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("mc-module: historian claim sweep failed: {error}");
+            }
+        }
+
+        // Only the host lane parks a run in the durable claim queue, so this lookup
+        // is skipped on the phases that lane never reaches. A run found here
+        // outlived this process: its claimant is either still working or has already
+        // left its answer on the row, and releasing the run would throw that away.
+        let parked_host_run = match phase {
+            HistorianPhase::AwaitingProducer | HistorianPhase::Reclaiming => store
+                .load_parked_historian_run(&parsed.session_id)
+                .ok()
+                .flatten(),
+            _ => None,
+        };
+        if let Some(parked) = parked_host_run {
+            // Still out with a claimant and still inside its deadline: the session
+            // keeps its single-flight slot, which is exactly what it would be doing
+            // if this process had never restarted, and there is no report to
+            // validate, so none of the chunk work below is needed.
+            //
+            // Putting the run back on offer IS needed, and is the whole of what this
+            // branch does. A restart can take a row out of the queue while leaving
+            // the run itself alive; without this call the shortcut would skip the
+            // re-publication and the run would sit parked until its deadline.
+            if parked.report.is_none() && parked.deadline_ms > now {
+                historian::reoffer_parked_historian_run(&store, &parked.run_id, now);
+                drop(guard);
+                return Some("reattaching");
+            }
+            let publication_fence = Arc::new(ReattachSnapshotPublicationFence {
+                snapshots: Arc::clone(&self.transform_snapshots),
+                session_id: session_id.clone(),
+                generation: snapshot_generation,
+                #[cfg(test)]
+                after_store_publish: Arc::clone(&self.publication_fence_write_hook),
+            });
+            let live: Vec<_> = projection
+                .blocks
+                .iter()
+                .filter(|b| !b.synthetic)
+                .cloned()
+                .collect();
+            let Some(range) = loaded.meta.historian.chunk_range.clone() else {
+                drop(guard);
+                return Some("recovering");
+            };
+            let chunk = historian_chunk::build_historian_chunk(
+                parsed.messages.as_slice(),
+                &live,
+                range.from_ordinal,
+                derive_historian_chunk_tokens(config.historian_context_limit_tokens),
+                range.to_ordinal.saturating_add(1),
+            );
+            let prior_compartments = match store.load_compartments(&session_id) {
+                Ok(cs) => cs
+                    .iter()
+                    .map(historian_chunk::stored_range)
+                    .collect::<Vec<_>>(),
+                Err(_) => Vec::new(),
+            };
+            let raw_chunk_messages = serde_json::to_string(
+                &parsed
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        !message.ck.meta.synthetic
+                            && message.ordinal >= chunk.chunk.start_index
+                            && message.ordinal <= chunk.chunk.end_index
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+            let boundary_dates = historian_chunk::native_boundary_dates(&parsed.messages);
+            let fingerprint_items: Vec<_> =
+                chunk.snapshot.iter().map(|item| item.as_item()).collect();
+            let observed = historian::compute_chunk_fingerprint(&fingerprint_items);
+            let adopt_await_timeout =
+                historian::historian_await_timeout(parsed.historian_timeout_ms);
+            tokio::spawn(async move {
+                let _guard = guard;
+                let outcome =
+                    historian::adopt_historian_run_on_host(historian::HistorianReattachRequest {
+                        store: &store,
+                        session_id: &session_id,
+                        project_path: &project_path,
+                        observed_chunk_fingerprint: &observed,
+                        validation_chunk: &chunk.chunk,
+                        chunk_transcript: &chunk.text,
+                        raw_chunk_messages: &raw_chunk_messages,
+                        boundary_dates: &boundary_dates,
+                        prior_compartments: &prior_compartments,
+                        validate_options: historian_validate::ValidateOptions {
+                            sequence_offset: prior_compartments.len() as u64 + 1,
+                            in_emergency: false,
+                            memory_enabled: config.memory_enabled,
+                            auto_promote: config.auto_promote,
+                            user_memory_collection_enabled: config.user_memory_collection_enabled,
+                            force_keep_last_compartment: false,
+                        },
+                        publication_floor_ordinal: range.to_ordinal,
+                        await_timeout: adopt_await_timeout,
+                        now_ms: now,
+                        failure_backoff_at_ms: now + HISTORIAN_FAILURE_BACKOFF_MS,
+                        completion_now_ms: now_ms,
+                        publication_fence: Some(publication_fence.as_ref()),
+                    });
+                match outcome {
+                    Ok(historian::HostRunAdoption::Published(success)) => eprintln!(
+                        "mc-module: historian run {} published from a report a claimant left across a restart",
+                        success.producer_run_id
+                    ),
+                    Ok(historian::HostRunAdoption::Failed { run_id, code }) => eprintln!(
+                        "mc-module: historian run {run_id} released for {session_id}: claimant reported {code}"
+                    ),
+                    Ok(historian::HostRunAdoption::Released { run_id }) => eprintln!(
+                        "mc-module: historian run {run_id} released for {session_id}: no report before its deadline"
+                    ),
+                    Ok(
+                        historian::HostRunAdoption::NotParked
+                        | historian::HostRunAdoption::StillOut { .. },
+                    ) => {}
+                    Err(e) => eprintln!(
+                        "mc-module: historian host-run adoption failed for {session_id}: {e}"
+                    ),
+                }
+            });
+            return Some("reattaching");
+        }
 
         match phase {
             HistorianPhase::AwaitingProducer => {
@@ -5551,6 +5759,7 @@ impl McHandler {
                         let action = historian::handle_restart_load(
                             &store,
                             &session_id,
+                            now,
                             now + HISTORIAN_FAILURE_BACKOFF_MS,
                         )?;
                         match action {
@@ -5605,12 +5814,21 @@ impl McHandler {
                 });
                 Some("reattaching")
             }
-            HistorianPhase::Firing | HistorianPhase::Validating | HistorianPhase::Publishing => {
+            // Reached only when the queue row is gone: a run parked for a claimant
+            // that still has its row was handled above. Without a row nothing can
+            // ever claim or report the run, so keeping it would hold the session's
+            // single-flight slot forever. Releasing it costs one re-assembled chunk
+            // on the next trigger and never loses durable output.
+            HistorianPhase::Firing
+            | HistorianPhase::Reclaiming
+            | HistorianPhase::Validating
+            | HistorianPhase::Publishing => {
                 tokio::spawn(async move {
                     let _guard = guard;
                     if let Err(e) = historian::handle_restart_load(
                         &store,
                         &session_id,
+                        now,
                         now + HISTORIAN_FAILURE_BACKOFF_MS,
                     ) {
                         tracing::error!(
@@ -6234,6 +6452,8 @@ impl McHandler {
                 project_root: binding.project_root.clone(),
                 project_slug,
                 firing,
+                runner: cfg.historian_runner,
+                host_runs: Arc::clone(&self.host_runs),
                 model_chain_generation,
                 runner_refusal_cache: Arc::clone(&self.historian_runner_refusals),
                 live_guard,
@@ -6384,6 +6604,8 @@ impl McHandler {
             project_root: binding.project_root.clone(),
             project_slug,
             firing,
+            runner: binding.config.historian_runner,
+            host_runs: Arc::clone(&self.host_runs),
             model_chain_generation,
             runner_refusal_cache: Arc::clone(&self.historian_runner_refusals),
             live_guard,
@@ -6479,9 +6701,11 @@ impl McHandler {
             historian_temperature,
             historian_await_timeout,
             project_path,
-            project_root,
             project_slug,
+            project_root,
             firing,
+            runner,
+            host_runs,
             model_chain_generation,
             runner_refusal_cache,
             live_guard,
@@ -6501,6 +6725,35 @@ impl McHandler {
         );
         let failure_started_at_ms = firing.now_ms;
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
+        if runner == HistorianRunnerKind::Host {
+            // The host lane never opens a Broca route, so there is no connect step
+            // to fail: the run is queued and this task waits for a claimant.
+            let mut request = firing.as_fire_request(
+                &store,
+                &session_id,
+                &project_path,
+                &project_slug,
+                language.as_deref(),
+            );
+            request.temperature = historian_temperature;
+            request.publication_fence = publication_fence.as_deref();
+            // The claimant walks the same model chain a Broca firing would, each
+            // attempt under the host's own per-attempt timeout, so this waits for the
+            // whole chain exactly as a Broca firing's joiners do.
+            let firing_budget = historian::firing_completion_wait_budget(
+                historian_await_timeout,
+                firing.model_chain.len(),
+            );
+            let result =
+                historian::run_historian_firing_on_host(&host_runs, request, firing_budget).await;
+            if let Ok(loaded) = store.load(&session_id) {
+                DISPATCH_HEALTH.record_historian_outcome(
+                    historian_status_summary(&loaded.meta.historian),
+                    loaded.meta.historian.recent_decisions.len(),
+                );
+            }
+            return result;
+        }
         let result = match factory.connect(&project_root).await {
             Ok(mut producer) => {
                 let mut request = firing.as_fire_request(
@@ -7387,6 +7640,291 @@ impl McHandler {
                 code: "store_write_failed".to_string(),
                 message: error.to_string(),
             },
+        }
+    }
+
+    /// The project a claim-lane request may act on, and the version check the rest
+    /// of the management surface applies.
+    ///
+    /// The four claim ops cannot take a `session_id` the way the neighbouring
+    /// management ops do: a claimant polls precisely because it does not know which
+    /// session produced a run. What it can be held to is the channel's own binding.
+    /// One module store serves every project on the machine, the queue row records
+    /// which project queued the run, and `historian.claim` hands back the folded
+    /// conversation transcript — so without this scope a second project's host
+    /// process can list and claim the first project's runs and read its transcripts.
+    ///
+    /// The project is resolved through the authority route exactly as the transform
+    /// that queued the run resolved it, so a workspace member and its authority
+    /// project agree on one key rather than two spellings of the same project.
+    fn historian_lane_binding(
+        &self,
+        channel: u16,
+        request: &Value,
+        operation: &str,
+    ) -> Result<SessionBinding, HandlerOutcome> {
+        if request.get("v").and_then(Value::as_u64) != Some(1) {
+            return Err(HandlerOutcome::Error {
+                code: "bad_request".to_string(),
+                message: format!("{operation} requires v=1"),
+            });
+        }
+        self.facade_binding(channel)
+            .map_err(|_| HandlerOutcome::Error {
+                code: "route_unbound".to_string(),
+                message: format!("{operation} on a channel with no session binding"),
+            })
+    }
+
+    /// The project key a bound channel's runs are queued under: the authority route
+    /// resolution the transform applied when it queued them, so a workspace member
+    /// and its authority project are one key rather than two spellings.
+    fn historian_lane_project(
+        &self,
+        binding: &SessionBinding,
+        store: &McStore,
+    ) -> Result<String, HandlerOutcome> {
+        let route_project_root = binding.project_root.to_string_lossy().to_string();
+        match store.authority_project_for_route(&route_project_root, "memories") {
+            Ok(Some(project)) => Ok(project),
+            Ok(None) => Ok(route_project_root),
+            Err(error) => Err(HandlerOutcome::Error {
+                code: "authority_project_resolution_failed".to_string(),
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    /// `historian.pending {session_id?}` — runs waiting for a claimant.
+    ///
+    /// Omitting `session_id` lists every run of the caller's own project, because a
+    /// claimant discovers runs by polling, not by already knowing which session
+    /// produced them. Runs queued by any other project are not the caller's to see.
+    fn handle_historian_pending_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
+        let binding = match self.historian_lane_binding(channel, request, "historian.pending") {
+            Ok(binding) => binding,
+            Err(outcome) => return outcome,
+        };
+        let session_id = match optional_run_string(request, "session_id") {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let store = match self.store.get() {
+            Some(store) => store,
+            None => return self.store_refusal(),
+        };
+        let project_path = match self.historian_lane_project(&binding, store) {
+            Ok(project) => project,
+            Err(outcome) => return outcome,
+        };
+        match store.list_pending_historian_runs(&project_path, session_id.as_deref(), now_ms()) {
+            Ok(runs) => respond(json!({
+                "ok": true,
+                "runs": runs
+                    .into_iter()
+                    .map(|run| json!({
+                        "run_id": run.run_id,
+                        "session_id": run.session_id,
+                        "chunk_fingerprint": run.chunk_fingerprint,
+                        "prompt_bytes_len": run.prompt_bytes_len,
+                        "deadline_ms": run.deadline_ms,
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
+            Err(error) => HandlerOutcome::Error {
+                code: "store_load_failed".to_string(),
+                message: error.to_string(),
+            },
+        }
+    }
+
+    /// `historian.claim {run_id, claimant_instance_id}` — take a queued run.
+    ///
+    /// A lost race answers `{ok: false, refusal}` rather than an error frame: two
+    /// claimants reaching for the same run is ordinary operation, and the caller's
+    /// response is to move to the next run, not to treat the request as failed.
+    /// Malformed requests still fail loudly.
+    fn handle_historian_claim_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
+        let binding = match self.historian_lane_binding(channel, request, "historian.claim") {
+            Ok(binding) => binding,
+            Err(outcome) => return outcome,
+        };
+        let run_id = match required_run_string(request, "run_id", "historian.claim") {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let claimant = match required_run_string(request, "claimant_instance_id", "historian.claim")
+        {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let store = match self.store.get() {
+            Some(store) => store,
+            None => return self.store_refusal(),
+        };
+        let project_path = match self.historian_lane_project(&binding, store) {
+            Ok(project) => project,
+            Err(outcome) => return outcome,
+        };
+        match store.claim_historian_run(&project_path, &run_id, &claimant, now_ms()) {
+            Ok(mc_store::HistorianClaimOutcome::Claimed(claim)) => respond(json!({
+                "ok": true,
+                "run_id": claim.run_id,
+                "session_id": claim.session_id,
+                "attempt": claim.attempt,
+                "token": claim.token,
+                "prompt": {
+                    "system": claim.system_prompt,
+                    "user": claim.user_prompt,
+                },
+                "model_chain": claim.model_chain,
+                "await_budget_ms": claim.await_budget_ms,
+                "claim_deadline_ms": claim.claim_deadline_ms,
+                "heartbeat_interval_ms": mc_store::HISTORIAN_HEARTBEAT_INTERVAL_MS,
+            })),
+            Ok(mc_store::HistorianClaimOutcome::Refused(refusal)) => {
+                respond(json!({ "ok": false, "refusal": refusal.as_wire_str() }))
+            }
+            Err(error) => HandlerOutcome::Error {
+                code: "store_write_failed".to_string(),
+                message: error.to_string(),
+            },
+        }
+    }
+
+    /// `historian.heartbeat {run_id, token}` — extend the current claim's lease.
+    fn handle_historian_heartbeat_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
+        let binding = match self.historian_lane_binding(channel, request, "historian.heartbeat") {
+            Ok(binding) => binding,
+            Err(outcome) => return outcome,
+        };
+        let run_id = match required_run_string(request, "run_id", "historian.heartbeat") {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let token = match required_run_string(request, "token", "historian.heartbeat") {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let store = match self.store.get() {
+            Some(store) => store,
+            None => return self.store_refusal(),
+        };
+        let project_path = match self.historian_lane_project(&binding, store) {
+            Ok(project) => project,
+            Err(outcome) => return outcome,
+        };
+        match store.heartbeat_historian_run(&project_path, &run_id, &token, now_ms()) {
+            Ok(mc_store::HistorianHeartbeatOutcome::Extended { claim_deadline_ms }) => {
+                respond(json!({
+                    "ok": true,
+                    "claim_deadline_ms": claim_deadline_ms,
+                    "heartbeat_interval_ms": mc_store::HISTORIAN_HEARTBEAT_INTERVAL_MS,
+                }))
+            }
+            Ok(mc_store::HistorianHeartbeatOutcome::Refused(refusal)) => {
+                respond(json!({ "ok": false, "refusal": refusal.as_wire_str() }))
+            }
+            Err(error) => HandlerOutcome::Error {
+                code: "store_write_failed".to_string(),
+                message: error.to_string(),
+            },
+        }
+    }
+
+    /// `historian.complete {run_id, token, output | error}` — the terminal report.
+    ///
+    /// The token is checked FIRST, before the report body is even read: a claimant
+    /// that was replaced still holds a real token, and parsing its output before
+    /// establishing that the claim is current would spend validation on a document
+    /// that can never be published.
+    ///
+    /// Accepting a report does not publish it. It hands the text to the firing task
+    /// that queued the run, which validates and publishes through exactly the same
+    /// code the in-module producer path uses — same parser, same length-cap
+    /// refusal, same publish CAS.
+    ///
+    /// When no task in this process is waiting — which is what a module restart
+    /// inside the completion window looks like from here — the report is stored on
+    /// the run's queue row instead of being refused, and the next transform pass
+    /// for that session publishes it through that same code. A fold takes minutes,
+    /// so the module being restarted inside one is ordinary rather than
+    /// exceptional, and throwing away a provider call the host already paid for is
+    /// the worse of the two answers. `publish` in the response says which of the
+    /// two happened, so a claimant can log "handed over" separately from "stored
+    /// for the next pass".
+    fn handle_historian_complete_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
+        let binding = match self.historian_lane_binding(channel, request, "historian.complete") {
+            Ok(binding) => binding,
+            Err(outcome) => return outcome,
+        };
+        let run_id = match required_run_string(request, "run_id", "historian.complete") {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let token = match required_run_string(request, "token", "historian.complete") {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
+        let store = match self.store.get() {
+            Some(store) => store,
+            None => return self.store_refusal(),
+        };
+        let project_path = match self.historian_lane_project(&binding, store) {
+            Ok(project) => project,
+            Err(outcome) => return outcome,
+        };
+        match store.authorize_historian_report(&project_path, &run_id, &token) {
+            Ok(mc_store::HistorianReportOutcome::Authorized(_)) => {}
+            Ok(mc_store::HistorianReportOutcome::Refused(refusal)) => {
+                return respond(json!({ "ok": false, "refusal": refusal.as_wire_str() }));
+            }
+            Err(error) => {
+                return HandlerOutcome::Error {
+                    code: "store_load_failed".to_string(),
+                    message: error.to_string(),
+                };
+            }
+        }
+
+        let report = match parse_historian_report(request) {
+            Ok(report) => report,
+            Err(outcome) => return outcome,
+        };
+        let durable = durable_report(&report);
+        match self.host_runs.deliver(&run_id, report) {
+            Ok(()) => respond(json!({ "ok": true, "accepted": true, "publish": "immediate" })),
+            Err(HostReportDeliveryError::AlreadyReported) => respond(json!({
+                "ok": false,
+                "refusal": HostReportDeliveryError::AlreadyReported.as_wire_str(),
+            })),
+            // The token is re-checked inside `record_historian_report`: between the
+            // authorization above and this write the lease can lapse and the run can
+            // be handed to somebody else, and the replaced claim's report must not
+            // be the one that lands.
+            Err(HostReportDeliveryError::NoWaiter) => {
+                match store.record_historian_report(
+                    &project_path,
+                    &run_id,
+                    &token,
+                    &durable,
+                    now_ms(),
+                ) {
+                    Ok(mc_store::HistorianRecordOutcome::Recorded) => {
+                        eprintln!(
+                            "mc-module: historian report for {run_id} stored for the next pass (no firing task in this process is waiting on it)"
+                        );
+                        respond(json!({ "ok": true, "accepted": true, "publish": "deferred" }))
+                    }
+                    Ok(mc_store::HistorianRecordOutcome::Refused(refusal)) => {
+                        respond(json!({ "ok": false, "refusal": refusal.as_wire_str() }))
+                    }
+                    Err(error) => HandlerOutcome::Error {
+                        code: "store_write_failed".to_string(),
+                        message: error.to_string(),
+                    },
+                }
+            }
         }
     }
 
@@ -9918,6 +10456,27 @@ impl McHandler {
                 .unwrap_or(Duration::ZERO)
         };
         let mut trigger_timings = HistorianTriggerTimings::default();
+        // Serve-then-fold. The emergency pass joins the fold inline only when this
+        // module runs the completion itself. Under the host runner the completion is
+        // made in another process, where it legitimately takes minutes; holding an
+        // emergency pass open for it would block the request the user is waiting on
+        // behind a background fold, and would make the hidden child's own context
+        // hook dispatch while its parent transform is still blocked. The emergency
+        // reduction this pass already computed is served instead, and the fold lands
+        // on a later pass. What that costs is real and is accounted rather than
+        // hidden: the tiered drops the emergency output makes are permanent, and the
+        // fold's arrival pays for a second prefix rewrite.
+        //
+        // Resolved from the same place the firing itself resolves its runner
+        // (`prepare_historian_fire`), not from the route's bind-time copy: a pass
+        // that decided to wait inline while the firing went to the host would wait
+        // for a completion that was never going to arrive in this process. Only an
+        // emergency pass asks, so the ordinary pass pays nothing for it.
+        let serve_then_fold = result.scheduler_pass == scheduler::PassDecision::Emergency95
+            && self
+                .effective_config(&binding.project_root)
+                .historian_runner
+                == HistorianRunnerKind::Host;
         let diagnostics = if parsed.is_subagent {
             historian_no_fire_diagnostics(NoFireDiagnosticsInput {
                 no_fire: "subagent_session".into(),
@@ -9929,7 +10488,8 @@ impl McHandler {
                 progress: None,
                 last_failure: None,
             })
-        } else if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
+        } else if result.scheduler_pass == scheduler::PassDecision::Emergency95 && !serve_then_fold
+        {
             match self.prepare_historian_fire(
                 Arc::clone(&store),
                 &parsed,
@@ -13852,6 +14412,10 @@ impl McHandler {
                 "state_import" => self.handle_state_import_value(channel, request),
                 "agent_drops.append" => self.handle_agent_drops_value(channel, request),
                 "note.evaluate" => self.handle_note_evaluation_value(channel, &request).await,
+                "historian.pending" => self.handle_historian_pending_value(channel, &request),
+                "historian.claim" => self.handle_historian_claim_value(channel, &request),
+                "historian.heartbeat" => self.handle_historian_heartbeat_value(channel, &request),
+                "historian.complete" => self.handle_historian_complete_value(channel, &request),
                 "todo_state.set" => self.handle_todo_state_set_value(channel, &request),
                 "session.flush" => self.handle_session_flush_value(channel, &request),
                 "session.recomp" => self.handle_session_recomp_value(channel, &request),
@@ -13922,6 +14486,115 @@ fn unrecognized_request_error(request: &Value) -> HandlerOutcome {
         message: format!(
             "no `method` or `kind` field matched a known request; got top-level keys: [{got_keys}]"
         ),
+    }
+}
+
+/// Maximum bytes a claimant's reported completion may carry.
+///
+/// The same ceiling the rest of the facade surface uses. Output past it cannot
+/// be a historian document the validator would accept anyway, and refusing at
+/// the wire keeps an oversized body from reaching the parser at all.
+const MAX_HISTORIAN_REPORT_BYTES: usize = MAX_FACADE_FRAME_BYTES;
+
+/// Read a required non-empty string field from a historian claim-lane request.
+fn required_run_string(
+    request: &Value,
+    field: &str,
+    operation: &str,
+) -> Result<String, HandlerOutcome> {
+    match request.get(field).and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() && value.len() <= 512 => Ok(value.to_string()),
+        Some(_) => Err(invalid_params_error(format!(
+            "{operation} {field} must contain 1..=512 non-blank bytes"
+        ))),
+        None => Err(invalid_params_error(format!(
+            "{operation} requires {field}"
+        ))),
+    }
+}
+
+/// Read an optional non-empty string field, refusing a present-but-blank value
+/// rather than silently widening the query to every session.
+fn optional_run_string(request: &Value, field: &str) -> Result<Option<String>, HandlerOutcome> {
+    match request.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() && value.len() <= 512 => {
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err(invalid_params_error(format!(
+            "{field} must be omitted or contain 1..=512 non-blank bytes"
+        ))),
+    }
+}
+
+/// Decode the terminal report body of `historian.complete`.
+///
+/// Exactly one of `output` and `error` must be present: a report carrying both
+/// does not say what happened, and a report carrying neither says nothing at all.
+/// The storable shape of a report, for the queue row that keeps it until a pass
+/// can publish it. Kept as a separate value because the in-process ledger consumes
+/// the report it is handed.
+fn durable_report(report: &HostRunReport) -> mc_store::HistorianRunReport {
+    match report {
+        HostRunReport::Output(output) => mc_store::HistorianRunReport::Output {
+            text: output.text.clone(),
+            length_capped: output.length_capped,
+        },
+        HostRunReport::Failed { code, message } => mc_store::HistorianRunReport::Failed {
+            code: code.clone(),
+            message: message.clone(),
+        },
+    }
+}
+
+fn parse_historian_report(request: &Value) -> Result<HostRunReport, HandlerOutcome> {
+    let output = request.get("output").filter(|value| !value.is_null());
+    let error = request.get("error").filter(|value| !value.is_null());
+    match (output, error) {
+        (Some(output), None) => {
+            let Some(text) = output.get("text").and_then(Value::as_str) else {
+                return Err(invalid_params_error(
+                    "historian.complete output requires a text string",
+                ));
+            };
+            if text.len() > MAX_HISTORIAN_REPORT_BYTES {
+                return Err(invalid_params_error(format!(
+                    "historian.complete output text exceeds the {MAX_HISTORIAN_REPORT_BYTES}-byte limit"
+                )));
+            }
+            Ok(HostRunReport::Output(
+                crate::historian_producer::ProducerOutput {
+                    text: text.to_string(),
+                    // Absent means the claimant did not observe a length-class
+                    // finish reason. It is never inferred from the text: a
+                    // document that merely looks complete can still be cut.
+                    length_capped: output
+                        .get("length_capped")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    // The claimant's report carries no token spend on this wire.
+                    usage: None,
+                },
+            ))
+        }
+        (None, Some(error)) => Ok(HostRunReport::Failed {
+            code: error
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("host_runner_error")
+                .to_string(),
+            message: error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("host runner reported a failure with no message")
+                .to_string(),
+        }),
+        (Some(_), Some(_)) => Err(invalid_params_error(
+            "historian.complete carries both output and error; exactly one says what happened",
+        )),
+        (None, None) => Err(invalid_params_error(
+            "historian.complete requires either output or error",
+        )),
     }
 }
 
@@ -18457,6 +19130,13 @@ mod tests {
     };
     use tokio::sync::Notify;
 
+    // Adversarial gate over the host-runner slice and the single-store marker
+    // slice merged together. Kept in its own files so the sequences it executes
+    // read as one argument instead of being scattered through this module.
+    mod gate_a1_b0;
+    mod gate_a1_b0_baseline_probe;
+    mod gate_a2;
+
     #[test]
     fn search_date_bounds_are_utc_inclusive_and_reject_invalid_values() {
         let date_args = serde_json::from_value::<Map<String, Value>>(serde_json::json!({
@@ -19479,6 +20159,109 @@ mod tests {
                 .as_str()
                 .is_some_and(|reason| reason.contains("lease")),
             "{metrics}"
+        );
+    }
+
+    /// A store that has been migrated into single-store mode must stop this binary at the door,
+    /// and every surface that answers "why is there no store" must name that specific reason.
+    ///
+    /// The named token is what makes the refusal actionable: "storage open failed" sends an
+    /// operator looking for a broken file, while `single_store_marker` says the store is intact
+    /// and this binary is the wrong one. The health lane, the shared refusal seam behind
+    /// `session.status` and the transform lane are all asserted, because an operator may be
+    /// looking at any one of the three and a reason that reaches only one is a reason they will
+    /// not see.
+    #[tokio::test]
+    async fn a_single_store_marker_refusal_is_named_on_health_and_on_every_refusal_seam() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let migrated = McStore::open(&descriptor).unwrap();
+        migrated
+            .set_single_store_marker_for_test(1_758_000_000_000, "a1b2c3d4")
+            .unwrap();
+        drop(migrated);
+
+        let handler = McHandler::new();
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while handler.store_open.failure_snapshot().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("an open that cannot succeed must record its reason");
+
+        let report = <McHandler as ModuleHandler>::health(&handler).await;
+        assert_eq!(report.status, HealthStatus::Failing);
+        let metrics = report
+            .metrics
+            .expect("a failed open must carry health metrics");
+        assert_eq!(metrics["storage_state"], "open_failed");
+        assert_eq!(
+            metrics["storage_open_failure_reason_code"],
+            SINGLE_STORE_MARKER_REFUSAL_REASON
+        );
+        let detail = report
+            .detail
+            .expect("a failed open must carry a health detail");
+        assert!(
+            detail.contains(SINGLE_STORE_MARKER_REFUSAL_REASON),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("run that build or newer"),
+            "health must carry the remediation, not only the diagnosis: {detail}"
+        );
+
+        // `session.status` and the other management lanes answer "there is no store" by calling
+        // exactly this method, so asserting it here covers all of them.
+        let (code, message) = error_frame(handler.store_refusal());
+        assert_eq!(code, "store_open_failed");
+        assert!(
+            message.contains(&format!("reason_code={SINGLE_STORE_MARKER_REFUSAL_REASON}")),
+            "{message}"
+        );
+        assert!(message.contains("ck-mc a1b2c3d4"), "{message}");
+        assert!(
+            message.contains("terminal"),
+            "a store this binary cannot read is not something a retry fixes: {message}"
+        );
+
+        let (transform_code, transform_message) =
+            error_frame(call_transform_outcome(&handler, request(big_messages())).await);
+        assert_eq!(transform_code, "store_open_failed");
+        assert!(
+            transform_message
+                .contains(&format!("reason_code={SINGLE_STORE_MARKER_REFUSAL_REASON}")),
+            "{transform_message}"
+        );
+    }
+
+    /// An open that failed for an ordinary reason must NOT borrow the single-store name, or the
+    /// named reason stops distinguishing anything.
+    #[tokio::test]
+    async fn an_ordinary_failed_open_carries_the_generic_reason_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let _predecessor = McStore::open(&descriptor).unwrap();
+        let handler = McHandler::new();
+        handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(60)));
+
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
+        wait_for_store_open_phase(&handler, STORE_OPEN_WAITING).await;
+        wait_for_store_open_phase(&handler, STORE_OPEN_IDLE).await;
+
+        let report = <McHandler as ModuleHandler>::health(&handler).await;
+        let metrics = report
+            .metrics
+            .expect("a failed open must carry health metrics");
+        assert_eq!(
+            metrics["storage_open_failure_reason_code"],
+            STORE_OPEN_FAILURE_REASON_GENERIC
         );
     }
 
@@ -20555,6 +21338,21 @@ mod tests {
         (handler, store, dir, project)
     }
 
+    /// The project key the claim lane resolves for a channel bound to this project
+    /// root.
+    ///
+    /// The lane scopes every op to the caller's project, resolving the key through
+    /// the authority route the way the transform that queued the run did. A test
+    /// that reads the queue directly has to use the same key, or it looks in the
+    /// wrong project and reads an empty queue as "nothing was queued".
+    fn lane_project_key(store: &McStore, project_root: &std::path::Path) -> String {
+        let route_root = project_root.to_string_lossy().to_string();
+        store
+            .authority_project_for_route(&route_root, "memories")
+            .unwrap()
+            .unwrap_or(route_root)
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn host_mural_write_family_is_hash_gated_and_claude_code_inherits_by_project() {
         let (handler, store, _dir, project) =
@@ -20779,6 +21577,7 @@ mod tests {
         McModuleConfig {
             cache_ttl_by_model: std::collections::BTreeMap::new(),
             historian_temperature: None,
+            historian_runner: crate::historian_runner::HistorianRunnerKind::default(),
             language: None,
             execute_threshold_percentage: 65.0,
             execute_threshold_user_config: None,
@@ -27146,6 +27945,9 @@ mod tests {
                 selected_range_identities: selected_range_identities.clone(),
                 producer_session_id: Some("producer".to_string()),
                 producer_run_id: Some("run".to_string()),
+                producer_attempt: 0,
+                coordinator_token: None,
+                claim_deadline_ms: None,
                 fired_at_ms: Some(1),
                 expected_revert_epoch: 0,
                 compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
@@ -27168,6 +27970,7 @@ mod tests {
                 predicate: &mc_store::HistorianPublishPredicate {
                     firing_seq: 7,
                     producer_run_id: "run".to_string(),
+                    producer_attempt: 0,
                     chunk_fingerprint: "fp".to_string(),
                     selected_range_identities,
                     compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
@@ -35863,6 +36666,131 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
+    /// What one served response cost: how many tail items the pass dropped to fit,
+    /// how many messages it served, and how many bytes that was.
+    ///
+    /// A dropped tool output serializes as `{"dropped": …}`, which is what makes
+    /// the drop count readable straight off the wire.
+    fn served_census(response: &Value) -> (usize, usize, usize) {
+        let served = serde_json::to_string(&response["ck_messages"]).unwrap();
+        let dropped = served.matches("\"dropped\"").count();
+        let messages = response["ck_messages"].as_array().map_or(0, Vec::len);
+        (dropped, messages, served.len())
+    }
+
+    /// Serve-then-fold (design §2.1 / §7A A8).
+    ///
+    /// Under the default runner an emergency pass joins the fold inline and serves
+    /// the folded prefix. Under the host runner the completion happens in another
+    /// process, where it legitimately takes minutes, so the pass serves the
+    /// emergency reduction it already computed and the fold lands later.
+    ///
+    /// The test prints the accounting A8 requires — dropped-tag count and the size
+    /// of the rewrite each runner serves — so the difference is a measured number
+    /// in the report rather than a claim.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_host_runner_serves_the_emergency_reduction_instead_of_joining_the_fold() {
+        let messages = big_messages();
+
+        let broca_producer = Arc::new(ProducerState::default());
+        let (broca_handler, _broca_store, _broca_dir, _broca_project) =
+            handler_with_store(Arc::clone(&broca_producer), default_test_config());
+        let broca =
+            call_transform_with_usage(&broca_handler, messages.clone(), 48_000, 50_000).await;
+        assert!(
+            m0_text(&broca).contains("autonomous summary"),
+            "the Broca lane still joins the fold inline on an emergency pass"
+        );
+        assert_eq!(broca_producer.starts.load(Ordering::SeqCst), 1);
+        let (broca_dropped, broca_messages, broca_bytes) = served_census(&broca);
+
+        let mut host_config = default_test_config();
+        host_config.historian_runner = HistorianRunnerKind::Host;
+        let host_producer = Arc::new(ProducerState::default());
+        let (host_handler, host_store, _host_dir, host_project) =
+            handler_with_store(Arc::clone(&host_producer), host_config);
+        let host_project_key = lane_project_key(&host_store, &host_project);
+        let host = call_transform_with_usage(&host_handler, messages.clone(), 48_000, 50_000).await;
+        assert_eq!(
+            host["historian"]["fired"], true,
+            "the emergency pass still fires; only the join is gone"
+        );
+        assert!(
+            !m0_text(&host).contains("autonomous summary"),
+            "the host lane serves the emergency reduction, not a fold it waited for"
+        );
+        assert_eq!(
+            host_producer.connects.load(Ordering::SeqCst),
+            0,
+            "the host lane never opens a Broca route"
+        );
+        let (host_dropped, host_messages, host_emergency_bytes) = served_census(&host);
+
+        // The run is queued for a claimant rather than run here.
+        let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
+        let queued = loop {
+            let pending = host_store
+                .list_pending_historian_runs(&host_project_key, None, now_ms())
+                .unwrap();
+            if let Some(run) = pending.into_iter().next() {
+                break run;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the emergency pass must queue its run for a claimant"
+            );
+            tokio::time::sleep(TEST_WAIT_POLL).await;
+        };
+
+        // A claimant answers, and the fold arrives on the NEXT pass. That pass is
+        // the second priced rewrite A8 asks to be accounted.
+        let claim = call_dispatch_request(
+            &host_handler,
+            json!({
+                "method": "historian.claim",
+                "v": 1,
+                "run_id": queued.run_id,
+                "claimant_instance_id": "install-uuid-one",
+            }),
+        )
+        .await;
+        assert_eq!(claim["ok"], json!(true), "{claim}");
+        // The same completion the scripted Broca producer would have returned for
+        // this prompt, so the two arms differ only in which side ran the model.
+        let completion = historian_output_for_prompt(
+            claim["prompt"]["user"]
+                .as_str()
+                .expect("a claim hands back its user prompt"),
+        );
+        let report = call_dispatch_request(
+            &host_handler,
+            json!({
+                "method": "historian.complete",
+                "v": 1,
+                "run_id": queued.run_id,
+                "token": claim["token"],
+                "output": { "text": completion, "length_capped": false },
+            }),
+        )
+        .await;
+        assert_eq!(report["ok"], json!(true), "{report}");
+        wait_for_idle(&host_store).await;
+
+        let host_second = call_transform_with_usage(&host_handler, messages, 48_000, 50_000).await;
+        assert!(
+            m0_text(&host_second).contains("autonomous summary"),
+            "the fold lands on the pass after the claimant reported"
+        );
+        let (_, host_second_messages, host_second_bytes) = served_census(&host_second);
+
+        eprintln!(
+            "A8 emergency accounting on one fixture: \
+             broca dropped_tags={broca_dropped} served_messages={broca_messages} served_bytes={broca_bytes} second_rewrite_bytes=0 | \
+             host dropped_tags={host_dropped} served_messages={host_messages} emergency_served_bytes={host_emergency_bytes} \
+             second_rewrite_messages={host_second_messages} second_rewrite_bytes={host_second_bytes}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn handler_emergency_busy_waits_for_the_active_run_and_then_refolds() {
         let producer = Arc::new(ProducerState::default());
@@ -36182,6 +37110,9 @@ mod tests {
             selected_range_identities,
             producer_session_id: Some("producer-session".to_string()),
             producer_run_id: Some("run-reattach".to_string()),
+            producer_attempt: 0,
+            coordinator_token: None,
+            claim_deadline_ms: None,
             fired_at_ms: Some(1),
             expected_revert_epoch: 0,
             compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
@@ -36215,6 +37146,9 @@ mod tests {
             selected_range_identities,
             producer_session_id: Some("producer-session".to_string()),
             producer_run_id: Some("run-stale".to_string()),
+            producer_attempt: 0,
+            coordinator_token: None,
+            claim_deadline_ms: None,
             fired_at_ms: Some(1),
             expected_revert_epoch: 0,
             compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
@@ -36587,6 +37521,7 @@ mod tests {
                 predicate: &mc_store::HistorianPublishPredicate {
                     firing_seq: 1,
                     producer_run_id: "run-stale".to_string(),
+                    producer_attempt: 0,
                     chunk_fingerprint: "seeded-fingerprint".to_string(),
                     selected_range_identities: seeded_historian_identities(),
                     compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
@@ -39634,6 +40569,7 @@ mod tests {
         let predicate = mc_store::HistorianPublishPredicate {
             firing_seq: 1,
             producer_run_id: "ctx-expand-run".to_string(),
+            producer_attempt: 0,
             chunk_fingerprint: "ctx-expand-fixture".to_string(),
             selected_range_identities,
             compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
@@ -40311,6 +41247,492 @@ mod tests {
             "{message}"
         );
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
+    }
+
+    // ---- historian claim lane: the wire A2 codes against -------------------
+
+    const CLAIM_RUN_ID: &str = "mc-historian:project:a1a1a1a1a1a1a1a1:1";
+    const CLAIM_SYSTEM_PROMPT: &str = "historian-system-prompt";
+    const CLAIM_USER_PROMPT: &str = "historian-user-prompt";
+    /// The budget the host runner queues a run under: the module's own completion
+    /// wait. It is deliberately longer than the lease ceiling, so a claimant's lease
+    /// can lapse while the run itself is still worth finishing.
+    const CLAIM_AWAIT_BUDGET_MS: i64 = 660_000;
+
+    #[derive(Debug, serde::Deserialize)]
+    struct ClaimWireGolden {
+        schema: u32,
+        cases: Vec<ClaimWireCase>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct ClaimWireCase {
+        name: String,
+        request: Value,
+        volatile: Vec<String>,
+        response: Value,
+    }
+
+    fn claim_wire_golden() -> ClaimWireGolden {
+        let golden: ClaimWireGolden =
+            serde_json::from_str(include_str!("../testdata/historian-claim-wire-golden.json"))
+                .expect("parse historian claim wire golden");
+        assert_eq!(golden.schema, 1);
+        golden
+    }
+
+    fn claim_wire_case<'a>(golden: &'a ClaimWireGolden, name: &str) -> &'a ClaimWireCase {
+        golden
+            .cases
+            .iter()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("the claim wire golden has no case named {name}"))
+    }
+
+    /// Replace one dotted path (`runs.0.deadline_ms`) with the volatile marker.
+    fn mask_volatile_path(value: &mut Value, path: &str) {
+        let mut cursor = value;
+        let mut segments = path.split('.').peekable();
+        while let Some(segment) = segments.next() {
+            let last = segments.peek().is_none();
+            let next = match cursor {
+                Value::Array(items) => {
+                    let index: usize = segment
+                        .parse()
+                        .unwrap_or_else(|_| panic!("{segment} is not an array index in {path}"));
+                    items.get_mut(index)
+                }
+                Value::Object(map) => map.get_mut(segment),
+                _ => None,
+            };
+            let Some(next) = next else {
+                panic!("the response has no value at {path}");
+            };
+            if last {
+                *next = Value::String("<volatile>".to_string());
+                return;
+            }
+            cursor = next;
+        }
+    }
+
+    fn mask_volatile(mut value: Value, paths: &[String]) -> Value {
+        for path in paths {
+            mask_volatile_path(&mut value, path);
+        }
+        value
+    }
+
+    /// Drive one golden case and return the raw (unmasked) response so the test
+    /// can check the volatile values it just masked out of the comparison.
+    async fn drive_claim_wire_case(
+        handler: &McHandler,
+        case: &ClaimWireCase,
+        token: Option<&str>,
+    ) -> Value {
+        let mut request = case.request.clone();
+        if let Some(token) = token {
+            if request.get("token").and_then(Value::as_str) == Some("<current-token>") {
+                request["token"] = json!(token);
+            }
+        }
+        let observed = call_dispatch_request(handler, request).await;
+        assert_eq!(
+            mask_volatile(observed.clone(), &case.volatile),
+            case.response,
+            "wire drift in {}",
+            case.name
+        );
+        observed
+    }
+
+    /// Put `ses` in the phase a firing reaches just before its completion runs,
+    /// then queue that run for a claimant.
+    fn queue_a_run_for_a_claimant(store: &McStore, project_path: &str, now_ms: i64) {
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.historian = HistorianDurableState {
+            state: HistorianPhase::Firing,
+            firing_seq: 1,
+            chunk_range: Some(HistorianChunkRange {
+                from_ordinal: 1,
+                to_ordinal: 3,
+            }),
+            chunk_fingerprint: "fp-a1".to_string(),
+            selected_range_identities: Vec::new(),
+            producer_session_id: None,
+            producer_run_id: None,
+            producer_attempt: 0,
+            coordinator_token: None,
+            claim_deadline_ms: None,
+            fired_at_ms: Some(now_ms),
+            expected_revert_epoch: 0,
+            compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
+            failure_backoff_at_ms: None,
+            last_failure: None,
+            last_no_fire: None,
+            recent_decisions: Vec::new(),
+            consecutive_publish_failures: 0,
+        };
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        store
+            .publish_pending_historian_run(&mc_store::NewHistorianPendingRun {
+                run_id: CLAIM_RUN_ID.to_string(),
+                session_id: "ses".to_string(),
+                project_path: project_path.to_string(),
+                firing_seq: 1,
+                chunk_fingerprint: "fp-a1".to_string(),
+                system_prompt: CLAIM_SYSTEM_PROMPT.to_string(),
+                user_prompt: CLAIM_USER_PROMPT.to_string(),
+                model_chain: vec!["test/first".to_string(), "test/second".to_string()],
+                await_budget_ms: CLAIM_AWAIT_BUDGET_MS,
+                now_ms,
+            })
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_historian_claim_lane_answers_the_wire_a2_codes_against() {
+        let golden = claim_wire_golden();
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let project_path = project.to_string_lossy().to_string();
+        let queued_at_ms = now_ms();
+        queue_a_run_for_a_claimant(&store, &project_path, queued_at_ms);
+
+        let pending = drive_claim_wire_case(
+            &handler,
+            claim_wire_case(&golden, "pending-lists-the-queued-run"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            pending["runs"][0]["deadline_ms"],
+            json!(queued_at_ms + CLAIM_AWAIT_BUDGET_MS),
+            "the run deadline is the queue time plus the await budget"
+        );
+        assert_eq!(
+            pending["runs"][0]["prompt_bytes_len"],
+            json!(CLAIM_SYSTEM_PROMPT.len() + CLAIM_USER_PROMPT.len()),
+            "prompt_bytes_len counts exactly the two strings claim hands back"
+        );
+        drive_claim_wire_case(
+            &handler,
+            claim_wire_case(&golden, "pending-without-a-session-lists-every-queued-run"),
+            None,
+        )
+        .await;
+
+        let claimed = drive_claim_wire_case(
+            &handler,
+            claim_wire_case(
+                &golden,
+                "claim-hands-back-the-request-under-a-minted-attempt-and-token",
+            ),
+            None,
+        )
+        .await;
+        let token = claimed["token"]
+            .as_str()
+            .expect("a claim mints a token")
+            .to_string();
+        assert_eq!(token.len(), 32, "the token is a 16-byte hex digest");
+        assert!(
+            claimed["claim_deadline_ms"]
+                .as_i64()
+                .is_some_and(|deadline| deadline > queued_at_ms
+                    && deadline <= queued_at_ms + CLAIM_AWAIT_BUDGET_MS),
+            "the lease ends within the run's own deadline: {claimed}"
+        );
+
+        // A claimed run is no longer offered to anyone else.
+        let pending_after_claim = call_dispatch_request(
+            &handler,
+            json!({ "method": "historian.pending", "v": 1, "session_id": "ses" }),
+        )
+        .await;
+        assert_eq!(pending_after_claim, json!({ "ok": true, "runs": [] }));
+
+        for name in [
+            "a-second-claimant-loses-the-race-while-the-lease-holds",
+            "claiming-a-run-that-was-never-queued",
+        ] {
+            drive_claim_wire_case(&handler, claim_wire_case(&golden, name), None).await;
+        }
+
+        let beat = drive_claim_wire_case(
+            &handler,
+            claim_wire_case(&golden, "heartbeat-extends-the-current-claim"),
+            Some(&token),
+        )
+        .await;
+        assert!(
+            beat["claim_deadline_ms"].as_i64().is_some_and(|deadline| {
+                deadline >= claimed["claim_deadline_ms"].as_i64().unwrap()
+            }),
+            "a heartbeat never shortens the lease: {beat}"
+        );
+
+        for name in [
+            "heartbeat-from-a-claimant-that-was-replaced",
+            "a-report-under-a-superseded-token-is-refused-before-its-output-is-read",
+        ] {
+            drive_claim_wire_case(&handler, claim_wire_case(&golden, name), Some(&token)).await;
+        }
+
+        // With a firing waiting, the report is handed over in this process.
+        {
+            let registration = handler.host_runs.register(CLAIM_RUN_ID);
+            drive_claim_wire_case(
+                &handler,
+                claim_wire_case(
+                    &golden,
+                    "a-report-accepted-by-the-firing-that-queued-the-run",
+                ),
+                Some(&token),
+            )
+            .await;
+            assert_eq!(
+                registration.wait(Duration::from_millis(50)).await,
+                Some(HostRunReport::Output(
+                    crate::historian_producer::ProducerOutput {
+                        text: "<compartments/>".to_string(),
+                        length_capped: false,
+                        usage: None,
+                    }
+                ))
+            );
+        }
+
+        {
+            let failure_registration = handler.host_runs.register(CLAIM_RUN_ID);
+            drive_claim_wire_case(
+                &handler,
+                claim_wire_case(
+                    &golden,
+                    "a-failure-report-accepted-by-the-firing-that-queued-the-run",
+                ),
+                Some(&token),
+            )
+            .await;
+            assert_eq!(
+                failure_registration.wait(Duration::from_millis(50)).await,
+                Some(HostRunReport::Failed {
+                    code: "chain_exhausted".to_string(),
+                    message: "every configured model refused".to_string(),
+                })
+            );
+        }
+
+        // Both registrations are gone, which is what a module restarted inside the
+        // completion window looks like from the claim lane: the run is still queued
+        // and its token is still current, but nothing in this process is waiting for
+        // the answer. The report is stored on the queue row rather than refused.
+        assert_eq!(handler.host_runs.waiting_count(), 0);
+        drive_claim_wire_case(
+            &handler,
+            claim_wire_case(
+                &golden,
+                "a-report-with-no-firing-waiting-is-stored-for-the-next-pass",
+            ),
+            Some(&token),
+        )
+        .await;
+        let parked = store
+            .load_parked_historian_run("ses")
+            .unwrap()
+            .expect("the queue row survives to carry the report");
+        assert_eq!(parked.run_id, CLAIM_RUN_ID);
+        assert_eq!(
+            parked.report,
+            Some(mc_store::HistorianRunReport::Output {
+                text: "<compartments/>".to_string(),
+                length_capped: false,
+            })
+        );
+
+        // A second report for a stored one is refused rather than overwriting it.
+        let duplicate = call_dispatch_request(
+            &handler,
+            json!({
+                "method": "historian.complete",
+                "v": 1,
+                "run_id": CLAIM_RUN_ID,
+                "token": token,
+                "output": { "text": "<compartments/>", "length_capped": false },
+            }),
+        )
+        .await;
+        assert_eq!(
+            duplicate,
+            json!({ "ok": false, "refusal": "already_reported" })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn claim_lane_requests_that_name_nothing_fail_loudly() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        for (request, expected_fragment) in [
+            (
+                json!({ "method": "historian.claim", "v": 1, "claimant_instance_id": "i" }),
+                "historian.claim requires run_id",
+            ),
+            (
+                json!({ "method": "historian.claim", "v": 1, "run_id": "r" }),
+                "historian.claim requires claimant_instance_id",
+            ),
+            (
+                json!({ "method": "historian.claim", "v": 1, "run_id": "  ", "claimant_instance_id": "i" }),
+                "run_id must contain",
+            ),
+            (
+                json!({ "method": "historian.heartbeat", "v": 1, "run_id": "r" }),
+                "historian.heartbeat requires token",
+            ),
+            (
+                json!({ "method": "historian.complete", "v": 1, "token": "t" }),
+                "historian.complete requires run_id",
+            ),
+            (
+                json!({ "method": "historian.pending", "v": 1, "session_id": "" }),
+                "session_id must be omitted",
+            ),
+        ] {
+            let outcome = handler.dispatch_value(7, request.clone()).await;
+            let (code, message) = error_frame(outcome);
+            assert_eq!(code, "invalid_params", "{request}");
+            assert!(
+                message.contains(expected_fragment),
+                "expected {expected_fragment:?} in {message:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_report_body_that_does_not_say_what_happened_is_refused() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let project_path = project.to_string_lossy().to_string();
+        queue_a_run_for_a_claimant(&store, &project_path, now_ms());
+        let claimed = call_dispatch_request(
+            &handler,
+            json!({
+                "method": "historian.claim",
+                "v": 1,
+                "run_id": CLAIM_RUN_ID,
+                "claimant_instance_id": "install-uuid-one",
+            }),
+        )
+        .await;
+        let token = claimed["token"].as_str().unwrap().to_string();
+        for (body, expected_fragment) in [
+            (
+                json!({
+                    "output": { "text": "<compartments/>" },
+                    "error": { "code": "chain_exhausted", "message": "both" },
+                }),
+                "both output and error",
+            ),
+            (json!({}), "requires either output or error"),
+            (
+                json!({ "output": { "length_capped": true } }),
+                "output requires a text string",
+            ),
+        ] {
+            let mut request = json!({
+                "method": "historian.complete",
+                "v": 1,
+                "run_id": CLAIM_RUN_ID,
+                "token": token,
+            });
+            for (key, value) in body.as_object().unwrap() {
+                request[key] = value.clone();
+            }
+            let (code, message) = error_frame(handler.dispatch_value(7, request.clone()).await);
+            assert_eq!(code, "invalid_params", "{request}");
+            assert!(
+                message.contains(expected_fragment),
+                "expected {expected_fragment:?} in {message:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_expired_lease_hands_the_same_run_to_the_next_claimant() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let project_path = project.to_string_lossy().to_string();
+        // Queue far enough in the past that the lease has already lapsed but the
+        // run's own deadline has not. Those are different clocks on purpose: the
+        // await budget outlives the lease ceiling, which is what makes a re-claim
+        // worth offering at all.
+        let queued_at_ms = now_ms() - mc_store::HISTORIAN_LEASE_CEILING_MS - 1;
+        const {
+            assert!(
+                CLAIM_AWAIT_BUDGET_MS > mc_store::HISTORIAN_LEASE_CEILING_MS,
+                "a lease that outlives its run leaves nothing to re-claim"
+            )
+        };
+        queue_a_run_for_a_claimant(&store, &project_path, queued_at_ms);
+
+        let first = store
+            .claim_historian_run(
+                &project_path,
+                CLAIM_RUN_ID,
+                "install-uuid-one",
+                queued_at_ms,
+            )
+            .unwrap();
+        let mc_store::HistorianClaimOutcome::Claimed(first) = first else {
+            panic!("the first claimant must win: {first:?}");
+        };
+        assert_eq!(first.attempt, 1);
+
+        let second = call_dispatch_request(
+            &handler,
+            json!({
+                "method": "historian.claim",
+                "v": 1,
+                "run_id": CLAIM_RUN_ID,
+                "claimant_instance_id": "install-uuid-two",
+            }),
+        )
+        .await;
+        assert_eq!(second["ok"], json!(true), "{second}");
+        assert_eq!(
+            second["attempt"],
+            json!(2),
+            "the replacement continues the same run under the next attempt"
+        );
+        assert_ne!(second["token"].as_str().unwrap(), first.token);
+
+        let state = store.historian_state("ses").unwrap();
+        assert_eq!(state.producer_run_id.as_deref(), Some(CLAIM_RUN_ID));
+        assert_eq!(state.chunk_fingerprint, "fp-a1");
+        assert_eq!(state.firing_seq, 1);
+        assert_eq!(state.producer_attempt, 2);
+
+        // The replaced claimant's token no longer names a live claim, so nothing it
+        // reports can reach validation.
+        let late = call_dispatch_request(
+            &handler,
+            json!({
+                "method": "historian.complete",
+                "v": 1,
+                "run_id": CLAIM_RUN_ID,
+                "token": first.token,
+                "output": { "text": "<compartments/>" },
+            }),
+        )
+        .await;
+        assert_eq!(
+            late,
+            json!({ "ok": false, "refusal": "superseded_token" }),
+            "a superseded report is refused before its output is read"
+        );
     }
 }
 

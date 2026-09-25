@@ -798,6 +798,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         experimentalTemporalAwareness: deps.config.temporal_awareness === true,
         muralEnabled: deps.config.mural?.enabled === true,
         historianTwoPass: deps.config.historian?.two_pass === true,
+        historianRunner: deps.config.historian?.runner,
+        historianHostRunnerEnabled: deps.config.historian?.host_runner?.enabled,
         liveModelBySession,
         sessionDirectoryBySession,
         // Keep the resolved controls available to both renderers. Rust mode must receive

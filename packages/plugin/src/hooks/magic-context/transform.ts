@@ -700,6 +700,18 @@ export interface TransformDeps {
     /** False when historian.disable=true, blocking historian-backed child agents. */
     historianRunnable?: boolean;
     /**
+     * Which side runs the historian completion in Rust transform mode
+     * (`historian.runner`). Absent means the default, which keeps the completion
+     * in the Broca module and leaves this process's pull loop unbuilt.
+     */
+    historianRunner?: "broca" | "host";
+    /**
+     * Operator kill switch for this process's historian pull loop
+     * (`historian.host_runner.enabled`). Absent means enabled; it only matters
+     * when `historianRunner` is "host".
+     */
+    historianHostRunnerEnabled?: boolean;
+    /**
      * Compaction-off mode (issue #266), boot-resolved and process-stable.
      * When true the transform runs additive-only: m[0]/m[1] memory/docs
      * injection, measurement and identity recording stay; every mutating
