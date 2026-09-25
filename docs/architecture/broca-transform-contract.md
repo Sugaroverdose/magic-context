@@ -64,6 +64,12 @@ variant; otherwise it serves `no_reduce`, which tells the model `ctx_reduce` is
 unavailable. The date line is stored per session, so it stays the same for the whole
 session. Fetch the guidance once, at the first send, and pin it with the system prompt.
 
+Broca never calls `guidance.get`; the caller that pins the system prompt does. Broca
+sets `tool_present` on transforms itself, derived from the session's frozen tool set,
+so the caller must derive its `guidance.get` value from the same tool set it gives
+Broca. If the two disagree, the guidance tells the model one thing while the module
+tags (or doesn't) for the other.
+
 ## 2. What the transform does, send by send
 
 Broca sends the loop's prompt with the pinned system prompt as the leading `system`
