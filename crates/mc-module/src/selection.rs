@@ -3800,8 +3800,20 @@ mod tests {
         vec![
             adv_item("u#0", 1, SelMessageRole::NonAssistant, SelKind::Text, None),
             adv_item("a#0", 2, SelMessageRole::Assistant, SelKind::Text, None),
-            adv_item("a#1", 2, SelMessageRole::Assistant, adv_call(large), Some("a#1")),
-            adv_item("t#0", 3, SelMessageRole::NonAssistant, adv_result(), Some("a#1")),
+            adv_item(
+                "a#1",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large),
+                Some("a#1"),
+            ),
+            adv_item(
+                "t#0",
+                3,
+                SelMessageRole::NonAssistant,
+                adv_result(),
+                Some("a#1"),
+            ),
         ]
     }
 
@@ -3827,10 +3839,34 @@ mod tests {
         let items = vec![
             adv_item("u#0", 1, SelMessageRole::NonAssistant, SelKind::Text, None),
             adv_item("a#0", 2, SelMessageRole::Assistant, SelKind::Text, None),
-            adv_item("a#1", 2, SelMessageRole::Assistant, adv_call(large()), Some("a#1")),
-            adv_item("a#2", 2, SelMessageRole::Assistant, adv_call(large()), Some("a#2")),
-            adv_item("t1#0", 3, SelMessageRole::NonAssistant, adv_result(), Some("a#1")),
-            adv_item("t2#0", 4, SelMessageRole::NonAssistant, adv_result(), Some("a#2")),
+            adv_item(
+                "a#1",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large()),
+                Some("a#1"),
+            ),
+            adv_item(
+                "a#2",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large()),
+                Some("a#2"),
+            ),
+            adv_item(
+                "t1#0",
+                3,
+                SelMessageRole::NonAssistant,
+                adv_result(),
+                Some("a#1"),
+            ),
+            adv_item(
+                "t2#0",
+                4,
+                SelMessageRole::NonAssistant,
+                adv_result(),
+                Some("a#2"),
+            ),
         ];
         let kinds = two_pass_kinds(&items, 4);
         eprintln!("ADV_RUST_PARALLEL_TOOL_MSGS kinds={kinds:?}");
@@ -3851,8 +3887,20 @@ mod tests {
         let items = vec![
             adv_item("u#0", 1, SelMessageRole::NonAssistant, SelKind::Text, None),
             adv_item("a#0", 2, SelMessageRole::Assistant, SelKind::Text, None),
-            adv_item("a#1", 2, SelMessageRole::Assistant, adv_call(large), Some("a#1")),
-            adv_item("a#2", 2, SelMessageRole::Assistant, adv_result(), Some("a#1")),
+            adv_item(
+                "a#1",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large),
+                Some("a#1"),
+            ),
+            adv_item(
+                "a#2",
+                2,
+                SelMessageRole::Assistant,
+                adv_result(),
+                Some("a#1"),
+            ),
         ];
         let kinds = two_pass_kinds(&items, 2);
         eprintln!("ADV_RUST_OPENCODE_ASSISTANT_END kinds={kinds:?}");
@@ -3866,8 +3914,20 @@ mod tests {
         let items = vec![
             adv_item("u#0", 1, SelMessageRole::NonAssistant, SelKind::Text, None),
             adv_item("a#0", 2, SelMessageRole::Assistant, SelKind::Text, None),
-            adv_item("a#1", 2, SelMessageRole::Assistant, adv_call(large), Some("a#1")),
-            adv_item("t#0", 3, SelMessageRole::NonAssistant, adv_result(), Some("a#1")),
+            adv_item(
+                "a#1",
+                2,
+                SelMessageRole::Assistant,
+                adv_call(large),
+                Some("a#1"),
+            ),
+            adv_item(
+                "t#0",
+                3,
+                SelMessageRole::NonAssistant,
+                adv_result(),
+                Some("a#1"),
+            ),
             adv_item("s#0", 4, SelMessageRole::System, SelKind::Text, None),
         ];
         let kinds = two_pass_kinds(&items, 4);
