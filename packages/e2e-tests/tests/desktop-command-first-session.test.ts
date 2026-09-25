@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { TestHarness } from "../src/harness";
 
 let h: TestHarness;
@@ -22,6 +23,11 @@ beforeAll(async () => {
         expect(opened.stdout).not.toContain(`${process.env.HOME}${forbidden}`);
     }
     expect(opened.stdout).toContain(h.opencode.env.dataDir);
+    const dbPaths = opened.stdout.split("\n")
+        .flatMap((line) => line.match(/\S+\.db(?:-wal|-shm)?(?=\s|$)/g) ?? []);
+    expect(dbPaths.length).toBeGreaterThan(0);
+    const dataDir = realpathSync(h.opencode.env.dataDir);
+    expect(dbPaths.filter((path) => !path.startsWith(`${dataDir}/`))).toEqual([]);
 });
 
 afterAll(async () => { await h?.dispose(); });

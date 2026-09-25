@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { __test as subagentRunnerTest } from "../../../pi-plugin/src/subagent-runner";
+import { hostExtractCache } from '../host-extract-cache';
 import { assertMockEndpoint, pinMockAgents } from "../mock-routing";
 
 export const REPO_ROOT = resolve(import.meta.dir, "../../../..");
@@ -265,6 +266,7 @@ export function childEnv(env: PiIsolatedEnv): Record<string, string> {
     if (key === "NODE_ENV") continue;
     result[key] = value;
   }
+  result.TMPDIR = hostExtractCache();
   result.PI_CODING_AGENT_DIR = env.agentDir;
   result.HOME = env.baseDir;
   result.XDG_CONFIG_HOME = env.configDir;
