@@ -130,6 +130,8 @@ interface Evidence {
     markerBoundaryId: string;
     markerCreated: number;
     markerCompleted: number;
+    /** The compartment whose start anchor is the marker boundary the conversion removes. */
+    boundaryCompartmentSequence: number;
     convertedMarkerCount: number;
     firstConvertedInput: string;
     preBoundarySentinel: string;
@@ -246,6 +248,77 @@ function placeSyntheticSplitBetweenCompartments(
                 "UPDATE compartments SET end_message = ?, end_message_id = ? WHERE id = ?",
             ).run(split.ordinal, split.id, source.id);
         })();
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * Make the Magic Context marker's boundary message the start anchor of a
+ * compartment, the shape issue 531 reported.
+ *
+ * The boundary is a user row inside the last published compartment. OpenCode 2's
+ * conversion folds that row and its completed summary into one native
+ * `compaction` record that the raw projection does not count, so after the flip
+ * the new compartment's start anchor names a message the host no longer serves.
+ * Its end anchor and the previous compartment's end anchor both survive.
+ *
+ * Returns the sequence of the compartment that now starts at the boundary.
+ */
+function startCompartmentAtMarkerBoundary(
+    fixture: ConversionFixture,
+    sessionId: string,
+    boundaryId: string,
+): number {
+    const projection = v1Projection(fixture, sessionId);
+    const boundary = projection.find((message) => message.id === boundaryId);
+    const before = projection.find((message) => message.ordinal === (boundary?.ordinal ?? 0) - 1);
+    if (!boundary || !before) throw new Error("the marker boundary has no preceding v1 message");
+
+    const db = new Database(fixture.contextDbPath);
+    try {
+        db.exec("PRAGMA busy_timeout = 30000");
+        const rows = db
+            .prepare(
+                `SELECT id, sequence, start_message, end_message, start_message_id
+                   FROM compartments WHERE session_id = ? ORDER BY sequence`,
+            )
+            .all(sessionId) as Array<{
+            id: number;
+            sequence: number;
+            start_message: number;
+            end_message: number;
+            start_message_id: string | null;
+        }>;
+        const existing = rows.find((row) => row.start_message_id === boundaryId);
+        if (existing) return existing.sequence;
+        const source = rows.find(
+            (row) => row.start_message < boundary.ordinal && row.end_message >= boundary.ordinal,
+        );
+        if (!source) throw new Error("no published compartment can be split at the marker boundary");
+
+        db.transaction(() => {
+            db.prepare(
+                "UPDATE compartments SET sequence = sequence + 1000 WHERE session_id = ? AND sequence > ?",
+            ).run(sessionId, source.sequence);
+            db.prepare(
+                "UPDATE compartments SET sequence = sequence - 999 WHERE session_id = ? AND sequence > ?",
+            ).run(sessionId, source.sequence + 1000);
+            db.prepare(
+                `INSERT INTO compartments
+                    (session_id, sequence, start_message, end_message, start_message_id,
+                     end_message_id, title, content, p1, p2, p3, p4, importance,
+                     episode_type, legacy, created_at, harness, rebase_status)
+                 SELECT session_id, ?, ?, end_message, ?, end_message_id, title, content,
+                        p1, p2, p3, p4, importance, episode_type, legacy, created_at,
+                        harness, rebase_status
+                   FROM compartments WHERE id = ?`,
+            ).run(source.sequence + 1, boundary.ordinal, boundary.id, source.id);
+            db.prepare(
+                "UPDATE compartments SET end_message = ?, end_message_id = ? WHERE id = ?",
+            ).run(before.ordinal, before.id, source.id);
+        })();
+        return source.sequence + 1;
     } finally {
         db.close();
     }
@@ -736,6 +809,13 @@ beforeAll(async () => {
             db.close();
         }
     })();
+    // Done last on the 1.x host, after its final publication, so the marker
+    // boundary read above is still inside the compartment being split.
+    const boundaryCompartmentSequence = startCompartmentAtMarkerBoundary(
+        fixture,
+        sessionId,
+        markerEvidence.boundaryId,
+    );
     v1Stopped = true;
     await v1.stop();
 
@@ -1044,6 +1124,7 @@ beforeAll(async () => {
         markerBoundaryId: markerEvidence.boundaryId,
         markerCreated: markerEvidence.created,
         markerCompleted: markerEvidence.completed,
+        boundaryCompartmentSequence,
         convertedMarkerCount,
         firstConvertedInput,
         preBoundarySentinel: markerEvidence.preBoundarySentinel,
@@ -1129,6 +1210,8 @@ test("every compartment endpoint resolves to the row its endpoint id names", () 
     const projection = new Map(evidence.forward.projection.map((m) => [m.id, m.ordinal]));
     expect(evidence.forward.compartments.length).toBeGreaterThanOrEqual(1);
     for (const compartment of evidence.forward.compartments) {
+        // Its start anchor is the removed marker boundary; the next test covers it.
+        if (compartment.sequence === evidence.boundaryCompartmentSequence) continue;
         expect(compartment.rebaseStatus).toBe("ok");
         expect(compartment.endMessageId).toBeString();
         const endpointOrdinal = projection.get(compartment.endMessageId!);
@@ -1142,6 +1225,33 @@ test("every compartment endpoint resolves to the row its endpoint id names", () 
         }
         expect(projection.get(compartment.startMessageId!)).toBe(compartment.startMessage);
     }
+});
+
+test("a compartment starting at the converted marker boundary is placed from its neighbour and the historian publishes after the flip", () => {
+    const projection = new Map(evidence.forward.projection.map((m) => [m.id, m.ordinal]));
+    // The conversion folded the boundary row into a native compaction record the
+    // raw projection does not count, so this start anchor resolves nowhere.
+    expect(projection.has(evidence.markerBoundaryId)).toBe(false);
+    const compartments = evidence.forward.compartments;
+    const index = compartments.findIndex(
+        (compartment) => compartment.sequence === evidence.boundaryCompartmentSequence,
+    );
+    expect(index).toBeGreaterThan(0);
+    const boundaryCompartment = compartments[index]!;
+    const previous = compartments[index - 1]!;
+    expect(boundaryCompartment.startMessageId).toBe(evidence.markerBoundaryId);
+    expect(boundaryCompartment.rebaseStatus).toBe("ok");
+    expect(previous.rebaseStatus).toBe("ok");
+    expect(boundaryCompartment.startMessage).toBe(previous.endMessage + 1);
+    expect(projection.get(boundaryCompartment.endMessageId!)).toBe(boundaryCompartment.endMessage);
+    expect(evidence.forward.rebaseLines[0]).toMatch(/derived=[1-9]/);
+
+    // The stored history still tiles, so the historian's pre-run check passes
+    // and a compartment is published after the flip.
+    expect(evidence.existingValidationFailureLines).toEqual([]);
+    expect(evidence.postFlipCompartmentSequence).toBeGreaterThan(
+        evidence.longArmBaselineCompartmentSequence,
+    );
 });
 
 test("the search index matches the v2 projection with no duplicate ordinals", () => {

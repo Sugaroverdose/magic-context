@@ -33,6 +33,7 @@ import {
     recordOverflowDetected,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import { rebaseSessionCoordinates } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { PluginContext } from "../../plugin/types";
 import * as shared from "../../shared";
@@ -55,6 +56,7 @@ import {
     hasRunnableCompartmentWindow,
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
+import { readRawSessionMessages } from "./read-session-chunk";
 import { __ignoredNotificationTest } from "./send-session-notification";
 import { tagMessages } from "./tag-messages";
 
@@ -3074,4 +3076,221 @@ it("rolls back protected-tail drain reservation when publish throws after histor
     });
 
     expect(loadProtectedTailMeta(db, "ses-drain-rollback").protectedTailDrainTokens).toBe(0);
+});
+
+describe("stored compartments a store-projection rebase left unresolved", () => {
+    const twelveMessages = Array.from({ length: 12 }, (_, index) => ({
+        id: `m-${index + 1}`,
+        // The last five user turns form the protected tail, leaving 1-7 eligible.
+        role: index >= 7 || index % 2 === 0 ? "user" : "assistant",
+        text: index >= 7 ? `protected ${index + 1}` : `message ${index + 1}`,
+    }));
+
+    /**
+     * The issue 531 shape at small scale: the middle compartment's start anchor
+     * was a native-compaction boundary the host's store conversion removed, so
+     * the rebase marked it unresolved and left its stale end (5) overlapping
+     * the next compartment, which the rebase moved to start at 5.
+     */
+    function seedStuckCompartments(
+        db: ReturnType<typeof openDatabase>,
+        sessionId: string,
+        middle: { start: number; end: number; startId: string; endId: string },
+        next: { start: number; end: number; startId: string; endId: string },
+    ): void {
+        replaceAllCompartments(db, sessionId, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 2,
+                startMessageId: "m-1",
+                endMessageId: "m-2",
+                title: "first",
+                content: "first summary",
+            },
+            {
+                sequence: 1,
+                startMessage: middle.start,
+                endMessage: middle.end,
+                startMessageId: middle.startId,
+                endMessageId: middle.endId,
+                title: "middle",
+                content: "middle summary",
+            },
+            {
+                sequence: 2,
+                startMessage: next.start,
+                endMessage: next.end,
+                startMessageId: next.startId,
+                endMessageId: next.endId,
+                title: "next",
+                content: "next summary",
+            },
+        ]);
+        db.prepare(
+            "UPDATE compartments SET rebase_status = 'unresolved' WHERE session_id = ? AND sequence = 1",
+        ).run(sessionId);
+        db.prepare(
+            "UPDATE session_meta SET coordinate_generation = 'v2', coordinate_rebase_notice = ? WHERE session_id = ?",
+        ).run(
+            JSON.stringify({
+                generation: "v2",
+                previousGeneration: "v1",
+                at: 1,
+                unresolvedCompartments: 1,
+            }),
+            sessionId,
+        );
+    }
+
+    function historianClient(label: string, output: string) {
+        const prompt = mock(async () => ({}));
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: `/tmp/${label}` } })),
+                create: mock(async () => ({ data: { id: `ses-agent-${label}` } })),
+                prompt,
+                messages: mock(async () => ({
+                    data: [
+                        {
+                            info: { role: "assistant", time: { created: 1 } },
+                            parts: [{ type: "text", text: output }],
+                        },
+                    ],
+                })),
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+        return { client, prompt };
+    }
+
+    const nextCompartmentMarkup =
+        '<compartment start="7" end="7" title="Seventh"><p1>Seventh summary</p1></compartment>';
+
+    it("places the unresolved compartment from its neighbours before the run and publishes", async () => {
+        useTempDataHome("compartment-runner-531-repair-");
+        const sessionId = "ses-531-historian-repair";
+        createOpenCodeDb(sessionId, twelveMessages);
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        seedStuckCompartments(
+            db,
+            sessionId,
+            { start: 3, end: 5, startId: "m-native-compaction-boundary", endId: "m-4" },
+            { start: 5, end: 6, startId: "m-5", endId: "m-6" },
+        );
+        const { client } = historianClient("531-repair", nextCompartmentMarkup);
+
+        await runCompartmentAgentWithLease({
+            client,
+            db,
+            sessionId,
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+        });
+
+        expect(
+            getCompartments(db, sessionId).map((row) => [
+                row.startMessage,
+                row.endMessage,
+                row.rebaseStatus,
+            ]),
+        ).toEqual([
+            [1, 2, "ok"],
+            [3, 4, "ok"],
+            [5, 6, "ok"],
+            [7, 7, "ok"],
+        ]);
+        expect(getHistorianFailureState(db, sessionId).failureCount).toBe(0);
+    });
+
+    it("publishes on a session the stamped-session repair already fixed", async () => {
+        useTempDataHome("compartment-runner-531-healed-");
+        const sessionId = "ses-531-historian-healed";
+        createOpenCodeDb(sessionId, twelveMessages);
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        seedStuckCompartments(
+            db,
+            sessionId,
+            { start: 3, end: 5, startId: "m-native-compaction-boundary", endId: "m-4" },
+            { start: 5, end: 6, startId: "m-5", endId: "m-6" },
+        );
+
+        // The first transform pass after the upgrade runs the one-time repair.
+        const repair = rebaseSessionCoordinates({
+            db,
+            sessionId,
+            generation: "v2",
+            readMessages: readRawSessionMessages,
+        });
+        expect(repair.status).toBe("repaired");
+        expect(
+            getCompartments(db, sessionId).map((row) => [row.startMessage, row.endMessage]),
+        ).toEqual([
+            [1, 2],
+            [3, 4],
+            [5, 6],
+        ]);
+
+        const { client } = historianClient("531-healed", nextCompartmentMarkup);
+        await runCompartmentAgentWithLease({
+            client,
+            db,
+            sessionId,
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+        });
+
+        expect(getCompartments(db, sessionId).map((row) => row.endMessage)).toEqual([2, 4, 6, 7]);
+        expect(getHistorianFailureState(db, sessionId).failureCount).toBe(0);
+    });
+
+    it("names /ctx-recomp when the neighbours cannot place it, and backs off instead of retrying every trigger", async () => {
+        useTempDataHome("compartment-runner-531-unrecoverable-");
+        const sessionId = "ses-531-historian-unrecoverable";
+        createOpenCodeDb(sessionId, twelveMessages);
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        // Both anchors are gone and the neighbours abut (2 then 3), so the only
+        // range the neighbours allow is empty: the row cannot be placed.
+        seedStuckCompartments(
+            db,
+            sessionId,
+            { start: 3, end: 5, startId: "m-gone-start", endId: "m-gone-end" },
+            { start: 3, end: 6, startId: "m-3", endId: "m-6" },
+        );
+        const { client, prompt } = historianClient("531-unrecoverable", nextCompartmentMarkup);
+
+        await runCompartmentAgentWithLease({
+            client,
+            db,
+            sessionId,
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+        });
+
+        const failure = getHistorianFailureState(db, sessionId);
+        expect(failure.failureCount).toBe(1);
+        expect(failure.lastError).toBe("invalid range 3-2");
+        expect(getHistorianPromptCount(prompt)).toBe(0);
+        const notices = getRpcNotificationTexts(prompt);
+        expect(notices.some((text) => text.includes("(MC-H03)"))).toBe(true);
+        expect(notices.some((text) => text.includes("Run /ctx-recomp to rebuild them."))).toBe(
+            true,
+        );
+        expect(notices.some((text) => text.includes("retry automatically"))).toBe(false);
+        expect(loadProtectedTailMeta(db, sessionId).historianDrainFailureAt).toBeGreaterThan(0);
+
+        // The next trigger inside the backoff does not fail again.
+        await runCompartmentAgentWithLease({
+            client,
+            db,
+            sessionId,
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+        });
+        expect(getHistorianFailureState(db, sessionId).failureCount).toBe(1);
+        expect(getHistorianPromptCount(prompt)).toBe(0);
+    });
 });
