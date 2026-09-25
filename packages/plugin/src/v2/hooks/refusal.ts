@@ -39,9 +39,7 @@ export async function interruptBeforeProvider(
                 timer = timers.setTimeout(
                     () =>
                         reject(
-                            new Error(
-                                `interrupt exceeded ${INTERRUPT_CONFIRMATION_TIMEOUT_MS} ms`,
-                            ),
+                            new Error(`interrupt exceeded ${INTERRUPT_CONFIRMATION_TIMEOUT_MS} ms`),
                         ),
                     INTERRUPT_CONFIRMATION_TIMEOUT_MS,
                 );

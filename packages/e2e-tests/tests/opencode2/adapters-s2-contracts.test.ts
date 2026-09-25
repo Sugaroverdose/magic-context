@@ -28,6 +28,8 @@ import {
 import { createHostSeams } from "../../../plugin/src/v2/hooks/context";
 import { adaptPayload, HEAD_IDS } from "../../../plugin/src/v2/hooks/payload";
 import {
+	INTERRUPT_CONFIRMATION_TIMEOUT_MS,
+	type InterruptTimers,
 	interruptBeforeProvider,
 	V2ContextRefusal,
 } from "../../../plugin/src/v2/hooks/refusal";
@@ -163,16 +165,56 @@ test("I9b interrupt idle no-op refuses rather than permitting a provider request
 		),
 	).rejects.toBeInstanceOf(V2ContextRefusal);
 });
+// A manual clock drives the deadline. Measuring real elapsed time around a
+// 2000 ms timer failed whenever other work in the same test process held the
+// event loop, so the test checks the scheduled delay and the ordering instead.
+function manualTimers() {
+	const scheduled: Array<{ ms: number; fire: () => void; cleared: boolean }> = [];
+	const timers: InterruptTimers = {
+		setTimeout: (fire, ms) => {
+			const entry = { ms, fire, cleared: false };
+			scheduled.push(entry);
+			return entry;
+		},
+		clearTimeout: (handle) => {
+			(handle as { cleared: boolean }).cleared = true;
+		},
+	};
+	return { scheduled, timers };
+}
+
 test("I9b interrupt timed-out is bounded to 2000 ms and throws typed refusal", async () => {
-	const start = performance.now();
+	const clock = manualTimers();
+	let settled = false;
+	const refused = interruptBeforeProvider(
+		{ interrupt: () => new Promise(() => {}) },
+		"ses-fixture",
+		clock.timers,
+	).finally(() => {
+		settled = true;
+	});
+	expect(clock.scheduled.map((entry) => entry.ms)).toEqual([2000]);
+	expect(INTERRUPT_CONFIRMATION_TIMEOUT_MS).toBe(2000);
+	// A host that never answers must not be refused before the deadline fires.
+	for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+	expect(settled).toBe(false);
+	clock.scheduled[0]!.fire();
+	const error = await refused.catch((caught: unknown) => caught);
+	expect(error).toBeInstanceOf(V2ContextRefusal);
+	expect(((error as Error).cause as Error).message).toBe("interrupt exceeded 2000 ms");
+});
+
+test("I9b interrupt confirmed before the deadline clears the deadline timer", async () => {
+	const clock = manualTimers();
 	await expect(
 		interruptBeforeProvider(
-			{ interrupt: () => new Promise(() => {}) },
+			{ interrupt: async () => ({ interrupted: true }) },
 			"ses-fixture",
+			clock.timers,
 		),
-	).rejects.toBeInstanceOf(V2ContextRefusal);
-	expect(performance.now() - start).toBeGreaterThanOrEqual(1900);
-	expect(performance.now() - start).toBeLessThan(2500);
+	).resolves.toBeUndefined();
+	expect(clock.scheduled).toHaveLength(1);
+	expect(clock.scheduled[0]!.cleared).toBe(true);
 });
 
 function fixture(sessionID: string): SessionContext {
