@@ -8,6 +8,7 @@ import {
     deriveWindowGeometry,
     formatCompactTokens,
     formatWindowDerivationLine,
+    isUsageReadingAboveModelWindow,
     parseWindowOverlay,
     placeholderFilteredOutput,
     readWindowOverlayFile,
@@ -400,5 +401,23 @@ describe("window geometry", () => {
         const line = formatWindowDerivationLine(533_700, result);
         expect(line).toBe("533.7k / 872k usable · window 1m · 128k output reserve");
         expect(line.length).toBeLessThanOrEqual(56);
+    });
+});
+
+describe("isUsageReadingAboveModelWindow", () => {
+    test("only a reading above the full window is impossible", () => {
+        // 272k window with a 64k reserve: 206k usable. A reading between the
+        // usable limit and the window is real pressure; above the window it is not.
+        expect(isUsageReadingAboveModelWindow(425_334, 272_000)).toBe(true);
+        expect(isUsageReadingAboveModelWindow(272_001, 272_000)).toBe(true);
+        expect(isUsageReadingAboveModelWindow(272_000, 272_000)).toBe(false);
+        expect(isUsageReadingAboveModelWindow(220_000, 272_000)).toBe(false);
+    });
+
+    test("an unknown or implausible window disables the check", () => {
+        expect(isUsageReadingAboveModelWindow(425_334, undefined)).toBe(false);
+        expect(isUsageReadingAboveModelWindow(425_334, 0)).toBe(false);
+        expect(isUsageReadingAboveModelWindow(425_334, 1_000)).toBe(false);
+        expect(isUsageReadingAboveModelWindow(undefined, 272_000)).toBe(false);
     });
 });

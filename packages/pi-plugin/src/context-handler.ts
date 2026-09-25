@@ -272,7 +272,9 @@ import {
 } from "./pi-lkg";
 import {
 	formatPiPressureForLog,
-	resolvePiPressureSnapshot,
+	isPiLiveUsageRawBranchEstimate,
+	resolvePiModelWindowTokens,
+	resolvePiPressureSnapshotWithWindowGuard,
 } from "./pi-pressure";
 import { assertPiRawFallbackFits, PiStorageBusyError } from "./pi-raw-fallback";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
@@ -2402,6 +2404,11 @@ export function registerPiContextHandler(
 
 			const tEntryBranch = performance.now();
 			const branchEntries = readPiBranchEntriesForContext(ctx, sessionId);
+			// Pi's live usage figure is a whole-raw-branch estimate while a context
+			// edit or compaction follows the last recorded usage (e.g. after a
+			// retried request); such a figure is never used as pressure.
+			const piLiveUsageIsRawBranchEstimate =
+				isPiLiveUsageRawBranchEstimate(branchEntries);
 			schedulePiTransformDecisionResolve({
 				db: options.db,
 				sessionId,
@@ -2936,11 +2943,20 @@ export function registerPiContextHandler(
 				usagePercentage = (usageInputTokens / usageContextLimit) * 100;
 			}
 			({ percentage: usagePercentage, inputTokens: usageInputTokens } =
-				resolvePiPressureSnapshot({
+				resolvePiPressureSnapshotWithWindowGuard({
+					sessionId,
+					source: "transform",
+					liveIsRawBranchEstimate: piLiveUsageIsRawBranchEstimate,
+					persistedFromLive: !usedPersistedUsage,
 					persistedPercentage: usagePercentage,
 					persistedInputTokens: usageInputTokens,
 					liveInputTokens: piUsage?.tokens,
 					usableContextLimit: usageContextLimit,
+					modelWindowTokens: resolvePiModelWindowTokens({
+						reportedWindow: piUsage?.contextWindow,
+						modelWindow: ctx.model?.contextWindow,
+						observedSafeInputTokens: provenInputTokens,
+					}),
 				}));
 			const realUsagePercentageBeforeEmergencyBump = usagePercentage;
 			// Emergency bump LAST so it floors recovery pressure without capping
@@ -3360,6 +3376,7 @@ export function registerPiContextHandler(
 					sessionMeta,
 					piUsage,
 					minimumPercentage: usagePercentage,
+					liveIsRawBranchEstimate: piLiveUsageIsRawBranchEstimate,
 					historianStateSnapshot: historianStateForPass,
 					publishedHistoryRide: isCacheBusting,
 				});
@@ -4339,6 +4356,7 @@ function maybeFireHistorian(args: {
 	};
 	taggerFloor?: number;
 	sessionMeta: ReturnType<typeof getOrCreateSessionMeta>;
+	liveIsRawBranchEstimate?: boolean;
 	piUsage:
 		| ReturnType<NonNullable<ExtensionContext["getContextUsage"]>>
 		| undefined;
@@ -4461,12 +4479,21 @@ function maybeFireHistorian(args: {
 			};
 			usageSource = "piUsage fallback";
 		}
-		usage = resolvePiPressureSnapshot({
+		usage = resolvePiPressureSnapshotWithWindowGuard({
+			sessionId,
+			source: "historian trigger",
+			liveIsRawBranchEstimate: args.liveIsRawBranchEstimate,
+			persistedFromLive: usageSource === "piUsage fallback",
 			persistedPercentage: usage.percentage,
 			persistedInputTokens: usage.inputTokens,
 			liveInputTokens: piUsage?.tokens,
 			usableContextLimit: usageContextLimit,
 			minimumPercentage: args.minimumPercentage,
+			modelWindowTokens: resolvePiModelWindowTokens({
+				reportedWindow: piUsage?.contextWindow,
+				modelWindow: ctx.model?.contextWindow,
+				observedSafeInputTokens: sessionMeta.observedSafeInputTokens,
+			}),
 		});
 		sessionLog(
 			sessionId,

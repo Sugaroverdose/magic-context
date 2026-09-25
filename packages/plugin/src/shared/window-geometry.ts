@@ -693,6 +693,29 @@ export function applyProvenInputFloor(
     };
 }
 
+/**
+ * A prompt-token reading larger than the model's whole context window cannot
+ * describe a request the provider accepted: nothing that big fits. Such readings
+ * come from host accounting (for example a client-side estimate over the raw,
+ * unreduced session after a transport retry), so pressure consumers must ignore
+ * them instead of treating them as an overflow. Readings between the usable
+ * limit and the window are still real and are not affected.
+ *
+ * `modelWindowTokens` is the full window (before any output reserve), never the
+ * reduced usable limit. An unknown window disables the check.
+ */
+export function isUsageReadingAboveModelWindow(
+    readingTokens: number | null | undefined,
+    modelWindowTokens: number | null | undefined,
+): boolean {
+    return (
+        isFinitePositive(readingTokens) &&
+        isFinitePositive(modelWindowTokens) &&
+        modelWindowTokens >= MIN_PLAUSIBLE_CONTEXT_LIMIT &&
+        readingTokens > modelWindowTokens
+    );
+}
+
 export function formatWindowDerivationLine(
     inputTokens: number,
     result: WindowGeometryResult,

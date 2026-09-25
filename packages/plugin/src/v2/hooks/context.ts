@@ -43,7 +43,10 @@ import {
 } from "../../hooks/magic-context/dropped-input-guard";
 import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
 import { getSessionErrorInfo } from "../../hooks/magic-context/event-payloads";
-import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
+import {
+    resolveContextLimit,
+    resolveContextWindowGeometry,
+} from "../../hooks/magic-context/event-resolvers";
 import {
     createChatMessageHook,
     createToolExecuteAfterHook,
@@ -77,6 +80,10 @@ import {
 import { pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
+import {
+    hasTrustedAbsoluteWall,
+    isUsageReadingAboveModelWindow,
+} from "../../shared/window-geometry";
 import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-descriptions";
 import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
 import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/host-media";
@@ -109,6 +116,14 @@ import {
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context } from "./types";
 import { resolveUsageReading, usageReadingMatchesDraft } from "./usage-reading";
+
+// Sessions whose current run of impossible usage readings was already logged.
+const impossibleUsageLogged = new Set<string>();
+
+function splitModelKey(modelKey: string): [string, string] {
+    const slash = modelKey.indexOf("/");
+    return slash < 0 ? [modelKey, ""] : [modelKey.slice(0, slash), modelKey.slice(slash + 1)];
+}
 
 // The event stream can trail the terminal store row by a scheduler tick; keep failure surfacing fast.
 const HIDDEN_SESSION_ERROR_GRACE_MS = 50;
@@ -644,7 +659,37 @@ export async function registerContext(context: V2Context) {
                     completed: latest?.data.time?.completed,
                     limitFor,
                 });
-                if (reading) {
+                const [measuredProviderID, measuredModelID] = reading?.modelKey
+                    ? splitModelKey(reading.modelKey)
+                    : [draft.model.providerID, draft.model.id];
+                // No session context: the wall must be the model's own window,
+                // not a limit learned from an earlier overflow error, which a
+                // later successful reading is allowed to disprove.
+                const measuredGeometry = reading
+                    ? resolveContextWindowGeometry(measuredProviderID, measuredModelID)
+                    : undefined;
+                // A completed reply whose prompt is larger than a trusted
+                // provider window is broken accounting: no request that large
+                // was accepted. Keep the previous reading rather than letting it
+                // drive emergency reduction or refusal.
+                const impossibleReading =
+                    reading !== undefined &&
+                    measuredGeometry !== undefined &&
+                    hasTrustedAbsoluteWall(measuredGeometry) &&
+                    isUsageReadingAboveModelWindow(
+                        reading.inputTokens,
+                        measuredGeometry.derivation.absoluteWall,
+                    );
+                if (impossibleReading && reading && measuredGeometry) {
+                    if (!impossibleUsageLogged.has(draft.sessionID)) {
+                        impossibleUsageLogged.add(draft.sessionID);
+                        sessionLog(
+                            draft.sessionID,
+                            `v2 usage reading ${reading.inputTokens} exceeds model window ${measuredGeometry.derivation.absoluteWall}; no request that large can have been accepted, keeping the previous reading until a plausible one arrives`,
+                        );
+                    }
+                } else if (reading) {
+                    impossibleUsageLogged.delete(draft.sessionID);
                     const readingMatchesDraft = usageReadingMatchesDraft(reading, draft.model);
                     unsafe = refusesBeforeProvider({
                         inputTokens: reading.inputTokens,
