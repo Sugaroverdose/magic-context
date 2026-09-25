@@ -249,30 +249,32 @@ export function transitionSessionHygieneUnits(
     const before = sessionHygieneUnitsVersion(db, sessionId);
     if (before >= HYGIENE_PROVIDER_UNITS_VERSION || !bustPermitted) return before;
 
-    return db.transaction(() => {
-        const row = readSessionRow(db, sessionId);
-        const root = parseStateRoot(row?.deferred_execute_state);
-        const namespace = parseNamespace(root);
-        if ((namespace.hygieneUnitsVersion ?? 1) >= HYGIENE_PROVIDER_UNITS_VERSION) {
-            return HYGIENE_PROVIDER_UNITS_VERSION;
-        }
+    return db
+        .transaction(() => {
+            const row = readSessionRow(db, sessionId);
+            const root = parseStateRoot(row?.deferred_execute_state);
+            const namespace = parseNamespace(root);
+            if ((namespace.hygieneUnitsVersion ?? 1) >= HYGIENE_PROVIDER_UNITS_VERSION) {
+                return HYGIENE_PROVIDER_UNITS_VERSION;
+            }
 
-        const lastNudge = scaledWatermark(row?.last_nudge_undropped, calibration.toolsRatio);
-        const nudgeLevel = parseNudgeLevelState(row?.last_nudge_level);
-        if (nudgeLevel) {
-            const grace = scaledWatermark(
-                nudgeLevel.postReduceGraceBaselineU,
-                calibration.toolsRatio,
-            );
-            if (grace !== null) nudgeLevel.postReduceGraceBaselineU = grace;
-        }
-        db.prepare(
-            "UPDATE session_meta SET last_nudge_undropped = COALESCE(?, last_nudge_undropped), last_nudge_level = COALESCE(?, last_nudge_level) WHERE session_id = ?",
-        ).run(lastNudge, nudgeLevel ? JSON.stringify(nudgeLevel) : null, sessionId);
-        persistNamespace(db, sessionId, root, {
-            ...namespace,
-            hygieneUnitsVersion: HYGIENE_PROVIDER_UNITS_VERSION,
-        });
-        return HYGIENE_PROVIDER_UNITS_VERSION;
-    })();
+            const lastNudge = scaledWatermark(row?.last_nudge_undropped, calibration.toolsRatio);
+            const nudgeLevel = parseNudgeLevelState(row?.last_nudge_level);
+            if (nudgeLevel) {
+                const grace = scaledWatermark(
+                    nudgeLevel.postReduceGraceBaselineU,
+                    calibration.toolsRatio,
+                );
+                if (grace !== null) nudgeLevel.postReduceGraceBaselineU = grace;
+            }
+            db.prepare(
+                "UPDATE session_meta SET last_nudge_undropped = COALESCE(?, last_nudge_undropped), last_nudge_level = COALESCE(?, last_nudge_level) WHERE session_id = ?",
+            ).run(lastNudge, nudgeLevel ? JSON.stringify(nudgeLevel) : null, sessionId);
+            persistNamespace(db, sessionId, root, {
+                ...namespace,
+                hygieneUnitsVersion: HYGIENE_PROVIDER_UNITS_VERSION,
+            });
+            return HYGIENE_PROVIDER_UNITS_VERSION;
+        })
+        .immediate();
 }

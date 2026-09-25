@@ -1078,7 +1078,7 @@ export function updateMemoryContent(
             deleteEmbeddingOnContentUpdateStatements.set(db, stmt);
         }
         stmt.run(id);
-    })();
+    }).immediate();
 
     if (memory) {
         invalidateMemory(memory.projectPath, id);
@@ -1205,7 +1205,7 @@ export function deleteMemory(db: Database, id: number): void {
     db.transaction(() => {
         getDeleteMemoryEmbeddingStatement(db).run(id);
         getDeleteMemoryStatement(db).run(id);
-    })();
+    }).immediate();
 
     if (memory) {
         invalidateMemory(memory.projectPath, id);

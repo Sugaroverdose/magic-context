@@ -536,7 +536,7 @@ export function injectCompactionMarker(
                 boundaryTime + 1,
                 JSON.stringify({ type: "text", text: args.summaryText }),
             );
-        })();
+        }).immediate();
 
         log(
             `[magic-context] compaction-marker: injected boundary at user msg ${boundary.id} (ordinal ~${args.endOrdinal}), summary msg ${summaryMsgId}`,
@@ -724,7 +724,7 @@ export function removeForeignCompactionMarker(
                 sessionId,
                 marker.compactionPartId,
             );
-        })();
+        }).immediate();
         return true;
     } catch (error) {
         log(
@@ -999,13 +999,15 @@ export function removeMcOwnedCompactionMarkers(
         }
 
         // Caveat 1: compaction part + summary rows deleted TOGETHER.
-        const rows = db.transaction(() => {
-            let changed = deleteSummaries(summaryIds);
-            for (const partId of mcPartIds) {
-                changed += deletePart.run(sessionId, partId).changes;
-            }
-            return changed;
-        })();
+        const rows = db
+            .transaction(() => {
+                let changed = deleteSummaries(summaryIds);
+                for (const partId of mcPartIds) {
+                    changed += deletePart.run(sessionId, partId).changes;
+                }
+                return changed;
+            })
+            .immediate();
         if (rows > 0 || summaryIds.size > 0 || mcPartIds.length > 0) {
             removedLineages += 1;
             removedRows += rows;
@@ -1024,7 +1026,7 @@ export function removeMcOwnedCompactionMarkers(
         if (survivingPartsReferenceDeletion || messageFieldReferencesDeletion) {
             retainedLineages += 1;
         } else {
-            const rows = db.transaction(() => deleteSummaries(orphanSummaryIds))();
+            const rows = db.transaction(() => deleteSummaries(orphanSummaryIds)).immediate();
             removedLineages += 1;
             removedRows += rows;
         }
@@ -1055,7 +1057,7 @@ export function removeCompactionMarker(state: CompactionMarkerState): boolean {
             db.prepare("DELETE FROM part WHERE id = ?").run(state.summaryPartId);
             db.prepare("DELETE FROM message WHERE id = ?").run(state.summaryMessageId);
             db.prepare("DELETE FROM part WHERE id = ?").run(state.compactionPartId);
-        })();
+        }).immediate();
         return true;
     } catch (error) {
         log(

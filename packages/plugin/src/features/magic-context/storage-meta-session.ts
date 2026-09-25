@@ -154,7 +154,7 @@ export function updateSessionMeta(
             ...values,
             sessionId,
         );
-    })();
+    }).immediate();
 }
 
 export function advanceToolReclaimWatermark(
@@ -168,7 +168,7 @@ export function advanceToolReclaimWatermark(
         db.prepare(
             "UPDATE session_meta SET tool_reclaim_watermark = MAX(COALESCE(tool_reclaim_watermark, 0), ?) WHERE session_id = ?",
         ).run(maxTagNumber, sessionId);
-    })();
+    }).immediate();
 }
 
 export interface PendingSessionCleanupRetryResult {
@@ -288,6 +288,6 @@ export function clearSession(
         deleteSessionScopedRows(db, [sessionId], undefined, {
             rustModuleCleanupAcknowledged,
         });
-    })();
+    }).immediate();
     logSlowWriteTransaction("clear-session", transactionStartedAt);
 }

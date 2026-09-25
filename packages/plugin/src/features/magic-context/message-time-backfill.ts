@@ -146,7 +146,7 @@ export function backfillMessageTimesBatch(
                 SET cursor_session_id = ?, cursor_ordinal = ?, completed = ?, updated_at = ?
               WHERE id = ?`,
         ).run(cursorSessionId, cursorOrdinal, completed ? 1 : 0, Date.now(), BACKFILL_STATE_ID);
-    })();
+    }).immediate();
     logSlowWriteTransaction("message_time_backfill", transactionStartedAt);
 
     return {

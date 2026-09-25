@@ -462,7 +462,7 @@ export function createTagger(): Tagger {
                         entryFingerprint,
                         tokenCounts,
                     );
-                })();
+                }).immediate();
             } catch (error: unknown) {
                 if (!isUniqueConstraintError(error)) {
                     throw error;

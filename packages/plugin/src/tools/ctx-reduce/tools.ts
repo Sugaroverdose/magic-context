@@ -230,12 +230,14 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             }
 
             try {
-                deps.db.transaction(() => {
-                    const now = Date.now();
-                    for (const id of dropIds) {
-                        queuePendingOp(deps.db, sessionId, id, "drop", now);
-                    }
-                })();
+                deps.db
+                    .transaction(() => {
+                        const now = Date.now();
+                        for (const id of dropIds) {
+                            queuePendingOp(deps.db, sessionId, id, "drop", now);
+                        }
+                    })
+                    .immediate();
             } catch (error) {
                 const errorMessage = getErrorMessage(error);
                 return `Error: Failed to queue ctx_reduce operations. ${errorMessage}`;

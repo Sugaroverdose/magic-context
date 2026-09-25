@@ -460,7 +460,7 @@ export async function doctorRetryV22Backfill(db: Database): Promise<{
                     bumpProjectMemoryEpochInTransaction(db, identity, now);
                     succeeded += 1;
                 }
-            })();
+            }).immediate();
         } catch (error) {
             const classified = classifyBackfillError(error);
             db.prepare(
@@ -516,7 +516,7 @@ export async function doctorRekeyV22DirIdentity(
         if (changedRows > 0) {
             bumpProjectMemoryEpochInTransaction(db, newIdentity, now);
         }
-    })();
+    }).immediate();
 
     return { oldIdentity, newIdentity, changedRows };
 }

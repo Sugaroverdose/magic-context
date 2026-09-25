@@ -496,28 +496,30 @@ export function dismissNotes(
     scope: NoteMutationScope,
 ): DismissNoteResult[] {
     const now = Date.now();
-    return db.transaction(() =>
-        noteIds.map((noteId): DismissNoteResult => {
-            const existing = getNoteById(db, noteId);
-            if (!existing) return { noteId, outcome: "not_found" };
-            if (!noteBelongsToScope(existing, scope)) {
-                return { noteId, outcome: "not_owned" };
-            }
-            if (existing.status === "dismissed") {
-                return { noteId, outcome: "already_dismissed" };
-            }
+    return db
+        .transaction(() =>
+            noteIds.map((noteId): DismissNoteResult => {
+                const existing = getNoteById(db, noteId);
+                if (!existing) return { noteId, outcome: "not_found" };
+                if (!noteBelongsToScope(existing, scope)) {
+                    return { noteId, outcome: "not_owned" };
+                }
+                if (existing.status === "dismissed") {
+                    return { noteId, outcome: "already_dismissed" };
+                }
 
-            const result = db
-                .prepare(
-                    "UPDATE notes SET status = 'dismissed', updated_at = ? WHERE id = ? AND status != 'dismissed'",
-                )
-                .run(now, noteId);
-            return {
-                noteId,
-                outcome: result.changes > 0 ? "dismissed" : "already_dismissed",
-            };
-        }),
-    )();
+                const result = db
+                    .prepare(
+                        "UPDATE notes SET status = 'dismissed', updated_at = ? WHERE id = ? AND status != 'dismissed'",
+                    )
+                    .run(now, noteId);
+                return {
+                    noteId,
+                    outcome: result.changes > 0 ? "dismissed" : "already_dismissed",
+                };
+            }),
+        )
+        .immediate();
 }
 
 export function dismissNote(db: Database, noteId: number, scope: NoteMutationScope): boolean {
@@ -553,5 +555,5 @@ export function replaceAllSessionNotes(db: Database, sessionId: string, notes: s
         for (const note of notes) {
             insert.run(note, sessionId, now, now, getHarness());
         }
-    })();
+    }).immediate();
 }

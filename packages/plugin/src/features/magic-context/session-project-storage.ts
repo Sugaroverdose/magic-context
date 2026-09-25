@@ -108,7 +108,7 @@ export function recordSessionProjectIdentity(
             projectPath,
             SESSION_CHUNK_REPAIR_BATCH_SIZE,
         );
-    })();
+    }).immediate();
 }
 
 /**

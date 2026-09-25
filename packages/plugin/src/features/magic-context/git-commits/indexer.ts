@@ -195,7 +195,7 @@ export async function embedUnembeddedCommits(db: Database, projectPath: string):
                         saveCommitEmbedding(db, row.sha, embedding, result.modelId);
                         embeddedThisBatch += 1;
                     }
-                })();
+                }).immediate();
                 enqueueShadowEmbeddingItems(
                     projectPath,
                     "commit",

@@ -115,7 +115,7 @@ function pruneExpiredPrimerCandidatesForProject(
     const stmt = db.prepare("DELETE FROM primer_candidates WHERE id = ? AND project_path = ?");
     db.transaction(() => {
         for (const id of toDelete) stmt.run(id, projectIdentity);
-    })();
+    }).immediate();
     return toDelete.length;
 }
 
