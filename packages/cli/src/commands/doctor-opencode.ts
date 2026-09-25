@@ -107,6 +107,12 @@ import {
 import { runV22BackfillCommands, type V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
 import { reportAuthorityMarkers } from "./doctor-authority";
 import {
+    compareCachedPluginFences,
+    listCachedOpenCodePluginFences,
+    readContextDbSchemaVersion,
+    reportCachedPluginFences,
+} from "./doctor-cached-plugin-fence";
+import {
     checkOpenCodeCompactionMarkerConversion,
     formatOpenCodeCompactionMarkerConversion,
     formatOpenCodeV2ReconversionRecipe,
@@ -992,7 +998,9 @@ export async function runDoctor(
         // Help users whose binary IS on PATH but is shadowed by a wrapper
         // script or lives in a directory not searched by our detection
         // (e.g. tool-version shims that only inject PATH at shell time).
-        log.info("Doctor checked ~/.opencode/bin/opencode and each entry in $PATH.");
+        log.info(
+            "Doctor checked ~/.opencode/bin/opencode, each entry in $PATH, and the OpenCode CLI bundled in OpenChamber.app.",
+        );
         log.info(
             "If `which opencode` succeeds outside doctor, your wrapper or shim may not be readable by Node — please share that wrapper in the issue.",
         );
@@ -1857,6 +1865,18 @@ export async function runDoctor(
     );
     if (v2Cache.fixed) fixed++;
     if (v2Cache.issue) issues++;
+
+    // 8c. OpenCode 1 and OpenCode 2 share context.db but cache Magic Context
+    // separately. Once the newer copy migrates the database, every cached copy
+    // whose compiled schema fence is behind it fails closed in its host. Runs
+    // after the cache steps above so a copy they just removed is not reported.
+    const sharedDbVersion = readContextDbSchemaVersion(dbPath);
+    if (sharedDbVersion !== null) {
+        reportCachedPluginFences(
+            compareCachedPluginFences(listCachedOpenCodePluginFences(), sharedDbVersion),
+            { pass, fail, info: (message) => log.info(message) },
+        );
+    }
 
     // 9. Check for min-release-age / before restrictions in ~/.npmrc.
     // OpenCode installs plugins with npm under the hood, so npm's age guards

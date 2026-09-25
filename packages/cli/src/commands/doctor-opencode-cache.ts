@@ -15,7 +15,8 @@ export interface PluginCacheResult {
     error?: string;
 }
 
-function readCachedPluginVersion(pluginCacheDir: string): string | undefined {
+/** Version of the Magic Context package installed under an OpenCode 1 cache root, if readable. */
+export function readCachedPluginVersion(pluginCacheDir: string): string | undefined {
     try {
         const installedPkgPath = getOpenCodePluginPackageJsonPath(pluginCacheDir);
         if (!existsSync(installedPkgPath)) return undefined;
