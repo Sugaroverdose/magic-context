@@ -150,6 +150,26 @@ export function foldChangesServedPrefix(
 }
 
 /**
+ * The single bust permission an executed HARD fold grants. True when the fold
+ * loses the provider's cached prefix anyway: its trigger evicts the cache
+ * (CACHE_LOSING_FOLD_REASONS) or it changes the m[0]/m[1]/mural bytes served
+ * ahead of the tail. A fold that re-renders the prefix byte-identically, such
+ * as a memory epoch bump, an upgrade marker or a mutation-log entry with no
+ * rendered-content change, keeps the provider cache alive, and any lane riding
+ * it would make itself the pass's only bust. Every lane that rides a fold
+ * consults this one decision: legacy skeleton conversion, pending-op drains,
+ * heuristic cleanup, synthetic todo and sentinel first-application. OpenCode
+ * and Pi both call it.
+ */
+export function foldBustsServedPrefix(
+    reason: string | null | undefined,
+    before: ServedPrefixBytes,
+    after: ServedPrefixBytes,
+): boolean {
+    return CACHE_LOSING_FOLD_REASONS.has(reason ?? "") || foldChangesServedPrefix(before, after);
+}
+
+/**
  * Convert every dropped tool call that still serves the legacy
  * `{"dropped": "[dropped §N§]"}` argument marker to the real-or-absent rule,
  * persisting the new mode, and return the conversions so the caller can render

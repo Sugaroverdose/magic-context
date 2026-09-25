@@ -136,9 +136,8 @@ import { computePiWorkMetrics } from "@magic-context/core/features/magic-context
 import {
 	applyFlushedStatuses,
 	applyPendingOperations,
-	CACHE_LOSING_FOLD_REASONS,
 	convertLegacyToolSkeletons,
-	foldChangesServedPrefix,
+	foldBustsServedPrefix,
 	RECENT_TOOL_SKELETON_WINDOW,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
 import {
@@ -365,12 +364,14 @@ let mutationGateObserverForTests:
 	| ((snapshot: {
 			foldDue: boolean;
 			foldExecuted: boolean;
+			foldBustsServedPrefix: boolean;
 			shouldApplyPendingOps: boolean;
 			shouldRunHeuristics: boolean;
 			shouldRunReasoningCleanup: boolean;
 	  }) => void)
 	| undefined;
 let lkgRecoveryLogObserverForTests: ((message: string) => void) | undefined;
+
 let variantChangeLogObserverForTests: ((message: string) => void) | undefined;
 
 function logPiLkgRecovery(sessionId: string, message: string): void {
@@ -5262,10 +5263,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			injectionPassSnapshot.cachedRow.cached_m1_bytes
 		);
 	let foldExecutedThisPass = false;
-	// True only when this pass's executed fold also loses the provider's cached
-	// prefix: its trigger evicts it (model, system prompt, idle TTL) or it changes
-	// the m[0]/m[1] bytes served ahead of the tail. Legacy skeleton conversion
-	// rides only such a fold, never one that re-renders the prefix identically.
+	// The one bust permission an executed fold grants: true only when the fold
+	// also loses the provider's cached prefix (see foldBustsServedPrefix). Every
+	// lane that rides a fold consults it: legacy skeleton conversion, pending-op
+	// drains, heuristics, synthetic todo and sentinel first-application.
 	let foldBustsServedPrefixThisPass = false;
 	let publishedM1RefreshedThisPass = false;
 	let prefixPreflightContended = false;
@@ -5315,10 +5316,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			);
 			if (foldExecutedThisPass) {
 				const afterFold = getOrCreateSessionMeta(args.db, args.sessionId);
-				foldBustsServedPrefixThisPass =
-					CACHE_LOSING_FOLD_REASONS.has(foldDueDecision.reason ?? "") ||
-					foldChangesServedPrefix(
-						{
+				foldBustsServedPrefixThisPass = foldBustsServedPrefix(
+					foldDueDecision.reason,
+					{
 							m0Bytes: persistedM0BeforeFold.cachedM0Bytes ?? null,
 							m1Bytes: persistedM0BeforeFold.cachedM1Bytes ?? null,
 						},
@@ -5367,7 +5367,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			: "";
 		sessionLog(
 			args.sessionId,
-			`pi m[0] HARD fold decision: reason=${foldDueDecision.reason ?? "unknown"}${mismatch} executed=${foldExecutedThisPass}`,
+			`pi m[0] HARD fold decision: reason=${foldDueDecision.reason ?? "unknown"}${mismatch} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
 		);
 	}
 	// Primary sessions run routine age-sensitive cleanup only once during an
@@ -5389,7 +5389,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// transform path, subagents should bypass this once-per-turn guard like
 	// OpenCode does, because they do not share the primary agent's turn cache.
 	const rideSignals = {
-		hardFold: foldExecutedThisPass || firstRenderBust,
+		hardFold: foldBustsServedPrefixThisPass || firstRenderBust,
 		force:
 			(args.forceMaterialization === true || emergencyDropEligible) &&
 			(args.contextUsage.percentage >= 95 ||
@@ -5425,9 +5425,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.forceMaterialization === true ||
 			hasPendingMaterializeSignal ||
 			deferredMaterializeEligible ||
-			// A fold persisted earlier in this pass already busted the prefix, so
+			// A fold persisted earlier in this pass changed the served prefix, so
 			// reductions may ride it without causing an independent bust.
-			foldExecutedThisPass ||
+			foldBustsServedPrefixThisPass ||
 			firstRenderBust ||
 			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
 
@@ -5646,6 +5646,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	mutationGateObserverForTests?.({
 		foldDue: foldDueDecision.value,
 		foldExecuted: foldExecutedThisPass,
+		foldBustsServedPrefix: foldBustsServedPrefixThisPass,
 		shouldApplyPendingOps,
 		shouldRunHeuristics,
 		shouldRunReasoningCleanup:
@@ -5658,7 +5659,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				? "deferred_publication"
 				: args.forceMaterialization
 					? "force_materialization"
-					: foldExecutedThisPass && args.schedulerDecision !== "execute"
+					: foldBustsServedPrefixThisPass &&
+							args.schedulerDecision !== "execute"
 						? `m0_hard_fold (drain folded into executed m[0] bust, scheduler=${args.schedulerDecision})`
 						: `${reclaimRideLabel(rideSignals)} (scheduler=${args.schedulerDecision})`;
 		const pendingOpsDepth = getPendingOpsCount(args.db, args.sessionId);
@@ -5884,7 +5886,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	if (shouldRunHeuristics) {
 		const reason = args.forceMaterialization
 			? "force_materialization"
-			: foldExecutedThisPass && args.schedulerDecision !== "execute"
+			: foldBustsServedPrefixThisPass && args.schedulerDecision !== "execute"
 				? `m0_hard_fold (drain folded into executed m[0] bust, scheduler=${args.schedulerDecision})`
 				: `${reclaimRideLabel(rideSignals)} (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
 		const heuristicsDecisionLog = `heuristics WILL RUN — reason=${reason}, context=${args.contextUsage.percentage.toFixed(1)}%, turn=n/a`;
@@ -5908,7 +5910,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		try {
 			const tHeuristic = performance.now();
 			const independentMutationBeforeHeuristics =
-				pendingOpsDidMutate || foldExecutedThisPass;
+				pendingOpsDidMutate || foldBustsServedPrefixThisPass;
 			// A queued drop or completed hard fold already changes provider-visible
 			// bytes on this pass. Rearm so accumulated candidates join that same cache
 			// rebuild instead of waiting for a new pressure period. Do not treat frozen

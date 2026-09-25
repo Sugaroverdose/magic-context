@@ -32,6 +32,7 @@ import {
 	hasPiFallbackToolOwnerTags,
 	incrementHistorianFailure,
 	insertTag,
+	queueM0Mutation,
 	queuePendingOp,
 	setChannel1NudgeState,
 	setLastNudgeUndropped,
@@ -4537,6 +4538,7 @@ describe("registerPiContextHandler", () => {
 					{
 						foldDue: true,
 						foldExecuted: true,
+						foldBustsServedPrefix: true,
 						shouldApplyPendingOps: true,
 						shouldRunHeuristics: true,
 						shouldRunReasoningCleanup: true,
@@ -4681,6 +4683,67 @@ describe("registerPiContextHandler", () => {
 			}
 		});
 
+		it("holds queued pending ops when an executed HARD fold re-renders the served m[0]/m[1] byte-identically", async () => {
+			// A structural mutation-log entry that changes no rendered content still
+			// executes a HARD fold. The fold reproduces the served pair, so the
+			// provider cache survives and a drain would be this pass's only bust.
+			const db = createTestDb();
+			const sessionId = "ses-pi-identical-hardfold-hold";
+			const gateSnapshots: Array<Record<string, boolean>> = [];
+			const restoreObserver =
+				contextHandlerInternals.setMutationGateObserverForTests((snapshot) => {
+					gateSnapshots.push(snapshot);
+				});
+			const sha = (messages: unknown) =>
+				createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+			try {
+				const { handler, toolTagNumber } = await primeBaseline(db, sessionId);
+				const deferMessages = buildMessages();
+				const defer = await handler(
+					{ messages: deferMessages },
+					contextFor(sessionId, deferMessages),
+				);
+				gateSnapshots.length = 0;
+
+				queueM0Mutation(db, { sessionId, mutationType: "compartment_delete" });
+				const hardMessages = buildMessages();
+				const hard = await handler(
+					{ messages: hardMessages },
+					contextFor(sessionId, hardMessages),
+				);
+
+				expect(gateSnapshots).toEqual([
+					{
+						foldDue: true,
+						foldExecuted: true,
+						foldBustsServedPrefix: false,
+						shouldApplyPendingOps: false,
+						shouldRunHeuristics: false,
+						shouldRunReasoningCleanup: false,
+					},
+				]);
+				expect(
+					getTagsBySession(db, sessionId).find(
+						(tag) => tag.tagNumber === toolTagNumber,
+					)?.status,
+				).toBe("active");
+				expect(getPendingOps(db, sessionId)).toHaveLength(1);
+				expect(sha(hard.messages)).toBe(sha(defer.messages));
+
+				// The following defer pass replays the same bytes.
+				const afterMessages = buildMessages();
+				const after = await handler(
+					{ messages: afterMessages },
+					contextFor(sessionId, afterMessages),
+				);
+				expect(sha(after.messages)).toBe(sha(defer.messages));
+			} finally {
+				restoreObserver();
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
 		it("Pi competing persisted pair cannot replace the pass-start prefix snapshot", async () => {
 			const db = createTestDb();
 			const sessionId = "ses-pi-competing-prefix";
@@ -4757,6 +4820,7 @@ describe("registerPiContextHandler", () => {
 					{
 						foldDue: true,
 						foldExecuted: false,
+						foldBustsServedPrefix: false,
 						shouldApplyPendingOps: false,
 						shouldRunHeuristics: false,
 						shouldRunReasoningCleanup: false,
@@ -4999,6 +5063,7 @@ describe("registerPiContextHandler", () => {
 					{
 						foldDue: true,
 						foldExecuted: false,
+						foldBustsServedPrefix: false,
 						shouldApplyPendingOps: false,
 						shouldRunHeuristics: false,
 						shouldRunReasoningCleanup: false,
