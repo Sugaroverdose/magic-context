@@ -3,6 +3,21 @@
     "header": "Pull-request and ordinary master CI intentionally run only the manifest-derived TS invocation. The tag release workflow runs the Rust invocation through scripts/run-rust-hermetic-e2e.sh on an explicitly enabled private-source runner; it requires sibling path-deps (../commons and ../subconscious).",
     "entries": [
         {
+            "path": "tests/adv-identical-bytes-hard.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "adversarial gate reproduction for identical-bytes HARD folds on a real OpenCode 1 host; run by hand, outside the mode lanes",
+            "contract_refs": [
+                "FOLD-UNDER-PRESSURE"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/cache-invariants.test.ts",
             "tier": "both-modes",
             "invocation": {

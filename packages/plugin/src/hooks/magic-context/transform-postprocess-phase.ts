@@ -66,10 +66,9 @@ import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
 import {
-    CACHE_LOSING_FOLD_REASONS,
     type ConvertedToolDropMode,
     convertLegacyToolSkeletons,
-    foldChangesServedPrefix,
+    foldBustsServedPrefix,
     renderConvertedToolSkeletons,
 } from "./apply-operations";
 import { runAutoSearchHint } from "./auto-search-runner";
@@ -1403,6 +1402,11 @@ export async function runPostTransformPhase(
             hasCompleteCachedM0M1(args.db, args.sessionId));
     const firstRenderBust = m0M1EnabledForFold && !completeCachedPrefixAvailable;
     let foldExecutedThisPass = false;
+    // The one bust permission an executed fold grants: true only when the fold
+    // also loses the provider's cached prefix (see foldBustsServedPrefix). Every
+    // lane that rides a fold consults it: legacy skeleton conversion, pending-op
+    // drains, heuristics, synthetic todo and sentinel first-application.
+    let foldBustsServedPrefixThisPass = false;
     let publishedM1RefreshedThisPass = false;
     let prefixPreflightFailed = false;
     const softRefreshOpportunity = args.schedulerDecision === "execute" || deferredMaterialize;
@@ -1416,13 +1420,10 @@ export async function runPostTransformPhase(
     let m0ComparisonDecision: MaterializeDecision | null = foldDueDecision;
     // Legacy dropped-tool skeletons (argument marker) are converted to the
     // real-or-absent rule only inside an executed HARD fold's transaction, and
-    // only when the provider's cached prefix is lost anyway: the fold's trigger
-    // evicts it (model, system prompt, idle TTL) or the fold changes the
-    // m[0]/m[1] bytes it serves. A fold that re-renders the prefix
-    // byte-identically (e.g. a memory epoch bump with no content change) keeps
-    // the prefix cached; converting there would make the conversion the bust.
+    // only when that fold busts the served prefix (foldBustsServedPrefix). The
+    // decision made there is the same one that later opens the other lanes.
     // Retries recompute the same decisions from the same wire, so collecting
-    // across attempts is safe.
+    // across attempts is safe; the last attempt is the one that committed.
     const convertedToolSkeletons = new Map<number, ConvertedToolDropMode>();
     let convertedToolSkeletonsDidMutate = false;
     const servedPrefixBeforeFold = {
@@ -1431,6 +1432,7 @@ export async function runPostTransformPhase(
         muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
     };
     if ((foldDueDecision.value || softRefreshOpportunity) && m0M1EnabledForFold && args.m0M1) {
+        let committedFoldBustsServedPrefix: boolean | undefined;
         try {
             const previousM1 = args.sessionMeta.cachedM1Bytes?.toString("utf8");
             // Omitting messages keeps prefix preparation off-wire. The final
@@ -1453,12 +1455,12 @@ export async function runPostTransformPhase(
                 muralEnabled: args.m0M1.muralEnabled,
                 compactionOff,
                 onFoldCommit: (db, rendered) => {
-                    if (
-                        !CACHE_LOSING_FOLD_REASONS.has(foldDueDecision.reason ?? "") &&
-                        !foldChangesServedPrefix(servedPrefixBeforeFold, rendered)
-                    ) {
-                        return;
-                    }
+                    committedFoldBustsServedPrefix = foldBustsServedPrefix(
+                        foldDueDecision.reason,
+                        servedPrefixBeforeFold,
+                        rendered,
+                    );
+                    if (!committedFoldBustsServedPrefix) return;
                     for (const [tagNumber, mode] of convertLegacyToolSkeletons(
                         db,
                         args.sessionId,
@@ -1474,6 +1476,10 @@ export async function runPostTransformPhase(
                 foldDueDecision.value || softRefreshOpportunity,
                 foldResult.m0RematerializedThisPass,
             );
+            // Every executed fold commits through the hook above. Should one ever
+            // execute without it, keep the permission executed folds always had.
+            foldBustsServedPrefixThisPass =
+                foldExecutedThisPass && (committedFoldBustsServedPrefix ?? true);
             publishedM1RefreshedThisPass =
                 !foldResult.materializationContentionRetryExhausted &&
                 previousM1 !== args.sessionMeta.cachedM1Bytes?.toString("utf8");
@@ -1519,7 +1525,7 @@ export async function runPostTransformPhase(
         }
         sessionLog(
             args.sessionId,
-            `m[0] HARD fold decision: reason=${foldDueDecision.reason ?? "unknown"} executed=${foldExecutedThisPass}`,
+            `m[0] HARD fold decision: reason=${foldDueDecision.reason ?? "unknown"} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
         );
     }
 
@@ -1540,7 +1546,7 @@ export async function runPostTransformPhase(
     };
     // All first applications share an independently priced cache-bust permission.
     const rideSignals = {
-        hardFold: foldExecutedThisPass || firstRenderBust,
+        hardFold: foldBustsServedPrefixThisPass || firstRenderBust,
         force:
             emergencyDropEligible &&
             (args.contextUsage.percentage >= 95 ||
@@ -1562,10 +1568,10 @@ export async function runPostTransformPhase(
         (rideSignals.publishedHistory ||
             materializationRequested ||
             forceMaterialization ||
-            // The off-wire fold landed, so the prefix already busted. Heuristics
-            // may ride it and bypass the once-per-turn guard without creating an
-            // independent prefix rewrite.
-            foldExecutedThisPass ||
+            // The off-wire fold changed the served prefix, so the prefix already
+            // busted. Heuristics may ride it and bypass the once-per-turn guard
+            // without creating an independent prefix rewrite.
+            foldBustsServedPrefixThisPass ||
             firstRenderBust ||
             // the derived force band emergency floor for BOTH primary and subagent. For a primary
             // this coincides with forceMaterialization (fullFeatureMode && the derived force band);
@@ -1620,7 +1626,7 @@ export async function runPostTransformPhase(
               ? "deferred_materialization"
               : forceMaterialization
                 ? `force_materialization (${args.contextUsage.percentage.toFixed(1)}% >= ${args.forceMaterializationPercentage}%)`
-                : foldExecutedThisPass && args.schedulerDecision !== "execute"
+                : foldBustsServedPrefixThisPass && args.schedulerDecision !== "execute"
                   ? `m0_hard_fold (drain folded into executed m[0] bust, scheduler=${args.schedulerDecision})`
                   : subagentRerun
                     ? `${reclaimRideLabel(rideSignals)} subagent_rerun (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`
@@ -1695,7 +1701,7 @@ export async function runPostTransformPhase(
                 ? "explicit_flush"
                 : deferredMaterialize
                   ? "deferred_materialization"
-                  : foldExecutedThisPass && args.schedulerDecision !== "execute"
+                  : foldBustsServedPrefixThisPass && args.schedulerDecision !== "execute"
                     ? `m0_hard_fold (drain folded into executed m[0] bust, scheduler=${args.schedulerDecision})`
                     : `${reclaimRideLabel(rideSignals)} (scheduler=${args.schedulerDecision})`;
             sessionLog(
@@ -1755,7 +1761,7 @@ export async function runPostTransformPhase(
             const independentMutationBeforeHeuristics =
                 pendingOpsDidMutate ||
                 args.didMutateFromFlushedStatuses ||
-                foldExecutedThisPass ||
+                foldBustsServedPrefixThisPass ||
                 args.historyRebuiltThisPass ||
                 args.compartmentInjectionRebuiltFromDb ||
                 args.rebuiltHistoryFromInitialPrepare;
