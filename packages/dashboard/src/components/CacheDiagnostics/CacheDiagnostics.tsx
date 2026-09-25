@@ -9,8 +9,10 @@ import {
   cacheCauseColor,
   cacheCauseLabel,
   cacheCauseTooltip,
+  cacheEventColorClass,
+  cacheEventLabel,
+  cacheWriteLabel,
   selectWorstCacheEvent,
-  severityColorClass,
 } from "../../lib/cache-format";
 import type { DbCacheEvent, Harness, SessionCacheStats } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
@@ -50,6 +52,15 @@ export function cachePercentage(ratio: number | null): string {
 export function cacheEventPercentage(event: DbCacheEvent): string {
   if (!event.cache_reported) return "No cached tokens reported";
   return event.severity === "unknown" ? "no cache data" : cachePercentage(event.hit_ratio);
+}
+
+/** Tooltip explaining what a row's percentage measures. */
+export function cacheRatioTitle(event: Pick<DbCacheEvent, "aggregate" | "cold_start">): string {
+  if (event.aggregate) {
+    return "Cached share of the whole run: cache reads over every request's prompt, summed. Not compared with other runs.";
+  }
+  if (event.cold_start) return "First request of the session: nothing was cached yet";
+  return "Cache retention vs the previous step's expected prefix";
 }
 
 export function cacheSessionTitle(row: SessionCacheStats): string {
@@ -524,8 +535,9 @@ export default function CacheDiagnostics() {
     });
   };
 
-  const severityIcon = (severity: string) => {
-    switch (severity) {
+  const severityIcon = (event: Pick<DbCacheEvent, "severity" | "cold_start">) => {
+    if (event.cold_start) return "🔵";
+    switch (event.severity) {
       case "stable":
         return "🟢";
       case "info":
@@ -539,6 +551,7 @@ export default function CacheDiagnostics() {
       case "full_bust":
         return "⚫";
       case "unknown":
+      case "aggregate":
         return "⚪";
       default:
         return "⚪";
@@ -546,12 +559,16 @@ export default function CacheDiagnostics() {
   };
 
   // Map a severity string to a bar/pill color class. Severity is the source of
-  // truth — list pills + bar-fills use the shared severityColorClass.
+  // truth — list pills + bar-fills use the shared cacheEventColorClass.
 
   // Bar-fill WIDTH for the turn/step list rows scales with retention (hit_ratio
   // now carries the cross-step retention), clamped to [0,1].
-  const barFraction = (event: { severity: string; hit_ratio: number }): number => {
-    if (event.severity === "unknown" || event.severity === "info") return 1;
+  const barFraction = (event: {
+    severity: string;
+    hit_ratio: number;
+    cold_start: boolean;
+  }): number => {
+    if (event.severity === "unknown" || event.severity === "info" || event.cold_start) return 1;
     return Math.min(1, Math.max(0, event.hit_ratio));
   };
 
@@ -836,9 +853,7 @@ export default function CacheDiagnostics() {
                           "min-width": "0",
                         }}
                       >
-                        <span style={{ "flex-shrink": "0" }}>
-                          {severityIcon(turn.worstSeverity)}
-                        </span>
+                        <span style={{ "flex-shrink": "0" }}>{severityIcon(turn.worstEvent)}</span>
                         <span style={{ "flex-shrink": "0", display: "inline-flex" }}>
                           <HarnessBadge harness={turn.harness} />
                         </span>
@@ -853,16 +868,10 @@ export default function CacheDiagnostics() {
                           {formatDateTime(turn.startTime)}
                         </span>
                         <span
-                          class={`pill ${severityColorClass(turn.worstSeverity)}`}
+                          class={`pill ${cacheEventColorClass(turn.worstEvent)}`}
                           style={{ "flex-shrink": "0" }}
                         >
-                          {turn.worstSeverity === "full_bust"
-                            ? "FULL BUST"
-                            : turn.worstSeverity === "info"
-                              ? "NEW SESSION"
-                              : turn.worstSeverity === "unknown"
-                                ? "NO CACHE DATA"
-                                : turn.worstSeverity.toUpperCase()}
+                          {cacheEventLabel(turn.worstEvent)}
                         </span>
                         <Show when={isMultiStep}>
                           <span class="pill gray" style={{ "flex-shrink": "0" }}>
@@ -897,22 +906,22 @@ export default function CacheDiagnostics() {
                           <span
                             class="mono"
                             style={{
-                              color: `var(--${severityColorClass(turn.worstSeverity)})`,
+                              color: `var(--${cacheEventColorClass(turn.worstEvent)})`,
                               "font-weight": "600",
                             }}
-                            title="Cache retention vs the previous step's expected prefix"
+                            title={cacheRatioTitle(last)}
                           >
                             {(turnRetention * 100).toFixed(1)}%
                           </span>
                         </Show>
                         <span class="mono">prompt={totalPrompt.toLocaleString()}</span>
                         <span class="mono">cached={last.cache_read.toLocaleString()}</span>
-                        <span class="mono">new={turn.totalCacheWrite.toLocaleString()}</span>
+                        <span class="mono">new={cacheWriteLabel(turn.events)}</span>
                         <div class="cache-bar">
                           <div
-                            class={`cache-bar-fill ${severityColorClass(turn.worstSeverity)}`}
+                            class={`cache-bar-fill ${cacheEventColorClass(turn.worstEvent)}`}
                             style={{
-                              width: `${barFraction({ severity: turn.worstSeverity, hit_ratio: turnRetention }) * 100}%`,
+                              width: `${barFraction({ severity: turn.worstSeverity, hit_ratio: turnRetention, cold_start: turn.worstEvent.cold_start }) * 100}%`,
                             }}
                           />
                         </div>
@@ -947,7 +956,7 @@ export default function CacheDiagnostics() {
                                 >
                                   <div class="cache-step-header">
                                     <span style={{ "flex-shrink": "0" }}>
-                                      {severityIcon(event.severity)}
+                                      {severityIcon(event)}
                                     </span>
                                     <span
                                       class="mono"
@@ -960,16 +969,10 @@ export default function CacheDiagnostics() {
                                       {formatDateTime(event.timestamp)}
                                     </span>
                                     <span
-                                      class={`pill ${severityColorClass(event.severity)}`}
+                                      class={`pill ${cacheEventColorClass(event)}`}
                                       style={{ "flex-shrink": "0" }}
                                     >
-                                      {event.severity === "full_bust"
-                                        ? "FULL BUST"
-                                        : event.severity === "info"
-                                          ? "NEW SESSION"
-                                          : event.severity === "unknown"
-                                            ? "NO CACHE DATA"
-                                            : event.severity.toUpperCase()}
+                                      {cacheEventLabel(event)}
                                     </span>
                                   </div>
                                   <div class="cache-step-meta">
@@ -984,10 +987,10 @@ export default function CacheDiagnostics() {
                                       <span
                                         class="mono"
                                         style={{
-                                          color: `var(--${severityColorClass(event.severity)})`,
+                                          color: `var(--${cacheEventColorClass(event)})`,
                                           "font-weight": "600",
                                         }}
-                                        title="Cache retention vs the previous step's expected prefix"
+                                        title={cacheRatioTitle(event)}
                                       >
                                         {cacheEventPercentage(event)}
                                       </span>
@@ -998,12 +1001,10 @@ export default function CacheDiagnostics() {
                                     <span class="mono">
                                       cached={event.cache_read.toLocaleString()}
                                     </span>
-                                    <span class="mono">
-                                      new={event.cache_write.toLocaleString()}
-                                    </span>
+                                    <span class="mono">new={cacheWriteLabel([event])}</span>
                                     <div class="cache-bar">
                                       <div
-                                        class={`cache-bar-fill ${severityColorClass(event.severity)}`}
+                                        class={`cache-bar-fill ${cacheEventColorClass(event)}`}
                                         style={{ width: `${barFraction(event) * 100}%` }}
                                       />
                                     </div>

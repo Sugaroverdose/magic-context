@@ -3,10 +3,11 @@ import { formatDateTime } from "../../lib/api";
 import {
   cacheCauseLabel,
   cacheCauseTooltip,
+  cacheEventColorClass,
+  cacheEventLabel,
   ctxBarGeom,
   formatTokensShort,
   normalizeEstimatedContextLimits,
-  severityColorClass,
 } from "../../lib/cache-format";
 import type { DbCacheEvent } from "../../lib/types";
 
@@ -110,7 +111,7 @@ export default function CacheTimeline(props: {
     };
     const windowLabel = g.limit > 0 ? g.limit.toLocaleString() : "unknown";
     const causeTip = event.cause ? cacheCauseTooltip(event.cause) : undefined;
-    const title = `${formatDateTime(event.timestamp)}\n${event.severity.toUpperCase()}${g.overflow ? " · OVERFLOW" : ""}\nPrompt: ${g.prompt.toLocaleString()} / ${windowLabel} (${pctOfWindow.toFixed(1)}% of window)\n${cachedLine}\nUncached: ${(event.input_tokens + event.cache_write).toLocaleString()}${dropLine}${causeTip ? `\n${causeTip}` : ""}\n(click → jump to step in list)`;
+    const title = `${formatDateTime(event.timestamp)}\n${cacheEventLabel(event)}${g.overflow ? " · OVERFLOW" : ""}\nPrompt: ${g.prompt.toLocaleString()} / ${windowLabel} (${pctOfWindow.toFixed(1)}% of window)\n${cachedLine}\nUncached: ${(event.input_tokens + event.cache_write).toLocaleString()}${dropLine}${causeTip ? `\n${causeTip}` : ""}\n(click → jump to step in list)`;
     return (
       <div class="ctx-bar-slot">
         <Show when={event.is_drop}>
@@ -134,7 +135,7 @@ export default function CacheTimeline(props: {
         >
           <Show when={!isUnknown && g.innerPct > 0}>
             <div
-              class={`ctx-bar-cached ${severityColorClass(event.severity)}`}
+              class={`ctx-bar-cached ${cacheEventColorClass(event)}`}
               style={{ height: `${g.innerPct}%` }}
             />
           </Show>

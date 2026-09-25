@@ -479,7 +479,15 @@ export interface DbCacheEvent {
   cache_reported: boolean;
   total_tokens: number;
   hit_ratio: number;
-  severity: "stable" | "info" | "warning" | "bust" | "full_bust" | "warming" | "unknown";
+  severity:
+    | "stable"
+    | "info"
+    | "warning"
+    | "bust"
+    | "full_bust"
+    | "warming"
+    | "unknown"
+    | "aggregate";
   cause: string | null;
   agent: string | null;
   finish?: string;
@@ -492,6 +500,16 @@ export interface DbCacheEvent {
    *  segmenting/scaling the timeline (see normalizeEstimatedContextLimits). */
   context_limit_estimated: boolean;
   is_drop: boolean;
+  /** True when the row sums several provider requests (a whole Broca run)
+   *  rather than describing one. `hit_ratio` is then the run's total cached
+   *  share and `severity` is "aggregate"; it is never a STABLE/BUST verdict. */
+  aggregate: boolean;
+  /** True for a session's first row: its opening request could not read the
+   *  cache, so a low share there is a cold start, not a miss. */
+  cold_start: boolean;
+  /** False when the source omitted the cache-write count, so `cache_write`
+   *  is an absent value rather than a reported zero. */
+  cache_write_reported: boolean;
 }
 
 export interface SessionCacheStats {

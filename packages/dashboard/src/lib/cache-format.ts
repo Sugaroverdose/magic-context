@@ -7,6 +7,7 @@ const SEVERITY_RANK: Record<DbCacheEvent["severity"], number> = {
   warning: 3,
   stable: 2,
   info: 1,
+  aggregate: 1,
   unknown: 0,
 };
 
@@ -44,8 +45,44 @@ export function severityColorClass(severity: string): string {
     case "info":
       return "blue";
     default:
-      return "gray"; // unknown / warming
+      return "gray"; // unknown / warming / aggregate
   }
+}
+
+type CacheLabelFields = Pick<DbCacheEvent, "severity" | "cold_start" | "aggregate">;
+
+/**
+ * Pill text for one cache row. A session's first row is a cold start: its
+ * opening request had nothing cached to read, so it is labelled neutrally
+ * instead of as a miss. A run aggregate sums a whole agent loop and carries
+ * no health verdict, so it is labelled as a total rather than STABLE/BUST.
+ */
+export function cacheEventLabel(event: CacheLabelFields): string {
+  if (event.aggregate) return event.cold_start ? "COLD START · RUN TOTAL" : "RUN TOTAL";
+  if (event.cold_start || event.severity === "info") return "COLD START";
+  if (event.severity === "full_bust") return "FULL BUST";
+  if (event.severity === "unknown") return "NO CACHE DATA";
+  return event.severity.toUpperCase();
+}
+
+/** Color class for a row's pill and bar: cold starts stay neutral blue. */
+export function cacheEventColorClass(event: CacheLabelFields): string {
+  if (event.cold_start) return "blue";
+  return severityColorClass(event.severity);
+}
+
+/**
+ * The `new=` value for a set of rows (one step, or every step of a turn).
+ * Several providers never report cache writes, and Broca then omits the
+ * field; a missing count must read as "not reported", not as zero writes.
+ */
+export function cacheWriteLabel(
+  events: readonly Pick<DbCacheEvent, "cache_write" | "cache_write_reported">[],
+): string {
+  const reported = events.filter((event) => event.cache_write_reported);
+  if (reported.length === 0) return "not reported";
+  const total = reported.reduce((sum, event) => sum + event.cache_write, 0).toLocaleString();
+  return reported.length < events.length ? `${total} (partial)` : total;
 }
 
 const CACHE_CAUSE_LABELS: Record<string, string> = {
