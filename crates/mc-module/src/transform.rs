@@ -5064,10 +5064,16 @@ fn apply_once(
                 // Keep reductions whose targets remain in the new tail; discard reductions covered
                 // by the new m0 summary or orphaned by a revert. Because apply_units cannot remove
                 // those obsolete units in place, rebuild the frozen unit set.
-                let effective = effective_reductions(
+                let mut effective = effective_reductions(
                     &core,
                     &selected_reductions,
                     suppress_bootstrap_reduction_tag_overlay,
+                );
+                convert_legacy_skeleton_units(
+                    &mut effective,
+                    &tail_for_selection,
+                    &core,
+                    &req.session_id,
                 );
                 let survivors = surviving_red_units(&effective, &live, comp.coverage_ordinal);
                 let channel1_survivors =
@@ -5296,10 +5302,16 @@ fn apply_once(
                         }
                     }
 
-                    let effective = effective_reductions(
+                    let mut effective = effective_reductions(
                         &core,
                         &selected_reductions,
                         suppress_bootstrap_reduction_tag_overlay,
+                    );
+                    convert_legacy_skeleton_units(
+                        &mut effective,
+                        &tail_for_selection,
+                        &core,
+                        &req.session_id,
                     );
                     let survivors = surviving_red_units(&effective, &live, comp.coverage_ordinal);
                     let channel1_survivors =
@@ -7953,6 +7965,52 @@ fn effective_reductions(
         });
     }
     eff
+}
+
+/// Convert frozen legacy `skeleton` call units (arguments replaced by the
+/// `{"dropped": …}` marker) to the real-or-absent rule while a HARD fold rebuilds the
+/// frozen unit set. That rebuild re-serves the whole prefix anyway, so the byte change
+/// rides its cache bust; SOFT and defer passes never reach this and keep replaying the
+/// legacy bytes. The new kinds persist with the fold's state write, so later passes
+/// never re-decide them. Models copied the marker into new calls and looped on the
+/// guard's refusal, which is why it must leave the wire.
+fn convert_legacy_skeleton_units(
+    effective: &mut BTreeMap<String, (String, String, String)>,
+    items: &[SelItem],
+    core: &CoreState,
+    session_id: &str,
+) {
+    let legacy = effective
+        .iter()
+        .filter(|(_, (kind, _, _))| kind == "skeleton")
+        .map(|(target, _)| target.clone())
+        .collect::<BTreeSet<_>>();
+    if legacy.is_empty() {
+        return;
+    }
+    let removed = effective
+        .iter()
+        .filter(|(_, (kind, _, _))| kind == "drop")
+        .map(|(target, _)| target.clone())
+        .collect::<HashSet<_>>();
+    let conversions = crate::selection::legacy_skeleton_conversions(
+        items,
+        &legacy,
+        &removed,
+        &frozen_red_targets(core),
+    );
+    for (target, kind) in &conversions {
+        if let Some(entry) = effective.get_mut(target) {
+            entry.0 = (*kind).to_string();
+            entry.1 = "[dropped]".to_string();
+        }
+    }
+    if !conversions.is_empty() {
+        tracing::debug!(
+            "mc-module: [{session_id}] HARD fold converted {} legacy dropped-tool skeleton(s) to real-or-absent",
+            conversions.len()
+        );
+    }
 }
 
 /// Drop frozen `red:*` units whose target is now COVERED (ordinal at/below the new
@@ -12775,7 +12833,10 @@ fn full_drop_tool_ids(
             continue;
         }
         let call_kind = call_kind_by_id.get(id.as_str()).copied().flatten();
-        if !matches!(call_kind, Some("skeleton" | "edit_marker")) {
+        if !matches!(
+            call_kind,
+            Some("skeleton" | "skeleton_real" | "edit_marker")
+        ) {
             remove.insert(id.clone());
         }
     }
@@ -14173,7 +14234,10 @@ fn build_output_with_tags_inner(
                         .filter_map(|block| {
                             frozen_units
                                 .by_key(&format!("{RED_KEY_PREFIX}{}", block.id()))
-                                .filter(|unit| unit.kind != "image")
+                                // A real-argument skeleton serves its call block exactly
+                                // as the host sent it; only its paired results carry a
+                                // reduction.
+                                .filter(|unit| unit.kind != "image" && unit.kind != "skeleton_real")
                                 .map(|unit| (block.block_index, unit))
                         })
                         .collect()
@@ -26637,10 +26701,10 @@ pub(crate) mod tests {
                 .map(|part| part["state"]["input"].clone())
                 .collect::<Vec<_>>(),
             vec![
-                json!({ "dropped": "[dropped]" }),
-                json!({ "dropped": "[dropped]" }),
+                json!({ "path": "a.txt", "detail": "x".repeat(600) }),
+                json!({ "path": "b.txt", "detail": "y".repeat(600) }),
             ],
-            "model-visible native calls must expose only the dropped-input marker"
+            "after a HARD fold, small dropped calls expose their real arguments, never a marker"
         );
         assert!(parts.iter().all(|part| {
             part["state"]["status"] == "completed"
@@ -36762,7 +36826,9 @@ pub(crate) mod tests {
             s.load(&request.session_id).unwrap().meta.last_render_config,
             new_identity
         );
-        let marker_input = first
+        // The priced HARD also converts the legacy skeleton under the real-or-absent
+        // rule: its small input is served as the real arguments, never a marker.
+        let served_input = first
             .messages()
             .iter()
             .flat_map(|message| message.content.iter())
@@ -36772,13 +36838,13 @@ pub(crate) mod tests {
             })
             .expect("served skeleton tool input");
         assert_eq!(
-            marker_input
+            served_input
                 .as_object()
                 .unwrap()
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            vec!["dropped"]
+            vec!["path"]
         );
 
         let replay = run(&s, &request, &spine());
@@ -36788,6 +36854,283 @@ pub(crate) mod tests {
             serde_json::to_vec(replay.messages()).unwrap(),
             "post-HARD defer replay must remain byte-identical"
         );
+    }
+
+    fn opencode_tool_message(
+        mid: &str,
+        ordinal: u64,
+        call_id: &str,
+        input: serde_json::Value,
+    ) -> CkIngressMessage {
+        let native_message = json!({
+            "absolute_ordinal": ordinal,
+            "info": { "id": mid, "role": "assistant" },
+            "parts": [{
+                "type": "tool",
+                "tool": "write",
+                "callID": call_id,
+                "state": {
+                    "status": "completed",
+                    "input": input,
+                    "output": format!("output of {call_id}")
+                }
+            }]
+        });
+        crate::codec::decode_opencode(&[native_message])
+            .messages
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    fn opencode_user_message(mid: &str, ordinal: u64, text: &str) -> CkIngressMessage {
+        let native_message = json!({
+            "absolute_ordinal": ordinal,
+            "info": { "id": mid, "role": "user" },
+            "parts": [{ "type": "text", "text": text }]
+        });
+        crate::codec::decode_opencode(&[native_message])
+            .messages
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    fn served_call_input(response: &TransformResponse, call_id: &str) -> Option<serde_json::Value> {
+        response
+            .messages()
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .find_map(|block| match &block.kind {
+                ck_wire::CkKind::ToolCall { id, input, .. } if id == call_id => Some(input.clone()),
+                _ => None,
+            })
+    }
+
+    fn served_has_result(response: &TransformResponse, call_id: &str) -> bool {
+        response
+            .messages()
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .any(|block| matches!(&block.kind, ck_wire::CkKind::ToolResult { id, .. } if id == call_id))
+    }
+
+    #[test]
+    fn legacy_marker_skeletons_replay_on_defer_and_convert_only_on_hard() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let large = json!({ "filePath": "/tmp/a.txt", "content": "L".repeat(2000) });
+        let request = active_opencode_req(
+            "legacy-skeleton-convert",
+            "rust-mode/tf1/gfull",
+            vec![
+                opencode_user_message("start-user", 1, "start"),
+                opencode_tool_message(
+                    "small-pair",
+                    2,
+                    "small-call",
+                    json!({ "command": "ls -la" }),
+                ),
+                opencode_tool_message("large-pair", 3, "large-call", large),
+                opencode_user_message("next-user", 4, "next prompt"),
+            ],
+        );
+        s.replace_compartments(
+            &request.session_id,
+            &[comp(1, 1, 1, "start-user", "SUMMARY")],
+        )
+        .unwrap();
+        // Reach the steady state (bootstrap and first-render passes) before seeding.
+        for _ in 0..3 {
+            if run(&s, &request, &spine()).action != "HARD" {
+                break;
+            }
+        }
+
+        // Model a session that already serves two legacy marker skeletons.
+        let mut loaded = s.load(&request.session_id).unwrap();
+        loaded.core.frozen_units.extend([
+            red_unit("small-pair#0", "skeleton", "[dropped]"),
+            red_unit("small-pair#1", "drop", "[dropped]"),
+            red_unit("large-pair#0", "skeleton", "[dropped]"),
+            red_unit("large-pair#1", "drop", "[dropped]"),
+            // A session serving these skeletons has already consumed every renderer
+            // transition, so their presence alone does not price a HARD.
+            transition_consumed_unit(
+                &[
+                    RendererTransitionClass::PoisonedReasoning,
+                    RendererTransitionClass::UnmatchedPair,
+                    RendererTransitionClass::SplitCoverage,
+                    RendererTransitionClass::SyntheticAnchorSplit,
+                    RendererTransitionClass::ReductionEnvelope,
+                    RendererTransitionClass::TemporalParity,
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        ]);
+        s.commit(
+            &request.session_id,
+            loaded.row_version,
+            &loaded.core,
+            &loaded.meta,
+        )
+        .unwrap();
+
+        // Defer passes replay the marker byte-identically and never convert it.
+        let marker_keys = |input: Option<serde_json::Value>| {
+            input
+                .and_then(|input| {
+                    input
+                        .as_object()
+                        .map(|map| map.keys().cloned().collect::<Vec<_>>())
+                })
+                .unwrap_or_default()
+        };
+        let defer_a = run(&s, &request, &spine());
+        let defer_b = run(&s, &request, &spine());
+        assert_ne!(defer_a.action, "HARD");
+        assert_ne!(defer_b.action, "HARD");
+        assert_eq!(
+            marker_keys(served_call_input(&defer_a, "small-call")),
+            vec!["dropped"]
+        );
+        assert_eq!(
+            marker_keys(served_call_input(&defer_a, "large-call")),
+            vec!["dropped"]
+        );
+        assert_eq!(
+            serde_json::to_vec(defer_a.messages()).unwrap(),
+            serde_json::to_vec(defer_b.messages()).unwrap()
+        );
+
+        // A HARD fold converts them: small keeps its real arguments, large is removed.
+        let mut loaded = s.load(&request.session_id).unwrap();
+        loaded.meta.last_render_config = "stale-render-identity".to_string();
+        s.commit(
+            &request.session_id,
+            loaded.row_version,
+            &loaded.core,
+            &loaded.meta,
+        )
+        .unwrap();
+        let hard = run(&s, &request, &spine());
+        assert_eq!(hard.action, "HARD");
+        assert_eq!(
+            served_call_input(&hard, "small-call"),
+            Some(json!({ "command": "ls -la" }))
+        );
+        assert!(served_has_result(&hard, "small-call"));
+        assert_eq!(served_call_input(&hard, "large-call"), None);
+        assert!(!served_has_result(&hard, "large-call"));
+        let kinds = s
+            .load(&request.session_id)
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .filter_map(|unit| {
+                unit.key
+                    .strip_prefix(RED_KEY_PREFIX)
+                    .map(|target| (target.to_string(), unit.kind.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            kinds.get("small-pair#0").map(String::as_str),
+            Some("skeleton_real")
+        );
+        assert_eq!(kinds.get("large-pair#0").map(String::as_str), Some("drop"));
+
+        // The following defer pass replays the converted bytes identically.
+        let after = run(&s, &request, &spine());
+        assert_ne!(after.action, "HARD");
+        assert_eq!(
+            serde_json::to_vec(hard.messages()).unwrap(),
+            serde_json::to_vec(after.messages()).unwrap()
+        );
+    }
+
+    #[test]
+    fn real_or_absent_drops_keep_the_shared_prefix_on_the_next_defer() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let base = vec![
+            opencode_user_message("start-user", 1, "start"),
+            opencode_tool_message(
+                "small-pair",
+                2,
+                "small-call",
+                json!({ "command": "ls -la" }),
+            ),
+            opencode_tool_message(
+                "mid-pair",
+                3,
+                "mid-call",
+                json!({ "content": "m".repeat(2000) }),
+            ),
+            opencode_tool_message(
+                "end-pair",
+                4,
+                "end-call",
+                json!({ "content": "e".repeat(3000) }),
+            ),
+        ];
+        // The shapes selection freezes under the real-or-absent rule: small in the
+        // window keeps real arguments, a large input is removed, and the large call
+        // whose result ends the request keeps real arguments.
+        let decisions = with_reductions(vec![
+            reduce("small-pair#0", "skeleton_real", "[dropped]"),
+            reduce("small-pair#1", "drop", "[dropped]"),
+            reduce("mid-pair#0", "drop", "[dropped]"),
+            reduce("mid-pair#1", "drop", "[dropped]"),
+            reduce("end-pair#0", "skeleton_real", "[dropped]"),
+            reduce("end-pair#1", "drop", "[dropped]"),
+        ]);
+        s.replace_compartments(
+            "real-or-absent-prefix",
+            &[comp(1, 1, 1, "start-user", "SUMMARY")],
+        )
+        .unwrap();
+        run(
+            &s,
+            &active_opencode_req("real-or-absent-prefix", "rust-mode/tf1/gfull", base.clone()),
+            &spine(),
+        );
+        let priced = run(
+            &s,
+            &active_opencode_req("real-or-absent-prefix", "rust-mode/tf1/gfull", base.clone()),
+            &decisions,
+        );
+        assert_eq!(
+            served_call_input(&priced, "small-call"),
+            Some(json!({ "command": "ls -la" }))
+        );
+        assert_eq!(served_call_input(&priced, "mid-call"), None);
+        assert_eq!(
+            served_call_input(&priced, "end-call"),
+            Some(json!({ "content": "e".repeat(3000) }))
+        );
+        let served = serde_json::to_string(priced.messages()).unwrap();
+        assert!(
+            !served.contains("\"dropped\":"),
+            "no marker in any argument position"
+        );
+
+        let mut newer = base;
+        newer.push(opencode_user_message("newer-user", 5, "a newer message"));
+        let deferred = run(
+            &s,
+            &active_opencode_req("real-or-absent-prefix", "rust-mode/tf1/gfull", newer),
+            &decisions,
+        );
+        assert_ne!(deferred.action, "HARD");
+        let prefix = |response: &TransformResponse, count: usize| {
+            let bytes = serde_json::to_vec(&response.messages()[..count]).unwrap();
+            format!("{:x}", Sha256::digest(bytes))
+        };
+        let shared = priced.messages().len();
+        assert_eq!(deferred.messages().len(), shared + 1);
+        assert_eq!(prefix(&deferred, shared), prefix(&priced, shared));
     }
 
     #[test]
@@ -37396,7 +37739,7 @@ pub(crate) mod tests {
             .iter()
             .find(|decision| decision.target_id.starts_with("reasoning-adjacency-left#"))
             .expect("the old tool arc must be selected");
-        assert_eq!(call.kind, "skeleton", "{decisions:?}");
+        assert_eq!(call.kind, "skeleton_real", "{decisions:?}");
 
         let result = served
             .iter()
@@ -38366,8 +38709,13 @@ pub(crate) mod tests {
             .find(|message| message["info"]["id"] == "pair-message")
             .expect("salted pair remains in native output");
         assert_eq!(salted_pair["parts"].as_array().unwrap().len(), 1);
+        // The salted pass is a HARD fold, which converts the legacy marker skeleton to
+        // the real-or-absent rule: the small call keeps its real input. Everything else
+        // about the pair, including its native tool identity, is unchanged.
+        let mut expected_pair = old_pair.clone();
+        expected_pair["parts"][0]["state"]["input"] = json!({ "path": "pair.txt" });
         assert_eq!(
-            salted_pair, old_pair,
+            salted_pair, &expected_pair,
             "the transition may persist compatibility state, but native tool identity is already valid"
         );
 
