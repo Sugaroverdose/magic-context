@@ -15343,16 +15343,24 @@ fn attach_native_messages_incremental(
     let mut message_keys = Vec::with_capacity(response.messages().len());
     for (position, served) in response.messages().iter().enumerate() {
         let meta = codec::sidecar::meta_for_ck(&sidecar, served, position);
+        // Resolve the slot from sidecar order alone, never from whether its raw tree is loaded.
+        // A degraded snapshot drops raw trees but keeps order, so a message whose slot depended
+        // on tree presence got a different key on the pass after every degraded store. That
+        // happens to OpenCode messages whose parts are all synthetic (injected reminders): they
+        // decode as synthetic yet keep their harness id. The changed key forced a re-encode of
+        // everything served after the first such message, then a second one once the tree was
+        // restored. With the full sidecar loaded this resolves to the same slot `meta_for_ck`
+        // finds, so keys of unchanged messages keep their value.
         let slot = meta.map(|meta| meta.mid.as_str()).or_else(|| {
+            let by_harness_id = served
+                .meta
+                .harness_id
+                .as_deref()
+                .filter(|mid| sidecar_positions.contains_key(*mid));
             if served.meta.synthetic {
-                None
+                by_harness_id
             } else {
-                served
-                    .meta
-                    .harness_id
-                    .as_deref()
-                    .filter(|mid| sidecar_positions.contains_key(*mid))
-                    .or_else(|| sidecar.order.get(position).map(String::as_str))
+                by_harness_id.or_else(|| sidecar.order.get(position).map(String::as_str))
             }
         });
         let sidecar_hash = slot.and_then(|slot| {
@@ -23894,6 +23902,143 @@ mod tests {
             String::from_utf8_lossy(&served_bytes_a),
             String::from_utf8_lossy(&prefix_bytes_b),
         );
+    }
+
+    /// A degraded store (raw sidecar trees dropped to fit the memory budget) must not change the
+    /// cache key of any already-served message. OpenCode stores injected reminders as user
+    /// messages whose parts are all synthetic; they decode as synthetic yet keep their harness
+    /// id. Their slot used to resolve only while the raw tree was loaded, so the pass after every
+    /// degraded store re-encoded everything from the first such message onward, and the pass
+    /// after that did it again once the tree had been restored. On large sessions that is a
+    /// periodic re-encode of hundreds of served messages starting at a fixed index.
+    #[test]
+    fn degraded_store_keeps_cache_keys_of_synthetic_ingress_messages() {
+        const SESSION_ID: &str = "native-degraded-synthetic-slot";
+        const PLAIN_PREFIX: usize = 8;
+        let mut native = (0..PLAIN_PREFIX)
+            .map(|index| {
+                let role = if index % 2 == 0 { "user" } else { "assistant" };
+                native_text_message(&format!("syn-slot-{index}"), role, &format!("turn {index}"))
+            })
+            .collect::<Vec<_>>();
+        native.push(json!({
+            "info": { "id": "syn-slot-reminder", "role": "user" },
+            "parts": [{ "type": "text", "text": "injected reminder", "synthetic": true }],
+        }));
+        native.push(native_text_message(
+            "syn-slot-after-u",
+            "user",
+            "after reminder",
+        ));
+        native.push(native_text_message(
+            "syn-slot-after-a",
+            "assistant",
+            "reply",
+        ));
+
+        let cache = Mutex::new(NativeAttachmentCache::new(usize::MAX / 4));
+        let mut previous: Option<(String, Vec<Value>)> = None;
+        // Pass 0 is a full serve, passes 1-4 are append-only (SOFT+) passes, pass 5 stores a
+        // degraded snapshot, and passes 6-7 are the two passes that used to re-encode the
+        // served prefix from the synthetic message onward.
+        const DEGRADED_PASS: usize = 5;
+        for pass in 0..8 {
+            if pass > 0 {
+                native.push(native_text_message(
+                    &format!("syn-slot-tail-{pass}"),
+                    "user",
+                    &format!("tail {pass}"),
+                ));
+            }
+            let decoded = codec::decode_opencode(&native).messages;
+            assert!(
+                decoded
+                    .iter()
+                    .any(|message| message.mid == "syn-slot-reminder" && message.ck.meta.synthetic),
+                "the fixture must carry a synthetic ingress message with a harness id"
+            );
+            let served = decoded
+                .iter()
+                .map(|message| message.ck.clone())
+                .collect::<Vec<_>>();
+            let fingerprint = format!("syn-slot-fp-{pass}");
+            let mut request =
+                native_cache_request(SESSION_ID, decoded, native.clone(), &fingerprint);
+            let frontier = previous.as_ref().map(|(after, _)| {
+                let replace_from = native.len() - 1;
+                request.tail_delta = Some(json!({
+                    "after": after,
+                    "replace_from": replace_from,
+                    "native_replace_from": replace_from,
+                }));
+                let (native_prefix, native_prefix_retained_bytes) = cache
+                    .lock()
+                    .unwrap()
+                    .delta_native_prefix(SESSION_ID, 0, after, replace_from)
+                    .expect("the cached ingress core must cover the tail delta");
+                NativeDeltaFrontier {
+                    after: after.clone(),
+                    native_replace_from: replace_from,
+                    native_prefix,
+                    native_prefix_retained_bytes,
+                    projection_cache: None,
+                }
+            });
+            // Only the degraded pass stores under a budget too small for the raw trees.
+            cache.lock().unwrap().max_entry_retained_bytes = if pass == DEGRADED_PASS {
+                1
+            } else {
+                usize::MAX / 4
+            };
+            let mut response = transform::TransformResponse::passthrough(
+                served,
+                request.full_array_fingerprint.clone(),
+            );
+            let stats = attach_native_messages_incremental(
+                &mut response,
+                &request,
+                &[],
+                &BTreeMap::new(),
+                None,
+                None,
+                false,
+                frontier.as_ref(),
+                0,
+                &cache,
+                NativeCacheKeyMode::Normal,
+            );
+            let served_native = response
+                .native_messages
+                .as_ref()
+                .expect("native serve")
+                .iter()
+                .map(|message| message.as_ref().clone())
+                .collect::<Vec<_>>();
+            if pass == DEGRADED_PASS {
+                assert_eq!(stats.degraded_store, 1, "{stats:?}");
+                assert!(cache.lock().unwrap().sessions[SESSION_ID]
+                    .snapshot
+                    .sidecar
+                    .messages
+                    .is_empty());
+            }
+            if pass > 0 {
+                // An append re-encodes the new message and the last previously served one; any
+                // more means an already-served message changed its cache key.
+                assert!(
+                    stats.encoded_messages <= 2,
+                    "pass {pass} re-encoded already-served messages: {stats:?}"
+                );
+                assert_eq!(stats.reencode_drift, 0, "pass {pass}: {stats:?}");
+                let (_, previous_native) = previous.as_ref().unwrap();
+                assert_eq!(
+                    &served_native[..previous_native.len()],
+                    previous_native.as_slice(),
+                    "pass {pass} changed already-served native bytes"
+                );
+            }
+            previous = Some((fingerprint, served_native));
+        }
     }
 
     #[test]
