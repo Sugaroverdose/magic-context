@@ -14,8 +14,6 @@ export interface OpenCodeCompactionMarkerConversionReport {
     postConversionMessages: number;
     /** Sessions holding at least one of those rows. */
     postConversionSessions: number;
-    /** Reconversion is offered only when it cannot delete anything OpenCode 2 added. */
-    recoveryRequired: boolean;
 }
 
 function safeData(column = "data"): string {
@@ -171,11 +169,6 @@ export function checkOpenCodeCompactionMarkerConversion(
         unmatchedConvertedMarkers,
         postConversionMessages: postConversion.messages,
         postConversionSessions: postConversion.sessions,
-        recoveryRequired:
-            migrationCompleted &&
-            migratedV2Schema &&
-            unmatchedConvertedMarkers > 0 &&
-            postConversion.messages === 0,
     };
 }
 
@@ -186,34 +179,38 @@ export function formatOpenCodeCompactionMarkerConversion(
 }
 
 /**
- * Shown instead of the reconversion recipe when reconverting would delete messages
- * OpenCode 2 wrote after its conversion. Returns null when that is not the case.
+ * Explain Magic Context markers that OpenCode 2's conversion did not carry over.
+ *
+ * This is informational. Magic Context on OpenCode 2 never relies on a host
+ * compaction row: it writes none for sessions started there (the v2 marker strategy
+ * is inert), keeps its own boundary in session_meta, and re-derives compartment
+ * positions from the messages that survived, filling an anchor the conversion removed
+ * from the neighbouring compartment. A converted session without the marker is in
+ * the same state as a session started on OpenCode 2.
+ *
+ * It never suggests clearing kv.migration.v1-v2. A reconversion rebuilds every
+ * OpenCode 1 session from its v1 rows, deletes whatever OpenCode 2 added to it, and
+ * also empties OpenCode 2's event table. Returns null when no marker is missing.
  */
-export function formatOpenCodeV2ReconversionRefusal(
+export function formatOpenCodeV2MissingMarkerNotice(
     report: OpenCodeCompactionMarkerConversionReport,
 ): string[] | null {
     if (
         !report.migrationCompleted ||
         !report.migratedV2Schema ||
-        report.unmatchedConvertedMarkers === 0 ||
-        report.postConversionMessages === 0
+        report.unmatchedConvertedMarkers === 0
     ) {
         return null;
     }
-    return [
-        "OpenCode 2 already completed its v1→v2 conversion, and one or more Magic Context markers are absent from session_message.",
-        `Do not clear kv.migration.v1-v2 to reconvert: OpenCode 2 would rebuild every converted session from its OpenCode 1 rows and delete the ${report.postConversionMessages} message(s) it added after the conversion, in ${report.postConversionSessions} session(s).`,
-        "If you already did that, restore opencode.db (with its -wal and -shm files) from a backup taken before the reconversion.",
+    const lines = [
+        `OpenCode 2's conversion did not carry over ${report.unmatchedConvertedMarkers} Magic Context compaction marker(s). No action is needed.`,
+        "Magic Context on OpenCode 2 does not use host compaction rows: it keeps its own boundary and re-derives compartment positions from the messages that survived. OpenCode reads these sessions' full history on each turn, as it does for any Magic Context session started on OpenCode 2.",
     ];
-}
-
-export function formatOpenCodeV2ReconversionRecipe(databasePath: string): string[] {
-    return [
-        "OpenCode 2 already completed its v1→v2 conversion, but one or more Magic Context markers are absent from session_message.",
-        "Recovery (with every OpenCode host stopped): clear only the kv.migration.v1-v2 marker, then restart the host once so it reconverts the v1 rows. Do not edit session_v2 or session_message by hand.",
-        `Database: ${databasePath}`,
-        "In sqlite3, run: DELETE FROM kv WHERE key = 'migration.v1-v2';",
-        "Large-store conversion can take several minutes. `opencode service start` may kill the server as unresponsive while it runs; start `opencode serve --port N` by hand instead.",
-        'Wait until `SELECT value FROM kv WHERE key = \'migration.v1-v2\';` reads `{"phase":"completed"}` before stopping that manual server',
-    ];
+    lines.push(
+        report.postConversionMessages > 0
+            ? `Do not clear kv.migration.v1-v2 to reconvert: OpenCode 2 would rebuild every converted session from its OpenCode 1 rows and delete the ${report.postConversionMessages} message(s) it added after the conversion, in ${report.postConversionSessions} session(s).`
+            : "Do not clear kv.migration.v1-v2 to reconvert: OpenCode 2 would rebuild every converted session from its OpenCode 1 rows, deleting anything added on OpenCode 2 since.",
+        "If you already reconverted, restore opencode.db (with its -wal and -shm files) from a backup taken before the reconversion.",
+    );
+    return lines;
 }

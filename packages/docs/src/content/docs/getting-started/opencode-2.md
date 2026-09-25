@@ -67,6 +67,8 @@ OpenCode 2 drops an OpenCode 1 compaction record whose summary has no completion
 
 ### If OpenCode 2 already converted the store
 
+If `doctor` reports that some Magic Context markers did not carry over, no action is needed. Magic Context on OpenCode 2 does not use OpenCode's compaction records: it keeps its own boundary and re-derives compartment positions from the messages that survived. A converted session without the marker is in the same state as a session started on OpenCode 2.
+
 Do not clear `kv.migration.v1-v2` to make OpenCode 2 convert again. An earlier version of this page recommended that, and it was wrong. The conversion rebuilds each OpenCode 1 session from its OpenCode 1 rows and deletes that session's OpenCode 2 messages first, so every message added on OpenCode 2 after the first conversion is lost.
 
 If you already did it, restore `opencode.db` (with its `-wal` and `-shm` files) from a backup taken before the reconversion.

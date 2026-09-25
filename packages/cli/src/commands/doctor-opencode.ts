@@ -115,8 +115,7 @@ import {
 import {
     checkOpenCodeCompactionMarkerConversion,
     formatOpenCodeCompactionMarkerConversion,
-    formatOpenCodeV2ReconversionRecipe,
-    formatOpenCodeV2ReconversionRefusal,
+    formatOpenCodeV2MissingMarkerNotice,
 } from "./doctor-compaction-markers";
 import {
     formatDanglingCompartmentBoundary,
@@ -1053,21 +1052,19 @@ export async function runDoctor(
                 fixed += report.repaired;
             } else if (options.fix) {
                 warn(`${summary}; repaired=${report.repaired}, but some rows remain unconvertible`);
+            } else if (report.migrationCompleted) {
+                // The backfill only matters for a conversion that has not run yet; this
+                // store's conversion is finished and will not run again on its own.
+                log.info(`${summary}; OpenCode 2 already converted this store`);
             } else {
                 warn(`${summary}; run \`magic-context doctor --fix\` before upgrading OpenCode`);
             }
 
-            const refusal = formatOpenCodeV2ReconversionRefusal(report);
-            if (refusal) {
-                const [heading, ...details] = refusal;
-                warn(heading ?? "OpenCode 2 conversion markers are missing");
-                for (const detail of details) log.warn(`  ${detail}`);
-            } else if (report.recoveryRequired) {
-                const [heading, ...details] = formatOpenCodeV2ReconversionRecipe(
-                    openCodeDbResolution.path,
-                );
-                warn(heading ?? "OpenCode 2 conversion recovery is required");
-                for (const detail of details) log.warn(`  ${detail}`);
+            const notice = formatOpenCodeV2MissingMarkerNotice(report);
+            if (notice) {
+                for (const [index, line] of notice.entries()) {
+                    log.info(index === 0 ? line : `  ${line}`);
+                }
             }
         } catch (error) {
             warn(

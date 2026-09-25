@@ -3,8 +3,7 @@ import { Database } from "@magic-context/core/shared/sqlite";
 import {
     checkOpenCodeCompactionMarkerConversion,
     formatOpenCodeCompactionMarkerConversion,
-    formatOpenCodeV2ReconversionRecipe,
-    formatOpenCodeV2ReconversionRefusal,
+    formatOpenCodeV2MissingMarkerNotice,
 } from "./doctor-compaction-markers";
 
 function convertedStoreFixture(): Database {
@@ -88,7 +87,6 @@ describe("doctor OpenCode compaction-marker conversion check", () => {
                 unmatchedConvertedMarkers: 1,
                 postConversionMessages: 0,
                 postConversionSessions: 0,
-                recoveryRequired: true,
             });
             expect(formatOpenCodeCompactionMarkerConversion(before)).toContain(
                 "before=1 missing time.completed; after=1",
@@ -112,7 +110,6 @@ describe("doctor OpenCode compaction-marker conversion check", () => {
             ).run();
             const converted = checkOpenCodeCompactionMarkerConversion(db);
             expect(converted.unmatchedConvertedMarkers).toBe(0);
-            expect(converted.recoveryRequired).toBe(false);
         } finally {
             db.close();
         }
@@ -139,26 +136,38 @@ describe("doctor OpenCode compaction-marker conversion check", () => {
             expect(report.unmatchedConvertedMarkers).toBe(1);
             expect(report.postConversionMessages).toBe(2);
             expect(report.postConversionSessions).toBe(1);
-            expect(report.recoveryRequired).toBe(false);
 
-            const refusal = formatOpenCodeV2ReconversionRefusal(report)?.join("\n") ?? "";
-            expect(refusal).toContain("Do not clear kv.migration.v1-v2");
-            expect(refusal).toContain("delete the 2 message(s)");
-            expect(refusal).not.toContain("DELETE FROM kv");
+            const notice = formatOpenCodeV2MissingMarkerNotice(report)?.join("\n") ?? "";
+            expect(notice).toContain("No action is needed");
+            expect(notice).toContain("Do not clear kv.migration.v1-v2");
+            expect(notice).toContain("delete the 2 message(s)");
+            expect(notice).not.toContain("DELETE FROM kv");
         } finally {
             db.close();
         }
     });
 
-    it("documents manual reconversion without proposing v2 table edits", () => {
-        const recipe = formatOpenCodeV2ReconversionRecipe("/tmp/opencode-channel.db").join("\n");
-        expect(recipe).toContain("every OpenCode host stopped");
-        expect(recipe).toContain("clear only the kv.migration.v1-v2 marker");
-        expect(recipe).toContain("DELETE FROM kv WHERE key = 'migration.v1-v2'");
-        expect(recipe).toContain("opencode serve --port N");
-        expect(recipe).toContain('{"phase":"completed"}');
-        // User-facing copy must not cite internal session notes.
-        expect(recipe).not.toMatch(/note #\d+/);
-        expect(recipe).not.toContain("INSERT INTO session_message");
+    it("reports a missing converted marker as informational and never prints a reconversion command", () => {
+        const db = convertedStoreFixture();
+        try {
+            const report = checkOpenCodeCompactionMarkerConversion(db);
+            expect(report.postConversionMessages).toBe(0);
+            const notice = formatOpenCodeV2MissingMarkerNotice(report)?.join("\n") ?? "";
+            expect(notice).toContain("did not carry over 1 Magic Context compaction marker(s)");
+            expect(notice).toContain("No action is needed");
+            expect(notice).toContain("Do not clear kv.migration.v1-v2");
+            expect(notice).not.toContain("DELETE FROM kv");
+            expect(notice).not.toContain("opencode serve");
+            expect(notice).not.toContain("INSERT INTO session_message");
+
+            db.prepare(
+                "INSERT INTO session_message (id, session_id, type, seq, data) VALUES ('mc-boundary', 'ses-1', 'compaction', 0, '{}')",
+            ).run();
+            expect(
+                formatOpenCodeV2MissingMarkerNotice(checkOpenCodeCompactionMarkerConversion(db)),
+            ).toBeNull();
+        } finally {
+            db.close();
+        }
     });
 });
