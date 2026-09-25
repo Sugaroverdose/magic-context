@@ -573,7 +573,11 @@ describe.skipIf(!prereqs.ok)(
 			// the pass, which is a newer one when a fold lands on that very pass.
 			const startedFrom =
 				restoresAfterFirst[0]?.split(" ")[0] ?? firstAfter[0]?.markerAt ?? "none";
-			expect(recordedBeforeRestart.has(startedFrom)).toBe(true);
+			// Coverage lines name a module boundary by its fold's end message and the
+			// record lines by the boundary message itself, so either spelling counts.
+			expect(
+				new Set([...beforeBoundaries, ...recordedBeforeRestart]).has(startedFrom),
+			).toBe(true);
 			expect(firstAfter[0]?.ocInput ?? Number.POSITIVE_INFINITY).toBeLessThan(
 				conversationalRows,
 			);
