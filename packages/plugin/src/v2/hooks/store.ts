@@ -187,6 +187,38 @@ export function readAllV2RawMessagesForConversion(
     }
 }
 
+/** Rows per page read by `readV2RawMessagePagesForConversion`. */
+const CONVERSION_PAGE_ROWS = 1000;
+
+/**
+ * `readAllV2RawMessagesForConversion`, a page at a time: the same messages with
+ * the same ordinals, but only one page of store rows is decoded and held at
+ * once. Ordinals count conversational rows across the whole session, so each
+ * page continues the count where the previous one stopped. The reader is
+ * closed when iteration ends, including when the consumer stops early.
+ */
+export function* readV2RawMessagePagesForConversion(
+    openReader: () => V2StoreReader,
+    sessionID: string,
+    pageRows = CONVERSION_PAGE_ROWS,
+): Generator<RawMessage[], void, void> {
+    const reader = openReader();
+    try {
+        let after = -1;
+        let ordinal = 0;
+        for (;;) {
+            const page = reader.page(sessionID, { after, limit: pageRows });
+            const messages = rawMessagePage(page.rows, ordinal);
+            ordinal += messages.length;
+            if (messages.length > 0) yield messages;
+            if (page.rows.length < pageRows || page.cursor === undefined) return;
+            after = page.cursor;
+        }
+    } finally {
+        reader.close();
+    }
+}
+
 /** Build the SQL-bounded reader used by context, indexing, and historian passes. */
 export function createV2RawMessageReader(openReader: () => V2StoreReader): V2RawMessageReader {
     const servedBoundaryCache = new Map<string, string | null>();

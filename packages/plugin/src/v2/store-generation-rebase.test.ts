@@ -791,7 +791,11 @@ test("a crash after the commit but before the reindex leaves an index later pass
     const projection = v2Projection(syntheticSplit);
     // Repopulating the index happens after the commit on purpose: it is catch-up
     // from the authoritative source, not part of the atomic state change. The
-    // second read stands in for a process that died right after committing.
+    // rebase reads the history once and writes the index from that read, so the
+    // process dying right after committing is stood in for by the first index
+    // write failing.
+    db.exec(`CREATE TEMP TRIGGER fail_reindex BEFORE INSERT ON message_history_source
+             BEGIN SELECT RAISE(ABORT, 'host store went away after the commit'); END`);
     let reads = 0;
     expect(() =>
         rebaseSessionCoordinates({
@@ -800,11 +804,12 @@ test("a crash after the commit but before the reindex leaves an index later pass
             generation: "v2",
             readMessages: () => {
                 reads += 1;
-                if (reads === 1) return projection;
-                throw new Error("host store went away after the commit");
+                return projection;
             },
         }),
     ).toThrow("host store went away after the commit");
+    db.exec("DROP TRIGGER fail_reindex");
+    expect(reads).toBe(1);
 
     // The rebase itself is durable, and the index is empty with a zero watermark
     // rather than holding documents filed under the old projection.

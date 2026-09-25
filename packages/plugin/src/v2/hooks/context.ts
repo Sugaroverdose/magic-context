@@ -24,7 +24,7 @@ import {
     recordOverflowDetected,
 } from "../../features/magic-context/storage";
 import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
-import { rebaseSessionCoordinates } from "../../features/magic-context/store-generation-rebase";
+import { rebaseSessionCoordinatesAsync } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
 import {
     getCurrentToolSetHash,
@@ -101,6 +101,7 @@ import {
     createV2RawMessageProvider,
     createV2RawMessageReader,
     readAllV2RawMessagesForConversion,
+    readV2RawMessagePagesForConversion,
     resolveV2BoundaryUserMessage,
     servedBoundaryRow,
 } from "./store";
@@ -851,12 +852,18 @@ export async function registerContext(context: V2Context) {
             // hash instead of comparing against the previous host and arming a
             // redundant follow-up fold. The shared transform sees the new stamp
             // later in this pass and treats its own rebase call as a no-op.
+            // The first request of a long session last served by OpenCode 1 does
+            // real work here; the async form lets the host keep serving (Stop,
+            // health checks) meanwhile, and this pass still waits for the
+            // commit before it builds anything.
             try {
-                rebaseSessionCoordinates({
+                await rebaseSessionCoordinatesAsync({
                     db,
                     sessionId: draft.sessionID,
                     generation: "v2",
                     readMessages: readAllForConversion,
+                    readMessagePages: (sessionID) =>
+                        readV2RawMessagePagesForConversion(openStoreReader, sessionID),
                 });
             } catch (error) {
                 sessionLog(
