@@ -17,6 +17,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pinMockAgents } from "../mock-routing";
 import { prepareContextDatabase } from "../prepare-context-db";
+import { pinnedOpenCode2Version, resolveOpenCode2CLI, sharedOpenCode2Root } from "./cli-resolution";
 import { isolateStoreDirectories } from "./store-directories";
 import { assertWriteFenceUnchanged, snapshotWriteFence } from "./write-fence";
 import { MockProvider, type MockResponse } from "../mock-provider/server";
@@ -41,25 +42,32 @@ export const ROOT_KEYS = [
 // container installs with --linker=hoisted) puts it under the workspace root. Take
 // whichever exists so the lane does not depend on the linker choice.
 //
+// Before node_modules, local runs prefer the shared per-version install created by
+// scripts/ensure-shared-opencode2.ts (see cli-resolution.ts for why). It is used only
+// when its manifest reports exactly the pinned version; CI never creates it, so CI
+// and the Docker lane keep resolving from node_modules.
+//
 // MC_E2E_OPENCODE2_CLI points the lane at a different GA build than the pinned
 // devDependency. Host-behavior findings are version-specific — a defect that the
 // pinned build tolerates can be fatal two patch releases later — so the lane has to
 // be runnable against an arbitrary installed binary without touching node_modules.
 function resolveCLI(): string {
-	const override = process.env.MC_E2E_OPENCODE2_CLI;
-	if (override) {
-		if (!existsSync(override)) {
-			throw new Error(`MC_E2E_OPENCODE2_CLI does not exist: ${override}`);
-		}
-		return resolve(override);
+	let pinnedVersion: string | null = null;
+	try {
+		pinnedVersion = pinnedOpenCode2Version();
+	} catch {
+		// Without a readable exact pin there is no version to match a shared install
+		// against, so resolution falls through to node_modules as it always did.
 	}
-	return (
-		[
+	return resolveOpenCode2CLI({
+		override: process.env.MC_E2E_OPENCODE2_CLI,
+		pinnedVersion,
+		sharedRoot: sharedOpenCode2Root(),
+		nodeModulesCandidates: [
 			resolve(import.meta.dir, "../../../plugin/node_modules/.bin/opencode2"),
 			resolve(import.meta.dir, "../../../../node_modules/.bin/opencode2"),
-		].find((candidate) => existsSync(candidate)) ??
-		resolve(import.meta.dir, "../../../plugin/node_modules/.bin/opencode2")
-	);
+		],
+	});
 }
 export const CLI = resolveCLI();
 export const PLUGIN = resolve(import.meta.dir, "../../../plugin");
