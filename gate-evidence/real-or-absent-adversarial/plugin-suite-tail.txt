@@ -1,0 +1,8 @@
+(skip) scoped gate pre-fix reader tolerates reserved ledger entry
+
+ 5609 pass
+ 2 skip
+ 0 fail
+ 176269 expect() calls
+Ran 5611 tests across 516 files. [149.58s]
+EXIT 0

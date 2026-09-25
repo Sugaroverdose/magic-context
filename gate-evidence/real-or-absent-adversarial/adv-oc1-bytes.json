@@ -1,0 +1,124 @@
+{
+  "requestCount": 28,
+  "aIndex": 22,
+  "aMessageCount": 37,
+  "aSha": "5dafca7834b450774d3c700ea5ceca55224043caa09b19fd2217a3bcbf3588b9",
+  "modes": {
+    "toolu_small": {
+      "tag": 2,
+      "status": "dropped",
+      "mode": "skeleton_real"
+    },
+    "toolu_a1024": {
+      "tag": 3,
+      "status": "dropped",
+      "mode": "skeleton_real"
+    },
+    "toolu_a1025": {
+      "tag": 4,
+      "status": "dropped",
+      "mode": "full"
+    },
+    "toolu_mb1024": {
+      "tag": 5,
+      "status": "dropped",
+      "mode": "skeleton_real"
+    },
+    "toolu_mb1025": {
+      "tag": 6,
+      "status": "dropped",
+      "mode": "full"
+    },
+    "toolu_large": {
+      "tag": 7,
+      "status": "dropped",
+      "mode": "full"
+    },
+    "toolu_end": {
+      "tag": 24,
+      "status": "dropped",
+      "mode": "skeleton_real"
+    }
+  },
+  "servedAtA": {
+    "toolu_small": {
+      "inputIsReal": true,
+      "result": "[dropped §2§]"
+    },
+    "toolu_a1024": {
+      "inputIsReal": true,
+      "result": "[dropped §3§]"
+    },
+    "toolu_a1025": "absent",
+    "toolu_mb1024": {
+      "inputIsReal": true,
+      "result": "[dropped §5§]"
+    },
+    "toolu_mb1025": "absent",
+    "toolu_large": "absent",
+    "toolu_end": {
+      "inputIsReal": true,
+      "result": "[dropped §24§]"
+    }
+  },
+  "servedAtLast": {
+    "toolu_small": {
+      "inputIsReal": true,
+      "result": "[dropped §2§]"
+    },
+    "toolu_a1024": {
+      "inputIsReal": true,
+      "result": "[dropped §3§]"
+    },
+    "toolu_a1025": "absent",
+    "toolu_mb1024": {
+      "inputIsReal": true,
+      "result": "[dropped §5§]"
+    },
+    "toolu_mb1025": "absent",
+    "toolu_large": "absent",
+    "toolu_end": {
+      "inputIsReal": true,
+      "result": "[dropped §24§]"
+    }
+  },
+  "perPass": [
+    {
+      "index": 23,
+      "messageCount": 39,
+      "sharedSha": "5dafca7834b450774d3c700ea5ceca55224043caa09b19fd2217a3bcbf3588b9",
+      "verdict": "STABLE",
+      "divergeSegment": "message[37](assistant)"
+    },
+    {
+      "index": 24,
+      "messageCount": 41,
+      "sharedSha": "5dafca7834b450774d3c700ea5ceca55224043caa09b19fd2217a3bcbf3588b9",
+      "verdict": "STABLE",
+      "divergeSegment": "message[37](assistant)"
+    },
+    {
+      "index": 25,
+      "messageCount": 43,
+      "sharedSha": "5dafca7834b450774d3c700ea5ceca55224043caa09b19fd2217a3bcbf3588b9",
+      "verdict": "STABLE",
+      "divergeSegment": "message[37](assistant)"
+    },
+    {
+      "index": 26,
+      "messageCount": 45,
+      "sharedSha": "5dafca7834b450774d3c700ea5ceca55224043caa09b19fd2217a3bcbf3588b9",
+      "verdict": "STABLE",
+      "divergeSegment": "message[37](assistant)"
+    },
+    {
+      "index": 27,
+      "messageCount": 47,
+      "sharedSha": "5dafca7834b450774d3c700ea5ceca55224043caa09b19fd2217a3bcbf3588b9",
+      "verdict": "STABLE",
+      "divergeSegment": "message[37](assistant)"
+    }
+  ],
+  "violations": [],
+  "oldMarkerAnywhere": false
+}

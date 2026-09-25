@@ -1,0 +1,224 @@
+{
+  "record": [
+    {
+      "index": 0,
+      "messageCount": 1,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "absent",
+        "toolu_a1025": "absent",
+        "toolu_mb1024": "absent",
+        "toolu_large": "absent",
+        "toolu_end": "absent"
+      },
+      "prefixEqualsPrevious": null,
+      "divergence": null
+    },
+    {
+      "index": 1,
+      "messageCount": 1,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "absent",
+        "toolu_a1025": "absent",
+        "toolu_mb1024": "absent",
+        "toolu_large": "absent",
+        "toolu_end": "absent"
+      },
+      "prefixEqualsPrevious": false,
+      "divergence": {
+        "verdict": "BUST",
+        "at": "system[0]"
+      }
+    },
+    {
+      "index": 2,
+      "messageCount": 3,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "real / §2§ small\n",
+        "toolu_a1025": "absent",
+        "toolu_mb1024": "absent",
+        "toolu_large": "absent",
+        "toolu_end": "absent"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[1](assistant)"
+      }
+    },
+    {
+      "index": 3,
+      "messageCount": 5,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "real / §2§ small\n",
+        "toolu_a1025": "real / §3§ aaaaaaaaaaaaaaaaaaaa",
+        "toolu_mb1024": "absent",
+        "toolu_large": "absent",
+        "toolu_end": "absent"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[3](assistant)"
+      }
+    },
+    {
+      "index": 4,
+      "messageCount": 7,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "real / §2§ small\n",
+        "toolu_a1025": "real / §3§ aaaaaaaaaaaaaaaaaaaa",
+        "toolu_mb1024": "real / §4§ éééééééééééééééééééé",
+        "toolu_large": "absent",
+        "toolu_end": "absent"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[5](assistant)"
+      }
+    },
+    {
+      "index": 5,
+      "messageCount": 9,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "real / §2§ small\n",
+        "toolu_a1025": "real / §3§ aaaaaaaaaaaaaaaaaaaa",
+        "toolu_mb1024": "real / §4§ éééééééééééééééééééé",
+        "toolu_large": "real / §5§ (no output)",
+        "toolu_end": "absent"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[7](assistant)"
+      }
+    },
+    {
+      "index": 6,
+      "messageCount": 11,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "real / §2§ small\n",
+        "toolu_a1025": "real / §3§ aaaaaaaaaaaaaaaaaaaa",
+        "toolu_mb1024": "real / §4§ éééééééééééééééééééé",
+        "toolu_large": "real / §5§ (no output)",
+        "toolu_end": "absent"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[9](assistant)"
+      }
+    },
+    {
+      "index": 7,
+      "messageCount": 13,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "real / §2§ small\n",
+        "toolu_a1025": "real / §3§ aaaaaaaaaaaaaaaaaaaa",
+        "toolu_mb1024": "real / §4§ éééééééééééééééééééé",
+        "toolu_large": "real / §5§ (no output)",
+        "toolu_end": "real / §9§ (no output)"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[11](assistant)"
+      }
+    },
+    {
+      "index": 8,
+      "messageCount": 15,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "real / §2§ small\n",
+        "toolu_a1025": "real / §3§ aaaaaaaaaaaaaaaaaaaa",
+        "toolu_mb1024": "real / §4§ éééééééééééééééééééé",
+        "toolu_large": "real / §5§ (no output)",
+        "toolu_end": "real / §9§ (no output)"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[13](assistant)"
+      }
+    },
+    {
+      "index": 9,
+      "messageCount": 17,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "real / §2§ small\n",
+        "toolu_a1025": "real / §3§ aaaaaaaaaaaaaaaaaaaa",
+        "toolu_mb1024": "real / §4§ éééééééééééééééééééé",
+        "toolu_large": "real / §5§ (no output)",
+        "toolu_end": "real / §9§ (no output)"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[15](assistant)"
+      }
+    },
+    {
+      "index": 10,
+      "messageCount": 19,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "real / §2§ small\n",
+        "toolu_a1025": "real / §3§ aaaaaaaaaaaaaaaaaaaa",
+        "toolu_mb1024": "real / §4§ éééééééééééééééééééé",
+        "toolu_large": "real / §5§ (no output)",
+        "toolu_end": "real / §9§ (no output)"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[17](assistant)"
+      }
+    },
+    {
+      "index": 11,
+      "messageCount": 21,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "real / §2§ small\n",
+        "toolu_a1025": "real / §3§ aaaaaaaaaaaaaaaaaaaa",
+        "toolu_mb1024": "real / §4§ éééééééééééééééééééé",
+        "toolu_large": "real / §5§ (no output)",
+        "toolu_end": "real / §9§ (no output)"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[19](assistant)"
+      }
+    },
+    {
+      "index": 12,
+      "messageCount": 23,
+      "lastRole": "user",
+      "shape": {
+        "toolu_small": "real / §2§ small\n",
+        "toolu_a1025": "real / §3§ aaaaaaaaaaaaaaaaaaaa",
+        "toolu_mb1024": "real / §4§ éééééééééééééééééééé",
+        "toolu_large": "real / §5§ (no output)",
+        "toolu_end": "real / §9§ (no output)"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[21](assistant)"
+      }
+    }
+  ],
+  "violations": [],
+  "requestCount": 13
+}

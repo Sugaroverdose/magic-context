@@ -1,0 +1,12 @@
+
+1 tests failed:
+(fail) Pi in-process child guard (#247) > claims process-wide startup maintenance from the full runtime [15154.39ms]
+  ^ this test timed out after 15000ms.
+
+ 1262 pass
+ 3 skip
+ 1 fail
+ 81166 expect() calls
+Ran 1266 tests across 105 files. [49.77s]
+error: script "test" exited with code 1
+EXIT 1

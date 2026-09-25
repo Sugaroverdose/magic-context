@@ -1,0 +1,25 @@
+{
+  "variant": "kill",
+  "childSignal": "SIGKILL",
+  "childStatus": null,
+  "killpoint": "reached conversion after fold commit",
+  "deferModes": {
+    "2": "dropped/truncated",
+    "3": "dropped/truncated"
+  },
+  "deferIdentical": true,
+  "childHardServed": "never-served",
+  "modesAfterRestart": {
+    "2": "dropped/truncated",
+    "3": "dropped/truncated"
+  },
+  "modesAfterNext": {
+    "2": "dropped/truncated",
+    "3": "dropped/truncated"
+  },
+  "next1LegacyMarker": true,
+  "next1EqualsNext2": true,
+  "next1EqualsChildHard": null,
+  "next1EqualsChildDefer": true,
+  "next1Tail": "ince>\"}],\"timestamp\":0},{\"role\":\"user\",\"content\":\"§1§ start\",\"timestamp\":1},{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"call-small\",\"name\":\"bash\",\"arguments\":{\"dropped\":\"[dropped §2§]\"}}],\"api\":\"test-api\",\"provider\":\"test-provider\",\"model\":\"test-model\",\"usage\":{},\"stopReason\":\"stop\",\"timestamp\":2},{\"role\":\"toolResult\",\"toolCallId\":\"call-small\",\"toolName\":\"bash\",\"content\":[{\"type\":\"text\",\"text\":\"[dropped §2§]\"}],\"isError\":false,\"timestamp\":3},{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"call-large\",\"name\":\"write\",\"arguments\":{\"dropped\":\"[dropped §3§]\"}}],\"api\":\"test-api\",\"provider\":\"test-provider\",\"model\":\"test-model\",\"usage\":{},\"stopReason\":\"stop\",\"timestamp\":4},{\"role\":\"toolResult\",\"toolCallId\":\"call-large\",\"toolName\":\"write\",\"content\":[{\"type\":\"text\",\"text\":\"[dropped §3§]\"}],\"isError\":false,\"timestamp\":5},{\"role\":\"user\",\"content\":\"§4§ next prompt\",\"timestamp\":6}]"
+}

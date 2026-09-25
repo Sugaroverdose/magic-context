@@ -1,0 +1,248 @@
+{
+  "record": [
+    {
+      "label": "ts-defer-1",
+      "messageCount": 13,
+      "modes": {
+        "toolu_small": "skeleton_real",
+        "toolu_legacy": "truncated",
+        "toolu_mb1024": "skeleton_real",
+        "toolu_mid": "full",
+        "toolu_end": "skeleton_real"
+      },
+      "shape": {
+        "toolu_small": "real / [dropped §2§]",
+        "toolu_legacy": "MARKER / [dropped §3§]",
+        "toolu_mb1024": "real / [dropped §4§]",
+        "toolu_mid": "absent",
+        "toolu_end": "real / [dropped §9§]"
+      },
+      "prefixEqualsPrevious": null,
+      "divergence": null
+    },
+    {
+      "label": "ts-defer-2",
+      "messageCount": 15,
+      "modes": {
+        "toolu_small": "skeleton_real",
+        "toolu_legacy": "truncated",
+        "toolu_mb1024": "skeleton_real",
+        "toolu_mid": "full",
+        "toolu_end": "skeleton_real"
+      },
+      "shape": {
+        "toolu_small": "real / [dropped §2§]",
+        "toolu_legacy": "MARKER / [dropped §3§]",
+        "toolu_mb1024": "real / [dropped §4§]",
+        "toolu_mid": "absent",
+        "toolu_end": "real / [dropped §9§]"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[13](assistant)",
+        "diff": null
+      }
+    },
+    {
+      "label": "rust-1",
+      "messageCount": 17,
+      "modes": {
+        "toolu_small": "skeleton_real",
+        "toolu_legacy": "truncated",
+        "toolu_mb1024": "skeleton_real",
+        "toolu_mid": "full",
+        "toolu_end": "skeleton_real"
+      },
+      "shape": {
+        "toolu_small": "real / [dropped]",
+        "toolu_legacy": "real / [dropped]",
+        "toolu_mb1024": "real / [dropped]",
+        "toolu_mid": "absent",
+        "toolu_end": "real / [dropped]"
+      },
+      "prefixEqualsPrevious": false,
+      "divergence": {
+        "verdict": "BUST",
+        "at": "message[2](user)",
+        "diff": {
+          "prev": "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_small\",\"content\":\"[dropped §2§]\"}]}",
+          "cur": "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_small\",\"content\":\"[dropped]\"}]}"
+        }
+      }
+    },
+    {
+      "label": "rust-2",
+      "messageCount": 19,
+      "modes": {
+        "toolu_small": "skeleton_real",
+        "toolu_legacy": "truncated",
+        "toolu_mb1024": "skeleton_real",
+        "toolu_mid": "full",
+        "toolu_end": "skeleton_real"
+      },
+      "shape": {
+        "toolu_small": "real / [dropped]",
+        "toolu_legacy": "real / [dropped]",
+        "toolu_mb1024": "real / [dropped]",
+        "toolu_mid": "absent",
+        "toolu_end": "real / [dropped]"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[17](assistant)",
+        "diff": null
+      }
+    },
+    {
+      "label": "rust-3",
+      "messageCount": 21,
+      "modes": {
+        "toolu_small": "skeleton_real",
+        "toolu_legacy": "truncated",
+        "toolu_mb1024": "skeleton_real",
+        "toolu_mid": "full",
+        "toolu_end": "skeleton_real"
+      },
+      "shape": {
+        "toolu_small": "real / [dropped]",
+        "toolu_legacy": "real / [dropped]",
+        "toolu_mb1024": "real / [dropped]",
+        "toolu_mid": "absent",
+        "toolu_end": "real / [dropped]"
+      },
+      "prefixEqualsPrevious": true,
+      "divergence": {
+        "verdict": "STABLE",
+        "at": "message[19](assistant)",
+        "diff": null
+      }
+    },
+    {
+      "label": "ts-back-1",
+      "messageCount": 23,
+      "modes": {
+        "toolu_small": "skeleton_real",
+        "toolu_legacy": "truncated",
+        "toolu_mb1024": "skeleton_real",
+        "toolu_mid": "full",
+        "toolu_end": "skeleton_real"
+      },
+      "shape": {
+        "toolu_small": "real / [dropped §2§]",
+        "toolu_legacy": "MARKER / [dropped §3§]",
+        "toolu_mb1024": "real / [dropped §4§]",
+        "toolu_mid": "absent",
+        "toolu_end": "real / [dropped §9§]"
+      },
+      "prefixEqualsPrevious": false,
+      "divergence": {
+        "verdict": "BUST",
+        "at": "message[2](user)",
+        "diff": {
+          "prev": "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_small\",\"content\":\"[dropped]\"}]}",
+          "cur": "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_small\",\"content\":\"[dropped §2§]\"}]}"
+        }
+      }
+    },
+    {
+      "label": "ts-back-2",
+      "messageCount": 25,
+      "modes": {
+        "toolu_small": "skeleton_real",
+        "toolu_legacy": "skeleton_real",
+        "toolu_mb1024": "skeleton_real",
+        "toolu_mid": "full",
+        "toolu_end": "skeleton_real"
+      },
+      "shape": {
+        "toolu_small": "real / [dropped §2§]",
+        "toolu_legacy": "real / [dropped §3§]",
+        "toolu_mb1024": "real / [dropped §4§]",
+        "toolu_mid": "absent",
+        "toolu_end": "real / [dropped §9§]"
+      },
+      "prefixEqualsPrevious": false,
+      "divergence": {
+        "verdict": "BUST",
+        "at": "message[3](assistant)",
+        "diff": {
+          "prev": "{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_legacy\",\"name\":\"bash\",\"input\":{\"dropped\":\"[dropped §3§]\"}}]}",
+          "cur": "{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_legacy\",\"name\":\"bash\",\"input\":{\"command\":\"echo legacy\",\"description\":\"legacy\"}}]}"
+        }
+      }
+    }
+  ],
+  "violations": [],
+  "requestCount": 15,
+  "logLines": [
+    "magic-context-e2e.log: [2026-09-25T13:48:18.986Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] m[0] HARD fold decision: reason=first_render executed=true",
+    "magic-context-e2e.log: [2026-09-25T13:48:18.997Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] heuristics WILL RUN — reason=force_materialization (319.9% >= 85%), context=319.9%, turn=msg_0d8d2f1c7001p2KvfE2D4Nn8RD",
+    "magic-context-e2e.log: [2026-09-25T13:48:18.997Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] pending ops WILL APPLY — reason=m0_hard_fold (drain folded into executed m[0] bust, scheduler=defer), pendingOps=0, context=319.9%",
+    "magic-context-e2e.log: [2026-09-25T13:48:18.999Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] transform: injected m[0]/m[1] (rematerialized=true, reason=first_render)",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.035Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=6 T=6 ratio=1.0000 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=4 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.035Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel2 evaluation: ctx_reduce=callable U=6 T=6 ratio=1.0000 band=quiet lease=empty->empty verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.140Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=6 T=8 ratio=0.7500 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=4 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.188Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] heuristics WILL NOT RUN — reason=scheduler_defer",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.188Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=0 context=6.7%",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.188Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.190Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=6 T=21 ratio=0.2857 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=4 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.190Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel2 evaluation: ctx_reduce=callable U=6 T=21 ratio=0.2857 band=quiet lease=empty->empty verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.220Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=6 T=23 ratio=0.2609 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=4 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.252Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] heuristics WILL NOT RUN — reason=scheduler_defer",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.252Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=0 context=6.7%",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.252Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.255Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=6 T=36 ratio=0.1667 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=4 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.255Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel2 evaluation: ctx_reduce=callable U=6 T=36 ratio=0.1667 band=quiet lease=empty->empty verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.288Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=6 T=546 ratio=0.0110 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=4 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.321Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] heuristics WILL NOT RUN — reason=scheduler_defer",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.321Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=0 context=6.7%",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.322Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.323Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=6 T=1067 ratio=0.0056 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=4 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.323Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel2 evaluation: ctx_reduce=callable U=6 T=1067 ratio=0.0056 band=quiet lease=empty->empty verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.355Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=6 T=1071 ratio=0.0056 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=4 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.417Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] heuristics WILL NOT RUN — reason=scheduler_defer",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.417Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=0 context=6.7%",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.417Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.419Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=6 T=1279 ratio=0.0047 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=4 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.420Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel2 evaluation: ctx_reduce=callable U=6 T=1279 ratio=0.0047 band=quiet lease=empty->empty verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.996Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] heuristics WILL NOT RUN — reason=scheduler_defer",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.996Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=3 context=6.7%",
+    "magic-context-e2e.log: [2026-09-25T13:48:19.996Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.003Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=20 T=1278 ratio=0.0156 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=3 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.003Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel2 evaluation: ctx_reduce=callable U=20 T=1278 ratio=0.0156 band=quiet lease=empty->empty verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.067Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=20 T=1282 ratio=0.0156 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=3 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.151Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] m[0] HARD fold decision: reason=unknown executed=false",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.158Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] heuristics WILL RUN — reason=force_materialization (100.0% >= 85%), context=100.0%, turn=msg_0d8d2f87f00104sTWm0m3T3o90",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.158Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] pending ops WILL APPLY — reason=ride=force (scheduler=execute), pendingOps=4, context=100.0%",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.160Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.172Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=28 T=28 ratio=1.0000 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=3 dampening=baseline-hold verdict=hold reason=agent-drops-app",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.172Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel2 evaluation: ctx_reduce=callable U=28 T=28 ratio=1.0000 band=quiet lease=empty->empty verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.766Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] heuristics WILL NOT RUN — reason=scheduler_defer",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.766Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=0 context=5.1%",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.766Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.771Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=40 T=40 ratio=1.0000 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=2 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:23.771Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel2 evaluation: ctx_reduce=callable U=40 T=40 ratio=1.0000 band=quiet lease=empty->empty verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:24.418Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] heuristics WILL NOT RUN — reason=scheduler_defer",
+    "magic-context-e2e.log: [2026-09-25T13:48:24.418Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=0 context=5.1%",
+    "magic-context-e2e.log: [2026-09-25T13:48:24.418Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "magic-context-e2e.log: [2026-09-25T13:48:24.423Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=50 T=50 ratio=1.0000 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=1 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:24.423Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel2 evaluation: ctx_reduce=callable U=50 T=50 ratio=1.0000 band=quiet lease=empty->empty verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:31.476Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] rust pass: decision=HARD reason=first_render scheduler=execute historian_no_fire=trigger_false canonical_cause=below_proactive_floor identity_delta=other served_from=transform in=14 out=16 applied=true row_version=2 elapsed=2",
+    "magic-context-e2e.log: [2026-09-25T13:48:32.363Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] rust pass: decision=SOFT+ reason=none scheduler=defer defer_reason=scheduler_defer historian_no_fire=trigger_false canonical_cause=below_proactive_floor served_from=transform in=16 out=18 applied=true row_version=4 elapsed=9.",
+    "magic-context-e2e.log: [2026-09-25T13:48:32.949Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] rust pass: decision=SOFT+ reason=none scheduler=defer defer_reason=scheduler_defer historian_no_fire=trigger_false canonical_cause=below_proactive_floor served_from=transform in=18 out=20 applied=true row_version=5 elapsed=14",
+    "magic-context-e2e.log: [2026-09-25T13:48:38.432Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] heuristics WILL NOT RUN — reason=scheduler_defer",
+    "magic-context-e2e.log: [2026-09-25T13:48:38.432Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=0 context=0.0%",
+    "magic-context-e2e.log: [2026-09-25T13:48:38.435Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "magic-context-e2e.log: [2026-09-25T13:48:38.490Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=87 T=87 ratio=1.0000 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=0 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:38.492Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel2 evaluation: ctx_reduce=callable U=87 T=87 ratio=1.0000 band=quiet lease=empty->empty verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:39.237Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] HARD fold converted 1 legacy dropped-tool skeleton(s) to real-or-absent",
+    "magic-context-e2e.log: [2026-09-25T13:48:39.237Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] m[0] HARD fold decision: reason=project_memory_epoch executed=true",
+    "magic-context-e2e.log: [2026-09-25T13:48:39.243Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] heuristics WILL RUN — reason=m0_hard_fold (drain folded into executed m[0] bust, scheduler=defer), context=5.1%, turn=msg_0d8d3439f00107BJVniCa324Lj",
+    "magic-context-e2e.log: [2026-09-25T13:48:39.243Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] pending ops WILL APPLY — reason=m0_hard_fold (drain folded into executed m[0] bust, scheduler=defer), pendingOps=0, context=5.1%",
+    "magic-context-e2e.log: [2026-09-25T13:48:39.246Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] transform: injected m[0]/m[1] (rematerialized=true, reason=project_memory_epoch)",
+    "magic-context-e2e.log: [2026-09-25T13:48:39.267Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel1 evaluation: ctx_reduce=callable U=97 T=97 ratio=1.0000 band=quiet grace_baseline_u=none grace_growth=0 growth_threshold=25000 sticky_floor_turns_remaining=0 dampening=none verdict=hold reason=tail-below-minimum",
+    "magic-context-e2e.log: [2026-09-25T13:48:39.267Z] [magic-context][ses_f272d0e58ffeAdec94UqkCG4KF] channel2 evaluation: ctx_reduce=callable U=97 T=97 ratio=1.0000 band=quiet lease=empty->empty verdict=hold reason=tail-below-minimum"
+  ]
+}

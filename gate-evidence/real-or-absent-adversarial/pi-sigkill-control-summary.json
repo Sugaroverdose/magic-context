@@ -1,0 +1,25 @@
+{
+  "variant": "control",
+  "childSignal": null,
+  "childStatus": 0,
+  "killpoint": "",
+  "deferModes": {
+    "2": "dropped/truncated",
+    "3": "dropped/truncated"
+  },
+  "deferIdentical": true,
+  "childHardServed": "converted",
+  "modesAfterRestart": {
+    "2": "dropped/skeleton_real",
+    "3": "dropped/full"
+  },
+  "modesAfterNext": {
+    "2": "dropped/skeleton_real",
+    "3": "dropped/full"
+  },
+  "next1LegacyMarker": false,
+  "next1EqualsNext2": true,
+  "next1EqualsChildHard": true,
+  "next1EqualsChildDefer": false,
+  "next1Tail": "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<session-history></session-history>\"}],\"timestamp\":-1},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<session-history-since>(no new content since last materialization)</session-history-since>\"}],\"timestamp\":0},{\"role\":\"user\",\"content\":\"§1§ start\",\"timestamp\":1},{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"call-small\",\"name\":\"bash\",\"arguments\":{\"command\":\"ls -la\"}}],\"api\":\"test-api\",\"provider\":\"test-provider\",\"model\":\"test-model\",\"usage\":{},\"stopReason\":\"stop\",\"timestamp\":2},{\"role\":\"toolResult\",\"toolCallId\":\"call-small\",\"toolName\":\"bash\",\"content\":[{\"type\":\"text\",\"text\":\"[dropped §2§]\"}],\"isError\":false,\"timestamp\":3},{\"role\":\"user\",\"content\":\"§4§ next prompt\",\"timestamp\":6}]"
+}
