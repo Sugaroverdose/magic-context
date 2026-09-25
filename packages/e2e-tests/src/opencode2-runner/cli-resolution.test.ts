@@ -152,43 +152,6 @@ describe("OpenCode 2 CLI resolution order", () => {
 	});
 });
 
-describe("open-path guard and the shared CLI install", () => {
-	const home = homedir();
-	const root = "/tmp/mc-opencode2-guard-root";
-	const binary = sharedOpenCode2Install(
-		"2.0.15",
-		sharedOpenCode2Root(home),
-	).binary;
-
-	test("the host may hold the shared binary open read-only", () => {
-		expect(() => assertOpenPaths([binary], root)).not.toThrow();
-	});
-
-	test("a writable descriptor under the shared install is still refused", () => {
-		expect(() => assertOpenPaths([binary], root, [], [binary])).toThrow(
-			"forbidden writable path",
-		);
-	});
-
-	test("a database under the shared install is still refused", () => {
-		const db = join(sharedOpenCode2Root(home), "2.0.15/opencode.db");
-		expect(() => assertOpenPaths([db], root)).toThrow("forbidden open path");
-	});
-
-	test("the rest of the magic-context directory stays protected", () => {
-		const magicContext = join(home, ".local/share/cortexkit/magic-context");
-		for (const path of [
-			join(magicContext, "logs/magic-context.log"),
-			join(magicContext, "e2e-bin-other/opencode.exe"),
-			join(magicContext, "e2e-bin/other-tool/bin/tool"),
-		]) {
-			expect(() => assertOpenPaths([path], root)).toThrow(
-				"forbidden open path",
-			);
-		}
-	});
-});
-
 describe("OpenCode 2 CLI pin", () => {
 	test("reads the exact @opencode/cli devDependency from packages/plugin", () => {
 		expect(pinnedOpenCode2Version()).toMatch(/^\d+\.\d+\.\d+$/);
@@ -206,10 +169,22 @@ describe("OpenCode 2 CLI pin", () => {
 
 	test("the shared root sits under the given home, outside any checkout", () => {
 		expect(sharedOpenCode2Root("/home/u")).toBe(
-			"/home/u/.local/share/cortexkit/magic-context/e2e-bin/opencode-cli",
+			"/home/u/.local/share/cortexkit/e2e-bin/opencode-cli",
 		);
 		expect(sharedOpenCode2Install("2.0.15", "/r").binary).toBe(
 			"/r/2.0.15/node_modules/@opencode/cli/bin/opencode.exe",
 		);
+	});
+
+	test("the unmodified open-path guard accepts the shared binary", () => {
+		// The shared root must stay outside every directory the guard protects (for
+		// example ~/.local/share/cortexkit/magic-context), or every host run fails.
+		const binary = sharedOpenCode2Install(
+			"2.0.15",
+			sharedOpenCode2Root(homedir()),
+		).binary;
+		expect(() =>
+			assertOpenPaths([binary], "/tmp/mc-opencode2-guard-root"),
+		).not.toThrow();
 	});
 });

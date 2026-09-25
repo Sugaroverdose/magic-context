@@ -470,14 +470,9 @@ export function assertOpenPaths(
 		join(home, ".config/cortexkit"),
 		join(home, ".local/state/opencode"),
 	];
-	// The shared CLI install sits inside the protected magic-context directory but holds
-	// only the CLI package, so the host's own program text there is expected. It is exempt
-	// from the protected-root rule alone: a database file or a writable descriptor under
-	// it still fails the checks below.
-	const sharedCli = sharedOpenCode2Root(home);
 	for (const path of paths) {
 		if (!path.startsWith("/")) continue; // lsof socket/pipe labels are not filesystem paths.
-		if ((!under(path, sharedCli) && protectedRoots.some((base) => under(path, base))) ||
+		if (protectedRoots.some((base) => under(path, base)) ||
 			(/\.(?:db|sqlite)(?:-(?:wal|shm))?$/.test(path) && !under(path, root)) ||
 			// Config and state live under the home XDG roots; a source file that merely sits
 			// in a directory named `config` (the plugin's own src/config/index.ts, which the

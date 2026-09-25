@@ -31,12 +31,13 @@ export function pinnedOpenCode2Version(
 	return version;
 }
 
-/** Parent of the per-version shared installs. Uses the real home directory, never XDG_DATA_HOME, because tests redirect XDG roots. */
+/**
+ * Parent of the per-version shared installs. Uses the real home directory, never XDG_DATA_HOME,
+ * because tests redirect XDG roots. It is a sibling of magic-context/, not inside it: the lane's
+ * open-path guard (assertOpenPaths) refuses any host file under the live magic-context directory.
+ */
 export function sharedOpenCode2Root(home: string = homedir()): string {
-	return join(
-		home,
-		".local/share/cortexkit/magic-context/e2e-bin/opencode-cli",
-	);
+	return join(home, ".local/share/cortexkit/e2e-bin/opencode-cli");
 }
 
 export interface SharedOpenCode2Install {
