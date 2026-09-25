@@ -10894,6 +10894,7 @@ impl McStore {
                 }
             };
             let initialized_before_sync = meta.initialized;
+            let mut adopted_over_materialized_boundary = false;
 
             if !request.compartments.is_empty()
                 && meta.historian.state != HistorianPhase::Idle
@@ -10923,16 +10924,58 @@ impl McStore {
                         })
                     }
                 };
-                if meta.initialized {
-                    // A force seed is process-local cold-start behavior, but this cache state is
-                    // durable. Re-adopting a lagging TypeScript mirror would move only the trim
-                    // cursor while retaining the module's newer m0/m1 bytes, so the next defer
-                    // would silently re-emit the already-folded interval as raw tail messages.
+                // An initialized row already has a materialized boundary. Which side wins
+                // depends on whose coverage ends later:
+                // - Seed at or behind the module's coverage: the TypeScript mirror is lagging
+                //   (for example a second adapter process force-seeding a stale mirror).
+                //   Adopting it would move only the trim cursor back while the module's newer
+                //   m0/m1 bytes stay, so the next defer would re-emit the already-folded
+                //   interval as raw tail messages. The module keeps its boundary.
+                // - Seed strictly after the module's coverage: the session ran under
+                //   TypeScript authority after its last Rust pass and the host folded further.
+                //   OpenCode's compaction marker has usually cut the module's old boundary out
+                //   of the live array, so keeping it would arm `pending_rewrite` and serve
+                //   every later pass raw with no way back. The seed is adopted like a bootstrap
+                //   seed: `bootstrap_seed_fold_pending` makes the next transform pass fold once
+                //   from the adopted coverage, and later defers replay that fold.
+                // "The module's coverage" includes compartments the module historian has already
+                // published but not yet folded. A mirror of those is not ahead of the module:
+                // the module folds them itself on a priced pass, so a restarted adapter's seed
+                // must not force that fold early onto a pass the scheduler would defer.
+                // A row with no folded coverage (compaction off, or nothing folded yet) has no
+                // boundary to strand, so it keeps its state as before.
+                let seed_ahead_of_module = meta.initialized
+                    && match meta.coverage_ordinal {
+                        Some(folded_end) => {
+                            let published_end: Option<i64> = tx.query_row(
+                                "SELECT MAX(end_message) FROM mc_compartments WHERE session_id = ?1",
+                                params![request.session_id],
+                                |row| row.get(0),
+                            )?;
+                            let module_end = published_end
+                                .and_then(|end| u64::try_from(end).ok())
+                                .map_or(folded_end, |end| end.max(folded_end));
+                            adoption.coverage_end_ordinal > module_end
+                        }
+                        None => false,
+                    };
+                if meta.initialized && !seed_ahead_of_module {
                     eprintln!(
-                        "mc-store: retained materialized boundary {:?} over state-sync seed {:?} for session {}",
+                        "mc-store: retained materialized boundary {:?} over state-sync seed {:?} at or behind it for session {}",
                         core.boundary_id, adoption.boundary_id, request.session_id
                     );
                 } else {
+                    if seed_ahead_of_module {
+                        eprintln!(
+                            "mc-store: adopted state-sync seed {:?} (coverage end {}) over older materialized boundary {:?} (coverage end {:?}) for session {}",
+                            adoption.boundary_id,
+                            adoption.coverage_end_ordinal,
+                            core.boundary_id,
+                            meta.coverage_ordinal,
+                            request.session_id
+                        );
+                        adopted_over_materialized_boundary = true;
+                    }
                     core.boundary_id = adoption.boundary_id;
                     core.reconcile_pending = false;
                     meta.coverage_ordinal = Some(adoption.coverage_end_ordinal);
@@ -11022,9 +11065,31 @@ impl McStore {
                 request.strip_seed_skipped,
             );
 
+            if adopted_over_materialized_boundary {
+                // The host and the module chunk history independently, so the same sequence
+                // number can cover different ordinals on each side. Overwriting by sequence
+                // would leave the module's higher-numbered rows behind with ranges that
+                // overlap the host's, a non-monotonic set the renderer and historian
+                // validation reject. The adopted seed therefore replaces the whole set, along
+                // with the rows keyed to the module's compartment sequences: chunk transcripts
+                // and compartment events. Candidate and side-channel rows are keyed by message
+                // ordinals, which stay valid under any chunking, so they are kept.
+                for table in [
+                    "mc_chunk_transcripts",
+                    "mc_compartment_events",
+                    "mc_compartments",
+                ] {
+                    tx.execute(
+                        &format!("DELETE FROM {table} WHERE session_id = ?1"),
+                        params![request.session_id],
+                    )?;
+                }
+            }
             let mut compartment_overwrites_skipped = 0usize;
             for compartment in request.compartments {
-                if initialized_before_sync {
+                // After adopting a newer seed the set above is empty and the host's
+                // compartments are written as the new set.
+                if initialized_before_sync && !adopted_over_materialized_boundary {
                     let retained_sequence = meta.folded_compartment_seq;
                     if compartment.sequence <= retained_sequence
                         || !write_seed_compartment_tx(
@@ -27590,6 +27655,151 @@ mod shadow_tests {
                 acked_watermarks: serde_json::json!({"section_seq": expected_shadow_seq}),
             })
             .unwrap();
+    }
+
+    #[test]
+    fn adopted_newer_seed_replaces_compartments_and_their_sequence_keyed_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let session = "adopt-session";
+        let chunk = |sequence: i64, start: i64, end: i64, content: &str| StoredCompartment {
+            sequence,
+            start_message: start,
+            end_message: end,
+            start_message_id: format!("m{start}#0"),
+            end_message_id: format!("m{end}#0"),
+            title: format!("c{sequence}"),
+            content: content.to_string(),
+            importance: 50,
+            ..Default::default()
+        };
+        // The module chunked ordinals 0..4 one message per compartment and folded them.
+        let module_set = (0..5)
+            .map(|seq| chunk(seq, seq, seq, "module"))
+            .collect::<Vec<_>>();
+        store.replace_compartments(session, &module_set).unwrap();
+        let core = CoreState {
+            boundary_id: "m4#0".to_string(),
+            ..CoreState::default()
+        };
+        let meta = ModuleMeta {
+            initialized: true,
+            coverage_ordinal: Some(4),
+            coverage_start_ordinal: Some(0),
+            folded_compartment_seq: 4,
+            ..ModuleMeta::default()
+        };
+        store.commit(session, None, &core, &meta).unwrap();
+        store
+            .inner
+            .with_conn(|conn| {
+                for seq in 0..5 {
+                    conn.execute(
+                        "INSERT INTO mc_chunk_transcripts
+                           (session_id, compartment_seq, start_ordinal, end_ordinal,
+                            transcript_deflate, created_at_ms)
+                         VALUES (?1, ?2, ?2, ?2, x'00', 0)",
+                        params![session, seq],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO mc_compartment_events
+                           (session_id, compartment_id, at_compartment, kind)
+                         VALUES (?1, ?2, ?2, 'decision')",
+                        params![session, seq],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        // The host chunked a longer history into three wider compartments.
+        let seed = vec![
+            chunk(0, 0, 3, "host 0"),
+            chunk(1, 4, 7, "host 1"),
+            chunk(2, 8, 9, "host 2"),
+        ];
+        store
+            .apply_authority_state_sync(ModuleStateSyncRequest {
+                session_id: session,
+                project_path: "project",
+                shadow_generation: 0,
+                expected_shadow_seq: 0,
+                seed_boundary_id: Some("m9#0"),
+                drop_seeds: &[],
+                drop_seed_skipped: 0,
+                pending_agent_drops: &[],
+                pending_agent_drops_skipped: 0,
+                user_hint_seeds: &[],
+                auto_search_hint_skipped: 0,
+                note_nudge_anchors: None,
+                todo_synthetic_anchor: None,
+                todo_synthetic_anchor_present: false,
+                emergency_latches: None,
+                pending_compaction_marker: None,
+                deferred_execute_state: None,
+                channel2_nudge_state: None,
+                strip_seeds: &[],
+                strip_seed_skipped: 0,
+                reasoning_cleared_through_tag: None,
+                compartments: &seed,
+                memories: &[],
+                memory_mutations: &[],
+                user_profile: &[],
+                user_profile_present: false,
+                workspace: None,
+                workspace_present: false,
+                last_todo_state: None,
+                project_memory_epoch: None,
+                user_profile_version: None,
+                acked_watermarks: serde_json::json!({}),
+            })
+            .unwrap();
+
+        let stored = store.load_compartments(session).unwrap();
+        assert_eq!(
+            stored
+                .iter()
+                .map(|c| (
+                    c.sequence,
+                    c.start_message,
+                    c.end_message,
+                    c.content.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 0, 3, "host 0"),
+                (1, 4, 7, "host 1"),
+                (2, 8, 9, "host 2")
+            ]
+        );
+        for pair in stored.windows(2) {
+            assert!(pair[0].sequence < pair[1].sequence);
+            assert!(pair[0].end_message < pair[1].start_message);
+        }
+        // Transcripts and events keyed to the module's old sequences described different
+        // ordinal ranges, so none may survive under the host's numbering.
+        let (transcripts, events): (i64, i64) = store
+            .inner
+            .with_conn(|conn| {
+                Ok((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM mc_chunk_transcripts WHERE session_id = ?1",
+                        params![session],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM mc_compartment_events WHERE session_id = ?1",
+                        params![session],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert_eq!((transcripts, events), (0, 0));
+        let adopted = store.load(session).unwrap();
+        assert_eq!(adopted.core.boundary_id, "m9#0");
+        assert_eq!(adopted.meta.coverage_ordinal, Some(9));
+        assert!(adopted.meta.bootstrap_seed_fold_pending);
     }
 
     type SectionSnapshot = (Vec<(i64, String)>, Vec<(i64, String, String)>);

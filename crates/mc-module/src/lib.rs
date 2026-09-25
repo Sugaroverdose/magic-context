@@ -5026,7 +5026,35 @@ impl McHandler {
                 .lock()
                 .expect("prompt surface epoch mutex")
                 .remove(&session);
+            self.evict_session_lineage_caches(&session);
         }
+    }
+
+    /// Retention bound for the per-session lineage caches `transform_session_roots` and
+    /// `guidance_dates`: an entry lives only while the session has a bound route, and is
+    /// evicted when its last route closes (`unbind_route`). `session.delete` also evicts the
+    /// guidance date, and the root entry when no route is still bound. Without this both
+    /// maps grow with every session the process has ever served.
+    ///
+    /// Evicting cannot change served bytes for a returning session, because each map is a
+    /// process-local copy of something the store already holds, and the rebuild is the same
+    /// one a module restart performs:
+    /// - `transform_session_roots` caches the durable `mc_transform_session_roots` proof.
+    ///   `module_knows_transform_session` re-reads that row (plus the cache-state row) on a
+    ///   miss and re-caches it, and a new transform on the session re-inserts its root.
+    /// - `guidance_dates` holds a date line only until it is persisted in the session's
+    ///   `ModuleMeta::guidance_date` (or the first committed transform). A persisted date is
+    ///   always read from the store first, so only a session with no durable row loses its
+    ///   in-memory line, exactly as it would across a restart.
+    fn evict_session_lineage_caches(&self, session_id: &str) {
+        self.transform_session_roots
+            .lock()
+            .expect("transform session roots mutex")
+            .remove(session_id);
+        self.guidance_dates
+            .lock()
+            .expect("guidance date mutex")
+            .remove(session_id);
     }
 
     /// Resolve the binding for a transform request on `channel`, FAIL-LOUD: the channel
@@ -7295,6 +7323,23 @@ impl McHandler {
                     .lock()
                     .expect("recomp sessions mutex")
                     .remove(&session_id);
+                // The delete removed the durable rows the lineage caches mirror. While a route
+                // is still bound, its in-memory root is the only lineage proof left for facade
+                // calls on that route, so it stays until `unbind_route` evicts it.
+                let still_bound = self
+                    .bindings
+                    .lock()
+                    .expect("bindings mutex")
+                    .values()
+                    .any(|candidate| candidate.session == session_id);
+                if still_bound {
+                    self.guidance_dates
+                        .lock()
+                        .expect("guidance date mutex")
+                        .remove(&session_id);
+                } else {
+                    self.evict_session_lineage_caches(&session_id);
+                }
                 respond(json!({ "ok": true, "deleted_rows": deleted_rows }))
             }
             Err(error) => HandlerOutcome::Error {
@@ -7527,9 +7572,18 @@ impl McHandler {
                 "reclaimable_tool_output_count": crate::transform::reclaimable_tool_output_count(Some(baseline)),
             })
         });
+        let raw_passthrough = raw_passthrough_status(&loaded);
+        let raw_passthrough_summary = if raw_passthrough.is_null() {
+            String::new()
+        } else {
+            format!(
+                ", serving raw: retained boundary {} absent from the live array",
+                loaded.core.boundary_id
+            )
+        };
         let summary = sanitize_status_text(
             &format!(
-                "session {short_session} (last active {age}): {} {}, coverage ordinal {coverage}, boundary {boundary}, {} pending {}, {} {}, pending m1 delta {}, last historian: {historian}, {publish_health}, surface {surface}",
+                "session {short_session} (last active {age}): {} {}, coverage ordinal {coverage}, boundary {boundary}{raw_passthrough_summary}, {} pending {}, {} {}, pending m1 delta {}, last historian: {historian}, {publish_health}, surface {surface}",
                 compartment_count,
                 plural_word(compartment_count, "compartment"),
                 pending_drop_count,
@@ -7590,6 +7644,7 @@ impl McHandler {
             "tag_count": tag_count,
             "pending_m1_delta": pending_m1_delta,
             "pending_m1_age_ms": pending_m1_age_ms,
+            "raw_passthrough": raw_passthrough,
             "historian": {
                 "consecutive_publish_failures": consecutive_publish_failures,
                 "publish_health_degraded": consecutive_publish_failures >= 3,
@@ -9287,6 +9342,7 @@ impl McHandler {
             "row_version": loaded.row_version,
             "historian": historian,
             "publication_floor_ordinal": loaded.meta.publication_floor_ordinal,
+            "raw_passthrough": raw_passthrough_status(&loaded),
             "tail_identity_re_adopt_count": loaded.meta.tail_identity_re_adopt_count,
             "pass_trace": pass_trace,
             "runtime_store_error": self.runtime_store_error_value(session_id),
@@ -17638,6 +17694,24 @@ fn storage_versions_block(store: &McStore) -> Value {
         "context_db_schema_version": null,
         "module_store_schema_version": store.module_store_schema_version().ok(),
         "binary_supported_version": LATEST_MIGRATION_VERSION,
+    })
+}
+
+/// Describe a session that the transform is serving as raw pass-through because its
+/// materialized boundary is no longer in the live array (an armed `pending_rewrite`). Every
+/// pass in that state skips m0/m1, drops, and folding, so status and health must say so
+/// instead of looking like a normally transforming session. Returns `null` otherwise.
+fn raw_passthrough_status(loaded: &mc_store::LoadedState) -> Value {
+    let Some(pending) = loaded.meta.pending_rewrite.as_ref() else {
+        return Value::Null;
+    };
+    json!({
+        "reason": "retained_boundary_absent",
+        "retained_boundary_id": &loaded.core.boundary_id,
+        "coverage_ordinal": loaded.meta.coverage_ordinal,
+        "armed_at_ms": pending.armed_at_ms,
+        "last_present_at_ms": pending.last_present_at_ms,
+        "absent_request_count": pending.absent_request_count,
     })
 }
 
@@ -37890,6 +37964,412 @@ mod tests {
         let next_hard = call_transform_request(&handler, next_hard_request).await;
         assert_eq!(next_hard["decision"], json!("HARD"));
         assert_eq!(m0_text(&next_hard).as_bytes(), folded_m0_bytes);
+    }
+
+    fn live_harness_ids(response: &Value) -> Vec<String> {
+        response["ck_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["meta"]["synthetic"] != json!(true))
+            .map(|message| message["meta"]["harness_id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A session materialized in Rust mode, ran under TypeScript authority long enough for
+    /// OpenCode's compaction marker to cut the module's boundary out of the live array, and
+    /// then returned to Rust mode. The host's seed is ahead of the module, so the module must
+    /// adopt it and fold once instead of serving every later pass raw.
+    #[tokio::test]
+    async fn newer_state_sync_seed_replaces_a_retained_boundary_after_a_ts_round_trip() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        store
+            .replace_compartments("ses", &[stored_comp(0, 0, 0, "m0", "module summary")])
+            .unwrap();
+        let folded = call_transform_request(
+            &handler,
+            request(vec![ck("m0", 0, "covered zero"), ck("m1", 1, "tail one")]),
+        )
+        .await;
+        assert_eq!(folded["boundary_id"], json!("m0#0"));
+
+        // Under TypeScript the host folded through m3 and compaction dropped m0..m2 from the
+        // live array. The first Rust pass after that flip finds the module boundary absent.
+        let live = vec![
+            ck("m3", 3, "host boundary"),
+            ck("m4", 4, "tail four"),
+            ck("m5", 5, "tail five"),
+        ];
+        let armed = call_transform_request(&handler, request(live.clone())).await;
+        assert_eq!(live_harness_ids(&armed), vec!["m3", "m4", "m5"]);
+        assert!(store.load("ses").unwrap().meta.pending_rewrite.is_some());
+        let armed_status = call_dispatch_request(
+            &handler,
+            json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        )
+        .await;
+        assert_eq!(
+            armed_status["raw_passthrough"]["reason"],
+            json!("retained_boundary_absent"),
+            "{armed_status}"
+        );
+        assert_eq!(
+            armed_status["raw_passthrough"]["retained_boundary_id"],
+            json!("m0#0")
+        );
+        assert!(armed_status["summary"]
+            .as_str()
+            .unwrap()
+            .contains("serving raw"));
+        let armed_health =
+            call_dispatch_request(&handler, json!({ "kind": "health", "session_id": "ses" })).await;
+        assert_eq!(
+            armed_health["raw_passthrough"]["reason"],
+            json!("retained_boundary_absent"),
+            "{armed_health}"
+        );
+
+        let shadow_seq = store.load("ses").unwrap().meta.shadow_seq;
+        let seeded = handler
+            .dispatch_value(
+                7,
+                json!({
+                    "kind": "state_sync",
+                    "session_id": "ses",
+                    "shadow_generation": 0,
+                    "expected_shadow_seq": shadow_seq,
+                    "seed_boundary_id": "m3#0",
+                    "compartments": (0..=3)
+                        .map(|sequence| state_sync_compartment(sequence, &format!("host summary {sequence}")))
+                        .collect::<Vec<_>>(),
+                    "acked_watermarks": { "compartment_sequence": 3 }
+                }),
+            )
+            .await;
+        assert!(matches!(seeded, HandlerOutcome::Response(_)), "{seeded:?}");
+        let adopted = store.load("ses").unwrap();
+
+        // A retained boundary would serve m3..m5 raw with no synthetic prefix.
+        let resumed = call_transform_request(&handler, request(live.clone())).await;
+        assert_eq!(
+            live_harness_ids(&resumed),
+            vec!["m4", "m5"],
+            "the returning session must be transformed, not passed through raw"
+        );
+        assert_eq!(resumed["decision"], json!("HARD"), "{resumed}");
+        assert_eq!(resumed["boundary_id"], json!("m3#0"));
+        assert_eq!(adopted.core.boundary_id, "m3#0");
+        assert_eq!(adopted.meta.coverage_ordinal, Some(3));
+        assert!(adopted.meta.pending_rewrite.is_none());
+        assert!(m0_text(&resumed).contains("host summary 3"));
+        assert!(!m0_text(&resumed).contains("module summary"));
+        assert!(store.load("ses").unwrap().meta.pending_rewrite.is_none());
+        let resumed_status = call_dispatch_request(
+            &handler,
+            json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        )
+        .await;
+        assert_eq!(resumed_status["raw_passthrough"], Value::Null);
+
+        // The adoption spent its one rewrite; a scheduler defer replays those bytes.
+        let replay =
+            call_transform_request(&handler, request_with_usage(live, 1_000, 50_000)).await;
+        assert_eq!(replay["scheduler_decision"], json!("defer"), "{replay}");
+        assert_eq!(replay["decision"], json!("SOFT+"), "{replay}");
+        assert_eq!(replay["ck_messages"], resumed["ck_messages"]);
+    }
+
+    /// A restarted adapter can mirror compartments the module historian published but has not
+    /// folded yet. That seed is not ahead of the module, so a scheduler defer must still replay.
+    #[tokio::test]
+    async fn adopted_seed_replaces_a_differently_chunked_module_compartment_set() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        // The module chunked ordinals 0..4 into five one-message compartments.
+        store
+            .replace_compartments(
+                "ses",
+                &(0..5)
+                    .map(|seq| stored_comp(seq, seq, seq, &format!("m{seq}"), "module chunk"))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let folded = call_transform_request(
+            &handler,
+            request((0..6).map(|o| ck(&format!("m{o}"), o, "live")).collect()),
+        )
+        .await;
+        assert_eq!(folded["boundary_id"], json!("m4#0"));
+
+        // The host chunked a longer history into three wider compartments.
+        let host_chunk = |sequence: i64, start: i64, end: i64| {
+            json!({
+                "sequence": sequence,
+                "start_message": start,
+                "end_message": end,
+                "start_message_id": format!("m{start}#0"),
+                "end_message_id": format!("m{end}#0"),
+                "title": format!("host {sequence}"),
+                "content": format!("host chunk {sequence}"),
+                "p1": format!("host chunk {sequence}"),
+            })
+        };
+        let seeded = handler
+            .dispatch_value(
+                7,
+                json!({
+                    "kind": "state_sync",
+                    "session_id": "ses",
+                    "shadow_generation": 0,
+                    "expected_shadow_seq": store.load("ses").unwrap().meta.shadow_seq,
+                    "seed_boundary_id": "m9#0",
+                    "compartments": [host_chunk(0, 0, 3), host_chunk(1, 4, 7), host_chunk(2, 8, 9)],
+                    "acked_watermarks": { "compartment_sequence": 2 }
+                }),
+            )
+            .await;
+        assert!(matches!(seeded, HandlerOutcome::Response(_)), "{seeded:?}");
+
+        let stored = store.load_compartments("ses").unwrap();
+        assert_eq!(
+            stored
+                .iter()
+                .map(|c| (
+                    c.sequence,
+                    c.start_message,
+                    c.end_message,
+                    c.content.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 0, 3, "host chunk 0"),
+                (1, 4, 7, "host chunk 1"),
+                (2, 8, 9, "host chunk 2"),
+            ],
+            "the adopted set must be exactly the seed's, with no module rows left behind"
+        );
+        for pair in stored.windows(2) {
+            assert!(pair[0].sequence < pair[1].sequence);
+            assert!(pair[0].end_message < pair[1].start_message);
+        }
+
+        let resumed = call_transform_request(
+            &handler,
+            request((8..12).map(|o| ck(&format!("m{o}"), o, "live")).collect()),
+        )
+        .await;
+        assert_eq!(resumed["decision"], json!("HARD"), "{resumed}");
+        assert_eq!(resumed["boundary_id"], json!("m9#0"));
+        assert_eq!(live_harness_ids(&resumed), vec!["m10", "m11"]);
+        assert!(!m0_text(&resumed).contains("module chunk"));
+    }
+
+    #[tokio::test]
+    async fn state_sync_seed_of_published_unfolded_compartments_keeps_the_defer() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        store
+            .replace_compartments("ses", &[stored_comp(0, 0, 0, "m0", "module zero")])
+            .unwrap();
+        let live = vec![
+            ck("m0", 0, "covered zero"),
+            ck("m1", 1, "covered one"),
+            ck("m2", 2, "live tail"),
+        ];
+        let folded = call_transform_request(&handler, request(live.clone())).await;
+        assert_eq!(folded["boundary_id"], json!("m0#0"));
+        store
+            .replace_compartments(
+                "ses",
+                &[
+                    stored_comp(0, 0, 0, "m0", "module zero"),
+                    stored_comp(1, 1, 1, "m1", "module one"),
+                ],
+            )
+            .unwrap();
+        let before = store.load("ses").unwrap();
+
+        let seeded = handler
+            .dispatch_value(
+                7,
+                json!({
+                    "kind": "state_sync",
+                    "session_id": "ses",
+                    "shadow_generation": 0,
+                    "expected_shadow_seq": before.meta.shadow_seq,
+                    "seed_boundary_id": "m1#0",
+                    "compartments": [
+                        state_sync_compartment(0, "mirror zero"),
+                        state_sync_compartment(1, "mirror one"),
+                    ],
+                    "acked_watermarks": { "compartment_sequence": 1 }
+                }),
+            )
+            .await;
+        assert!(matches!(seeded, HandlerOutcome::Response(_)), "{seeded:?}");
+        let after = store.load("ses").unwrap();
+        assert_eq!(after.core, before.core);
+        assert_eq!(after.meta.coverage_ordinal, Some(0));
+        assert!(!after.meta.bootstrap_seed_fold_pending);
+
+        let replay =
+            call_transform_request(&handler, request_with_usage(live, 1_000, 50_000)).await;
+        assert_eq!(replay["scheduler_decision"], json!("defer"), "{replay}");
+        assert_eq!(replay["decision"], json!("SOFT+"));
+        assert_eq!(replay["ck_messages"], folded["ck_messages"]);
+    }
+
+    fn lineage_cache_sizes(handler: &McHandler) -> (usize, usize) {
+        (
+            handler.transform_session_roots.lock().unwrap().len(),
+            handler.guidance_dates.lock().unwrap().len(),
+        )
+    }
+
+    #[tokio::test]
+    async fn session_lineage_caches_are_evicted_when_the_last_route_closes() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let root = project.to_str().unwrap();
+        handler.unbind_route(7);
+        let live = vec![ck("m0", 0, "zero"), ck("m1", 1, "one")];
+        let mut first_bytes = BTreeMap::new();
+        for index in 0..40u16 {
+            let session = format!("ses-{index}");
+            let channel = 100 + index;
+            handler.bind_route(channel, binding(root, &session));
+            let mut req = request(live.clone());
+            req["session_id"] = json!(session);
+            let served = call_transform_request_on_channel(&handler, channel, req).await;
+            assert_eq!(served["action"], "HARD", "{served}");
+            first_bytes.insert(session.clone(), served["ck_messages"].clone());
+            // A guidance read for a session with no durable row keeps its date in memory.
+            handler
+                .guidance_date_for_session(&store, &format!("guidance-only-{index}"))
+                .unwrap();
+        }
+        assert_eq!(lineage_cache_sizes(&handler).0, 40);
+        assert_eq!(lineage_cache_sizes(&handler).1, 40);
+
+        // A second route on the same session keeps its entries until the last one closes.
+        handler.bind_route(99, binding(root, "ses-0"));
+        for index in 0..40u16 {
+            handler.unbind_route(100 + index);
+        }
+        assert!(handler
+            .transform_session_roots
+            .lock()
+            .unwrap()
+            .contains_key("ses-0"));
+        handler.unbind_route(99);
+        assert_eq!(lineage_cache_sizes(&handler).0, 0);
+        // Guidance-only sessions never had a route, so they are bounded by deletion instead.
+        for index in 0..40u16 {
+            let session = format!("guidance-only-{index}");
+            handler.bind_route(7, binding(root, &session));
+            let deleted = call_dispatch_request(
+                &handler,
+                json!({ "method": "session.delete", "v": 1, "session_id": session }),
+            )
+            .await;
+            assert_eq!(deleted["ok"], json!(true), "{deleted}");
+            handler.unbind_route(7);
+        }
+        assert_eq!(lineage_cache_sizes(&handler), (0, 0));
+
+        // A returning session rebuilds its lineage from the store, as after a restart, and
+        // replays the same bytes it served before it left.
+        for index in [0u16, 17, 39] {
+            let session = format!("ses-{index}");
+            assert!(handler.module_knows_transform_session(&session, &project));
+            handler.bind_route(7, binding(root, &session));
+            let mut req = request_with_usage(live.clone(), 1_000, 50_000);
+            req["session_id"] = json!(session);
+            let replay = call_transform_request_on_channel(&handler, 7, req).await;
+            assert_eq!(replay["decision"], json!("SOFT+"), "{replay}");
+            assert_eq!(replay["ck_messages"], first_bytes[&session]);
+            handler.unbind_route(7);
+        }
+        assert_eq!(lineage_cache_sizes(&handler), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn session_delete_evicts_guidance_date_and_defers_root_to_route_close() {
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let served = call_transform_request(&handler, request(vec![ck("m0", 0, "zero")])).await;
+        assert_eq!(served["action"], "HARD");
+        handler.guidance_dates.lock().unwrap().insert(
+            "ses".to_string(),
+            "Today's date: Thu Sep 24 2026".to_string(),
+        );
+        assert_eq!(lineage_cache_sizes(&handler), (1, 1));
+        let deleted = call_dispatch_request(
+            &handler,
+            json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+        )
+        .await;
+        assert_eq!(deleted["ok"], json!(true), "{deleted}");
+        // The live route keeps authenticating its own lineage after the delete; the root
+        // entry goes when that route closes.
+        assert_eq!(lineage_cache_sizes(&handler), (1, 0));
+        assert!(handler.module_knows_transform_session("ses", &project));
+        handler.unbind_route(7);
+        assert_eq!(lineage_cache_sizes(&handler), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn state_sync_seed_at_the_materialized_boundary_is_ignored() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        store
+            .replace_compartments(
+                "ses",
+                &[
+                    stored_comp(0, 0, 0, "m0", "module zero"),
+                    stored_comp(1, 1, 1, "m1", "module one"),
+                ],
+            )
+            .unwrap();
+        let live = vec![
+            ck("m0", 0, "covered zero"),
+            ck("m1", 1, "covered one"),
+            ck("m2", 2, "live tail"),
+        ];
+        let folded = call_transform_request(&handler, request(live.clone())).await;
+        assert_eq!(folded["boundary_id"], json!("m1#0"));
+        let before = store.load("ses").unwrap();
+
+        let seeded = handler
+            .dispatch_value(
+                7,
+                json!({
+                    "kind": "state_sync",
+                    "session_id": "ses",
+                    "shadow_generation": 0,
+                    "expected_shadow_seq": before.meta.shadow_seq,
+                    "seed_boundary_id": "m1#0",
+                    "compartments": [
+                        state_sync_compartment(0, "mirror zero"),
+                        state_sync_compartment(1, "mirror one"),
+                    ],
+                    "acked_watermarks": { "compartment_sequence": 1 }
+                }),
+            )
+            .await;
+        assert!(matches!(seeded, HandlerOutcome::Response(_)), "{seeded:?}");
+        let after = store.load("ses").unwrap();
+        assert_eq!(after.core, before.core);
+        assert_eq!(after.meta.coverage_ordinal, Some(1));
+        assert!(!after.meta.bootstrap_seed_fold_pending);
+        assert_eq!(
+            store.load_compartments("ses").unwrap()[1].content,
+            "module one"
+        );
+        let replay = call_transform_request(&handler, request(live)).await;
+        assert_eq!(replay["decision"], json!("SOFT+"));
+        assert_eq!(replay["ck_messages"], folded["ck_messages"]);
     }
 
     #[tokio::test]
