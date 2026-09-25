@@ -45,12 +45,16 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-/// Whether this binary carries the single-store writers at all.
+/// Whether this binary can serve a store whose project rows live in the host's own
+/// database ("single-store mode"), as `session.status` reports it.
 ///
-/// The marker slice introduces this as `false` on a binary that has the refuse-to-open
-/// check but no writers. It is `true` here because the writers exist; the runtime
-/// `single_store` mode decides whether they run.
-pub const SINGLE_STORE_CAPABLE: bool = true;
+/// This is the store's own constant, not a second copy: `mc_store` is what refuses to
+/// open a store carrying the single-store marker, so the status surface has to report
+/// the same answer that refusal acts on. The writers in this file run only against a
+/// scratch copy (`shadow`) and `on` is refused, so this build cannot serve a moved
+/// store yet and reports `false`; the slice that adds the readers flips the store's
+/// constant and this follows.
+pub const SINGLE_STORE_CAPABLE: bool = mc_store::SINGLE_STORE_CAPABLE;
 
 /// The `context.db` upstream migration lane this binary was built against.
 ///
@@ -3075,7 +3079,8 @@ mod tests {
         }
         let store = HostStore::open(&path).unwrap();
         let health = store.health_value(SingleStoreMode::Shadow);
-        assert_eq!(health["capable"], json!(true));
+        // Reports the store's answer: this build cannot serve a moved store.
+        assert_eq!(health["capable"], json!(false));
         assert_eq!(health["mode"], json!("shadow"));
         assert_eq!(
             health["fence"]["persisted_version"],
@@ -3094,7 +3099,8 @@ mod tests {
     fn the_status_block_in_off_mode_opens_nothing() {
         set_mode(SingleStoreMode::Off);
         let block = status_value();
-        assert_eq!(block["capable"], json!(true));
+        // Reports the store's answer: this build cannot serve a moved store.
+        assert_eq!(block["capable"], json!(false));
         assert_eq!(block["mode"], json!("off"));
         assert!(
             block["path"].is_null(),

@@ -768,9 +768,9 @@ export function createHistorianHostRunner(args: {
 }): HistorianHostRunner {
     return new HistorianHostRunner({
         call: args.call,
-        // Persisted once per installation. Two processes serving one project present
-        // different ids, and the same install presents the same id after a restart —
-        // neither of which a file-derived or process-random id can do.
+        // Persisted once per installation in context.db: every process of one install
+        // presents the same id, before and after a restart. It is diagnostic only; the
+        // claim CAS and the attempt-scoped token are what keep two processes apart.
         claimantInstanceId: ensureInstallInstanceId(args.db),
         openExecutor: (sessionId) => {
             const sessionDirectory = args.sessionDirectory(sessionId);

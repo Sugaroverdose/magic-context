@@ -29,17 +29,18 @@ export function readInstallInstanceId(db: Database): string | null {
  * The identity one installation of this host presents when it claims a historian
  * run, minting and persisting it on first use.
  *
- * Why it is persisted rather than derived:
+ * It is persisted in `context.db`, so it names the INSTALLATION, not the process:
+ * every host process that opens the same `context.db` (two OpenCode windows on one
+ * machine, say) presents the same id, and the same install keeps presenting it
+ * after a restart. That is acceptable because nothing in the claim lane keys
+ * admission on this id. A claim is won by the compare-and-swap on the queued run's
+ * row, and a report is authorised only by the attempt-scoped token the module
+ * mints for that claim, so two processes presenting one id still cannot both hold
+ * a claim or report under each other's attempt. The id records which installation
+ * took a piece of work, for diagnosis; telling two processes of one install apart
+ * is the token's job, not this id's.
  *
- *  - A file-derived id (the store's own uuid, the database path) is the SAME for
- *    two processes opening the same file, so two hosts serving one project would
- *    both present it and a claim keyed on identity would admit both.
- *  - A process-random id is different for the same install after a restart, so a
- *    host could not recognise work it had claimed moments earlier.
- *
- * Minted once and never rotated. It is not a credential: it records which
- * installation took a piece of work, for diagnosis. What authorises a report is
- * the attempt-scoped token the module mints at claim time, so an id that leaks
+ * Minted once and never rotated. It is not a credential, so an id that leaks
  * grants nothing.
  *
  * Safe against two processes reaching it at once: the insert ignores a row that
