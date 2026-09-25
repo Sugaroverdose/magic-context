@@ -1,6 +1,6 @@
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
-import { embedUnembeddedMemoriesForProject } from "../project-embedding-registry";
+import { embedUnembeddedMemoriesForProjectOutcome } from "../project-embedding-registry";
 
 /**
  * Embed the memories another writer put into `memories` without an embedding.
@@ -58,9 +58,10 @@ export function getPendingEmbeddingWatermarks(db: Database): WatermarkRow[] {
 /**
  * Embed everything above each project's embedded mark and advance that mark.
  *
- * Returns how many rows were embedded. The mark only advances as far as the batch
- * actually reached when the embedder ran short, so an interrupted drain resumes rather
- * than skipping the rows it did not get to.
+ * Returns how many rows were embedded. The mark advances only when the embedder reports
+ * that nothing is left to embed. A provider outage, a provider that returned nothing, or
+ * embedding being disabled all leave the mark where it was, so the rows stay pending and
+ * a later drain asks for them again instead of skipping them for good.
  */
 export async function drainSingleStoreEmbeddingWatermarks(db: Database): Promise<number> {
     const pending = getPendingEmbeddingWatermarks(db);
@@ -69,18 +70,24 @@ export async function drainSingleStoreEmbeddingWatermarks(db: Database): Promise
     let embedded = 0;
     for (const watermark of pending) {
         try {
-            const count = await embedUnembeddedMemoriesForProject(db, watermark.project_path);
-            embedded += count;
-            if (count === 0) {
-                // Nothing left unembedded below the written mark: either the rows were
-                // already embedded, or embedding is disabled for this project. Advancing
-                // in both cases is what stops this from re-scanning the same range on
-                // every pass forever.
-                advanceEmbeddedWatermark(db, watermark.project_path, watermark.written_memory_id);
-                continue;
+            let outcome = await embedUnembeddedMemoriesForProjectOutcome(
+                db,
+                watermark.project_path,
+            );
+            if (outcome.kind === "embedded") {
+                embedded += outcome.count;
+                // The batch may have been the last one. Asking again costs one query when
+                // nothing is pending, and lets the mark advance on this pass rather than the
+                // next; the provider is only called again if rows really remain.
+                if (countUnembeddedBelow(db, watermark.project_path) === 0) {
+                    outcome = await embedUnembeddedMemoriesForProjectOutcome(
+                        db,
+                        watermark.project_path,
+                    );
+                    if (outcome.kind === "embedded") embedded += outcome.count;
+                }
             }
-            const stillPending = countUnembeddedBelow(db, watermark.project_path);
-            if (stillPending === 0) {
+            if (outcome.kind === "done") {
                 advanceEmbeddedWatermark(db, watermark.project_path, watermark.written_memory_id);
             }
         } catch (error) {

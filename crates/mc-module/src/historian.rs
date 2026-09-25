@@ -218,11 +218,8 @@ fn to_stored_compartment(
 /// Built from the rows that are already on their way into the module's own store, so the
 /// two writers are handed the same publish rather than two independently derived ones.
 ///
-/// The harness label is `module` here because that is what the module stamps on its own
-/// rows and nothing on this path carries the route's harness. A host-written row carries
-/// the host's label instead, so shadow verification reports `harness` as diverging; the
-/// slice that turns the writers on has to thread the route's real label through this
-/// request before that column can agree.
+/// The harness label is the route's own, carried on the request, so a module-written row
+/// and a host-written row for the same session carry the same label.
 fn fold_publish_view(
     request: &ValidatedPublishRequest<'_>,
     compartments: &[StoredCompartment],
@@ -236,7 +233,7 @@ fn fold_publish_view(
     single_store::FoldPublish {
         session_id: request.session_id.to_string(),
         project_path: request.project_path.to_string(),
-        harness: "module".to_string(),
+        harness: request.harness.to_string(),
         now_ms: request.created_at_ms,
         compartments: compartments
             .iter()
@@ -872,6 +869,11 @@ pub trait HistorianPublicationFence: Send + Sync {
 pub struct ValidatedPublishRequest<'a> {
     pub session_id: &'a str,
     pub project_path: &'a str,
+    /// The harness label the host stamps on this session's rows (`opencode`, `opencode2`,
+    /// `pi`, ...). The single-store writers stamp the same one, because it is part of
+    /// `primer_candidates`' upsert key: any other label would add a second candidate row
+    /// beside the host's instead of updating it.
+    pub harness: &'a str,
     pub expected_row_version: Option<u64>,
     pub expected_revert_epoch: u64,
     pub predicate: &'a HistorianPublishPredicate,
@@ -1018,17 +1020,22 @@ pub fn publish_validated_chunk(
                     request.session_id
                 );
             }
-            // Shadow verification, when configured. Off by default and inert then.
-            if let Some(report) = crate::host_store::verify_publish_in_shadow(&fold_publish_view(
-                &request,
-                &compartments,
-                &facts,
-                &events,
-                &primer_candidates,
-                &user_memory_candidates,
-            )) {
-                if !report.divergences.is_empty() {
-                    eprintln!("[magic-context] {}", report.summary());
+            // The single-store writers, when configured. Off by default: one atomic load
+            // and nothing else, not even building the view.
+            if crate::host_store::mode() != crate::host_store::SingleStoreMode::Off {
+                if let Some(crate::host_store::ModePublish::Shadow(report)) =
+                    crate::host_store::apply_publish_for_mode(&fold_publish_view(
+                        &request,
+                        &compartments,
+                        &facts,
+                        &events,
+                        &primer_candidates,
+                        &user_memory_candidates,
+                    ))
+                {
+                    if !report.divergences.is_empty() {
+                        eprintln!("[magic-context] {}", report.summary());
+                    }
                 }
             }
             Ok(result)
@@ -1439,6 +1446,8 @@ pub struct HistorianFireRequest<'a> {
     pub store: &'a McStore,
     pub session_id: &'a str,
     pub project_path: &'a str,
+    /// The route's harness label, stamped on the rows the single-store writers produce.
+    pub harness: &'a str,
     pub project_slug: &'a str,
     /// The role-scoped historian SYSTEM prompt (HISTORIAN_SYSTEM_PROMPT). Sent via the
     /// producer's `system` field, never concatenated into `prompt`. Empty means absent.
@@ -1480,6 +1489,8 @@ pub struct HistorianReattachRequest<'a> {
     pub store: &'a McStore,
     pub session_id: &'a str,
     pub project_path: &'a str,
+    /// The route's harness label, stamped on the rows the single-store writers produce.
+    pub harness: &'a str,
     pub observed_chunk_fingerprint: &'a str,
     pub validation_chunk: &'a HistorianChunk,
     pub chunk_transcript: &'a str,
@@ -2418,6 +2429,7 @@ where
             store: request.store,
             session_id: request.session_id,
             project_path: request.project_path,
+            harness: request.harness,
             awaiting,
             output: output.clone(),
             observed_chunk_fingerprint: request.observed_chunk_fingerprint,
@@ -2663,6 +2675,7 @@ pub async fn run_historian_firing_on_host(
         store: request.store,
         session_id: request.session_id,
         project_path: request.project_path,
+        harness: request.harness,
         awaiting: claimed.clone(),
         output,
         observed_chunk_fingerprint: request.observed_chunk_fingerprint,
@@ -2806,6 +2819,7 @@ pub fn adopt_historian_run_on_host(
         store: request.store,
         session_id: request.session_id,
         project_path: request.project_path,
+        harness: request.harness,
         awaiting,
         output,
         observed_chunk_fingerprint: request.observed_chunk_fingerprint,
@@ -2986,6 +3000,7 @@ where
         store: request.store,
         session_id: request.session_id,
         project_path: request.project_path,
+        harness: request.harness,
         awaiting,
         output,
         observed_chunk_fingerprint: request.observed_chunk_fingerprint,
@@ -3015,6 +3030,7 @@ struct PublishOutputRequest<'a> {
     store: &'a McStore,
     session_id: &'a str,
     project_path: &'a str,
+    harness: &'a str,
     awaiting: HistorianDurableState,
     output: ProducerOutput,
     observed_chunk_fingerprint: &'a str,
@@ -3038,6 +3054,7 @@ fn publish_output_from_awaiting(
         store,
         session_id,
         project_path,
+        harness,
         awaiting,
         output,
         observed_chunk_fingerprint,
@@ -3109,6 +3126,7 @@ fn publish_output_from_awaiting(
         ValidatedPublishRequest {
             session_id,
             project_path,
+            harness,
             expected_row_version: Some(publishing_row_version),
             expected_revert_epoch: publishing.expected_revert_epoch,
             predicate: &predicate,
@@ -3326,6 +3344,48 @@ mod tests {
     fn empty_boundary_dates() -> &'static BTreeMap<String, String> {
         static EMPTY: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
         EMPTY.get_or_init(BTreeMap::new)
+    }
+
+    /// The single-store view stamps the route's own harness label, not a module-wide
+    /// one. `harness` is part of `primer_candidates`' upsert key, so any other label makes
+    /// the module add a second candidate row beside the host's instead of updating it.
+    #[test]
+    fn the_single_store_view_carries_the_routes_harness_label() {
+        let predicate = HistorianPublishPredicate {
+            firing_seq: 1,
+            producer_run_id: "run-1".into(),
+            producer_attempt: 0,
+            chunk_fingerprint: "fp".into(),
+            selected_range_identities: Vec::new(),
+            compartment_set_generation: CompartmentSetGeneration {
+                max_sequence: 0,
+                count: 0,
+            },
+        };
+        let validated = ValidatedChunk::default();
+        for harness in ["opencode", "opencode2", "pi"] {
+            let request = ValidatedPublishRequest {
+                session_id: "ses",
+                project_path: "git:proj",
+                harness,
+                expected_row_version: None,
+                expected_revert_epoch: 0,
+                predicate: &predicate,
+                observed_chunk_fingerprint: "fp",
+                validated: &validated,
+                promote_facts: false,
+                collect_user_memory_candidates: false,
+                publication_floor_ordinal: 1,
+                chunk_transcript: "",
+                raw_chunk_messages: "[]",
+                boundary_dates: empty_boundary_dates(),
+                created_at_ms: 1,
+                failure_backoff_at_ms: 0,
+                publication_fence: None,
+            };
+            let view = fold_publish_view(&request, &[], &[], &[], &[], &[]);
+            assert_eq!(view.harness, harness);
+        }
     }
 
     fn pctx<'a>() -> ProducerContext<'a> {
@@ -3718,6 +3778,7 @@ mod tests {
             store,
             session_id: "ses",
             project_path: FIRE_PROJECT,
+            harness: "opencode",
             project_slug: "proj",
             system: Cow::Borrowed("role guidance"),
             content_language: None,
@@ -3762,6 +3823,7 @@ mod tests {
             store,
             session_id: "ses",
             project_path: "git:proj",
+            harness: "opencode",
             observed_chunk_fingerprint: "fp",
             validation_chunk: chunk,
             chunk_transcript: "U: transcript",
@@ -5061,6 +5123,7 @@ mod tests {
             store: &store,
             session_id: left_lineage,
             project_path: "git:proj",
+            harness: "opencode",
             observed_chunk_fingerprint: "fp",
             validation_chunk: &chunk,
             chunk_transcript: "U: left transcript",
@@ -5079,6 +5142,7 @@ mod tests {
             store: &store,
             session_id: right_lineage,
             project_path: "git:proj",
+            harness: "opencode",
             observed_chunk_fingerprint: "fp",
             validation_chunk: &chunk,
             chunk_transcript: "U: right transcript",
@@ -5822,6 +5886,7 @@ mod tests {
             store: &store,
             session_id: "ses",
             project_path: "git:proj",
+            harness: "opencode",
             observed_chunk_fingerprint: "fp-changed",
             validation_chunk: &chunk,
             chunk_transcript: "U: transcript",
@@ -6181,6 +6246,7 @@ mod tests {
             ValidatedPublishRequest {
                 session_id: "ses",
                 project_path: "git:proj",
+                harness: "opencode",
                 expected_row_version: Some(rv),
                 expected_revert_epoch: 0,
                 predicate: &predicate,
@@ -6270,6 +6336,7 @@ mod tests {
                 ValidatedPublishRequest {
                     session_id,
                     project_path: "git:proj",
+                    harness: "opencode",
                     expected_row_version: Some(loaded),
                     expected_revert_epoch: 0,
                     predicate: &predicate,
@@ -6425,6 +6492,7 @@ mod tests {
             ValidatedPublishRequest {
                 session_id: "ses",
                 project_path: "git:proj",
+                harness: "opencode",
                 expected_row_version: loaded.row_version,
                 expected_revert_epoch: 0,
                 predicate: &predicate,
@@ -6514,6 +6582,7 @@ mod tests {
             ValidatedPublishRequest {
                 session_id: "ses",
                 project_path: "git:proj",
+                harness: "opencode",
                 expected_row_version: loaded.row_version,
                 expected_revert_epoch: 0,
                 predicate: &predicate,
@@ -6596,6 +6665,7 @@ mod tests {
             ValidatedPublishRequest {
                 session_id: "ses",
                 project_path: "git:proj",
+                harness: "opencode",
                 expected_row_version: fresh.row_version,
                 expected_revert_epoch: 0,
                 predicate: &predicate,

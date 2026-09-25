@@ -2555,19 +2555,48 @@ function getLoadUnembeddedMemoriesStatement(db: Database): PreparedStatement {
     return stmt;
 }
 
+/**
+ * Why one embedding batch for a project's memories ended the way it did.
+ *
+ * A count alone cannot carry this: "embedded nothing" means the work is finished in only
+ * one of these cases (`done`). A caller that records progress, such as the single-store
+ * watermark drain, must not treat an outage or a disabled provider as finished work.
+ */
+export type EmbedMemoriesOutcome =
+    /** Embedding is not enabled for this project, so nothing was attempted. */
+    | { kind: "disabled" }
+    /** No active memory in this project is missing a vector for the current model. */
+    | { kind: "done" }
+    /** A batch ran; `count` rows were saved. More rows may still be pending. */
+    | { kind: "embedded"; count: number }
+    /** The provider produced no result for the batch (for example, it is not loaded). */
+    | { kind: "unavailable" }
+    /** The provider call threw. The error has already been logged. */
+    | { kind: "failed"; error: unknown };
+
 export async function embedUnembeddedMemoriesForProject(
     db: Database,
     projectIdentity: string,
     batchSize = 10,
 ): Promise<number> {
+    const outcome = await embedUnembeddedMemoriesForProjectOutcome(db, projectIdentity, batchSize);
+    return outcome.kind === "embedded" ? outcome.count : 0;
+}
+
+/** Embed one batch of a project's unembedded memories and say why it ended. */
+export async function embedUnembeddedMemoriesForProjectOutcome(
+    db: Database,
+    projectIdentity: string,
+    batchSize = 10,
+): Promise<EmbedMemoriesOutcome> {
     const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-    if (!snapshot?.enabled) return 0;
+    if (!snapshot?.enabled) return { kind: "disabled" };
 
     const normalizedBatchSize = Math.max(1, Math.floor(batchSize));
     const memories = getLoadUnembeddedMemoriesStatement(db)
         .all(snapshot.modelId, projectIdentity, normalizedBatchSize)
         .filter(isUnembeddedMemoryRow);
-    if (memories.length === 0) return 0;
+    if (memories.length === 0) return { kind: "done" };
 
     try {
         const result = await embedItemsForProject(
@@ -2581,7 +2610,7 @@ export async function embedUnembeddedMemoriesForProject(
             db,
             projectIdentity,
         );
-        if (!result) return 0;
+        if (!result) return { kind: "unavailable" };
 
         let embeddedCount = 0;
         db.transaction(() => {
@@ -2608,10 +2637,10 @@ export async function embedUnembeddedMemoriesForProject(
                 .filter((memory) => result.vectors.has(`memory:${memory.id}`))
                 .map((memory) => String(memory.id)),
         );
-        return embeddedCount;
+        return { kind: "embedded", count: embeddedCount };
     } catch (error) {
         log("[magic-context] failed to proactively embed missing memories:", error);
-        return 0;
+        return { kind: "failed", error };
     }
 }
 
