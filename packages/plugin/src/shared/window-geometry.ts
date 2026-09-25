@@ -645,9 +645,12 @@ export function hasTrustedAbsoluteWall(geometry: WindowGeometryResult): boolean 
 }
 
 /**
- * Successful requests can disprove static catalog metadata, but cannot
- * disprove a provider, overlay, or observed-overflow wall. A reading beyond
- * that wall is malformed usage accounting and must not enlarge the geometry.
+ * Successful requests can disprove static catalog metadata, but do not widen a
+ * provider, overlay, or observed-overflow wall here. A provider or overlay wall
+ * is the configured limit: a reading beyond it is real pressure against that
+ * limit (the usage handlers count it in full), not proof that the geometry
+ * should grow. An observed-overflow wall that a larger accepted request
+ * disproves is cleared by the usage handlers instead.
  */
 export function applyProvenInputFloor(
     geometry: WindowGeometryResult,
@@ -691,29 +694,6 @@ export function applyProvenInputFloor(
             },
         },
     };
-}
-
-/**
- * A prompt-token reading larger than the model's whole context window cannot
- * describe a request the provider accepted: nothing that big fits. Such readings
- * come from host accounting (for example a client-side estimate over the raw,
- * unreduced session after a transport retry), so pressure consumers must ignore
- * them instead of treating them as an overflow. Readings between the usable
- * limit and the window are still real and are not affected.
- *
- * `modelWindowTokens` is the full window (before any output reserve), never the
- * reduced usable limit. An unknown window disables the check.
- */
-export function isUsageReadingAboveModelWindow(
-    readingTokens: number | null | undefined,
-    modelWindowTokens: number | null | undefined,
-): boolean {
-    return (
-        isFinitePositive(readingTokens) &&
-        isFinitePositive(modelWindowTokens) &&
-        modelWindowTokens >= MIN_PLAUSIBLE_CONTEXT_LIMIT &&
-        readingTokens > modelWindowTokens
-    );
 }
 
 export function formatWindowDerivationLine(

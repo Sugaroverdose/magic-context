@@ -276,8 +276,7 @@ import {
 import {
 	formatPiPressureForLog,
 	isPiLiveUsageRawBranchEstimate,
-	resolvePiModelWindowTokens,
-	resolvePiPressureSnapshotWithWindowGuard,
+	resolvePiPressureSnapshotWithEstimateGuard,
 } from "./pi-pressure";
 import { assertPiRawFallbackFits, PiStorageBusyError } from "./pi-raw-fallback";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
@@ -2946,7 +2945,7 @@ export function registerPiContextHandler(
 				usagePercentage = (usageInputTokens / usageContextLimit) * 100;
 			}
 			({ percentage: usagePercentage, inputTokens: usageInputTokens } =
-				resolvePiPressureSnapshotWithWindowGuard({
+				resolvePiPressureSnapshotWithEstimateGuard({
 					sessionId,
 					source: "transform",
 					liveIsRawBranchEstimate: piLiveUsageIsRawBranchEstimate,
@@ -2955,11 +2954,6 @@ export function registerPiContextHandler(
 					persistedInputTokens: usageInputTokens,
 					liveInputTokens: piUsage?.tokens,
 					usableContextLimit: usageContextLimit,
-					modelWindowTokens: resolvePiModelWindowTokens({
-						reportedWindow: piUsage?.contextWindow,
-						modelWindow: ctx.model?.contextWindow,
-						observedSafeInputTokens: provenInputTokens,
-					}),
 				}));
 			const realUsagePercentageBeforeEmergencyBump = usagePercentage;
 			// Emergency bump LAST so it floors recovery pressure without capping
@@ -4482,7 +4476,7 @@ function maybeFireHistorian(args: {
 			};
 			usageSource = "piUsage fallback";
 		}
-		usage = resolvePiPressureSnapshotWithWindowGuard({
+		usage = resolvePiPressureSnapshotWithEstimateGuard({
 			sessionId,
 			source: "historian trigger",
 			liveIsRawBranchEstimate: args.liveIsRawBranchEstimate,
@@ -4492,11 +4486,6 @@ function maybeFireHistorian(args: {
 			liveInputTokens: piUsage?.tokens,
 			usableContextLimit: usageContextLimit,
 			minimumPercentage: args.minimumPercentage,
-			modelWindowTokens: resolvePiModelWindowTokens({
-				reportedWindow: piUsage?.contextWindow,
-				modelWindow: ctx.model?.contextWindow,
-				observedSafeInputTokens: sessionMeta.observedSafeInputTokens,
-			}),
 		});
 		sessionLog(
 			sessionId,

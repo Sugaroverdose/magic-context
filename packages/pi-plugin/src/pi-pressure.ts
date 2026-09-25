@@ -29,10 +29,7 @@
  */
 
 import { sessionLog } from "@magic-context/core/shared/logger";
-import {
-	isUsageReadingAboveModelWindow,
-	MIN_PLAUSIBLE_CONTEXT_LIMIT,
-} from "@magic-context/core/shared/window-geometry";
+import { MIN_PLAUSIBLE_CONTEXT_LIMIT } from "@magic-context/core/shared/window-geometry";
 
 export interface PiAssistantUsage {
 	input?: number;
@@ -126,8 +123,6 @@ export function computePiPressure(
 export interface PiPressureSnapshot extends PiPressure {
 	/** Usable prompt-token denominator used for both percentage and display. */
 	contextLimit?: number;
-	/** Largest reading left out because it exceeded the model window. */
-	ignoredReading?: number;
 }
 
 export interface ResolvePiPressureSnapshotArgs {
@@ -137,12 +132,6 @@ export interface ResolvePiPressureSnapshotArgs {
 	usableContextLimit?: number;
 	/** Scheduler recovery latch, used for historian admission, never a display denominator. */
 	minimumPercentage?: number;
-	/**
-	 * The model's full context window (not the reduced usable limit). A reading
-	 * above it cannot be a prompt the provider accepted, so it is left out of the
-	 * snapshot. Omit to keep every reading.
-	 */
-	modelWindowTokens?: number;
 }
 
 /**
@@ -157,28 +146,17 @@ export interface ResolvePiPressureSnapshotArgs {
 export function resolvePiPressureSnapshot(
 	args: ResolvePiPressureSnapshotArgs,
 ): PiPressureSnapshot {
-	let ignoredReading: number | undefined;
-	const plausible = (value: number): number => {
-		if (!isUsageReadingAboveModelWindow(value, args.modelWindowTokens))
-			return value;
-		ignoredReading = Math.max(ignoredReading ?? 0, value);
-		return 0;
-	};
-	const persistedInputTokens = plausible(
+	const persistedInputTokens =
 		Number.isFinite(args.persistedInputTokens) && args.persistedInputTokens > 0
 			? args.persistedInputTokens
-			: 0,
-	);
-	const liveInputTokens = plausible(
+			: 0;
+	const liveInputTokens =
 		typeof args.liveInputTokens === "number" &&
-			Number.isFinite(args.liveInputTokens) &&
-			args.liveInputTokens > 0
+		Number.isFinite(args.liveInputTokens) &&
+		args.liveInputTokens > 0
 			? args.liveInputTokens
-			: 0,
-	);
+			: 0;
 	const inputTokens = Math.max(persistedInputTokens, liveInputTokens);
-	const ignored =
-		ignoredReading === undefined ? {} : { ignoredReading: ignoredReading };
 	const contextLimit =
 		typeof args.usableContextLimit === "number" &&
 		Number.isFinite(args.usableContextLimit) &&
@@ -196,7 +174,6 @@ export function resolvePiPressureSnapshot(
 					: 0,
 			),
 			contextLimit,
-			...ignored,
 		};
 	}
 
@@ -208,55 +185,16 @@ export function resolvePiPressureSnapshot(
 		inputTokens,
 		percentage: validInferredLimit ? (inputTokens / inferredLimit) * 100 : 0,
 		...(validInferredLimit ? { contextLimit: inferredLimit } : {}),
-		...ignored,
 	};
 }
 
-/**
- * The window a Pi usage reading is checked against: the model's full context
- * window as Pi reports it, raised to any prompt size this session has already
- * had accepted (a wrong-small catalog window must not hide real readings).
- */
-export function resolvePiModelWindowTokens(args: {
-	reportedWindow?: number | null;
-	modelWindow?: number | null;
-	observedSafeInputTokens?: number | null;
-}): number | undefined {
-	const candidates = [
-		args.reportedWindow,
-		args.modelWindow,
-		args.observedSafeInputTokens,
-	].filter(
-		(value): value is number =>
-			typeof value === "number" &&
-			Number.isFinite(value) &&
-			value >= MIN_PLAUSIBLE_CONTEXT_LIMIT,
-	);
-	return candidates.length > 0 ? Math.max(...candidates) : undefined;
-}
+// Sessions whose current run of set-aside estimates has already been logged.
+// Cleared when a usable reading arrives, so each run logs exactly once.
+const estimateSetAsideLogged = new Set<string>();
 
-// Sessions whose current impossible-reading episode has already been logged.
-// Cleared when a plausible reading arrives, so each episode logs exactly once.
-const impossibleReadingLogged = new Set<string>();
-
-/** Log an ignored above-window reading once per episode for the session. */
-export function noteImpossiblePiUsageReading(
-	sessionId: string,
-	reading: number,
-	modelWindowTokens: number,
-	source: string,
-): void {
-	if (impossibleReadingLogged.has(sessionId)) return;
-	impossibleReadingLogged.add(sessionId);
-	sessionLog(
-		sessionId,
-		`usage reading ${reading} exceeds model window ${modelWindowTokens} (${source}); no request that large can have been accepted, keeping the previous reading until a plausible one arrives`,
-	);
-}
-
-/** A plausible reading ends the impossible-reading episode for the session. */
-export function notePlausiblePiUsageReading(sessionId: string): void {
-	impossibleReadingLogged.delete(sessionId);
+/** A usable reading ends the set-aside episode for the session. */
+export function notePiUsageReadingUsed(sessionId: string): void {
+	estimateSetAsideLogged.delete(sessionId);
 }
 
 function entryUsageTokens(usage: unknown): number {
@@ -321,8 +259,8 @@ export function noteRawBranchEstimateSetAside(
 	reading: number,
 	source: string,
 ): void {
-	if (impossibleReadingLogged.has(sessionId)) return;
-	impossibleReadingLogged.add(sessionId);
+	if (estimateSetAsideLogged.has(sessionId)) return;
+	estimateSetAsideLogged.add(sessionId);
 	sessionLog(
 		sessionId,
 		`usage reading ${reading} set aside (${source}): Pi re-estimated its whole unreduced session branch because a context edit or compaction follows the last recorded usage (for example after a retried request); keeping the previous reading until provider usage arrives`,
@@ -330,16 +268,18 @@ export function noteRawBranchEstimateSetAside(
 }
 
 /**
- * `resolvePiPressureSnapshot` for the pressure decision. Two kinds of live
- * figure are left out so the previous trusted reading stands:
- * - any reading above the model window (no accepted request can be that big);
- * - Pi's raw-branch estimate (see isPiLiveUsageRawBranchEstimate), at any
- *   size, because it ignores everything Magic Context removed from the served
- *   request.
- * The first set-aside figure of an episode is logged with the raw number and
- * the reason.
+ * `resolvePiPressureSnapshot` for the pressure decision, with Pi's raw-branch
+ * estimate (see isPiLiveUsageRawBranchEstimate) left out at any size: it is
+ * Pi's own figure, not a provider report, and it ignores everything Magic
+ * Context removed from the served request. The previous provider reading
+ * stands instead, and the first set-aside figure of an episode is logged.
+ *
+ * No reading is compared with the model window. A provider report is the size
+ * of a request the provider accepted, and the window is a configured figure
+ * that can be smaller than what the model serves, so a reading past it is real
+ * overflow for the scheduler to handle.
  */
-export function resolvePiPressureSnapshotWithWindowGuard(
+export function resolvePiPressureSnapshotWithEstimateGuard(
 	args: ResolvePiPressureSnapshotArgs & {
 		sessionId: string;
 		source: string;
@@ -370,29 +310,10 @@ export function resolvePiPressureSnapshotWithWindowGuard(
 				}
 			: args,
 	);
-	if (
-		snapshot.ignoredReading !== undefined &&
-		args.modelWindowTokens !== undefined
-	) {
-		noteImpossiblePiUsageReading(
-			args.sessionId,
-			snapshot.ignoredReading,
-			args.modelWindowTokens,
-			args.source,
-		);
-	} else if (setAsideEstimate) {
-		if (isUsageReadingAboveModelWindow(live, args.modelWindowTokens)) {
-			noteImpossiblePiUsageReading(
-				args.sessionId,
-				live,
-				args.modelWindowTokens as number,
-				args.source,
-			);
-		} else {
-			noteRawBranchEstimateSetAside(args.sessionId, live, args.source);
-		}
+	if (setAsideEstimate) {
+		noteRawBranchEstimateSetAside(args.sessionId, live, args.source);
 	} else if (snapshot.inputTokens > 0) {
-		notePlausiblePiUsageReading(args.sessionId);
+		notePiUsageReadingUsed(args.sessionId);
 	}
 	return snapshot;
 }

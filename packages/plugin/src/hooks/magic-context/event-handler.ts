@@ -46,10 +46,7 @@ import {
     refreshModelLimitsAfterAuthOnce,
     refreshModelLimitsFromApi,
 } from "../../shared/models-dev-cache";
-import {
-    hasTrustedAbsoluteWall,
-    isUsageReadingAboveModelWindow,
-} from "../../shared/window-geometry";
+import { hasTrustedAbsoluteWall } from "../../shared/window-geometry";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import {
@@ -81,7 +78,8 @@ import { clearMessageTokensCache } from "./transform";
 import { resetDegradedCacheCount } from "./transform-postprocess-phase";
 
 const CONTEXT_USAGE_TTL_MS = 60 * 60 * 1000;
-const usageRefusalLogSeen = new Set<string>();
+// Session/model pairs whose current run of above-window readings was logged.
+const usageAboveWallLogSeen = new Set<string>();
 
 type CacheTtlConfig = string | Record<string, string>;
 
@@ -657,27 +655,29 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     baseGeometry && hasTrustedAbsoluteWall(baseGeometry)
                         ? baseGeometry.derivation.absoluteWall
                         : undefined;
-                const usageReadingValid = !isUsageReadingAboveModelWindow(
-                    totalInputTokens,
-                    trustedAbsoluteWall,
-                );
-                const refusalKey = `${info.sessionID}|${modelKey ?? "unknown"}`;
-                if (hasUsageTokens && !usageReadingValid) {
-                    // No request larger than the trusted window can have been
-                    // accepted, so this is broken accounting. The previous
-                    // pressure (in memory and persisted) stays as it is, so the
-                    // figure cannot drive the emergency band, a forced
-                    // historian, or refusal. Logged once per run of such
-                    // readings; a plausible reading re-arms the log.
-                    if (!usageRefusalLogSeen.has(refusalKey)) {
-                        usageRefusalLogSeen.add(refusalKey);
+                // Provider usage is the prompt size of a request the provider
+                // accepted, so it is real pressure at any size. The trusted
+                // window is configured (overlay or provider metadata) and can be
+                // smaller than what the model actually serves. A reading past it
+                // is real overflow of the user's limit: it counts in full
+                // against the configured usable limit (pressure above 100%
+                // drives the emergency band) but is not recorded as proven
+                // capacity, which would silently widen the configured window.
+                const aboveTrustedWall =
+                    trustedAbsoluteWall !== undefined && totalInputTokens > trustedAbsoluteWall;
+                const aboveWallLogKey = `${info.sessionID}|${modelKey ?? "unknown"}`;
+                if (hasUsageTokens && aboveTrustedWall) {
+                    if (!usageAboveWallLogSeen.has(aboveWallLogKey)) {
+                        usageAboveWallLogSeen.add(aboveWallLogKey);
                         sessionLog(
                             info.sessionID,
-                            `usage reading ${totalInputTokens} exceeds model window ${trustedAbsoluteWall}; no request that large can have been accepted, keeping the previous reading until a plausible one arrives`,
+                            `provider usage ${totalInputTokens} exceeds configured window ${trustedAbsoluteWall}; counted as real pressure against the configured limit`,
                         );
                     }
-                } else if (hasUsageTokens) {
-                    usageRefusalLogSeen.delete(refusalKey);
+                } else {
+                    usageAboveWallLogSeen.delete(aboveWallLogKey);
+                }
+                if (hasUsageTokens) {
                     const pressureInputTokens = totalInputTokens;
                     // Auth is provably live now (a request returned usage), so
                     // re-warm the model-limit cache once per process to overwrite
@@ -690,8 +690,11 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         );
                     }
                     const requestSucceeded = !messageHadOverflowError;
-                    const successfulUsageProof = requestSucceeded && usageReadingValid;
-                    if (successfulUsageProof) {
+                    const successfulUsageProof = requestSucceeded && !aboveTrustedWall;
+                    // A limit learned from an earlier overflow error is stale
+                    // once the provider accepts a larger request, whatever the
+                    // configured window says, so it is cleared.
+                    if (requestSucceeded) {
                         const rawOverflow = getOverflowState(deps.db, info.sessionID);
                         const detectedLimitMatchesModel =
                             rawOverflow.detectedContextLimitModelKey === null ||

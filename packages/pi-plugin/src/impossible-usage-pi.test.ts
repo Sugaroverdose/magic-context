@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	getOrCreateSessionMeta,
 	getTagsBySession,
@@ -7,6 +10,10 @@ import {
 import * as loggerModule from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
+import {
+	clearWindowOverlayCacheForTest,
+	setWindowOverlayPath,
+} from "@magic-context/core/shared/window-geometry";
 
 import {
 	awaitInFlightHistorians,
@@ -28,10 +35,11 @@ import {
 // Replays the usage sequence from a Pi session on openai-codex gpt-6-sol
 // (272K window, 64K output reserve → 206,464 usable). After a WebSocket 1012
 // retry, Pi's own context estimate jumped to 425,334 tokens — more than the
-// model's whole window — and the next reading was back to 37,812. A reading
-// above the window cannot be the prompt of any request the provider accepted,
+// model's whole window — and the next reading was back to 37,812. That figure
+// is Pi's estimate of its whole raw, unreduced branch, not a provider report,
 // so it must not drive emergency reduction, historian force-firing, or the
-// persisted pressure used by later passes.
+// persisted pressure used by later passes. Provider reports, by contrast,
+// count at any size (see "Pi provider usage above the configured window").
 const MODEL = {
 	provider: "openai-codex",
 	id: "gpt-6-sol",
@@ -209,7 +217,7 @@ describe("Pi usage readings above the model window (issue 534 replay)", () => {
 		mock.restore();
 	});
 
-	it("ignores a 425K reading on a 272K window: no emergency, drops, or historian force", async () => {
+	it("ignores Pi's 425K estimate on a 272K window: no emergency, drops, or historian force", async () => {
 		const sessionId = "ses-issue-534-impossible";
 		const logs: string[] = [];
 		spyOn(loggerModule, "sessionLog").mockImplementation(
@@ -249,10 +257,10 @@ describe("Pi usage readings above the model window (issue 534 replay)", () => {
 			expect(runner.run).not.toHaveBeenCalled();
 			expect(logs.some((line) => line.includes("EMERGENCY"))).toBe(false);
 			expect(logs.some((line) => line.includes("force-firing"))).toBe(false);
-			const impossible = logs.filter((line) =>
-				line.includes("usage reading 425334 exceeds model window 272000"),
+			const setAside = logs.filter((line) =>
+				line.includes("usage reading 425334 set aside"),
 			);
-			expect(impossible).toHaveLength(1);
+			expect(setAside).toHaveLength(1);
 			expect(getOrCreateSessionMeta(db, sessionId).lastInputTokens).toBe(
 				147_839,
 			);
@@ -417,20 +425,19 @@ describe("isPiLiveUsageRawBranchEstimate", () => {
 	});
 
 	it("never uses the raw-branch estimate as pressure, even with no provider reading", async () => {
-		const { resolvePiPressureSnapshotWithWindowGuard } = await import(
+		const { resolvePiPressureSnapshotWithEstimateGuard } = await import(
 			"./pi-pressure"
 		);
 		const base = {
 			sessionId: "ses-issue-534-guard",
 			source: "test",
 			usableContextLimit: 206_464,
-			modelWindowTokens: 272_000,
 			liveIsRawBranchEstimate: true,
 		};
 		// A persisted provider reading stands; the estimate is ignored even
 		// when it is smaller.
 		expect(
-			resolvePiPressureSnapshotWithWindowGuard({
+			resolvePiPressureSnapshotWithEstimateGuard({
 				...base,
 				persistedInputTokens: 147_839,
 				persistedPercentage: 71.6,
@@ -440,7 +447,7 @@ describe("isPiLiveUsageRawBranchEstimate", () => {
 		// Without one, the caller's fallback (which is the same live figure) is
 		// set aside too, leaving pressure unknown rather than inflated.
 		expect(
-			resolvePiPressureSnapshotWithWindowGuard({
+			resolvePiPressureSnapshotWithEstimateGuard({
 				...base,
 				persistedFromLive: true,
 				persistedInputTokens: 190_000,
@@ -451,8 +458,108 @@ describe("isPiLiveUsageRawBranchEstimate", () => {
 	});
 });
 
+// A measured overlay cell for the model: the strongest configured window the
+// resolver knows, and the one a provider report above 272K contradicts.
+function use272kOverlay(): () => void {
+	const dir = mkdtempSync(join(tmpdir(), "pi-534-overlay-"));
+	const overlayPath = join(dir, "window-overlay.json");
+	writeFileSync(
+		overlayPath,
+		JSON.stringify({
+			schema: "fusiform-window-overlay/v1",
+			generated_at: "2026-09-11T00:00:00Z",
+			minted_provider_ids: [],
+			cells: [
+				{
+					provider_id: MODEL.provider,
+					model_id: MODEL.id,
+					facts: {
+						"window.enforced": {
+							value: { kind: "stated", value: MODEL.contextWindow },
+							grade: "measured",
+							units: "provider",
+							boundary: "Observed",
+							source_ref: "issue 534 follow-up fixture",
+							observed_at: "2026-09-11T00:00:00Z",
+						},
+					},
+				},
+			],
+		}),
+	);
+	setWindowOverlayPath(overlayPath);
+	return () => {
+		setWindowOverlayPath(undefined);
+		clearWindowOverlayCacheForTest();
+		rmSync(dir, { recursive: true, force: true });
+	};
+}
+
+describe("Pi provider usage above the configured window", () => {
+	afterEach(() => {
+		mock.restore();
+	});
+
+	it("treats a provider-reported 300K on a 272K window as real pressure on every pass", async () => {
+		const sessionId = "ses-issue-534-provider-above-window";
+		const logs: string[] = [];
+		spyOn(loggerModule, "sessionLog").mockImplementation(
+			(_session: string, ...parts: unknown[]) => {
+				logs.push(parts.map(String).join(" "));
+			},
+		);
+		const restoreOverlay = use272kOverlay();
+		const { db, runPass, messageEnd, droppedToolCount } = setup(sessionId);
+		const emergencyPasses = () =>
+			logs.filter((line) => line.includes("EMERGENCY=true")).length;
+		try {
+			await runPass(1_000);
+			await messageEnd(
+				assistantMessage("ok", 91, codexUsage(147_839)),
+				147_839,
+			);
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+			});
+			await runPass(147_839);
+			expect(emergencyPasses()).toBe(0);
+
+			// The provider accepted a 300K request: a model whose real window is
+			// larger than the configured 272K. The reading is the real prompt size.
+			await messageEnd(
+				assistantMessage("ok", 92, codexUsage(300_000)),
+				300_000,
+			);
+			expect(getOrCreateSessionMeta(db, sessionId).lastInputTokens).toBe(
+				300_000,
+			);
+			await runPass(300_000);
+			await awaitInFlightHistorians();
+			expect(emergencyPasses()).toBe(1);
+			expect(droppedToolCount()).toBeGreaterThan(0);
+
+			// Context stays above the configured window: every reading counts.
+			await messageEnd(
+				assistantMessage("ok", 93, codexUsage(310_000)),
+				310_000,
+			);
+			expect(getOrCreateSessionMeta(db, sessionId).lastInputTokens).toBe(
+				310_000,
+			);
+			await runPass(310_000);
+			await awaitInFlightHistorians();
+			expect(emergencyPasses()).toBe(2);
+		} finally {
+			restoreOverlay();
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+});
+
 describe("Pi message_end provider usage above a trusted window", () => {
-	it("keeps the previous reading on success and still clamps after an overflow error", async () => {
+	it("counts every successful reading in full and still clamps after an overflow error", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-issue-534-provider-usage";
 		const piModel = {
@@ -469,22 +576,37 @@ describe("Pi message_end provider usage above a trusted window", () => {
 				piContextWindowSource: "observed",
 				piModel,
 			});
-			await persistPiPressureFromMessageEnd({
-				db,
-				sessionId,
-				message: assistantMessage("ok", 2, { usage: { input: 425_334 } }),
-				piContextWindow: 272_000,
-				piContextWindowSource: "observed",
-				piModel,
-			});
+			const accepted = (ordinal: number, input: number) =>
+				persistPiPressureFromMessageEnd({
+					db,
+					sessionId,
+					message: assistantMessage("ok", ordinal, { usage: { input } }),
+					piContextWindow: 272_000,
+					piContextWindowSource: "observed",
+					piModel,
+				});
+			await accepted(2, 300_000);
 			let meta = getOrCreateSessionMeta(db, sessionId);
-			expect(meta.lastInputTokens).toBe(147_839);
+			// Counted in full against the configured usable limit, and never
+			// recorded as proven capacity that would widen the configured window.
+			expect(meta.lastInputTokens).toBe(300_000);
+			expect(meta.lastContextPercentage).toBeGreaterThan(100);
 			expect(meta.observedSafeInputTokens).toBe(147_839);
+			const usableLimit = meta.lastUsageContextLimit;
+
+			await accepted(3, 310_000);
+			meta = getOrCreateSessionMeta(db, sessionId);
+			expect(meta.lastInputTokens).toBe(310_000);
+			expect(meta.lastUsageContextLimit).toBe(usableLimit);
+			expect(meta.lastContextPercentage).toBeCloseTo(
+				(310_000 / usableLimit) * 100,
+				5,
+			);
 
 			await persistPiPressureFromMessageEnd({
 				db,
 				sessionId,
-				message: assistantMessage("", 3, {
+				message: assistantMessage("", 4, {
 					usage: { input: 425_334 },
 					stopReason: "error",
 					errorMessage: "Your input exceeds the context window",
