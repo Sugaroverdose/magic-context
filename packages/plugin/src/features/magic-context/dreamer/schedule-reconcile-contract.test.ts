@@ -22,6 +22,9 @@
  */
 
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { insertMemory } from "../memory/storage-memory";
@@ -50,10 +53,18 @@ const TICK = 5 * MINUTE;
 const START = Date.UTC(2026, 0, 5, 0, 0);
 
 let db: Database | null = null;
+let tempDir: string | null = null;
+let peer: Database | null = null;
+const originalTz = process.env.TZ;
 afterEach(() => {
     setSystemTime();
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
     if (db) closeQuietly(db);
-    db = null;
+    if (peer) closeQuietly(peer);
+    db = peer = null;
+    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+    tempDir = null;
 });
 
 function freshDb(): Database {
@@ -64,6 +75,23 @@ function freshDb(): Database {
     // run never advances last_run_at, so the gate keeps passing.
     insertMemory(d, { projectPath: PROJECT, category: "PROJECT_RULES", content: "shared rule" });
     return d;
+}
+
+function sharedDb(): Database {
+    tempDir = mkdtempSync(join(tmpdir(), "mc-schedule-reconcile-"));
+    const file = join(tempDir, "context.db");
+    const first = new Database(file);
+    initializeDatabase(first);
+    runMigrations(first);
+    insertMemory(first, {
+        projectPath: PROJECT,
+        category: "PROJECT_RULES",
+        content: "shared rule",
+    });
+    peer = new Database(file);
+    peer.exec("PRAGMA busy_timeout=0");
+    db = first;
+    return first;
 }
 
 function verify(schedule: string): DreamTaskRuntimeConfig {
@@ -141,6 +169,146 @@ const transientFailure = (): TaskExecOutcome => ({
 const permanentFailure = (): TaskExecOutcome => ({ status: "failed", error: "bad output" });
 
 describe("shared schedule reconciliation contract", () => {
+    it("re-reads the row under a write lock before reconciling across connections", () => {
+        const first = sharedDb();
+        planDueTasks(first, PROJECT, [verify("0 */6 * * *")], START);
+        const consumed = START + 6 * HOUR;
+        const now = consumed + MINUTE;
+        let reads = 0;
+        let interleaved = false;
+        const instrumented = new Proxy(first, {
+            get(target, key) {
+                if (key === "prepare")
+                    return (sql: string) => {
+                        const statement = target.prepare(sql);
+                        if (
+                            !sql.includes(
+                                "FROM task_schedule_state WHERE project_path = ? AND task = ?",
+                            )
+                        )
+                            return statement;
+                        return new Proxy(statement, {
+                            get(stmt, method) {
+                                if (method === "get")
+                                    return (...args: string[]) => {
+                                        const result = stmt.get(...args);
+                                        if (++reads === 2) {
+                                            interleaved = true;
+                                            writeTaskScheduleState(peer!, {
+                                                ...row(peer!),
+                                                nextDueAt: START + 12 * HOUR,
+                                                lastRunAt: consumed,
+                                                lastStatus: "completed",
+                                            });
+                                        }
+                                        return result;
+                                    };
+                                const value = Reflect.get(stmt, method);
+                                return typeof value === "function" ? value.bind(stmt) : value;
+                            },
+                        });
+                    };
+                const value = Reflect.get(target, key);
+                return typeof value === "function" ? value.bind(target) : value;
+            },
+        });
+        planDueTasks(instrumented, PROJECT, [verify("0 3 * * *")], now);
+        expect(interleaved).toBe(true);
+        expect(row(first)).toMatchObject({
+            nextDueAt: START + 12 * HOUR,
+            lastRunAt: consumed,
+            lastStatus: "completed",
+        });
+    });
+
+    it("keeps a second writer out between the locked read and update", () => {
+        const first = sharedDb();
+        planDueTasks(first, PROJECT, [verify("0 */6 * * *")], START);
+        let reads = 0;
+        let locked = false;
+        let blocked = false;
+        const instrumented = new Proxy(first, {
+            get(target, key) {
+                if (key === "exec")
+                    return (sql: string) => {
+                        if (sql === "BEGIN IMMEDIATE") locked = true;
+                        const result = target.exec(sql);
+                        if (sql === "COMMIT" || sql === "ROLLBACK") locked = false;
+                        return result;
+                    };
+                if (key === "prepare")
+                    return (sql: string) => {
+                        const statement = target.prepare(sql);
+                        if (
+                            !sql.includes(
+                                "FROM task_schedule_state WHERE project_path = ? AND task = ?",
+                            )
+                        )
+                            return statement;
+                        return new Proxy(statement, {
+                            get(stmt, method) {
+                                if (method === "get")
+                                    return (...args: string[]) => {
+                                        const result = stmt.get(...args);
+                                        reads++;
+                                        if (locked) {
+                                            try {
+                                                writeTaskScheduleState(peer!, {
+                                                    ...row(peer!),
+                                                    lastStatus: "completed",
+                                                });
+                                            } catch (error) {
+                                                blocked =
+                                                    (error as { code?: string }).code ===
+                                                    "SQLITE_BUSY";
+                                            }
+                                        }
+                                        return result;
+                                    };
+                                const value = Reflect.get(stmt, method);
+                                return typeof value === "function" ? value.bind(stmt) : value;
+                            },
+                        });
+                    };
+                const value = Reflect.get(target, key);
+                return typeof value === "function" ? value.bind(target) : value;
+            },
+        });
+        planDueTasks(instrumented, PROJECT, [verify("0 3 * * *")], START + HOUR);
+        expect(reads).toBeGreaterThan(1);
+        expect(blocked).toBe(true);
+        expect(row(first).lastStatus).toBeNull();
+    });
+
+    it("does not re-arm a consumed civil minute in Madrid's repeated hour", async () => {
+        process.env.TZ = "Europe/Madrid";
+        db = freshDb();
+        const first = Date.parse("2026-10-25T00:30:00Z");
+        const repeated = Date.parse("2026-10-25T01:30:00Z");
+        const a = verify("30 2 * * *");
+        const b = verify("30 2 * * 0");
+        setSystemTime(new Date(first - MINUTE));
+        planDueTasks(db, PROJECT, [a], first - MINUTE);
+        expect(row(db).nextDueAt).toBe(first);
+        const executions: number[] = [];
+        for (const now of [first, first + MINUTE, repeated - MINUTE, repeated, repeated + MINUTE]) {
+            setSystemTime(new Date(now));
+            for (const config of [a, b]) {
+                await runDueTasksForProject({
+                    db,
+                    projectIdentity: PROJECT,
+                    tasks: [config],
+                    now,
+                    executor: async () => {
+                        executions.push(now);
+                        return { status: "completed" };
+                    },
+                });
+            }
+        }
+        expect(executions).toEqual([first]);
+        expect(row(db).nextDueAt).toBeGreaterThan(repeated);
+    });
     it("a schedule change arms the earlier of the armed slot and the next slot after now", () => {
         db = freshDb();
         // Worktree A (every 6 hours) seeds the row at 00:00: armed for 06:00.

@@ -112,6 +112,18 @@ function ensureSeeded(
     seedTaskScheduleState(db, projectIdentity, config.task, nextDueAt, lastRunAt, config.schedule);
 }
 
+function firstRepeatedCivilMinute(candidateMs: number): number | null {
+    const date = new Date(candidateMs);
+    const first = new Date(
+        date.getFullYear(),
+        date.getMonth(),
+        date.getDate(),
+        date.getHours(),
+        date.getMinutes(),
+    ).getTime();
+    return first < candidateMs ? first : null;
+}
+
 /**
  * Reconcile enabled worktrees without postponing an already-armed shared slot.
  * Disabled worktrees are filtered by the caller and never mutate shared state.
@@ -133,28 +145,60 @@ function reconcileSchedule(
     now: number,
 ): void {
     ensureSeeded(db, projectIdentity, config, now);
-    const stored = getTaskScheduleState(db, projectIdentity, config.task);
-    if (!stored || stored.schedule === config.schedule) return;
-
-    if (stored.schedule === null && stored.nextDueAt !== null) {
-        // Legacy row seeded from this same config before the schedule column
-        // existed: backfill the string, keep the already-correct next_due_at.
-        writeTaskScheduleState(db, { ...stored, schedule: config.schedule });
+    if (getTaskScheduleState(db, projectIdentity, config.task)?.schedule === config.schedule)
         return;
+
+    // Cron search can scan years for an impossible expression. Do it before
+    // taking the write lock; only the row-dependent decision belongs inside.
+    const candidate = nextDueAtMs(config.schedule, now);
+    const repeatedFirst = candidate === null ? null : firstRepeatedCivilMinute(candidate);
+    const afterRepeatedFirst =
+        repeatedFirst === null ? candidate : nextDueAtMs(config.schedule, now, repeatedFirst);
+    db.exec("BEGIN IMMEDIATE");
+    let committed = false;
+    try {
+        const stored = getTaskScheduleState(db, projectIdentity, config.task);
+        if (stored && stored.schedule !== config.schedule) {
+            if (stored.schedule === null && stored.nextDueAt !== null) {
+                // The legacy slot was seeded from this config before schedule was stored;
+                // only the missing schedule string needs backfilling.
+                writeTaskScheduleState(db, { ...stored, schedule: config.schedule });
+            } else {
+                // An advanced shared slot has already consumed the first copy of
+                // a repeated civil minute. Do not re-arm its second copy.
+                const nextDueAt =
+                    repeatedFirst !== null &&
+                    candidate !== null &&
+                    stored.nextDueAt !== null &&
+                    stored.nextDueAt > candidate &&
+                    stored.lastStatus !== null
+                        ? afterRepeatedFirst
+                        : candidate;
+                const reconciledNextDueAt =
+                    stored.nextDueAt === null
+                        ? nextDueAt
+                        : nextDueAt === null
+                          ? stored.nextDueAt
+                          : Math.min(stored.nextDueAt, nextDueAt);
+                writeTaskScheduleState(db, {
+                    ...stored,
+                    schedule: config.schedule,
+                    nextDueAt: reconciledNextDueAt,
+                    retryCount: reconciledNextDueAt === stored.nextDueAt ? stored.retryCount : 0,
+                });
+            }
+        }
+        db.exec("COMMIT");
+        committed = true;
+    } finally {
+        if (!committed) {
+            try {
+                db.exec("ROLLBACK");
+            } catch {
+                /* transaction already closed */
+            }
+        }
     }
-    const nextDueAt = nextDueAtMs(config.schedule, now);
-    const reconciledNextDueAt =
-        stored.nextDueAt === null
-            ? nextDueAt
-            : nextDueAt === null
-              ? stored.nextDueAt
-              : Math.min(stored.nextDueAt, nextDueAt);
-    writeTaskScheduleState(db, {
-        ...stored,
-        schedule: config.schedule,
-        nextDueAt: reconciledNextDueAt,
-        retryCount: reconciledNextDueAt === stored.nextDueAt ? stored.retryCount : 0,
-    });
 }
 
 interface DueTask {
