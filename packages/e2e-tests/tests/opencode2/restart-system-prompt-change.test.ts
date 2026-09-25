@@ -7,8 +7,9 @@ import { isolation, spawnOpencode2, waitForPluginActive } from "../../src/openco
 
 // A host restart whose configuration changes the system prompt must pay for the
 // change once. The first pass after the restart already sends new system bytes,
-// so the provider rebuilds its cache there anyway; the m[0] rebuild for the
-// changed prompt hash has to ride that same pass. Detecting the change one pass
+// so the provider rebuilds its cache there anyway; the HARD fold Magic Context
+// runs for the changed prompt hash (which re-renders its cached history prefix,
+// m[0]) has to ride that same pass. Detecting the change one pass
 // later makes a second, separate cache rebuild.
 //
 // The prompt is changed by a Magic Context config change: `language` adds a
@@ -136,7 +137,9 @@ test("a restart that changes the system prompt pays exactly one HARD fold, on th
         await turn(`BEFORE-RESTART-1 ${FILLER}`);
         await turn(`BEFORE-RESTART-2 ${FILLER}`);
         expect(dropIssued).toBe(true);
-        // Precondition: the drop was queued for a later cache-losing pass, not refused or held.
+        // Precondition: ctx_reduce queued the drop for a later cache-losing pass. Its tool
+        // result is neither an error nor a "Held" answer (the reply for a message still
+        // inside the protected recent window).
         const dropResult = JSON.stringify(
             (passes.at(-1)!.units.map((unit) => JSON.parse(unit)) as Array<{ type?: string; output?: unknown }>).find(
                 (item) => item?.type === "function_call_output",
@@ -172,7 +175,8 @@ test("a restart that changes the system prompt pays exactly one HARD fold, on th
                 pass.units,
             ),
         }));
-        // Kept in the test output: the per-pass record a reviewer reads.
+        // Printed so a run shows, pass by pass, the fold decision and how much of the
+        // request a caching provider would read from cache and write anew.
         console.log(JSON.stringify(measured, null, 2));
 
         const after = measured.slice(beforeRestart);

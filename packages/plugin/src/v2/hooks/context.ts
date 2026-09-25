@@ -335,9 +335,9 @@ export function recordV2ToolDefinitions(draft: SessionContext): void {
  * ctx_reduce verdict is frozen, because that verdict chooses the guidance text.
  * When nothing has frozen the verdict yet in this process, the handler falls
  * back to reading the first user message from OpenCode 1's `message` table. On
- * this host that read never succeeds (the store has a different schema), so
- * without the step below the first pass after every restart left the verdict
- * provisional and skipped the hash comparison. A restart that changed the system
+ * OpenCode 2 that read never succeeds (its store has a different schema), so
+ * without freezing the verdict here first, the first pass after every restart
+ * left the verdict provisional and skipped the hash comparison. A restart that changed the system
  * prompt then sent the new prompt on that first pass (so the provider cache was
  * lost there anyway) and only detected the change on the second pass, whose
  * separate HARD fold rebuilt the cache a second time.
@@ -347,7 +347,7 @@ export function recordV2ToolDefinitions(draft: SessionContext): void {
  * pass freezes it from (the adapted messages carry no per-message tools map, see
  * payload.ts), so it can only freeze to the value the transform would have
  * frozen. A draft with no user message leaves the verdict provisional, as before.
- * Any future read of this host's ctx_reduce permissions has to run before this
+ * Any future read of OpenCode 2's ctx_reduce permissions has to run before this
  * call: once frozen, the verdict never changes for the session.
  */
 export async function applyV2SystemPrompt(

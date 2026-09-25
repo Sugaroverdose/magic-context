@@ -65,7 +65,10 @@ afterEach(() => {
     rmSync(dataHome, { recursive: true, force: true });
 });
 
-/** One host process: its own handler and refresh sets, as `registerContext` creates them. */
+/**
+ * One simulated host process: a fresh system-prompt handler with its own refresh
+ * signal sets, the per-process state `registerContext` creates.
+ */
 function hostProcess() {
     const flags = {
         historyRefreshSessions: new Set<string>(),
@@ -95,7 +98,10 @@ const userTurn: SessionContext["messages"] = [
     { id: "msg_user_1", role: "user", content: [{ type: "text", text: "hello" }] },
 ];
 
-/** Record the stored hash from a previous host process, then forget that process's verdict. */
+/**
+ * Store a system-prompt hash from an earlier host process, then clear the
+ * in-memory ctx_reduce verdict the way a restart does. The stored hash survives.
+ */
 async function previousProcess(hostPrompt: string): Promise<string> {
     const { prompt } = hostProcess();
     // In that process a message transform had already frozen the verdict.
@@ -114,7 +120,8 @@ async function previousProcess(hostPrompt: string): Promise<string> {
 describe("OpenCode 2 system-prompt stage after a restart", () => {
     it("detects a changed system prompt on the first pass after a restart", async () => {
         const before = await previousProcess("Host prompt, configuration one.");
-        // Precondition: the handler's own verdict fallback cannot freeze the verdict here.
+        // Precondition: the handler's fallback (the OpenCode 1 database, which has no row
+        // for this session) cannot freeze the verdict on its own.
         expect(resolveCtxReduceAvailability(SESSION).frozen).toBe(false);
 
         const { prompt, flags } = hostProcess();
@@ -189,16 +196,19 @@ describe("OpenCode 2 system-prompt stage after a restart", () => {
                 storedHash: getOrCreateSessionMeta(openDatabase(), SESSION).systemPromptHash,
                 foldSignalled: flags.pendingMaterializationSessions.has(SESSION),
             });
-            // The message transform later in the pass consumes these signals.
+            // Stand in for the message transform later in the pass, which consumes the
+            // fold and history-refresh signals.
             flags.pendingMaterializationSessions.delete(SESSION);
             flags.historyRefreshSessions.delete(SESSION);
         };
 
-        // Priced pass: the first pass after the restart, with the changed prompt.
+        // Priced pass (one that rebuilds the provider cache): the first pass after the
+        // restart, with the changed prompt.
         await run("Host prompt, configuration two. Today's date: 2026-09-24");
-        // Next pass: it consumes the adjunct refresh the priced pass left for it.
+        // Next pass: it consumes the system-prompt refresh signal the priced pass left for it.
         await run("Host prompt, configuration two. Today's date: 2026-09-24");
-        // Defer pass: the host's date moved on, but the prompt must not change.
+        // Defer pass (one that must reuse the cached prefix): the host's date moved on,
+        // but the prompt must not change.
         await run("Host prompt, configuration two. Today's date: 2026-09-25");
 
         expect(passes.map((pass) => pass.foldSignalled)).toEqual([true, false, false]);
