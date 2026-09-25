@@ -197,6 +197,24 @@ describe("resolveOpenCodeDbPath", () => {
         });
     });
 
+    it("takes an absolute v2 OPENCODE_DB as is and resolves a relative one against the data dir", () => {
+        // OpenCode 2 resolves the database with `path.resolve(data, OPENCODE_DB)`;
+        // verified against the 2.0.15 binary's `opencode debug paths db`.
+        const { dataHome, openCodeDir } = useDataHome();
+        const absolute = join(dataHome, "elsewhere", "custom.db");
+        expect(resolveOpenCodeDbPath("v2", { dataHome, env: { OPENCODE_DB: absolute } })).toEqual({
+            path: absolute,
+            source: "OPENCODE_DB",
+            channel: null,
+        });
+        expect(
+            resolveOpenCodeDbPath("v2", { dataHome, env: { OPENCODE_DB: "nested/../rel.db" } }),
+        ).toEqual({ path: join(openCodeDir, "rel.db"), source: "OPENCODE_DB", channel: null });
+        expect(resolveOpenCodeDbPath("v2", { dataHome, env: { OPENCODE_DB: ":memory:" } })).toEqual(
+            { path: ":memory:", source: "OPENCODE_DB", channel: null },
+        );
+    });
+
     it("detects store generations and refuses a mismatched schema before reading", () => {
         const { openCodeDir } = useDataHome();
         const v1Path = join(openCodeDir, "v1.db");

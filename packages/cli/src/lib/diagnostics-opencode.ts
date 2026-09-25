@@ -28,14 +28,19 @@ import {
     resolveOpenCodeDbPath,
 } from "@magic-context/core/shared/opencode-db-path";
 import { parse as parseJsonc } from "comment-json";
+import { pluginEntryPackage } from "../adapters/opencode";
 import { inspectMagicContextLogs, type LogFileInspection } from "./log-lines";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
 import {
     getOpenCodePluginCacheRoots,
-    getOpenCodePluginPackageJsonPaths,
+    getOpenCodePluginPackageJsonPath,
+    getOpenCodeV2PluginCacheSlot,
+    listOpenCodeV2PluginCacheSlots,
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION,
     OPENCODE_PLUGIN_NAME,
+    readConfiguredOpenCodePluginSpec,
+    readOpenCodeV2CachedPluginVersion,
 } from "./opencode-plugin-cache";
 import { readPluginEntries } from "./opencode-plugin-registration";
 import { type ConfigPaths, detectConfigPaths, getMagicContextHistorianDir } from "./paths";
@@ -64,6 +69,8 @@ export interface DiagnosticReport {
         path: string;
         cached?: string;
         latest?: string;
+        /** Every Magic Context install found across OpenCode 1 and OpenCode 2 cache layouts. */
+        installs?: PluginCacheInstall[];
     };
     storageDir: {
         path: string;
@@ -114,6 +121,15 @@ export interface DiagnosticReport {
      * fail/success/noop history that the self-clearing session_meta counter hides.
      */
     historianRuns: HistorianRunSummary[];
+}
+
+export interface PluginCacheInstall {
+    /** `opencode1`: `<cache>/opencode/packages/`; `opencode2`: `<cache>/opencode/npm/`. */
+    layout: "opencode1" | "opencode2";
+    /** What the install is keyed by: `latest`, a dist-tag such as `beta`, or a version. */
+    spec: string;
+    path: string;
+    cached?: string;
 }
 
 /**
@@ -241,23 +257,63 @@ function getSelfVersion(): string {
     return "unknown";
 }
 
-function getPluginCacheInfo(): { path: string; cached?: string; latest?: string } {
-    const [path = ""] = getOpenCodePluginCacheRoots();
-    let cached: string | undefined;
-    for (const installedPkgPath of getOpenCodePluginPackageJsonPaths()) {
-        try {
-            if (existsSync(installedPkgPath)) {
-                const pkg = JSON.parse(readFileSync(installedPkgPath, "utf-8")) as {
-                    version?: unknown;
-                };
-                cached = typeof pkg.version === "string" ? pkg.version : undefined;
-                if (cached) break;
-            }
-        } catch {
-            cached = undefined;
-        }
+function readLegacyCachedVersion(root: string): string | undefined {
+    try {
+        const pkg = JSON.parse(readFileSync(getOpenCodePluginPackageJsonPath(root), "utf-8")) as {
+            version?: unknown;
+        };
+        return typeof pkg.version === "string" ? pkg.version : undefined;
+    } catch {
+        return undefined;
     }
-    return { path, cached, latest: getSelfVersion() };
+}
+
+/**
+ * The plugin-cache section of the issue report. `path`/`cached` describe the
+ * install the running host loads: on OpenCode 2 the `npm/<name>@<spec>/` slot
+ * for the configured spec, on OpenCode 1 the `packages/` tree. `installs`
+ * lists every Magic Context install found in either layout, since both can
+ * exist on one machine.
+ */
+export function collectOpenCodePluginCacheReport(
+    hostGeneration: OpenCodeHostGeneration,
+    opencodeConfig: Record<string, unknown> | null,
+): DiagnosticReport["pluginCache"] {
+    const installs: PluginCacheInstall[] = [];
+    for (const root of getOpenCodePluginCacheRoots()) {
+        if (!existsSync(root)) continue;
+        const spec = root.endsWith("@latest") ? "latest" : "(bare)";
+        installs.push({
+            layout: "opencode1",
+            spec,
+            path: root,
+            cached: readLegacyCachedVersion(root),
+        });
+    }
+    for (const slot of listOpenCodeV2PluginCacheSlots()) {
+        installs.push({
+            layout: "opencode2",
+            spec: slot.spec,
+            path: slot.slot,
+            cached: slot.version,
+        });
+    }
+
+    let path: string;
+    let cached: string | undefined;
+    if (hostGeneration === "v2") {
+        path = getOpenCodeV2PluginCacheSlot(
+            undefined,
+            readConfiguredOpenCodePluginSpec(opencodeConfig),
+        );
+        cached = readOpenCodeV2CachedPluginVersion(path);
+    } else {
+        [path = ""] = getOpenCodePluginCacheRoots();
+        cached = installs.find(
+            (install) => install.layout === "opencode1" && install.cached,
+        )?.cached;
+    }
+    return { path, cached, latest: getSelfVersion(), installs };
 }
 
 function getStorageResolution(): ReturnType<typeof getMagicContextStorageResolution> {
@@ -295,11 +351,12 @@ function readConfig(path: string): { value: Record<string, unknown> | null; erro
     }
 }
 
-function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
+export function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
     // Both keys: OpenCode 2 loads `plugin` and `plugins` together.
-    const plugins = readPluginEntries(config).map(({ entry }) => entry);
+    // Tuple and OpenCode 2 `{ package, options }` entries register the plugin too.
+    const plugins = readPluginEntries(config).map(({ entry }) => pluginEntryPackage(entry));
     return plugins.some((entry) => {
-        if (typeof entry !== "string") return false;
+        if (entry === null) return false;
         if (entry === OPENCODE_PLUGIN_NAME) return true;
         if (entry === OPENCODE_PLUGIN_ENTRY_WITH_VERSION) return true;
         if (entry.startsWith(`${OPENCODE_PLUGIN_NAME}@`)) return true;
@@ -843,7 +900,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
             ...(magicContextConfig.error ? { parseError: magicContextConfig.error } : {}),
             flags: (sanitizeValue(magicContextConfig.value ?? {}) as Record<string, unknown>) ?? {},
         },
-        pluginCache: getPluginCacheInfo(),
+        pluginCache: collectOpenCodePluginCacheReport(hostGeneration, opencodeConfig.value),
         storageDir: {
             path: storageDirPath,
             source: storageResolution.source,
@@ -897,6 +954,11 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         path: sanitizeString(report.pluginCache.path),
         cached: report.pluginCache.cached ?? null,
         latest: report.pluginCache.latest ?? null,
+        installs: (report.pluginCache.installs ?? []).map((install) => ({
+            ...install,
+            path: sanitizeString(install.path),
+            cached: install.cached ?? null,
+        })),
     };
 
     const storage = {

@@ -57,6 +57,7 @@ import {
     isDevPathPluginEntry,
     isLocalPathPluginEntry,
     matchesPluginEntry,
+    pluginEntryPackage,
 } from "../adapters/opencode";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { migrateConfigLocationsForCli } from "../lib/config-location-migration";
@@ -117,6 +118,17 @@ import {
 import { reportUnresolvedHarnessRelabel } from "./doctor-harness-relabel";
 import { clearPluginCache } from "./doctor-opencode-cache";
 import { checkPluginDuplicates } from "./doctor-opencode-plugin-duplicates";
+import {
+    checkOpenCodePluginEntry,
+    isPinnedOpenCodePluginSpecifier,
+    withPluginEntrySpecifier,
+} from "./doctor-opencode-plugin-entry";
+import {
+    checkOpenCodeV2PluginCache,
+    configuredOpenCodeV2DistTag,
+    openCodeHostDatabaseFiles,
+    reportOpenCodeV2PluginCache,
+} from "./doctor-opencode2-cache";
 import {
     countPendingCoordinateRebases,
     formatPendingCoordinateRebases,
@@ -391,18 +403,25 @@ export function checkUserMemoriesDreamerCompatibility(
 }
 
 /**
- * Fetch the latest version of an npm package from the registry. Returns null
- * on any error so the doctor can report "check unavailable" rather than fail.
+ * Fetch the version an npm dist-tag (`latest` by default) points at. Returns
+ * null on any error so the doctor can report "check unavailable" rather than fail.
  */
-async function fetchNpmLatest(pkg: string, timeoutMs = 5000): Promise<string | null> {
+async function fetchNpmLatest(
+    pkg: string,
+    distTag = "latest",
+    timeoutMs = 5000,
+): Promise<string | null> {
     try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
-            const res = await fetch(`https://registry.npmjs.org/${pkg}/latest`, {
-                signal: controller.signal,
-                headers: { Accept: "application/json" },
-            });
+            const res = await fetch(
+                `${resolveNpmRegistryUrl()}/${pkg}/${encodeURIComponent(distTag)}`,
+                {
+                    signal: controller.signal,
+                    headers: { Accept: "application/json" },
+                },
+            );
             if (!res.ok) return null;
             const body = (await res.json()) as { version?: unknown };
             return typeof body.version === "string" ? body.version : null;
@@ -412,6 +431,16 @@ async function fetchNpmLatest(pkg: string, timeoutMs = 5000): Promise<string | n
     } catch {
         return null;
     }
+}
+
+/**
+ * Registry doctor asks for the latest version. OpenCode installs plugins through
+ * npm's own config loader, which honours `npm_config_registry`; reading the
+ * same variable keeps doctor's "latest" equal to what the host would install.
+ */
+export function resolveNpmRegistryUrl(env: NodeJS.ProcessEnv = process.env): string {
+    const configured = (env.npm_config_registry ?? env.NPM_CONFIG_REGISTRY)?.trim();
+    return (configured || "https://registry.npmjs.org").replace(/\/+$/, "");
 }
 
 /** Self-version with src/dist layout fallback. */
@@ -428,10 +457,7 @@ function getSelfVersion(): string {
     return "0.0.0";
 }
 
-export function isPinnedOpenCodePluginSpecifier(specifier: string): boolean {
-    if (specifier === PLUGIN_NAME || specifier === PLUGIN_ENTRY_WITH_VERSION) return false;
-    return specifier.startsWith(`${PLUGIN_NAME}@`);
-}
+export { isPinnedOpenCodePluginSpecifier };
 
 export function describeAutoUpdateStall(
     specifier: string,
@@ -1436,30 +1462,10 @@ export async function runDoctor(
             ) {
                 writeFileAtomic(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
             }
-            // Operate on the raw plugin array. Entries can be:
-            //   • a string  "@cortexkit/opencode-magic-context@latest"
-            //   • a tuple   ["@pkg/name@latest", { ...options }]
-            //   • a dev URL "file:///abs/path/.../packages/plugin"
-            // We MUST preserve every entry shape on write — filtering out
-            // tuples (or stripping options) would silently drop user config.
-            // matchesPluginEntry / isDevPathPluginEntry are imported from
-            // ../adapters/opencode and accept both strings and tuples.
             // OpenCode 2 loads the legacy `plugin` array and its native `plugins`
             // array together, so an entry under either key is a live registration
             // and a fresh entry must go under the running host's own key.
-            const registrationKey = pluginConfigKeyFor(hostGeneration);
             const allEntries = readPluginEntries(config);
-            const found = allEntries.find(
-                ({ entry }) =>
-                    matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
-            );
-            // The array doctor edits: the one holding the existing entry, else the
-            // host generation's own key for a fresh registration.
-            const targetKey = found?.key ?? registrationKey;
-            const rawPlugins: unknown[] = Array.isArray(config?.[targetKey])
-                ? (config[targetKey] as unknown[])
-                : [];
-            const existingIdx = found ? found.index : -1;
             if (
                 allEntries.some(
                     ({ entry }) =>
@@ -1472,67 +1478,25 @@ export async function runDoctor(
                     "An unverifiable local OpenCode plugin path was ignored because its package name is not Magic Context",
                 );
             }
-            // Helper: extract the plain string (or first element of a tuple) so
-            // we can compare against the desired @latest entry.
-            const entryAsString = (entry: unknown): string | null => {
-                if (typeof entry === "string") return entry;
-                if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
-                return null;
-            };
-
+            // String, tuple and OpenCode 2 `{ package, options }` entries are all
+            // read, and a rewrite keeps the entry's shape and options.
             if (
-                existingIdx >= 0 &&
-                entryAsString(rawPlugins[existingIdx]) === PLUGIN_ENTRY_WITH_VERSION
+                checkOpenCodePluginEntry(
+                    config,
+                    configName,
+                    { force: options.force, registrationKey: pluginConfigKeyFor(hostGeneration) },
+                    {
+                        pass,
+                        warn,
+                        fixed: (message) => {
+                            pass(message);
+                            fixed++;
+                        },
+                        autoUpdateStall: reportAutoUpdateStall,
+                    },
+                )
             ) {
-                pass(`Plugin registered in ${configName}`);
-            } else if (existingIdx >= 0) {
-                const oldEntry = rawPlugins[existingIdx];
-                const oldEntryStr = entryAsString(oldEntry) ?? "";
-
-                // Dev-path entries (file://, absolute, relative) are detected
-                // so we don't double-add @latest, but we MUST NOT replace them
-                // — that would silently disable the developer's local plugin
-                // checkout. Always log as-is and leave the entry alone, even
-                // under --force.
-                if (isDevPathPluginEntry(oldEntry)) {
-                    pass(`Plugin registered in ${configName} (dev path: ${oldEntryStr})`);
-                } else {
-                    const isPinned = isPinnedOpenCodePluginSpecifier(oldEntryStr);
-
-                    if (isPinned && !options.force) {
-                        reportAutoUpdateStall(oldEntryStr);
-                        // Without --force, doctor reports pin ownership but leaves the config unchanged.
-                        warn(
-                            `Plugin pinned to ${oldEntryStr} in ${configName} — use 'doctor --force' to upgrade`,
-                        );
-                    } else {
-                        // Upgrade versionless entry to @latest, or --force upgrades pinned.
-                        // If the existing entry is a tuple, preserve options by
-                        // updating only the package-name slot; otherwise replace
-                        // with the plain string entry.
-                        if (Array.isArray(oldEntry) && oldEntry.length >= 1) {
-                            const replacement = [...oldEntry];
-                            replacement[0] = PLUGIN_ENTRY_WITH_VERSION;
-                            rawPlugins[existingIdx] = replacement;
-                        } else {
-                            rawPlugins[existingIdx] = PLUGIN_ENTRY_WITH_VERSION;
-                        }
-                        config[targetKey] = rawPlugins;
-                        writeFileAtomic(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
-                        pass(
-                            `Upgraded plugin entry in ${configName}: ${oldEntryStr} → ${PLUGIN_ENTRY_WITH_VERSION}`,
-                        );
-                        fixed++;
-                    }
-                }
-            } else {
-                // Auto-add plugin entry — preserves comments AND every existing
-                // tuple/options entry the user already had.
-                rawPlugins.push(PLUGIN_ENTRY_WITH_VERSION);
-                config[targetKey] = rawPlugins;
                 writeFileAtomic(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
-                pass(`Added plugin to ${configName}`);
-                fixed++;
             }
         } catch {
             warn("Could not parse opencode config to verify plugin entry");
@@ -1629,14 +1593,9 @@ export async function runDoctor(
                         "An unverifiable local TUI plugin path was ignored because its package name is not Magic Context",
                     );
                 }
-                const tuiEntryAsString = (entry: unknown): string => {
-                    if (typeof entry === "string") return entry;
-                    if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
-                    return "";
-                };
                 if (tuiIdx >= 0) {
                     const tuiEntry = tuiRawPlugins[tuiIdx];
-                    const tuiEntryStr = tuiEntryAsString(tuiEntry);
+                    const tuiEntryStr = pluginEntryPackage(tuiEntry) ?? "";
                     if (isDevPathPluginEntry(tuiEntry)) {
                         pass(`TUI sidebar plugin configured (dev path: ${tuiEntryStr})`);
                     } else {
@@ -1647,14 +1606,11 @@ export async function runDoctor(
                                 `TUI plugin pinned to ${tuiEntryStr} — use 'doctor --force' to upgrade`,
                             );
                         } else if (tuiPinned && options.force) {
-                            // Preserve tuple options when upgrading.
-                            if (Array.isArray(tuiEntry) && tuiEntry.length >= 1) {
-                                const replacement = [...tuiEntry];
-                                replacement[0] = PLUGIN_ENTRY_WITH_VERSION;
-                                tuiRawPlugins[tuiIdx] = replacement;
-                            } else {
-                                tuiRawPlugins[tuiIdx] = PLUGIN_ENTRY_WITH_VERSION;
-                            }
+                            // Preserve tuple or object options when upgrading.
+                            tuiRawPlugins[tuiIdx] = withPluginEntrySpecifier(
+                                tuiEntry,
+                                PLUGIN_ENTRY_WITH_VERSION,
+                            );
                             tuiConfig.plugin = tuiRawPlugins;
                             writeFileAtomic(paths.tuiConfig, `${stringify(tuiConfig, null, 2)}\n`);
                             pass(
@@ -1865,9 +1821,42 @@ export async function runDoctor(
             log.info(`  Manually delete: ${cacheResult.path}`);
         }
         issues++;
-    } else {
+    } else if (hostGeneration !== "v2") {
+        // OpenCode 2 never uses the 1.x `packages/` tree; its own cache is
+        // reported by the next step, so an empty 1.x tree says nothing there.
         pass("Plugin cache clean (no cached version found)");
     }
+
+    // 8b. OpenCode 2 caches plugins under `npm/<name>@<spec>/<generation>/` and
+    // never replaces an `@latest` install on its own. An entry that follows
+    // another dist-tag (`@beta`, `@next`) loads from that tag's slot, which is
+    // stale against the tag's current version, not against `latest`. The config
+    // is read again here because the entry check above may have rewritten it.
+    let v2DistTag: string | undefined;
+    if (paths.opencodeConfigFormat !== "none") {
+        try {
+            v2DistTag = configuredOpenCodeV2DistTag(
+                parse(readFileSync(paths.opencodeConfig, "utf-8")) as Record<string, unknown>,
+            );
+        } catch {
+            // An unreadable config was already reported; check the `@latest` slot.
+        }
+    }
+    const v2Cache = reportOpenCodeV2PluginCache(
+        checkOpenCodeV2PluginCache({
+            fix: options.fix,
+            force: options.force,
+            latestVersion: v2DistTag
+                ? await fetchNpmLatest(PLUGIN_NAME, v2DistTag)
+                : pluginNpmLatest,
+            distTag: v2DistTag,
+            hostFiles: openCodeHostDatabaseFiles([openCodeDbResolution.path]),
+        }),
+        { pass, warn, info: (message) => log.info(message) },
+        { reportMissing: hostGeneration === "v2" },
+    );
+    if (v2Cache.fixed) fixed++;
+    if (v2Cache.issue) issues++;
 
     // 9. Check for min-release-age / before restrictions in ~/.npmrc.
     // OpenCode installs plugins with npm under the hood, so npm's age guards

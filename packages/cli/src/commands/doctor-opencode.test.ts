@@ -9,6 +9,7 @@ import {
     runMigrations,
 } from "@magic-context/core/features/magic-context/storage";
 import { computeLegacyRustDirIdentity } from "@magic-context/core/features/magic-context/v22-deferred-backfill";
+import { resolveOpenCodeDbPath } from "@magic-context/core/shared/opencode-db-path";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import {
@@ -28,6 +29,7 @@ import {
     isPinnedOpenCodePluginSpecifier,
     migrateLegacyAgentEnabledConfigForDoctor,
     parseOpenCodeModelCatalog,
+    resolveNpmRegistryUrl,
 } from "./doctor-opencode";
 import { clearPluginCache } from "./doctor-opencode-cache";
 
@@ -133,6 +135,37 @@ describe("OpenCode database doctor surface", () => {
             message:
                 "FAIL OpenCode session database: not found (looked for /tmp/custom-opencode.db); set OPENCODE_DB if OpenCode stores it elsewhere.",
         });
+    });
+});
+
+describe("doctor OpenCode 2 database path", () => {
+    it("uses an absolute OPENCODE_DB as is, like OpenCode 2 does", () => {
+        const dataHome = mkdtempSync(join(tmpdir(), "mc-doctor-db-"));
+        try {
+            const absolute = join(dataHome, "elsewhere", "opencode.db");
+            const resolution = resolveOpenCodeDbPath("v2", {
+                dataHome,
+                env: { OPENCODE_DB: absolute },
+            });
+            expect(resolution.path).toBe(absolute);
+            expect(
+                resolveOpenCodeDbPath("v2", { dataHome, env: { OPENCODE_DB: "custom.db" } }).path,
+            ).toBe(join(dataHome, "opencode", "custom.db"));
+        } finally {
+            rmSync(dataHome, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("doctor npm registry", () => {
+    it("asks the registry OpenCode installs from", () => {
+        expect(resolveNpmRegistryUrl({})).toBe("https://registry.npmjs.org");
+        expect(resolveNpmRegistryUrl({ npm_config_registry: "http://127.0.0.1:4873/" })).toBe(
+            "http://127.0.0.1:4873",
+        );
+        expect(resolveNpmRegistryUrl({ NPM_CONFIG_REGISTRY: "https://mirror.example" })).toBe(
+            "https://mirror.example",
+        );
     });
 });
 

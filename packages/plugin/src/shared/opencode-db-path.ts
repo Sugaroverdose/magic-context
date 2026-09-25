@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 export type OpenCodeDbPathSource = "OPENCODE_DB" | "channel" | "default" | "discovered";
 export type OpenCodeHostGeneration = "v1" | "v2";
@@ -185,7 +185,10 @@ function resolveV2Fresh(
     const filename = sourceOpenCodeDatabaseFilename("v2", channel, env);
     const explicit = env.OPENCODE_DB !== undefined;
     return {
-        path: filename === ":memory:" ? filename : join(dataDir, filename),
+        // OpenCode 2 uses `path.resolve(data, filename)`: an absolute
+        // OPENCODE_DB is taken as is and a relative one is resolved against
+        // the data directory. `join` would nest an absolute value under it.
+        path: filename === ":memory:" ? filename : resolve(dataDir, filename),
         source: explicit ? "OPENCODE_DB" : env.OPENCODE_CHANNEL ? "channel" : "default",
         channel: explicit ? null : channel,
     };
