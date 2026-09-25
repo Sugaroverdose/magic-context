@@ -106,11 +106,24 @@ pub const BRACKET_TABLE: &str = "context_privilege_state";
 
 /// Maximum rows one non-final chunk may write.
 ///
-/// Sized from the measured publish transaction duration on the committed schema
-/// snapshot: see `measured_chunk_cost_report` and the slice report. The budget targets a
-/// chunk well under a fifth of `CONTEXT_BUSY_TIMEOUT_MS`, so a seat that arrives mid-fold
-/// waits a small fraction of its tolerance rather than racing it.
-pub const DEFAULT_PUBLISH_CHUNK_ROWS: usize = 64;
+/// Sized from `host_store::tests::measure_chunk_cost_on_a_realistic_store`, which seeds a
+/// `context.db` to production-like row counts (2,000 memories, 11,000 compartments,
+/// 1,000 notes, with and without 1,000,000 tags) and times memory-only chunks, the most
+/// expensive row class. Measured on a debug build (unoptimized bundled SQLite) on a
+/// machine at load average ~70, so these are upper bounds; the million tags did not move
+/// the cost. Worst of five chunks, against the 250 ms ceiling below:
+///
+/// | rows | median   | worst    |
+/// | ---- | -------- | -------- |
+/// | 16   | 18-33 ms | 30-63 ms |
+/// | 32   | 35-37 ms | 47-182 ms |
+/// | 64   | 63-80 ms | 118-139 ms |
+/// | 128  | 138-206 ms | 268-270 ms |
+///
+/// 16 rows keeps the worst observed chunk at a quarter of the ceiling (4x margin) and
+/// the median at under a seventh of it. 64, the previous value, was sized on an empty
+/// store and left under 2x margin at the worst observation here.
+pub const DEFAULT_PUBLISH_CHUNK_ROWS: usize = 16;
 
 /// Target wall-clock ceiling for one chunk's write transaction, in microseconds.
 ///
@@ -122,7 +135,12 @@ pub const PUBLISH_CHUNK_BUDGET_US: i64 = 250_000;
 /// together, plus one each for the facts delete and the compartment replace.
 ///
 /// That chunk cannot be split, because committing it is what makes the fold visible, so
-/// a fold too large for it is refused before any of its chunks is written.
+/// a fold too large for it is refused before any of its chunks is written. Measured by
+/// the same instrument as [`DEFAULT_PUBLISH_CHUNK_ROWS`]: a 256-row visibility chunk
+/// (84 compartments, each with a fact and an event) took 11-16 ms at the median and
+/// 81 ms at the worst observation, a 3x margin under the ceiling. These rows drive no
+/// full-text index, which is why the chunk is far cheaper per row than a memory chunk.
+/// A historian fold is a handful of compartments, far below this ceiling.
 pub const MAX_VISIBILITY_CHUNK_ROWS: usize = 256;
 
 // ── Mode ────────────────────────────────────────────────────────────────────
@@ -3499,20 +3517,153 @@ mod tests {
 
     // ── Chunk budget measurement ────────────────────────────────────────────
 
-    /// Measure what a chunk actually costs on the committed schema, and hold the shipped
-    /// budget to the wall-clock property it was derived from.
-    ///
-    /// The budget is a row count, but the thing that matters is how long a seat can be
-    /// made to wait. This measures the shipped budget's worth of the most expensive row
-    /// class — a memory, whose insert drives an external-content full-text delete and
-    /// insert — and fails if that transaction runs past the budget's wall-clock ceiling.
-    #[test]
-    fn the_shipped_chunk_budget_holds_its_wall_clock_ceiling() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = fixture_db(dir.path(), "context.db");
-        mark_managed(&path, "git:fixture");
-        let mut store = HostStore::open(&path).unwrap();
+    /// Row counts of a `context.db` that has been in daily use for a while. The chunk
+    /// budget is measured and held on a store this size, not on an empty one: full-text
+    /// segment merges and index depth both grow with what is already there, and an
+    /// empty-store measurement understated the cost of a chunk by more than an order of
+    /// magnitude.
+    const REALISTIC_MEMORIES: usize = 2_000;
+    const REALISTIC_COMPARTMENTS: usize = 11_000;
+    const REALISTIC_NOTES: usize = 1_000;
+    const REALISTIC_TAGS: usize = 1_000_000;
+    /// Sessions the seeded rows are spread over.
+    const SEEDED_SESSIONS: usize = 200;
 
+    /// Seed a fixture to production-like row counts. `tags` is separate because it is by
+    /// far the largest table and no module write touches it or its indexes; the
+    /// instrument below measures with and without it.
+    fn seed_realistic_store(path: &Path, tags: usize) {
+        let mut conn = Connection::open(path).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        let tx = conn.transaction().unwrap();
+        // The authority guards abort writes to a managed project unless the bracket row
+        // is set; the seed is not what is being measured, so it simply holds the bracket.
+        tx.execute("UPDATE context_privilege_state SET enabled = 1 WHERE id = 1", [])
+            .unwrap();
+        {
+            let mut memory = tx
+                .prepare(
+                    "INSERT INTO memories
+                       (project_path, category, content, normalized_hash, importance,
+                        source_session_id, first_seen_at, created_at, updated_at, last_seen_at)
+                     VALUES (?1, 'ARCHITECTURE', ?2, ?3, 50, ?4, 1, 1, 1, 1)",
+                )
+                .unwrap();
+            for index in 0..REALISTIC_MEMORIES {
+                let project = if index % 2 == 0 { "git:fixture" } else { "git:other" };
+                let content = format!(
+                    "seeded memory {index} about module {} and the {} path, noting that \
+                     subsystem {} depends on {} when the {} flag is set",
+                    index % 97,
+                    index % 13,
+                    index % 31,
+                    index % 17,
+                    index % 7
+                );
+                memory
+                    .execute(params![
+                        project,
+                        content,
+                        compute_normalized_hash(&content),
+                        format!("ses_seed_{}", index % SEEDED_SESSIONS),
+                    ])
+                    .unwrap();
+            }
+            let mut compartment = tx
+                .prepare(
+                    "INSERT INTO compartments
+                       (session_id, sequence, start_message, end_message, start_message_id,
+                        end_message_id, title, content, p1, p2, importance, legacy, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?7, 50, 0, 1)",
+                )
+                .unwrap();
+            for index in 0..REALISTIC_COMPARTMENTS {
+                let session = index % SEEDED_SESSIONS;
+                let sequence = (index / SEEDED_SESSIONS) as i64 + 1;
+                compartment
+                    .execute(params![
+                        format!("ses_seed_{session}"),
+                        sequence,
+                        sequence * 10,
+                        sequence * 10 + 9,
+                        format!("msg_{session}_{sequence}_a"),
+                        format!("msg_{session}_{sequence}_z"),
+                        format!("compartment {sequence} of session {session}"),
+                        format!(
+                            "The session worked through step {sequence}: it read the code, \
+                             changed the module, ran the suite and recorded what it found. {}",
+                            "Detail. ".repeat(40)
+                        ),
+                    ])
+                    .unwrap();
+            }
+            let mut note = tx
+                .prepare(
+                    "INSERT INTO notes (type, status, content, session_id, created_at, updated_at)
+                     VALUES ('session', 'active', ?1, ?2, 1, 1)",
+                )
+                .unwrap();
+            for index in 0..REALISTIC_NOTES {
+                note.execute(params![
+                    format!("seeded note {index}: remember to revisit the fence"),
+                    format!("ses_seed_{}", index % SEEDED_SESSIONS),
+                ])
+                .unwrap();
+            }
+        }
+        tx.execute("UPDATE context_privilege_state SET enabled = 0 WHERE id = 1", [])
+            .unwrap();
+        tx.commit().unwrap();
+
+        if tags > 0 {
+            // The tags triggers bump a per-session counter on every insert; they are
+            // taken off for the bulk load and put back verbatim, so the schema the module
+            // then meets is the committed one.
+            let triggers: Vec<(String, String)> = conn
+                .prepare(
+                    "SELECT name, sql FROM sqlite_master
+                      WHERE type = 'trigger' AND tbl_name = 'tags'",
+                )
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let tx = conn.transaction().unwrap();
+            for (name, _) in &triggers {
+                tx.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
+            }
+            {
+                let mut tag = tx
+                    .prepare(
+                        "INSERT INTO tags
+                           (session_id, message_id, type, byte_size, tag_number, tool_name,
+                            token_count, entry_fingerprint)
+                         VALUES (?1, ?2, 'tool', 512, ?3, 'read', 128, ?4)",
+                    )
+                    .unwrap();
+                for index in 0..tags {
+                    let session = index % SEEDED_SESSIONS;
+                    let number = (index / SEEDED_SESSIONS) as i64 + 1;
+                    tag.execute(params![
+                        format!("ses_seed_{session}"),
+                        format!("msg_{session}_{}", number / 4),
+                        number,
+                        format!("fp_{index:x}"),
+                    ])
+                    .unwrap();
+                }
+            }
+            for (_, sql) in &triggers {
+                tx.execute_batch(sql).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+    }
+
+    fn memories_only_publish(count: usize, salt: &str) -> FoldPublish {
         let mut publish = sample_publish();
         publish.compartments.clear();
         publish.facts.clear();
@@ -3520,67 +3671,166 @@ mod tests {
         publish.notes.clear();
         publish.primer_candidates.clear();
         publish.user_observations.clear();
-        publish.memories = (0..DEFAULT_PUBLISH_CHUNK_ROWS)
+        publish.memories = (0..count)
             .map(|index| HostMemory {
                 category: "ARCHITECTURE".to_string(),
                 content: format!(
-                    "measured memory {index} with enough prose to give the full-text index real work to do"
+                    "measured memory {salt} {index} with enough prose to give the full-text index real work to do"
                 ),
                 ..HostMemory::default()
             })
             .collect();
+        publish
+    }
 
-        let outcome = store.publish_fold(&publish).unwrap();
-        let worst = outcome.max_chunk_duration_us();
+    /// A fold whose visibility chunk carries `compartments` compartments with one fact and
+    /// one event per compartment, appended after a seeded session's existing history.
+    fn visibility_publish(compartments: usize, session: &str, first_sequence: i64) -> FoldPublish {
+        let mut publish = sample_publish();
+        publish.session_id = session.to_string();
+        publish.memories.clear();
+        publish.notes.clear();
+        publish.primer_candidates.clear();
+        publish.user_observations.clear();
+        publish.compartments = (0..compartments)
+            .map(|index| HostCompartment {
+                sequence: first_sequence + index as i64,
+                start_message: 10_000 + index as i64 * 4,
+                end_message: 10_003 + index as i64 * 4,
+                start_message_id: format!("msg_new_{index}_a"),
+                end_message_id: format!("msg_new_{index}_d"),
+                title: format!("measured compartment {index}"),
+                content: format!("measured body {index} {}", "Detail. ".repeat(40)),
+                p1: Some(format!("measured body {index}")),
+                importance: Some(60),
+                created_at: 1_700_000_000_000,
+                ..HostCompartment::default()
+            })
+            .collect();
+        publish.facts = (0..compartments)
+            .map(|index| HostSessionFact {
+                category: "Decisions".to_string(),
+                content: format!("measured fact {index}"),
+            })
+            .collect();
+        publish.events = (0..compartments)
+            .map(|index| HostCompartmentEvent {
+                kind: "causal_incident".to_string(),
+                at_compartment: Some(index as i64 + 1),
+                fields_json: "{}".to_string(),
+            })
+            .collect();
+        publish
+    }
+
+    /// Hold the shipped budgets to the wall-clock ceiling they were derived from, on a
+    /// store seeded to production-like row counts.
+    ///
+    /// The budgets are row counts, but the thing that matters is how long a seat can be
+    /// made to wait. This publishes the shipped staged budget's worth of the most
+    /// expensive row class — a memory, whose insert drives an external-content full-text
+    /// delete and insert — and a visibility chunk at its shipped ceiling, and fails if
+    /// either transaction runs past `PUBLISH_CHUNK_BUDGET_US`. The seed leaves out the
+    /// million tag rows: no module write touches that table, and the instrument below
+    /// shows chunk cost does not move with it.
+    #[test]
+    fn the_shipped_chunk_budgets_hold_their_wall_clock_ceiling_on_a_realistic_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_db(dir.path(), "context.db");
+        mark_managed(&path, "git:fixture");
+        seed_realistic_store(&path, 0);
+        let mut store = HostStore::open(&path).unwrap();
+
+        let mut worst_staged = 0;
+        for round in 0..3 {
+            let outcome = store
+                .publish_fold(&memories_only_publish(
+                    DEFAULT_PUBLISH_CHUNK_ROWS,
+                    &format!("round{round}"),
+                ))
+                .unwrap();
+            worst_staged = worst_staged.max(outcome.max_chunk_duration_us());
+        }
+        // Rows per compartment in the visibility chunk: the compartment, its fact and its
+        // event. Two more are the facts delete and the compartment replace.
+        let compartments = (MAX_VISIBILITY_CHUNK_ROWS - 2) / 3;
+        let visibility = store
+            .publish_fold(&visibility_publish(compartments, "ses_seed_7", 1_000))
+            .unwrap();
+        let worst_visibility = *visibility.chunk_durations_us.last().unwrap();
+
         assert!(
-            worst < PUBLISH_CHUNK_BUDGET_US,
-            "a {DEFAULT_PUBLISH_CHUNK_ROWS}-row chunk held its transaction for {worst}us, over the {PUBLISH_CHUNK_BUDGET_US}us budget"
+            worst_staged < PUBLISH_CHUNK_BUDGET_US,
+            "a {DEFAULT_PUBLISH_CHUNK_ROWS}-row staged chunk held its transaction for {worst_staged}us, over the {PUBLISH_CHUNK_BUDGET_US}us ceiling"
         );
-        // Recorded so the slice report can quote a number rather than an impression.
+        assert!(
+            worst_visibility < PUBLISH_CHUNK_BUDGET_US,
+            "a {MAX_VISIBILITY_CHUNK_ROWS}-row visibility chunk held its transaction for {worst_visibility}us, over the {PUBLISH_CHUNK_BUDGET_US}us ceiling"
+        );
         println!(
-            "single_store chunk measurement: rows={DEFAULT_PUBLISH_CHUNK_ROWS} worst_chunk_us={worst} budget_us={PUBLISH_CHUNK_BUDGET_US}"
+            "single_store chunk measurement (seeded): staged_rows={DEFAULT_PUBLISH_CHUNK_ROWS} worst_staged_us={worst_staged} visibility_rows={MAX_VISIBILITY_CHUNK_ROWS} visibility_us={worst_visibility} ceiling_us={PUBLISH_CHUNK_BUDGET_US}"
         );
     }
 
-    /// Re-derive the row budget by sweeping chunk sizes on the committed schema.
+    /// Re-derive the budgets by sweeping chunk sizes on a store seeded to production-like
+    /// row counts, with and without the million tag rows.
     ///
     /// Not part of the ordinary suite: it is a measuring instrument, and its output is a
-    /// table of numbers rather than a pass/fail claim. Run it when the budget needs
+    /// table of numbers rather than a pass/fail claim. Run it when a budget needs
     /// revisiting:
     ///   cargo test -p mc-module --lib host_store::tests::measure -- --ignored --nocapture
     #[test]
     #[ignore = "measurement instrument, not an assertion"]
-    fn measure_chunk_cost_across_sizes() {
-        for rows in [16_usize, 32, 64, 128, 256, 512, 1024] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = fixture_db(dir.path(), "context.db");
-            mark_managed(&path, "git:fixture");
-            let mut store = HostStore::open(&path).unwrap();
-            store.set_chunk_budget(rows);
-
-            let mut publish = sample_publish();
-            publish.compartments.clear();
-            publish.facts.clear();
-            publish.events.clear();
-            publish.notes.clear();
-            publish.primer_candidates.clear();
-            publish.user_observations.clear();
-            publish.memories = (0..rows)
-                .map(|index| HostMemory {
-                    category: "ARCHITECTURE".to_string(),
-                    content: format!(
-                        "measured memory {index} with enough prose to give the full-text index real work to do"
-                    ),
-                    ..HostMemory::default()
-                })
-                .collect();
-
-            let outcome = store.publish_fold(&publish).unwrap();
+    fn measure_chunk_cost_on_a_realistic_store() {
+        for tags in [0, REALISTIC_TAGS] {
+            let template_dir = tempfile::tempdir().unwrap();
+            let template = fixture_db(template_dir.path(), "template.db");
+            mark_managed(&template, "git:fixture");
+            let seed_started = Instant::now();
+            seed_realistic_store(&template, tags);
             println!(
-                "rows={rows} worst_chunk_us={} chunks={}",
-                outcome.max_chunk_duration_us(),
-                outcome.chunk_rows.len()
+                "seeded tags={tags} in {:?}, file {} bytes",
+                seed_started.elapsed(),
+                std::fs::metadata(&template).unwrap().len()
             );
+            for rows in [16_usize, 32, 64, 128, 256, 512] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("context.db");
+                std::fs::copy(&template, &path).unwrap();
+                let mut store = HostStore::open(&path).unwrap();
+                store.set_chunk_budget(rows);
+                store.set_visibility_budget(usize::MAX);
+                let mut staged = Vec::new();
+                for round in 0..5 {
+                    let outcome = store
+                        .publish_fold(&memories_only_publish(rows, &format!("r{round}")))
+                        .unwrap();
+                    staged.push(outcome.max_chunk_duration_us());
+                }
+                let mut visibility = Vec::new();
+                for round in 0..5 {
+                    let compartments = rows.saturating_sub(2) / 3;
+                    let outcome = store
+                        .publish_fold(&visibility_publish(
+                            compartments.max(1),
+                            &format!("ses_seed_{round}"),
+                            1_000,
+                        ))
+                        .unwrap();
+                    visibility.push(*outcome.chunk_durations_us.last().unwrap());
+                }
+                staged.sort_unstable();
+                visibility.sort_unstable();
+                println!(
+                    "tags={tags} rows={rows} staged_us(min/median/max)={}/{}/{} visibility_us(min/median/max)={}/{}/{}",
+                    staged[0],
+                    staged[2],
+                    staged[4],
+                    visibility[0],
+                    visibility[2],
+                    visibility[4]
+                );
+            }
         }
     }
 }
