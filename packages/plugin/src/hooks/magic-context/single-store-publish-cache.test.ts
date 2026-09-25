@@ -119,7 +119,12 @@ function pass(projectDirectory: string, isCacheBustingPass: boolean) {
     });
     const m0 = result.m0Bytes ? result.m0Bytes.toString("utf8") : "";
     const m1 = result.m1Text ?? "";
-    return { m0, m1, prefix: sha256(`${m0}\u0000${m1}`), rematerialized: result.m0RematerializedThisPass };
+    return {
+        m0,
+        m1,
+        prefix: sha256(`${m0}\u0000${m1}`),
+        rematerialized: result.m0RematerializedThisPass,
+    };
 }
 
 function sessionMetaCache(): unknown {

@@ -98,10 +98,11 @@ pub const DOMAIN_TABLES: &[&str] = &[
 
 /// The table the privileged-writer bracket flips inside every write transaction.
 ///
-/// It is fingerprinted like a domain table because every chunk depends on its exact
-/// shape: a migration that re-keys it (the scoped privilege row planned for single-store
-/// projects is one) would leave the module flipping a row the guards no longer read. A
-/// change here refuses every write, since no chunk can be written without the bracket.
+/// It is fingerprinted like a domain table because every chunk sets and clears its row
+/// `id = 1`, and the authority guards on `memories` and `notes` read that row. A migration
+/// that changed the table's key (for example, one privilege row per project instead of
+/// one per file) would leave the module setting a row the guards no longer read, so any
+/// change to this table refuses every write.
 pub const BRACKET_TABLE: &str = "context_privilege_state";
 
 /// Maximum rows one non-final chunk may write.
@@ -955,10 +956,13 @@ pub fn compute_normalized_hash(content: &str) -> String {
 /// pointing at a deleted id; here they would be re-inserted by the retry beside the
 /// originals, so they are removed with the rows they describe.
 ///
-/// `session_meta` is deliberately left alone: a historian publish must never cause a
-/// cache bust by itself. The host's own fold path (`appendCompartments`) clears no cached
-/// m0/m1 either; the new rows reach m0/m1 through the compartment marker on the next pass
-/// that is already busting.
+/// `session_meta` is deliberately left alone. It holds the cached rendering of the
+/// session's history prefix (the m0/m1 messages), and clearing it would force that prefix
+/// to be re-rendered, changing bytes the provider has cached, on a pass that was otherwise
+/// replaying them. A historian publish must never cause that by itself. The host's own
+/// fold path (`appendCompartments`) clears nothing either: the reader notices the new
+/// rows through the highest compartment sequence it recorded with the cache, and picks
+/// them up on the next pass that re-renders for another reason.
 fn replace_compartments_from_first_sequence(
     tx: &Transaction<'_>,
     publish: &FoldPublish,
@@ -2556,10 +2560,8 @@ mod tests {
         let path = fixture_db(dir.path(), "context.db");
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "ALTER TABLE context_privilege_state ADD COLUMN project_path TEXT;",
-            )
-            .unwrap();
+            conn.execute_batch("ALTER TABLE context_privilege_state ADD COLUMN project_path TEXT;")
+                .unwrap();
         }
         let mut store = HostStore::open(&path).unwrap();
         assert!(store.writable_tables().is_empty());
@@ -3519,9 +3521,9 @@ mod tests {
 
     /// Row counts of a `context.db` that has been in daily use for a while. The chunk
     /// budget is measured and held on a store this size, not on an empty one: full-text
-    /// segment merges and index depth both grow with what is already there, and an
-    /// empty-store measurement understated the cost of a chunk by more than an order of
-    /// magnitude.
+    /// segment merges, index depth and the memory de-duplication lookup all grow with
+    /// what is already there. A 64-row memory chunk took about 5 ms on the empty schema
+    /// and 60-140 ms on this seed.
     const REALISTIC_MEMORIES: usize = 2_000;
     const REALISTIC_COMPARTMENTS: usize = 11_000;
     const REALISTIC_NOTES: usize = 1_000;
@@ -3538,8 +3540,11 @@ mod tests {
         let tx = conn.transaction().unwrap();
         // The authority guards abort writes to a managed project unless the bracket row
         // is set; the seed is not what is being measured, so it simply holds the bracket.
-        tx.execute("UPDATE context_privilege_state SET enabled = 1 WHERE id = 1", [])
-            .unwrap();
+        tx.execute(
+            "UPDATE context_privilege_state SET enabled = 1 WHERE id = 1",
+            [],
+        )
+        .unwrap();
         {
             let mut memory = tx
                 .prepare(
@@ -3550,7 +3555,11 @@ mod tests {
                 )
                 .unwrap();
             for index in 0..REALISTIC_MEMORIES {
-                let project = if index % 2 == 0 { "git:fixture" } else { "git:other" };
+                let project = if index % 2 == 0 {
+                    "git:fixture"
+                } else {
+                    "git:other"
+                };
                 let content = format!(
                     "seeded memory {index} about module {} and the {} path, noting that \
                      subsystem {} depends on {} when the {} flag is set",
@@ -3611,8 +3620,11 @@ mod tests {
                 .unwrap();
             }
         }
-        tx.execute("UPDATE context_privilege_state SET enabled = 0 WHERE id = 1", [])
-            .unwrap();
+        tx.execute(
+            "UPDATE context_privilege_state SET enabled = 0 WHERE id = 1",
+            [],
+        )
+        .unwrap();
         tx.commit().unwrap();
 
         if tags > 0 {

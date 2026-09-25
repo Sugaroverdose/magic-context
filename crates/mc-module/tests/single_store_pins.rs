@@ -276,7 +276,9 @@ fn a_publish_killed_between_chunks_is_resumed_by_the_retry_without_duplicates() 
             assert_eq!(
                 count(
                     &conn,
-                    &format!("SELECT COUNT(*) FROM compartments WHERE session_id = '{CHILD_SESSION}'")
+                    &format!(
+                        "SELECT COUNT(*) FROM compartments WHERE session_id = '{CHILD_SESSION}'"
+                    )
                 ),
                 0,
                 "a kill after staged chunk {kill_after} left a visible fold"
@@ -358,7 +360,7 @@ fn a_later_publish_of_the_same_memory_still_counts_as_seen_again() {
     assert_eq!(last_seen, NOW_MS + 60_000);
 }
 
-// ── One compartment contract for both writers ───────────────────────────────
+// ── The module and the host leave the same compartment rows ─────────────────
 
 /// The module's visibility chunk leaves the session with the row set the host's
 /// `replaceAllCompartmentState` leaves when handed the kept prefix plus this publish:
@@ -667,7 +669,10 @@ fn a_lost_busy_timeout_is_a_typed_refusal() {
     blocker.execute_batch("ROLLBACK").unwrap();
 
     let error = outcome.expect_err("the publish must fail when it cannot take the write lock");
-    assert!(waited >= Duration::from_millis(4_500), "gave up after {waited:?}");
+    assert!(
+        waited >= Duration::from_millis(4_500),
+        "gave up after {waited:?}"
+    );
     assert_eq!(error.code(), "single_store_busy", "{error}");
     assert!(!error.is_schema_refusal());
     assert!(
@@ -733,7 +738,10 @@ fn with_single_store_on_the_watermark_reaches_the_real_context_db() {
     assert_eq!(watermark(&path), Some((highest, 0)));
     let conn = Connection::open(&path).unwrap();
     assert_eq!(
-        count(&conn, "SELECT COUNT(*) FROM memories WHERE source_session_id = 'ses_on'"),
+        count(
+            &conn,
+            "SELECT COUNT(*) FROM memories WHERE source_session_id = 'ses_on'"
+        ),
         3
     );
 }
@@ -771,7 +779,11 @@ fn a_shadow_run_writes_nothing_to_the_live_context_db() {
     );
 
     checkpoint(&path);
-    assert_eq!(before, sha256_of(&path), "a shadow run changed the live context.db");
+    assert_eq!(
+        before,
+        sha256_of(&path),
+        "a shadow run changed the live context.db"
+    );
     assert_eq!(watermark(&path), None);
 }
 
