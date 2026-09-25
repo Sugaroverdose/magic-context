@@ -4,10 +4,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { resolvePiWindowGeometry } from "./pi-context-limit";
-import {
-	resolvePiModelWindowTokens,
-	resolvePiPressureSnapshot,
-} from "./pi-pressure";
+import { resolvePiPressureSnapshot } from "./pi-pressure";
 
 const STATUS_KEY = "magic-context";
 const RECENT_FAILURE_MS = 60_000;
@@ -33,7 +30,6 @@ type SessionMetaStatus = {
 	last_input_tokens: number | null;
 	last_context_percentage: number | null;
 	detected_context_limit: number | null;
-	observed_safe_input_tokens: number | null;
 };
 
 const lastRenderedBySession = new Map<string, string>();
@@ -123,13 +119,6 @@ export function renderStatusText(
 					persistedInputTokens: persistedInputTokens ?? 0,
 					liveInputTokens,
 					usableContextLimit: windowGeometry?.usableSoft,
-					// Show the same pressure the transform acts on: a live estimate
-					// above the model window is not a real prompt size.
-					modelWindowTokens: resolvePiModelWindowTokens({
-						reportedWindow: usage?.contextWindow,
-						modelWindow: ctx.model?.contextWindow,
-						observedSafeInputTokens: meta?.observed_safe_input_tokens,
-					}),
 				})
 			: undefined;
 	const inputTokens = pressure?.inputTokens;
@@ -162,8 +151,7 @@ function readSessionMetaStatus(
 			.prepare<[string], SessionMetaStatus>(
 				`SELECT compartment_in_progress, historian_failure_count,
 				        historian_last_failure_at, last_input_tokens,
-				        last_context_percentage, detected_context_limit,
-				        observed_safe_input_tokens
+				        last_context_percentage, detected_context_limit
 				 FROM session_meta WHERE session_id = ?`,
 			)
 			.get(sessionId);

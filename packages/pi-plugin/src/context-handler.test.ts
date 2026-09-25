@@ -2554,8 +2554,11 @@ describe("registerPiContextHandler", () => {
 			const meta = getOrCreateSessionMeta(db, sessionId);
 			expect(meta.observedSafeInputTokens).toBe(0);
 			expect(meta.lastUsageContextLimit).toBe(204_000);
-			expect(meta.lastInputTokens).toBe(272_000);
-			expect(meta.lastContextPercentage).toBeCloseTo(133.3333);
+			// The reply was accepted, so its usage is the real prompt size and
+			// counts in full against the configured limit instead of being clamped
+			// at the configured window; only the persisted proof is healed.
+			expect(meta.lastInputTokens).toBe(593_717);
+			expect(meta.lastContextPercentage).toBeCloseTo((593_717 / 204_000) * 100);
 			expect(meta.cacheAlertSent).toBe(false);
 		} finally {
 			closeQuietly(db);

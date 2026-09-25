@@ -602,8 +602,8 @@ describe("createEventHandler", () => {
         );
     });
 
-    it("refuses an impossible success reading above an overlay-backed wall", async () => {
-        useTempDataHome("context-event-impossible-usage-");
+    it("treats provider usage above an overlay-backed window as real pressure on every reading", async () => {
+        useTempDataHome("context-event-above-window-usage-");
         const overlayPath = join(makeTempDir("context-event-overlay-"), "window-overlay.json");
         writeFileSync(
             overlayPath,
@@ -669,14 +669,34 @@ describe("createEventHandler", () => {
             });
 
         await reading(147_839, 0);
-        await reading(585_397, 8_320);
+        recordDetectedContextLimit(deps.db, "ses-impossible-usage", 200_000);
+        await reading(291_680, 8_320);
 
-        // The impossible reading is refused and the previous trusted reading stays.
-        const meta = getOrCreateSessionMeta(deps.db, "ses-impossible-usage");
-        expect(meta.observedSafeInputTokens).toBe(147_839);
-        expect(meta.lastInputTokens).toBe(147_839);
+        // The provider accepted a 300K prompt on a model configured at 272K.
+        // It is the real prompt size, measured against the configured usable
+        // limit, so pressure is past the emergency line.
+        let meta = getOrCreateSessionMeta(deps.db, "ses-impossible-usage");
+        expect(meta.lastInputTokens).toBe(300_000);
         expect(meta.lastUsageContextLimit).toBe(240_000);
-        expect(contextUsageMap.get("ses-impossible-usage")?.usage.inputTokens).toBe(147_839);
+        expect(meta.lastContextPercentage).toBeCloseTo((300_000 / 240_000) * 100, 5);
+        expect(contextUsageMap.get("ses-impossible-usage")?.usage.inputTokens).toBe(300_000);
+        // The limit learned from an earlier overflow error is disproved by the
+        // accepted request and cleared.
+        expect(getOverflowState(deps.db, "ses-impossible-usage").detectedContextLimit).toBe(0);
+        // The configured window stays the user's limit: the reading is pressure,
+        // not a proven capacity that would widen the window. (Recording the
+        // learned limit above reset the proven floor to 0.)
+        expect(meta.observedSafeInputTokens).toBe(0);
+
+        // Staying above the configured window keeps counting on every reading.
+        await reading(310_000, 0);
+        meta = getOrCreateSessionMeta(deps.db, "ses-impossible-usage");
+        expect(meta.lastInputTokens).toBe(310_000);
+        expect(meta.lastContextPercentage).toBeCloseTo((310_000 / 240_000) * 100, 5);
+        expect(contextUsageMap.get("ses-impossible-usage")?.usage.percentage).toBeCloseTo(
+            (310_000 / 240_000) * 100,
+            5,
+        );
     });
 
     it("clears a stale unkeyed detected limit on the first successful event after restart", async () => {
