@@ -19,7 +19,7 @@
     "replay:transform-wire-parity": "bun scripts/replay-transform-wire-parity.ts"
   },
   "dependencies": {
-    "@cortexkit/subc-client": "0.4.1",
+    "@cortexkit/subc-client": "0.11.1",
     "@opencode-ai/sdk": "^1.15.13"
   },
   "devDependencies": {
