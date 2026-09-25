@@ -4497,6 +4497,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 pct?: number;
                 flush?: boolean;
                 turn?: string;
+                mural?: boolean;
             } = {},
         ) {
             const messages = tail(sessionId, opts.newer ?? 0);
@@ -4526,6 +4527,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                         projectDirectory: FOLD_PROJECT,
                         historyBudgetTokens: 98_000,
                         hardSignals: opts.hard ?? BASE_HARD,
+                        ...(opts.mural
+                            ? { muralEnabled: true, memoryInjectionBudgetTokens: 400 }
+                            : {}),
                     },
                 }),
             );
@@ -4541,6 +4545,87 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         }
         const statusOf = (sessionId: string, tag: number) =>
             getTagsBySession(db, sessionId).find((row) => row.tagNumber === tag)?.status;
+
+        it("mural-only change: an OpenCode HARD that swaps only the mural image opens the lanes", async () => {
+            const xdg = mkdtempSync(join(tmpdir(), "mc-adv-oc-mural-"));
+            tempDirs.push(xdg);
+            process.env.XDG_DATA_HOME = xdg;
+            const modelsDev = await import("../../shared/models-dev-cache");
+            modelsDev.clearModelsDevCache();
+            try {
+                await modelsDev.refreshModelLimitsFromApi({
+                    config: {
+                        providers: async () => ({
+                            data: {
+                                providers: [
+                                    {
+                                        id: "anthropic",
+                                        models: {
+                                            opus: {
+                                                limit: { context: 200_000, input: 200_000 },
+                                                modalities: { input: ["text", "image"] },
+                                            },
+                                        },
+                                    },
+                                ],
+                            },
+                        }),
+                    },
+                } as never);
+                db = new Database(":memory:");
+                initializeDatabase(db);
+                // The mural manifest and cue columns come from the migrations.
+                (await import("../../features/magic-context/migrations")).runMigrations(db);
+                const sessionId = "ses-adv-oc-mural-only";
+                materializeBaseline(sessionId);
+                const { insertMemory } = await import(
+                    "../../features/magic-context/memory/storage-memory"
+                );
+                const cues = await import("../../features/magic-context/mural/storage-mural-cues");
+                // This in-memory schema has no privileged-writer table, so write the
+                // derived cue columns directly (the same columns setMuralCue writes).
+                const setCue = (id: number, cue: string, hash: string) =>
+                    db
+                        .prepare("UPDATE memories SET mural_cue = ?, mural_cue_hash = ? WHERE id = ?")
+                        .run(cue, hash, id);
+                for (let i = 0; i < 24; i++) {
+                    const content = `ADV_MURAL_MEMORY_${i}: ${"rule text ".repeat(20)}`;
+                    const memory = insertMemory(db, {
+                        projectPath: FOLD_PROJECT,
+                        category: "PROJECT_RULES",
+                        content,
+                        importance: 50,
+                    });
+                    setCue(memory.id, `cue-a-${i}`, cues.computeCueContentHash(content));
+                }
+                await bumpEpoch();
+                await pass(sessionId, { mural: true });
+                const withMural = await pass(sessionId, { mural: true });
+                const muralA = getOrCreateSessionMeta(db, sessionId).cachedM0MuralDataUrl;
+                console.log(
+                    `ADV_OC_MURAL_DEBUG vision=${(await import("../../features/magic-context/mural/render-trigger")).modelKeyAcceptsImages("anthropic/opus")} upgrade=${getOrCreateSessionMeta(db, sessionId).cachedM0UpgradeState} withMuralReason=${withMural.result.materializeReason} manifest=${JSON.stringify(db.prepare("SELECT project_path, length(image) AS n FROM mural_manifest").all())} cued=${JSON.stringify(db.prepare("SELECT count(*) AS c FROM memories WHERE mural_cue IS NOT NULL").get())}`,
+                );
+                const target = toolTag(sessionId, "c-mid", "m-mid");
+                queuePendingOp(db, sessionId, target, "drop");
+                const rows = db
+                    .prepare("SELECT id, content FROM memories WHERE project_path = ?")
+                    .all(FOLD_PROJECT) as Array<{ id: number; content: string }>;
+                for (const row of rows) {
+                    setCue(row.id, `cue-b-${row.id}`, cues.computeCueContentHash(row.content));
+                }
+                queueM0Mutation(db, { sessionId, mutationType: "compartment_delete" });
+                const hard = await pass(sessionId, { mural: true });
+                const muralB = getOrCreateSessionMeta(db, sessionId).cachedM0MuralDataUrl;
+                console.log(
+                    `ADV_OC_MURAL_ONLY reason=${hard.result.materializeReason} muralPresent=${muralA !== null} muralChanged=${muralA !== muralB} headTextIdentical=${head(hard.messages) === head(withMural.messages)} status=${statusOf(sessionId, target)}`,
+                );
+                expect(muralA).not.toBeNull();
+                expect(muralA).not.toBe(muralB);
+                expect(statusOf(sessionId, target)).toBe("dropped");
+            } finally {
+                modelsDev.clearModelsDevCache();
+            }
+        });
         const bumpEpoch = async () => {
             const { bumpEpochsForWorkspaceMembers } = await import(
                 "../../features/magic-context/workspaces"
