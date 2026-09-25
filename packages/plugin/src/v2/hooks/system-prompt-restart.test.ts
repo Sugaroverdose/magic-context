@@ -154,7 +154,9 @@ describe("OpenCode 2 system-prompt stage after a restart", () => {
     it("keeps a ctx_reduce permission deny read before the pass: no reduce guidance, verdict frozen", async () => {
         const client = {
             app: {
-                agents: async () => ({ data: [{ name: "build", permission: { ctx_reduce: "deny" } }] }),
+                agents: async () => ({
+                    data: [{ name: "build", permission: { ctx_reduce: "deny" } }],
+                }),
             },
             session: { get: async () => ({ data: { agent: "build" } }) },
         } as unknown as PluginContext["client"];

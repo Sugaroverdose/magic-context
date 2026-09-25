@@ -30,7 +30,7 @@ import {
     getCurrentToolSetHash,
     recordToolDefinition,
 } from "../../features/magic-context/tool-definition-tokens";
-import { resolveCtxReduceAvailabilityFromMessages } from '../../hooks/magic-context/ctx-reduce-availability';
+import { resolveCtxReduceAvailabilityFromMessages } from "../../hooks/magic-context/ctx-reduce-availability";
 import {
     deriveHistorianChunkTokens,
     resolveHistorianContextLimit,
