@@ -10987,7 +10987,7 @@ fn build_channel2_reminder_text(
     let summary = format_reclaimable_output_summary(reclaimable_tool_outputs, reclaimable_tokens);
     let hint_text = format_reclaimable_hint(hint);
     format!(
-        "Routine housekeeping: {summary} are reclaimable — make a ctx_reduce pass at a natural stopping point.{hint_text}"
+        "Your next step: call ctx_reduce on the outputs you've already used ({summary}). Then continue your task.{hint_text}"
     )
 }
 
@@ -11454,10 +11454,11 @@ mod nudge_formula_tests {
         ));
         let sticky = build_channel1_reminder(Channel1Level::Firm, 70_000, 16, &[], true);
         assert!(
-            sticky.contains("Reminder: 16 spent tool outputs (~70k tokens) are still reclaimable")
+            sticky.contains("Still unstamped: 16 spent tool outputs (~70k tokens). Stamp the ones")
         );
         let escalation = build_channel1_reminder(Channel1Level::Urgent, 80_000, 16, &[], false);
-        assert!(escalation.contains("Housekeeping backlog:"));
+        assert!(escalation
+            .contains("are still unstamped. Call ctx_reduce now, before your next tool call"));
     }
 
     #[test]
@@ -11668,19 +11669,19 @@ fn build_channel1_reminder(
     let hint_text = format_reclaimable_hint(hint);
     if sticky {
         return format!(
-            "\n\n<system-reminder>\nReminder: {summary} are still reclaimable — ctx_reduce them at a natural stopping point.{hint_text}\n</system-reminder>"
+            "\n\n<system-reminder>\nStill unstamped: {summary}. Stamp the ones you've used with ctx_reduce now.{hint_text}\n</system-reminder>"
         );
     }
 
     let body = match level {
         Channel1Level::Gentle => format!(
-            "Housekeeping: {summary} are reclaimable — drop the ones you have already processed with ctx_reduce at a natural stopping point."
+            "Housekeeping: {summary} are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish."
         ),
         Channel1Level::Firm => format!(
-            "Housekeeping: {summary} are reclaimable — make a ctx_reduce pass at a natural stopping point."
+            "{summary} are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue."
         ),
         Channel1Level::Urgent => format!(
-            "Housekeeping backlog: {summary} are reclaimable — a ctx_reduce pass is due."
+            "{summary} are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used."
         ),
     };
     format!("\n\n<system-reminder>\n{body}{hint_text}\n</system-reminder>")
@@ -32698,8 +32699,8 @@ pub(crate) mod tests {
             // A re-fire after the band was recorded as firm is a genuine crossing back
             // into urgent, so it renders the full copy rather than the calm same-band one,
             // and it lands on the newest tool result.
-            assert!(refired_result.contains("Housekeeping backlog:"));
-            assert!(!refired_result.contains("Reminder: "));
+            assert!(refired_result.contains("are still unstamped. Call ctx_reduce now"));
+            assert!(!refired_result.contains("Still unstamped: "));
             assert_eq!(
                 frozen_channel1_units(&s, "nudge")
                     .iter()
@@ -32729,6 +32730,102 @@ pub(crate) mod tests {
                 "a reduce-suppressed pass adds no new span"
             );
             assert_eq!(frozen_channel1_units(&s, "nudge").len(), 2);
+        });
+    }
+
+    /// A reminder already served to the model is part of the provider's cached prefix, so a
+    /// release that rewords the reminder copy must keep replaying the stored bytes of every
+    /// reminder minted before it. Only reminders minted afterwards carry the new copy.
+    #[test]
+    fn channel1_reminder_served_with_superseded_copy_replays_its_bytes_after_a_copy_change() {
+        run_active_surface_test(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let huge = "word ".repeat(40_000);
+            let mut messages = Vec::new();
+            for number in 1..=5 {
+                messages.push(assistant_tool_call(
+                    &format!("call{number}"),
+                    number * 2 - 1,
+                    &format!("c{number}"),
+                ));
+                messages.push(tool_result(
+                    &format!("result{number}"),
+                    number * 2,
+                    &format!("c{number}"),
+                    &huge,
+                ));
+            }
+            let mut request = active_cc_req("copy", "cfg0", messages.clone());
+            request.protected_tags = 0;
+            let request = with_usage(request, 900, 1024);
+            run(&s, &request, &spine());
+            run(&s, &request, &spine());
+            assert_eq!(frozen_channel1_units(&s, "copy").len(), 1);
+
+            // Stand in for the previous build: the stored unit holds the text that build
+            // minted and served, worded with the superseded copy.
+            let old_copy = "\n\n<system-reminder>\nHousekeeping: 5 spent tool outputs (~200k tokens) are reclaimable — make a ctx_reduce pass at a natural stopping point.\noldest reclaimable: §1§ tool.\n</system-reminder>";
+            let mut loaded = s.load("copy").unwrap();
+            for unit in loaded
+                .core
+                .frozen_units
+                .iter_mut()
+                .filter(|unit| unit.key.starts_with(CHANNEL1_KEY_PREFIX))
+            {
+                unit.frozen_payload = old_copy.to_string();
+            }
+            s.commit("copy", loaded.row_version, &loaded.core, &loaded.meta)
+                .unwrap();
+
+            let digest = |response: &TransformResponse| {
+                let mut hasher = Sha256::new();
+                for message in response.messages() {
+                    hasher.update(message.canonical_bytes());
+                }
+                format!("{:x}", hasher.finalize())
+            };
+            let pass_a = run(&s, &request, &spine());
+            assert!(tail_bytes(&pass_a, "result5").ends_with(old_copy));
+            let pass_b = run(&s, &request, &spine());
+            assert_eq!(
+                digest(&pass_b),
+                digest(&pass_a),
+                "a defer pass serves the superseded reminder bytes unchanged"
+            );
+            assert!(tail_bytes(&pass_b, "result5").ends_with(old_copy));
+
+            // Re-open the cadence gates the same way the refire test does, then mint a new
+            // reminder on a fresh tool result: it must use the current copy while the old
+            // one keeps its bytes.
+            let mut refire_meta = s.load("copy").unwrap();
+            let refire_baseline = refire_meta.meta.tail_hygiene_baseline.as_mut().unwrap();
+            refire_baseline.channel1_post_reduce_grace_baseline_u = None;
+            refire_baseline.channel1_post_reduce_grace_pre_level.clear();
+            refire_meta.meta.channel1_last_nudge_undropped = 0;
+            refire_meta.meta.channel1_last_fire_ordinal = u64::MAX;
+            s.commit(
+                "copy",
+                refire_meta.row_version,
+                &refire_meta.core,
+                &refire_meta.meta,
+            )
+            .unwrap();
+            let mut refire_messages = messages;
+            refire_messages.push(assistant_tool_call("call6", 11, "c6"));
+            refire_messages.push(tool_result("result6", 12, "c6", &huge.repeat(3)));
+            let mut refire_request = active_cc_req("copy", "cfg0", refire_messages);
+            refire_request.protected_tags = 0;
+            let refired = run(&s, &with_usage(refire_request, 900, 1024), &spine());
+            assert_eq!(
+                tail_bytes(&refired, "result5"),
+                tail_bytes(&pass_a, "result5")
+            );
+            let fresh = tail_bytes(&refired, "result6");
+            assert!(fresh.contains(
+                "are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used."
+            ));
+            assert!(!fresh.contains("natural stopping point"));
         });
     }
 

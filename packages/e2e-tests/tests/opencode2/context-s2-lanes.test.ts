@@ -450,7 +450,7 @@ test("I15 channel2_via_synthetic uses a recorded admission id at the tool batch 
 					usage: { input_tokens: 100, output_tokens: 10 },
 				};
 			const nudged = JSON.stringify(body.input).includes(
-				"Routine housekeeping:",
+				"Your next step: call ctx_reduce",
 			);
 			if (nudged || ++step > (seeded ? 3 : 24))
 				return {
@@ -507,7 +507,7 @@ test("I15 channel2_via_synthetic uses a recorded admission id at the tool batch 
 			expect(HEAD_IDS).not.toContain(
 				synthetic[0].id as (typeof HEAD_IDS)[number],
 			);
-			expect(synthetic[0].data.text).toContain("Routine housekeeping:");
+			expect(synthetic[0].data.text).toContain("Your next step: call ctx_reduce");
 			const laterFrame = capture
 				.frames()
 				.find(
@@ -529,7 +529,7 @@ test("I15 channel2_via_synthetic uses a recorded admission id at the tool batch 
 				.requests()
 				.filter((request) => request.body.model !== "mock-model");
 			expect(titleWires.length).toBeGreaterThan(0);
-			expect(JSON.stringify(titleWires)).not.toContain("Routine housekeeping:");
+			expect(JSON.stringify(titleWires)).not.toContain("Your next step: call ctx_reduce");
 		} finally {
 			reader.close();
 		}

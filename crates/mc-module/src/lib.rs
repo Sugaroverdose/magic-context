@@ -26824,7 +26824,7 @@ mod tests {
         let first_text = first["host_directives"]["channel2_nudge"]["text"]
             .as_str()
             .expect("due OpenCode pass must carry channel2 text");
-        assert!(first_text.contains("Routine housekeeping: "));
+        assert!(first_text.contains("Your next step: call ctx_reduce on the outputs"));
         assert!(first_text.contains("spent tool outputs (~"));
         assert!(!first_text.contains("of ~"));
         assert!(!first_text.contains("of this session"));
@@ -26865,7 +26865,7 @@ mod tests {
             .as_object()
             .expect("due Claude Code pass must carry the gateway directive");
         let cc_text = cc_directive["text"].as_str().unwrap();
-        assert!(cc_text.contains("Routine housekeeping: "));
+        assert!(cc_text.contains("Your next step: call ctx_reduce on the outputs"));
         assert!(cc_text.contains("spent tool outputs (~"));
         assert!(!cc_text.contains("of ~"));
         assert!(!cc_text.contains("of this session"));

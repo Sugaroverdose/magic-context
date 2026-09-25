@@ -38,12 +38,12 @@
   "fullMeasurements": {
     "guidance": {
       "primary-full-reduce-memory-on": {
-        "chars": 4989,
-        "tokens": 1180
+        "chars": 5151,
+        "tokens": 1218
       },
       "primary-full-reduce-memory-off": {
-        "chars": 4652,
-        "tokens": 1100
+        "chars": 4814,
+        "tokens": 1138
       },
       "primary-full-no-reduce-memory-on": {
         "chars": 4056,
@@ -54,20 +54,20 @@
         "tokens": 870
       },
       "primary-full-reduce-dreamer-off": {
-        "chars": 4841,
-        "tokens": 1150
+        "chars": 5003,
+        "tokens": 1188
       },
       "primary-full-reduce-temporal-off": {
-        "chars": 4830,
-        "tokens": 1136
+        "chars": 4992,
+        "tokens": 1174
       },
       "primary-full-reduce-caveman-on": {
-        "chars": 5604,
-        "tokens": 1306
+        "chars": 5766,
+        "tokens": 1344
       },
       "primary-full-reduce-language-on": {
-        "chars": 5189,
-        "tokens": 1226
+        "chars": 5351,
+        "tokens": 1264
       },
       "subagent-reduce": {
         "chars": 1360,
@@ -119,9 +119,9 @@
       },
       "totalTokens": 765
     },
-    "builtInProviderVisibleTotal": 3487
+    "builtInProviderVisibleTotal": 3525
   },
-  "mutableProseBaseline": 2722,
+  "mutableProseBaseline": 2760,
   "integerLightCeiling": 1825,
   "includedSurfaces": [
     "The primary built-in full guidance section for the exact feature variant above.",

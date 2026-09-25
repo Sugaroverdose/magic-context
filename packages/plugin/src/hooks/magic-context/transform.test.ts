@@ -66,6 +66,7 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import type { MarkerUpdateOutcome } from "./compaction-marker-manager";
 import { registerActiveCompartmentRun } from "./compartment-runner";
+import { createToolExecuteAfterHook } from "./hook-handlers";
 import { injectM0M1 } from "./inject-compartments";
 import { captureSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { __ignoredNotificationTest } from "./send-session-notification";
@@ -4708,5 +4709,109 @@ describe("live transform protected-token window", () => {
                 deprecatedProtectedTagCount: 5,
             }),
         ).toEqual(Array.from({ length: 16 }, (_, index) => index + 15));
+    });
+});
+
+describe("Channel 1 reminder copy changes", () => {
+    // A reminder is appended to the tool output when it fires, and OpenCode stores that
+    // output. Every later pass serves the stored bytes, so a reminder worded with the
+    // copy of an earlier release must keep replaying verbatim; only a newly fired
+    // reminder may carry the current copy.
+    const SUPERSEDED_REMINDER =
+        "\n\n<system-reminder>\nHousekeeping: 16 spent tool outputs (~90k tokens) are reclaimable — make a ctx_reduce pass at a natural stopping point.\noldest reclaimable: §1§ read.\n</system-reminder>";
+
+    it("replays a reminder served with superseded copy byte-identically and mints new ones with the current copy", async () => {
+        useTempDataHome("context-transform-reminder-copy-");
+        const sessionId = "ses-reminder-copy";
+        const db = openDatabase();
+        const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>();
+        let decision: "execute" | "defer" = "execute";
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: () => decision },
+            contextUsageMap,
+            db,
+            historyRefreshSessions: new Set<string>(),
+            deferredHistoryRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            clearReasoningAge: 1000,
+            protectedTokens: 0,
+            historianRunnable: false,
+            liveModelBySession: new Map([
+                [sessionId, { providerID: "anthropic", modelID: "claude-opus-5" }],
+            ]),
+        });
+        const source: TestMessage[] = [
+            {
+                info: { id: "copy-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "start" }],
+            },
+            {
+                info: { id: "copy-tool", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "copy-call",
+                        state: {
+                            status: "completed",
+                            output: `file contents${SUPERSEDED_REMINDER}`,
+                        },
+                    },
+                ],
+            },
+            {
+                info: { id: "copy-reply", role: "assistant" },
+                parts: [{ type: "text", text: "read it" }],
+            },
+        ];
+        const run = async () => {
+            const output = { messages: structuredClone(source) };
+            await transform({}, output);
+            return output.messages;
+        };
+        const sha = (value: unknown) =>
+            createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
+        await run();
+        decision = "defer";
+        const passA = await run();
+        const passB = await run();
+        expect(toolOutput(passA[1], 0)).toEndWith(SUPERSEDED_REMINDER);
+        expect(sha(passB)).toBe(sha(passA));
+        expect(toolOutput(passB[1], 0)).toEndWith(SUPERSEDED_REMINDER);
+
+        const channel1State = {
+            baselineU: 80_000,
+            baselineT: 180_000,
+            turnDeltaU: 0,
+            turnDeltaT: 0,
+            usableWindow: 128_000,
+            realUserTurnCount: 1,
+            baselineGeneration: 1,
+            computedAt: 1,
+            evaluable: true,
+            generationInvalidated: false,
+            baselineParts: [],
+            contentSignature: "copy",
+            reducedSinceRefresh: false,
+            oldestReclaimableToolTags: [],
+        };
+        const hook = createToolExecuteAfterHook({
+            db,
+            channel1StateBySession: new Map([[sessionId, channel1State]]),
+        });
+        // An output that already carries a reminder is never re-worded.
+        const replayed = { output: `file contents${SUPERSEDED_REMINDER}` };
+        await hook({ tool: "read", sessionID: sessionId }, replayed);
+        expect(replayed.output).toBe(`file contents${SUPERSEDED_REMINDER}`);
+
+        const fresh = { output: "next file" };
+        await hook({ tool: "read", sessionID: sessionId }, fresh);
+        expect(fresh.output).toContain(
+            "spent tool outputs (~80k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.",
+        );
+        expect(fresh.output).not.toContain("natural stopping point");
     });
 });
