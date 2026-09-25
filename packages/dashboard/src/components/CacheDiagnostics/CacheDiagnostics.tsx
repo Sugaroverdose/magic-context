@@ -999,9 +999,7 @@ export default function CacheDiagnostics() {
                                     <span class="mono">
                                       prompt={evTotalPrompt.toLocaleString()}
                                     </span>
-                                    <span class="mono">
-                                      cached={cacheReadLabel(event)}
-                                    </span>
+                                    <span class="mono">cached={cacheReadLabel(event)}</span>
                                     <span class="mono">new={cacheWriteLabel([event])}</span>
                                     <div class="cache-bar">
                                       <div
