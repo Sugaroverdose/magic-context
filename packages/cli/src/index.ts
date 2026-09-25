@@ -21,6 +21,7 @@
  *   --help, -h              Print help and exit
  */
 import { createRequire } from "node:module";
+import { subcommandHelp } from "./lib/cli-help";
 import { isPromptCancelledError } from "./lib/prompts";
 import { runSqlitePreflight } from "./lib/sqlite-preflight";
 
@@ -86,6 +87,9 @@ function printUsage(): void {
     console.log("    (default: auto-detect, prompt if multiple installed)");
     console.log("");
     console.log("  Usage:");
+    console.log(
+        "    npx @cortexkit/magic-context@latest <command> --help   # help for one command",
+    );
     console.log("    npx @cortexkit/magic-context@latest setup");
     console.log("        # add --dry-run to preview the wizard without writing any files");
     console.log("    npx @cortexkit/magic-context@latest doctor");
@@ -108,6 +112,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
     const command = argv[0];
     const rest = argv.slice(1);
+
+    // Answer `<command> --help` before any command runs: without this, a help
+    // flag was ignored and `doctor --help` ran the whole doctor.
+    const help = subcommandHelp(argv);
+    if (help !== null) {
+        console.log(help);
+        return 0;
+    }
 
     try {
         if (command === "setup") {

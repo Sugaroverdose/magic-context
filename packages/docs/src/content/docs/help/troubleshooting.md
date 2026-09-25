@@ -76,6 +76,17 @@ npx @cortexkit/magic-context@latest setup
 
 If you need to downgrade intentionally, run `doctor --force` afterward — it will report whether the schema is compatible. If not, the only option is to delete the database (`~/.local/share/cortexkit/magic-context/context.db`) and start fresh. **This deletes all memories and compartments** — back up first if you want to preserve anything.
 
+### Running OpenCode 1 and OpenCode 2 side by side
+
+Both hosts open the same `context.db`, but each keeps its own cached copy of the plugin: OpenCode 1 under `~/.cache/opencode/packages/`, OpenCode 2 under `~/.cache/opencode/npm/`. Neither host replaces a cached `@latest` install on its own. When the two copies differ, the newer one migrates the database on its first start and the older host then fails closed on every prompt.
+
+`doctor` reads the version and schema fence of each cached copy, compares them with the newest migration in `context.db`, and names any cache directory that is behind. To bring that host up to date:
+
+- **OpenCode 2:** open `/plugins`, select Magic Context and press **ctrl+u** (ctrl+r only re-checks), or run `opencode plugin update`. Then restart OpenCode 2.
+- **OpenCode 1:** quit OpenCode 1 and delete the cache directory doctor names (for example `~/.cache/opencode/packages/@cortexkit/opencode-magic-context@latest`). OpenCode 1 installs the current release on its next start.
+
+After each Magic Context release, update both hosts before using either one, so neither is left behind the database.
+
 ---
 
 ## Historian failures
