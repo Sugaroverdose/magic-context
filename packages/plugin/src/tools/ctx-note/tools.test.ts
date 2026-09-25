@@ -76,6 +76,26 @@ describe("createCtxNoteTools", () => {
         expect(readResult).toContain("Remember the user prefers build on integrate.");
     });
 
+    it("refuses a condition on a session note and heals a previously parked row", async () => {
+        await tools.ctx_note.execute({ action: "write", content: "session" }, toolContext());
+        const reply = await tools.ctx_note.execute(
+            { action: "update", note_ids: [1], surface_condition: "tomorrow" },
+            toolContext(),
+        );
+        expect(reply).toContain("Only a note created with a condition can have one");
+        expect(
+            db.prepare("SELECT status, surface_condition FROM notes WHERE id = 1").get(),
+        ).toEqual({ status: "active", surface_condition: null });
+        db.prepare(
+            "UPDATE notes SET status = 'pending', surface_condition = 'orphan' WHERE id = 1",
+        ).run();
+        const read = await tools.ctx_note.execute({ action: "read" }, toolContext());
+        expect(read).toContain("session");
+        expect(
+            db.prepare("SELECT status, surface_condition FROM notes WHERE id = 1").get(),
+        ).toEqual({ status: "active", surface_condition: null });
+    });
+
     it("routes notes only when the notes domain reports module authority", async () => {
         const routed: Array<{ action: string; memoryProject: string }> = [];
         tools = createCtxNoteTools({

@@ -1,6 +1,7 @@
 import { createHmac, randomUUID } from "node:crypto";
 
 import type { Compartment } from "../../features/magic-context/compartment-storage";
+import { getModuleNoteEvaluationBridge } from "../../features/magic-context/context-authority";
 import {
     buildWorkspaceMemorySqlFilter,
     getMaxMemoryIdForProjects,
@@ -73,6 +74,7 @@ export interface ModuleWatermarks {
      * state-sync markers are still valid. */
     workspace_fingerprint?: string | null;
     reasoning_cleared_through_tag?: number;
+    note_evaluation_available?: boolean;
 }
 
 export interface ModuleWorkspacePayload {
@@ -141,6 +143,7 @@ export interface ModuleStateSyncPayload {
     method: "state_sync";
     params: {
         session_id?: string;
+        note_evaluation_available?: boolean;
         shadow_generation: number;
         expected_shadow_seq: number;
         seed_id?: string;
@@ -214,6 +217,7 @@ export interface ModuleStateSyncOptions {
      * This bypasses both capability and own-store reads; force/restart seeds ignore it.
      */
     knownWatermarksUnchanged?: boolean;
+    noteEvaluationProjectPath?: string;
 }
 
 export interface ModuleCompartmentMirrorRow {
@@ -607,6 +611,7 @@ export function loadModuleWatermarks(args: {
     workspace?: ModuleWorkspaceContext;
     /** Reuse the enclosing pass's session_meta projection. */
     sessionMeta?: ReturnType<typeof getOrCreateSessionMeta>;
+    noteEvaluationProjectPath?: string;
 }): ModuleWatermarks {
     const workspace = args.workspace ?? resolveModuleWorkspaceContext(args.db, args.projectPath);
     const sessionMeta = args.sessionMeta ?? getOrCreateSessionMeta(args.db, args.sessionId);
@@ -629,6 +634,7 @@ export function loadModuleWatermarks(args: {
     const memoryMutationId = args.projectPath
         ? (getMaxMemoryMutationIdForProjects(args.db, workspace.expandedIdentities) ?? 0)
         : 0;
+    const evaluationProject = args.noteEvaluationProjectPath ?? args.projectPath;
     return {
         compartment_sequence: compartmentRow?.max_sequence ?? -1,
         memory_id: memoryId,
@@ -643,6 +649,9 @@ export function loadModuleWatermarks(args: {
             0,
         workspace_fingerprint: workspace.workspace?.fingerprint ?? null,
         reasoning_cleared_through_tag: sessionMeta.clearedReasoningThroughTag ?? 0,
+        note_evaluation_available: evaluationProject
+            ? getModuleNoteEvaluationBridge(evaluationProject) !== undefined
+            : false,
     };
 }
 
@@ -660,7 +669,8 @@ export function moduleWatermarksEqual(
         left.project_memory_epoch === right.project_memory_epoch &&
         left.project_user_profile_version === right.project_user_profile_version &&
         (left.workspace_fingerprint ?? null) === (right.workspace_fingerprint ?? null) &&
-        (left.reasoning_cleared_through_tag ?? 0) === (right.reasoning_cleared_through_tag ?? 0)
+        (left.reasoning_cleared_through_tag ?? 0) === (right.reasoning_cleared_through_tag ?? 0) &&
+        (left.note_evaluation_available ?? false) === (right.note_evaluation_available ?? false)
     );
 }
 
@@ -1298,6 +1308,7 @@ export function buildPagedModuleStateSyncPayloads(
                       project_memory_epoch: args.watermarks.project_memory_epoch,
                       user_profile_version: args.watermarks.project_user_profile_version,
                       acked_watermarks: args.watermarks,
+                      note_evaluation_available: args.watermarks.note_evaluation_available ?? false,
                       ...(args.dropSeedSkipped !== undefined
                           ? { drop_seed_skipped: args.dropSeedSkipped }
                           : {}),
@@ -1426,6 +1437,7 @@ export async function buildModuleStateSyncPayload(args: {
         projectPath: args.pass.projectPath,
         workspace,
         sessionMeta,
+        noteEvaluationProjectPath: args.options?.noteEvaluationProjectPath,
     });
     if (
         !args.force &&
@@ -1919,6 +1931,7 @@ export async function buildModuleStateSyncPayload(args: {
             project_memory_epoch: currentWatermarks.project_memory_epoch,
             user_profile_version: currentWatermarks.project_user_profile_version,
             acked_watermarks: currentWatermarks,
+            note_evaluation_available: currentWatermarks.note_evaluation_available ?? false,
             ...(pendingCompactionMarker !== undefined
                 ? { pending_compaction_marker: pendingCompactionMarker }
                 : {}),
@@ -2065,7 +2078,9 @@ export async function syncModuleState(args: {
         if (
             !force &&
             args.options?.knownWatermarksUnchanged === true &&
-            args.state.lastAckedWatermarks !== null
+            args.state.lastAckedWatermarks !== null &&
+            (args.state.lastAckedWatermarks.note_evaluation_available ?? false) ===
+                (getModuleNoteEvaluationBridge(args.projectRoot) !== undefined)
         ) {
             return { status: "no_change" };
         }
@@ -2133,7 +2148,11 @@ export async function syncModuleState(args: {
                 state: args.state,
                 pass: args.pass,
                 force,
-                options: { ...args.options, stateSyncDeltas },
+                options: {
+                    ...args.options,
+                    stateSyncDeltas,
+                    noteEvaluationProjectPath: args.projectRoot,
+                },
             });
             timing.serialize += Math.max(
                 0,

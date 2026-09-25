@@ -228,7 +228,17 @@ function noteCheckColumnsExist(db: Database): boolean {
     }
 }
 
+function healPendingSessionNotes(db: Database): void {
+    db.prepare(
+        "UPDATE notes SET status = 'active', surface_condition = NULL WHERE type = 'session' AND status = 'pending' AND surface_condition IS NOT NULL",
+    ).run();
+}
+
+export const SESSION_NOTE_CONDITION_ERROR =
+    "Only a note created with a condition can have one. Write a new note with surface_condition, and dismiss this one.";
+
 function getNoteById(db: Database, noteId: number): Note | null {
+    healPendingSessionNotes(db);
     const row = db.prepare("SELECT * FROM notes WHERE id = ?").get(noteId);
     return isNoteRow(row) ? toNote(row) : null;
 }
@@ -269,6 +279,7 @@ function buildStatusClause(status: GetNotesOptions["status"]): {
 }
 
 export function getNotes(db: Database, options: GetNotesOptions = {}): Note[] {
+    healPendingSessionNotes(db);
     const clauses: string[] = [];
     const params: Array<string | NoteStatus> = [];
 
@@ -377,6 +388,9 @@ export function updateNote(
 ): Note | null {
     const existing = getNoteByIdInScope(db, noteId, scope);
     if (!existing) {
+        return null;
+    }
+    if (updates.surfaceCondition !== undefined && existing.type !== "smart") {
         return null;
     }
 

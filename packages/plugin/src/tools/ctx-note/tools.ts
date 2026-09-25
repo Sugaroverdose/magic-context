@@ -23,7 +23,10 @@ import {
     updateNote,
 } from "../../features/magic-context/storage";
 import type { NoteMutationScope } from "../../features/magic-context/storage-notes";
-import { getNoteByIdInScope } from "../../features/magic-context/storage-notes";
+import {
+    getNoteByIdInScope,
+    SESSION_NOTE_CONDITION_ERROR,
+} from "../../features/magic-context/storage-notes";
 import type { RustNoteToolRequest, RustToolBackends } from "../../plugin/rust-tool-backends";
 import {
     isRustAuthorityDrainingError,
@@ -467,6 +470,14 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 const updates: UpdateNoteOptions = {};
                 if (args.content?.trim()) updates.content = args.content.trim();
                 let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
+                if (args.surface_condition?.trim() && projectIdentity) {
+                    const existing = getNoteByIdInScope(deps.db, noteId, {
+                        projectPath: projectIdentity,
+                        sessionId,
+                    });
+                    if (existing?.type === "session")
+                        return `Error: ${SESSION_NOTE_CONDITION_ERROR}`;
+                }
                 if (args.surface_condition?.trim()) {
                     const surfaceCondition = args.surface_condition.trim();
                     updates.surfaceCondition = surfaceCondition;

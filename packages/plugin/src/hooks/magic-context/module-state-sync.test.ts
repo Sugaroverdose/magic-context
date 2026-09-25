@@ -6,6 +6,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
+import {
+    getModuleNoteEvaluationBridge,
+    registerModuleNoteEvaluationBridge,
+} from "../../features/magic-context/context-authority";
 import { runMigrations } from "../../features/magic-context/migrations";
 import {
     addProcessedImageStrippedIds,
@@ -428,6 +432,46 @@ describe("module state external epochs", () => {
                 project_user_profile_version: 4,
             }),
         );
+    });
+});
+
+describe("module note evaluation capability sync", () => {
+    it("sends the registered bridge capability and re-sends when it changes", async () => {
+        const db = createContextDb();
+        const sessionId = "ses-note-capability";
+        const projectPath = "/tmp/note-capability-contract";
+        const state = { ...syncState(), lastAckedWatermarks: null };
+        const build = () =>
+            buildModuleStateSyncPayload({
+                state,
+                pass: { db, sessionId, projectPath, nowMs: 1 },
+                force: false,
+            });
+        expect(getModuleNoteEvaluationBridge(projectPath)).toBeUndefined();
+        const before = await build();
+        expect(
+            before && typeof before === "object" && before.params.note_evaluation_available,
+        ).toBe(false);
+        if (!before || typeof before !== "object") throw new Error("missing payload");
+        state.lastAckedWatermarks = before.watermarks;
+        registerModuleNoteEvaluationBridge(
+            projectPath,
+            {} as Parameters<typeof registerModuleNoteEvaluationBridge>[1],
+        );
+        const calls: Array<Record<string, unknown>> = [];
+        await syncModuleState({
+            client: {
+                async call(args) {
+                    calls.push(args.body as Record<string, unknown>);
+                    return { result: { shadow_seq: 1 } };
+                },
+            },
+            state,
+            pass: { db, sessionId, projectPath: "/tmp/a-different-memory-identity", nowMs: 1 },
+            projectRoot: projectPath,
+            force: false,
+        });
+        expect(calls.at(-1)?.note_evaluation_available).toBe(true);
     });
 });
 
