@@ -108,6 +108,8 @@ export interface OpenCodeV2CacheResult {
     pids?: number[];
     reason?: string;
     error?: string;
+    /** Cleared only because of `--force`: the install was not known to be outdated. */
+    forced?: boolean;
 }
 
 /** True when the cached install is older than `latest` or unreadable. */
@@ -166,7 +168,7 @@ export function checkOpenCodeV2PluginCache(
             error: err instanceof Error ? err.message : String(err),
         };
     }
-    return { action: "cleared", slot, cached, latest };
+    return { action: "cleared", slot, cached, latest, forced: !stale };
 }
 
 /**
@@ -237,7 +239,7 @@ export function reportOpenCodeV2PluginCache(
             return { fixed: false, issue: true };
         case "cleared":
             report.pass(
-                `Cleared ${result.latest ? "outdated " : ""}Magic Context from the OpenCode 2 plugin cache (${versions}) — OpenCode installs the latest on next start`,
+                `Cleared ${result.forced ? "" : "outdated "}Magic Context from the OpenCode 2 plugin cache (${versions}${result.forced ? ", --force" : ""}) — OpenCode installs the latest on next start`,
             );
             report.info(`  ${result.slot}`);
             return { fixed: true, issue: false };

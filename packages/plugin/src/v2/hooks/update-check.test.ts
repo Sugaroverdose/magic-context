@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
     __resetNotificationStateForTests,
     drainNotifications,
 } from "../../shared/rpc-notifications";
 import { startUpdateChecks } from "./update-check";
 
+// The notification queue is process-wide; other test files in the same run leave toasts in it.
+beforeEach(() => __resetNotificationStateForTests());
 afterEach(() => __resetNotificationStateForTests());
 
 function oneEventContext() {

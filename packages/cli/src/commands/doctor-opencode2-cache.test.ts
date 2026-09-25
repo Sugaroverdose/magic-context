@@ -85,7 +85,7 @@ describe("doctor OpenCode 2 plugin cache check", () => {
                 },
             },
         );
-        expect(result.action).toBe("cleared");
+        expect(result).toMatchObject({ action: "cleared", forced: false });
         expect(existsSync(slot)).toBe(false);
         for (const neighbour of neighbours) expect(existsSync(neighbour)).toBe(true);
         // The host database and the slot itself are what the in-use probe checks.
@@ -143,8 +143,8 @@ describe("doctor OpenCode 2 plugin cache check", () => {
             checkOpenCodeV2PluginCache(
                 { force: true, latestVersion: null, hostFiles: [] },
                 { slot, probe: free },
-            ).action,
-        ).toBe("cleared");
+            ),
+        ).toMatchObject({ action: "cleared", forced: true });
         expect(existsSync(slot)).toBe(false);
     });
 
