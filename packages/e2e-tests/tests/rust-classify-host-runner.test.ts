@@ -3,12 +3,17 @@
 /**
  * Rust mode: the classify dreamer task under `historian.runner: "host"`.
  *
- * The runner setting is about who runs the HISTORIAN completion, but classify rides
- * the same module route (the runner route to Broca). Under the host runner the module
- * declares no Broca route at boot and its producer factory has no target, so a
- * classify request has nowhere to go. This drives classify through the real
- * module once under the default runner (it answers) and once after restarting the
- * module with the host runner configured in its user tier.
+ * Classify used to ride the module's runner route to Broca. Under the host runner
+ * the module declares no Broca route at boot and its producer factory has no
+ * target, so every classify attempt failed with "host historian runner does not
+ * use a subc module route". Classify now runs the way the historian does under
+ * that runner: the module answers `host_completion_required` with the system
+ * prompt, the host runs the completion on its own carrier, and the module checks
+ * and records the text the host sends back under the same command id.
+ *
+ * This drives classify through the real module once under the default runner (the
+ * module runs it) and once after restarting the module with the host runner
+ * configured in its user tier, where the test stands in for the host's carrier.
  */
 
 import { Database } from "bun:sqlite";
@@ -213,17 +218,23 @@ describe.skipIf(!rustPrereqs.ok)(
 			await h?.dispose();
 		});
 
-		const runTask = (park: boolean, modelChain: string[]) =>
+		const runTask = (
+			park: boolean,
+			modelChain: string[],
+			hostCompletion?: Record<string, unknown>,
+			commandId = `classify:lane:${park ? "park" : "clean"}:${Date.now()}`,
+		) =>
 			h.subc.moduleRequest(sessionId, h.env.workdir, {
 				method: "dreamer.run_task",
 				task: "classify",
-				command_id: `classify:lane:${park ? "park" : "clean"}:${Date.now()}`,
+				command_id: commandId,
 				authority_generation: authorityGeneration,
 				model_chain: modelChain,
 				payload: {
 					prompt_body: classifyPrompt(projectIdentity, items, park),
 					items,
 				},
+				...(hostCompletion ? { host_completion: hostCompletion } : {}),
 			});
 
 		it("still classifies after the module restarts with historian.runner = host", async () => {
@@ -240,9 +251,36 @@ describe.skipIf(!rustPrereqs.ok)(
 			);
 			await h.subc.restartModule();
 
+			const commandId = `classify:lane:host:${Date.now()}`;
+			const asked = (await runTask(
+				false,
+				["mock-anthropic/mock-sonnet"],
+				undefined,
+				commandId,
+			)) as { ok?: boolean; code?: string; system_prompt?: string };
+			console.log(
+				`classify under historian.runner=host, first answer: ${JSON.stringify({ ...asked, system_prompt: asked.system_prompt?.slice(0, 60) })}`,
+			);
+			// The module no longer attempts a route it does not have: it asks the host.
+			expect(asked.ok).toBe(false);
+			expect(asked.code).toBe("host_completion_required");
+			expect(asked.system_prompt).toContain("memory classifier");
+
+			// The host's carrier answers with a manifest covering the pool.
+			const manifest = `<classify>\n${items
+				.map(
+					(item) =>
+						`<memory id="${item.memory_id}" importance="60" scope="project" shareable="false"/>`,
+				)
+				.join("\n")}\n</classify>`;
 			let after: unknown;
 			try {
-				after = await runTask(false, ["mock-anthropic/mock-sonnet"]);
+				after = await runTask(
+					false,
+					["mock-anthropic/mock-sonnet"],
+					{ text: manifest, model: "mock-anthropic/mock-sonnet" },
+					commandId,
+				);
 			} catch (error) {
 				after = {
 					ok: false,
@@ -259,6 +297,11 @@ describe.skipIf(!rustPrereqs.ok)(
 				.slice(-2);
 			console.log(`module classify lines: ${classifyLines.join(" | ")}`);
 			expect((after as { ok?: boolean }).ok).toBe(true);
+			expect((after as { manifest_text?: string }).manifest_text).toBe(manifest);
+			expect(
+				(after as { diagnostics?: { runner?: string } }).diagnostics?.runner,
+			).toBe("host");
+			expect(classifyLines.at(-1)).toContain("session=host outcome=manifest");
 		}, 300_000);
 	},
 );

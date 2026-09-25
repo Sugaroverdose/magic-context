@@ -388,6 +388,89 @@ describe("module-backed classification", () => {
         }
     });
 
+    test("runs the completion on this host when the module has no completion runner, and hands the text back", async () => {
+        const db = freshDb();
+        try {
+            const projectIdentity = "git:module-host-runner";
+            const contextIds = addMemories(db, projectIdentity, 10);
+            for (const [index, contextId] of contextIds.entries()) {
+                addMirrorMapping(db, projectIdentity, contextId, 9300 + index, `hash-${index}`);
+            }
+            installAuthorityManagedMarker(db, projectIdentity, "store");
+
+            const calls: ClassifyModuleCallArgs[] = [];
+            const args = moduleArgs(db, projectIdentity, (call) => {
+                calls.push(call);
+                if (call.method === "dreamer.run_task") {
+                    const completion = (call.body as { host_completion?: { text: string } })
+                        .host_completion;
+                    // The module under historian.runner = host: no runner of its own, so
+                    // it asks for the host's completion and then echoes the text it got.
+                    return completion
+                        ? { result: { ok: true, manifest_text: completion.text } }
+                        : {
+                              result: {
+                                  ok: false,
+                                  code: "host_completion_required",
+                                  system_prompt: "module classify system prompt",
+                              },
+                          };
+                }
+                const rows = (call.body as { arguments: { rows: Array<{ memory_id: number }> } })
+                    .arguments.rows;
+                return { result: { accepted: rows.map((row) => row.memory_id), rejected: [] } };
+            });
+            args.client = undefined;
+            args.model = "anthropic/profile-dreamer";
+            const systems: string[] = [];
+            let manifest = "";
+            args.hiddenCompletionExecutor = {
+                capabilities: { tools: false, harness: "opencode2" },
+                open: async (run) => {
+                    systems.push(run.system);
+                    return { id: "host-classify" };
+                },
+                attempt: async (_handle, request) => {
+                    const prompt = request.body?.parts?.[0]?.text ?? "";
+                    const ids = [...prompt.matchAll(/^\[(\d+)\]/gm)].map((match) =>
+                        Number(match[1]),
+                    );
+                    manifest = `<classify>${ids.map((id) => `<memory id="${id}" importance="70" scope="project" shareable="false"/>`).join("")}</classify>`;
+                },
+                collect: async () => ({
+                    text: manifest,
+                    reasoning: null,
+                    lengthCapped: false,
+                    usage: { input: 12, output: 3, cacheRead: 0, cacheWrite: 0 },
+                    providerId: "anthropic",
+                    modelId: "profile-dreamer",
+                }),
+                close: async () => {},
+            } satisfies HiddenCompletionExecutor;
+
+            const result = await runClassify(args);
+
+            expect(result.classified).toBe(10);
+            expect(systems).toEqual(["module classify system prompt"]);
+            const taskCalls = calls.filter((call) => call.method === "dreamer.run_task");
+            expect(taskCalls).toHaveLength(2);
+            const [first, second] = taskCalls.map(
+                (call) => call.body as { command_id: string; host_completion?: unknown },
+            );
+            expect(first?.host_completion).toBeUndefined();
+            expect(second?.command_id).toBe(first?.command_id);
+            expect(second?.host_completion).toEqual({
+                text: manifest,
+                model: "anthropic/profile-dreamer",
+                length_capped: false,
+                usage: { input: 12, output: 3, cache_read: 0, cache_write: 0 },
+            });
+            expect(calls.at(-1)?.method).toBe("memory.set_classification");
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("excludes active context rows without a mirror mapping", async () => {
         const db = freshDb();
         try {

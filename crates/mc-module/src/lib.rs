@@ -95,9 +95,10 @@ use subc_client_rs::{
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
 use classify::{
-    child_session_id, has_manifest_envelope, next_attempt_nonce, CLASSIFY_AWAIT_TIMEOUT,
-    CLASSIFY_MAX_OUTPUT_TOKENS, CLASSIFY_RECOVERY_TIMEOUT, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK,
-    CLASSIFY_TEMPERATURE, MAX_CLASSIFY_PROMPT_BYTES,
+    child_session_id, has_manifest_envelope, next_attempt_nonce, parse_host_classify_completion,
+    CLASSIFY_AWAIT_TIMEOUT, CLASSIFY_MAX_OUTPUT_TOKENS, CLASSIFY_RECOVERY_TIMEOUT,
+    CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK, CLASSIFY_TEMPERATURE, HOST_COMPLETION_REQUIRED,
+    MAX_CLASSIFY_PROMPT_BYTES,
 };
 use config::{derive_historian_chunk_tokens, ConfigCache, McModuleConfig};
 use healing::{tail_reclaim, SerializerProfile};
@@ -12123,12 +12124,77 @@ impl McHandler {
             binding.config.language.as_deref(),
             historian_prompt::ContentLanguageDirectiveOptions::default(),
         );
+        let host_completion = match request.get("host_completion") {
+            None | Some(Value::Null) => None,
+            Some(value) => match parse_host_classify_completion(value) {
+                Ok(completion) => Some(completion),
+                Err(message) => return invalid_params_error(message),
+            },
+        };
+        // Under the host runner this module has no completion runner to attempt the
+        // chain on. The request is answered with what the host needs to run the
+        // completion itself, and the host sends the text back on a second request.
+        // Nothing is recorded in the command ledger, so that second request under
+        // the same command id is not answered from a replay of this one.
+        if host_completion.is_none()
+            && self
+                .effective_config(&binding.project_root)
+                .historian_runner
+                == HistorianRunnerKind::Host
+        {
+            tracing::info!(
+                "mc-module: classify runner=host: the host runs the completion for command {command_id}"
+            );
+            return respond(json!({
+                "ok": false,
+                "code": HOST_COMPLETION_REQUIRED,
+                "message": "historian.runner is host: run the classify completion on the host and resend it as host_completion",
+                "system_prompt": classify_system_prompt.as_ref(),
+                "max_output_tokens": CLASSIFY_MAX_OUTPUT_TOKENS,
+                "temperature": CLASSIFY_TEMPERATURE,
+            }));
+        }
         let mut attempts = 0usize;
         // Every attempt's failure is kept. Overwriting one slot reported whichever model
         // happened to be last and threw away the cause of the run that actually broke.
         let mut attempt_errors: Vec<String> = Vec::new();
         let mut output = None;
-        for model in model_chain {
+        let runner = if host_completion.is_some() {
+            "host"
+        } else {
+            "module"
+        };
+        if let Some(completion) = host_completion {
+            attempts = 1;
+            let outcome = if has_manifest_envelope(&completion.text) {
+                "manifest"
+            } else {
+                "no_manifest"
+            };
+            tracing::info!(
+                "mc-module: classify attempt=1 model={} session=host outcome={outcome}",
+                completion.model
+            );
+            if outcome == "manifest" {
+                output = Some((
+                    completion.model,
+                    historian_producer::ProducerOutput {
+                        text: completion.text,
+                        length_capped: completion.length_capped,
+                        usage: completion.usage,
+                    },
+                    "host".to_string(),
+                ));
+            } else {
+                attempt_errors.push(format!(
+                    "{}: classify host completion returned no classify manifest envelope",
+                    completion.model
+                ));
+            }
+        }
+        // The chain is walked here only when this module ran the completion itself.
+        let producer_models: &[String] = if runner == "host" { &[] } else { model_chain };
+        for model in producer_models {
             attempts += 1;
             // Each attempt gets its OWN provider session. An attempt can end while its run
             // is still active (a parked run, or one abandoned at the await deadline), and a
@@ -12238,6 +12304,9 @@ impl McHandler {
                 "recovery_timeout_ms": CLASSIFY_RECOVERY_TIMEOUT.as_millis(),
             }
         });
+        if runner == "host" {
+            response["diagnostics"]["runner"] = json!("host");
+        }
         // The runner's token spend for the successful attempt, so the host can record
         // it on its invocation row. Omitted when the runner reported none; hosts that
         // predate the field ignore it.
@@ -31832,6 +31901,88 @@ mod tests {
         assert!(sessions
             .iter()
             .all(|session| session.starts_with("mc-dreamer:classify:")));
+    }
+
+    /// Under `historian.runner = "host"` the module has no completion runner, so a
+    /// classify request is answered with the prompt the host must run, and the host's
+    /// completion sent back on a second request is checked and recorded like the
+    /// module's own runner output. The module's producer is never started.
+    #[tokio::test(flavor = "current_thread")]
+    async fn classify_under_the_host_runner_runs_on_the_host_and_never_on_a_module_route() {
+        let producer = Arc::new(ProducerState::default());
+        let mut config = default_test_config();
+        config.historian_runner = HistorianRunnerKind::Host;
+        let (handler, store, _dir, project) = handler_with_store(Arc::clone(&producer), config);
+        let route_root = project.to_str().unwrap();
+        handler.bind_route(7, binding(route_root, "ses"));
+        activate_module_authority(&store, "context", "git:identity", route_root, "memories");
+        let generation = store
+            .authority_status("context", "git:identity", "memories")
+            .unwrap()
+            .unwrap()
+            .generation;
+        let request = |completion: Option<Value>| {
+            let mut body = json!({
+                "v": 1,
+                "session_id": "ses",
+                "task": CLASSIFY_TASK,
+                "command_id": "host-runner-classify",
+                "authority_generation": generation,
+                "model_chain": ["test/first"],
+                "payload": { "prompt_body": "classify", "items": [] },
+            });
+            if let Some(completion) = completion {
+                body["host_completion"] = completion;
+            }
+            body
+        };
+        let decode = |outcome: HandlerOutcome| match outcome {
+            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+            other => panic!("expected a response: {other:?}"),
+        };
+
+        let asked = decode(handler.handle_dreamer_run_task(7, &request(None)).await);
+        assert_eq!(asked["ok"], json!(false));
+        assert_eq!(asked["code"], json!(HOST_COMPLETION_REQUIRED));
+        assert!(asked["system_prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("You are a memory classifier"));
+
+        let answered = decode(
+            handler
+                .handle_dreamer_run_task(
+                    7,
+                    &request(Some(json!({
+                        "text": "<classify></classify>",
+                        "model": "test/first",
+                        "usage": { "input": 10, "output": 2 },
+                    }))),
+                )
+                .await,
+        );
+        assert_eq!(answered["ok"], json!(true));
+        assert_eq!(answered["manifest_text"], json!("<classify></classify>"));
+        assert_eq!(answered["diagnostics"]["runner"], json!("host"));
+        assert_eq!(answered["diagnostics"]["model"], json!("test/first"));
+        assert_eq!(answered["usage"]["input"], json!(10));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+
+        let mut bad = request(Some(
+            json!({ "text": "no manifest", "model": "test/first" }),
+        ));
+        bad["command_id"] = json!("host-runner-classify-bad");
+        match handler.handle_dreamer_run_task(7, &bad).await {
+            HandlerOutcome::Error { code, message } => {
+                assert_eq!(code, "dreamer_run_failed");
+                assert!(
+                    message.contains("no classify manifest envelope"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected a refusal: {other:?}"),
+        }
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
