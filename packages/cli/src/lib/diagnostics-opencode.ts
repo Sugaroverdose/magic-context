@@ -28,6 +28,7 @@ import {
     resolveOpenCodeDbPath,
 } from "@magic-context/core/shared/opencode-db-path";
 import { parse as parseJsonc } from "comment-json";
+import { pluginEntryPackage } from "../adapters/opencode";
 import { inspectMagicContextLogs, type LogFileInspection } from "./log-lines";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
@@ -295,11 +296,12 @@ function readConfig(path: string): { value: Record<string, unknown> | null; erro
     }
 }
 
-function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
+export function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
     // Both keys: OpenCode 2 loads `plugin` and `plugins` together.
-    const plugins = readPluginEntries(config).map(({ entry }) => entry);
+    // Tuple and OpenCode 2 `{ package, options }` entries register the plugin too.
+    const plugins = readPluginEntries(config).map(({ entry }) => pluginEntryPackage(entry));
     return plugins.some((entry) => {
-        if (typeof entry !== "string") return false;
+        if (entry === null) return false;
         if (entry === OPENCODE_PLUGIN_NAME) return true;
         if (entry === OPENCODE_PLUGIN_ENTRY_WITH_VERSION) return true;
         if (entry.startsWith(`${OPENCODE_PLUGIN_NAME}@`)) return true;
