@@ -4150,6 +4150,8 @@ impl historian::HistorianPublicationFence for ReattachSnapshotPublicationFence {
 struct HistorianFiringTask {
     store: Arc<McStore>,
     session_id: String,
+    /// The route's harness label, stamped on rows the single-store writers produce.
+    harness: String,
     language: Option<String>,
     historian_temperature: Option<f64>,
     historian_await_timeout: Duration,
@@ -5523,6 +5525,7 @@ impl McHandler {
         now: i64,
     ) -> Option<&'static str> {
         let project_path = binding.project_root.to_string_lossy().to_string();
+        let harness = binding.harness.clone();
         let config = self.effective_config(&binding.project_root);
         let Ok(loaded) = store.load(&parsed.session_id) else {
             return Some("recovery_load_failed");
@@ -5670,6 +5673,7 @@ impl McHandler {
                         store: &store,
                         session_id: &session_id,
                         project_path: &project_path,
+                        harness: &harness,
                         observed_chunk_fingerprint: &observed,
                         validation_chunk: &chunk.chunk,
                         chunk_transcript: &chunk.text,
@@ -5796,6 +5800,7 @@ impl McHandler {
                                 store: &store,
                                 session_id: &session_id,
                                 project_path: &project_path,
+                                harness: &harness,
                                 observed_chunk_fingerprint: &observed,
                                 validation_chunk: &chunk.chunk,
                                 chunk_transcript: &chunk.text,
@@ -6459,6 +6464,7 @@ impl McHandler {
             task: HistorianFiringTask {
                 store,
                 session_id: parsed.session_id.clone(),
+                harness: binding.harness.clone(),
                 language: cfg.language.clone(),
                 historian_temperature: cfg.historian_temperature,
                 historian_await_timeout: historian::historian_await_timeout(
@@ -6613,6 +6619,7 @@ impl McHandler {
         PreparedWrapupAction::FireReady(Box::new(HistorianFiringTask {
             store,
             session_id: parsed.session_id.clone(),
+            harness: binding.harness.clone(),
             language,
             historian_temperature: binding.config.historian_temperature,
             historian_await_timeout: historian::historian_await_timeout(None),
@@ -6713,6 +6720,7 @@ impl McHandler {
         let HistorianFiringTask {
             store,
             session_id,
+            harness,
             language,
             historian_temperature,
             historian_await_timeout,
@@ -6748,6 +6756,7 @@ impl McHandler {
                 &store,
                 &session_id,
                 &project_path,
+                &harness,
                 &project_slug,
                 language.as_deref(),
             );
@@ -6776,6 +6785,7 @@ impl McHandler {
                     &store,
                     &session_id,
                     &project_path,
+                    &harness,
                     &project_slug,
                     language.as_deref(),
                 );

@@ -693,6 +693,7 @@ impl AssembledHistorianFiring {
         store: &'a McStore,
         session_id: &'a str,
         project_path: &'a str,
+        harness: &'a str,
         project_slug: &'a str,
         content_language: Option<&'a str>,
     ) -> HistorianFireRequest<'a> {
@@ -700,6 +701,7 @@ impl AssembledHistorianFiring {
             store,
             session_id,
             project_path,
+            harness,
             project_slug,
             // The role-scoped historian system prompt. The assembler builds the USER
             // prompt (chunk + references); content-language guidance belongs only on this

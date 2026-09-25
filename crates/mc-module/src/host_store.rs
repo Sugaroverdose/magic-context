@@ -9,12 +9,14 @@
 //!
 //! 1. **`context.db` is a versioned external schema.** The module opens it, never
 //!    migrates it, and refuses to write when the schema it finds is not the schema it
-//!    was built against. "Not the schema" means two separate checks: the persisted
-//!    migration lane must not be ahead of this binary's fence, and each domain table's
-//!    full `sqlite_master` surface — its columns, its CHECK/UNIQUE constraints, its
-//!    indexes, and its triggers — must hash to the value baked in below. Both are
-//!    rechecked inside every write transaction, because a migration can land between
-//!    opening the file and writing to it.
+//!    was built against. "Not the schema" is decided per table: each table the module
+//!    writes has its full `sqlite_master` surface — its columns, its CHECK/UNIQUE
+//!    constraints, its indexes, and its triggers — hashed and compared with the value
+//!    baked in below. A host migration that leaves a table's surface alone leaves that
+//!    table writable, whatever the migration lane now says; one that changes it fails
+//!    that table closed with a typed refusal. The check is repeated inside every write
+//!    transaction, because a migration can land between opening the file and writing
+//!    to it.
 //!
 //! 2. **The authority guards stay armed.** `context.db` carries triggers that abort a
 //!    memory or note write for a managed project unless `context_privilege_state.enabled`
@@ -38,7 +40,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::time::Instant;
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -58,10 +60,10 @@ pub const SINGLE_STORE_CAPABLE: bool = mc_store::SINGLE_STORE_CAPABLE;
 
 /// The `context.db` upstream migration lane this binary was built against.
 ///
-/// The rule is `persisted <= built`, the same one-directional check the host applies to
-/// its own file: a database migrated past this number may be read but never written,
-/// because a newer migration may have changed a domain table in a way these writers do
-/// not know about.
+/// Reported, not enforced. A lane ahead of this number says the host has migrated since
+/// this binary was built; whether that migration changed anything these writers depend
+/// on is answered per table by the fingerprints, so a migration that touched only tables
+/// the module never writes does not stop the module writing.
 pub const BUILT_CONTEXT_FENCE_VERSION: i64 = 91;
 
 /// Versions at or above this number belong to downstream forks and are excluded when
@@ -79,6 +81,9 @@ pub const CONTEXT_BUSY_TIMEOUT_MS: u32 = 5_000;
 /// `user_memory_candidates` is the observations table behind the privacy gate;
 /// `user_memories` holds the promoted ones. Both are listed because the fingerprint is a
 /// per-table fence and the module refuses per table, not per file.
+///
+/// The module also writes one non-domain table, [`BRACKET_TABLE`], in every transaction,
+/// so that table is fingerprinted too.
 pub const DOMAIN_TABLES: &[&str] = &[
     "compartment_events",
     "compartments",
@@ -90,6 +95,14 @@ pub const DOMAIN_TABLES: &[&str] = &[
     "user_memories",
     "user_memory_candidates",
 ];
+
+/// The table the privileged-writer bracket flips inside every write transaction.
+///
+/// It is fingerprinted like a domain table because every chunk depends on its exact
+/// shape: a migration that re-keys it (the scoped privilege row planned for single-store
+/// projects is one) would leave the module flipping a row the guards no longer read. A
+/// change here refuses every write, since no chunk can be written without the bracket.
+pub const BRACKET_TABLE: &str = "context_privilege_state";
 
 /// Maximum rows one non-final chunk may write.
 ///
@@ -104,6 +117,13 @@ pub const DEFAULT_PUBLISH_CHUNK_ROWS: usize = 64;
 /// This is what the row budget is derived from; the row count is the knob, this is the
 /// property it exists to hold.
 pub const PUBLISH_CHUNK_BUDGET_US: i64 = 250_000;
+
+/// Maximum rows the final, visibility chunk may write: compartments, facts and events
+/// together, plus one each for the facts delete and the compartment replace.
+///
+/// That chunk cannot be split, because committing it is what makes the fold visible, so
+/// a fold too large for it is refused before any of its chunks is written.
+pub const MAX_VISIBILITY_CHUNK_ROWS: usize = 256;
 
 // ── Mode ────────────────────────────────────────────────────────────────────
 
@@ -178,11 +198,6 @@ pub enum HostStoreError {
     FenceMissing {
         path: String,
     },
-    /// The persisted upstream lane is newer than this binary's fence.
-    FenceAhead {
-        persisted: i64,
-        built: i64,
-    },
     /// A domain table this binary writes is absent.
     TableMissing {
         table: String,
@@ -213,6 +228,12 @@ pub enum HostStoreError {
         rows: usize,
         budget: usize,
     },
+    /// Another writer held `context.db`'s write lock for longer than the busy timeout.
+    /// This is the refusal an interactive seat's own writes are protected by, so it is
+    /// named and counted rather than reported as a generic SQLite failure.
+    Busy {
+        reason: String,
+    },
     Sqlite(rusqlite::Error),
 }
 
@@ -222,12 +243,12 @@ impl HostStoreError {
         match self {
             HostStoreError::OpenFailed { .. } => "single_store_open_failed",
             HostStoreError::FenceMissing { .. } => "single_store_fence_missing",
-            HostStoreError::FenceAhead { .. } => "single_store_fence_ahead",
             HostStoreError::TableMissing { .. } => "single_store_table_missing",
             HostStoreError::FingerprintMismatch { .. } => "single_store_fingerprint_mismatch",
             HostStoreError::ModeRefused { .. } => "single_store_mode_refused",
             HostStoreError::PrivilegeFlipFailed { .. } => "single_store_privilege_flip_failed",
             HostStoreError::ChunkBudgetExceeded { .. } => "single_store_chunk_budget_exceeded",
+            HostStoreError::Busy { .. } => "single_store_busy",
             HostStoreError::Sqlite(_) => "single_store_sqlite_error",
         }
     }
@@ -239,7 +260,6 @@ impl HostStoreError {
         matches!(
             self,
             HostStoreError::FenceMissing { .. }
-                | HostStoreError::FenceAhead { .. }
                 | HostStoreError::TableMissing { .. }
                 | HostStoreError::FingerprintMismatch { .. }
         )
@@ -255,10 +275,6 @@ impl fmt::Display for HostStoreError {
             HostStoreError::FenceMissing { path } => write!(
                 formatter,
                 "{path} has no schema_migrations table, so its migration lane cannot be read"
-            ),
-            HostStoreError::FenceAhead { persisted, built } => write!(
-                formatter,
-                "context.db is at upstream migration lane v{persisted}, newer than the v{built} this module was built against; domain writes are refused until the module is rebuilt"
             ),
             HostStoreError::TableMissing { table } => {
                 write!(formatter, "context.db has no {table} table")
@@ -283,6 +299,10 @@ impl fmt::Display for HostStoreError {
                 formatter,
                 "a publish chunk carried {rows} rows, over the {budget}-row write budget"
             ),
+            HostStoreError::Busy { reason } => write!(
+                formatter,
+                "context.db stayed locked by another writer past the {CONTEXT_BUSY_TIMEOUT_MS} ms busy timeout: {reason}"
+            ),
             HostStoreError::Sqlite(error) => write!(formatter, "context.db write failed: {error}"),
         }
     }
@@ -292,13 +312,39 @@ impl std::error::Error for HostStoreError {}
 
 impl From<rusqlite::Error> for HostStoreError {
     fn from(error: rusqlite::Error) -> Self {
+        // SQLITE_BUSY only reaches this code after the connection's busy handler has
+        // already waited out CONTEXT_BUSY_TIMEOUT_MS, so it always means the timeout was
+        // lost, never a momentary collision.
+        if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) {
+            return HostStoreError::Busy {
+                reason: error.to_string(),
+            };
+        }
         HostStoreError::Sqlite(error)
     }
 }
 
+/// How many writes this process lost to the busy timeout since it started.
+///
+/// Each one is a publish that could not get `context.db`'s write lock because another
+/// writer, usually an interactive seat, held it past the timeout.
+static BUSY_REFUSALS: AtomicU64 = AtomicU64::new(0);
+
+pub fn busy_refusal_count() -> u64 {
+    BUSY_REFUSALS.load(Ordering::Relaxed)
+}
+
+/// Count a lost busy timeout on its way out of a public entry point.
+fn counted<T>(result: Result<T, HostStoreError>) -> Result<T, HostStoreError> {
+    if let Err(HostStoreError::Busy { .. }) = &result {
+        BUSY_REFUSALS.fetch_add(1, Ordering::Relaxed);
+    }
+    result
+}
+
 // ── Schema fingerprints ─────────────────────────────────────────────────────
 
-/// The `sqlite_master` fingerprint each domain table must carry.
+/// The `sqlite_master` fingerprint each domain table, and [`BRACKET_TABLE`], must carry.
 ///
 /// Regenerate together with any migration that touches a domain table:
 /// `bun scripts/dump-context-db-schema.ts > crates/mc-module/tests/fixtures/context-db-schema.sql`
@@ -312,6 +358,10 @@ pub const DOMAIN_TABLE_FINGERPRINTS: &[(&str, &str)] = &[
     (
         "compartments",
         "3ea325c5d2d51df824126f3abcdd9f01707a4b254762b5c613323ad18a4591c3",
+    ),
+    (
+        "context_privilege_state",
+        "5fe555e971ccd6cb5c7a25aa523d527950bf3f4fd5e38bbd79cbcda9fd2f095b",
     ),
     (
         "memories",
@@ -438,7 +488,7 @@ impl FenceState {
                 path: path.display().to_string(),
             })?;
         let mut fingerprints = BTreeMap::new();
-        for table in DOMAIN_TABLES {
+        for table in DOMAIN_TABLES.iter().chain(std::iter::once(&BRACKET_TABLE)) {
             if let Some(fingerprint) = read_table_fingerprint(conn, table)? {
                 fingerprints.insert((*table).to_string(), fingerprint);
             }
@@ -450,22 +500,22 @@ impl FenceState {
         })
     }
 
-    /// The whole-file part of the fence: refuse every domain write when the host has
-    /// migrated past this binary.
-    fn check_lane(&self) -> Result<(), HostStoreError> {
-        if self.persisted_version > self.built_version {
-            return Err(HostStoreError::FenceAhead {
-                persisted: self.persisted_version,
-                built: self.built_version,
-            });
-        }
-        Ok(())
+    /// True when the host has migrated past the lane this binary was built against.
+    /// Informational: the fingerprints decide what is writable.
+    pub fn lane_ahead(&self) -> bool {
+        self.persisted_version > self.built_version
     }
 
-    /// The per-table part of the fence. Behind-lane with a matching fingerprint is
-    /// writable: the table this binary knows is the table that is there.
+    /// Whether a write to `table` may proceed: the bracket table and the table itself
+    /// must both be the ones this binary was built against.
+    fn check_write(&self, table: &str) -> Result<(), HostStoreError> {
+        self.check_table(BRACKET_TABLE)?;
+        self.check_table(table)
+    }
+
+    /// The fence for one table. A table whose surface still hashes to the value this
+    /// binary was built against is the table these writers know, at any migration lane.
     fn check_table(&self, table: &str) -> Result<(), HostStoreError> {
-        self.check_lane()?;
         let Some(found) = self.fingerprints.get(table) else {
             return Err(HostStoreError::TableMissing {
                 table: table.to_string(),
@@ -669,6 +719,7 @@ pub struct HostStore {
     path: PathBuf,
     fence: FenceState,
     chunk_budget: usize,
+    visibility_budget: usize,
 }
 
 impl HostStore {
@@ -715,6 +766,7 @@ impl HostStore {
             path: path.to_path_buf(),
             fence,
             chunk_budget: DEFAULT_PUBLISH_CHUNK_ROWS,
+            visibility_budget: MAX_VISIBILITY_CHUNK_ROWS,
         })
     }
 
@@ -736,22 +788,27 @@ impl HostStore {
         self.chunk_budget
     }
 
-    /// Refuse every write when the lane is ahead; otherwise report which domain tables
-    /// this binary may write.
-    pub fn writable_tables(&self) -> Result<Vec<&'static str>, HostStoreError> {
-        self.fence.check_lane()?;
-        Ok(DOMAIN_TABLES
+    /// Override the visibility chunk's row ceiling. Tests use it to measure the chunk at
+    /// sizes above the shipped ceiling.
+    pub fn set_visibility_budget(&mut self, rows: usize) {
+        self.visibility_budget = rows.max(1);
+    }
+
+    /// The domain tables this binary may write. Empty when the bracket table itself has
+    /// changed, because no write can be made without it.
+    pub fn writable_tables(&self) -> Vec<&'static str> {
+        DOMAIN_TABLES
             .iter()
             .copied()
-            .filter(|table| self.fence.check_table(table).is_ok())
-            .collect())
+            .filter(|table| self.fence.check_write(table).is_ok())
+            .collect()
     }
 
     /// The health block the status surface reports.
     pub fn health_value(&self, mode: SingleStoreMode) -> Value {
         let mut tables = serde_json::Map::new();
-        for table in DOMAIN_TABLES {
-            let state = match self.fence.check_table(table) {
+        for table in DOMAIN_TABLES.iter().chain(std::iter::once(&BRACKET_TABLE)) {
+            let state = match self.fence.check_write(table) {
                 Ok(()) => json!({ "writable": true }),
                 Err(error) => json!({
                     "writable": false,
@@ -768,7 +825,7 @@ impl HostStore {
             "fence": {
                 "persisted_version": self.fence.persisted_version,
                 "built_version": self.fence.built_version,
-                "lane_ok": self.fence.check_lane().is_ok(),
+                "lane_ahead": self.fence.lane_ahead(),
             },
             "tables": Value::Object(tables),
         })
@@ -819,6 +876,7 @@ fn with_privileged_transaction<T>(
     // between opening the file and writing to it, and a stale open-time answer would let
     // this write land on a schema nobody checked.
     let live_fence = FenceState::read(&transaction, Path::new("context.db"), fence.built_version)?;
+    live_fence.check_table(BRACKET_TABLE)?;
     for table in tables {
         live_fence.check_table(table)?;
     }
@@ -863,6 +921,53 @@ fn with_privileged_transaction<T>(
 /// colliding with it.
 pub fn compute_normalized_hash(content: &str) -> String {
     mc_store::compute_normalized_memory_hash(content)
+}
+
+/// Replace the session's compartments from the publish's first sequence upward.
+///
+/// A fold is an append, so on a first attempt nothing sits at or above that sequence and
+/// this is a plain insert. Anything that does sit there is a row this publish supersedes:
+/// most often the same fold's own rows from an attempt whose visibility chunk committed
+/// before the retry, otherwise a stale tail. Replacing it gives the session the row set
+/// the host's `replaceAllCompartmentState` leaves when handed the rows below the fold
+/// plus the fold itself, and it is what makes a retried visibility chunk idempotent
+/// rather than an abort on `UNIQUE(session_id, sequence)`.
+///
+/// Events that pointed at a replaced compartment go with it. The host leaves such events
+/// pointing at a deleted id; here they would be re-inserted by the retry beside the
+/// originals, so they are removed with the rows they describe.
+///
+/// `session_meta` is deliberately left alone: a historian publish must never cause a
+/// cache bust by itself. The host's own fold path (`appendCompartments`) clears no cached
+/// m0/m1 either; the new rows reach m0/m1 through the compartment marker on the next pass
+/// that is already busting.
+fn replace_compartments_from_first_sequence(
+    tx: &Transaction<'_>,
+    publish: &FoldPublish,
+) -> Result<Vec<i64>, HostStoreError> {
+    if let Some(first_sequence) = publish.compartments.iter().map(|c| c.sequence).min() {
+        tx.execute(
+            "DELETE FROM compartment_events
+              WHERE session_id = ?1
+                AND compartment_id IN (
+                    SELECT id FROM compartments WHERE session_id = ?1 AND sequence >= ?2
+                )",
+            params![publish.session_id, first_sequence],
+        )?;
+        tx.execute(
+            "DELETE FROM compartments WHERE session_id = ?1 AND sequence >= ?2",
+            params![publish.session_id, first_sequence],
+        )?;
+    }
+    // An event whose anchor resolved to no compartment carries no id to match on. One
+    // stamped with this publish's instant was written by an earlier attempt of this same
+    // publish, and would otherwise be written a second time.
+    tx.execute(
+        "DELETE FROM compartment_events
+          WHERE session_id = ?1 AND compartment_id IS NULL AND created_at = ?2",
+        params![publish.session_id, publish.now_ms],
+    )?;
+    insert_compartments(tx, publish)
 }
 
 fn insert_compartments(
@@ -970,13 +1075,18 @@ fn insert_compartment_events(
 /// because a memory row is compared column-for-column between the two writers. The FTS
 /// index is maintained by triggers on this table, so the insert keeps it correct without
 /// this code knowing the index exists.
+///
+/// A retried publish finds the rows an interrupted attempt already wrote: a live memory
+/// last seen at this publish's own instant was recorded by this publish, so it is neither
+/// inserted again nor counted as seen a second time. Its id is still reported when this
+/// publish created it, so the embedding watermark covers it.
 fn insert_memories(
     tx: &Transaction<'_>,
     publish: &FoldPublish,
 ) -> Result<Vec<i64>, HostStoreError> {
     let mut ids = Vec::with_capacity(publish.memories.len());
     let mut existing = tx.prepare(
-        "SELECT id FROM memories
+        "SELECT id, last_seen_at, created_at FROM memories
           WHERE project_path = ?1 AND status IN ('active', 'permanent') AND content = ?2",
     )?;
     let mut bump_seen = tx.prepare(
@@ -997,12 +1107,22 @@ fn insert_memories(
         // not learned again. This is the same durable de-duplication the module's own
         // publish performs, and it is what keeps a re-run of the same fold from either
         // duplicating a memory or aborting the whole chunk on the dedup constraint.
-        if let Some(id) = existing
+        if let Some((id, last_seen_at, created_at)) = existing
             .query_row(params![publish.project_path, memory.content], |row| {
-                row.get::<_, i64>(0)
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
             })
             .optional()?
         {
+            if last_seen_at == publish.now_ms {
+                if created_at == publish.now_ms {
+                    ids.push(id);
+                }
+                continue;
+            }
             bump_seen.execute(params![publish.now_ms, id])?;
             continue;
         }
@@ -1030,7 +1150,23 @@ fn insert_notes(tx: &Transaction<'_>, publish: &FoldPublish) -> Result<(), HostS
         "INSERT INTO notes (type, status, content, session_id, created_at, updated_at, harness, anchor_ordinal)
          VALUES ('session', 'active', ?1, ?2, ?3, ?3, ?4, ?5)",
     )?;
+    // The same note, for the same session, stamped with this publish's instant, is this
+    // publish's own row from an interrupted attempt.
+    let mut already_written = tx.prepare(
+        "SELECT 1 FROM notes
+          WHERE type = 'session' AND session_id = ?1 AND content = ?2
+            AND created_at = ?3 AND harness = ?4
+          LIMIT 1",
+    )?;
     for note in &publish.notes {
+        if already_written.exists(params![
+            publish.session_id,
+            note.content,
+            publish.now_ms,
+            publish.harness,
+        ])? {
+            continue;
+        }
         statement.execute(params![
             note.content,
             publish.session_id,
@@ -1130,9 +1266,27 @@ fn insert_user_observations(
            (content, session_id, source_compartment_start, source_compartment_end, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
+    // Every column of an observation is matched: an identical row already present is this
+    // publish's own from an interrupted attempt.
+    let mut already_written = tx.prepare(
+        "SELECT 1 FROM user_memory_candidates
+          WHERE content = ?1 AND session_id = ?2
+            AND source_compartment_start IS ?3 AND source_compartment_end IS ?4
+            AND created_at = ?5
+          LIMIT 1",
+    )?;
     for observation in &publish.user_observations {
         let content = observation.content.trim();
         if content.is_empty() {
+            continue;
+        }
+        if already_written.exists(params![
+            content,
+            publish.session_id,
+            observation.source_compartment_start,
+            observation.source_compartment_end,
+            observation.created_at,
+        ])? {
             continue;
         }
         statement.execute(params![
@@ -1197,8 +1351,13 @@ fn insert_user_memories(tx: &Transaction<'_>, publish: &FoldPublish) -> Result<(
             created_at, updated_at)
          VALUES (?1, 'active', ?2, ?3, ?4, ?2, ?2)",
     )?;
+    // Promoted at this publish's instant from the same candidates: this publish's own row.
+    let mut already_written = tx.prepare(
+        "SELECT 1 FROM user_memories
+          WHERE content = ?1 AND promoted_at = ?2 AND source_candidate_ids = ?3
+          LIMIT 1",
+    )?;
     for memory in &publish.user_memories {
-        let provenance = user_memory_provenance(tx, &memory.source_candidate_ids)?;
         let candidate_ids = Value::Array(
             memory
                 .source_candidate_ids
@@ -1207,6 +1366,10 @@ fn insert_user_memories(tx: &Transaction<'_>, publish: &FoldPublish) -> Result<(
                 .collect(),
         )
         .to_string();
+        if already_written.exists(params![memory.content, publish.now_ms, candidate_ids])? {
+            continue;
+        }
+        let provenance = user_memory_provenance(tx, &memory.source_candidate_ids)?;
         statement.execute(params![
             memory.content,
             publish.now_ms,
@@ -1297,25 +1460,46 @@ impl Chunk<'_> {
                     + user_observations.len()
                     + user_memories.len()
             }
-            // The facts delete counts as one row of work whether or not any facts follow
-            // it, so an all-facts-removed pass is not scored as free.
+            // The facts delete and the compartment replace each count as one row of work
+            // whether or not any rows follow them, so a pass that only removes rows is not
+            // scored as free.
             Chunk::Visibility => {
-                publish.compartments.len() + publish.facts.len() + publish.events.len() + 1
+                publish.compartments.len() + publish.facts.len() + publish.events.len() + 2
             }
         }
     }
 
-    fn tables(&self) -> &'static [&'static str] {
+    /// The tables this chunk writes, and so the only ones whose fingerprint it depends on.
+    /// A publish that writes no note is not refused because `notes` changed.
+    fn tables(&self) -> Vec<&'static str> {
         match self {
-            Chunk::Staged { .. } => &[
-                "memories",
-                "memory_embedding_watermarks",
-                "notes",
-                "primer_candidates",
-                "user_memories",
-                "user_memory_candidates",
-            ],
-            Chunk::Visibility => &["compartments", "compartment_events", "session_facts"],
+            Chunk::Staged {
+                memories,
+                notes,
+                primer_candidates,
+                user_observations,
+                user_memories,
+            } => {
+                let mut tables = Vec::new();
+                if !memories.is_empty() {
+                    tables.extend(["memories", "memory_embedding_watermarks"]);
+                }
+                if !notes.is_empty() {
+                    tables.push("notes");
+                }
+                if !primer_candidates.is_empty() {
+                    tables.push("primer_candidates");
+                }
+                // Promoting a user memory reads its candidates for provenance.
+                if !user_observations.is_empty() || !user_memories.is_empty() {
+                    tables.push("user_memory_candidates");
+                }
+                if !user_memories.is_empty() {
+                    tables.push("user_memories");
+                }
+                tables
+            }
+            Chunk::Visibility => vec!["compartments", "compartment_events", "session_facts"],
         }
     }
 }
@@ -1393,19 +1577,60 @@ impl HostStore {
         &mut self,
         publish: &FoldPublish,
     ) -> Result<PublishOutcome, HostStoreError> {
-        self.fence.check_lane()?;
+        self.publish_fold_observed(publish, &mut |_| {})
+    }
+
+    /// [`HostStore::publish_fold`], calling `observer` after each chunk commits.
+    ///
+    /// The observer runs between two transactions, so it is the one place a test can stand
+    /// in for everything that happens there in production: a crash, a host migration, a
+    /// second writer.
+    pub fn publish_fold_observed(
+        &mut self,
+        publish: &FoldPublish,
+        observer: &mut dyn FnMut(ChunkCommitted),
+    ) -> Result<PublishOutcome, HostStoreError> {
+        counted(self.publish_chunks(publish, observer))
+    }
+
+    /// The chunk loop behind [`HostStore::publish_fold_observed`].
+    ///
+    /// Retry is resume: every staged writer recognises the rows an interrupted attempt of
+    /// the same publish already committed (they carry the publish's own instant) and does
+    /// not write them again, and the visibility chunk replaces rather than appends. So a
+    /// publish that died between chunks, or was refused between chunks by a migration, is
+    /// completed by running the same publish again, and running a completed one again
+    /// changes nothing.
+    fn publish_chunks(
+        &mut self,
+        publish: &FoldPublish,
+        observer: &mut dyn FnMut(ChunkCommitted),
+    ) -> Result<PublishOutcome, HostStoreError> {
         let budget = self.chunk_budget;
+        let chunks = plan_chunks(publish, budget);
+        // Every chunk is sized before the first one is written, so a publish that cannot
+        // fit is refused whole instead of leaving its staged rows behind.
+        for chunk in &chunks {
+            let rows = chunk.rows(publish);
+            let limit = match chunk {
+                Chunk::Staged { .. } => budget,
+                Chunk::Visibility => self.visibility_budget,
+            };
+            if rows > limit {
+                return Err(HostStoreError::ChunkBudgetExceeded {
+                    rows,
+                    budget: limit,
+                });
+            }
+        }
         let mut outcome = PublishOutcome::default();
 
-        for chunk in plan_chunks(publish, budget) {
+        for chunk in chunks {
             let rows = chunk.rows(publish);
-            if matches!(chunk, Chunk::Staged { .. }) && rows > budget {
-                return Err(HostStoreError::ChunkBudgetExceeded { rows, budget });
-            }
             let fence = self.fence.clone();
             let tables = chunk.tables();
             let (chunk_result, elapsed_us) =
-                with_privileged_transaction(&mut self.conn, &fence, tables, |tx| {
+                with_privileged_transaction(&mut self.conn, &fence, &tables, |tx| {
                     apply_chunk(tx, publish, &chunk, &outcome)
                 })?;
             outcome.chunk_rows.push(rows);
@@ -1415,9 +1640,24 @@ impl HostStore {
                 outcome.embedding_watermark = watermark;
             }
             outcome.compartment_ids.extend(chunk_result.compartment_ids);
+            observer(ChunkCommitted {
+                index: outcome.chunk_rows.len() - 1,
+                rows,
+                visibility: matches!(chunk, Chunk::Visibility),
+            });
         }
         Ok(outcome)
     }
+}
+
+/// One chunk that has just committed, as reported to a publish observer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkCommitted {
+    /// Zero-based position of the chunk in the publish.
+    pub index: usize,
+    pub rows: usize,
+    /// True for the final chunk, the one that makes the fold visible.
+    pub visibility: bool,
 }
 
 #[derive(Default)]
@@ -1475,7 +1715,7 @@ fn apply_chunk(
         }
         Chunk::Visibility => {
             replace_session_facts(tx, publish)?;
-            result.compartment_ids = insert_compartments(tx, publish)?;
+            result.compartment_ids = replace_compartments_from_first_sequence(tx, publish)?;
             insert_compartment_events(tx, publish, &result.compartment_ids)?;
             let _ = so_far;
         }
@@ -1764,7 +2004,14 @@ impl HostStore {
         publish: &FoldPublish,
         scratch_dir: &Path,
     ) -> Result<ShadowReport, HostStoreError> {
-        self.fence.check_lane()?;
+        counted(self.shadow_publish_inner(publish, scratch_dir))
+    }
+
+    fn shadow_publish_inner(
+        &mut self,
+        publish: &FoldPublish,
+        scratch_dir: &Path,
+    ) -> Result<ShadowReport, HostStoreError> {
         std::fs::create_dir_all(scratch_dir).map_err(|error| HostStoreError::OpenFailed {
             path: scratch_dir.display().to_string(),
             reason: error.to_string(),
@@ -1784,6 +2031,7 @@ impl HostStore {
 
         let mut scratch = HostStore::open_with_fence(&scratch_path, self.fence.built_version)?;
         scratch.set_chunk_budget(self.chunk_budget);
+        scratch.set_visibility_budget(self.visibility_budget);
         scratch.rewind_publish_scope(publish)?;
         let outcome = scratch.publish_fold(publish)?;
 
@@ -1990,6 +2238,11 @@ pub fn status_value() -> Value {
             json!(DEFAULT_PUBLISH_CHUNK_ROWS),
         );
         object.insert(
+            "visibility_budget_rows".to_string(),
+            json!(MAX_VISIBILITY_CHUNK_ROWS),
+        );
+        object.insert("busy_refusals".to_string(), json!(busy_refusal_count()));
+        object.insert(
             "last_shadow".to_string(),
             match last_shadow_summary() {
                 Some(summary) => json!(summary),
@@ -2002,6 +2255,59 @@ pub fn status_value() -> Value {
         }
     }
     block
+}
+
+/// What [`apply_publish_for_mode`] did with one fold publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModePublish {
+    /// `shadow`: the writers ran against a scratch copy; `context.db` was not written.
+    Shadow(ShadowReport),
+    /// `on`: the publish was written to `context.db`, including its embedding watermark.
+    Written(PublishOutcome),
+}
+
+/// Hand one fold publish to whatever the resolved mode asks for.
+///
+/// `off` returns `None` after one relaxed atomic load and opens nothing. `shadow` runs
+/// [`verify_publish_in_shadow`], which writes only a scratch copy. `on` writes the real
+/// `context.db`, so the rows and the embedding watermark that asks the host to embed them
+/// land where the host's drain reads them. `on` is still refused by [`admit_mode`], so in
+/// this build that arm is reached only by a caller that sets the mode directly.
+///
+/// A failure is recorded for the status surface and swallowed: the fold has already
+/// committed to the module's own store, and nothing here may fail it retroactively.
+pub fn apply_publish_for_mode(publish: &FoldPublish) -> Option<ModePublish> {
+    match mode() {
+        SingleStoreMode::Off => None,
+        SingleStoreMode::Shadow => verify_publish_in_shadow(publish).map(ModePublish::Shadow),
+        SingleStoreMode::On => {
+            let path = resolve_context_db_path();
+            if !path.exists() {
+                record_shadow_outcome(format!(
+                    "single_store on: no context.db at {}",
+                    path.display()
+                ));
+                return None;
+            }
+            match HostStore::open(&path).and_then(|mut store| store.publish_fold(publish)) {
+                Ok(outcome) => {
+                    record_shadow_outcome(format!(
+                        "single_store on: {} chunks, {} rows written",
+                        outcome.chunk_rows.len(),
+                        outcome.total_rows()
+                    ));
+                    Some(ModePublish::Written(outcome))
+                }
+                Err(error) => {
+                    record_shadow_outcome(format!(
+                        "single_store on refused ({}): {error}",
+                        error.code()
+                    ));
+                    None
+                }
+            }
+        }
+    }
 }
 
 /// Verify one fold publish against `context.db`, if the mode asks for it.
@@ -2189,7 +2495,7 @@ mod tests {
         let path = fixture_db(dir.path(), "context.db");
         let conn = Connection::open(&path).unwrap();
         let mut drift = Vec::new();
-        for table in DOMAIN_TABLES {
+        for table in DOMAIN_TABLES.iter().chain(std::iter::once(&BRACKET_TABLE)) {
             let found = read_table_fingerprint(&conn, table)
                 .unwrap()
                 .unwrap_or_else(|| panic!("committed schema snapshot has no {table} table"));
@@ -2205,22 +2511,48 @@ mod tests {
         );
     }
 
+    /// The lane alone refuses nothing: a database migrated past this binary whose domain
+    /// tables still carry the fingerprints it was built against is written normally, and
+    /// the status block says the lane is ahead.
     #[test]
-    fn a_database_one_lane_ahead_refuses_every_domain_write() {
+    fn a_database_one_lane_ahead_with_unchanged_tables_stays_writable() {
         let dir = tempfile::tempdir().unwrap();
         let path = fixture_db(dir.path(), "context.db");
+        mark_managed(&path, "git:fixture");
         let mut store = HostStore::open_with_fence(&path, BUILT_CONTEXT_FENCE_VERSION - 1).unwrap();
 
-        let error = store.publish_fold(&sample_publish()).unwrap_err();
-        assert_eq!(error.code(), "single_store_fence_ahead");
-        assert!(error.is_schema_refusal());
-        assert!(store.writable_tables().is_err());
+        assert!(store.fence().lane_ahead());
+        assert_eq!(store.writable_tables(), DOMAIN_TABLES.to_vec());
+        assert_eq!(
+            store.health_value(SingleStoreMode::Shadow)["fence"]["lane_ahead"],
+            json!(true)
+        );
+        store.publish_fold(&sample_publish()).unwrap();
+    }
 
-        let conn = Connection::open(&path).unwrap();
-        let compartments: i64 = conn
-            .query_row("SELECT COUNT(*) FROM compartments", [], |row| row.get(0))
+    /// Every chunk flips the privilege row, so a change to its table refuses every write,
+    /// not only writes to one domain table.
+    #[test]
+    fn a_change_to_the_privilege_table_refuses_every_domain_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_db(dir.path(), "context.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE context_privilege_state ADD COLUMN project_path TEXT;",
+            )
             .unwrap();
-        assert_eq!(compartments, 0, "a refused publish must write nothing");
+        }
+        let mut store = HostStore::open(&path).unwrap();
+        assert!(store.writable_tables().is_empty());
+        let error = store.publish_fold(&sample_publish()).unwrap_err();
+        assert_eq!(error.code(), "single_store_fingerprint_mismatch");
+        assert!(error.to_string().contains(BRACKET_TABLE), "{error}");
+        let conn = Connection::open(&path).unwrap();
+        let memories: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(memories, 0, "a refused publish must write nothing");
     }
 
     #[test]
@@ -2240,7 +2572,7 @@ mod tests {
             store.fence().persisted_version,
             BUILT_CONTEXT_FENCE_VERSION - 1
         );
-        assert!(store.writable_tables().unwrap().contains(&"memories"));
+        assert!(store.writable_tables().contains(&"memories"));
     }
 
     #[test]
@@ -3086,7 +3418,7 @@ mod tests {
             health["fence"]["persisted_version"],
             json!(BUILT_CONTEXT_FENCE_VERSION)
         );
-        assert_eq!(health["fence"]["lane_ok"], json!(true));
+        assert_eq!(health["fence"]["lane_ahead"], json!(false));
         assert_eq!(health["tables"]["memories"]["writable"], json!(true));
         assert_eq!(health["tables"]["notes"]["writable"], json!(false));
         assert_eq!(
@@ -3154,13 +3486,15 @@ mod tests {
 
     #[test]
     fn unavailable_health_carries_the_error_code() {
-        let error = HostStoreError::FenceAhead {
-            persisted: 120,
-            built: BUILT_CONTEXT_FENCE_VERSION,
+        let error = HostStoreError::FenceMissing {
+            path: "/tmp/example/context.db".to_string(),
         };
         let health = HostStore::unavailable_health_value(SingleStoreMode::Shadow, Some(&error));
-        assert_eq!(health["error_code"], json!("single_store_fence_ahead"));
-        assert!(health["detail"].as_str().unwrap().contains("v120"));
+        assert_eq!(health["error_code"], json!("single_store_fence_missing"));
+        assert!(health["detail"]
+            .as_str()
+            .unwrap()
+            .contains("/tmp/example/context.db"));
     }
 
     // ── Chunk budget measurement ────────────────────────────────────────────
