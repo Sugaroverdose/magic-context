@@ -1066,14 +1066,19 @@ pub const fn cc_u1_active(profile: Option<SerializerProfile>, tool_present: bool
 }
 
 /// Return whether the provider-visible tagging and reduction overlay may be enabled.
-/// OpenCode uses the same overlay when its session exposes ctx_reduce.
+/// OpenCode and Broca-hosted sessions use the same overlay when their tool array
+/// exposes ctx_reduce.
 pub const fn tagging_surface_active(
     profile: Option<SerializerProfile>,
     tool_present: bool,
 ) -> bool {
     matches!(
         profile,
-        Some(SerializerProfile::ClaudeCodeAnthropic | SerializerProfile::OpencodeAiSdk)
+        Some(
+            SerializerProfile::ClaudeCodeAnthropic
+                | SerializerProfile::OpencodeAiSdk
+                | SerializerProfile::OwnedBroca
+        )
     ) && tool_present
 }
 
@@ -9718,7 +9723,11 @@ impl McHandler {
             requested_selection.guidance_override = binding.config.prompt_surface_guidance_override;
         }
         let selection = self.freeze_prompt_surface_selection(session_id, requested_selection);
-        let active = cc_u1_active(profile, tool_present);
+        // Claude Code keys the reduce-capable variant on its acknowledgement contract. A
+        // Broca session gets it whenever its tool array includes ctx_reduce, because the
+        // transform tags that session's messages. OpenCode builds its own guidance.
+        let active = cc_u1_active(profile, tool_present)
+            || (matches!(profile, Some(SerializerProfile::OwnedBroca)) && tool_present);
         let expected_variant = if active { "full" } else { "no_reduce" };
         if let Some(variant) = request.get("variant").and_then(Value::as_str) {
             if variant != expected_variant {

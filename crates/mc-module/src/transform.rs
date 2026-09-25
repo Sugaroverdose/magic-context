@@ -937,6 +937,22 @@ fn emit_protected_tags_deprecation_once(req: &TransformRequest) {
     }
 }
 
+/// Log once per session that caller drop ids were received and ignored (see
+/// `TransformRequestWire::agent_drop_ids`).
+fn emit_agent_drop_ids_ignored_once(session_id: &str, count: usize) {
+    static WARNED_SESSIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let first = WARNED_SESSIONS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("agent_drop_ids warning mutex")
+        .insert(session_id.to_string());
+    if first {
+        tracing::info!(
+            "mc-module: ignoring {count} agent_drop_ids for session {session_id}; ctx_reduce drops use the module's durable queue"
+        );
+    }
+}
+
 fn present_deprecated_value<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Value>, D::Error> {
@@ -971,6 +987,9 @@ struct TransformRequestWire {
     clear_reasoning_age: u64,
     #[serde(default)]
     cache_ttl: Option<String>,
+    /// Broca's name for the cache TTL, in milliseconds. Used only when `cache_ttl` is absent.
+    #[serde(default)]
+    cache_ttl_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     effective_execute_threshold: Option<f64>,
     #[serde(default = "default_auto_search_enabled")]
@@ -1019,6 +1038,16 @@ struct TransformRequestWire {
     geometry: Option<TransformGeometry>,
     #[serde(default)]
     provider_error: Option<String>,
+    /// Broca's name for the provider overflow error body. Used only when `provider_error` is
+    /// absent.
+    #[serde(default)]
+    overflow_error_text: Option<String>,
+    /// Broca's caller-side drop list. Accepted and ignored: `ctx_reduce` calls reach this
+    /// module's facade and land in its durable drop queue, which applies drops on the next
+    /// pass allowed to change the prefix. A second, caller-held list would be another source
+    /// of truth for the same drops.
+    #[serde(default)]
+    agent_drop_ids: Vec<String>,
     #[serde(default)]
     mid_turn: bool,
     #[serde(default)]
@@ -1072,6 +1101,9 @@ impl<'de> Deserialize<'de> for TransformRequest {
         } else {
             wire.messages
         };
+        if !wire.agent_drop_ids.is_empty() {
+            emit_agent_drop_ids_ignored_once(&wire.session_id, wire.agent_drop_ids.len());
+        }
         let protected_tags_present = wire.protected_tags.is_some();
         let protected_tags = wire
             .protected_tags
@@ -1094,7 +1126,10 @@ impl<'de> Deserialize<'de> for TransformRequest {
             provider_id: wire.provider_id,
             model_key: wire.model_key,
             clear_reasoning_age: wire.clear_reasoning_age,
-            cache_ttl: wire.cache_ttl,
+            cache_ttl: wire.cache_ttl.or_else(|| {
+                wire.cache_ttl_ms
+                    .map(|milliseconds| milliseconds.to_string())
+            }),
             effective_execute_threshold: wire.effective_execute_threshold,
             auto_search_enabled: wire.auto_search_enabled,
             auto_search_score_threshold: wire.auto_search_score_threshold,
@@ -1117,7 +1152,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             tail_delta: wire.tail_delta,
             usage: wire.usage,
             geometry: wire.geometry,
-            provider_error: wire.provider_error,
+            provider_error: wire.provider_error.or(wire.overflow_error_text),
             mid_turn: wire.mid_turn,
             prev_response_completed_at_ms: wire.prev_response_completed_at_ms,
             request_observed_at_ms: wire.request_observed_at_ms,
@@ -2399,14 +2434,14 @@ pub(crate) fn assert_prefix_projection_equivalent(
 
 /// Fingerprint the served output, one entry per block.
 ///
-/// `frame_block_stems` names the composed frames the builder actually emitted, in emission
-/// order. Anything else that is synthetic is named from its own shape (a todo pair) or from
+/// `frame_block_stems` names the composed frames the builder actually emitted, indexed by
+/// output position (`None` where the message at that position is not a frame). Anything else that is synthetic is named from its own shape (a todo pair) or from
 /// its position among the synthetic messages. Assigning a frame id by counting synthetic
 /// messages instead would hand `mc_m0` to the first harness-authored synthetic message of a
 /// frameless output, and the host reads that id as "the frozen prefix moved".
 fn served_output_fingerprints(
     messages: &[ServedMessage],
-    frame_block_stems: &[&'static str],
+    frame_block_stems: &[Option<&'static str>],
 ) -> Vec<ServedBlockFingerprint> {
     let mut synthetic_index = 0usize;
     let mut fingerprints = Vec::new();
@@ -2419,10 +2454,14 @@ fn served_output_fingerprints(
                 Some(ck_wire::CkKind::ToolResult { id, .. }) => {
                     format!("mc_todo:{id}:result")
                 }
-                _ => frame_block_stems.get(message_index).map_or_else(
-                    || format!("mc_synthetic:{synthetic_index}"),
-                    |stem| (*stem).to_string(),
-                ),
+                _ => frame_block_stems
+                    .get(message_index)
+                    .copied()
+                    .flatten()
+                    .map_or_else(
+                        || format!("mc_synthetic:{synthetic_index}"),
+                        |stem| (*stem).to_string(),
+                    ),
             };
             synthetic_index = synthetic_index.saturating_add(1);
             id
@@ -3165,6 +3204,21 @@ fn apply_additive_only(
         .iter()
         .find(|unit| unit.key == M0_MURAL_KEY);
     let mut messages = Vec::with_capacity(req.messages.len() + 2);
+    // Broca's leading system messages go ahead of the frames, as in the full pipeline
+    // (see `place_leading_system_before_frames`).
+    let leading_systems = if serializer_profile == Some(SerializerProfile::OwnedBroca) {
+        req.messages
+            .iter()
+            .take_while(|message| message.ck.role == "system" && !message.ck.meta.synthetic)
+            .count()
+    } else {
+        0
+    };
+    messages.extend(
+        req.messages[..leading_systems]
+            .iter()
+            .map(|message| ServedMessage::from_message(message.ck.clone())),
+    );
     messages.push(ServedMessage::from_message(synthetic_m0_message(
         m0.frozen_payload.clone(),
         mural,
@@ -3173,7 +3227,7 @@ fn apply_additive_only(
         CkWireMessage::synthetic_user_text(m1.frozen_payload.clone()),
     ));
     messages.extend(
-        req.messages
+        req.messages[leading_systems..]
             .iter()
             .map(|message| ServedMessage::from_message(message.ck.clone())),
     );
@@ -4727,7 +4781,12 @@ fn apply_once(
     let prefix_replay_must_be_preserved = !is_provider_prefix_mutation_pass;
     if !prefix_replay_must_be_preserved {
         meta.pending_tag_block_ids.clear();
-    } else if serializer_profile == Some(SerializerProfile::OpencodeAiSdk) {
+    } else if matches!(
+        serializer_profile,
+        Some(SerializerProfile::OpencodeAiSdk | SerializerProfile::OwnedBroca)
+    ) {
+        // Broca can serve a message the module never rendered (its last-known-good array
+        // plus the raw tail after a failed transform), so it needs the same hold.
         let mint_end = pending_overlays
             .tag_mint_start
             .saturating_add(pending_overlays.tag_mint_count)
@@ -11735,7 +11794,7 @@ fn legacy_system_strip_candidates(
     core: &CoreState,
     meta: &ModuleMeta,
     rendered: &[ServedMessage],
-    frame_block_stems: &[&'static str],
+    frame_block_stems: &[Option<&'static str>],
 ) -> HashSet<String> {
     if !core
         .frozen_units
@@ -12943,12 +13002,13 @@ fn output_trailing_blank_decision(
 
 struct BuiltOutput {
     messages: Vec<ServedMessage>,
-    /// Block-id stems of the composed frames this output leads with, in emission order
-    /// (`mc_m0`, then `mc_m1`). Empty when the output carries no composed frame at all,
-    /// which is every subagent pass. Naming the frames from what was actually emitted —
+    /// Block-id stems of the composed frames in this output, indexed by output position
+    /// (`mc_m0`, then `mc_m1`; `None` for a position that holds a caller message, such as a
+    /// Broca system message placed ahead of the frames). Empty when the output carries no
+    /// composed frame at all, which is every subagent pass. Naming the frames from what was actually emitted —
     /// rather than from "the first synthetic message in the array" — keeps a harness-authored
     /// synthetic prompt from inheriting a frame's block id in a frameless output.
-    frame_block_stems: Vec<&'static str>,
+    frame_block_stems: Vec<Option<&'static str>>,
     cache_entries: HashMap<String, SerializedOutputCacheEntry>,
     cache_stats: SerializedOutputCacheStats,
     timings: BuildOutputTimings,
@@ -13466,6 +13526,34 @@ pub(crate) fn user_terminated_tail_decision(
     }
 }
 
+/// Move the caller's leading system messages ahead of the composed m0/m1 frames.
+///
+/// Some of Broca's renderers (OpenAI chat, and Responses without the instructions field)
+/// send system messages where they sit in the array, so frames placed first would put two
+/// user messages ahead of the system prompt. The renderers that lift system messages out
+/// are indifferent to the order. Only the run of system messages directly after the frames
+/// moves; the frame stems move with their frames so fingerprints keep naming them.
+fn place_leading_system_before_frames(
+    out: &mut [ServedMessage],
+    frame_block_stems: &mut Vec<Option<&'static str>>,
+) {
+    let frames = frame_block_stems.len();
+    if frames == 0 {
+        return;
+    }
+    let leading_systems = out[frames..]
+        .iter()
+        .take_while(|message| message.role == "system" && !message.meta.synthetic)
+        .count();
+    if leading_systems == 0 {
+        return;
+    }
+    out[..frames + leading_systems].rotate_left(frames);
+    let mut stems = vec![None; leading_systems];
+    stems.append(frame_block_stems);
+    *frame_block_stems = stems;
+}
+
 fn enforce_user_terminated_tail(
     request: &TransformRequest,
     output: &mut Vec<ServedMessage>,
@@ -13938,7 +14026,7 @@ fn build_output_with_tags_inner(
     let mut prev_assistant = false;
     // Record each composed frame as it is emitted. A subagent never reaches this block, so
     // its output leads with ordinary history and the list stays empty.
-    let mut frame_block_stems: Vec<&'static str> = Vec::new();
+    let mut frame_block_stems: Vec<Option<&'static str>> = Vec::new();
 
     if !req.is_subagent {
         if let Some(unit) = frozen_units.by_key("m0") {
@@ -13965,7 +14053,7 @@ fn build_output_with_tags_inner(
                 reused,
             );
             out.push(served);
-            frame_block_stems.push(M0_ID);
+            frame_block_stems.push(Some(M0_ID));
         }
         if let Some(unit) = frozen_units.by_key("m1") {
             let key = "synthetic:m1".to_string();
@@ -13987,7 +14075,7 @@ fn build_output_with_tags_inner(
                 reused,
             );
             out.push(served);
-            frame_block_stems.push(M1_ID);
+            frame_block_stems.push(Some(M1_ID));
         }
     }
 
@@ -14409,6 +14497,9 @@ fn build_output_with_tags_inner(
                 ));
             }
         }
+    }
+    if serializer_profile == Some(SerializerProfile::OwnedBroca) {
+        place_leading_system_before_frames(&mut out, &mut frame_block_stems);
     }
     if serializer_profile == Some(SerializerProfile::ClaudeCodeAnthropic) {
         let first_tail = out
@@ -16962,7 +17053,7 @@ pub(crate) mod tests {
 
         let with_frames = served_output_fingerprints(
             &[m0, m1, turn.clone(), trailing_prompt.clone()],
-            &[M0_ID, M1_ID],
+            &[Some(M0_ID), Some(M1_ID)],
         )
         .into_iter()
         .map(|fingerprint| fingerprint.block_id)
@@ -17249,7 +17340,7 @@ pub(crate) mod tests {
         // Name the leading synthetic messages the way the builder did: frames are emitted
         // first and in order, so taking as many frame ids as there are leading synthetic
         // messages reproduces the builder's own naming.
-        let frames = [M0_ID, M1_ID]
+        let frames = [Some(M0_ID), Some(M1_ID)]
             .into_iter()
             .take(
                 forced_messages
@@ -30140,6 +30231,102 @@ pub(crate) mod tests {
             .any(|row| row.block_id == "target#1"));
         assert!(s
             .load("opencode-late-tag-bust")
+            .unwrap()
+            .meta
+            .pending_tag_block_ids
+            .is_empty());
+    }
+
+    /// A Broca session can serve a message the module never rendered: when a transform fails,
+    /// Broca sends its last-known-good array plus the raw new tail, and the provider caches
+    /// those raw bytes. If the module later records such a block as served, a tag minted for it
+    /// on a defer pass must wait for a prefix-mutation pass, exactly as on OpenCode.
+    #[test]
+    fn owned_broca_defer_holds_a_late_tag_on_a_served_block_until_a_bust() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "owned-broca-late-tag";
+        let build = |messages: Vec<CkIngressMessage>, cfg: &str| {
+            let mut request = profile_req(SerializerProfile::OwnedBroca, session, cfg, messages);
+            request.tool_present = true;
+            with_usage(request, 1, 100)
+        };
+        let mut messages = vec![wire_item("user", "prompt", 1, &["inspect tests"])];
+        let first = run(&s, &build(messages.clone(), "cfg0"), &spine());
+        assert_eq!(first.action, "HARD");
+
+        // Stand in for the host having served `late` raw, outside a module response.
+        let mut seeded = s.load(session).unwrap();
+        seeded
+            .meta
+            .served_output_fingerprint
+            .push(ServedBlockFingerprint {
+                block_id: "late#0".to_string(),
+                content_hash: "raw-served".to_string(),
+                serialized_len: 4,
+            });
+        s.commit_transform(
+            session,
+            TransformCommit {
+                expected: seeded.row_version,
+                core: &seeded.core,
+                meta: &seeded.meta,
+                consumed_drop_ids: &[],
+                first_applied_command_ids: &[],
+                memory_revision: None,
+                compartment_max_seq: None,
+                project_root: None,
+                first_divergence: None,
+                scheduler_observation: None,
+                scheduler_request_observed_at_ms: None,
+                scheduler_full_array_fingerprint: None,
+                scheduler_eligible_supersession_count: None,
+                scheduler_withheld_by_tag_window: None,
+                scheduler_withheld_by_exempt_message: None,
+                scheduler_applied_supersession_count: None,
+                scheduler_applied_reductions: false,
+                overlays: TransformOverlayBatch::default(),
+            },
+        )
+        .unwrap();
+
+        messages.push(wire_item("assistant", "late", 2, &["served raw answer"]));
+        messages.push(wire_item("user", "fresh", 3, &["continue"]));
+        let defer = run(&s, &build(messages.clone(), "cfg0"), &spine());
+        assert_eq!(defer.action, "SOFT+");
+        let text_of = |response: &TransformResponse, mid: &str| {
+            first_block_text(
+                &response
+                    .messages()
+                    .iter()
+                    .find(|message| message.meta.harness_id.as_deref() == Some(mid))
+                    .unwrap()
+                    .content[0],
+            )
+            .unwrap()
+            .to_string()
+        };
+        assert_eq!(
+            text_of(&defer, "late"),
+            "served raw answer",
+            "a defer pass must not first-apply a tag to a block the provider already cached"
+        );
+        assert!(
+            text_of(&defer, "fresh").starts_with('§'),
+            "a block on its first send is tagged on any pass"
+        );
+        assert!(s
+            .load(session)
+            .unwrap()
+            .meta
+            .pending_tag_block_ids
+            .contains("late#0"));
+
+        let bust = run(&s, &build(messages, "cfg1"), &spine());
+        assert_eq!(bust.action, "HARD");
+        assert!(text_of(&bust, "late").starts_with('§'));
+        assert!(s
+            .load(session)
             .unwrap()
             .meta
             .pending_tag_block_ids
