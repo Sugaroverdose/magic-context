@@ -19816,6 +19816,62 @@ pub(crate) mod tests {
         assert_eq!(hard3.messages(), minting.messages());
     }
 
+    /// Re-gate reproduction: the HARD rebuild drops frozen reductions whose target is absent
+    /// from the live array (its orphan clean-up), while defers keep them. When an identical-bytes
+    /// marker HARD lands on a pass whose array temporarily lacks the reduced message (an undo
+    /// that is later redone), the frozen drop is lost, and the redone message is served raw on
+    /// a later defer although no pass priced that change. The control (the same undo and redo
+    /// with no marker HARD) keeps the dropped bytes. Ignored so the suite stays green; run it
+    /// with `--ignored` to see the divergence.
+    #[test]
+    #[ignore = "re-gate reproduction: marker HARD orphan clean-up changes later defer bytes"]
+    fn regate_marker_hard_during_undo_keeps_the_frozen_drop_for_the_redo() {
+        let run_case = |marker_hard: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let session = "regate-undo";
+            s.replace_compartments(session, &[comp(1, 1, 1, "anchor", "first coverage")])
+                .unwrap();
+            let mut messages = vec![item("anchor", 1, "covered")];
+            run(&s, &req(session, "cfg", messages.clone()), &spine());
+            messages.extend([
+                item("old-a", 2, "older prompt"),
+                assistant_tool_call("call-1", 3, "t1"),
+                tool_result("res-1", 4, "t1", &"OUTPUT ".repeat(400)),
+                item("next", 5, "next prompt"),
+            ]);
+            let full = req(session, "cfg", messages.clone());
+            let reductions = vec![reduce("res-1", "drop", "[dropped]")];
+            run(&s, &full, &[]);
+            s.arm_soft_refresh(session).unwrap();
+            let minting = run(&s, &full, &reductions);
+            assert_eq!(minting.action, "SOFT");
+            assert!(frozen_red_payload(&s.load(session).unwrap().core, "res-1#0").is_some());
+            let before = run(&s, &full, &[]);
+            // Undo: the last three messages leave the array.
+            let undone = req(session, "cfg", messages[..2].to_vec());
+            if marker_hard {
+                regate_mark_epoch_pending(&s, session);
+            }
+            let undo_pass = run(&s, &undone, &[]);
+            let red_after_undo =
+                frozen_red_payload(&s.load(session).unwrap().core, "res-1#0").is_some();
+            // Redo: the same messages return.
+            let redo = run(&s, &full, &[]);
+            eprintln!(
+                "REGATE_RUST_UNDO marker_hard={marker_hard} undo_action={} red_kept={red_after_undo} redo_action={} redo_equals_before={}",
+                undo_pass.action,
+                redo.action,
+                redo.messages() == before.messages(),
+            );
+            (undo_pass.action.clone(), red_after_undo, redo.messages() == before.messages())
+        };
+        let control = run_case(false);
+        assert!(control.1 && control.2, "control: {control:?}");
+        let marker = run_case(true);
+        assert_eq!(marker.0, "HARD");
+        assert!(marker.2, "marker HARD during undo: {marker:?}");
+    }
     /// Re-gate: with a persisted floor snapshot, a changed configured floor waits for a bust.
     /// A store-marker HARD that keeps the provider cache now snapshots the floor. The served
     /// bytes must not move on that pass or on the defers after it, the queued drop must stay
