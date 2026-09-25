@@ -4,6 +4,7 @@ import {
   cacheEventPercentage,
   cacheHarnessOptions,
   cachePercentage,
+  cacheRatioTitle,
   cacheSessionRatio,
   cacheSessionTitle,
   cacheSessionVisible,
@@ -45,6 +46,9 @@ function event(partial: Partial<DbCacheEvent>): DbCacheEvent {
     context_limit: 0,
     context_limit_estimated: false,
     is_drop: false,
+    aggregate: false,
+    cold_start: false,
+    cache_write_reported: true,
     ...partial,
   };
 }
@@ -88,5 +92,21 @@ describe("Broca cache sessions", () => {
     const unmanaged = { ...brocaRow, managed: false };
     expect(cacheSessionVisible(unmanaged, "broca", false, true)).toBe(false);
     expect(cacheSessionVisible(unmanaged, "broca", true, true)).toBe(true);
+  });
+
+  test("a run aggregate shows its own cached share and explains it", () => {
+    const run = event({
+      aggregate: true,
+      severity: "aggregate",
+      input_tokens: 993,
+      cache_read: 114_560,
+      hit_ratio: 114_560 / 115_553,
+    });
+    expect(cacheEventPercentage(run)).toBe("99.1%");
+    expect(cacheRatioTitle(run)).toContain("whole run");
+  });
+
+  test("a cold first request explains that nothing was cached yet", () => {
+    expect(cacheRatioTitle(event({ cold_start: true }))).toContain("First request");
   });
 });
