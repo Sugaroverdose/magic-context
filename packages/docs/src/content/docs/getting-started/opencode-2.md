@@ -32,7 +32,19 @@ Setup does **not** write `tui.json` on OpenCode 2. That file is read only by Ope
 
 The shared `magic-context.jsonc` is the same file on every harness; see [Installation](/getting-started/installation/) for its locations and the historian model setting.
 
-If you add the entry by hand, use `plugins` on 2.x. Do not list Magic Context under both keys, or it loads twice.
+If you add the entry by hand, use `plugins` on 2.x. Do not list Magic Context under both keys: OpenCode loads the first entry and fails the second with "Duplicate plugin ID", so the plugins list shows two rows, one of them failed. `opencode plugin add` can create exactly this when an entry already sits under `plugin`. `npx @cortexkit/magic-context@latest doctor --fix` keeps one entry and removes the rest.
+
+## Updating Magic Context on OpenCode 2
+
+OpenCode 2 installs an `@latest` plugin once and keeps loading that copy. When a new release is published, OpenCode only marks the plugin "update available" in `/plugins`; it does not install it. Pressing ctrl+r there refreshes that mark, but installs nothing.
+
+To install the new release, do one of these:
+
+- Open `/plugins` and press ctrl+u. OpenCode installs the new version and reloads the plugin without a restart.
+- Run `opencode plugin update`.
+- Quit OpenCode (including `opencode service stop`) and run `npx @cortexkit/magic-context@latest doctor --fix`. Doctor removes the outdated cached copy, and OpenCode installs the current release on its next start. Doctor won't remove it while OpenCode is running.
+
+An entry pinned to a version, such as `@cortexkit/opencode-magic-context@0.42.6`, never moves. Change it to `@latest`, or run `doctor --force` to do that for you.
 
 ## Move an existing OpenCode 1 install
 
