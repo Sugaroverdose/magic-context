@@ -4502,6 +4502,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 flush?: boolean;
                 turn?: string;
                 mural?: boolean;
+                // Serve the pass from a session state that never loaded the
+                // persisted mural image (the field is undefined, not null).
+                leanMural?: boolean;
             } = {},
         ) {
             const messages = tail(sessionId, opts.newer ?? 0);
@@ -4524,6 +4527,14 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                     currentTurnId: opts.turn ?? null,
                     contextUsage: { percentage: pct, inputTokens: pct * 100 },
                     pendingMaterializationSessions: opts.flush ? new Set([sessionId]) : new Set(),
+                    ...(opts.leanMural
+                        ? {
+                              sessionMeta: {
+                                  ...getOrCreateSessionMeta(db, sessionId),
+                                  cachedM0MuralDataUrl: undefined,
+                              } as never,
+                          }
+                        : {}),
                     m0M1: {
                         projectPath: FOLD_PROJECT,
                         projectDirectory: FOLD_PROJECT,
@@ -4536,6 +4547,90 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 }),
             );
             return { messages, result };
+        }
+
+        // Re-gate: an identical-bytes epoch HARD on a session that serves a mural
+        // image. The fold re-renders the same text and the same image, so the
+        // queued drop must stay held. The lean variant starts the pass from a
+        // state whose mural field was never loaded (undefined rather than null).
+        // It is marked failing: the pre-fold snapshot reads the missing field as
+        // "no image served", so the unchanged image counts as a change and the
+        // drop lands. It turns red (unexpected pass) once that snapshot loads the
+        // persisted image first.
+        for (const lean of [false, true]) {
+            (lean ? it.failing : it)(`REGATE mural unchanged (${lean ? "lean" : "hydrated"} state): an identical-bytes epoch HARD holds the drop`, async () => {
+                const xdg = mkdtempSync(join(tmpdir(), "mc-regate-oc-mural-"));
+                tempDirs.push(xdg);
+                process.env.XDG_DATA_HOME = xdg;
+                const modelsDev = await import("../../shared/models-dev-cache");
+                modelsDev.clearModelsDevCache();
+                try {
+                    await modelsDev.refreshModelLimitsFromApi({
+                        config: {
+                            providers: async () => ({
+                                data: {
+                                    providers: [
+                                        {
+                                            id: "anthropic",
+                                            models: {
+                                                opus: {
+                                                    limit: { context: 200_000, input: 200_000 },
+                                                    modalities: { input: ["text", "image"] },
+                                                },
+                                            },
+                                        },
+                                    ],
+                                },
+                            }),
+                        },
+                    } as never);
+                    db = new Database(":memory:");
+                    initializeDatabase(db);
+                    (await import("../../features/magic-context/migrations")).runMigrations(db);
+                    const sessionId = `ses-regate-oc-mural-${lean ? "lean" : "hydrated"}`;
+                    materializeBaseline(sessionId);
+                    const { insertMemory } = await import(
+                        "../../features/magic-context/memory/storage-memory"
+                    );
+                    const cues = await import(
+                        "../../features/magic-context/mural/storage-mural-cues"
+                    );
+                    for (let i = 0; i < 24; i++) {
+                        const content = `REGATE_MURAL_MEMORY_${i}: ${"rule text ".repeat(20)}`;
+                        const memory = insertMemory(db, {
+                            projectPath: FOLD_PROJECT,
+                            category: "PROJECT_RULES",
+                            content,
+                            importance: 50,
+                        });
+                        db.prepare(
+                            "UPDATE memories SET mural_cue = ?, mural_cue_hash = ? WHERE id = ?",
+                        ).run(`cue-${i}`, cues.computeCueContentHash(content), memory.id);
+                    }
+                    await bumpEpoch();
+                    await pass(sessionId, { mural: true });
+                    const defer = await pass(sessionId, { mural: true });
+                    const muralA = getOrCreateSessionMeta(db, sessionId).cachedM0MuralDataUrl;
+                    const target = toolTag(sessionId, "c-mid", "m-mid");
+                    queuePendingOp(db, sessionId, target, "drop");
+                    await bumpEpoch();
+                    const hard = await pass(sessionId, { mural: true, leanMural: lean });
+                    const muralB = getOrCreateSessionMeta(db, sessionId).cachedM0MuralDataUrl;
+                    const after = await pass(sessionId, { mural: true });
+                    console.log(
+                        `REGATE_OC_MURAL lean=${lean} reason=${hard.result.materializeReason} materialized=${hard.result.materialized} muralPresent=${muralA !== null} muralChanged=${muralA !== muralB} headIdentical=${head(hard.messages) === head(defer.messages)} wireIdentical=${sha(hard.messages) === sha(defer.messages)} status=${statusOf(sessionId, target)} afterEqualsDefer=${sha(after.messages) === sha(defer.messages)}`,
+                    );
+                    expect(muralA).not.toBeNull();
+                    expect(muralB).toBe(muralA);
+                    expect(hard.result.materialized).toBe(true);
+                    expect(head(hard.messages)).toBe(head(defer.messages));
+                    expect(statusOf(sessionId, target)).toBe("active");
+                    expect(sha(hard.messages)).toBe(sha(defer.messages));
+                    expect(sha(after.messages)).toBe(sha(defer.messages));
+                } finally {
+                    modelsDev.clearModelsDevCache();
+                }
+            });
         }
 
         function toolTag(sessionId: string, callID: string, owner: string): number {

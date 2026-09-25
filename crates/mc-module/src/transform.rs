@@ -19721,6 +19721,257 @@ pub(crate) mod tests {
         assert_eq!(replay.messages(), hard.messages());
     }
 
+    fn regate_mark_epoch_pending(s: &McStore, session: &str) {
+        let mut loaded = s.load(session).unwrap();
+        loaded.meta.project_memory_epoch_pending = true;
+        s.commit(session, loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+    }
+
+    fn regate_unit_keys(s: &McStore, session: &str) -> Vec<String> {
+        s.load(session)
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .map(|unit| unit.key.clone())
+            .collect()
+    }
+
+    /// Re-gate: an identical-bytes store-marker HARD runs the HARD branch, which rebuilds
+    /// the frozen-unit vector from survivors in a fixed kind order. On a session carrying
+    /// caveman and reduction units minted by the bust just before it, the rebuilt vector must
+    /// serve exactly the bytes that bust served, and the defer after it must replay them.
+    #[test]
+    fn regate_identical_marker_hard_right_after_a_minting_bust_replays_its_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "regate-rich";
+        s.replace_compartments(session, &[comp(1, 1, 1, "anchor", "first coverage")])
+            .unwrap();
+        let mut messages = vec![item("anchor", 1, "covered")];
+        let boot = run(&s, &req(session, "cfg", messages.clone()), &spine());
+        assert_eq!(boot.action, "HARD");
+        messages.extend([
+            item("old-a", 2, &caveman_test_source("old-a")),
+            assistant_tool_call("call-1", 3, "t1"),
+            tool_result("res-1", 4, "t1", &"OUTPUT ".repeat(400)),
+            item("old-b", 5, &caveman_test_source("old-b")),
+            item("next", 6, "next prompt"),
+        ]);
+        let mut armed = req(session, "cfg", messages.clone());
+        armed.caveman_enabled = true;
+        armed.caveman_min_chars = 1;
+        armed.protected_tags = 0;
+        let reductions = vec![reduce("res-1", "drop", "[dropped]")];
+        let held = run(&s, &armed, &[]);
+        assert_eq!(held.action, "SOFT+");
+        s.arm_soft_refresh(session).unwrap();
+        let minting = run(&s, &armed, &reductions);
+        assert_eq!(minting.action, "SOFT");
+        let keys_after_soft = regate_unit_keys(&s, session);
+        assert!(
+            !stored_caveman_units(&s, session).is_empty(),
+            "the flush bust must mint caveman units: {keys_after_soft:?}"
+        );
+        assert!(frozen_red_payload(&s.load(session).unwrap().core, "res-1#0").is_some());
+
+        // The marker HARD comes on the very next pass.
+        regate_mark_epoch_pending(&s, session);
+        let hard = run(&s, &armed, &reductions);
+        let keys_after_hard = regate_unit_keys(&s, session);
+        let replay = run(&s, &armed, &reductions);
+        // A second marker HARD after a plain defer.
+        regate_mark_epoch_pending(&s, session);
+        let hard2 = run(&s, &armed, &reductions);
+        // A third marker HARD from a freshly opened store, as after a process restart.
+        drop(s);
+        let s = store(dir.path());
+        regate_mark_epoch_pending(&s, session);
+        let hard3 = run(&s, &armed, &reductions);
+        eprintln!(
+            "REGATE_RUST_RICH hard_action={} hard2_action={} hard3_action={} hard3_identical={} reason={:?} wire_identical={} m0_identical={} replay_identical={} hard2_identical={} units_soft={:?} units_hard={:?}",
+            hard.action,
+            hard2.action,
+            hard3.action,
+            hard3.messages() == minting.messages(),
+            hard.materialize_reason,
+            hard.messages() == minting.messages(),
+            m0_bytes(&hard) == m0_bytes(&minting),
+            replay.messages() == minting.messages(),
+            hard2.messages() == minting.messages(),
+            keys_after_soft,
+            keys_after_hard,
+        );
+        assert_eq!(hard.action, "HARD");
+        assert_eq!(hard2.action, "HARD");
+        assert_eq!(
+            serde_json::to_vec(&hard.ck_messages).unwrap(),
+            serde_json::to_vec(&minting.ck_messages).unwrap()
+        );
+        assert_eq!(hard.messages(), minting.messages());
+        assert_eq!(replay.messages(), minting.messages());
+        assert_eq!(hard2.messages(), minting.messages());
+        assert_eq!(hard3.action, "HARD");
+        assert_eq!(hard3.messages(), minting.messages());
+    }
+
+    /// Re-gate: with a persisted floor snapshot, a changed configured floor waits for a bust.
+    /// A store-marker HARD that keeps the provider cache now snapshots the floor. The served
+    /// bytes must not move on that pass or on the defers after it, the queued drop must stay
+    /// held, and it must land on the next genuine bust.
+    #[test]
+    fn regate_floor_moves_on_identical_marker_hard_without_moving_served_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "regate-floor";
+        s.replace_compartments(session, &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let mut request = with_usage(
+            req(
+                session,
+                "cfg0",
+                vec![item("a", 1, "raw"), item("tail", 2, "pending drop")],
+            ),
+            10,
+            100,
+        );
+        request.system_prompt_hash = "sys-a".to_string();
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        ctx.protected_tokens_floor = 4_000;
+        transform(&s, &request, &ctx).unwrap();
+        let baseline = transform(&s, &request, &ctx).unwrap();
+        assert_ne!(baseline.action, "HARD");
+        assert_eq!(
+            s.load(session).unwrap().meta.protected_tokens_effective,
+            Some(4_000)
+        );
+        s.append_pending_agent_drops(session, &["tail#0".to_string()], 1)
+            .unwrap();
+        // The configured floor changes; a defer may not replace the persisted snapshot.
+        ctx.protected_tokens_floor = 8_000;
+        let defer = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(defer.messages(), baseline.messages());
+        let floor_after_defer = s.load(session).unwrap().meta.protected_tokens_effective;
+
+        regate_mark_epoch_pending(&s, session);
+        let hard = transform(&s, &request, &ctx).unwrap();
+        let floor_after_hard = s.load(session).unwrap().meta.protected_tokens_effective;
+        let drops_after_hard = s.load_pending_agent_drops(session).unwrap().len();
+        let mut grown = request.clone();
+        grown.messages.push(item("later", 3, "a later prompt"));
+        let later = transform(&s, &grown, &ctx).unwrap();
+        let later2 = transform(&s, &grown, &ctx).unwrap();
+        let prefix_len = baseline.messages().len();
+        eprintln!(
+            "REGATE_RUST_FLOOR floor_after_defer={floor_after_defer:?} floor_after_hard={floor_after_hard:?} hard_action={} wire_identical={} drops_held={} later_prefix_identical={} later_replay_identical={}",
+            hard.action,
+            hard.messages() == baseline.messages(),
+            drops_after_hard,
+            later.messages()[..prefix_len] == baseline.messages()[..],
+            later2.messages() == later.messages(),
+        );
+        assert_eq!(floor_after_defer, Some(4_000));
+        assert_eq!(hard.action, "HARD");
+        assert_eq!(floor_after_hard, Some(8_000));
+        assert_eq!(hard.messages(), baseline.messages());
+        assert_eq!(drops_after_hard, 1);
+        assert_eq!(later.messages()[..prefix_len], baseline.messages()[..]);
+        assert_eq!(later2.messages(), later.messages());
+
+        // A genuine HARD (a changed system prompt) lands the held drop.
+        let mut changed = grown.clone();
+        changed.system_prompt_hash = "sys-b".to_string();
+        let genuine = transform(&s, &changed, &ctx).unwrap();
+        eprintln!(
+            "REGATE_RUST_FLOOR_GENUINE action={} reason={:?} drops_left={} red_frozen={}",
+            genuine.action,
+            genuine.materialize_reason,
+            s.load_pending_agent_drops(session).unwrap().len(),
+            frozen_red_payload(&s.load(session).unwrap().core, "tail#0").is_some(),
+        );
+        assert_eq!(genuine.action, "HARD");
+        assert!(s.load_pending_agent_drops(session).unwrap().is_empty());
+        assert!(frozen_red_payload(&s.load(session).unwrap().core, "tail#0").is_some());
+    }
+
+    /// Re-gate: the same pending work (a queued drop and a newer todowrite) is held by an identical-bytes marker HARD and consumed by a genuine HARD (a
+    /// changed system prompt), so the non-mutation treatment is confined to the marker case.
+    #[test]
+    fn regate_genuine_hard_still_opens_every_lane_the_marker_hard_holds() {
+        let run_case = |genuine: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let session = "regate-lanes";
+            s.replace_compartments(session, &[comp(1, 1, 1, "a", "SUMMARY")])
+                .unwrap();
+            let first =
+                json!([{"content": "first", "status": "in_progress", "priority": "high"}]);
+            let second =
+                json!([{"content": "second", "status": "in_progress", "priority": "high"}]);
+            let mut request = with_usage(
+                req(
+                    session,
+                    "cfg0",
+                    vec![
+                        item("a", 1, "raw"),
+                        todowrite_call("todo-a", 2, first),
+                        item("tail", 3, "pending drop"),
+                        item("prose", 4, &caveman_test_source("prose")),
+                    ],
+                ),
+                10,
+                100,
+            );
+            request.system_prompt_hash = "sys-a".to_string();
+            request.caveman_enabled = true;
+            request.caveman_min_chars = 1;
+            request.protected_tags = 0;
+            let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+            transform(&s, &request, &ctx).unwrap();
+            let baseline = transform(&s, &request, &ctx).unwrap();
+            assert_ne!(baseline.action, "HARD");
+            let todo_before = synthetic_todo_pair_bytes(&baseline);
+            request.messages.push(todowrite_call("todo-b", 5, second));
+            request
+                .messages
+                .push(item("prose-b", 6, &caveman_test_source("prose-b")));
+            request.messages.push(item("next", 7, "next prompt"));
+            s.append_pending_agent_drops(session, &["tail#0".to_string()], 1)
+                .unwrap();
+            let defer = transform(&s, &request, &ctx).unwrap();
+            let caveman_before = stored_caveman_units(&s, session).len();
+            assert_eq!(synthetic_todo_pair_bytes(&defer), todo_before);
+            if genuine {
+                request.system_prompt_hash = "sys-b".to_string();
+            } else {
+                regate_mark_epoch_pending(&s, session);
+            }
+            let hard = transform(&s, &request, &ctx).unwrap();
+            let loaded = s.load(session).unwrap();
+            let outcome = (
+                hard.action.clone(),
+                s.load_pending_agent_drops(session).unwrap().len(),
+                frozen_red_payload(&loaded.core, "tail#0").is_some(),
+                synthetic_todo_pair_bytes(&hard) != todo_before,
+                stored_caveman_units(&s, session).len() > caveman_before,
+                hard.messages() == defer.messages(),
+            );
+            eprintln!(
+                "REGATE_RUST_LANES genuine={genuine} action={} reason={:?} drops_left={} red_frozen={} todo_changed={} caveman_minted={} wire_identical={}",
+                outcome.0, hard.materialize_reason, outcome.1, outcome.2, outcome.3, outcome.4, outcome.5
+            );
+            outcome
+        };
+        let marker = run_case(false);
+        assert_eq!(marker, ("HARD".to_string(), 1, false, false, false, true));
+        let genuine = run_case(true);
+        // The caveman column stays false in both cases: prose-b is too young to be eligible,
+        // so this fixture does not exercise the caveman lane (the rich-state test covers the
+        // replay of already-minted caveman units).
+        assert_eq!(genuine, ("HARD".to_string(), 0, true, true, false, false));
+    }
+
     #[test]
     fn cached_m1_missing_hard_advisory_drains_pending_drop_on_defer() {
         let dir = tempfile::tempdir().unwrap();
