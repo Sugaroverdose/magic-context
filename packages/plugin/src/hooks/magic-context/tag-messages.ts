@@ -260,7 +260,22 @@ export type TagTarget = {
     setContent: (content: string) => boolean;
     getContent?: () => string | null;
     drop?: () => ToolDropResult;
+    /** Legacy skeleton: arguments replaced by the `{"dropped": …}` marker.
+     * Replay-only, for `drop_mode = 'truncated'` tags not yet converted. */
     truncate?: () => ToolDropResult;
+    /** Real-argument skeleton: the call keeps the arguments the host gave it,
+     * only the output becomes `[dropped §N§]` (`drop_mode = 'skeleton_real'`). */
+    skeletonReal?: () => ToolDropResult;
+    /** Total UTF-8 bytes of the string values in the call's input (see
+     * tool-input-size.ts); null when the call is not on this pass's wire. */
+    inputStringBytes?: () => number | null;
+    /** Non-mutating: would removing this call leave the request ending on an
+     * assistant turn (given what this pass already removed)? */
+    wouldStrandConversationEnd?: () => boolean;
+    /** Non-mutating: the host adapter cannot remove this call structurally, so
+     * drop() would keep a paired shell instead. A new drop then keeps the real
+     * arguments (skeletonReal) rather than any placeholder. */
+    cannotRemove?: () => boolean;
     /** Edit-marker compression for an edit/write superseded by a later edit to
      * the same file: keep the call + filePath + a region hint of the diff,
      * output → [dropped §N§]. Used by smart-drops. */

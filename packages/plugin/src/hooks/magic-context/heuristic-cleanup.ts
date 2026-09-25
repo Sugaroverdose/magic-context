@@ -13,6 +13,7 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import type { TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared";
+import { applyNewToolDrop, hasSmallToolInput } from "./apply-operations";
 import { applyCavemanCleanup, type CavemanCleanupConfig } from "./caveman-cleanup";
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
 import {
@@ -137,7 +138,9 @@ export function applyHeuristicCleanup(
                     targets.get(tag.tagNumber),
                     calibration,
                     targets.get(tag.tagNumber)?.requiresToolArcSkeleton === true ||
-                        ((emergency.usagePercentage ?? 0) < 95 && recentTags.has(tag.tagNumber)),
+                        ((emergency.usagePercentage ?? 0) < 95 &&
+                            recentTags.has(tag.tagNumber) &&
+                            hasSmallToolInput(targets.get(tag.tagNumber))),
                 ),
             );
         const measuredByTag = new Map(activeTags.map((tag) => [tag.tagNumber, tag]));
@@ -170,25 +173,17 @@ export function applyHeuristicCleanup(
                         (emergency.usagePercentage ?? 0) < 95 &&
                         newestEmergencyTags.has(tag.tagNumber);
                     // Removing the result separator beside native reasoning lets Anthropic
-                    // merge signed assistant turns, so this safety case always keeps the pair.
-                    const reasoningSafeSkeleton = target?.requiresToolArcSkeleton === true;
-                    const skeleton = recent || reasoningSafeSkeleton;
-                    const result = reasoningSafeSkeleton
-                        ? (target?.truncate?.() ?? "absent")
-                        : recent
-                          ? (target?.truncate?.() ?? target?.drop?.() ?? "absent")
-                          : (target?.drop?.() ?? "absent");
+                    // merge signed assistant turns, so this safety case always keeps the
+                    // pair, with its real arguments.
+                    const { result, mode } = applyNewToolDrop(target, {
+                        inWindow: recent,
+                        keepSkeleton: target?.requiresToolArcSkeleton === true,
+                    });
                     if (result === "removed" || result === "truncated") {
                         updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
-                        // drop() keeps a skeleton instead of removing the last tool
-                        // result the request ends with (removing it would end the
-                        // request on an assistant turn), so persist the mode applied.
-                        updateTagDropMode(
-                            db,
-                            sessionId,
-                            tag.tagNumber,
-                            skeleton || result === "truncated" ? "truncated" : "full",
-                        );
+                        // Persist the mode applied (including drop() keeping the
+                        // call whose result ends the request) so replays match.
+                        updateTagDropMode(db, sessionId, tag.tagNumber, mode);
                         droppedTools++;
                         emergencyDroppedTools++;
                         droppedTokenReductions.push({
@@ -316,15 +311,11 @@ export function applyHeuristicCleanup(
                     const tag = group[i];
                     const target = targets.get(tag.tagNumber);
                     // Deduplication remains a full drop; only the emergency newest-window
-                    // arm preserves skeleton bytes.
-                    const result = target?.drop?.() ?? "absent";
+                    // arm preserves skeleton bytes. A call that cannot be removed keeps
+                    // its real arguments.
+                    const { result, mode } = applyNewToolDrop(target, { inWindow: false });
                     if (result === "incomplete") continue;
-                    updateTagDropMode(
-                        db,
-                        sessionId,
-                        tag.tagNumber,
-                        result === "truncated" ? "truncated" : "full",
-                    );
+                    updateTagDropMode(db, sessionId, tag.tagNumber, mode);
                     updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
                     if (result === "removed" || result === "truncated") {
                         deduplicatedTools++;

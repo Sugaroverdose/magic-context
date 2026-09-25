@@ -65,6 +65,11 @@ import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
+import {
+    type ConvertedToolDropMode,
+    convertLegacyToolSkeletons,
+    renderConvertedToolSkeletons,
+} from "./apply-operations";
 import { runAutoSearchHint } from "./auto-search-runner";
 import { hasReclaimRide, reclaimRideLabel } from "./cache-busting-signals";
 import {
@@ -1407,6 +1412,12 @@ export async function runPostTransformPhase(
     // Keep its observational tool-set operands even when it correctly declines
     // to materialize, so a separate cache-busting pass can be attributed later.
     let m0ComparisonDecision: MaterializeDecision | null = foldDueDecision;
+    // Legacy dropped-tool skeletons (argument marker) are converted to the
+    // real-or-absent rule only inside an executed HARD fold's transaction, so
+    // the byte change rides that fold's cache bust. Retries recompute the same
+    // decisions from the same wire, so collecting across attempts is safe.
+    const convertedToolSkeletons = new Map<number, ConvertedToolDropMode>();
+    let convertedToolSkeletonsDidMutate = false;
     if ((foldDueDecision.value || softRefreshOpportunity) && m0M1EnabledForFold && args.m0M1) {
         try {
             const previousM1 = args.sessionMeta.cachedM1Bytes?.toString("utf8");
@@ -1429,6 +1440,15 @@ export async function runPostTransformPhase(
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,
                 compactionOff,
+                onFoldCommit: (db) => {
+                    for (const [tagNumber, mode] of convertLegacyToolSkeletons(
+                        db,
+                        args.sessionId,
+                        args.targets,
+                    )) {
+                        convertedToolSkeletons.set(tagNumber, mode);
+                    }
+                },
             });
             preparedPrefix = foldResult;
             prefixPreflightFailed = foldResult.materializationContentionRetryExhausted === true;
@@ -1441,6 +1461,19 @@ export async function runPostTransformPhase(
                 previousM1 !== args.sessionMeta.cachedM1Bytes?.toString("utf8");
             m0RematerializedThisPass = foldResult.m0RematerializedThisPass;
             m0MaterializeReason = foldResult.decision.reason;
+            // Only a committed fold persisted the conversions; render them now,
+            // before the batch finalizes, so this pass serves what later passes
+            // replay from the new drop modes.
+            if (foldResult.m0RematerializedThisPass && convertedToolSkeletons.size > 0) {
+                convertedToolSkeletonsDidMutate = renderConvertedToolSkeletons(
+                    args.targets,
+                    convertedToolSkeletons,
+                );
+                sessionLog(
+                    args.sessionId,
+                    `HARD fold converted ${convertedToolSkeletons.size} legacy dropped-tool skeleton(s) to real-or-absent`,
+                );
+            }
             if (foldResult.m0RematerializedThisPass) {
                 m0ComparisonDecision = foldResult.decision;
             }
@@ -1624,6 +1657,13 @@ export async function runPostTransformPhase(
     let prependedMessageCount = 0;
     const reasoningMutatedMessages = new Set<MessageLike>();
     let reasoningMutationTargetUnknown = false;
+    if (convertedToolSkeletonsDidMutate) {
+        for (const tagNumber of convertedToolSkeletons.keys()) {
+            const message = args.targets.get(tagNumber)?.message;
+            if (message) reasoningMutatedMessages.add(message);
+            else reasoningMutationTargetUnknown = true;
+        }
+    }
     if (args.didMutateFromFlushedStatuses) {
         for (const target of args.targets.values()) {
             if (target.message) reasoningMutatedMessages.add(target.message);
@@ -2648,6 +2688,7 @@ export async function runPostTransformPhase(
         pendingOpsDidMutate ||
         heuristicOrReasoningDidMutate ||
         autoReclaimDidMutateThisPass ||
+        convertedToolSkeletonsDidMutate ||
         m0RematerializedThisPass ||
         (m0M1InjectedThisPass && historyWasConsumedThisPass) ||
         historyWasConsumedThisPass;

@@ -29,6 +29,7 @@ import {
     setChannel2NudgeState,
     setPendingCompactionMarkerState,
     updateSessionMeta,
+    updateTagDropMode,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
@@ -222,6 +223,17 @@ function makeDropTarget(message: MessageLike): TagTarget {
             part.state.output = "[dropped]";
             return "truncated";
         },
+        // These mock calls carry no input, so a drop inside the newest-call window
+        // keeps them as a (real-argument) skeleton with the same placeholder output.
+        skeletonReal: () => {
+            const part = message.parts.find(
+                (candidate) => (candidate as { type?: string }).type === "tool",
+            ) as { state?: { output?: string } } | undefined;
+            if (!part?.state) return "absent";
+            part.state.output = "[dropped]";
+            return "truncated";
+        },
+        inputStringBytes: () => 0,
         canDrop: () => message.parts.some((part) => (part as { type?: string }).type === "tool"),
     };
 }
@@ -3383,6 +3395,126 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         );
 
         expect(getChannel2NudgeState(db, sessionId)).toBe("");
+    });
+
+    it("replays legacy marker skeletons on defer passes and converts them only on an executed HARD fold", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-hardfold-legacy-skeleton";
+        materializeBaseline(sessionId);
+        const largeContent = "L".repeat(2000);
+        const makeTail = () =>
+            [
+                {
+                    info: { id: "m-small", role: "assistant", sessionID: sessionId },
+                    parts: [
+                        {
+                            type: "tool",
+                            tool: "bash",
+                            callID: "call-small",
+                            state: {
+                                status: "completed",
+                                input: { command: "ls -la" },
+                                output: "small output",
+                            },
+                        },
+                    ],
+                },
+                {
+                    info: { id: "m-large", role: "assistant", sessionID: sessionId },
+                    parts: [
+                        {
+                            type: "tool",
+                            tool: "write",
+                            callID: "call-large",
+                            state: {
+                                status: "completed",
+                                input: { filePath: "/tmp/a.txt", content: largeContent },
+                                output: "wrote file",
+                            },
+                        },
+                    ],
+                },
+                {
+                    info: { id: "m-next", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "next prompt" }],
+                },
+            ] as unknown as MessageLike[];
+        const tailOnly = (messages: MessageLike[]) =>
+            JSON.stringify(
+                messages.filter((message) => ["m-small", "m-large"].includes(message.info.id)),
+            );
+        const pass = async (hardSignals?: M0HardSignals) => {
+            const messages = makeTail();
+            const tagger = createTagger();
+            tagger.initFromDb(sessionId, db);
+            const tagged = tagMessages(sessionId, messages, tagger, db);
+            const replayed = applyFlushedStatuses(sessionId, db, tagged.targets);
+            tagged.batch.finalize();
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    tagger,
+                    targets: tagged.targets,
+                    reasoningByMessage: tagged.reasoningByMessage,
+                    messageTagNumbers: tagged.messageTagNumbers,
+                    batch: tagged.batch,
+                    didMutateFromFlushedStatuses: replayed,
+                    schedulerDecision: "defer",
+                    contextUsage: { percentage: 40, inputTokens: 4000 },
+                    m0M1: {
+                        projectPath: FOLD_PROJECT,
+                        projectDirectory: FOLD_PROJECT,
+                        historyBudgetTokens: 98_000,
+                        hardSignals: hardSignals ?? BASE_HARD,
+                    },
+                }),
+            );
+            return { messages, result };
+        };
+
+        // Seed a session that already serves two legacy marker skeletons.
+        const first = makeTail();
+        const firstTagger = createTagger();
+        tagMessages(sessionId, first, firstTagger, db);
+        const small = firstTagger.getToolTag(sessionId, "call-small", "m-small")!;
+        const large = firstTagger.getToolTag(sessionId, "call-large", "m-large")!;
+        for (const tag of [small, large]) {
+            updateTagStatus(db, sessionId, tag, "dropped");
+            updateTagDropMode(db, sessionId, tag, "truncated");
+        }
+
+        // Defer passes replay the marker byte-identically and never convert.
+        const deferA = await pass();
+        const deferB = await pass();
+        const legacyWire = tailOnly(deferA.messages);
+        expect(deferA.result.materialized).toBe(false);
+        expect(legacyWire).toContain(`{"dropped":"[dropped §${small}§]"}`);
+        expect(legacyWire).toContain(`{"dropped":"[dropped §${large}§]"}`);
+        expect(tailOnly(deferB.messages)).toBe(legacyWire);
+        expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === small)?.dropMode).toBe(
+            "truncated",
+        );
+
+        // The HARD fold converts: small keeps its real arguments, large is removed.
+        const hardSignals = { ...BASE_HARD, modelKey: "anthropic/sonnet" };
+        const hard = await pass(hardSignals);
+        expect(hard.result.materialized).toBe(true);
+        const tags = getTagsBySession(db, sessionId);
+        expect(tags.find((t) => t.tagNumber === small)?.dropMode).toBe("skeleton_real");
+        expect(tags.find((t) => t.tagNumber === large)?.dropMode).toBe("full");
+        const convertedWire = tailOnly(hard.messages);
+        expect(convertedWire).not.toContain('"dropped":');
+        expect(convertedWire).not.toContain("call-large");
+        const smallPart = hard.messages.find((m) => m.info.id === "m-small")?.parts[0] as {
+            state: { input: unknown; output: string };
+        };
+        expect(smallPart.state.input).toEqual({ command: "ls -la" });
+        expect(smallPart.state.output).toBe(`[dropped §${small}§]`);
+
+        // The following defer pass replays the converted bytes identically.
+        const after = await pass(hardSignals);
+        expect(after.result.materialized).toBe(false);
+        expect(tailOnly(after.messages)).toBe(convertedWire);
     });
 
     it("drains queued pending ops on a DEFER scheduler pass when m[0] HARD-folds", async () => {

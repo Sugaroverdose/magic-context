@@ -11,22 +11,31 @@ import { sessionLog } from "../../shared/logger";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
 import type { TagTarget } from "./tag-messages";
+import type { ToolDropResult } from "./tool-drop-target";
+import { SKELETON_REAL_INPUT_MAX_BYTES } from "./tool-input-size";
 
 // Max characters kept from the original user content when a user-message tag
 // is dropped. ~250 characters maps to ~50 Claude tokens (1 token ≈ 4-5 chars
 // for English prose). Keeps the ai-tokenizer dependency in scripts only.
 
 /**
- * Agent-initiated (ctx_reduce) drops of a tool call within the newest N tool
- * calls keep a structural skeleton — the tool_use/tool_result pair survives
- * with the canonical `[dropped §N§]` placeholder as its output and a single
- * non-executable dropped-input marker — instead of being removed outright.
+ * Agent-initiated (ctx_reduce) and emergency drops of a tool call within the
+ * newest N tool calls keep a structural skeleton when the call's input is
+ * small: the tool_use/tool_result pair survives with its REAL arguments and
+ * the canonical `[dropped §N§]` placeholder as its output (`skeleton_real`).
+ * A large input is removed outright, like a drop outside the window.
  *
- * WHY: when every recent tool call vanishes from the wire, models (especially
- * smaller ones) lose the anchors showing what they actually did and start
- * hallucinating fake tool-call shapes (the §N§ cargo-culting failure mode).
- * Keeping skeletons in the recent band structurally prevents that class.
- * Older drops still remove the full structure — deep history needs no anchors.
+ * WHY a skeleton: when every recent tool call vanishes from the wire, models
+ * (especially smaller ones) lose the anchors showing what they actually did
+ * and start writing fake tool calls as plain text. Keeping skeletons in the
+ * recent band prevents that. Older drops still remove the full structure.
+ *
+ * WHY real arguments: every synthetic value previously put in the argument
+ * position (5-character clamps, then a `{"dropped": "[dropped §N§]"}` marker)
+ * was copied by models into new calls, which then ran with garbage arguments
+ * or looped on the dropped-input guard's refusal. A dropped call's arguments
+ * are therefore either the real ones or absent. The size rule lives in
+ * tool-input-size.ts.
  *
  * CACHE SAFETY: the mode is decided once, at drop time (always a
  * cache-busting pass), persisted in `tags.drop_mode`, and replayed
@@ -53,6 +62,122 @@ export const RECENT_TOOL_SKELETON_WINDOW = 20;
 export function buildReplacementContent(tagId: number): string {
     return `[dropped \u00a7${tagId}\u00a7]`;
 }
+export interface NewToolDropOutcome {
+    result: ToolDropResult;
+    /** The drop mode to persist so every later pass replays the same bytes. */
+    mode: "skeleton_real" | "full";
+}
+
+/**
+ * Apply a NEW drop of a tool call under the real-or-absent rule and report
+ * the mode to persist:
+ *  1. inside the newest-call window with a small input: keep the call with its
+ *     real arguments, output -> `[dropped §N§]` (`skeleton_real`);
+ *  2. otherwise remove the call and its result (`full`);
+ *  3. except when the call cannot be removed: its result ends the request
+ *     (drop() then keeps it, see ToolMutationBatch.wouldStrandConversationEnd),
+ *     the host adapter cannot remove it structurally, or the caller requires a
+ *     paired skeleton (`keepSkeleton`, e.g. beside native reasoning). Those keep
+ *     the REAL arguments too; nothing is ever written into the argument position.
+ */
+export function applyNewToolDrop(
+    target: TagTarget | undefined,
+    options: { inWindow: boolean; keepSkeleton?: boolean },
+): NewToolDropOutcome {
+    if (!target) return { result: "absent", mode: "full" };
+    if (
+        (options.inWindow && hasSmallToolInput(target)) ||
+        options.keepSkeleton === true ||
+        target.cannotRemove?.() === true
+    ) {
+        return { result: target.skeletonReal?.() ?? "absent", mode: "skeleton_real" };
+    }
+    const result = target.drop?.() ?? "absent";
+    return { result, mode: result === "truncated" ? "skeleton_real" : "full" };
+}
+
+/** True when a drop of this call inside the newest-call window keeps real arguments. */
+export function hasSmallToolInput(target: TagTarget | undefined): boolean {
+    const bytes = target?.inputStringBytes?.() ?? null;
+    return bytes !== null && bytes <= SKELETON_REAL_INPUT_MAX_BYTES;
+}
+
+export type ConvertedToolDropMode = "skeleton_real" | "full";
+
+/**
+ * Convert every dropped tool call that still serves the legacy
+ * `{"dropped": "[dropped §N§]"}` argument marker to the real-or-absent rule,
+ * persisting the new mode, and return the conversions so the caller can render
+ * them on this pass's wire.
+ *
+ * Call this ONLY inside the transaction that records an executing HARD fold.
+ * That pass rebuilds the whole prefix anyway, so the changed bytes ride the
+ * same cache bust; on every other pass the legacy tags keep replaying their
+ * marker byte-identically. Deciding here and persisting the mode means later
+ * passes never re-decide (never demote, never restore).
+ *
+ * Legacy tags are `drop_mode = 'truncated'`, plus `full` tags whose host
+ * adapter cannot remove the call and so replays a marker instead (Pi). Each is
+ * re-decided from its real input: small -> `skeleton_real`; large -> `full`,
+ * unless the call cannot be removed (it ends the request, the adapter cannot
+ * remove it, or it sits beside native reasoning), which keeps real arguments.
+ * The legacy marker was only ever written inside the newest-call window or for
+ * a call that could not be removed, so every legacy tag is re-decided as an
+ * in-window drop. Tags not on this pass's wire stay as they are.
+ */
+export function convertLegacyToolSkeletons(
+    db: ContextDatabase,
+    sessionId: string,
+    targets: ReadonlyMap<number, TagTarget>,
+): Map<number, ConvertedToolDropMode> {
+    const rows = db
+        .prepare(
+            `SELECT tag_number AS tagNumber, drop_mode AS dropMode
+               FROM tags
+              WHERE session_id = ? AND type = 'tool' AND status = 'dropped'
+                AND drop_mode IN ('truncated', 'full')
+              ORDER BY tag_number`,
+        )
+        .all(sessionId) as Array<{ tagNumber: number; dropMode: string }>;
+    const converted = new Map<number, ConvertedToolDropMode>();
+    for (const row of rows) {
+        const target = targets.get(row.tagNumber);
+        if (target?.canDrop?.() !== true) continue;
+        const cannotRemove =
+            target.cannotRemove?.() === true ||
+            target.requiresToolArcSkeleton === true ||
+            target.wouldStrandConversationEnd?.() === true;
+        let mode: ConvertedToolDropMode;
+        if (row.dropMode === "full") {
+            // Removable full drops already serve real-or-absent bytes.
+            if (target.cannotRemove?.() !== true) continue;
+            mode = "skeleton_real";
+        } else {
+            mode = hasSmallToolInput(target) || cannotRemove ? "skeleton_real" : "full";
+        }
+        updateTagDropMode(db, sessionId, row.tagNumber, mode);
+        converted.set(row.tagNumber, mode);
+    }
+    return converted;
+}
+
+/** Render conversions from convertLegacyToolSkeletons on this pass's wire. */
+export function renderConvertedToolSkeletons(
+    targets: ReadonlyMap<number, TagTarget>,
+    converted: ReadonlyMap<number, ConvertedToolDropMode>,
+): boolean {
+    let didMutate = false;
+    for (const [tagNumber, mode] of converted) {
+        const target = targets.get(tagNumber);
+        const result =
+            mode === "skeleton_real"
+                ? (target?.skeletonReal?.() ?? "absent")
+                : (target?.drop?.() ?? "absent");
+        if (result === "removed" || result === "truncated") didMutate = true;
+    }
+    return didMutate;
+}
+
 export interface PendingOperationBatchDiagnostics {
     source: "pending" | "synthetic" | "mixed";
     total: number;
@@ -182,26 +307,15 @@ export function applyPendingOperations(
                         onTagReduced?.({ tagNumber: pendingOp.tagId, mode: "edit_marker" });
                         updateTagDropMode(db, sessionId, pendingOp.tagId, "edit_marker");
                         shouldPersistDrop = true;
-                    } else if (skeletonWindow.has(pendingOp.tagId)) {
-                        const truncResult = target?.truncate?.() ?? "absent";
-                        if (
-                            truncResult === "incomplete" ||
-                            (synthetic && truncResult !== "truncated")
-                        ) {
-                            reject(`truncate_${truncResult}`);
-                            continue;
-                        }
-                        if (truncResult === "truncated") {
-                            didMutateMessage = true;
-                            operationMutated = true;
-                            onTagReduced?.({ tagNumber: pendingOp.tagId, mode: "truncated" });
-                        } else {
-                            reject(`truncate_${truncResult}`);
-                        }
-                        updateTagDropMode(db, sessionId, pendingOp.tagId, "truncated");
-                        shouldPersistDrop = true;
                     } else {
-                        const dropResult = target?.drop?.() ?? "absent";
+                        // Real-or-absent: a small input inside the newest-call
+                        // window keeps its real arguments; everything else is
+                        // removed, except the call whose result ends the request
+                        // (drop() keeps it with real arguments). Persist the mode
+                        // applied so replays match this pass.
+                        const { result: dropResult, mode: appliedMode } = applyNewToolDrop(target, {
+                            inWindow: skeletonWindow.has(pendingOp.tagId),
+                        });
                         if (
                             dropResult === "incomplete" ||
                             (synthetic && dropResult !== "removed" && dropResult !== "truncated")
@@ -209,15 +323,13 @@ export function applyPendingOperations(
                             reject(`drop_${dropResult}`);
                             continue;
                         }
-                        // drop() keeps a skeleton instead of removing the last tool
-                        // result the request ends with (removing it would end the
-                        // request on an assistant turn); persist the mode applied so
-                        // replays match this pass.
-                        const appliedMode = dropResult === "truncated" ? "truncated" : "full";
                         if (dropResult === "removed" || dropResult === "truncated") {
                             didMutateMessage = true;
                             operationMutated = true;
-                            onTagReduced?.({ tagNumber: pendingOp.tagId, mode: appliedMode });
+                            onTagReduced?.({
+                                tagNumber: pendingOp.tagId,
+                                mode: appliedMode === "full" ? "full" : "truncated",
+                            });
                         } else {
                             reject(`drop_${dropResult}`);
                         }
@@ -312,7 +424,14 @@ export function applyFlushedStatuses(
                     if (markResult === "truncated") {
                         didMutateMessage = true;
                     }
+                } else if (tag.dropMode === "skeleton_real") {
+                    const result = target?.skeletonReal?.() ?? "absent";
+                    if (result === "truncated") {
+                        didMutateMessage = true;
+                    }
                 } else if (tag.dropMode === "truncated") {
+                    // Legacy marker skeleton: replayed byte-identically until a
+                    // HARD fold converts it (convertLegacyToolSkeletons).
                     const truncResult = target?.truncate?.() ?? "absent";
                     if (truncResult === "truncated") {
                         didMutateMessage = true;

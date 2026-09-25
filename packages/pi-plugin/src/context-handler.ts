@@ -136,6 +136,7 @@ import { computePiWorkMetrics } from "@magic-context/core/features/magic-context
 import {
 	applyFlushedStatuses,
 	applyPendingOperations,
+	convertLegacyToolSkeletons,
 	RECENT_TOOL_SKELETON_WINDOW,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
 import {
@@ -5468,6 +5469,39 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		},
 	);
 	logTransformTiming(args.sessionId, "tagMessages", tTag);
+
+	// Legacy dropped-tool skeletons (argument marker) convert to the
+	// real-or-absent rule only on a pass whose HARD fold executed, so the byte
+	// change rides that fold's cache bust. The fold committed before tagging
+	// built the targets the decision needs, so this is its own transaction
+	// right after it; the status replay below then renders the new modes. A
+	// crash between the two leaves the tags legacy until the next HARD fold,
+	// and the next served pass carries the new m[0] (a bust) either way.
+	if (foldExecutedThisPass) {
+		try {
+			let converted = 0;
+			args.db
+				.transaction(() => {
+					converted = convertLegacyToolSkeletons(
+						args.db,
+						args.sessionId,
+						targets,
+					).size;
+				})
+				.immediate();
+			if (converted > 0) {
+				sessionLog(
+					args.sessionId,
+					`pi HARD fold converted ${converted} legacy dropped-tool skeleton(s) to real-or-absent`,
+				);
+			}
+		} catch (error) {
+			sessionLog(
+				args.sessionId,
+				`pi legacy dropped-tool skeleton conversion failed (kept legacy bytes): ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
 
 	// 1b. Note-nudge `commit_detected` trigger. Mirrors OpenCode's logic
 	// in `tag-messages.ts` + `transform.ts:677-690`: only fire on the

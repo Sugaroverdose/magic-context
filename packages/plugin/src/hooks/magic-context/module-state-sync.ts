@@ -80,7 +80,7 @@ export interface ModuleWorkspacePayload {
     members: Array<{ project_path: string; share_categories: string[] }>;
 }
 
-export type ModuleDropMode = "full" | "truncated" | "edit_marker";
+export type ModuleDropMode = "full" | "truncated" | "skeleton_real" | "edit_marker";
 
 export interface ModuleDropSeed {
     block_id: string;
