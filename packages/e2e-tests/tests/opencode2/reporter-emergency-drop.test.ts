@@ -187,7 +187,14 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         const milestones = log.split("\n").filter((line) => /v2 usage:|emergency tiered drop:|heuristic cleanup:|pending ops WILL APPLY|prefix trim:|rematerialized=true/.test(line));
         expect(milestones.some((line) => /v2 usage: inputTokens=820000 .*percentage=109\./.test(line))).toBe(true);
         expect(milestones.some((line) => line.includes("pending ops WILL APPLY — reason=explicit_flush, pendingOps=46"))).toBe(true);
-        expect(milestones.some((line) => line.includes("emergency tiered drop: tiered drop: 143 tags"))).toBe(true);
+        // The OpenCode 1 leg omits the agent on chat.message; since 6a7158a407 ("preserve
+        // LKG after host adds empty summaries") the v1 entry still measures the tool
+        // definitions under the "default" agent key. That measured envelope reaches the
+        // OpenCode 2 wire estimate (about 761k tokens, 101.6%, rather than 740k, 98.7%),
+        // which raises the estimated fixed floor, so the planner drops 146 tags, not 143.
+        const v1Log = readFileSync(fixture.logPath("v1-reporter"), "utf8");
+        expect(v1Log).toMatch(/final-wire telemetry estimate=\d+ .*toolDefinitions=\d+ /);
+        expect(milestones.some((line) => line.includes("emergency tiered drop: tiered drop: 146 tags"))).toBe(true);
         expect(milestones.some((line) => /heuristic cleanup: dropped \d+ tool tags, deduplicated \d+ tool calls, dropped 5 system injections/.test(line))).toBe(true);
         expect(milestones.some((line) => /prefix trim: boundary .* absent from current messages; pass=priced; no in-pass trim applied/.test(line))).toBe(true);
         expect(milestones.some((line) => line.includes("rematerialized=true, reason=render_config"))).toBe(true);

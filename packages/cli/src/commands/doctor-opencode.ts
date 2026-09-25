@@ -116,6 +116,7 @@ import {
 } from "./doctor-compartment-boundaries";
 import { reportUnresolvedHarnessRelabel } from "./doctor-harness-relabel";
 import { clearPluginCache } from "./doctor-opencode-cache";
+import { checkPluginDuplicates } from "./doctor-opencode-plugin-duplicates";
 import {
     countPendingCoordinateRebases,
     formatPendingCoordinateRebases,
@@ -1419,6 +1420,22 @@ export async function runDoctor(
         try {
             const raw = readFileSync(paths.opencodeConfig, "utf-8");
             const config = parse(raw) as Record<string, unknown>;
+            const configName =
+                paths.opencodeConfigFormat === "jsonc" ? "opencode.jsonc" : "opencode.json";
+            // Duplicates first, so the single-entry checks below see the
+            // deduplicated config when --fix removed the extra entries.
+            if (
+                checkPluginDuplicates(config, configName, options, {
+                    warn,
+                    pass: (message) => {
+                        pass(message);
+                        fixed++;
+                    },
+                    info: (message) => log.info(message),
+                })
+            ) {
+                writeFileAtomic(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
+            }
             // Operate on the raw plugin array. Entries can be:
             //   • a string  "@cortexkit/opencode-magic-context@latest"
             //   • a tuple   ["@pkg/name@latest", { ...options }]
@@ -1455,9 +1472,6 @@ export async function runDoctor(
                     "An unverifiable local OpenCode plugin path was ignored because its package name is not Magic Context",
                 );
             }
-            const configName =
-                paths.opencodeConfigFormat === "jsonc" ? "opencode.jsonc" : "opencode.json";
-
             // Helper: extract the plain string (or first element of a tuple) so
             // we can compare against the desired @latest entry.
             const entryAsString = (entry: unknown): string | null => {

@@ -19,9 +19,10 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
         // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
-        // removed. Adding an OpenCode 2 lane file moves this number and the excluded
-        // list below and nothing else, because those files carry tier "excluded" and
-        // so never enter a TS or Rust invocation list.
+        // removed. Adding an excluded OpenCode 2 file moves this number and the excluded
+        // list below and nothing else, because tier "excluded" never enters a TS or
+        // Rust invocation list. A ts-only OpenCode 2 file also moves the TS and
+        // opencode2 counts in the next test.
         expect(validation.files.length).toBe(109);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
@@ -33,13 +34,24 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(30);
+        expect(ts).toHaveLength(34);
         expect(rust).toHaveLength(52);
         expect(rust).toContain("tests/subagent-behavior.test.ts");
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(2);
         expect(filesForMode(validation, "ts", "opencode")).toHaveLength(27);
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(23);
-        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(20);
+        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(24);
+        // These four OpenCode 2 files are ts-only with hosts ["opencode2"], so only the
+        // OpenCode 2 host lane runs them; the other host lanes never select them.
+        for (const path of [
+            "tests/opencode2/adapters-s2-contracts.test.ts",
+            "tests/opencode2/adapters-s3-marker-policy.test.ts",
+            "tests/opencode2/pins.test.ts",
+            "tests/opencode2/reporter-emergency-drop.test.ts",
+        ]) {
+            expect(filesForMode(validation, "ts", "opencode2")).toContain(path);
+            expect(filesForMode(validation, "ts", "opencode")).not.toContain(path);
+        }
         // OMP hashes each request into its system header, breaking within-session byte identity
         // in cache-stability and long-running-session; their manifest entries declare the omission.
         expect(filesForMode(validation, "ts", "omp")).toHaveLength(19);
@@ -47,8 +59,6 @@ describe("mode manifest validator", () => {
             .filter((entry) => entry.tier === "excluded")
             .map((entry) => entry.path);
         expect([...excluded].sort()).toEqual([
-            "tests/opencode2/adapters-s2-contracts.test.ts",
-            "tests/opencode2/adapters-s3-marker-policy.test.ts",
             "tests/opencode2/automatic-s3-paths.test.ts",
             "tests/opencode2/bounded-raw-reads.test.ts",
             "tests/opencode2/commands-s2-flush.test.ts",
@@ -70,10 +80,8 @@ describe("mode manifest validator", () => {
             "tests/opencode2/image-attachment.test.ts",
             "tests/opencode2/marker-s3-runtime.test.ts",
             "tests/opencode2/mural-media-schema.test.ts",
-            "tests/opencode2/pins.test.ts",
             "tests/opencode2/probes.test.ts",
             "tests/opencode2/prompt-surface-s6.test.ts",
-            "tests/opencode2/reporter-emergency-drop.test.ts",
             "tests/opencode2/rpc-s2-listener.test.ts",
             "tests/opencode2/runner.test.ts",
             "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",

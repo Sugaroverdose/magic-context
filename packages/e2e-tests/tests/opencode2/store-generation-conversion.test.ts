@@ -201,6 +201,10 @@ function placeSyntheticSplitBetweenCompartments(
 
     const db = new Database(fixture.contextDbPath);
     try {
+        // The OpenCode 1 host is still running and writes tags and session state
+        // to this database after each turn, so wait for its short write
+        // transactions instead of failing on the first lock.
+        db.exec("PRAGMA busy_timeout = 30000");
         const rows = db
             .prepare(
                 `SELECT id, sequence, start_message, end_message
