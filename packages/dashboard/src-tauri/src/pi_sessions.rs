@@ -1151,17 +1151,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn omp_detection_requires_an_executable_not_just_a_file() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let candidate = dir.path().join("omp");
         fs::write(&candidate, "not a real binary").unwrap();
         assert!(!is_executable_file(&candidate));
 
-        let mut perms = fs::metadata(&candidate).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&candidate, perms).unwrap();
-        assert!(is_executable_file(&candidate));
+        // The same bytes with the executable bit set. It comes from the shared
+        // content-addressed stub store (see crate::test_bin) instead of a chmod
+        // of the file above, so no new executable is created per run.
+        let executable = crate::test_bin::write_test_executable("omp", "not a real binary", "");
+        assert!(is_executable_file(&executable));
 
         assert!(!is_executable_file(dir.path()));
         assert!(!is_executable_file(&dir.path().join("missing-omp")));
