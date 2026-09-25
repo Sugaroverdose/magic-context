@@ -22,6 +22,7 @@
  */
 
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -55,11 +56,8 @@ const START = Date.UTC(2026, 0, 5, 0, 0);
 let db: Database | null = null;
 let tempDir: string | null = null;
 let peer: Database | null = null;
-const originalTz = process.env.TZ;
 afterEach(() => {
     setSystemTime();
-    if (originalTz === undefined) delete process.env.TZ;
-    else process.env.TZ = originalTz;
     if (db) closeQuietly(db);
     if (peer) closeQuietly(peer);
     db = peer = null;
@@ -281,7 +279,28 @@ describe("shared schedule reconciliation contract", () => {
     });
 
     it("does not re-arm a consumed civil minute in Madrid's repeated hour", async () => {
-        process.env.TZ = "Europe/Madrid";
+        if (process.env.MC_DREAMER_DST_CHILD !== "1") {
+            // Bun does not restore its default timezone after changing TZ in-process.
+            // A child isolates Madrid without changing the rest of the test suite.
+            const child = spawnSync(
+                process.execPath,
+                [
+                    "test",
+                    import.meta.path,
+                    "--test-name-pattern",
+                    "does not re-arm a consumed civil minute",
+                ],
+                {
+                    env: { ...process.env, TZ: "Europe/Madrid", MC_DREAMER_DST_CHILD: "1" },
+                    encoding: "utf8",
+                    timeout: 20_000,
+                },
+            );
+            expect(child.error).toBeUndefined();
+            expect(child.status, child.stderr).toBe(0);
+            return;
+        }
+        expect(process.env.TZ).toBe("Europe/Madrid");
         db = freshDb();
         const first = Date.parse("2026-10-25T00:30:00Z");
         const repeated = Date.parse("2026-10-25T01:30:00Z");
