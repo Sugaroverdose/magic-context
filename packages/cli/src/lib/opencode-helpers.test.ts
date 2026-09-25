@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { writeTestExecutable } from "@magic-context/core/shared/test-fake-executable";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import {
     describeOpenCodeInstallations,
@@ -17,14 +17,12 @@ import {
 const isPosix = process.platform !== "win32";
 const originalComSpec = process.env.ComSpec;
 const originalPathExpansionProbe = process.env.MC_OPENCODE_TEST_PATH;
-const tempDirs: string[] = [];
 
 afterEach(() => {
     if (originalComSpec === undefined) delete process.env.ComSpec;
     else process.env.ComSpec = originalComSpec;
     if (originalPathExpansionProbe === undefined) delete process.env.MC_OPENCODE_TEST_PATH;
     else process.env.MC_OPENCODE_TEST_PATH = originalPathExpansionProbe;
-    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 describe("OpenCode installation reports", () => {
@@ -58,23 +56,20 @@ describe("OpenCode installation reports", () => {
     });
 });
 
+// Stubs are content-addressed and shared across runs (see writeTestExecutable),
+// so they are never removed in afterEach.
 function fakeOpencode(body: string): string {
-    const dir = mkdtempSync(join(tmpdir(), "mc-oc-bin-"));
-    tempDirs.push(dir);
-    const bin = join(dir, "opencode");
-    writeFileSync(bin, `#!/bin/sh\n${body}\n`);
-    chmodSync(bin, 0o755);
-    return bin;
+    return writeTestExecutable("opencode", `#!/bin/sh\n${body}\n`);
 }
 
-function fakeOpenCodeCommandShim(): string {
-    const dir = mkdtempSync(join(tmpdir(), "mc %MC_OPENCODE_TEST_PATH% & shim "));
-    tempDirs.push(dir);
-    const shim = join(dir, "opencode.cmd");
+// The directory prefix deliberately contains a percent-variable and `&` so the
+// cmd invocation is proven to quote the shim path instead of expanding it.
+const SHIM_DIR_PREFIX = "mc %MC_OPENCODE_TEST_PATH% & shim ";
 
+function fakeOpenCodeCommandShim(): string {
     if (process.platform === "win32") {
-        writeFileSync(
-            shim,
+        return writeTestExecutable(
+            "opencode.cmd",
             [
                 "@echo off",
                 'if "%~1"=="--version" (',
@@ -84,18 +79,19 @@ function fakeOpenCodeCommandShim(): string {
                 "  echo openai/gpt-5.5",
                 ")",
             ].join("\r\n"),
+            { dirPrefix: SHIM_DIR_PREFIX },
         );
-    } else {
-        const comSpec = join(dir, "fake-cmd");
-        writeFileSync(
-            comSpec,
-            '#!/bin/sh\ncase "$5" in\n  *--version*) echo "1.18.7" ;;\n  *models*) printf "anthropic/claude-opus-4-8\\nopenai/gpt-5.5\\n" ;;\nesac\n',
-        );
-        chmodSync(comSpec, 0o755);
-        process.env.ComSpec = comSpec;
     }
 
-    return shim;
+    // POSIX has no cmd.exe: a fake ComSpec answers instead, and the shim path
+    // beside it only needs to exist as a string ending in .cmd.
+    const comSpec = writeTestExecutable(
+        "fake-cmd",
+        '#!/bin/sh\ncase "$5" in\n  *--version*) echo "1.18.7" ;;\n  *models*) printf "anthropic/claude-opus-4-8\\nopenai/gpt-5.5\\n" ;;\nesac\n',
+        { dirPrefix: SHIM_DIR_PREFIX },
+    );
+    process.env.ComSpec = comSpec;
+    return join(dirname(comSpec), "opencode.cmd");
 }
 
 describe("OpenCode command execution", () => {

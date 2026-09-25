@@ -10,6 +10,8 @@ pub mod process_ext;
 pub mod project_identity;
 pub mod serve;
 #[cfg(test)]
+pub mod test_bin;
+#[cfg(test)]
 pub mod test_env;
 pub mod workspaces;
 

@@ -26,6 +26,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage-db";
 import { rpcPortFilePath } from "@magic-context/core/shared/rpc-utils";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { writeTestExecutable } from "@magic-context/core/shared/test-fake-executable";
 
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import { defaultSqliteExecutable, REPAIR_DB_EXIT, runRepairDb } from "./doctor-repair-db";
@@ -426,12 +427,11 @@ describe("doctor repair-db", () => {
         // shell starts, but `.recover` dies the moment it reaches for
         // sqlite_dbpage — the exact stderr seen on the CI runner. Injected
         // through the same sqliteExecutable seam as the could-not-start test;
-        // no real sqlite3 is invoked.
-        const stubSqlite = join(storageDir, "sqlite3-without-dbpage");
-        writeFileSync(
-            stubSqlite,
+        // no real sqlite3 is invoked. The stub is a shared content-addressed
+        // file outside storageDir (see writeTestExecutable), reused across runs.
+        const stubSqlite = writeTestExecutable(
+            "sqlite3-without-dbpage",
             "#!/bin/sh\necho 'sql error: no such table: sqlite_dbpage (1)' >&2\nexit 1\n",
-            { mode: 0o755 },
         );
         // confirmations=[true]: if the command DID offer the destructive reset,
         // the mock would accept it and wipe the database — so a green test also

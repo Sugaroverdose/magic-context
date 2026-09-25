@@ -1677,17 +1677,16 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn opencode_model_probe_reports_timeout_and_empty_then_accepts_warm_output() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let bin = dir.path().join("opencode");
-        std::fs::write(
-            &bin,
+        // Shared content-addressed stubs (see crate::test_bin), reused across
+        // runs. The "empty" CLI is a second stub with its own content and path
+        // rather than an in-place rewrite of the first.
+        let slow = crate::test_bin::write_test_executable(
+            "opencode",
             "#!/bin/sh\nsleep 0.2\nprintf 'opencode/big-pickle\\n'\n",
-        )
-        .expect("write fake CLI");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("make executable");
-        let bin = bin.to_str().expect("UTF-8 path");
+            "",
+        );
+        let empty = crate::test_bin::write_test_executable("opencode", "#!/bin/sh\nexit 0\n", "");
+        let bin = slow.to_str().expect("UTF-8 path");
         let timeout = std::time::Duration::from_millis(30);
         assert!(probe_opencode_models(bin, timeout)
             .await
@@ -1699,11 +1698,16 @@ mod tests {
                 .unwrap(),
             vec!["opencode/big-pickle"]
         );
-        std::fs::write(bin, "#!/bin/sh\nexit 0\n").expect("write empty CLI");
-        assert!(probe_opencode_models(bin, timeout)
-            .await
-            .unwrap_err()
-            .contains("returned no models"));
+        // The empty-output case is not about the deadline. A generous timeout
+        // keeps the first-ever launch of a new stub file (which macOS delays
+        // for a malware scan) from surfacing as a timeout instead.
+        let bin = empty.to_str().expect("UTF-8 path");
+        assert!(
+            probe_opencode_models(bin, std::time::Duration::from_secs(2))
+                .await
+                .unwrap_err()
+                .contains("returned no models")
+        );
     }
 
     // #149 regression: the discovery path must be able to LAUNCH a `.cmd` shim
