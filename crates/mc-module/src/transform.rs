@@ -19652,7 +19652,8 @@ pub(crate) mod tests {
         let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
         ctx.protected_tokens_floor = 4_000;
         transform(&s, &request, &ctx).unwrap();
-        // A session with no floor snapshot yet: floor inputs are tracked in memory only.
+        // Remove the persisted floor snapshot. Until one is persisted, the module remembers the
+        // last configured floor and window size in memory, and a change to them raises a HARD.
         let mut legacy = s.load("ses-floor").unwrap();
         legacy.meta.protected_tokens_effective = None;
         s.commit("ses-floor", legacy.row_version, &legacy.core, &legacy.meta)
