@@ -29,6 +29,17 @@ function packageInfo(): { version: string; development: boolean } {
     }
 }
 
+/**
+ * OpenCode 2 owns plugin installs: it installs an `@latest` entry once, flags
+ * it outdated at startup, and installs a newer release only when the user asks
+ * it to (its plugins dialog, or `opencode plugin update`). The v1 auto-updater
+ * does not run on this host, so the notice names the host's own update path
+ * instead of promising an automatic one.
+ */
+export function formatUpdateAvailableMessage(latest: string, current: string): string {
+    return `Magic Context ${latest} is available (running ${current}). To install it, open /plugins, select Magic Context and press ctrl+u, or run \`opencode plugin update\`. A version-pinned plugin entry must be changed in your OpenCode config instead.`;
+}
+
 /** GA eventMethods is exactly ["subscribe"] (promise/event.d.ts), not on.
  * The v2 plugin domain supplies list only; version checks must never use the
  * v1 checker's singular-plugin configuration writer against plural plugins.
@@ -51,10 +62,11 @@ export function startUpdateChecks(
                 if (typeof last === "number" && Date.now() - last < 60 * 60 * 1000) continue;
                 await context.storage.set("version-check-at", Date.now());
                 const latest = await check(controller.signal);
-                const comparison = latest ? compareSemverCore(latest, packageInfo().version) : null;
-                if (!controller.signal.aborted && comparison !== null && comparison > 0) {
+                const current = packageInfo().version;
+                const comparison = latest ? compareSemverCore(latest, current) : null;
+                if (latest && !controller.signal.aborted && comparison !== null && comparison > 0) {
                     pushNotification("toast", {
-                        message: `Magic Context ${latest} is available. Update the plugin to install it.`,
+                        message: formatUpdateAvailableMessage(latest, current),
                         variant: "info",
                     });
                 }
