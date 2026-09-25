@@ -83,7 +83,6 @@ import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
-import { seedLongSessionBoundary } from "../fold/seed-boundary";
 import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { type HostServiceOwner, removeHostSession } from "../host-service";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
@@ -1062,11 +1061,6 @@ export async function registerContext(context: V2Context) {
             let checkpoint: SessionContext["messages"][number] | undefined;
             let submitted: string | undefined;
             try {
-                // A long Rust-mode session with no boundary yet gets one before anything
-                // below reads the record, so the restore and the trim both hand the module
-                // a bounded array instead of the whole session.
-                if (rustModeModuleClient && db)
-                    seedLongSessionBoundary(db, reader, draft.sessionID);
                 const cut = reader.latestCompaction(draft.sessionID);
                 const incoming = cut && draft.messages.find((message) => message.id === cut.id);
                 postFold = cut !== undefined;

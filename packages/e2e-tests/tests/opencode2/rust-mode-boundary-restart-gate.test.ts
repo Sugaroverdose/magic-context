@@ -60,23 +60,32 @@ function logLines(logPath: string, marker: string): string[] {
 
 function readCoverage(
 	logPath: string,
-): Array<{ ocInput: number; markerAt: string }> {
-	return logLines(logPath, "rust input coverage: ").map((body) => ({
-		ocInput: Number(field(body, "oc_input") || "0"),
-		markerAt: field(body, "marker_at"),
-	}));
+): Array<{
+	ocInput: number;
+	markerAt: string;
+	covered: number;
+	firstOrdinal: number | null;
+}> {
+	return logLines(logPath, "rust input coverage: ").map((body) => {
+		const first = field(body, "first_ordinal");
+		return {
+			ocInput: Number(field(body, "oc_input") || "0"),
+			markerAt: field(body, "marker_at"),
+			covered: Number(field(body, "covered") || "0"),
+			firstOrdinal: /^\d+$/.test(first) ? Number(first) : null,
+		};
+	});
 }
 
 /**
  * Every boundary written to context.db so far, by the module's fold or by the seed for a
- * long session: the boundary message id each "recorded" or "seeded" line names.
+ * the boundary message id each "v2 boundary recorded" line names.
  */
 function readRecordedBoundaries(logPath: string): Set<string> {
 	return new Set(
-		[
-			...logLines(logPath, "v2 boundary recorded at "),
-			...logLines(logPath, "v2 boundary seeded at "),
-		].map((line) => /boundary message ([^\s:]+)/.exec(line)?.[1] ?? ""),
+		logLines(logPath, "v2 boundary recorded at ").map(
+			(line) => /boundary message ([^\s:]+)/.exec(line)?.[1] ?? "",
+		),
 	);
 }
 
@@ -584,6 +593,19 @@ describe.skipIf(!prereqs.ok)(
 			expect(
 				[...boundaries()].some((marker) => !beforeBoundaries.has(marker)),
 			).toBe(true);
+			// Nothing the model sees of its own history disappears unfolded: on every
+			// pass, each message before the first one handed to the module lies inside
+			// compartments the module has published. The module serves or folds what it
+			// is handed.
+			const coverage = readCoverage(logPath);
+			const unfolded = coverage.filter(
+				(entry) =>
+					entry.firstOrdinal === null || entry.firstOrdinal - 1 > entry.covered,
+			);
+			expect(unfolded).toEqual([]);
+			if (SEEDED_ROWS > 0)
+				// Not vacuous: the long session was actually handed over from a boundary.
+				expect(coverage.some((entry) => (entry.firstOrdinal ?? 0) > 1)).toBe(true);
 			for (const frame of allFrames)
 				expect(frame.counters.operations.history).toBeUndefined();
 			for (const max of Object.values(perOperation))

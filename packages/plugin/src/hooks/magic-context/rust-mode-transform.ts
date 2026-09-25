@@ -749,8 +749,16 @@ export function formatRustInputCoverageLog(args: {
     ocInput: number;
     markerAt: string | null;
     covered: number;
+    /**
+     * Raw-message ordinal of the first message handed to the module, when known. With
+     * `covered` it shows that nothing before the array was dropped unfolded: every
+     * ordinal below it has to be inside published compartments.
+     */
+    firstOrdinal?: number | null;
 }): string {
-    return `rust input coverage: oc_input=${args.ocInput} marker_at=${args.markerAt ?? "none"} covered=${args.covered}`;
+    const first =
+        args.firstOrdinal === undefined ? "" : ` first_ordinal=${args.firstOrdinal ?? "unknown"}`;
+    return `rust input coverage: oc_input=${args.ocInput} marker_at=${args.markerAt ?? "none"} covered=${args.covered}${first}`;
 }
 
 function materializedCompactionBoundary(
@@ -2317,6 +2325,7 @@ export function createRustModeTransform(
         let moduleElapsedMs = 0;
         let rowVersion = 0;
         let coveredOrdinal = 0;
+        let inputFirstOrdinal: number | null = null;
         let markerAt: string | null = null;
         // Read before this pass can advance the marker: the nudge arm below needs the
         // coverage a previous process already published.
@@ -2462,6 +2471,7 @@ export function createRustModeTransform(
                     ocInput: inputCount,
                     markerAt,
                     covered: coveredOrdinal,
+                    firstOrdinal: inputFirstOrdinal,
                 }),
             );
             sessionLog(
@@ -2965,6 +2975,10 @@ export function createRustModeTransform(
             state.ordinalMemoStoredCount = resolved.memoStoredCount;
             state.ordinalMemoCanonicalCount = resolved.memoCanonicalCount;
             state.ordinalMemoVerifyPending = false;
+            const firstInputId = messages[0] ? messageIdOf(messages[0]) : null;
+            inputFirstOrdinal = firstInputId
+                ? (state.idOrdinalMemo.get(firstInputId) ?? null)
+                : null;
 
             const syncPass = {
                 db: deps.db,
