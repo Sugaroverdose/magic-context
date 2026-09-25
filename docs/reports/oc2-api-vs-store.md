@@ -43,6 +43,33 @@ root or any path under the live OpenCode or Magic Context directories. Every run
 
 ---
 
+## Checking the claims from the other port (upstream/v2 `cc9011c1ae`) against the 2.0.15 bundle
+
+The other port's findings were read against upstream source. They were re-checked here against
+the shipped 2.0.15 binary and live runs:
+
+| Claim | 2.0.15 verdict | Evidence |
+|---|---|---|
+| Service mode is the default; TUI, `run`, `mini`, `models`, `reload`, `api`, `auth`, `stats` and the session commands go through `ServerConnection.resolve` → `Service.ensure` → `serve --service` | **Confirmed**, with one omission | `cli.server-connection.resolve` (`us`) calls `Le.ensure({...ci()})`; `ci()` builds `command: [...execPath, "serve", "--service"]`. Every listed command calls `us`. **Omission: `opencode acp`** does not call `us`. It imports `dj` from the standalone chunk (`cli.standalone.endpoint`, which spawns `serve --stdio --port 0`) and calls it unconditionally, so ACP never has a registration. |
+| Only a service-mode server writes the registration, from inside the serving process during `onListen`, so `pid === process.pid` identifies our own server | **Confirmed** | In `serve`, `o = mode==="service" ? ci() : undefined`, and `onListen` calls the writer only when `o` is set. The writer builds `{id, version, url, pid: process.pid, password}`, writes a temp file and renames it into place. Measured: `registration.pid === child.pid` on every service run. |
+| Only three modes leave no registration: plain `serve`, `--standalone`, `--server` | **Incomplete** | `acp` is a fourth, as above. `--server` is a client flag; our plugin runs in whichever server the client connects to, so whether a registration exists depends on how *that* server was started. |
+| Don't read the file synchronously during setup; before `onListen` it may still name the previous server; wait until the pid matches and re-check on reconnect | **Advice holds; the race did not reproduce in 2.0.15** | Probe: I planted a stale `service.json` (pid 1) and booted `serve --service` with a plugin that reads the file in `setup` and polls it. The plugin is loaded lazily on the first location request, after `onListen`, and it saw its own pid at setup. The race is still possible in principle (the file is written in `onListen`, and plugin load timing is not a contract), so match on pid and never cache a mismatch. The writer also re-reads the file every 5 s and **shuts the service down** when the file no longer matches; that is why a live registration always names its writer. `discoverOwnHostService` already reads per call and matches on pid. |
+| Session list with `parentID` | **Confirmed** | `GET /api/session?parentID=` listed 3 imported children, with cursor paging (default 50). |
+| `GET /api/session/:id/message`, paged, NO compaction bound | **Confirmed** | See section 1. An ascending walk returned all 20,000 rows, including the 14,000 before the compaction row. The page maximum is 200. |
+| `GET /api/session/active` | **Confirmed, but it is not a history route** | "Foreground Session drains currently owned by this OpenCode process". It returned `{"data":{}}` when idle. It covers none of the adapter's reads. |
+| `DELETE /api/session/:id` with a recursive child cascade | **Confirmed** | On a throwaway copy, deleting the 20k parent returned 204 in 1.2 s. All 3 children then returned 404, and `session_v2`/`session_message` held no rows for any of them. |
+| Experimental resumable log `GET /api/experimental/session/:id/log` | **Exists, but it cannot serve history** | It is an SSE stream of the durable `event` table ("events after an exclusive aggregate sequence", `follow=true` for live). On both imported and prompted sessions it returned only `{"type":"log.synced","seq":N}`. After projection the `event` table held **0 rows**, so there is nothing to replay. In a follow stream, a new synthetic input produced only a new `log.synced` watermark (12 → 13). Its `seq` is the event aggregate sequence, not the `session_message` position. It is also experimental. |
+| Ruling: use the server API for all of these, never read `opencode.db`, require `--service` | **Does not fit this adapter** | The other port's needs (listing, deleting, following) are covered by the API. Ours are positional and synchronous (section 1, section 3), and requiring `--service` disables us under `acp`, `--standalone` and plain `serve` (section 4). Where our needs match theirs we already use the API (child deletion) or could (see section 5). |
+
+The message route against our five needs, on the 20k session (details in sections 1–3):
+
+- **Stable order:** yes. The ascending walk equals `seq` order.
+- **A position usable as an ordinal:** **no**. Rows carry no `seq` or index, and the cursor is an opaque, id-keyed anchor.
+- **Lookup by id:** yes (`/message/{id}`), but it returns no position.
+- **Count:** **no route**. It takes a full walk: 101 requests, 16.6 MB, 614 ms.
+- **Cost:** see section 2.
+- **Re-entrancy mid-prompt:** awaited calls work; a synchronous call deadlocks (section 3).
+
 ## 0. When is the API present? (the service-mode claim, checked against the 2.0.15 bundle)
 
 The operator's reading is **mostly right, with one correction and one addition**.
@@ -78,7 +105,7 @@ What each mode starts, from the 2.0.15 bundle:
 | `--server URL` (any client) | a remote/explicit server | the plugin is loaded in *that* server, which may or may not be a registered service |
 | Desktop app | not part of the CLI bundle | **not determinable from 2.0.15 sources.** The desktop app installed on this machine is 1.18.14 (a v1 host). A 2.x desktop that uses `@opencode/client`'s `service.ensure` with the default command would get `serve --service`. |
 
-Correction to the operator's summary: `opencode acp` is a third no-registration mode besides
+Correction to the operator's summary and to the other port's list: `opencode acp` is a further no-registration mode besides
 `--standalone` and plain `serve`, and it has no opt-in. Editors that talk ACP to OpenCode 2 will
 always load our plugin into a server with no registration.
 
