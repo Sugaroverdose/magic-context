@@ -3,6 +3,9 @@
 //! Runtime clients and the manifest both resolve through this registry so adding a route target
 //! cannot silently leave the module's `consumes` declaration behind.
 
+use subc_protocol::manifest::{
+    SelfSignalDeclaration, SelfSignalEffect, SelfSignalKind, SignalAnchor, SignalCadence,
+};
 use subc_protocol::RouteTarget;
 
 pub const DEFAULT_THALAMUS_MODULE_ID: &str = "thalamus";
@@ -64,6 +67,65 @@ impl RegisteredRoute {
             Self::HistorianRunner => config.runner_module_id(),
         }
     }
+
+    /// Behaviors that run through this route and change an external surface, declared
+    /// in the manifest only while the route resolves to a module. The match is
+    /// exhaustive so a new route has to state its own behaviors here.
+    fn self_signals(self) -> Vec<SelfSignalDeclaration> {
+        match self {
+            // A lookup on the session registry: it spends nothing and shapes no surface.
+            Self::SessionResolve => Vec::new(),
+            // The runner route carries every model call this module makes, so both
+            // callers of it spend the user's provider quota.
+            Self::HistorianRunner => vec![
+                SelfSignalDeclaration {
+                    name: "historian_firing".to_string(),
+                    kind: SelfSignalKind::Other("historian".to_string()),
+                    effect: SelfSignalEffect::Mutate,
+                    anchored_to: SignalAnchor::Event {
+                        event: "transform request that passes the historian trigger".to_string(),
+                    },
+                    cadence: Some(SignalCadence::Derived {
+                        source: "historian trigger config (execute threshold / commit clusters / tail size)"
+                            .to_string(),
+                    }),
+                    domain: Some(PROVIDER_USAGE_DOMAIN.to_string()),
+                    note: Some(
+                        "spends quota only when the resolved model chain routes through the runner module"
+                            .to_string(),
+                    ),
+                },
+                SelfSignalDeclaration {
+                    name: "dreamer_classify".to_string(),
+                    kind: SelfSignalKind::Cron,
+                    effect: SelfSignalEffect::Mutate,
+                    anchored_to: SignalAnchor::Event {
+                        event: "host dreamer.run_task request".to_string(),
+                    },
+                    cadence: Some(SignalCadence::Derived {
+                        source: "host dreamer.tasks.classify-memories.schedule".to_string(),
+                    }),
+                    domain: Some(PROVIDER_USAGE_DOMAIN.to_string()),
+                    note: Some("host-scheduled; the module does not own the interval".to_string()),
+                },
+            ],
+        }
+    }
+}
+
+/// The external surface the runner-backed behaviors shape: the user's provider quota.
+pub const PROVIDER_USAGE_DOMAIN: &str = "provider-usage";
+
+/// Self-signals for the manifest under the resolved runner configuration. They come from
+/// the same registry that opens routes and fills `consumes`, so a host-runner
+/// configuration drops them together with the runner target. An empty list still means
+/// "examined, none to register".
+pub fn self_signals(config: &RouteTargetConfig) -> Vec<SelfSignalDeclaration> {
+    RegisteredRoute::ALL
+        .iter()
+        .filter(|route| route.module_id(config).is_some())
+        .flat_map(|route| route.self_signals())
+        .collect()
 }
 
 /// Module ids this module may open a route to under the resolved runner configuration.
@@ -101,6 +163,61 @@ mod tests {
             route_targets(&RouteTargetConfig::host_runner()),
             vec!["thalamus".to_string()]
         );
+    }
+
+    #[test]
+    fn self_signals_follow_the_resolved_runner_target() {
+        let names = |config: &RouteTargetConfig| {
+            self_signals(config)
+                .into_iter()
+                .map(|signal| signal.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&RouteTargetConfig::default()),
+            ["historian_firing", "dreamer_classify"]
+        );
+        assert_eq!(
+            names(&RouteTargetConfig::runner_module("custom-runner")),
+            ["historian_firing", "dreamer_classify"]
+        );
+        assert!(names(&RouteTargetConfig::host_runner()).is_empty());
+    }
+
+    /// Drift guard: a route's behaviors are declared exactly while its target is
+    /// declared consumed, and every declaration names the surface it shapes.
+    #[test]
+    fn every_self_signal_rides_a_consumed_route() {
+        for config in [
+            RouteTargetConfig::default(),
+            RouteTargetConfig::runner_module("custom-runner"),
+            RouteTargetConfig::host_runner(),
+        ] {
+            let consumed = route_targets(&config);
+            let declared = self_signals(&config);
+            let mut expected = Vec::new();
+            for route in RegisteredRoute::ALL {
+                match route.module_id(&config) {
+                    Some(module_id) => {
+                        assert!(consumed.iter().any(|target| target == module_id));
+                        expected.extend(route.self_signals());
+                    }
+                    None => {
+                        for signal in route.self_signals() {
+                            assert!(
+                                !declared.contains(&signal),
+                                "{route:?} is unresolved but {} is declared",
+                                signal.name
+                            );
+                        }
+                    }
+                }
+            }
+            assert_eq!(declared, expected, "{config:?}");
+            for signal in &declared {
+                assert!(signal.domain.is_some(), "{} names no domain", signal.name);
+            }
+        }
     }
 
     #[test]

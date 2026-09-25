@@ -275,6 +275,44 @@ pub struct ProducerOutput {
     /// terminal can still say completed while a model step hit its output ceiling and
     /// cut the text mid-document, so validation failures need this to self-diagnose.
     pub length_capped: bool,
+    /// Provider token spend for the run, when the runner reported any. `None` means
+    /// nothing was reported, not a zero-cost run.
+    pub usage: Option<ProducerUsage>,
+}
+
+/// Token spend for one producer run, summed over its model steps. Field meanings follow
+/// the runner's usage record: `input` is fresh (non-cached) input, `cache_read` and
+/// `cache_write` are the cached-input hit and cache-creation counts, and `output`
+/// already includes any reasoning tokens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProducerUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl ProducerUsage {
+    /// Reads a runner usage object (`input_tokens`, `output_tokens`,
+    /// `cached_input_tokens`, `cache_write_tokens`; each optional). Returns `None` when
+    /// the value is not an object.
+    fn from_runner_usage(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let field = |name: &str| object.get(name).and_then(Value::as_u64).unwrap_or(0);
+        Some(Self {
+            input: field("input_tokens"),
+            output: field("output_tokens"),
+            cache_read: field("cached_input_tokens"),
+            cache_write: field("cache_write_tokens"),
+        })
+    }
+
+    fn add(&mut self, other: Self) {
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1040,6 +1078,10 @@ impl HistorianProducer {
         let mut text = String::new();
         let mut last_run_started: Option<String> = None;
         let mut length_capped = false;
+        // The runner reports each model step's usage on its `step_finished` unit, never
+        // a running total, so the run's spend is their sum. The terminal's own `usage`
+        // is only used when no step unit carried any (for example an older runner).
+        let mut step_usage: Option<ProducerUsage> = None;
         loop {
             let Some(frame) = read_frame(&mut self.stream).await? else {
                 return Err(HistorianProducerError::UnexpectedStreamEnd);
@@ -1081,6 +1123,15 @@ impl HistorianProducer {
                     if unit_is_length_capped(unit) {
                         length_capped = true;
                     }
+                    if is_step_finished_unit(unit) {
+                        if let Some(usage) =
+                            unit.get("usage").and_then(ProducerUsage::from_runner_usage)
+                        {
+                            step_usage
+                                .get_or_insert_with(ProducerUsage::default)
+                                .add(usage);
+                        }
+                    }
                     if terminal {
                         if last_run_started.as_deref() != Some(run_id) {
                             return Err(HistorianProducerError::TerminalRunMismatch {
@@ -1099,9 +1150,13 @@ impl HistorianProducer {
                         }
                         // The run terminal control unit is authoritative. StreamEnd is only
                         // route mechanics and can appear on detach/resubscribe without ending a run.
+                        let usage = step_usage.or_else(|| {
+                            unit.get("usage").and_then(ProducerUsage::from_runner_usage)
+                        });
                         return Ok(ProducerOutput {
                             text,
                             length_capped,
+                            usage,
                         });
                     }
                 }
@@ -1331,6 +1386,12 @@ fn is_run_started_unit(unit: &Value) -> bool {
     unit_type(unit)
         .map(str::to_ascii_lowercase)
         .is_some_and(|ty| ty == "run_started" || ty == "runstarted")
+}
+
+fn is_step_finished_unit(unit: &Value) -> bool {
+    unit_type(unit)
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|ty| ty == "step_finished" || ty == "stepfinished")
 }
 
 /// A length-class finish reason on ANY unit (step or terminal): providers spell it
@@ -2163,6 +2224,61 @@ mod tests {
             log.goodbyes,
             vec![11, 10],
             "close releases subscribe and command routes"
+        );
+    }
+
+    /// Run spend is the sum of every step's usage (each step is billed separately); the
+    /// terminal's own usage is used only when no step reported any.
+    #[tokio::test]
+    async fn await_output_sums_step_usage_and_falls_back_to_terminal_usage() {
+        let with_steps = vec![
+            json!({"kind":"control","unit":{"type":"run_started","run_id":"run-1"}}),
+            json!({"kind":"control","unit":{"type":"step_finished","step_id":"s1","finish_reason":"tool_calls",
+                "usage":{"input_tokens":10_000,"output_tokens":2_000,"cached_input_tokens":7,"cache_write_tokens":1}}}),
+            json!({"kind":"control","unit":{"type":"step_finished","step_id":"s2","finish_reason":"stop",
+                "usage":{"input_tokens":4_039,"output_tokens":4_125,"cached_input_tokens":5}}}),
+            json!({"kind":"control","unit":{"type":"run_finished","reason":"completed",
+                "usage":{"input_tokens":1,"output_tokens":1}}}),
+        ];
+        let server = fake_server(json!({"state":"active","run_id":"run-1"}), with_steps).await;
+        let mut first = client(&server).await;
+        first
+            .start("mc-historian:proj:4", "", "prompt", "prov/model-a")
+            .await
+            .unwrap();
+        let output = first.await_output("run-1").await.unwrap();
+        first.close().await;
+        assert_eq!(
+            output.usage,
+            Some(ProducerUsage {
+                input: 14_039,
+                output: 6_125,
+                cache_read: 12,
+                cache_write: 1,
+            })
+        );
+
+        let terminal_only = vec![
+            json!({"kind":"control","unit":{"type":"run_started","run_id":"run-1"}}),
+            json!({"kind":"control","unit":{"type":"run_finished","reason":"completed",
+                "usage":{"input_tokens":30,"output_tokens":40}}}),
+        ];
+        let server = fake_server(json!({"state":"active","run_id":"run-1"}), terminal_only).await;
+        let mut second = client(&server).await;
+        second
+            .start("mc-historian:proj:5", "", "prompt", "prov/model-a")
+            .await
+            .unwrap();
+        let output = second.await_output("run-1").await.unwrap();
+        second.close().await;
+        assert_eq!(
+            output.usage,
+            Some(ProducerUsage {
+                input: 30,
+                output: 40,
+                cache_read: 0,
+                cache_write: 0,
+            })
         );
     }
 

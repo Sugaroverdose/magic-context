@@ -255,6 +255,21 @@ function rustCommandId(operation: string): string {
     return `opencode-${operation}-${randomUUID()}`;
 }
 
+/** Summary text a module sends when it has no transform snapshot for the session.
+ *  Modules that predate the `transform_not_observed` reason send it under the
+ *  generic `snapshot_unavailable` reason, so this text is how a newer host still
+ *  recognizes that case when talking to an older module. */
+const LEGACY_TRANSFORM_NOT_OBSERVED_SUMMARY =
+    "wrapup unavailable until a full session transform has been observed";
+
+function wrapupNeedsSessionMessage(value: Record<string, unknown>): boolean {
+    if (value.reason === "transform_not_observed") return true;
+    return (
+        value.reason === "snapshot_unavailable" &&
+        value.summary === LEGACY_TRANSFORM_NOT_OBSERVED_SUMMARY
+    );
+}
+
 function formatRustOperationMessage(
     operation: "wrapup" | "recomp",
     value: Record<string, unknown>,
@@ -274,8 +289,15 @@ function formatRustOperationMessage(
                 // The module's nonterminal disposition: progress was made but the
                 // drain stopped short of the keep watermark for a retryable reason.
                 // The TypeScript orchestrator presents the same shape as a Partial
-                // with the prescribed continuation, not a terminal failure.
-                return `## Magic Wrapup — Partial\n\n${renderCapabilityRefusal("history_compression")}`;
+                // with the prescribed continuation, not a terminal failure. The
+                // continuation depends on the reason: most clear on a retry, but a
+                // session the module has not seen since its route bound only clears
+                // after a message in that session.
+                return `## Magic Wrapup — Partial\n\n${
+                    wrapupNeedsSessionMessage(value)
+                        ? renderUserFacingFailure("history_compression_needs_message")
+                        : renderCapabilityRefusal("history_compression")
+                }`;
             default:
                 return `## Magic Wrapup — Failed\n\n${renderCapabilityRefusal("history_compression")}`;
         }

@@ -1194,6 +1194,68 @@ describe("createMagicContextCommandHandler", () => {
             expect(texts).not.toContain("— Failed");
         });
 
+        it("renders each retryable Rust wrapup reason with what unblocks it", async () => {
+            const sendMessageFirst =
+                "Send a message in this session first, then run /ctx-wrapup again. (MC-C12)";
+            const retry = "Retry in a moment. (MC-C09)";
+            const cases = [
+                {
+                    reason: "transform_not_observed",
+                    summary: "anything",
+                    expected: sendMessageFirst,
+                },
+                // A module that predates `transform_not_observed` reports the missing
+                // snapshot under the generic reason with this summary.
+                {
+                    reason: "snapshot_unavailable",
+                    summary: "wrapup unavailable until a full session transform has been observed",
+                    expected: sendMessageFirst,
+                },
+                {
+                    reason: "snapshot_unavailable",
+                    summary: "too many concurrent wrapups",
+                    expected: retry,
+                },
+                { reason: "budget_exhausted", summary: "budget expired", expected: retry },
+                { reason: "snapshot_stale", summary: "stale", expected: retry },
+                { reason: "backoff_active", summary: "backoff", expected: retry },
+                { reason: "some_future_reason", summary: "future", expected: retry },
+            ];
+            for (const [index, row] of cases.entries()) {
+                const sendNotification = mock(async () => {});
+                const moduleCall = mock(async () => ({
+                    ok: false,
+                    disposition: "retryable",
+                    reason: row.reason,
+                    summary: row.summary,
+                }));
+                const handler = createMagicContextCommandHandler({
+                    db,
+                    transformMode: "rust",
+                    rustModeModuleClient: { call: moduleCall },
+                    sendNotification,
+                });
+                const sessionId = `ses-rust-wrapup-reason-${index}`;
+                await expectSentinel(
+                    handler["command.execute.before"](
+                        { command: "ctx-wrapup", sessionID: sessionId, arguments: "" },
+                        makeOutput(""),
+                        {},
+                    ),
+                    "__CONTEXT_MANAGEMENT_CTX-WRAPUP_HANDLED__",
+                );
+                const text = (sendNotification.mock.calls as unknown as Array<[string, string]>)
+                    .filter(([notified]) => notified === sessionId)
+                    .map(([, notification]) => notification)
+                    .join("\n");
+                const label = `${row.reason}/${row.summary}`;
+                expect(text, label).toContain("## Magic Wrapup — Partial");
+                expect(text, label).toContain(row.expected);
+                const other = row.expected === retry ? sendMessageFirst : retry;
+                expect(text, label).not.toContain(other);
+            }
+        });
+
         it("keeps /ctx-embed on the TypeScript subsystem in Rust mode", async () => {
             const sendNotification = mock(async () => {});
             const moduleCall = mock(async () => {

@@ -3992,10 +3992,19 @@ enum WrapupFiringError {
 
 const TERMINAL_WRAPUP_FAILURE_PREFIX: &str = "mc-terminal-wrapup-failure:";
 
+/// Wrapup refusal when the session's transform snapshot carries no historian model
+/// chain. The host sends one with every transform, so this names a host defect.
+const WRAPUP_MODEL_CHAIN_MISSING: &str = "the session's transform carried no historian model chain";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RetryableWrapupReason {
     BackoffActive,
     SnapshotUnavailable,
+    /// No full transform pass has been observed for the session since its route bound
+    /// (a rebind drops the snapshot, and so can cache eviction). Retrying alone never
+    /// clears this: only a new transform pass, i.e. a message in the session, does.
+    /// Kept distinct from `SnapshotUnavailable`, whose causes a retry can clear.
+    TransformNotObserved,
     SnapshotStale,
     BudgetExhausted,
 }
@@ -4005,6 +4014,7 @@ impl RetryableWrapupReason {
         match self {
             Self::BackoffActive => "backoff_active",
             Self::SnapshotUnavailable => "snapshot_unavailable",
+            Self::TransformNotObserved => "transform_not_observed",
             Self::SnapshotStale => "snapshot_stale",
             Self::BudgetExhausted => "budget_exhausted",
         }
@@ -4478,7 +4488,6 @@ impl McHandler {
             factory,
             McModuleConfig {
                 cache_ttl_by_model: std::collections::BTreeMap::new(),
-                model_chain: vec!["test/model".to_string()],
                 historian_temperature: None,
                 language: None,
                 execute_threshold_percentage: 65.0,
@@ -5532,6 +5541,10 @@ impl McHandler {
                 let fingerprint_items: Vec<_> =
                     chunk.snapshot.iter().map(|item| item.as_item()).collect();
                 let observed = historian::compute_chunk_fingerprint(&fingerprint_items);
+                // The same resolution and clamp a fresh attempt applies to the host's
+                // per-request timeout.
+                let reattach_await_timeout =
+                    historian::historian_await_timeout(parsed.historian_timeout_ms);
                 tokio::spawn(async move {
                     let _guard = guard;
                     let result = async {
@@ -5574,6 +5587,7 @@ impl McHandler {
                                     force_keep_last_compartment: false,
                                 },
                                 publication_floor_ordinal: range.to_ordinal,
+                                await_timeout: reattach_await_timeout,
                                 now_ms: now,
                                 failure_backoff_at_ms: now + HISTORIAN_FAILURE_BACKOFF_MS,
                                 completion_now_ms: now_ms,
@@ -5905,10 +5919,33 @@ impl McHandler {
             .reason
             .expect("a true historian trigger carries its firing rule");
         let trigger_reason = Some(trigger_rule.as_str().to_string());
-        let model_chain = parsed
-            .historian_model_chain
-            .as_deref()
-            .unwrap_or(&cfg.model_chain);
+        // The host is the only resolver of the historian's model chain and sends it with
+        // every transform. A request without one is refused by name rather than filled
+        // in from this module's own reading of the config file.
+        let Some(model_chain) = parsed.historian_model_chain.as_deref() else {
+            tracing::warn!(
+                "mc-module: historian for {} not fired: the transform request carried no historian_model_chain",
+                parsed.session_id
+            );
+            let diagnostics = historian_no_fire_diagnostics(NoFireDiagnosticsInput {
+                no_fire: "model_chain_missing".into(),
+                detail_kind: "model_chain_missing",
+                cause: HistorianNoFireCause::ModelChainMissing,
+                extra: None,
+                reason: trigger_reason,
+                state,
+                progress,
+                last_failure,
+            });
+            self.record_no_fire(
+                &store,
+                &parsed.session_id,
+                &loaded,
+                &diagnostics,
+                &decision_context,
+            );
+            return PreparedHistorianAction::Complete(diagnostics);
+        };
         let model_chain_generation = self.historian_runner_refusals.activate_chain(model_chain);
         if model_chain.is_empty() {
             let diagnostics = historian_no_fire_diagnostics(NoFireDiagnosticsInput {
@@ -6253,19 +6290,26 @@ impl McHandler {
         }
 
         let cfg = self.effective_config(&binding.project_root);
-        let model_chain_generation = self
-            .historian_runner_refusals
-            .activate_chain(&cfg.model_chain);
-        if cfg.model_chain.is_empty() {
+        // Wrapup runs on the host's chain from the session's last transform, the same
+        // chain the autonomous historian uses; the module has no chain of its own.
+        let Some(model_chain) = parsed.historian_model_chain.clone() else {
+            tracing::warn!(
+                "mc-module: wrapup for {} refused: the session's transform carried no historian_model_chain",
+                parsed.session_id
+            );
+            return PreparedWrapupAction::Failed(WRAPUP_MODEL_CHAIN_MISSING.to_string());
+        };
+        let model_chain_generation = self.historian_runner_refusals.activate_chain(&model_chain);
+        if model_chain.is_empty() {
             return PreparedWrapupAction::Failed("no historian models are configured".to_string());
         }
         if self
             .historian_runner_refusals
-            .all_models_durably_refused(model_chain_generation, &cfg.model_chain)
+            .all_models_durably_refused(model_chain_generation, &model_chain)
         {
             let failures = self
                 .historian_runner_refusals
-                .cached_durable_refusals(model_chain_generation, &cfg.model_chain);
+                .cached_durable_refusals(model_chain_generation, &model_chain);
             return PreparedWrapupAction::Failed(historian::runner_refusal_detail(&failures, true));
         }
         let live = projection
@@ -6285,7 +6329,7 @@ impl McHandler {
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
-                model_chain: cfg.model_chain,
+                model_chain,
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
                 historian_context_limit_tokens: cfg
                     .historian_context_limit_known
@@ -6700,20 +6744,17 @@ impl McHandler {
     /// How long a join may wait for an already-running firing it did not start. The
     /// firing may walk its whole model chain (a timed-out attempt moves on to the next
     /// model), so the join allows one per-attempt budget per model rather than one
-    /// attempt in total. The joiner does not know which chain or timeout the running
-    /// firing was started with, so it takes the larger of the host-supplied and
-    /// configured chains and of the host-supplied and default per-attempt timeouts.
+    /// attempt in total. The joiner does not know which timeout the running firing was
+    /// started with, so it takes the larger of the host-supplied and default
+    /// per-attempt timeouts; the chain length is the host's, the only chain there is.
     fn active_firing_join_budget(
-        &self,
-        project_root: &Path,
         host_model_chain: Option<&[String]>,
         host_timeout_ms: Option<u64>,
     ) -> Duration {
-        let configured_chain_len = self.effective_config(project_root).model_chain.len();
         let host_chain_len = host_model_chain.map_or(0, <[String]>::len);
         let timeout = historian::historian_await_timeout(host_timeout_ms)
             .max(historian::historian_await_timeout(None));
-        historian::firing_completion_wait_budget(timeout, configured_chain_len.max(host_chain_len))
+        historian::firing_completion_wait_budget(timeout, host_chain_len)
     }
 
     async fn await_wrapup_historian_completion(
@@ -8026,10 +8067,18 @@ impl McHandler {
                     "too many concurrent wrapups",
                 );
             }
-            TransformSnapshotLookup::Missing | TransformSnapshotLookup::InFlight => {
+            TransformSnapshotLookup::Missing => {
+                return Self::retryable_wrapup_response(
+                    RetryableWrapupReason::TransformNotObserved,
+                    "wrapup unavailable until a full session transform has been observed",
+                );
+            }
+            // A transform pass is running and will leave a snapshot when it finishes,
+            // so a plain retry clears this one.
+            TransformSnapshotLookup::InFlight => {
                 return Self::retryable_wrapup_response(
                     RetryableWrapupReason::SnapshotUnavailable,
-                    "wrapup unavailable until a full session transform has been observed",
+                    "wrapup unavailable while a session transform is in progress",
                 );
             }
         };
@@ -8240,8 +8289,7 @@ impl McHandler {
             match prepared {
                 PreparedWrapupAction::FilteredNoiseSkipped => continue,
                 PreparedWrapupAction::Busy(completion) => {
-                    let join_budget = self.active_firing_join_budget(
-                        &binding.project_root,
+                    let join_budget = Self::active_firing_join_budget(
                         parsed.historian_model_chain.as_deref(),
                         parsed.historian_timeout_ms,
                     );
@@ -8268,6 +8316,10 @@ impl McHandler {
                 PreparedWrapupAction::Failed(reason) => {
                     if reason == "no historian models are configured" {
                         terminal_failure = Some(("no_models", reason));
+                        break;
+                    }
+                    if reason == WRAPUP_MODEL_CHAIN_MISSING {
+                        terminal_failure = Some(("model_chain_missing", reason));
                         break;
                     }
                     let retry_reason = if reason.contains("backoff") {
@@ -11469,9 +11521,17 @@ impl McHandler {
                 return invalid_params_error("dreamer.run_task model_chain must be an array");
             }
         };
-        let model_chain = requested_model_chain
-            .as_deref()
-            .unwrap_or(&binding.config.model_chain);
+        // The host resolves each dreamer task's model chain and sends it; the module
+        // keeps no chain of its own to fall back to.
+        let Some(model_chain) = requested_model_chain.as_deref() else {
+            tracing::warn!(
+                "mc-module: dreamer.run_task {task} refused: the request carried no model_chain"
+            );
+            return HandlerOutcome::Error {
+                code: "model_chain_missing".to_string(),
+                message: "dreamer.run_task requires the host-resolved model_chain".to_string(),
+            };
+        };
         let classify_system_prompt = historian_prompt::with_content_language_directive(
             CLASSIFY_SYSTEM_PROMPT,
             binding.config.language.as_deref(),
@@ -11577,7 +11637,7 @@ impl McHandler {
             };
         }
         let (model, result, child_session) = output.expect("classifier output set");
-        let response = json!({
+        let mut response = json!({
             "ok": true,
             "manifest_text": result.text,
             "truncated": result.length_capped,
@@ -11592,6 +11652,17 @@ impl McHandler {
                 "recovery_timeout_ms": CLASSIFY_RECOVERY_TIMEOUT.as_millis(),
             }
         });
+        // The runner's token spend for the successful attempt, so the host can record
+        // it on its invocation row. Omitted when the runner reported none; hosts that
+        // predate the field ignore it.
+        if let Some(usage) = result.usage {
+            response["usage"] = json!({
+                "input": usage.input,
+                "output": usage.output,
+                "cache_read": usage.cache_read,
+                "cache_write": usage.cache_write,
+            });
+        }
         match store.record_dream_task_command(
             &ledger_session,
             command_id,
@@ -18324,13 +18395,13 @@ pub fn manifest_with_route_targets(
     // the HELLO identical to the pre-field wire shape (serde skips None).
     .capabilities(None)
     // Introduced by subc-protocol 0.14: optional self-signal manifest registry.
-    // Some(vec![]) is deliberate over None per the falsy-value discrimination
-    // rule: it declares "examined, none to register" (MC emits no self-signals
-    // today), while None would read as "never examined". Serde still emits the
-    // field, which is the examined marker the daemon census reads. Actual
-    // signal publication remains deferred; this empty marker is preserved
-    // byte-identically from the pre-builder manifest.
-    .self_signals(Some(vec![]))
+    // The historian firing and the classify task both spend provider quota through
+    // the runner route, so they are declared from the same resolved route registry
+    // that fills `consumes` below. Under a host-runner configuration the list is
+    // empty, and Some(vec![]) is kept over None per the falsy-value discrimination
+    // rule: it declares "examined, none to register", while None would read as
+    // "never examined".
+    .self_signals(Some(route_targets::self_signals(resolved_routes)))
     // Introduced by subc-protocol 0.13: build provenance for the deploy ladder.
     // The git sha is stamped by the release build command (MC_BUILD_SHA env at
     // compile time); a bare `cargo build` leaves it absent rather than wrong.
@@ -18429,6 +18500,16 @@ mod tests {
                 of: vec!["thalamus".to_string()],
             }]
         );
+        // Self-signals drop out with the runner target, but the field stays declared
+        // ("examined, none").
+        assert_eq!(hosted.self_signals, Some(vec![]));
+        assert_eq!(
+            custom.self_signals,
+            Some(route_targets::self_signals(
+                &RouteTargetConfig::runner_module("custom-runner")
+            ))
+        );
+        assert_eq!(custom.self_signals.as_ref().map(Vec::len), Some(2));
     }
 
     #[test]
@@ -18497,11 +18578,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn historian_decision_write_fence_records_distinct_pass_evaluations() {
         let producer = Arc::new(ProducerState::default());
-        let mut config = default_test_config();
-        config.model_chain.clear();
-        let (handler, store, _dir, _project) = handler_with_store(producer, config);
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
 
         let mut first = request_with_usage(trigger_ingress_fixture(180, 1_000), 20_000, 200_000);
+        first["historian_model_chain"] = json!([]);
         first["request_observed_at_ms"] = json!(1_000);
         let first_response = call_transform_request(&handler, first).await;
         assert_eq!(first_response["status"], "ok");
@@ -18516,6 +18596,7 @@ mod tests {
 
         let second_messages = trigger_ingress_fixture(300, 1_000);
         let mut second = request_with_usage(second_messages.clone(), 140_000, 200_000);
+        second["historian_model_chain"] = json!([]);
         second["request_observed_at_ms"] = json!(2_000);
         let second_response = call_transform_request(&handler, second).await;
         assert_eq!(second_response["status"], "ok");
@@ -18544,6 +18625,7 @@ mod tests {
 
         let row_version = second_state.row_version;
         let mut steady = request_with_usage(second_messages, 140_000, 200_000);
+        steady["historian_model_chain"] = json!([]);
         steady["request_observed_at_ms"] = json!(3_000);
         let steady_response = call_transform_request(&handler, steady).await;
         assert_eq!(steady_response["status"], "ok");
@@ -19608,10 +19690,21 @@ mod tests {
             "bindings must not appear on the wire"
         );
         assert_eq!(m.protocol_ver, PROTOCOL_VERSION);
-        // The builder migration must preserve the deliberate empty self-signal
-        // marker ("examined, none to register") byte-identically; actual signal
-        // publication remains deferred.
-        assert_eq!(m.self_signals, Some(vec![]));
+        // The default runner route spends provider quota for the historian and the
+        // classify task, so both are declared.
+        assert_eq!(
+            m.self_signals
+                .as_ref()
+                .expect("self_signals must be declared, not omitted")
+                .iter()
+                .map(|signal| signal.name.as_str())
+                .collect::<Vec<_>>(),
+            ["historian_firing", "dreamer_classify"]
+        );
+        assert_eq!(
+            wire["self_signals"][0]["domain"],
+            serde_json::json!("provider-usage")
+        );
         // Provenance is stamped by the subc-protocol build_provenance helper.
         // The wire_crate_version is always present (a compile-time constant of
         // the linked subc-protocol crate); build_git_sha is present only when
@@ -20417,6 +20510,7 @@ mod tests {
             Ok(ProducerOutput {
                 text,
                 length_capped: false,
+                usage: None,
             })
         }
 
@@ -20684,7 +20778,6 @@ mod tests {
     fn default_test_config() -> McModuleConfig {
         McModuleConfig {
             cache_ttl_by_model: std::collections::BTreeMap::new(),
-            model_chain: vec!["test/model".to_string()],
             historian_temperature: None,
             language: None,
             execute_threshold_percentage: 65.0,
@@ -20899,8 +20992,12 @@ mod tests {
                 ..ModuleUsage::default()
             },
             "messages": messages,
+            // The host sends its resolved historian chain with every transform.
+            "historian_model_chain": [TEST_HISTORIAN_MODEL],
         })
     }
+
+    const TEST_HISTORIAN_MODEL: &str = "test/model";
 
     fn request(messages: Vec<CkIngressMessage>) -> Value {
         request_with_usage(messages, 45_000, 50_000)
@@ -21172,7 +21269,6 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn claude_code_response_resolves_per_pass_model_cache_ttl_from_module_config() {
         let mut config = default_test_config();
-        config.model_chain.clear();
         config
             .cache_ttl_by_model
             .insert("anthropic/claude-opus-4-1".to_string(), "300m".to_string());
@@ -21184,6 +21280,7 @@ mod tests {
         handler.bind_route(7, route);
         let mut transform_request = request(vec![ck("a", 1, "alpha")]);
         transform_request["serializer_profile"] = json!("claude-code-anthropic");
+        transform_request["historian_model_chain"] = json!([]);
         transform_request["model_key"] = json!("anthropic/claude-opus-4-1");
 
         let response = call_transform_request(&handler, transform_request).await;
@@ -21193,7 +21290,6 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn claude_code_response_without_model_cache_ttl_inherits_harness_markers() {
         let mut config = default_test_config();
-        config.model_chain.clear();
         config.cache_ttl = "90m".to_string();
         let route_config = config.clone();
         let (handler, _store, _dir, project) =
@@ -21203,6 +21299,7 @@ mod tests {
         handler.bind_route(7, route);
         let mut transform_request = request(vec![ck("a", 1, "alpha")]);
         transform_request["serializer_profile"] = json!("claude-code-anthropic");
+        transform_request["historian_model_chain"] = json!([]);
 
         let response = call_transform_request(&handler, transform_request).await;
         assert!(response.get("cache_ttl").is_none());
@@ -30602,17 +30699,18 @@ mod tests {
                 Ok(ProducerOutput {
                     text: "All Antigravity endpoints failed".to_string(),
                     length_capped: false,
+                    usage: None,
                 }),
                 Ok(ProducerOutput {
                     text: "<classify></classify>".to_string(),
                     length_capped: false,
+                    usage: None,
                 }),
             ]);
         let (handler, store, _dir, project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
         let route_root = project.to_str().unwrap();
         let mut route_binding = binding(route_root, "ses");
-        route_binding.config.model_chain = vec!["test/base-dreamer".to_string()];
         route_binding.config.language = Some("tr".to_string());
         handler.bind_route(7, route_binding);
         activate_module_authority(&store, "context", "git:identity", route_root, "memories");
@@ -30660,6 +30758,103 @@ mod tests {
                 .contains("Write human-readable prose you author in: Turkish (Türkçe).")));
     }
 
+    /// The classify response carries the runner's token spend so the host can record it
+    /// on the invocation row, and omits the field when the runner reported none.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_response_carries_producer_usage() {
+        for usage in [
+            Some(crate::historian_producer::ProducerUsage {
+                input: 14_039,
+                output: 6_125,
+                cache_read: 12,
+                cache_write: 3,
+            }),
+            None,
+        ] {
+            let producer = Arc::new(ProducerState::default());
+            producer
+                .await_results
+                .lock()
+                .expect("await results mutex")
+                .push_back(Ok(ProducerOutput {
+                    text: "<classify></classify>".to_string(),
+                    length_capped: false,
+                    usage,
+                }));
+            let (handler, store, _dir, project) =
+                handler_with_store(Arc::clone(&producer), default_test_config());
+            let route_root = project.to_str().unwrap();
+            handler.bind_route(7, binding(route_root, "ses"));
+            activate_module_authority(&store, "context", "git:identity", route_root, "memories");
+            let generation = store
+                .authority_status("context", "git:identity", "memories")
+                .unwrap()
+                .unwrap()
+                .generation;
+            let outcome = handler
+                .handle_dreamer_run_task(
+                    7,
+                    &json!({
+                        "v": 1,
+                        "session_id": "ses",
+                        "task": CLASSIFY_TASK,
+                        "command_id": "usage-command",
+                        "authority_generation": generation,
+                        "model_chain": ["test/classifier"],
+                        "payload": { "prompt_body": "classify", "items": [] },
+                    }),
+                )
+                .await;
+            let response = match outcome {
+                HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+                other => panic!("dreamer run failed: {other:?}"),
+            };
+            assert_eq!(response["diagnostics"]["model"], json!("test/classifier"));
+            match usage {
+                Some(_) => assert_eq!(
+                    response["usage"],
+                    json!({ "input": 14_039, "output": 6_125, "cache_read": 12, "cache_write": 3 })
+                ),
+                None => assert!(response.get("usage").is_none(), "{response}"),
+            }
+        }
+    }
+
+    /// dreamer.run_task without `model_chain` is refused by name before any producer
+    /// run; the module no longer falls back to a chain read from disk.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_without_model_chain_is_refused_by_name() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let route_root = project.to_str().unwrap();
+        handler.bind_route(7, binding(route_root, "ses"));
+        activate_module_authority(&store, "context", "git:identity", route_root, "memories");
+        let generation = store
+            .authority_status("context", "git:identity", "memories")
+            .unwrap()
+            .unwrap()
+            .generation;
+        let outcome = handler
+            .handle_dreamer_run_task(
+                7,
+                &json!({
+                    "v": 1,
+                    "session_id": "ses",
+                    "task": CLASSIFY_TASK,
+                    "command_id": "no-chain",
+                    "authority_generation": generation,
+                    "payload": { "prompt_body": "classify", "items": [] },
+                }),
+            )
+            .await;
+        match outcome {
+            HandlerOutcome::Error { code, .. } => assert_eq!(code, "model_chain_missing"),
+            other => panic!("expected a named refusal: {other:?}"),
+        }
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn classify_fallback_attempts_never_share_a_provider_session() {
         // A parked run does not end: it keeps holding its provider session. A second
@@ -30680,6 +30875,7 @@ mod tests {
                 Ok(ProducerOutput {
                     text: "<classify></classify>".to_string(),
                     length_capped: false,
+                    usage: None,
                 }),
             ]);
         let (handler, store, _dir, project) =
@@ -30807,6 +31003,7 @@ mod tests {
                         "task": CLASSIFY_TASK,
                         "command_id": "cancel-command",
                         "authority_generation": generation,
+                        "model_chain": [TEST_HISTORIAN_MODEL],
                         "payload": { "prompt_body": "classify", "items": [] },
                     }),
                 )
@@ -32107,8 +32304,27 @@ mod tests {
         messages: Vec<CkIngressMessage>,
         context_limit_tokens: u64,
     ) {
+        cache_wrapup_snapshot(
+            handler,
+            session_id,
+            messages,
+            context_limit_tokens,
+            Some(vec![TEST_HISTORIAN_MODEL.to_string()]),
+        );
+    }
+
+    /// Caches a wrapup snapshot whose transform carried `historian_model_chain`
+    /// (`None` models a request that carried no chain at all).
+    fn cache_wrapup_snapshot(
+        handler: &McHandler,
+        session_id: &str,
+        messages: Vec<CkIngressMessage>,
+        context_limit_tokens: u64,
+        historian_model_chain: Option<Vec<String>>,
+    ) {
         let mut parsed = transform_request(messages, 1, context_limit_tokens);
         parsed.session_id = session_id.to_string();
+        parsed.historian_model_chain = historian_model_chain;
         parsed.serializer_profile = SerializerProfile::ClaudeCodeAnthropic.wire_id().to_string();
         let retained_bytes = serde_json::to_vec(&parsed).unwrap().len();
         let projection = crate::ck_wire::project_messages(&parsed.messages).unwrap();
@@ -33751,6 +33967,44 @@ mod tests {
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
     }
 
+    /// A route rebind (for example after a host restart) drops the session's transform
+    /// snapshot, and only a new transform pass restores it. Wrapup must say so with its
+    /// own reason rather than the generic `snapshot_unavailable`, because the host tells
+    /// the user to send a message first for this reason and to retry for the others.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wrapup_after_route_rebind_reports_transform_not_observed() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        cache_wrapup_messages(&handler, wrapup_messages(20, 40));
+        handler.unbind_route(7);
+        handler.bind_route(7, binding(project.to_str().unwrap(), "ses"));
+
+        let body = tool_body(
+            handler
+                .dispatch_value(
+                    7,
+                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
+        assert_eq!(body["disposition"], json!("retryable"), "{body}");
+        assert_eq!(body["reason"], json!("transform_not_observed"));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+
+        // One transform pass after the rebind is what unblocks it.
+        cache_wrapup_messages(&handler, wrapup_messages(20, 40));
+        let retry = tool_body(
+            handler
+                .dispatch_value(
+                    7,
+                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
+        assert_eq!(retry["disposition"], json!("nothing_to_compact"), "{retry}");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn retryable_snapshot_conditions_do_not_poison_command_ids() {
         let producer = Arc::new(ProducerState::default());
@@ -33764,7 +34018,7 @@ mod tests {
         });
         let missing = tool_body(handler.dispatch_value(7, missing_request.clone()).await);
         assert_eq!(missing["disposition"], json!("retryable"));
-        assert_eq!(missing["reason"], json!("snapshot_unavailable"));
+        assert_eq!(missing["reason"], json!("transform_not_observed"));
         assert!(store
             .load_wrapup_command("ses", "missing-retry")
             .unwrap()
@@ -33816,10 +34070,15 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn session_wrapup_no_models_is_terminal_and_retains_command() {
         let producer = Arc::new(ProducerState::default());
-        let mut config = default_test_config();
-        config.model_chain.clear();
-        let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
-        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        cache_wrapup_snapshot(
+            &handler,
+            "ses",
+            wrapup_messages(80, 800),
+            200_000,
+            Some(vec![]),
+        );
         let request = json!({
             "method": "session.wrapup",
             "v": 1,
@@ -33851,6 +34110,31 @@ mod tests {
         assert_eq!(replay["ok"], json!(false), "{replay}");
         assert_eq!(replay["reason"], json!("no_models"), "{replay}");
         assert_eq!(replay["replayed"], json!(true));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    }
+
+    /// A wrapup whose session transform carried no model chain is a terminal, named
+    /// refusal; the module does not fall back to a chain of its own.
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_wrapup_without_model_chain_is_terminal_by_name() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        cache_wrapup_snapshot(&handler, "ses", wrapup_messages(80, 800), 200_000, None);
+        let response = tool_body(
+            handler
+                .dispatch_value(
+                    7,
+                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
+        assert_eq!(response["disposition"], json!("failed"), "{response}");
+        assert_eq!(
+            response["reason"],
+            json!("model_chain_missing"),
+            "{response}"
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
@@ -34721,6 +35005,7 @@ mod tests {
                         "A stale snapshot must not publish this fact.",
                     ),
                     length_capped: false,
+                    usage: None,
                 }));
             hook_handler
                 .transform_snapshots
@@ -34828,6 +35113,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: historian_output_with_fact(start, end, "Atomic cleanup race fact."),
                     length_capped: false,
+                    usage: None,
                 }));
             hook_handler
                 .transform_snapshots
@@ -34904,6 +35190,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: historian_output_with_fact(start, end, "Fence race fact."),
                     length_capped: false,
+                    usage: None,
                 }));
             hook_handler
                 .transform_snapshots
@@ -35241,7 +35528,7 @@ mod tests {
         assert_eq!(body["reason"], json!("snapshot_unavailable"));
         assert_eq!(
             body["summary"],
-            "wrapup unavailable until a full session transform has been observed"
+            "wrapup unavailable while a session transform is in progress"
         );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
@@ -35316,7 +35603,7 @@ mod tests {
                 .await,
         );
         assert_eq!(evicted["disposition"], json!("retryable"));
-        assert_eq!(evicted["reason"], json!("snapshot_unavailable"));
+        assert_eq!(evicted["reason"], json!("transform_not_observed"));
         assert_eq!(
             evicted["summary"],
             "wrapup unavailable until a full session transform has been observed"
@@ -36273,18 +36560,51 @@ mod tests {
         }
     }
 
+    /// A reattach to a run left in `AwaitingProducer` by a module restart honours the
+    /// host's per-request `historian_timeout_ms` like a fresh attempt does, and an older
+    /// host that omits it keeps the default.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reattach_after_restart_awaits_with_the_transform_historian_timeout() {
+        for (configured, expected) in [(Some(90_000), 90), (None, 600)] {
+            let producer = Arc::new(ProducerState::default());
+            producer.outputs.lock().unwrap().push_back(historian_output(
+                1,
+                3,
+                "reattached summary",
+            ));
+            let (handler, store, _dir, _project) =
+                handler_with_store(Arc::clone(&producer), default_test_config());
+            let messages = big_messages();
+            seed_awaiting(&store, &messages);
+            let mut transform = request(messages);
+            if let Some(timeout) = configured {
+                transform["historian_timeout_ms"] = json!(timeout);
+            }
+            let response = call_transform_request(&handler, transform).await;
+            assert_eq!(response["historian"]["no_fire"], "reattaching");
+            wait_for_count(&producer.await_outputs, 1).await;
+            wait_for_idle(&store).await;
+            assert_eq!(
+                producer
+                    .await_timeouts
+                    .lock()
+                    .expect("await timeouts mutex")
+                    .as_slice(),
+                [Duration::from_secs(expected)],
+                "configured={configured:?}"
+            );
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn wrapup_join_budget_covers_a_two_model_walk_whose_first_attempt_times_out() {
-        let mut config = default_test_config();
-        config.model_chain = vec!["prov/model-a".to_string(), "prov/model-b".to_string()];
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), config);
         let one_attempt =
             historian::completion_wait_budget(historian::historian_await_timeout(Some(720_000)));
+        let two_models = vec!["prov/model-a".to_string(), "prov/model-b".to_string()];
 
         // The running firing may spend a full attempt budget timing out on model-a and
         // then another on model-b; joining it must not give up after the first.
-        let budget = handler.active_firing_join_budget(&project, None, Some(720_000));
+        let budget = McHandler::active_firing_join_budget(Some(&two_models), Some(720_000));
         assert_eq!(budget, one_attempt * 2);
 
         // A longer host-resolved chain widens the join; the default timeout is the floor
@@ -36297,17 +36617,16 @@ mod tests {
         let default_attempt =
             historian::completion_wait_budget(historian::historian_await_timeout(None));
         assert_eq!(
-            handler.active_firing_join_budget(&project, Some(&host_chain), Some(60_000)),
+            McHandler::active_firing_join_budget(Some(&host_chain), Some(60_000)),
             default_attempt * 3
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn profile_resolved_transform_models_override_base_config_for_broca_dispatch() {
+    async fn profile_resolved_transform_models_drive_broca_dispatch() {
         let producer = Arc::new(ProducerState::default());
-        let mut config = default_test_config();
-        config.model_chain = vec!["anthropic/base-historian".to_string()];
-        let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
         let mut transform = request(big_messages());
         transform["serializer_profile"] = json!("opencode-aisdk");
         transform["historian_model_chain"] =
@@ -36320,7 +36639,7 @@ mod tests {
         assert_eq!(
             producer.models.lock().expect("models mutex").as_slice(),
             ["anthropic/profile-historian"],
-            "the Broca dispatch must use the host's profile-resolved primary instead of module-local base config"
+            "the Broca dispatch must use the host's profile-resolved primary"
         );
     }
 
@@ -36405,13 +36724,16 @@ mod tests {
         // Skip branch writes the discriminant durably (supervised rigs read state, not
         // responses), a repeat of the same reason writes nothing, and a real fire clears it.
         let producer = Arc::new(ProducerState::default());
-        let mut config = default_test_config();
-        config.model_chain.clear();
         let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), config.clone());
+            handler_with_store(Arc::clone(&producer), default_test_config());
         let messages = big_messages();
+        let without_models = || {
+            let mut transform = request(messages.clone());
+            transform["historian_model_chain"] = json!([]);
+            transform
+        };
 
-        let _ = call_transform(&handler, messages.clone()).await;
+        let _ = call_transform_request(&handler, without_models()).await;
         let loaded = store.load("ses").unwrap();
         assert_eq!(
             loaded.meta.historian.last_no_fire.as_deref(),
@@ -36419,24 +36741,16 @@ mod tests {
         );
         let version_after_first = loaded.row_version;
 
-        let _ = call_transform(&handler, messages.clone()).await;
+        let _ = call_transform_request(&handler, without_models()).await;
         let loaded = store.load("ses").unwrap();
         assert_eq!(
             loaded.row_version, version_after_first,
             "an unchanged skip reason must not rewrite the row"
         );
 
-        // Same store, models restored: the fire must clear the stale skip reason.
-        config.model_chain = vec!["prov/model-a".to_string()];
-        let handler2 = McHandler::with_producer_factory_and_config(
-            Arc::new(TestProducerFactory {
-                state: Arc::clone(&producer),
-            }),
-            config,
-        );
-        handler2.store.set(Arc::clone(&store)).ok().unwrap();
-        handler2.bind_route(7, binding(_project.to_str().unwrap(), "ses"));
-        let fired = call_transform(&handler2, messages).await;
+        // Same store, the host sends models again: the fire must clear the stale skip
+        // reason.
+        let fired = call_transform(&handler, messages).await;
         assert_eq!(fired["historian"]["fired"], true);
         // The clearing write happens in the spawned firing's persist. Durable state is
         // still Idle until that task runs, so gate on the producer actually starting
@@ -36445,6 +36759,38 @@ mod tests {
         wait_for_idle(&store).await;
         let loaded = store.load("ses").unwrap();
         assert_eq!(loaded.meta.historian.last_no_fire, None);
+    }
+
+    /// A transform without `historian_model_chain` is refused by name: the module has no
+    /// chain of its own to fall back to, and the served bytes are unaffected.
+    #[tokio::test(flavor = "current_thread")]
+    async fn transform_without_historian_model_chain_is_refused_by_name() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+        let without_chain = || {
+            let mut transform = request(messages.clone());
+            transform
+                .as_object_mut()
+                .unwrap()
+                .remove("historian_model_chain");
+            transform
+        };
+        let _ = call_transform_request(&handler, without_chain()).await;
+        let response = call_transform_request(&handler, without_chain()).await;
+        assert_eq!(response["historian"]["no_fire"], "model_chain_missing");
+        assert_eq!(
+            response["historian"]["canonical_cause"],
+            "model_chain_missing"
+        );
+        assert_eq!(
+            store.load("ses").unwrap().meta.historian.last_no_fire.as_deref(),
+            Some(
+                "model_chain_missing{raw_cause=ModelChainMissing,canonical_cause=model_chain_missing}"
+            )
+        );
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -36515,13 +36861,16 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn defer_pass_historian_diagnostics_are_byte_pure_and_non_vacuous() {
         let producer = Arc::new(ProducerState::default());
-        let mut config = default_test_config();
-        config.model_chain.clear();
-        let (handler, store, _dir, _project) = handler_with_store(producer, config);
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         let messages = big_messages();
+        let without_models = || {
+            let mut transform = request(messages.clone());
+            transform["historian_model_chain"] = json!([]);
+            transform
+        };
 
-        let _ = call_transform(&handler, messages.clone()).await;
-        let with_historian = call_transform(&handler, messages.clone()).await;
+        let _ = call_transform_request(&handler, without_models()).await;
+        let with_historian = call_transform_request(&handler, without_models()).await;
         assert_eq!(with_historian["action"], "SOFT+");
         assert_eq!(with_historian["historian"]["no_fire"], "no_models");
         assert!(with_historian["historian"]["reason"].is_string());
@@ -36532,7 +36881,7 @@ mod tests {
         assert!(progress["protected_tail_n_tokens"].as_f64().unwrap() > 0.0);
         assert!(progress["eligible_chunk_tokens"].is_number());
 
-        let req: TransformRequest = serde_json::from_value(request(messages)).unwrap();
+        let req: TransformRequest = serde_json::from_value(without_models()).unwrap();
         let project_path = handler.resolve_binding(7, "ses").unwrap().project_root;
         let project_path_string = project_path.to_string_lossy().to_string();
         let response_without_historian = transform::transform(
@@ -36969,6 +37318,11 @@ mod tests {
         parity_control["method"] = json!("transform");
         parity_control["session_id"] = json!("paged-map-parity");
         parity_control["tool_input_key_orders"] = small_map;
+        // The paged fixture pages carry no historian chain; compare like with like.
+        parity_control
+            .as_object_mut()
+            .unwrap()
+            .remove("historian_model_chain");
         assert_eq!(assembled, parity_control);
 
         assert!(matches!(

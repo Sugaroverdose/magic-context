@@ -80,7 +80,9 @@ impl Default for CavemanConfig {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct McModuleConfig {
-    pub model_chain: Vec<String>,
+    // No model chain lives here. The host resolves the historian's and each dreamer
+    // task's model chain from its own config and sends it with every request; the
+    // module refuses a request that carries none rather than guessing from disk.
     /// Optional trusted user-configured sampling temperature for historian requests.
     pub historian_temperature: Option<f64>,
     /// Trusted user-configured language for hidden-agent prose. Project config is deliberately
@@ -132,7 +134,6 @@ pub struct McModuleConfig {
 impl Default for McModuleConfig {
     fn default() -> Self {
         Self {
-            model_chain: Vec::new(),
             historian_temperature: None,
             language: None,
             execute_threshold_percentage: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
@@ -484,55 +485,6 @@ fn merge_tiers_with_warnings(
     let mut warnings = Vec::new();
 
     if let Some(user) = user {
-        // Module-leg model override. The shared config file serves two consumers whose
-        // model namespaces differ: the TS plugin resolves harness-namespace ids (e.g.
-        // OpenCode's auth plugins register "google/antigravity-gemini-3.5-flash"),
-        // while this module drives llm-runner, whose catalog uses canonical ids
-        // ("google/gemini-3.5-flash" + a vault auth method). When module_model is
-        // present it REPLACES the plugin-namespace chain entirely (no mixing — a
-        // half-translated chain would burn permanent-classified advances every fire);
-        // when absent, fall back to the plugin keys so single-namespace setups keep
-        // working with one set of keys.
-        let module_model = user
-            .pointer("/historian/module_model")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        if let Some(model) = module_model {
-            cfg.model_chain.push(model.to_string());
-            if let Some(fallbacks) = user
-                .pointer("/historian/module_fallback_models")
-                .and_then(Value::as_array)
-            {
-                cfg.model_chain.extend(
-                    fallbacks
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(ToOwned::to_owned),
-                );
-            }
-        } else {
-            if let Some(model) = user.pointer("/historian/model").and_then(Value::as_str) {
-                if !model.trim().is_empty() {
-                    cfg.model_chain.push(model.trim().to_string());
-                }
-            }
-            if let Some(fallbacks) = user
-                .pointer("/historian/fallback_models")
-                .and_then(Value::as_array)
-            {
-                cfg.model_chain.extend(
-                    fallbacks
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(ToOwned::to_owned),
-                );
-            }
-        }
         if let Some(temperature) = number_at(user, "/historian/temperature") {
             cfg.historian_temperature = Some(temperature);
         }
@@ -688,7 +640,6 @@ fn merge_tiers_with_warnings(
             DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
         ));
     cfg.execute_threshold_percentage = cfg.resolve_execute_threshold(None).percentage;
-    cfg.model_chain.dedup();
     (cfg, warnings)
 }
 
@@ -1001,19 +952,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tier_policy_ignores_project_models_and_rejects_project_lowering() {
+    fn tier_policy_rejects_project_lowering() {
         let user = serde_json::json!({
-            "historian": { "model": "cheap", "fallback_models": ["fallback"] },
             "execute_threshold_percentage": 80,
             "memory": { "enabled": false }
         });
         let project = serde_json::json!({
-            "historian": { "model": "expensive", "fallback_models": ["expensive2"] },
             "execute_threshold_percentage": 40,
             "memory": { "enabled": true }
         });
         let cfg = merge_tiers(Some(&user), Some(&project));
-        assert_eq!(cfg.model_chain, vec!["cheap", "fallback"]);
         assert_eq!(cfg.execute_threshold_percentage, 80.0);
         assert!(cfg.memory_enabled);
     }
@@ -1466,81 +1414,17 @@ mod tests {
     }
 
     #[test]
-    fn module_model_replaces_plugin_chain_entirely() {
-        let user = serde_json::json!({
-            "historian": {
-                "model": "google/antigravity-gemini-3.5-flash",
-                "fallback_models": ["google/antigravity-claude-opus-4-6-thinking"],
-                "module_model": "google/gemini-3.5-flash",
-                "module_fallback_models": ["ollama-cloud/kimi-k2.7-code"]
-            }
-        });
-        let cfg = merge_tiers(Some(&user), None);
-        // No plugin-namespace ids may leak into the module chain — a mixed chain
-        // burns a permanent-classified advance on every historian fire.
-        assert_eq!(
-            cfg.model_chain,
-            vec!["google/gemini-3.5-flash", "ollama-cloud/kimi-k2.7-code"]
-        );
-    }
-
-    #[test]
-    fn module_model_absent_falls_back_to_plugin_keys() {
-        let user = serde_json::json!({
-            "historian": {
-                "model": "deepseek/deepseek-v4-flash",
-                "fallback_models": ["ollama-cloud/kimi-k2.7-code"],
-                "module_fallback_models": ["ignored/without-module-model"]
-            }
-        });
-        let cfg = merge_tiers(Some(&user), None);
-        assert_eq!(
-            cfg.model_chain,
-            vec!["deepseek/deepseek-v4-flash", "ollama-cloud/kimi-k2.7-code"]
-        );
-    }
-
-    #[test]
-    fn module_model_blank_is_treated_as_absent() {
-        let user = serde_json::json!({
-            "historian": {
-                "model": "deepseek/deepseek-v4-flash",
-                "module_model": "   "
-            }
-        });
-        let cfg = merge_tiers(Some(&user), None);
-        assert_eq!(cfg.model_chain, vec!["deepseek/deepseek-v4-flash"]);
-    }
-
-    #[test]
-    fn module_model_is_user_tier_only() {
-        let user = serde_json::json!({
-            "historian": { "module_model": "google/gemini-3.5-flash" }
-        });
-        let project = serde_json::json!({
-            "historian": {
-                "module_model": "evil/expensive-model",
-                "module_fallback_models": ["evil/other"]
-            }
-        });
-        let cfg = merge_tiers(Some(&user), Some(&project));
-        assert_eq!(cfg.model_chain, vec!["google/gemini-3.5-flash"]);
-    }
-
-    #[test]
     fn historian_temperature_is_optional_and_user_tier_only() {
         let project = serde_json::json!({ "historian": { "temperature": 0.9 } });
         assert_eq!(merge_tiers(None, None).historian_temperature, None);
         for temperature in [0.1, 0.0] {
             let user = serde_json::json!({
                 "historian": {
-                    "temperature": temperature,
-                    "module_model": "module/historian"
+                    "temperature": temperature
                 }
             });
             let resolved = merge_tiers(Some(&user), Some(&project));
             assert_eq!(resolved.historian_temperature, Some(temperature));
-            assert_eq!(resolved.model_chain, vec!["module/historian"]);
         }
         assert_eq!(
             merge_tiers(None, Some(&project)).historian_temperature,
@@ -1565,7 +1449,7 @@ mod tests {
         let project = dir.path().join("project");
         std::fs::create_dir_all(project.join(".cortexkit")).unwrap();
 
-        std::fs::write(&user, r#"{ "historian": { "model": "model-a" } }"#).unwrap();
+        std::fs::write(&user, r#"{ "historian": { "temperature": 0.1 } }"#).unwrap();
         std::fs::write(
             project.join(".cortexkit/magic-context.jsonc"),
             r#"{ "memory": { "enabled": true } }"#,
@@ -1574,17 +1458,17 @@ mod tests {
 
         let mut cache = ConfigCache::default();
         let first = cache.effective_for_paths(&user, &project);
-        assert_eq!(first.model_chain, vec!["model-a"]);
+        assert_eq!(first.historian_temperature, Some(0.1));
 
         // Without an mtime change, a different file body is intentionally ignored.
         let original_mtime = std::fs::metadata(&user).unwrap().modified().unwrap();
-        std::fs::write(&user, r#"{ "historian": { "model": "model-b" } }"#).unwrap();
+        std::fs::write(&user, r#"{ "historian": { "temperature": 0.2 } }"#).unwrap();
         filetime::set_file_mtime(&user, filetime::FileTime::from_system_time(original_mtime))
             .unwrap();
         let unchanged = cache.effective_for_paths(&user, &project);
-        assert_eq!(unchanged.model_chain, vec!["model-a"]);
+        assert_eq!(unchanged.historian_temperature, Some(0.1));
 
-        // Once mtime changes, the cache reloads and picks up the new user-tier model.
+        // Once mtime changes, the cache reloads and picks up the new user-tier value.
         let newer = filetime::FileTime::from_unix_time(
             original_mtime
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1595,6 +1479,6 @@ mod tests {
         );
         filetime::set_file_mtime(&user, newer).unwrap();
         let reloaded = cache.effective_for_paths(&user, &project);
-        assert_eq!(reloaded.model_chain, vec!["model-b"]);
+        assert_eq!(reloaded.historian_temperature, Some(0.2));
     }
 }

@@ -424,6 +424,110 @@ describe("module-backed classification", () => {
         }
     });
 
+    test("always sends a model_chain, even an empty one", async () => {
+        const db = freshDb();
+        try {
+            const projectIdentity = "git:module-empty-chain";
+            const contextIds = addMemories(db, projectIdentity, 10);
+            for (const [offset, contextId] of contextIds.entries()) {
+                addMirrorMapping(db, projectIdentity, contextId, 9400 + offset, `e-${offset}`);
+            }
+            installAuthorityManagedMarker(db, projectIdentity, "store");
+            let taskBody: Record<string, unknown> | undefined;
+            await expect(
+                runClassify(
+                    moduleArgs(db, projectIdentity, (call) => {
+                        if (call.method === "dreamer.run_task") {
+                            taskBody = call.body as Record<string, unknown>;
+                            throw new Error("stop after capturing the request");
+                        }
+                        return { result: { accepted: [], rejected: [] } };
+                    }),
+                ),
+            ).rejects.toThrow("stop after capturing the request");
+            expect(taskBody?.model_chain).toEqual([]);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("records the module's usage and model on the invocation row", async () => {
+        const cases = [
+            {
+                response: {
+                    usage: { input: 14_039, output: 6_125, cache_read: 12, cache_write: 3 },
+                    diagnostics: { model: "antigravity/gemini-3.8-flash" },
+                },
+                expected: {
+                    provider_id: "antigravity",
+                    model_id: "gemini-3.8-flash",
+                    input_tokens: 14_039,
+                    output_tokens: 6_125,
+                    cache_read_tokens: 12,
+                    cache_write_tokens: 3,
+                },
+            },
+            // A module that predates `usage` still gets its model recorded.
+            {
+                response: { diagnostics: { model: "antigravity/gemini-3.8-flash" } },
+                expected: {
+                    provider_id: "antigravity",
+                    model_id: "gemini-3.8-flash",
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+            },
+        ];
+        for (const [index, row] of cases.entries()) {
+            const db = freshDb();
+            try {
+                const projectIdentity = `git:module-usage-${index}`;
+                const contextIds = addMemories(db, projectIdentity, 10);
+                for (const [offset, contextId] of contextIds.entries()) {
+                    addMirrorMapping(db, projectIdentity, contextId, 9300 + offset, `h-${offset}`);
+                }
+                installAuthorityManagedMarker(db, projectIdentity, "store");
+                let itemIds: number[] = [];
+                const args = moduleArgs(db, projectIdentity, (call) => {
+                    if (call.method === "dreamer.run_task") {
+                        itemIds = (
+                            call.body as { payload: { items: Array<{ memory_id: number }> } }
+                        ).payload.items.map((item) => item.memory_id);
+                        const manifest = itemIds
+                            .map(
+                                (id) =>
+                                    `<memory id="${id}" importance="80" scope="project" shareable="true"/>`,
+                            )
+                            .join("\n");
+                        return {
+                            result: {
+                                manifest_text: `<classify>${manifest}</classify>`,
+                                ...row.response,
+                            },
+                        };
+                    }
+                    return { result: { accepted: itemIds, rejected: [] } };
+                });
+                args.parentSessionId = "ses-parent";
+                await runClassify(args);
+
+                const recorded = db
+                    .prepare(
+                        `SELECT status, provider_id, model_id, input_tokens, output_tokens,
+                                cache_read_tokens, cache_write_tokens
+                           FROM subagent_invocations
+                          WHERE session_id = 'ses-parent' AND task = 'classify-memories'`,
+                    )
+                    .all();
+                expect(recorded).toEqual([{ status: "completed", ...row.expected }]);
+            } finally {
+                closeQuietly(db);
+            }
+        }
+    });
+
     test("surfaces module rejection reason counts", async () => {
         const db = freshDb();
         try {
