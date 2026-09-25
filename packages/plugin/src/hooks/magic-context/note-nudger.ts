@@ -328,7 +328,7 @@ export function clearAllNoteNudgeState(db: Database, sessionId: string): void {
                  note_nudge_sticky_message_id = ''
              WHERE session_id = ?`,
         ).run(sessionId);
-    })();
+    }).immediate();
     lastDeliveredAt.delete(sessionId);
 }
 

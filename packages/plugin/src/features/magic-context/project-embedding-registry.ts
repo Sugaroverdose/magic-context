@@ -1332,7 +1332,7 @@ export function registerProjectShadowEmbedding(
         recordScopeActiveIdentity(db, projectIdentity, "commit", registration.modelId, now);
         recordScopeActiveIdentity(db, projectIdentity, "chunk", registration.chunkModelId, now);
         persistShadowDescriptor(db, registration);
-    })();
+    }).immediate();
     // A new shadow identity just landed (rotation, or a first/again registration
     // over a corpus that already has primary rows). Re-embed the historical
     // corpus under it so the measurement cohort keeps its coverage; the old
@@ -2009,7 +2009,7 @@ async function processShadowQueueItem(item: ShadowQueueItem): Promise<ShadowBack
                     hashGuardRejected = true;
                 }
             }
-        })();
+        }).immediate();
         return {
             writes,
             ...(writes === 0
@@ -2056,7 +2056,7 @@ async function processShadowQueueItem(item: ShadowQueueItem): Promise<ShadowBack
                 saveCommitEmbedding(db, row.sha, vector, registration.modelId);
                 writes += 1;
             }
-        })();
+        }).immediate();
         return {
             writes,
             ...(writes === 0
@@ -2629,7 +2629,7 @@ export async function embedUnembeddedMemoriesForProjectOutcome(
                     embeddedCount += 1;
                 }
             }
-        })();
+        }).immediate();
         enqueueShadowEmbeddingItems(
             projectIdentity,
             "memory",
@@ -2681,7 +2681,7 @@ async function embedCommitBatch(
             saveCommitEmbedding(db, commit.sha, embedding, result.modelId);
             embeddedCount += 1;
         }
-    })();
+    }).immediate();
     enqueueShadowEmbeddingItems(
         projectIdentity,
         "commit",

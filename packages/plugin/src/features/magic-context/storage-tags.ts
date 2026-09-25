@@ -1758,20 +1758,22 @@ export function markTagsCompactedByMessageIds(
            )
          RETURNING id`,
     );
-    return db.transaction(() => {
-        let changed = 0;
-        for (const messageId of new Set(messageIds)) {
-            const escaped = escapeLikePattern(messageId);
-            changed += update.all(
-                sessionId,
-                messageId,
-                `${escaped}:p%`,
-                `${escaped}:file%`,
-                messageId,
-            ).length;
-        }
-        return changed;
-    })();
+    return db
+        .transaction(() => {
+            let changed = 0;
+            for (const messageId of new Set(messageIds)) {
+                const escaped = escapeLikePattern(messageId);
+                changed += update.all(
+                    sessionId,
+                    messageId,
+                    `${escaped}:p%`,
+                    `${escaped}:file%`,
+                    messageId,
+                ).length;
+            }
+            return changed;
+        })
+        .immediate();
 }
 
 /**

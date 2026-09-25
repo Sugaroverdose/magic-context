@@ -2182,7 +2182,7 @@ export async function unifiedSearch(
                         throw error;
                     }
                 }
-            })();
+            }).immediate();
         }
     }
 

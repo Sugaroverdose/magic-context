@@ -193,79 +193,81 @@ function cleanupRemovedMessageState(
     sessionId: string,
     messageId: string,
 ): MessageRemovedCleanupResult {
-    return deps.db.transaction(() => {
-        const removedTagNumbers = deleteTagsByMessageId(deps.db, sessionId, messageId);
-        sessionLog(
-            sessionId,
-            `event message.removed: deleted ${removedTagNumbers.length} tag(s) for message ${messageId}`,
-        );
-
-        const strippedPlaceholderRemoved = removeStrippedPlaceholderId(
-            deps.db,
-            sessionId,
-            messageId,
-        );
-        sessionLog(
-            sessionId,
-            strippedPlaceholderRemoved
-                ? `event message.removed: removed ${messageId} from stripped placeholder ids`
-                : `event message.removed: stripped placeholder ids unchanged for ${messageId}`,
-        );
-
-        const removedNoteNudgeAnchor = removeNoteNudgeAnchorByMessageId(
-            deps.db,
-            sessionId,
-            messageId,
-        );
-        const removedAutoSearchDecision = removeAutoSearchHintDecisionByMessageId(
-            deps.db,
-            sessionId,
-            messageId,
-        );
-        const persistedNoteNudge = getPersistedNoteNudge(deps.db, sessionId);
-        const clearedNoteNudgeTrigger = persistedNoteNudge.triggerMessageId === messageId;
-        if (clearedNoteNudgeTrigger) {
-            clearNoteNudgeTriggerOnly(deps.db, sessionId);
-        }
-        const clearedNoteNudge = removedNoteNudgeAnchor || clearedNoteNudgeTrigger;
-        sessionLog(
-            sessionId,
-            clearedNoteNudge
-                ? `event message.removed: pruned note nudge state for ${messageId}`
-                : `event message.removed: note nudge state unchanged for ${messageId}`,
-        );
-        sessionLog(
-            sessionId,
-            removedAutoSearchDecision
-                ? `event message.removed: pruned auto-search decision for ${messageId}`
-                : `event message.removed: auto-search decision unchanged for ${messageId}`,
-        );
-
-        const currentWatermark = getPersistedReasoningWatermark(deps.db, sessionId);
-        const maxRemainingTag = getMaxTagNumberBySession(deps.db, sessionId);
-        if (currentWatermark > maxRemainingTag) {
-            setPersistedReasoningWatermark(deps.db, sessionId, maxRemainingTag);
+    return deps.db
+        .transaction(() => {
+            const removedTagNumbers = deleteTagsByMessageId(deps.db, sessionId, messageId);
             sessionLog(
                 sessionId,
-                `event message.removed: reset reasoning watermark ${currentWatermark}→${maxRemainingTag}`,
+                `event message.removed: deleted ${removedTagNumbers.length} tag(s) for message ${messageId}`,
             );
-        } else {
+
+            const strippedPlaceholderRemoved = removeStrippedPlaceholderId(
+                deps.db,
+                sessionId,
+                messageId,
+            );
             sessionLog(
                 sessionId,
-                `event message.removed: reasoning watermark unchanged at ${currentWatermark} (max tag ${maxRemainingTag})`,
+                strippedPlaceholderRemoved
+                    ? `event message.removed: removed ${messageId} from stripped placeholder ids`
+                    : `event message.removed: stripped placeholder ids unchanged for ${messageId}`,
             );
-        }
 
-        const removedIndexedMessages = deleteIndexedMessage(deps.db, sessionId, messageId);
-        sessionLog(
-            sessionId,
-            `event message.removed: deleted ${removedIndexedMessages} indexed message row(s) for ${messageId}`,
-        );
+            const removedNoteNudgeAnchor = removeNoteNudgeAnchorByMessageId(
+                deps.db,
+                sessionId,
+                messageId,
+            );
+            const removedAutoSearchDecision = removeAutoSearchHintDecisionByMessageId(
+                deps.db,
+                sessionId,
+                messageId,
+            );
+            const persistedNoteNudge = getPersistedNoteNudge(deps.db, sessionId);
+            const clearedNoteNudgeTrigger = persistedNoteNudge.triggerMessageId === messageId;
+            if (clearedNoteNudgeTrigger) {
+                clearNoteNudgeTriggerOnly(deps.db, sessionId);
+            }
+            const clearedNoteNudge = removedNoteNudgeAnchor || clearedNoteNudgeTrigger;
+            sessionLog(
+                sessionId,
+                clearedNoteNudge
+                    ? `event message.removed: pruned note nudge state for ${messageId}`
+                    : `event message.removed: note nudge state unchanged for ${messageId}`,
+            );
+            sessionLog(
+                sessionId,
+                removedAutoSearchDecision
+                    ? `event message.removed: pruned auto-search decision for ${messageId}`
+                    : `event message.removed: auto-search decision unchanged for ${messageId}`,
+            );
 
-        return {
-            clearedNoteNudge,
-        };
-    })();
+            const currentWatermark = getPersistedReasoningWatermark(deps.db, sessionId);
+            const maxRemainingTag = getMaxTagNumberBySession(deps.db, sessionId);
+            if (currentWatermark > maxRemainingTag) {
+                setPersistedReasoningWatermark(deps.db, sessionId, maxRemainingTag);
+                sessionLog(
+                    sessionId,
+                    `event message.removed: reset reasoning watermark ${currentWatermark}→${maxRemainingTag}`,
+                );
+            } else {
+                sessionLog(
+                    sessionId,
+                    `event message.removed: reasoning watermark unchanged at ${currentWatermark} (max tag ${maxRemainingTag})`,
+                );
+            }
+
+            const removedIndexedMessages = deleteIndexedMessage(deps.db, sessionId, messageId);
+            sessionLog(
+                sessionId,
+                `event message.removed: deleted ${removedIndexedMessages} indexed message row(s) for ${messageId}`,
+            );
+
+            return {
+                clearedNoteNudge,
+            };
+        })
+        .immediate();
 }
 
 export function createEventHandler(deps: EventHandlerDeps) {

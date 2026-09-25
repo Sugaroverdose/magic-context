@@ -123,8 +123,10 @@ function createMockDb(options?: { failCounterWrite?: boolean; rollbackTransactio
         return { run: () => {}, get: () => undefined };
     });
 
+    // Mirrors bun:sqlite: the wrapper runs deferred when called and exposes
+    // `.immediate()` for writers that take the write lock at BEGIN.
     const transaction = mock((callback: () => void) => {
-        return () => {
+        const run = () => {
             if (!options?.rollbackTransactions) {
                 callback();
                 return;
@@ -143,6 +145,7 @@ function createMockDb(options?: { failCounterWrite?: boolean; rollbackTransactio
                 throw error;
             }
         };
+        return Object.assign(run, { immediate: run });
     });
 
     return {
@@ -268,9 +271,10 @@ describe("createTagger", () => {
             const sessionId = "session-1";
             const failingDb = createMockDb();
             failingDb.transaction = mock(() => {
-                return () => {
+                const run = () => {
                     throw new Error("DB write failed");
                 };
+                return Object.assign(run, { immediate: run });
             });
 
             //#when

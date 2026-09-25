@@ -69,7 +69,7 @@ function persistMarkerStateAndDropReplacedTag(
         if (replacedSummaryMessageId !== null) {
             dropMarkerSummaryTag(db, sessionId, replacedSummaryMessageId);
         }
-    })();
+    }).immediate();
     logSlowWriteTransaction("marker-drain", transactionStartedAt);
 }
 

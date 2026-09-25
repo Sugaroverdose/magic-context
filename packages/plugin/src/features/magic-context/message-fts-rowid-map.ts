@@ -180,7 +180,7 @@ export function backfillMessageFtsRowidMapBatch(
             watermarkRowid,
             completed,
         };
-    })();
+    }).immediate();
     logSlowWriteTransaction("message_fts_rowid_backfill", transactionStartedAt);
 
     return progress;

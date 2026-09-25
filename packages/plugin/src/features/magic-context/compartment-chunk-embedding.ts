@@ -902,7 +902,7 @@ export function replaceCompartmentChunkEmbeddings(
                 row.createdAt ?? now,
             );
         }
-    })();
+    }).immediate();
     invalidateDecodedSearchPools(
         db,
         ([sessionId, projectPath, cachedModelId]) =>
@@ -1149,7 +1149,7 @@ function renumberOneBasedChunkWindows(
                 );
             }
         }
-    })();
+    }).immediate();
     invalidateDecodedSearchPools(
         db,
         ([sessionId, cachedProjectPath, cachedModelId]) =>

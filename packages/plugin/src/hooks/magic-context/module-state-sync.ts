@@ -447,34 +447,36 @@ async function resyncModuleCompartmentsFromAuthoritative(args: {
              harness = excluded.harness`,
     );
     const now = Date.now();
-    args.db.transaction(() => {
-        if (divergentSequence !== undefined) {
-            args.db
-                .prepare("DELETE FROM compartments WHERE session_id = ? AND sequence >= ?")
-                .run(args.sessionId, divergentSequence);
-        }
-        for (const compartment of authoritative) {
-            upsert.run(
-                args.sessionId,
-                compartment.sequence,
-                compartment.start_message,
-                compartment.end_message,
-                compartment.start_message_id,
-                compartment.end_message_id,
-                compartment.title,
-                compartment.content,
-                compartment.p1 ?? null,
-                compartment.p2 ?? null,
-                compartment.p3 ?? null,
-                compartment.p4 ?? null,
-                compartment.importance ?? 50,
-                compartment.episode_type ?? null,
-                compartment.legacy ?? (compartment.p1 ? 0 : 1),
-                compartment.created_at ?? now,
-                getHarness(),
-            );
-        }
-    })();
+    args.db
+        .transaction(() => {
+            if (divergentSequence !== undefined) {
+                args.db
+                    .prepare("DELETE FROM compartments WHERE session_id = ? AND sequence >= ?")
+                    .run(args.sessionId, divergentSequence);
+            }
+            for (const compartment of authoritative) {
+                upsert.run(
+                    args.sessionId,
+                    compartment.sequence,
+                    compartment.start_message,
+                    compartment.end_message,
+                    compartment.start_message_id,
+                    compartment.end_message_id,
+                    compartment.title,
+                    compartment.content,
+                    compartment.p1 ?? null,
+                    compartment.p2 ?? null,
+                    compartment.p3 ?? null,
+                    compartment.p4 ?? null,
+                    compartment.importance ?? 50,
+                    compartment.episode_type ?? null,
+                    compartment.legacy ?? (compartment.p1 ? 0 : 1),
+                    compartment.created_at ?? now,
+                    getHarness(),
+                );
+            }
+        })
+        .immediate();
     rememberCompartmentMirrorCursor(
         args.sessionId,
         maxSequence,

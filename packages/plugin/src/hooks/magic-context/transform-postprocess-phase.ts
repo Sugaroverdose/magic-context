@@ -450,6 +450,27 @@ export interface RustMaterializedCompactionBoundary {
     endMessageId: string;
 }
 
+/** Logged when another process holds the write lock past busy_timeout. */
+export const RUST_MARKER_LOCK_SKIP_LOG =
+    "rust compaction-marker: pending target write skipped on lock contention; next pass retries";
+
+/**
+ * SQLITE_BUSY, SQLITE_LOCKED and their extended codes such as SQLITE_BUSY_SNAPSHOT.
+ * bun:sqlite reports the name in `code`; node:sqlite reports `code:
+ * "ERR_SQLITE_ERROR"` with the numeric result in `errcode`, whose low byte is the
+ * primary code (5 busy, 6 locked).
+ */
+function isSqliteLockContentionError(error: unknown): boolean {
+    if (!error || typeof error !== "object") return false;
+    const { code, errcode } = error as { code?: unknown; errcode?: unknown };
+    if (typeof code === "string" && /^SQLITE_(BUSY|LOCKED)(_[A-Z_]+)?$/.test(code)) return true;
+    if (typeof errcode === "number") {
+        const primary = errcode & 0xff;
+        return primary === 5 || primary === 6;
+    }
+    return false;
+}
+
 /**
  * Use the boundary carried in the module response as OpenCode's compaction target;
  * do not replace it with a target read later from status. Store that target in the
@@ -489,25 +510,48 @@ export function applyRustModeDeferredCompactionMarker(args: {
             endMessageId: boundary.endMessageId,
             publishedAt: Date.now(),
         };
-        args.db.transaction(() => {
-            const persisted = getPersistedCompactionMarkerState(args.db, args.sessionId);
-            const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
-            if (pending && pending.ordinal > target.ordinal) {
-                target = pending;
-                return;
-            }
-            if (
-                pending &&
-                pending.ordinal === target.ordinal &&
-                pending.endMessageId === target.endMessageId
-            ) {
-                target = pending;
-                return;
-            }
-            if (persisted && persisted.boundaryOrdinal >= target.ordinal && pending === null)
-                return;
-            setPendingCompactionMarkerState(args.db, args.sessionId, target);
-        })();
+        // IMMEDIATE takes the write lock before the first read, so busy_timeout covers
+        // contention with other processes. A deferred transaction that reads first and
+        // then writes fails at once with SQLITE_BUSY (or SQLITE_BUSY_SNAPSHOT) because
+        // SQLite never runs the busy handler for a read-to-write upgrade.
+        try {
+            args.db
+                .transaction(() => {
+                    const persisted = getPersistedCompactionMarkerState(args.db, args.sessionId);
+                    const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
+                    if (pending && pending.ordinal > target.ordinal) {
+                        target = pending;
+                        return;
+                    }
+                    if (
+                        pending &&
+                        pending.ordinal === target.ordinal &&
+                        pending.endMessageId === target.endMessageId
+                    ) {
+                        target = pending;
+                        return;
+                    }
+                    if (
+                        persisted &&
+                        persisted.boundaryOrdinal >= target.ordinal &&
+                        pending === null
+                    )
+                        return;
+                    setPendingCompactionMarkerState(args.db, args.sessionId, target);
+                })
+                .immediate();
+        } catch (error) {
+            // This marker bookkeeping runs after the module already produced a valid
+            // transform, and every Rust-mode pass records the boundary again. A lock
+            // held past busy_timeout therefore skips this pass's recording and drain
+            // instead of failing the pass into LKG or raw fallback.
+            if (!isSqliteLockContentionError(error)) throw error;
+            sessionLog(
+                args.sessionId,
+                `${RUST_MARKER_LOCK_SKIP_LOG}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return;
+        }
     }
 
     const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
@@ -828,11 +872,13 @@ export function reconcileMarkerRepresentation(
         }
     }
     if (staleSummaryIds.size > 0) {
-        options.db.transaction(() => {
-            for (const messageId of staleSummaryIds) {
-                dropMarkerSummaryTag(options.db, options.sessionId, messageId);
-            }
-        })();
+        options.db
+            .transaction(() => {
+                for (const messageId of staleSummaryIds) {
+                    dropMarkerSummaryTag(options.db, options.sessionId, messageId);
+                }
+            })
+            .immediate();
     }
 
     const removedSummary = retainedMessages.length !== messages.length;

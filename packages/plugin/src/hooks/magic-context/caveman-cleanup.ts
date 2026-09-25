@@ -196,7 +196,7 @@ export function applyCavemanCleanup(
             else if (targetDepth === DEPTH_FULL) result.compressedToFull += 1;
             else if (targetDepth === DEPTH_ULTRA) result.compressedToUltra += 1;
         }
-    })();
+    }).immediate();
 
     const total = result.compressedToLite + result.compressedToFull + result.compressedToUltra;
     if (total > 0) {

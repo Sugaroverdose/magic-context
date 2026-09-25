@@ -332,7 +332,7 @@ export function replaceAllCompartments(
     db.transaction(() => {
         db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
         insertCompartmentRows(db, sessionId, compartments, now);
-    })();
+    }).immediate();
 }
 
 /**
@@ -349,7 +349,7 @@ export function appendCompartments(
     const now = Date.now();
     db.transaction(() => {
         insertCompartmentRows(db, sessionId, compartments, now);
-    })();
+    }).immediate();
 }
 
 /**
@@ -367,7 +367,7 @@ export function replaceSessionFacts(
         db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
         insertFactRows(db, sessionId, facts, now);
         clearCachedM0M1(db, sessionId);
-    })();
+    }).immediate();
 }
 
 export function getSessionFacts(db: Database, sessionId: string): SessionFact[] {
@@ -393,7 +393,7 @@ export function replaceAllCompartmentState(
         insertFactRows(db, sessionId, facts, now);
 
         clearCachedM0M1(db, sessionId);
-    })();
+    }).immediate();
 }
 
 export function replaceAllCompartmentStateAndBumpDepth(
@@ -547,7 +547,7 @@ export function saveRecompStagingPass(
         for (const f of facts) {
             factStmt.run(sessionId, f.category, f.content, passNumber, now, getHarness());
         }
-    })();
+    }).immediate();
 }
 
 /** Read existing staging data for resume. Returns null if no staging exists. */
@@ -602,19 +602,21 @@ export function promoteRecompStaging(
 } | null {
     const now = Date.now();
     if (!holderId) {
-        return db.transaction(() => {
-            const staging = getRecompStaging(db, sessionId);
-            if (!staging || staging.compartments.length === 0) return null;
+        return db
+            .transaction(() => {
+                const staging = getRecompStaging(db, sessionId);
+                if (!staging || staging.compartments.length === 0) return null;
 
-            db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
-            db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
-            insertCompartmentRows(db, sessionId, staging.compartments, now);
-            insertFactRows(db, sessionId, staging.facts, now);
-            db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
-            db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
-            clearCachedM0M1(db, sessionId);
-            return { compartments: staging.compartments, facts: staging.facts };
-        })();
+                db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
+                db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
+                insertCompartmentRows(db, sessionId, staging.compartments, now);
+                insertFactRows(db, sessionId, staging.facts, now);
+                db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
+                db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
+                clearCachedM0M1(db, sessionId);
+                return { compartments: staging.compartments, facts: staging.facts };
+            })
+            .immediate();
     }
 
     const transactionStartedAt = performance.now();
@@ -676,7 +678,7 @@ export function clearRecompStaging(db: Database, sessionId: string): void {
         } catch {
             // column missing in very old schemas — ignore
         }
-    })();
+    }).immediate();
 }
 
 // ── Partial recomp range marker ─────────────────────────────────────────────

@@ -2055,7 +2055,7 @@ function databaseIsInTransaction(db: ContextDatabase): boolean {
 
 function runImmediateTransaction<T>(db: ContextDatabase, fn: () => T): T {
 	if (databaseIsInTransaction(db)) {
-		return db.transaction(fn)();
+		return db.transaction(fn).immediate();
 	}
 	const transactionStartedAt = performance.now();
 	db.exec("BEGIN IMMEDIATE");

@@ -10,8 +10,11 @@ const makeDb = () => {
         run: mock((_sessionId: string) => {}),
     }));
 
+    // Mirrors bun:sqlite: the wrapper runs deferred when called and exposes
+    // `.immediate()` for writers that take the write lock at BEGIN.
     const transaction = mock((callback: () => void) => {
-        return () => callback();
+        const run = () => callback();
+        return Object.assign(run, { immediate: run });
     });
 
     return { prepare, transaction };

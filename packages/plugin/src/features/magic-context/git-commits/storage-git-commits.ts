@@ -134,7 +134,7 @@ export function upsertCommits(
                 }
             }
         }
-    })();
+    }).immediate();
 
     return { inserted, updated };
 }

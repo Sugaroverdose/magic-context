@@ -268,17 +268,19 @@ class HiddenChildStateStore {
     }
 
     mutate<T>(change: (state: HiddenChildrenMeta) => T): T {
-        return this.db.transaction(() => {
-            const state = this.read();
-            const result = change(state);
-            this.db
-                .prepare(
-                    `INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)
+        return this.db
+            .transaction(() => {
+                const state = this.read();
+                const result = change(state);
+                this.db
+                    .prepare(
+                        `INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)
                      ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-                )
-                .run(this.key, JSON.stringify(state));
-            return result;
-        })();
+                    )
+                    .run(this.key, JSON.stringify(state));
+                return result;
+            })
+            .immediate();
     }
 
     put(child: PersistedHiddenChild): void {

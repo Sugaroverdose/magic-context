@@ -515,7 +515,7 @@ export function clearIndexedMessages(db: Database, sessionId: string): void {
     const transactionStartedAt = performance.now();
     db.transaction(() => {
         clearIndexedMessagesInTransaction(db, sessionId);
-    })();
+    }).immediate();
     logSlowWriteTransaction("message_index_clear", transactionStartedAt);
 }
 
