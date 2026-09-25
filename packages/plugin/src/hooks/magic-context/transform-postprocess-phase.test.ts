@@ -4135,6 +4135,802 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             "active",
         );
     });
+
+    // A HARD fold whose re-render reproduces the served m[0]/m[1] bytes leaves
+    // the provider's cached prefix alive. Such a fold must not hand the mutation
+    // lanes a bust permission, or a lane would originate the only bust itself.
+    describe("identical-bytes HARD fold does not open the mutation lanes", () => {
+        const sha = (messages: MessageLike[]) =>
+            createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+        const head = (messages: MessageLike[]) => JSON.stringify(messages.slice(0, 2));
+
+        function tail(sessionId: string, newer = 0): MessageLike[] {
+            const tool = (id: string, callID: string, input: unknown, output: string) => ({
+                info: { id, role: "assistant", sessionID: sessionId },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "bash",
+                        callID,
+                        state: { status: "completed", input, output },
+                    },
+                ],
+            });
+            const user = (id: string, text: string) => ({
+                info: { id, role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text }],
+            });
+            return [
+                user("m-u0", "start"),
+                tool("m-old", "c-old", { command: "cat big" }, "O".repeat(3000)),
+                tool("m-mid", "c-mid", { command: "cat mid" }, "M".repeat(3000)),
+                tool("m-new", "c-new", { command: "ls" }, "new output"),
+                user("m-next", "next prompt"),
+                ...Array.from({ length: newer }, (_, i) => user(`m-newer-${i}`, `newer ${i}`)),
+            ] as unknown as MessageLike[];
+        }
+
+        async function pass(
+            sessionId: string,
+            opts: {
+                hard?: M0HardSignals;
+                newer?: number;
+                scheduler?: "defer" | "execute";
+                budget?: number;
+                turn?: string;
+            } = {},
+        ) {
+            const messages = tail(sessionId, opts.newer ?? 0);
+            const tagger = createTagger();
+            tagger.initFromDb(sessionId, db);
+            const tagged = tagMessages(sessionId, messages, tagger, db);
+            const replayed = applyFlushedStatuses(sessionId, db, tagged.targets);
+            tagged.batch.finalize();
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    tagger,
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets: tagged.targets,
+                    reasoningByMessage: tagged.reasoningByMessage,
+                    messageTagNumbers: tagged.messageTagNumbers,
+                    batch: tagged.batch,
+                    didMutateFromFlushedStatuses: replayed,
+                    schedulerDecision: opts.scheduler ?? "defer",
+                    currentTurnId: opts.turn ?? null,
+                    contextUsage: { percentage: 40, inputTokens: 4000 },
+                    m0M1: {
+                        projectPath: FOLD_PROJECT,
+                        projectDirectory: FOLD_PROJECT,
+                        historyBudgetTokens: opts.budget ?? 98_000,
+                        hardSignals: opts.hard ?? BASE_HARD,
+                    },
+                }),
+            );
+            return { messages, result };
+        }
+
+        function toolTag(sessionId: string, callID: string, owner: string): number {
+            const tagger = createTagger();
+            tagger.initFromDb(sessionId, db);
+            const tag = tagger.getToolTag(sessionId, callID, owner);
+            if (tag === undefined || tag === null) throw new Error(`no tag for ${callID}`);
+            return tag;
+        }
+        const statusOf = (sessionId: string, tag: number) =>
+            getTagsBySession(db, sessionId).find((row) => row.tagNumber === tag)?.status;
+
+        const bumpEpoch = async () => {
+            const { bumpEpochsForWorkspaceMembers } = await import(
+                "../../features/magic-context/workspaces"
+            );
+            bumpEpochsForWorkspaceMembers(db, FOLD_PROJECT);
+        };
+        const setCachedUpgradeState = (sessionId: string, from: string, to: string) => {
+            db.prepare(
+                "UPDATE session_meta SET cached_m0_upgrade_state = replace(cached_m0_upgrade_state, ?, ?) WHERE session_id = ?",
+            ).run(from, to, sessionId);
+        };
+
+        // Each HARD trigger listed below is armed alone on a session whose
+        // rendered content is unchanged; `identical` records whether the fold
+        // reproduces the previously served m[0]/m[1] bytes.
+        const TRIGGERS: Array<{
+            reason: string;
+            arm: (sessionId: string) => Promise<M0HardSignals | undefined>;
+            identical: boolean;
+        }> = [
+            {
+                reason: "project_memory_epoch",
+                arm: async () => {
+                    await bumpEpoch();
+                    return undefined;
+                },
+                identical: true,
+            },
+            {
+                reason: "upgrade_state",
+                arm: async (sessionId) => {
+                    setCachedUpgradeState(sessionId, "ready", "legacy");
+                    return undefined;
+                },
+                identical: true,
+            },
+            {
+                reason: "compartment_render_epoch",
+                arm: async (sessionId) => {
+                    setCachedUpgradeState(
+                        sessionId,
+                        "|compartment-render:cre",
+                        "|compartment-render:old",
+                    );
+                    return undefined;
+                },
+                identical: true,
+            },
+            {
+                reason: "max_mutation_id",
+                arm: async (sessionId) => {
+                    queueM0Mutation(db, { sessionId, mutationType: "compartment_delete" });
+                    return undefined;
+                },
+                identical: true,
+            },
+            {
+                reason: "model_change",
+                arm: async () => ({ ...BASE_HARD, modelKey: "anthropic/sonnet" }),
+                identical: true,
+            },
+            {
+                reason: "system_hash",
+                arm: async () => ({ ...BASE_HARD, systemHash: "sys-v2" }),
+                identical: true,
+            },
+            {
+                reason: "ttl_idle",
+                arm: async () => ({
+                    ...BASE_HARD,
+                    cacheExpired: true,
+                    lastResponseTime: Date.now() + 60_000,
+                }),
+                identical: true,
+            },
+        ];
+
+        for (const trigger of TRIGGERS) {
+            it(`${trigger.reason}: HARD fold executes and ${trigger.identical ? "re-renders m[0]/m[1] byte-identically" : "changes m[0]/m[1]"}`, async () => {
+                db = new Database(":memory:");
+                initializeDatabase(db);
+                const sessionId = `ses-identical-${trigger.reason}`;
+                materializeBaseline(sessionId);
+                const defer = await pass(sessionId);
+                const hardSignals = await trigger.arm(sessionId);
+                const hard = await pass(sessionId, { hard: hardSignals });
+                expect(hard.result.materialized).toBe(true);
+                expect(hard.result.materializeReason).toBe(trigger.reason);
+                expect(head(hard.messages) === head(defer.messages)).toBe(trigger.identical);
+            });
+        }
+
+        it("cached_m1_missing: HARD fold executes; the missing pair already counts as a first-render bust", async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "ses-identical-cached-m1-missing";
+            materializeBaseline(sessionId);
+            const defer = await pass(sessionId);
+            db.prepare("UPDATE session_meta SET cached_m1_bytes = NULL WHERE session_id = ?").run(
+                sessionId,
+            );
+            const hard = await pass(sessionId);
+            expect(hard.result.materialized).toBe(true);
+            expect(hard.result.materializeReason).toBe("cached_m1_missing");
+            // The re-render reproduces the old pair, but with no complete cached
+            // pair on record the pass cannot prove what the provider holds.
+            expect(head(hard.messages)).toBe(head(defer.messages));
+        });
+
+        it("pressure refold: absorbing a large m[1] into m[0] changes the served pair", async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "ses-identical-pressure";
+            injectM0M1({
+                db,
+                sessionId,
+                state: getOrCreateSessionMeta(db, sessionId),
+                projectPath: FOLD_PROJECT,
+                projectDirectory: FOLD_PROJECT,
+                historyBudgetTokens: 500,
+                isCacheBustingPass: true,
+                hardSignals: BASE_HARD,
+            });
+            const { insertMemory } = await import(
+                "../../features/magic-context/memory/storage-memory"
+            );
+            for (let i = 0; i < 45; i++) {
+                insertMemory(db, {
+                    projectPath: FOLD_PROJECT,
+                    category: "PROJECT_RULES",
+                    content: `PRESSURE_MEMORY_${i}: rule ${i}.`,
+                    importance: 50,
+                });
+            }
+            const defer = await pass(sessionId, { budget: 500 });
+            const exec = await pass(sessionId, { scheduler: "execute", budget: 500 });
+            expect(exec.result.materialized).toBe(true);
+            expect(head(exec.messages)).not.toBe(head(defer.messages));
+        });
+
+        it("holds a queued ctx_reduce drop on an identical-bytes project_memory_epoch HARD; the served bytes stay identical", async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "ses-identical-epoch-drain";
+            materializeBaseline(sessionId);
+            const defer = await pass(sessionId);
+            const target = toolTag(sessionId, "c-mid", "m-mid");
+            queuePendingOp(db, sessionId, target, "drop");
+            // A queued drop alone never busts: the next defer pass holds it.
+            const held = await pass(sessionId);
+            expect(sha(held.messages)).toBe(sha(defer.messages));
+
+            await bumpEpoch();
+            const hard = await pass(sessionId, { turn: "turn-epoch" });
+            expect(hard.result.materialized).toBe(true);
+            expect(head(hard.messages)).toBe(head(defer.messages));
+            // The fold reproduced the served pair, so nothing may change the wire.
+            expect(statusOf(sessionId, target)).toBe("active");
+            expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([target]);
+            expect(sha(hard.messages)).toBe(sha(defer.messages));
+
+            // The pass after it is a plain defer and replays the same bytes.
+            const after = await pass(sessionId);
+            expect(after.result.materialized).toBe(false);
+            expect(sha(after.messages)).toBe(sha(defer.messages));
+        });
+
+        it("holds age reclaim on an identical-bytes max_mutation_id HARD; the served bytes stay identical", async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "ses-identical-mutation-reclaim";
+            materializeBaseline(sessionId);
+            const defer = await pass(sessionId);
+            const old = toolTag(sessionId, "c-old", "m-old");
+            const mid = toolTag(sessionId, "c-mid", "m-mid");
+            advanceToolReclaimWatermark(db, sessionId, mid);
+
+            queueM0Mutation(db, { sessionId, mutationType: "compartment_delete" });
+            const hard = await pass(sessionId, { turn: "turn-mutation" });
+            expect(hard.result.materialized).toBe(true);
+            expect(hard.result.materializeReason).toBe("max_mutation_id");
+            expect(statusOf(sessionId, old)).toBe("active");
+            expect(statusOf(sessionId, mid)).toBe("active");
+            expect(sha(hard.messages)).toBe(sha(defer.messages));
+
+            const after = await pass(sessionId);
+            expect(sha(after.messages)).toBe(sha(defer.messages));
+        });
+
+        it("still drains on a provider-dead model change even though m[0]/m[1] re-render identically", async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "ses-identical-model-drain";
+            materializeBaseline(sessionId);
+            const defer = await pass(sessionId);
+            const target = toolTag(sessionId, "c-mid", "m-mid");
+            queuePendingOp(db, sessionId, target, "drop");
+            const hardSignals = { ...BASE_HARD, modelKey: "anthropic/sonnet" };
+            const hard = await pass(sessionId, { hard: hardSignals, turn: "turn-model" });
+            expect(hard.result.materialized).toBe(true);
+            expect(head(hard.messages)).toBe(head(defer.messages));
+            expect(statusOf(sessionId, target)).toBe("dropped");
+            expect(sha(hard.messages)).not.toBe(sha(defer.messages));
+
+            // The priced pass and the defer pass after it serve the same prefix.
+            const after = await pass(sessionId, { hard: hardSignals, newer: 1 });
+            expect(after.result.materialized).toBe(false);
+            expect(sha(after.messages.slice(0, hard.messages.length))).toBe(sha(hard.messages));
+        });
+
+        it("still drains on a project_memory_epoch HARD that changes m[0]", async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "ses-changed-epoch-drain";
+            materializeBaseline(sessionId);
+            const defer = await pass(sessionId);
+            const target = toolTag(sessionId, "c-mid", "m-mid");
+            queuePendingOp(db, sessionId, target, "drop");
+            const { insertMemory } = await import(
+                "../../features/magic-context/memory/storage-memory"
+            );
+            insertMemory(db, {
+                projectPath: FOLD_PROJECT,
+                category: "PROJECT_RULES",
+                content: "EPOCH_CONTENT_CHANGE: new rule.",
+                importance: 50,
+            });
+            await bumpEpoch();
+            const hard = await pass(sessionId, { turn: "turn-epoch-changed" });
+            expect(hard.result.materialized).toBe(true);
+            expect(hard.result.materializeReason).toBe("project_memory_epoch");
+            expect(head(hard.messages)).not.toBe(head(defer.messages));
+            expect(statusOf(sessionId, target)).toBe("dropped");
+
+            const after = await pass(sessionId, { newer: 1 });
+            expect(after.result.materialized).toBe(false);
+            expect(sha(after.messages.slice(0, hard.messages.length))).toBe(sha(hard.messages));
+        });
+    });
+
+    // Adversarial gate reproductions for the shared fold bust permission. Each case
+    // records what the lanes did so the gate report can quote executed evidence.
+    describe("ADV gate: identical-bytes HARD lane permission", () => {
+        const sha = (messages: MessageLike[]) =>
+            createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+        const head = (messages: MessageLike[]) => JSON.stringify(messages.slice(0, 2));
+
+        function tail(sessionId: string, newer = 0): MessageLike[] {
+            const tool = (id: string, callID: string, input: unknown, output: string) => ({
+                info: { id, role: "assistant", sessionID: sessionId },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "bash",
+                        callID,
+                        state: { status: "completed", input, output },
+                    },
+                ],
+            });
+            const user = (id: string, text: string) => ({
+                info: { id, role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text }],
+            });
+            return [
+                user("m-u0", "start"),
+                tool("m-old", "c-old", { command: "cat big" }, "O".repeat(3000)),
+                tool("m-mid", "c-mid", { command: "cat mid" }, "M".repeat(3000)),
+                tool("m-new", "c-new", { command: "ls" }, "new output"),
+                user("m-next", "next prompt"),
+                ...Array.from({ length: newer }, (_, i) => user(`m-newer-${i}`, `newer ${i}`)),
+            ] as unknown as MessageLike[];
+        }
+
+        async function pass(
+            sessionId: string,
+            opts: {
+                hard?: M0HardSignals;
+                newer?: number;
+                scheduler?: "defer" | "execute";
+                pct?: number;
+                flush?: boolean;
+                turn?: string;
+                mural?: boolean;
+                // Serve the pass from a session state that never loaded the
+                // persisted mural image (the field is undefined, not null).
+                leanMural?: boolean;
+            } = {},
+        ) {
+            const messages = tail(sessionId, opts.newer ?? 0);
+            const tagger = createTagger();
+            tagger.initFromDb(sessionId, db);
+            const tagged = tagMessages(sessionId, messages, tagger, db);
+            const replayed = applyFlushedStatuses(sessionId, db, tagged.targets);
+            tagged.batch.finalize();
+            const pct = opts.pct ?? 40;
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    tagger,
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets: tagged.targets,
+                    reasoningByMessage: tagged.reasoningByMessage,
+                    messageTagNumbers: tagged.messageTagNumbers,
+                    batch: tagged.batch,
+                    didMutateFromFlushedStatuses: replayed,
+                    schedulerDecision: opts.scheduler ?? "defer",
+                    currentTurnId: opts.turn ?? null,
+                    contextUsage: { percentage: pct, inputTokens: pct * 100 },
+                    pendingMaterializationSessions: opts.flush ? new Set([sessionId]) : new Set(),
+                    ...(opts.leanMural
+                        ? {
+                              sessionMeta: {
+                                  ...getOrCreateSessionMeta(db, sessionId),
+                                  cachedM0MuralDataUrl: undefined,
+                              } as never,
+                          }
+                        : {}),
+                    m0M1: {
+                        projectPath: FOLD_PROJECT,
+                        projectDirectory: FOLD_PROJECT,
+                        historyBudgetTokens: 98_000,
+                        hardSignals: opts.hard ?? BASE_HARD,
+                        ...(opts.mural
+                            ? { muralEnabled: true, memoryInjectionBudgetTokens: 400 }
+                            : {}),
+                    },
+                }),
+            );
+            return { messages, result };
+        }
+
+        // Re-gate: an identical-bytes epoch HARD on a session that serves a mural
+        // image. The fold re-renders the same text and the same image, so the
+        // queued drop must stay held. The lean variant starts the pass from a
+        // state whose mural field was never loaded (undefined rather than null).
+        // It is marked failing: the pre-fold snapshot reads the missing field as
+        // "no image served", so the unchanged image counts as a change and the
+        // drop lands. It turns red (unexpected pass) once that snapshot loads the
+        // persisted image first.
+        for (const lean of [false, true]) {
+            (lean ? it.failing : it)(`REGATE mural unchanged (${lean ? "lean" : "hydrated"} state): an identical-bytes epoch HARD holds the drop`, async () => {
+                const xdg = mkdtempSync(join(tmpdir(), "mc-regate-oc-mural-"));
+                tempDirs.push(xdg);
+                process.env.XDG_DATA_HOME = xdg;
+                const modelsDev = await import("../../shared/models-dev-cache");
+                modelsDev.clearModelsDevCache();
+                try {
+                    await modelsDev.refreshModelLimitsFromApi({
+                        config: {
+                            providers: async () => ({
+                                data: {
+                                    providers: [
+                                        {
+                                            id: "anthropic",
+                                            models: {
+                                                opus: {
+                                                    limit: { context: 200_000, input: 200_000 },
+                                                    modalities: { input: ["text", "image"] },
+                                                },
+                                            },
+                                        },
+                                    ],
+                                },
+                            }),
+                        },
+                    } as never);
+                    db = new Database(":memory:");
+                    initializeDatabase(db);
+                    (await import("../../features/magic-context/migrations")).runMigrations(db);
+                    const sessionId = `ses-regate-oc-mural-${lean ? "lean" : "hydrated"}`;
+                    materializeBaseline(sessionId);
+                    const { insertMemory } = await import(
+                        "../../features/magic-context/memory/storage-memory"
+                    );
+                    const cues = await import(
+                        "../../features/magic-context/mural/storage-mural-cues"
+                    );
+                    for (let i = 0; i < 24; i++) {
+                        const content = `REGATE_MURAL_MEMORY_${i}: ${"rule text ".repeat(20)}`;
+                        const memory = insertMemory(db, {
+                            projectPath: FOLD_PROJECT,
+                            category: "PROJECT_RULES",
+                            content,
+                            importance: 50,
+                        });
+                        db.prepare(
+                            "UPDATE memories SET mural_cue = ?, mural_cue_hash = ? WHERE id = ?",
+                        ).run(`cue-${i}`, cues.computeCueContentHash(content), memory.id);
+                    }
+                    await bumpEpoch();
+                    await pass(sessionId, { mural: true });
+                    const defer = await pass(sessionId, { mural: true });
+                    const muralA = getOrCreateSessionMeta(db, sessionId).cachedM0MuralDataUrl;
+                    const target = toolTag(sessionId, "c-mid", "m-mid");
+                    queuePendingOp(db, sessionId, target, "drop");
+                    await bumpEpoch();
+                    const hard = await pass(sessionId, { mural: true, leanMural: lean });
+                    const muralB = getOrCreateSessionMeta(db, sessionId).cachedM0MuralDataUrl;
+                    const after = await pass(sessionId, { mural: true });
+                    console.log(
+                        `REGATE_OC_MURAL lean=${lean} reason=${hard.result.materializeReason} materialized=${hard.result.materialized} muralPresent=${muralA !== null} muralChanged=${muralA !== muralB} headIdentical=${head(hard.messages) === head(defer.messages)} wireIdentical=${sha(hard.messages) === sha(defer.messages)} status=${statusOf(sessionId, target)} afterEqualsDefer=${sha(after.messages) === sha(defer.messages)}`,
+                    );
+                    expect(muralA).not.toBeNull();
+                    expect(muralB).toBe(muralA);
+                    expect(hard.result.materialized).toBe(true);
+                    expect(head(hard.messages)).toBe(head(defer.messages));
+                    expect(statusOf(sessionId, target)).toBe("active");
+                    expect(sha(hard.messages)).toBe(sha(defer.messages));
+                    expect(sha(after.messages)).toBe(sha(defer.messages));
+                } finally {
+                    modelsDev.clearModelsDevCache();
+                }
+            });
+        }
+
+        function toolTag(sessionId: string, callID: string, owner: string): number {
+            const tagger = createTagger();
+            tagger.initFromDb(sessionId, db);
+            const tag = tagger.getToolTag(sessionId, callID, owner);
+            if (tag === undefined || tag === null) throw new Error(`no tag for ${callID}`);
+            return tag;
+        }
+        const statusOf = (sessionId: string, tag: number) =>
+            getTagsBySession(db, sessionId).find((row) => row.tagNumber === tag)?.status;
+
+        it("mural-only change: an OpenCode HARD that swaps only the mural image opens the lanes", async () => {
+            const xdg = mkdtempSync(join(tmpdir(), "mc-adv-oc-mural-"));
+            tempDirs.push(xdg);
+            process.env.XDG_DATA_HOME = xdg;
+            const modelsDev = await import("../../shared/models-dev-cache");
+            modelsDev.clearModelsDevCache();
+            try {
+                await modelsDev.refreshModelLimitsFromApi({
+                    config: {
+                        providers: async () => ({
+                            data: {
+                                providers: [
+                                    {
+                                        id: "anthropic",
+                                        models: {
+                                            opus: {
+                                                limit: { context: 200_000, input: 200_000 },
+                                                modalities: { input: ["text", "image"] },
+                                            },
+                                        },
+                                    },
+                                ],
+                            },
+                        }),
+                    },
+                } as never);
+                db = new Database(":memory:");
+                initializeDatabase(db);
+                // The mural manifest and cue columns come from the migrations.
+                (await import("../../features/magic-context/migrations")).runMigrations(db);
+                const sessionId = "ses-adv-oc-mural-only";
+                materializeBaseline(sessionId);
+                const { insertMemory } = await import(
+                    "../../features/magic-context/memory/storage-memory"
+                );
+                const cues = await import("../../features/magic-context/mural/storage-mural-cues");
+                // This in-memory schema has no privileged-writer table, so write the
+                // derived cue columns directly (the same columns setMuralCue writes).
+                const setCue = (id: number, cue: string, hash: string) =>
+                    db
+                        .prepare(
+                            "UPDATE memories SET mural_cue = ?, mural_cue_hash = ? WHERE id = ?",
+                        )
+                        .run(cue, hash, id);
+                for (let i = 0; i < 24; i++) {
+                    const content = `ADV_MURAL_MEMORY_${i}: ${"rule text ".repeat(20)}`;
+                    const memory = insertMemory(db, {
+                        projectPath: FOLD_PROJECT,
+                        category: "PROJECT_RULES",
+                        content,
+                        importance: 50,
+                    });
+                    setCue(memory.id, `cue-a-${i}`, cues.computeCueContentHash(content));
+                }
+                await bumpEpoch();
+                await pass(sessionId, { mural: true });
+                const withMural = await pass(sessionId, { mural: true });
+                const muralA = getOrCreateSessionMeta(db, sessionId).cachedM0MuralDataUrl;
+                console.log(
+                    `ADV_OC_MURAL_DEBUG vision=${(await import("../../features/magic-context/mural/render-trigger")).modelKeyAcceptsImages("anthropic/opus")} upgrade=${getOrCreateSessionMeta(db, sessionId).cachedM0UpgradeState} withMuralReason=${withMural.result.materializeReason} manifest=${JSON.stringify(db.prepare("SELECT project_path, length(image) AS n FROM mural_manifest").all())} cued=${JSON.stringify(db.prepare("SELECT count(*) AS c FROM memories WHERE mural_cue IS NOT NULL").get())}`,
+                );
+                const target = toolTag(sessionId, "c-mid", "m-mid");
+                queuePendingOp(db, sessionId, target, "drop");
+                const rows = db
+                    .prepare("SELECT id, content FROM memories WHERE project_path = ?")
+                    .all(FOLD_PROJECT) as Array<{ id: number; content: string }>;
+                for (const row of rows) {
+                    setCue(row.id, `cue-b-${row.id}`, cues.computeCueContentHash(row.content));
+                }
+                queueM0Mutation(db, { sessionId, mutationType: "compartment_delete" });
+                const hard = await pass(sessionId, { mural: true });
+                const muralB = getOrCreateSessionMeta(db, sessionId).cachedM0MuralDataUrl;
+                console.log(
+                    `ADV_OC_MURAL_ONLY reason=${hard.result.materializeReason} muralPresent=${muralA !== null} muralChanged=${muralA !== muralB} headTextIdentical=${head(hard.messages) === head(withMural.messages)} status=${statusOf(sessionId, target)}`,
+                );
+                expect(muralA).not.toBeNull();
+                expect(muralA).not.toBe(muralB);
+                expect(statusOf(sessionId, target)).toBe("dropped");
+            } finally {
+                modelsDev.clearModelsDevCache();
+            }
+        });
+        const bumpEpoch = async () => {
+            const { bumpEpochsForWorkspaceMembers } = await import(
+                "../../features/magic-context/workspaces"
+            );
+            bumpEpochsForWorkspaceMembers(db, FOLD_PROJECT);
+        };
+
+        // Baseline, then a queued drop, then an identical-bytes epoch HARD that
+        // must hold the drop. Returns the pre-HARD defer bytes and the target.
+        async function heldAfterIdenticalHard(sessionId: string) {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            materializeBaseline(sessionId);
+            const defer = await pass(sessionId);
+            const target = toolTag(sessionId, "c-mid", "m-mid");
+            queuePendingOp(db, sessionId, target, "drop");
+            await bumpEpoch();
+            const hard = await pass(sessionId, { turn: "t-hard" });
+            expect(hard.result.materialized).toBe(true);
+            expect(hard.result.materializeReason).toBe("project_memory_epoch");
+            expect(head(hard.messages)).toBe(head(defer.messages));
+            expect(statusOf(sessionId, target)).toBe("active");
+            expect(sha(hard.messages)).toBe(sha(defer.messages));
+            const d1 = await pass(sessionId);
+            const d2 = await pass(sessionId);
+            expect(sha(d1.messages)).toBe(sha(defer.messages));
+            expect(sha(d2.messages)).toBe(sha(defer.messages));
+            expect(statusOf(sessionId, target)).toBe("active");
+            return { defer, target };
+        }
+
+        it("starvation: a held drop lands on the next execute pass that publishes m[1]; the defer after replays it", async () => {
+            const sessionId = "ses-adv-starve-execute";
+            const { defer, target } = await heldAfterIdenticalHard(sessionId);
+            // An additive memory surfaces through m[1] on the next execute pass,
+            // which is the published-history bust queued drops wait for.
+            const { insertMemory } = await import(
+                "../../features/magic-context/memory/storage-memory"
+            );
+            insertMemory(db, {
+                projectPath: FOLD_PROJECT,
+                category: "PROJECT_RULES",
+                content: "ADV_EXECUTE_PUBLISH: new rule.",
+                importance: 50,
+            });
+            const exec = await pass(sessionId, { scheduler: "execute", turn: "t-exec" });
+            console.log(
+                `ADV_EXEC materialized=${exec.result.materialized} reason=${exec.result.materializeReason} status=${statusOf(sessionId, target)} pending=${getPendingOps(db, sessionId).length} changed=${sha(exec.messages) !== sha(defer.messages)}`,
+            );
+            expect(statusOf(sessionId, target)).toBe("dropped");
+            expect(getPendingOps(db, sessionId)).toHaveLength(0);
+            expect(sha(exec.messages)).not.toBe(sha(defer.messages));
+            const after = await pass(sessionId, { turn: "t-exec" });
+            expect(sha(after.messages)).toBe(sha(exec.messages));
+        });
+
+        it("control: a queued drop on a plain execute pass with no HARD and no m[1] change", async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "ses-adv-control-execute";
+            materializeBaseline(sessionId);
+            const defer = await pass(sessionId);
+            const target = toolTag(sessionId, "c-mid", "m-mid");
+            queuePendingOp(db, sessionId, target, "drop");
+            const exec = await pass(sessionId, { scheduler: "execute", turn: "t-exec" });
+            console.log(
+                `ADV_CONTROL_EXEC materialized=${exec.result.materialized} status=${statusOf(sessionId, target)} changed=${sha(exec.messages) !== sha(defer.messages)}`,
+            );
+        });
+
+        it("starvation: a held drop lands on the next explicit /ctx-flush pass", async () => {
+            const sessionId = "ses-adv-starve-flush";
+            const { defer, target } = await heldAfterIdenticalHard(sessionId);
+            const flush = await pass(sessionId, { flush: true });
+            expect(statusOf(sessionId, target)).toBe("dropped");
+            expect(sha(flush.messages)).not.toBe(sha(defer.messages));
+            const after = await pass(sessionId);
+            expect(sha(after.messages)).toBe(sha(flush.messages));
+        });
+
+        it("starvation: a held drop lands when usage enters the >=85% force band", async () => {
+            const sessionId = "ses-adv-starve-force";
+            const { target } = await heldAfterIdenticalHard(sessionId);
+            const force = await pass(sessionId, { pct: 86 });
+            expect(statusOf(sessionId, target)).toBe("dropped");
+            const after = await pass(sessionId, { pct: 86 });
+            expect(sha(after.messages)).toBe(sha(force.messages));
+        });
+
+        it("starvation: a held drop lands on a later genuine HARD (model change)", async () => {
+            const sessionId = "ses-adv-starve-model";
+            const { target } = await heldAfterIdenticalHard(sessionId);
+            const hardSignals = { ...BASE_HARD, modelKey: "anthropic/sonnet" };
+            const hard = await pass(sessionId, { hard: hardSignals });
+            expect(hard.result.materializeReason).toBe("model_change");
+            expect(statusOf(sessionId, target)).toBe("dropped");
+            const after = await pass(sessionId, { hard: hardSignals });
+            expect(sha(after.messages)).toBe(sha(hard.messages));
+        });
+
+        for (const pct of [86, 96]) {
+            it(`emergency: an identical-bytes HARD at ${pct}% still drains the queued drop on the same pass`, async () => {
+                db = new Database(":memory:");
+                initializeDatabase(db);
+                const sessionId = `ses-adv-emergency-${pct}`;
+                materializeBaseline(sessionId);
+                await pass(sessionId);
+                const target = toolTag(sessionId, "c-mid", "m-mid");
+                queuePendingOp(db, sessionId, target, "drop");
+                await bumpEpoch();
+                const hard = await pass(sessionId, { pct });
+                expect(hard.result.materialized).toBe(true);
+                expect(statusOf(sessionId, target)).toBe("dropped");
+                const after = await pass(sessionId, { pct });
+                expect(sha(after.messages)).toBe(sha(hard.messages));
+            });
+        }
+
+        // Every cache-losing or byte-changing trigger must still open the lanes.
+        const OPENING: Array<{
+            reason: string;
+            arm: (sessionId: string) => Promise<M0HardSignals | undefined>;
+        }> = [
+            { reason: "system_hash", arm: async () => ({ ...BASE_HARD, systemHash: "sys-v2" }) },
+            {
+                reason: "ttl_idle",
+                arm: async () => ({
+                    ...BASE_HARD,
+                    cacheExpired: true,
+                    lastResponseTime: Date.now() + 60_000,
+                }),
+            },
+            {
+                reason: "cached_m1_missing",
+                arm: async (sessionId) => {
+                    db.prepare(
+                        "UPDATE session_meta SET cached_m1_bytes = NULL WHERE session_id = ?",
+                    ).run(sessionId);
+                    return undefined;
+                },
+            },
+            {
+                reason: "max_mutation_id",
+                arm: async (sessionId) => {
+                    appendCompartments(db, sessionId, [
+                        {
+                            sequence: 0,
+                            startMessage: 1,
+                            endMessage: 1,
+                            startMessageId: "m-u0",
+                            endMessageId: "m-u0",
+                            title: "Real mutation",
+                            content: "U: start (compartment the mutation log surfaces)",
+                        },
+                    ] as never);
+                    db.prepare(
+                        "UPDATE session_meta SET cached_m0_max_compartment_seq = 0 WHERE session_id = ?",
+                    ).run(sessionId);
+                    queueM0Mutation(db, { sessionId, mutationType: "compartment_upgrade" });
+                    return undefined;
+                },
+            },
+        ];
+        for (const trigger of OPENING) {
+            it(`${trigger.reason}: a HARD that busts still drains the queued drop on a defer pass`, async () => {
+                db = new Database(":memory:");
+                initializeDatabase(db);
+                const sessionId = `ses-adv-open-${trigger.reason}`;
+                materializeBaseline(sessionId);
+                const defer = await pass(sessionId);
+                const target = toolTag(sessionId, "c-mid", "m-mid");
+                queuePendingOp(db, sessionId, target, "drop");
+                const hardSignals = await trigger.arm(sessionId);
+                const hard = await pass(sessionId, { hard: hardSignals });
+                console.log(
+                    `ADV_OPEN reason=${hard.result.materializeReason} materialized=${hard.result.materialized} headChanged=${head(hard.messages) !== head(defer.messages)} status=${statusOf(sessionId, target)}`,
+                );
+                expect(hard.result.materialized).toBe(true);
+                expect(hard.result.materializeReason).toBe(trigger.reason);
+                expect(statusOf(sessionId, target)).toBe("dropped");
+                // A ttl_idle signal stays armed while cacheExpired is true, so the
+                // follow-up pass uses the settled signals the provider would send.
+                const after = await pass(sessionId, {
+                    hard: trigger.reason === "ttl_idle" ? BASE_HARD : hardSignals,
+                });
+                console.log(
+                    `ADV_OPEN_AFTER reason=${trigger.reason} afterMaterialized=${after.result.materialized} afterReason=${after.result.materializeReason} identical=${sha(after.messages) === sha(hard.messages)}`,
+                );
+                if (sha(after.messages) !== sha(hard.messages)) {
+                    for (
+                        let i = 0;
+                        i < Math.max(after.messages.length, hard.messages.length);
+                        i++
+                    ) {
+                        const a = JSON.stringify(hard.messages[i]);
+                        const b = JSON.stringify(after.messages[i]);
+                        if (a !== b)
+                            console.log(
+                                `ADV_DIFF idx=${i}\n HARD =${a?.slice(0, 600)}\n AFTER=${b?.slice(0, 600)}`,
+                            );
+                    }
+                }
+                expect(sha(after.messages)).toBe(sha(hard.messages));
+            });
+        }
+    });
 });
 
 describe("postprocess empty-sentinel provider gate", () => {
