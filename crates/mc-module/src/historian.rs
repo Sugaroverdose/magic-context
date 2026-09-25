@@ -1537,16 +1537,33 @@ pub fn firing_completion_wait_budget(timeout: Duration, chain_len: usize) -> Dur
 /// drain has the same uncapped-until-target shape). Derivation: one busy-join at
 /// entry (bounded by [`firing_completion_wait_budget`] — 660s per model the joined
 /// firing may try — and always clamped to the remaining request budget) plus producer rounds each
-/// bounded by [`wrapup_round_wait_budget`] (600s); the loop re-checks the remaining
-/// budget before every round, so the wall time is one join plus as many rounds as
-/// fit under the budget. Sized for a large multi-chunk drain with margin. Bump this
-/// in the same commit as any change to those inputs and notify consumers.
+/// bounded by [`wrapup_round_wait_budget`] (one full firing, capped by the
+/// remaining request time). The request budget limits the total wrapup time:
+/// after joining an active firing, new rounds run only while time remains. Sized for a large multi-chunk drain with margin. If the firing or round
+/// wait budget changes, update this request budget in the same commit and
+/// notify the callers that set wrapup request deadlines.
 pub const MAX_WRAPUP_REQUEST_BUDGET: Duration = Duration::from_secs(3_800);
 
-/// Per-round wrapup wait bound. A timed-out producer keeps running under the normal
-/// historian guard so durable recovery remains identical to an incremental firing.
-pub fn wrapup_round_wait_budget() -> Duration {
-    Duration::from_secs(600)
+/// Per-round wrapup wait bound. Each model may use its full attempt plus re-drain.
+/// If a round times out, its producer continues under the historian's usual
+/// safeguards, allowing the same durable recovery as an incremental firing.
+pub fn wrapup_round_wait_budget(
+    timeout: Duration,
+    chain_len: usize,
+    remaining: Duration,
+) -> Duration {
+    firing_completion_wait_budget(timeout, chain_len).min(remaining)
+}
+
+#[cfg(test)]
+#[test]
+fn wrapup_round_wait_covers_fallbacks_and_respects_remaining_request_budget() {
+    let timeout = Duration::from_secs(600);
+    let firing = wrapup_round_wait_budget(timeout, 3, Duration::from_secs(3_800));
+    assert_eq!(firing, Duration::from_secs(1_980));
+    assert!(firing > completion_wait_budget(timeout));
+    let remaining = Duration::from_millis(7);
+    assert_eq!(wrapup_round_wait_budget(timeout, 3, remaining), remaining);
 }
 
 /// The transform-call deadline a consumer sets, VERBATIM, for requests to this module —
@@ -1555,8 +1572,8 @@ pub fn wrapup_round_wait_budget() -> Duration {
 ///
 /// Derivation: a ≥95% (Emergency95) request may legitimately block until compaction
 /// lands, and its worst case nests both emergency arms sequentially — busy-await of an
-/// active run (one `completion_wait_budget`, 660s) followed by an inline refire (a
-/// second 660s) plus transform re-runs — ≈ 1350s, rounded up with margin. A consumer
+/// active run (the 20s `TRANSFORM_HISTORIAN_FOLLOWUP_BUDGET`) followed by an
+/// inline refire (up to 660s per model) plus transform re-runs, with margin. A consumer
 /// deadline below this false-trips on legitimate work and forwards a RAW array at the
 /// exact pressure where raw risks provider context-overflow; a trip at THIS value means
 /// the module violated its own per-arm bounds (a bug), making forward-raw-and-discard

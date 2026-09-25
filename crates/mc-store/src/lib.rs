@@ -7557,7 +7557,7 @@ fn materialize_drop_seed_units(
             false,
         ) else {
             skipped = skipped.saturating_add(1);
-            eprintln!(
+            tracing::warn!(
                 "mc-store: skipped invalid drop seed for session {session_id}: {}",
                 seed.block_id
             );
@@ -7571,7 +7571,7 @@ fn materialize_drop_seed_units(
                 if primary_order < existing_order {
                     candidates.insert(primary_key.clone(), primary);
                 }
-                eprintln!(
+                tracing::warn!(
                     "mc-store: resolved conflicting drop seed deterministically for session {session_id}: {}",
                     primary_key
                 );
@@ -7585,14 +7585,14 @@ fn materialize_drop_seed_units(
         for block_id in related {
             let Some(unit) = seeded_drop_unit(&block_id, "full", None, true) else {
                 skipped = skipped.saturating_add(1);
-                eprintln!(
+                tracing::warn!(
                     "mc-store: skipped invalid related drop seed for session {session_id}: {block_id}"
                 );
                 continue;
             };
             if let Some(existing) = candidates.get(&unit.key) {
                 if existing != &unit {
-                    eprintln!(
+                    tracing::warn!(
                         "mc-store: ignored conflicting related drop seed for session {session_id}: {}",
                         unit.key
                     );
@@ -7622,7 +7622,7 @@ fn materialize_drop_seed_units(
             .map(|index| &core.frozen_units[*index])
         {
             if existing != &unit {
-                eprintln!(
+                tracing::debug!(
                     "mc-store: retained existing frozen drop unit for session {session_id}: {key}"
                 );
             }
@@ -7657,9 +7657,10 @@ fn materialize_strip_seed_units(
             || !valid_strip_seed_kind(&seed.strip_kind)
         {
             skipped = skipped.saturating_add(1);
-            eprintln!(
+            tracing::warn!(
                 "mc-store: skipped invalid strip seed for session {session_id}: {}:{}",
-                seed.strip_kind, seed.message_id
+                seed.strip_kind,
+                seed.message_id
             );
             continue;
         }
@@ -7691,7 +7692,7 @@ fn materialize_strip_seed_units(
             .map(|index| &core.frozen_units[*index])
         {
             if existing != &unit {
-                eprintln!(
+                tracing::debug!(
                     "mc-store: retained existing frozen strip unit for session {session_id}: {key}"
                 );
             }
@@ -7786,7 +7787,7 @@ impl McStore {
             // startup continues; the line exists so a rolled-back module that later
             // fails a query on a column it does not know is attributable to the
             // version skew rather than to data corruption.
-            eprintln!(
+            tracing::warn!(
                 "mc-store: store schema v{} is ahead of this binary's chain v{} (older binary on a newer store); continuing without migrating",
                 migration.recorded, migration.chain_max
             );
@@ -7795,7 +7796,7 @@ impl McStore {
         // elsewhere must not be served by a binary that would read the copies left behind here.
         if !single_store_capable {
             if let Some(marker) = inner.with_conn(read_single_store_marker)? {
-                eprintln!(
+                tracing::warn!(
                     "mc-store: refusing to open: {SINGLE_STORE_MARKER_REFUSAL_REASON}: {}",
                     marker.remediation()
                 );
@@ -11378,13 +11379,13 @@ impl McStore {
                         None => false,
                     };
                 if meta.initialized && !seed_ahead_of_module {
-                    eprintln!(
+                    tracing::info!(
                         "mc-store: retained materialized boundary {:?} over state-sync seed {:?} at or behind it for session {}",
                         core.boundary_id, adoption.boundary_id, request.session_id
                     );
                 } else {
                     if seed_ahead_of_module {
-                        eprintln!(
+                        tracing::info!(
                             "mc-store: adopted state-sync seed {:?} (coverage end {}) over older materialized boundary {:?} (coverage end {:?}) for session {}",
                             adoption.boundary_id,
                             adoption.coverage_end_ordinal,
@@ -11419,7 +11420,7 @@ impl McStore {
             for seed in request.pending_agent_drops {
                 if !valid_drop_seed_block_id(&seed.block_id) {
                     pending_agent_drops_skipped = pending_agent_drops_skipped.saturating_add(1);
-                    eprintln!(
+                    tracing::warn!(
                         "mc-store: skipped invalid pending drop seed for session {}: {}",
                         request.session_id, seed.block_id
                     );
@@ -11525,7 +11526,7 @@ impl McStore {
                 }
             }
             if compartment_overwrites_skipped > 0 {
-                eprintln!(
+                tracing::info!(
                     "mc-store: skipped {} state-sync compartment overwrite(s) while retaining folded sequence {} for session {}",
                     compartment_overwrites_skipped,
                     meta.folded_compartment_seq,
@@ -11641,7 +11642,7 @@ impl McStore {
         })?;
 
         let commit_ms = (timing_started.elapsed().as_secs_f64() * 1000.0 - import_ms).max(0.0);
-        eprintln!("mc-state-sync-timing side=store session={} import_ms={:.3} drop_seed_units_ms={:.3} commit_ms={:.3} compartments={} tags={}", request.session_id, import_ms, drop_seed_units_ms, commit_ms, request.compartments.len(), request.drop_seeds.len());
+        tracing::debug!("mc-state-sync-timing side=store session={} import_ms={:.3} drop_seed_units_ms={:.3} commit_ms={:.3} compartments={} tags={}", request.session_id, import_ms, drop_seed_units_ms, commit_ms, request.compartments.len(), request.drop_seeds.len());
         match outcome {
             ModuleStateSyncTxnOutcome::Committed(result) => Ok(result),
             ModuleStateSyncTxnOutcome::NonRetryableStoreConstraint { detail } => {
@@ -19943,6 +19944,13 @@ fn assert_memory_feed_snapshots_complete(store: &McStore) {
 mod tests {
     use super::*;
     use cortexkit_store_types::{Isolation, StorageBackend};
+
+    #[test]
+    fn production_store_has_no_direct_stderr_writes() {
+        let source = include_str!("lib.rs");
+        let production = source.split_once("#[cfg(test)]\nmod tests {").unwrap().0;
+        assert!(!production.contains(concat!("eprint", "ln!")));
+    }
 
     // Adversarial gate over the claim-lane migration and the single-store marker
     // migration as one merged chain.

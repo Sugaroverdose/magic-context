@@ -879,6 +879,58 @@ impl DispatchHealth {
     }
 }
 
+/// Publish the compile-time byte epochs even while storage is opening or failed.
+fn with_pinned_epochs_health(mut report: HealthReport) -> HealthReport {
+    let metrics = report.metrics.get_or_insert_with(|| json!({}));
+    let metrics = metrics.as_object_mut().expect("health metrics object");
+    metrics.insert(
+        "profile_epoch_claude_code_anthropic".into(),
+        json!(PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC),
+    );
+    metrics.insert("tagger_feature_epoch".into(), json!(TAGGER_FEATURE_EPOCH));
+    metrics.insert(
+        "memory_render_format_epoch".into(),
+        json!(MEMORY_RENDER_FORMAT_EPOCH),
+    );
+    metrics.insert(
+        "compartment_render_format_epoch".into(),
+        json!(COMPARTMENT_RENDER_FORMAT_EPOCH),
+    );
+    metrics.insert(
+        "build_sha".into(),
+        json!(option_env!("MC_BUILD_SHA")
+            .map(str::trim)
+            .filter(|sha| !sha.is_empty())),
+    );
+    report
+}
+
+#[cfg(test)]
+#[test]
+fn health_exposes_pinned_epochs_and_build_sha() {
+    let report = with_pinned_epochs_health(DISPATCH_HEALTH.report(0));
+    let metrics = report.metrics.unwrap();
+    assert_eq!(
+        metrics["profile_epoch_claude_code_anthropic"],
+        json!(PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC)
+    );
+    assert_eq!(metrics["tagger_feature_epoch"], json!(TAGGER_FEATURE_EPOCH));
+    assert_eq!(
+        metrics["memory_render_format_epoch"],
+        json!(MEMORY_RENDER_FORMAT_EPOCH)
+    );
+    assert_eq!(
+        metrics["compartment_render_format_epoch"],
+        json!(COMPARTMENT_RENDER_FORMAT_EPOCH)
+    );
+    assert_eq!(
+        metrics["build_sha"],
+        json!(option_env!("MC_BUILD_SHA")
+            .map(str::trim)
+            .filter(|sha| !sha.is_empty()))
+    );
+}
+
 static DISPATCH_HEALTH: DispatchHealth = DispatchHealth::new();
 
 struct TransformDispatchTicket<'a> {
@@ -6946,7 +6998,11 @@ impl McHandler {
                 "wrapup request budget expired before historian round".to_string(),
             ));
         };
-        let wait = historian::wrapup_round_wait_budget().min(remaining);
+        let wait = historian::wrapup_round_wait_budget(
+            task.historian_await_timeout,
+            task.firing.model_chain.len(),
+            remaining,
+        );
         let factory = Arc::clone(&self.producer_factory);
         let handle = tokio::spawn(Self::execute_historian_firing_task(factory, task));
         match tokio::time::timeout(wait, handle).await {
@@ -14402,13 +14458,14 @@ impl ModuleHandler for McHandler {
     /// channel-0 health task, so neither the store nor a handler lock is touched here.
     async fn health(&self) -> HealthReport {
         let now = now_ms().max(0) as u64;
-        if let Some(waiting) = self.store_open.waiting_report(now) {
-            return waiting;
-        }
-        if let Some(failed) = self.store_open.failed_report() {
-            return failed;
-        }
-        self.augment_memory_mirror_health(DISPATCH_HEALTH.report(now), now)
+        let report = if let Some(waiting) = self.store_open.waiting_report(now) {
+            waiting
+        } else if let Some(failed) = self.store_open.failed_report() {
+            failed
+        } else {
+            self.augment_memory_mirror_health(DISPATCH_HEALTH.report(now), now)
+        };
+        with_pinned_epochs_health(report)
     }
 
     /// Record the route's {project_root, session} so the transform path can resolve the
