@@ -38083,6 +38083,89 @@ mod tests {
     /// A restarted adapter can mirror compartments the module historian published but has not
     /// folded yet. That seed is not ahead of the module, so a scheduler defer must still replay.
     #[tokio::test]
+    async fn adopted_seed_replaces_a_differently_chunked_module_compartment_set() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        // The module chunked ordinals 0..4 into five one-message compartments.
+        store
+            .replace_compartments(
+                "ses",
+                &(0..5)
+                    .map(|seq| stored_comp(seq, seq, seq, &format!("m{seq}"), "module chunk"))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let folded = call_transform_request(
+            &handler,
+            request((0..6).map(|o| ck(&format!("m{o}"), o, "live")).collect()),
+        )
+        .await;
+        assert_eq!(folded["boundary_id"], json!("m4#0"));
+
+        // The host chunked a longer history into three wider compartments.
+        let host_chunk = |sequence: i64, start: i64, end: i64| {
+            json!({
+                "sequence": sequence,
+                "start_message": start,
+                "end_message": end,
+                "start_message_id": format!("m{start}#0"),
+                "end_message_id": format!("m{end}#0"),
+                "title": format!("host {sequence}"),
+                "content": format!("host chunk {sequence}"),
+                "p1": format!("host chunk {sequence}"),
+            })
+        };
+        let seeded = handler
+            .dispatch_value(
+                7,
+                json!({
+                    "kind": "state_sync",
+                    "session_id": "ses",
+                    "shadow_generation": 0,
+                    "expected_shadow_seq": store.load("ses").unwrap().meta.shadow_seq,
+                    "seed_boundary_id": "m9#0",
+                    "compartments": [host_chunk(0, 0, 3), host_chunk(1, 4, 7), host_chunk(2, 8, 9)],
+                    "acked_watermarks": { "compartment_sequence": 2 }
+                }),
+            )
+            .await;
+        assert!(matches!(seeded, HandlerOutcome::Response(_)), "{seeded:?}");
+
+        let stored = store.load_compartments("ses").unwrap();
+        assert_eq!(
+            stored
+                .iter()
+                .map(|c| (
+                    c.sequence,
+                    c.start_message,
+                    c.end_message,
+                    c.content.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 0, 3, "host chunk 0"),
+                (1, 4, 7, "host chunk 1"),
+                (2, 8, 9, "host chunk 2"),
+            ],
+            "the adopted set must be exactly the seed's, with no module rows left behind"
+        );
+        for pair in stored.windows(2) {
+            assert!(pair[0].sequence < pair[1].sequence);
+            assert!(pair[0].end_message < pair[1].start_message);
+        }
+
+        let resumed = call_transform_request(
+            &handler,
+            request((8..12).map(|o| ck(&format!("m{o}"), o, "live")).collect()),
+        )
+        .await;
+        assert_eq!(resumed["decision"], json!("HARD"), "{resumed}");
+        assert_eq!(resumed["boundary_id"], json!("m9#0"));
+        assert_eq!(live_harness_ids(&resumed), vec!["m10", "m11"]);
+        assert!(!m0_text(&resumed).contains("module chunk"));
+    }
+
+    #[tokio::test]
     async fn state_sync_seed_of_published_unfolded_compartments_keeps_the_defer() {
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
