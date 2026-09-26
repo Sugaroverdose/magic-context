@@ -239,8 +239,8 @@ describe("a compaction request between two real passes", () => {
         });
 
         // Shipped order: the compaction's system transform runs before its messages
-        // transform. A prompt the signature list does not know, so only the window
-        // decides.
+        // transform. The prompt matches none of the known internal-agent prompt
+        // openers, so only the compacting hook's mark can identify the request.
         markCompactionRequest(sessionId);
         const system = ["An unrecognised summarizer prompt."];
         await handler({ sessionID: sessionId }, { system });
