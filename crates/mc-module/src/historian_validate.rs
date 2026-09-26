@@ -188,6 +188,10 @@ pub struct ParsedCompartmentOutput {
     pub compartments: Vec<ParsedCompartment>,
     #[serde(default)]
     pub facts: Vec<FactCandidate>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dropped_fact_blocks: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dropped_facts: usize,
     #[serde(default)]
     pub events: Vec<ParsedEvent>,
     #[serde(default)]
@@ -227,6 +231,10 @@ pub struct ValidatedCompartment {
 pub struct ValidatedChunk {
     pub compartments: Vec<ValidatedCompartment>,
     pub facts: Vec<FactCandidate>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dropped_fact_blocks: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dropped_facts: usize,
     pub events: Vec<ParsedEvent>,
     pub primer_candidates: Vec<PrimerCandidate>,
     pub user_observations: Vec<UserObservationCandidate>,
@@ -281,6 +289,8 @@ pub fn parse_compartment_output(
 
     let mut compartments = Vec::new();
     let mut facts = Vec::new();
+    let mut dropped_fact_blocks = 0;
+    let mut dropped_facts = 0;
 
     for caps in compartment_regex().captures_iter(text) {
         let attrs = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
@@ -365,6 +375,19 @@ pub fn parse_compartment_output(
             continue;
         }
         let block = category_caps.get(2).map(|m| m.as_str()).unwrap_or_default();
+        if !HISTORIAN_CATEGORIES.contains(&category) {
+            let count = fact_item_regex()
+                .captures_iter(block)
+                .filter(|caps| {
+                    caps.get(1)
+                        .is_some_and(|m| !unescape_xml(m.as_str().trim()).is_empty())
+                })
+                .count();
+            dropped_fact_blocks += 1;
+            dropped_facts += count;
+            eprintln!("{}", format_dropped_fact_category(category, count));
+            continue;
+        }
         for item_caps in fact_item_regex().captures_iter(block) {
             let raw = item_caps.get(1).map(|m| m.as_str()).unwrap_or_default();
             let unescaped = unescape_xml(raw.trim());
@@ -438,6 +461,8 @@ pub fn parse_compartment_output(
     Ok(ParsedCompartmentOutput {
         compartments,
         facts,
+        dropped_fact_blocks,
+        dropped_facts,
         events,
         unprocessed_from,
         user_observations,
@@ -628,6 +653,8 @@ pub fn validate_historian_output(
     Ok(ValidatedChunk {
         compartments,
         facts,
+        dropped_fact_blocks: parsed.dropped_fact_blocks,
+        dropped_facts: parsed.dropped_facts,
         events,
         primer_candidates,
         user_observations,
@@ -1235,14 +1262,25 @@ fn events_block_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#"(?s)<events>(.*?)</events>"#).unwrap())
 }
 
+const HISTORIAN_CATEGORIES: &[&str] = &[
+    "PROJECT_RULES",
+    "ARCHITECTURE",
+    "CONSTRAINTS",
+    "CONFIG_VALUES",
+    "NAMING",
+];
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+fn format_dropped_fact_category(category: &str, count: usize) -> String {
+    format!("[historian] Dropped <facts> category {category} ({count} facts)")
+}
+
 fn category_block_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r#"(?s)<(PROJECT_RULES|ARCHITECTURE|CONSTRAINTS|CONFIG_VALUES|NAMING)>(.*?)</(PROJECT_RULES|ARCHITECTURE|CONSTRAINTS|CONFIG_VALUES|NAMING)>"#,
-        )
-        .unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r#"(?s)<([A-Z][A-Z0-9_]*)>(.*?)</([A-Z][A-Z0-9_]*)>"#).unwrap())
 }
 
 fn fact_item_regex() -> &'static Regex {
@@ -1305,6 +1343,18 @@ fn side_channel_anchor_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_fact_categories_report_every_drop() {
+        let parsed = parse_compartment_output("<output><facts><PROJECT_RULS>\n* One\n* Two\n</PROJECT_RULS><USER_DIRECTIVES>\n* Three\n</USER_DIRECTIVES></facts></output>").unwrap();
+        assert!(parsed.facts.is_empty());
+        assert_eq!(parsed.dropped_fact_blocks, 2);
+        assert_eq!(parsed.dropped_facts, 3);
+        assert_eq!(
+            format_dropped_fact_category("PROJECT_RULS", 2),
+            "[historian] Dropped <facts> category PROJECT_RULS (2 facts)"
+        );
+    }
 
     #[derive(Debug, Deserialize)]
     struct GoldenInput {
