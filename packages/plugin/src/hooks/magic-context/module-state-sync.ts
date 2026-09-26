@@ -82,7 +82,13 @@ export interface ModuleWorkspacePayload {
     members: Array<{ project_path: string; share_categories: string[] }>;
 }
 
-export type ModuleDropMode = "full" | "truncated" | "skeleton_real" | "edit_marker";
+export type ModuleDropMode =
+    | "full"
+    | "truncated"
+    | "skeleton_real"
+    | "skeleton_stripped"
+    | "edit_marker"
+    | "edit_marker_stripped";
 
 export interface ModuleDropSeed {
     block_id: string;
@@ -879,7 +885,7 @@ function dropSeedForTag(args: {
                 block_id: `${tag.toolOwnerMessageId}#${call.blockIndex}`,
                 ...(related.length > 0 ? { related_block_ids: related } : {}),
                 drop_mode: tag.dropMode,
-                ...(tag.dropMode === "edit_marker"
+                ...(tag.dropMode === "edit_marker" || tag.dropMode === "edit_marker_stripped"
                     ? { payload: editMarkerSeedPayload(call.toolInput) }
                     : {}),
             },

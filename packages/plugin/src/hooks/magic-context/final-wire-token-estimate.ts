@@ -2,7 +2,6 @@ import {
     getLargestMeasuredToolDefinitionTokens,
     getMeasuredToolDefinitionTokens,
 } from "../../features/magic-context/tool-definition-tokens";
-import { isDroppedToolOutput } from "./ctx-reduce-nudge";
 import { providerMass, resolveDecisionCalibration } from "./decision-calibration";
 import {
     estimateImageTokensFromDataUrl,
@@ -112,10 +111,9 @@ export function estimateMessageTokens(message: MessageLike): MessageTokenEstimat
                     p.state?.output ?? p.state?.content ?? p.output ?? p.result ?? p.content,
                 );
                 toolCall += serializedTokens(p.state?.error);
-                // Images a tool returned beside its text (see estimateToolAttachmentImageTokens).
-                // A dropped result no longer carries them.
-                if (!(typeof p.state?.output === "string" && isDroppedToolOutput(p.state.output)))
-                    toolCall += estimateToolAttachmentImageTokens(p.state);
+                // Legacy skeletons may still carry media. Count what the wire
+                // actually contains, not what its output marker implies.
+                toolCall += estimateToolAttachmentImageTokens(p.state);
                 break;
             case "tool-call":
                 toolCall += serializedTokens(p.input ?? p.args);

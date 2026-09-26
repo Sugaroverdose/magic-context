@@ -7525,10 +7525,10 @@ fn seeded_drop_unit(
     } else if drop_mode == "truncated" || drop_mode == "skeleton" {
         // Legacy marker skeleton; the module converts it on its next HARD fold.
         ("skeleton", "[dropped]".to_string())
-    } else if drop_mode == "skeleton_real" {
+    } else if drop_mode == "skeleton_real" || drop_mode == "skeleton_stripped" {
         // The call keeps its real arguments; only its paired results are reduced.
         ("skeleton_real", "[dropped]".to_string())
-    } else if drop_mode == "edit_marker" {
+    } else if drop_mode == "edit_marker" || drop_mode == "edit_marker_stripped" {
         ("edit_marker", payload.unwrap_or("[dropped]").to_string())
     } else {
         return None;
@@ -19956,6 +19956,15 @@ fn assert_memory_feed_snapshots_complete(store: &McStore) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attachment_stripped_drop_modes_seed_the_existing_canonical_reductions() {
+        let skeleton = super::seeded_drop_unit("m1#0", "skeleton_stripped", None, false).unwrap();
+        assert_eq!(skeleton.kind, "skeleton_real");
+        let edit =
+            super::seeded_drop_unit("m2#0", "edit_marker_stripped", Some("hint"), false).unwrap();
+        assert_eq!(edit.kind, "edit_marker");
+        assert_eq!(edit.frozen_payload, "hint");
+    }
     use super::*;
     use cortexkit_store_types::{Isolation, StorageBackend};
 

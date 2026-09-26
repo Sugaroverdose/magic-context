@@ -55,6 +55,35 @@ function buildIndex(messages: MessageLike[]): ToolCallIndex {
 }
 
 describe("tool-drop-target", () => {
+    it("strips attachments on a newly selected skeleton but preserves legacy replay", () => {
+        const attachment = { type: "file", mime: "image/png", url: "data:image/png;base64,abcd" };
+        const original = {
+            type: "tool",
+            callID: "c1",
+            state: { input: { path: "a" }, output: "large output", attachments: [attachment] },
+        };
+        const row = message("m1", "assistant", [original]);
+        const target = createToolDropTarget(
+            "c1",
+            [],
+            buildIndex([row]),
+            new ToolMutationBatch([row]),
+            7,
+        );
+        expect(target.hasAttachments()).toBe(true);
+        expect(target.skeletonStripped()).toBe("truncated");
+        expect((row.parts[0] as typeof original).state.attachments).toEqual([]);
+        expect(original.state.attachments).toEqual([attachment]);
+        const replay = message("m1", "assistant", [structuredClone(original)]);
+        createToolDropTarget(
+            "c1",
+            [],
+            buildIndex([replay]),
+            new ToolMutationBatch([replay]),
+            7,
+        ).skeletonReal();
+        expect((replay.parts[0] as typeof original).state.attachments).toEqual([attachment]);
+    });
     let buildOutput: ReturnType<typeof mock<(suffix: string) => string>>;
 
     beforeEach(() => {

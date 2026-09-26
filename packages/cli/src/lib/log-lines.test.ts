@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import golden from "./__fixtures__/log_format_golden.json";
 import opaqueMessages from "./__fixtures__/opaque-log-messages.json";
+
 import {
     getMagicContextLogPaths,
     inspectLogFile,
@@ -14,6 +15,16 @@ import {
     readLogLines,
 } from "./log-lines";
 import { extractHistorianFailureLines } from "./logs-opencode";
+
+it("reads message.updated identifiers as event fields", () => {
+    const line =
+        "[2026-09-05T10:41:03.130Z] [magic-context][ses_538] event message.updated: provider=mock model=test hasUsageTokens=true tokens.input=10 cache.read=2 cache.write=0 message.id=msg_538 session.id=ses_538";
+    const record = parseLogLine(line);
+    expect(record?.session).toBe("ses_538");
+    expect(record?.message).toBe("event message.updated:");
+    expect(record?.kv["message.id"]).toBe("msg_538");
+    expect(record?.kv["session.id"]).toBe("ses_538");
+});
 
 /**
  * The writer removes complete CSI escape sequences (7-bit `ESC [` or the C1

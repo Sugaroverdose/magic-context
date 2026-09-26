@@ -129,11 +129,12 @@ function servedPart(occurrence: IndexedOccurrence): unknown {
  * written into the argument position, so a model copying this call from its
  * history copies real, executable arguments.
  */
-function skeletonRealToolPart(part: unknown, tagId: number): void {
+function skeletonRealToolPart(part: unknown, tagId: number, stripAttachments = false): void {
     if (!isRecord(part)) return;
     const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
     if (part.type === "tool" && isRecord(part.state)) {
         part.state.output = sentinel;
+        if (stripAttachments) part.state.attachments = [];
         return;
     }
     if (part.type === "tool_result") {
@@ -194,12 +195,13 @@ function truncateToolPart(part: unknown, tagId: number): void {
  * A SEPARATE path from `truncateToolPart`: it must never alter the existing
  * skeleton bytes. Deterministic + idempotent (see edit-marker.ts).
  */
-function editMarkerToolPart(part: unknown, tagId: number): void {
+function editMarkerToolPart(part: unknown, tagId: number, stripAttachments = false): void {
     if (!isRecord(part)) return;
     const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
 
     if (part.type === "tool" && isRecord(part.state)) {
         part.state.output = sentinel;
+        if (stripAttachments) part.state.attachments = [];
         if (isRecord(part.state.input)) applyEditMarkerToInput(part.state.input);
         return;
     }
@@ -458,6 +460,9 @@ export function createToolDropTarget(
     truncate: () => ToolDropResult;
     skeletonReal: () => ToolDropResult;
     editMarker: () => ToolDropResult;
+    editMarkerStripped: () => ToolDropResult;
+    skeletonStripped: () => ToolDropResult;
+    hasAttachments: () => boolean;
     inputStringBytes: () => number | null;
     wouldStrandConversationEnd: () => boolean;
     /**
@@ -526,6 +531,28 @@ export function createToolDropTarget(
         return "truncated";
     };
 
+    const skeletonStripped = (): ToolDropResult => {
+        const entry = index.get(compositeKey);
+        if (!entry || entry.occurrences.length === 0) return "absent";
+        if (!entry.hasResult) return "incomplete";
+        for (const occurrence of entry.occurrences) {
+            clampCloneInPlace(occurrence, (part) => skeletonRealToolPart(part, tagId, true));
+        }
+        clearThinkingParts(thinkingParts);
+        return "truncated";
+    };
+
+    const hasAttachments = (): boolean =>
+        index
+            .get(compositeKey)
+            ?.occurrences.some(
+                ({ part }) =>
+                    isRecord(part) &&
+                    isRecord(part.state) &&
+                    Array.isArray(part.state.attachments) &&
+                    part.state.attachments.length > 0,
+            ) ?? false;
+
     const readRawInput = (): unknown => {
         const entry = index.get(compositeKey);
         if (!entry) return undefined;
@@ -536,7 +563,7 @@ export function createToolDropTarget(
         return undefined;
     };
 
-    const editMarker = (): ToolDropResult => {
+    const applyEditMarker = (stripAttachments: boolean): ToolDropResult => {
         const entry = index.get(compositeKey);
         if (!entry || entry.occurrences.length === 0) return "absent";
         if (!entry.hasResult) return "incomplete";
@@ -544,7 +571,9 @@ export function createToolDropTarget(
         for (const occurrence of entry.occurrences) {
             // Same mutation-safety guarantee as truncate(): clamp a clone, never
             // the live part object.
-            clampCloneInPlace(occurrence, (part) => editMarkerToolPart(part, tagId));
+            clampCloneInPlace(occurrence, (part) =>
+                editMarkerToolPart(part, tagId, stripAttachments),
+            );
         }
         clearThinkingParts(thinkingParts);
         return "truncated";
@@ -594,7 +623,10 @@ export function createToolDropTarget(
         drop,
         truncate,
         skeletonReal,
-        editMarker,
+        skeletonStripped,
+        hasAttachments,
+        editMarker: () => applyEditMarker(false),
+        editMarkerStripped: () => applyEditMarker(true),
         inputStringBytes: (): number | null => {
             const entry = index.get(compositeKey);
             if (!entry || entry.occurrences.length === 0) return null;

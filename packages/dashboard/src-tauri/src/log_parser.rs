@@ -1169,6 +1169,15 @@ mod tests {
     }
 
     #[test]
+    fn reads_message_updated_identifiers_as_fields() {
+        let record = parse_log_record("[2026-09-05T10:41:03.130Z] [magic-context][ses_538] event message.updated: provider=mock model=test hasUsageTokens=true tokens.input=10 cache.read=2 cache.write=0 message.id=msg_538 session.id=ses_538").unwrap();
+        assert_eq!(record.session.as_deref(), Some("ses_538"));
+        assert_eq!(record.message, "event message.updated:");
+        assert_eq!(record.kv.get("message.id").map(String::as_str), Some("msg_538"));
+        assert_eq!(record.kv.get("session.id").map(String::as_str), Some("ses_538"));
+    }
+
+    #[test]
     fn reads_the_legacy_shape_as_legacy_and_maps_global_to_no_session() {
         let record = parse_log_record(LEGACY_LINE).unwrap();
         assert_eq!(record.grammar, LogGrammar::Legacy);

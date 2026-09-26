@@ -65,7 +65,7 @@ export function buildReplacementContent(tagId: number): string {
 export interface NewToolDropOutcome {
     result: ToolDropResult;
     /** The drop mode to persist so every later pass replays the same bytes. */
-    mode: "skeleton_real" | "full";
+    mode: "skeleton_real" | "skeleton_stripped" | "full";
 }
 
 /**
@@ -90,9 +90,19 @@ export function applyNewToolDrop(
         options.keepSkeleton === true ||
         target.cannotRemove?.() === true
     ) {
-        return { result: target.skeletonReal?.() ?? "absent", mode: "skeleton_real" };
+        const strip = target.hasAttachments?.() === true;
+        return {
+            result: (strip ? target.skeletonStripped?.() : target.skeletonReal?.()) ?? "absent",
+            mode: strip ? "skeleton_stripped" : "skeleton_real",
+        };
     }
     const result = target.drop?.() ?? "absent";
+    // A result at the end of the request cannot be removed without leaving a
+    // dangling call. When drop() keeps that call as a skeleton, strip its media
+    // and persist the choice; older skeleton modes still replay their media.
+    if (result === "truncated" && target.hasAttachments?.() === true) {
+        return { result: target.skeletonStripped?.() ?? "absent", mode: "skeleton_stripped" };
+    }
     return { result, mode: result === "truncated" ? "skeleton_real" : "full" };
 }
 
@@ -363,8 +373,11 @@ export function applyPendingOperations(
                     if (editMarkerTagIds.has(pendingOp.tagId)) {
                         // Superseded edit/write: compress to a filePath-preserving
                         // marker even when the tag is inside the recent skeleton
-                        // window. Frozen as drop_mode="edit_marker", replayed by mode.
-                        const markResult = target?.editMarker?.() ?? "absent";
+                        // window. Freeze the chosen render mode for later replay.
+                        const strip = target?.hasAttachments?.() === true;
+                        const markResult =
+                            (strip ? target?.editMarkerStripped?.() : target?.editMarker?.()) ??
+                            "absent";
                         if (markResult === "incomplete" || markResult === "absent") {
                             reject(`edit_marker_${markResult}`);
                             continue;
@@ -372,7 +385,12 @@ export function applyPendingOperations(
                         didMutateMessage = true;
                         operationMutated = true;
                         onTagReduced?.({ tagNumber: pendingOp.tagId, mode: "edit_marker" });
-                        updateTagDropMode(db, sessionId, pendingOp.tagId, "edit_marker");
+                        updateTagDropMode(
+                            db,
+                            sessionId,
+                            pendingOp.tagId,
+                            strip ? "edit_marker_stripped" : "edit_marker",
+                        );
                         shouldPersistDrop = true;
                     } else {
                         // Real-or-absent: a small input inside the newest-call
@@ -486,11 +504,17 @@ export function applyFlushedStatuses(
         if (tag.status === "dropped") {
             const target = targets.get(tag.tagNumber);
             if (tag.type === "tool") {
-                if (tag.dropMode === "edit_marker") {
+                if (tag.dropMode === "edit_marker_stripped") {
+                    const result = target?.editMarkerStripped?.() ?? "absent";
+                    if (result === "truncated") didMutateMessage = true;
+                } else if (tag.dropMode === "edit_marker") {
                     const markResult = target?.editMarker?.() ?? "absent";
                     if (markResult === "truncated") {
                         didMutateMessage = true;
                     }
+                } else if (tag.dropMode === "skeleton_stripped") {
+                    const result = target?.skeletonStripped?.() ?? "absent";
+                    if (result === "truncated") didMutateMessage = true;
                 } else if (tag.dropMode === "skeleton_real") {
                     const result = target?.skeletonReal?.() ?? "absent";
                     if (result === "truncated") {
