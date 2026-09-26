@@ -32,9 +32,9 @@ describe.skipIf(!rustPrereqs.ok)("rust historian: hermetic Broca producer", () =
 
     beforeAll(async () => {
         h = await RustTestHarness.create({
-            modelContextLimit: 30_000,
+            modelContextLimit: 128_000,
             magicContextConfig: {
-                execute_threshold_percentage: 25,
+                execute_threshold_percentage: 15,
                 protected_tags: 1,
                 compressor: { enabled: false },
             },
@@ -84,7 +84,7 @@ describe.skipIf(!rustPrereqs.ok)("rust historian: hermetic Broca producer", () =
         h.mock.setDefault({
             text: "historian trigger",
             usage: {
-                input_tokens: 27_000,
+                input_tokens: 100_000,
                 output_tokens: 20,
                 cache_creation_input_tokens: 2_000,
             },
@@ -137,9 +137,9 @@ describe.skipIf(!rustPrereqs.ok)("rust historian: hermetic Broca producer", () =
         "fits an oversize completed tool arc, publishes it once, and advances past it",
         async () => {
             const oversize = await RustTestHarness.create({
-                modelContextLimit: 30_000,
+                modelContextLimit: 128_000,
                 magicContextConfig: {
-                    execute_threshold_percentage: 25,
+                    execute_threshold_percentage: 15,
                     protected_tags: 1,
                     compressor: { enabled: false },
                     historian: { context_limit_tokens: 120_000 },

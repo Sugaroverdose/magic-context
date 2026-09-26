@@ -853,6 +853,9 @@ pub struct TransformRequest {
     /// a present but empty list disables historian dispatch for this OpenCode route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub historian_model_chain: Option<Vec<String>>,
+    #[serde(default)]
+    pub historian_model_limits:
+        std::collections::BTreeMap<String, crate::historian::HistorianModelLimits>,
     /// Host-resolved per-attempt historian deadline; absent on older adapters.
     #[serde(default)]
     pub historian_timeout_ms: Option<u64>,
@@ -1071,6 +1074,9 @@ struct TransformRequestWire {
     #[serde(default)]
     historian_model_chain: Option<Vec<String>>,
     #[serde(default)]
+    historian_model_limits:
+        std::collections::BTreeMap<String, crate::historian::HistorianModelLimits>,
+    #[serde(default)]
     historian_timeout_ms: Option<u64>,
     #[serde(default)]
     declared_trim: Option<DeclaredTrim>,
@@ -1164,6 +1170,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             detected_context_limit_model_key: wire.detected_context_limit_model_key,
             history_budget_tokens: wire.history_budget_tokens,
             historian_model_chain: wire.historian_model_chain,
+            historian_model_limits: wire.historian_model_limits,
             historian_timeout_ms: wire.historian_timeout_ms,
             declared_trim: wire.declared_trim,
             lineage_switched: wire.lineage_switched,
@@ -16765,6 +16772,7 @@ pub(crate) mod tests {
             detected_context_limit_model_key: None,
             history_budget_tokens: None,
             historian_model_chain: None,
+            historian_model_limits: Default::default(),
             historian_timeout_ms: None,
             declared_trim: None,
             lineage_switched: false,
@@ -19864,7 +19872,11 @@ pub(crate) mod tests {
                 redo.action,
                 redo.messages() == before.messages(),
             );
-            (undo_pass.action.clone(), red_after_undo, redo.messages() == before.messages())
+            (
+                undo_pass.action.clone(),
+                red_after_undo,
+                redo.messages() == before.messages(),
+            )
         };
         let control = run_case(false);
         assert!(control.1 && control.2, "control: {control:?}");
@@ -19961,8 +19973,7 @@ pub(crate) mod tests {
             let session = "regate-lanes";
             s.replace_compartments(session, &[comp(1, 1, 1, "a", "SUMMARY")])
                 .unwrap();
-            let first =
-                json!([{"content": "first", "status": "in_progress", "priority": "high"}]);
+            let first = json!([{"content": "first", "status": "in_progress", "priority": "high"}]);
             let second =
                 json!([{"content": "second", "status": "in_progress", "priority": "high"}]);
             let mut request = with_usage(

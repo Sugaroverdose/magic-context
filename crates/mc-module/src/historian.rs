@@ -1442,6 +1442,14 @@ impl HistorianProducerDriver for HistorianProducer {
     }
 }
 
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+pub struct HistorianModelLimits {
+    #[serde(default)]
+    pub context: Option<usize>,
+    #[serde(default)]
+    pub output: Option<u32>,
+}
+
 pub struct HistorianFireRequest<'a> {
     pub store: &'a McStore,
     pub session_id: &'a str,
@@ -1463,6 +1471,7 @@ pub struct HistorianFireRequest<'a> {
     pub historian_context_limit_tokens: Option<usize>,
     /// Fallback windows must belong to their own model, never to the primary model.
     pub fallback_context_limits: std::collections::BTreeMap<String, usize>,
+    pub model_limits: std::collections::BTreeMap<String, HistorianModelLimits>,
     pub max_output_tokens: u32,
     pub from_ordinal: u64,
     pub to_ordinal: u64,
@@ -2097,12 +2106,25 @@ where
             },
             true,
         );
-        let current_window = if index == 0 {
+        let resolved = request.model_limits.get(model);
+        let legacy_window = if index == 0 {
             request.historian_context_limit_tokens
         } else {
             request.fallback_context_limits.get(model).copied()
         };
-        let fit_limit = producer_input_token_limit(current_window, request.max_output_tokens);
+        let current_window = resolved
+            .and_then(|limit| limit.context)
+            .or(legacy_window)
+            .or(request.historian_context_limit_tokens)
+            .map(|window| {
+                request
+                    .historian_context_limit_tokens
+                    .map_or(window, |cap| window.min(cap))
+            });
+        let output = resolved
+            .and_then(|limit| limit.output)
+            .unwrap_or(request.max_output_tokens);
+        let fit_limit = producer_input_token_limit(current_window, output);
         if fit_limit.is_none() {
             static UNKNOWN_WINDOWS: std::sync::OnceLock<
                 std::sync::Mutex<std::collections::HashSet<String>>,
@@ -3329,6 +3351,7 @@ mod tests {
             detected_context_limit_model_key: None,
             history_budget_tokens: None,
             historian_model_chain: None,
+            historian_model_limits: Default::default(),
             historian_timeout_ms: None,
             declared_trim: None,
             lineage_switched: false,
@@ -3788,6 +3811,7 @@ mod tests {
             await_timeout: historian_await_timeout(None),
             producer_source_tokens: 1,
             historian_context_limit_tokens: Some(200_000),
+            model_limits: Default::default(),
             fallback_context_limits: models
                 .iter()
                 .map(|model| (model.clone(), 200_000))
@@ -4121,6 +4145,85 @@ mod tests {
             ))));
         assert!(run_historian_firing(&mut producer, request).await.is_ok());
         assert_eq!(producer.observed_starts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fallback_uses_its_resolved_window_and_output_reserve() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_compartment(&store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model-a".into(), "prov/model-b".into()];
+        let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+        request.historian_context_limit_tokens = None;
+        request.fallback_context_limits.clear();
+        request.model_limits.insert(
+            models[1].clone(),
+            HistorianModelLimits {
+                context: Some(4),
+                output: Some(4),
+            },
+        );
+        let mut producer = ScriptedProducer::default()
+            .with_start(Err(HistorianProducerError::retryable_model_failure(
+                "primary failed",
+            )))
+            .with_start(Ok(run_handle("unexpected-fallback")))
+            .with_output(Ok(producer_output(historian_xml("unexpected"))));
+        let error = run_historian_firing(&mut producer, request)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("producer_prompt_fit_refused model=prov/model-b"));
+        assert_eq!(producer.observed_starts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_fallback_window_dispatches_and_logs_once() {
+        struct LogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = std::sync::Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || LogWriter(std::sync::Arc::clone(&writer)))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        for _ in 0..2 {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_prior_compartment(&store);
+            let chunk = historian_chunk();
+            let prior = prior_ranges();
+            let models = vec!["prov/model-a".into(), "prov/unknown-541".into()];
+            let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+            request.historian_context_limit_tokens = None;
+            request.fallback_context_limits.clear();
+            let mut producer = ScriptedProducer::default()
+                .with_start(Err(HistorianProducerError::retryable_model_failure(
+                    "primary failed",
+                )))
+                .with_start(Ok(run_handle("run-unknown")))
+                .with_output(Ok(producer_output(historian_xml("unknown window"))));
+            assert!(run_historian_firing(&mut producer, request).await.is_ok());
+            assert_eq!(producer.observed_starts.len(), 2);
+        }
+        let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            logs.matches(
+                "producer window unknown or inconsistent for prov/unknown-541: sending unguarded"
+            )
+            .count(),
+            1
+        );
     }
 
     #[tokio::test]

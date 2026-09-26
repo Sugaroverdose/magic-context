@@ -57,6 +57,7 @@ import { writeRustTransformDecision } from "../../features/magic-context/transfo
 import type { ContextUsage } from "../../features/magic-context/types";
 import { canonicalModelIdentity } from "../../shared/harness-provider-map";
 import { log, sessionLog } from "../../shared/logger";
+import { getSdkOutputLimit, getSdkWindowGeometry } from "../../shared/models-dev-cache";
 import { promptSurfaceConfigIdentity, resolvePromptSurface } from "../../shared/prompt-surface";
 import { createPromptSurfaceGuidanceEpochCache } from "../../shared/prompt-surface-runtime";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
@@ -69,6 +70,7 @@ import {
     type ToolAvailabilityVerdict,
     todowritePermissionDenied,
 } from "./ctx-reduce-availability";
+import { resolveKnownHistorianContextLimit } from "./derive-budgets";
 import { isEditTool } from "./edit-marker";
 import {
     EmergencyFailClosedError,
@@ -1596,6 +1598,36 @@ function resolvedHistorianModelChain(
     return [...new Set(models)];
 }
 
+function resolvedHistorianModelLimits(
+    chain: readonly string[],
+): Record<string, { context?: number; output?: number }> {
+    return Object.fromEntries(
+        chain.map((key) => {
+            const [provider, ...parts] = key.split("/");
+            const output =
+                provider && parts.length ? getSdkOutputLimit(provider, parts.join("/")) : undefined;
+            const known = resolveKnownHistorianContextLimit(key);
+            const learned =
+                provider && parts.length
+                    ? getSdkWindowGeometry(provider, parts.join("/"))?.derivation.window
+                    : undefined;
+            const context =
+                known === undefined
+                    ? learned
+                    : learned === undefined
+                      ? known
+                      : Math.min(known, learned);
+            return [
+                key,
+                {
+                    ...(context !== undefined ? { context } : {}),
+                    ...(output !== undefined ? { output } : {}),
+                },
+            ];
+        }),
+    );
+}
+
 function muralInputForWire(
     mural: ReturnType<typeof resolveMuralWire> | undefined,
 ): Record<string, unknown> | undefined {
@@ -1740,6 +1772,7 @@ function buildTransformBody(args: {
         auto_search_min_prompt_chars: args.passInputs.auto_search_min_prompt_chars,
         history_budget_tokens: args.passInputs.history_budget_tokens,
         historian_model_chain: args.passInputs.historian_model_chain,
+        historian_model_limits: args.passInputs.historian_model_limits,
         historian_timeout_ms: args.passInputs.historian_timeout_ms,
         clear_reasoning_age: args.passInputs.clear_reasoning_age,
         caveman_enabled: args.passInputs.caveman_enabled === true,
@@ -2799,7 +2832,12 @@ export function createRustModeTransform(
                 sessionMeta.cachedM0SystemHash === observedSystemHash
                     ? ""
                     : observedSystemHash;
+            const historianChain = resolvedHistorianModelChain({
+                historianModel: historianRun?.model ?? deps.historianModel,
+                fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
+            });
             const passInputs: Record<string, unknown> = {
+                historian_model_limits: resolvedHistorianModelLimits(historianChain),
                 now_ms: requestObservedAtMs,
                 model_key: modelKey,
                 provider_id: model?.providerID ?? null,
@@ -2810,10 +2848,7 @@ export function createRustModeTransform(
                 auto_search_score_threshold: deps.autoSearch?.scoreThreshold ?? 0.6,
                 auto_search_min_prompt_chars: deps.autoSearch?.minPromptChars ?? 20,
                 history_budget_tokens: historyBudgetTokens,
-                historian_model_chain: resolvedHistorianModelChain({
-                    historianModel: historianRun?.model ?? deps.historianModel,
-                    fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
-                }),
+                historian_model_chain: historianChain,
                 historian_timeout_ms:
                     historianRun?.timeoutMs ??
                     deps.historianTimeoutMs ??
@@ -4241,6 +4276,7 @@ export const __rustModeTransformTest = {
     hardWallUsagePercentage,
     muralInputForWire,
     resolvedHistorianModelChain,
+    resolvedHistorianModelLimits,
     formatRustPassLog,
     formatRustInputCoverageLog,
     materializedCompactionBoundary,

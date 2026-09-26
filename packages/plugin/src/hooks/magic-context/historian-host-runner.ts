@@ -2,10 +2,14 @@ import { ensureInstallInstanceId } from "../../features/magic-context/install-in
 import type { PluginContext } from "../../plugin/types";
 import { log as defaultLog } from "../../shared/logger";
 import { promptSyncWithValidatedOutputRetry } from "../../shared/model-suggestion-retry";
+import { getSdkOutputLimit, getSdkWindowGeometry } from "../../shared/models-dev-cache";
 import { modelBodyField } from "../../shared/resolve-fallbacks";
 import type { Database } from "../../shared/sqlite";
 import { createV1HiddenCompletionExecutor } from "./compartment-runner-historian";
 import type { HiddenCompletionExecutor } from "./compartment-runner-types";
+import { resolveKnownHistorianContextLimit } from "./derive-budgets";
+import { historianProducerReserve, producerPromptFailureReason } from "./producer-window-guard";
+import { estimateTokens } from "./read-session-formatting";
 
 /**
  * The host half of the `historian.runner: "host"` lane.
@@ -295,6 +299,7 @@ function failureCode(error: unknown, aborted: boolean): string {
 
 export class HistorianHostRunner {
     private readonly active = new Map<string, ActiveRun>();
+    private readonly unknownWindows = new Set<string>();
     private polling: Promise<void> | null = null;
     private idleCancel: (() => void) | null = null;
     private idlePollsLeft = 0;
@@ -631,6 +636,42 @@ export class HistorianHostRunner {
                 {
                     transport: Object.assign(
                         (request: Parameters<typeof executor.attempt>[1]) => {
+                            const model = request.body?.model;
+                            const key =
+                                model?.providerID && model?.modelID
+                                    ? `${model.providerID}/${model.modelID}`
+                                    : head;
+                            const [provider, ...parts] = key.split("/");
+                            const known = resolveKnownHistorianContextLimit(key);
+                            const learned =
+                                provider && parts.length
+                                    ? getSdkWindowGeometry(provider, parts.join("/"))?.derivation
+                                          .window
+                                    : undefined;
+                            const window =
+                                known === undefined
+                                    ? learned
+                                    : learned === undefined
+                                      ? known
+                                      : Math.min(known, learned);
+                            if (window === undefined && !this.unknownWindows.has(key)) {
+                                this.unknownWindows.add(key);
+                                this.log(`producer window unknown for ${key}: sending unguarded`);
+                            }
+                            const output =
+                                provider && parts.length
+                                    ? getSdkOutputLimit(provider, parts.join("/"))
+                                    : undefined;
+                            const reserve = historianProducerReserve(window, undefined, output);
+                            const failure = producerPromptFailureReason({
+                                sourceLocal: estimateTokens(claim.user),
+                                systemLocal: estimateTokens(claim.system),
+                                toolsLocal: 0,
+                                modelKey: key,
+                                contextLimitTokens: window,
+                                maxOutputTokens: reserve,
+                            });
+                            if (failure) throw new Error(`${key}: ${failure}`);
                             attemptStartedAt = Date.now();
                             return executor.attempt(handle, request);
                         },

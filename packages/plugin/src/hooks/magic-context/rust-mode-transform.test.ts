@@ -57,6 +57,7 @@ import {
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import { ABSOLUTE_EMERGENCY_PERCENTAGE } from "../../shared/escalation-bands";
 import * as logger from "../../shared/logger";
+import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { promptSurfaceConfigIdentity } from "../../shared/prompt-surface";
 import { createPromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import { Database, withPrivilegedWriter } from "../../shared/sqlite";
@@ -608,6 +609,64 @@ describe("Rust mode authority adapter", () => {
             "anthropic/profile-historian",
             "openai/profile-fallback",
         ]);
+        const limits = __rustModeTransformTest.resolvedHistorianModelLimits(historianModelChain);
+        expect(Object.keys(limits)).toEqual(body.historian_model_chain);
+        expect(limits["anthropic/profile-historian"]).toBeDefined();
+        expect(limits["openai/profile-fallback"]).toBeDefined();
+    });
+
+    it("sends each historian chain model's resolved window and output ceiling", async () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-historian-model-limits-"));
+        const previous = process.env.XDG_DATA_HOME;
+        try {
+            process.env.XDG_DATA_HOME = root;
+            clearModelsDevCache();
+            await refreshModelLimitsFromApi({
+                config: {
+                    providers: async () => ({
+                        data: {
+                            providers: [
+                                {
+                                    id: "anthropic",
+                                    models: {
+                                        primary: { limit: { context: 200_000, output: 16_000 } },
+                                    },
+                                },
+                                {
+                                    id: "openai",
+                                    models: {
+                                        fallback: { limit: { context: 64_000, output: 8_000 } },
+                                    },
+                                },
+                            ],
+                        },
+                    }),
+                },
+            });
+            const chain = ["anthropic/primary", "openai/fallback"];
+            const body = __rustModeTransformTest.buildTransformBody({
+                sessionId: "historian-limits",
+                input: [],
+                nativeMessages: [],
+                passInputs: {
+                    historian_model_chain: chain,
+                    historian_model_limits:
+                        __rustModeTransformTest.resolvedHistorianModelLimits(chain),
+                },
+                usage: {},
+                modelKey: null,
+                providerId: null,
+            });
+            expect(body.historian_model_limits).toEqual({
+                "anthropic/primary": { context: 200_000, output: 16_000 },
+                "openai/fallback": { context: 64_000, output: 8_000 },
+            });
+        } finally {
+            clearModelsDevCache();
+            if (previous === undefined) delete process.env.XDG_DATA_HOME;
+            else process.env.XDG_DATA_HOME = previous;
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 
     it("gates and copies a mural payload onto the transform wire", () => {
