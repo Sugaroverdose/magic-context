@@ -48,6 +48,7 @@ import {
     getHistorianFailureState,
     getLastNudgeUndropped,
     getOverflowState,
+    getPersistedCompactionMarkerState,
     loadTransformPassStateSnapshot,
     recordOverflowDetected,
     resetProtectedTailNoEligibleHead,
@@ -111,6 +112,8 @@ import {
 import type { LiveModelBySession } from "./hook-handlers";
 import {
     capturePrefixTrimSourceOrder,
+    findHostCompactionWindow,
+    type HostCompactionWindow,
     mustMaterialize,
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,
@@ -233,6 +236,10 @@ export function clearMessageTokensCache(sessionId: string, messageId?: string): 
 // appears (or changes) for a session in this process — not on every transform
 // pass. Bounded so crashed/abandoned sessions can't leak the guard forever.
 const recordedSessionProjectIdentity = new BoundedSessionMap<string>(MESSAGE_TOKENS_CACHE_MAX);
+
+// Summary id of the native host compaction last logged per session, so the
+// window head is reported once per compaction rather than on every pass.
+const hostCompactionLoggedBySession = new BoundedSessionMap<string>(MESSAGE_TOKENS_CACHE_MAX);
 
 // Tagger / trigger load-scoping floor (OpenCode only). Several hot-path reads
 // preload an in-memory map or aggregate over a session's tags; on a large/old
@@ -973,6 +980,28 @@ export function createTransform(deps: TransformDeps) {
             return;
         }
         logTransformTiming(sessionId, "getOrCreateSessionMeta", tMeta);
+
+        // Read before anything in this pass trims the messages: a native host
+        // compaction is recognised by the rows at the head of the host window.
+        let hostCompaction: HostCompactionWindow | null = null;
+        try {
+            hostCompaction = findHostCompactionWindow(
+                messages,
+                () => getPersistedCompactionMarkerState(db, sessionId)?.summaryMessageId || null,
+            );
+            if (
+                hostCompaction &&
+                hostCompactionLoggedBySession.get(sessionId) !== hostCompaction.summaryMessageId
+            ) {
+                hostCompactionLoggedBySession.set(sessionId, hostCompaction.summaryMessageId);
+                sessionLog(
+                    sessionId,
+                    `transform: native host compaction heads the window (request ${hostCompaction.compactionMessageId}, summary ${hostCompaction.summaryMessageId}, completed ${hostCompaction.completedAt}); a baseline older than it folds on this pass`,
+                );
+            }
+        } catch (error) {
+            sessionLog(sessionId, "transform: reading the host compaction head failed:", error);
+        }
 
         // Magic Context's OWN hidden children (historian/dreamer)
         // are fully exempt from the transform. They have a
@@ -2426,6 +2455,7 @@ export function createTransform(deps: TransformDeps) {
             modelKey: hardModelKey,
             cacheExpired: hardCacheExpired,
             lastResponseTime: sessionMeta.lastResponseTime,
+            ...(hostCompaction ? { hostCompaction } : {}),
         };
 
         const lateActiveRunBlocksMaterialization =

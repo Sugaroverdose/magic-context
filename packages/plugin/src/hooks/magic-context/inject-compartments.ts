@@ -53,7 +53,10 @@ import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
-import { reconcileForkOrphanedCompactionMarkers } from "./compaction-marker-manager";
+import {
+    MARKER_SUMMARY_TEXT,
+    reconcileForkOrphanedCompactionMarkers,
+} from "./compaction-marker-manager";
 import {
     COMPARTMENT_RENDER_EPOCH,
     decodeCachedM0UpgradeIdentity,
@@ -849,6 +852,25 @@ export interface M0HardSignals {
     cacheExpired: boolean;
     /** Epoch ms of the last completed assistant response (end-of-turn). */
     lastResponseTime: number;
+    /**
+     * A native host compaction heading the live window, read from the messages
+     * the host served this pass before anything trimmed them. Absent when the
+     * window does not start with one.
+     */
+    hostCompaction?: HostCompactionWindow;
+}
+
+/**
+ * A native OpenCode compaction (`/compact` or automatic) heading the live window.
+ * OpenCode then serves [compaction request, summary, retained tail, newer rows]
+ * and stops loading everything older. Magic Context's own marker pair has the
+ * same shape and is never reported here.
+ */
+export interface HostCompactionWindow {
+    compactionMessageId: string;
+    summaryMessageId: string;
+    /** Epoch ms at which the host finished writing the summary. */
+    completedAt: number;
 }
 
 const EMPTY_HARD_SIGNALS: M0HardSignals = {
@@ -1760,6 +1782,19 @@ export function mustMaterialize(args: {
         hard.lastResponseTime > (args.state.cachedM0MaterializedAt ?? 0)
     ) {
         return withToolSetHashComparison({ value: true, reason: "ttl_idle" });
+    }
+    // A native host compaction replaced the window after the last fold. The host
+    // summary now stands in for the history before its retained tail, and the
+    // stored baseline boundary still points at a row the host no longer serves.
+    // The compaction already changed everything after the cached prefix, so the
+    // re-anchoring fold rides that change. Self-consuming like the idle expiry:
+    // after the fold, materializedAt is newer than the summary.
+    const hostCompaction = hard.hostCompaction;
+    if (
+        hostCompaction !== undefined &&
+        hostCompaction.completedAt > (args.state.cachedM0MaterializedAt ?? 0)
+    ) {
+        return withToolSetHashComparison({ value: true, reason: "host_compaction" });
     }
 
     // ── HARD: genuine m[0] CONTENT change (the rendered baseline bytes differ) ──
@@ -3441,6 +3476,70 @@ function firstPersistedLiveId(messages: readonly MessageLike[]): string | null {
         return id;
     }
     return null;
+}
+
+function textOfParts(parts: readonly unknown[]): string {
+    return parts
+        .map((part) => {
+            const text = (part as { text?: unknown }).text;
+            return typeof text === "string" ? text : "";
+        })
+        .join("");
+}
+
+/**
+ * Read a native host compaction off the head of the messages the host served,
+ * before anything in this pass trims them. `readMagicContextSummaryMessageId`
+ * returns the summary row of Magic Context's own marker, which has the same
+ * shape and is excluded along with any row carrying its placeholder text. It is
+ * only called when the head has that shape, so ordinary passes read nothing.
+ */
+export function findHostCompactionWindow(
+    messages: readonly MessageLike[],
+    readMagicContextSummaryMessageId: () => string | null,
+): HostCompactionWindow | null {
+    const persisted: MessageLike[] = [];
+    for (const message of messages) {
+        if (persisted.length === 2) break;
+        const id = message.info.id;
+        if (typeof id !== "string" || id.length === 0) continue;
+        if (isHostRenderedSystemMessage(message)) continue;
+        persisted.push(message);
+    }
+    const [request, summary] = persisted;
+    if (!request || !summary) return null;
+    if (
+        request.info.role !== "user" ||
+        !request.parts.some((part) => (part as { type?: unknown }).type === "compaction")
+    ) {
+        return null;
+    }
+    const summaryInfo = summary.info as MessageLike["info"] & {
+        parentID?: unknown;
+        time?: { created?: unknown; completed?: unknown };
+    };
+    if (
+        summaryInfo.role !== "assistant" ||
+        summaryInfo.summary !== true ||
+        summaryInfo.parentID !== request.info.id ||
+        !summaryInfo.finish ||
+        summaryInfo.error
+    ) {
+        return null;
+    }
+    const summaryMessageId = summary.info.id as string;
+    if (textOfParts(summary.parts).includes(MARKER_SUMMARY_TEXT)) return null;
+    if (summaryMessageId === readMagicContextSummaryMessageId()) return null;
+    const completedAt =
+        typeof summaryInfo.time?.completed === "number"
+            ? summaryInfo.time.completed
+            : summaryInfo.time?.created;
+    if (typeof completedAt !== "number" || !Number.isFinite(completedAt)) return null;
+    return {
+        compactionMessageId: request.info.id as string,
+        summaryMessageId,
+        completedAt,
+    };
 }
 
 function boundaryPrecedesWindow(sessionId: string, boundary: string, firstLiveId: string): boolean {
