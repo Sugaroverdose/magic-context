@@ -56,11 +56,12 @@ import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatt
 import { servedModuleM0Text } from "../../hooks/magic-context/rust-served-m0";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
+import { scheduleAfterBootQuiet } from '../../plugin/boot-quiet';
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
 import { detectConflicts } from "../../shared/conflict-detector";
 import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
 import { getErrorMessage } from "../../shared/error-message";
-import { sessionLog } from "../../shared/logger";
+import { log, sessionLog } from "../../shared/logger";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import {
     isSaneLimit,
@@ -98,6 +99,7 @@ import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { RestoredRowCache } from "./restore-rows";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { createV2RustRefusalRecovery, resolveV2RustModeModuleClient } from "./rust-mode";
+import { runV2SessionProjectBackfill } from './session-project-backfill';
 import {
     createV2RawMessageProvider,
     createV2RawMessageReader,
@@ -632,6 +634,14 @@ export async function registerContext(context: V2Context) {
     const openStoreReader = () =>
         new V2StoreReader(gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"));
     const pagedRead = createV2RawMessageReader(openStoreReader);
+    if (db && isDatabasePersisted(db)) {
+        const backfillDb = db;
+        scheduleAfterBootQuiet(() => {
+            runV2SessionProjectBackfill(backfillDb, openStoreReader).catch((error: unknown) =>
+                log("[session-project-backfill] OpenCode 2 backfill failed:", error),
+            );
+        });
+    }
     const readAllForConversion = (sessionID: string) =>
         readAllV2RawMessagesForConversion(openStoreReader, sessionID);
     // Refusal recovery only needs to know whether a user turn followed the refused
