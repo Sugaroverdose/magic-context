@@ -15,7 +15,7 @@ import {
     createPromptSurfaceRuntime,
     promptSurfaceHashMaterial,
 } from "../../shared/prompt-surface-runtime";
-import { isCompactionSystemRequest } from "./compaction-request";
+import { takeCompactionSystemTransform } from "./compaction-request";
 import {
     ctxReduceSpawnPermissionReadNeeded,
     primeCtxReduceSpawnPermission,
@@ -243,7 +243,7 @@ export function createSystemPromptHashHandler(deps: {
         // or advancing the sticky date would make the next real turn see its own
         // prompt as a change and fold a second time; the host compaction already
         // costs the one fold the replaced history needs.
-        if (isCompactionSystemRequest(sessionId)) {
+        if (takeCompactionSystemTransform(sessionId)) {
             sessionLog(sessionId, "system-prompt-hash skipped (OpenCode compaction request)");
             return;
         }

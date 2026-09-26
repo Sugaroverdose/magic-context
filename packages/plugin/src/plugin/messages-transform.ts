@@ -12,7 +12,9 @@ import {
 } from "../features/magic-context/storage-meta-persisted";
 import { updateSessionMeta } from "../features/magic-context/storage-meta-session";
 import {
-    renderCompactionRequestFromLkg,
+    messageIdsOf,
+    rememberServedRender,
+    renderCompactionRequest,
     takeCompactionMessagesTransform,
 } from "../hooks/magic-context/compaction-request";
 import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-closed";
@@ -326,8 +328,12 @@ export function createMessagesTransformHandler(args: {
                   }
               })()
             : null;
+        const inputIds = sessionId ? messageIdsOf(output.messages as MessageLike[]) : null;
         try {
             await magicContext?.["experimental.chat.messages.transform"]?.(input, output);
+            if (sessionId && inputIds && !isInternalChild) {
+                rememberServedRender(sessionId, inputIds, output.messages as MessageLike[]);
+            }
             return output.messages;
         } catch (error) {
             if (
@@ -461,8 +467,8 @@ export function createMessagesTransformHandler(args: {
         if (compactionSessionId && takeCompactionMessagesTransform(compactionSessionId)) {
             // OpenCode is building its native compaction request from this history.
             // It is not a turn of the session, so nothing may be persisted from it:
-            // hand the compaction agent the last render instead of running a pass.
-            const rendered = renderCompactionRequestFromLkg(
+            // hand the compaction agent the last served render instead of running a pass.
+            const rendered = renderCompactionRequest(
                 compactionSessionId,
                 output.messages as MessageLike[],
             );
@@ -470,16 +476,17 @@ export function createMessagesTransformHandler(args: {
                 replaceMessagesInPlace(output, rendered as unknown as MessageWithParts[]);
                 sessionLog(
                     compactionSessionId,
-                    `compaction request: served the last-known-good render (${rendered.length} messages); transform skipped`,
+                    `compaction request: served the last pass's render (${rendered.length} messages); transform skipped`,
                 );
                 return output.messages;
             }
-            // Without a last render there is no way to hand over m[0]/m[1]
-            // without running the transform, and the raw history may be far too
-            // large to summarise. Fall back to the ordinary pass.
+            // No pass has been served in this process (a restart just before the
+            // compaction). There is no way to hand over m[0]/m[1] without running
+            // the transform, and the raw history may be far too large to
+            // summarise, so fall back to the ordinary pass.
             sessionLog(
                 compactionSessionId,
-                "compaction request: no last-known-good render; running the ordinary transform",
+                "compaction request: no render served in this process; running the ordinary transform",
             );
         }
         const inputMessages = [...output.messages];

@@ -22,14 +22,14 @@ import { createTagger } from "../../features/magic-context/tagger";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import {
     clearCompactionRequest,
-    isCompactionSystemRequest,
     markCompactionRequest,
-    renderCompactionRequestFromLkg,
+    messageIdsOf,
+    rememberServedRender,
+    renderCompactionRequest,
     resetCompactionRequestsForTest,
     takeCompactionMessagesTransform,
+    takeCompactionSystemTransform,
 } from "./compaction-request";
-import { captureLkgSlot } from "./lkg-replay";
-import { resetLkgSlotsForTest } from "./lkg-slot";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import { createTransform } from "./transform";
 import type { MessageLike } from "./transform-operations";
@@ -45,7 +45,6 @@ function useTempDataHome(prefix: string): void {
 
 afterEach(() => {
     resetCompactionRequestsForTest();
-    resetLkgSlotsForTest();
     closeDatabase();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
@@ -92,38 +91,54 @@ const sha = (messages: readonly unknown[]): string =>
     createHash("sha256").update(JSON.stringify(messages)).digest("hex");
 
 describe("compaction request detection", () => {
-    it("claims only the messages transform right after the compacting hook", () => {
+    it("shipped 1.18.30 order: compacting, system, messages; then the real turn's system, messages", () => {
+        expect(takeCompactionSystemTransform("ses_a")).toBe(false);
         expect(takeCompactionMessagesTransform("ses_a")).toBe(false);
-        expect(isCompactionSystemRequest("ses_a")).toBe(false);
 
         markCompactionRequest("ses_a");
-        // The compaction request's own system transforms (one per attempt of its
-        // LLM call) are all inside the window.
-        expect(isCompactionSystemRequest("ses_a")).toBe(true);
+        expect(takeCompactionSystemTransform("ses_a")).toBe(true);
         expect(takeCompactionMessagesTransform("ses_a")).toBe(true);
-        expect(isCompactionSystemRequest("ses_a")).toBe(true);
-        expect(isCompactionSystemRequest("ses_a")).toBe(true);
         // Another session is never affected.
-        expect(isCompactionSystemRequest("ses_b")).toBe(false);
+        expect(takeCompactionSystemTransform("ses_b")).toBe(false);
         expect(takeCompactionMessagesTransform("ses_b")).toBe(false);
 
-        // The next messages transform is a real turn, and closes the window before
-        // that turn's own system transform runs.
+        // The real turn after the compaction.
+        expect(takeCompactionSystemTransform("ses_a")).toBe(false);
         expect(takeCompactionMessagesTransform("ses_a")).toBe(false);
-        expect(isCompactionSystemRequest("ses_a")).toBe(false);
+        expect(takeCompactionSystemTransform("ses_a")).toBe(false);
+    });
+
+    it("source-tag order: compacting, messages, system per attempt; then the real turn's messages, system", () => {
+        markCompactionRequest("ses_a");
+        expect(takeCompactionMessagesTransform("ses_a")).toBe(true);
+        // One system transform per attempt of the compaction agent's LLM call.
+        expect(takeCompactionSystemTransform("ses_a")).toBe(true);
+        expect(takeCompactionSystemTransform("ses_a")).toBe(true);
+
+        // The real turn after the compaction.
         expect(takeCompactionMessagesTransform("ses_a")).toBe(false);
+        expect(takeCompactionSystemTransform("ses_a")).toBe(false);
+    });
+
+    it("a new compaction reopens the window", () => {
+        markCompactionRequest("ses_a");
+        expect(takeCompactionSystemTransform("ses_a")).toBe(true);
+        expect(takeCompactionMessagesTransform("ses_a")).toBe(true);
+        markCompactionRequest("ses_a");
+        expect(takeCompactionSystemTransform("ses_a")).toBe(true);
+        expect(takeCompactionMessagesTransform("ses_a")).toBe(true);
     });
 
     it("forgets a deleted session", () => {
         markCompactionRequest("ses_a");
         clearCompactionRequest("ses_a");
-        expect(isCompactionSystemRequest("ses_a")).toBe(false);
+        expect(takeCompactionSystemTransform("ses_a")).toBe(false);
         expect(takeCompactionMessagesTransform("ses_a")).toBe(false);
     });
 });
 
-describe("renderCompactionRequestFromLkg", () => {
-    const sessionId = "ses_lkg_render";
+describe("renderCompactionRequest", () => {
+    const sessionId = "ses_served_render";
     const m0: MessageLike = {
         info: { id: "mc_m0", role: "user", sessionID: sessionId },
         parts: [
@@ -134,63 +149,69 @@ describe("renderCompactionRequestFromLkg", () => {
             },
         ],
     } as unknown as MessageLike;
+    // Magic Context's own compaction marker summary: not host input to the pass,
+    // and not flagged synthetic.
+    const markerSummary: MessageLike = {
+        info: { id: "msg_marker_summary", role: "assistant", sessionID: sessionId },
+        parts: [{ type: "text", text: "marker summary" }],
+    } as unknown as MessageLike;
 
-    function capture(input: TestMessage[], output: MessageLike[]): void {
-        expect(
-            captureLkgSlot({
-                sessionId,
-                input: input as unknown as MessageLike[],
-                output,
-                modelKey: "anthropic/claude",
-                providerKey: "anthropic",
-            }),
-        ).toBe(true);
+    function remember(input: TestMessage[], served: MessageLike[]): void {
+        rememberServedRender(sessionId, messageIdsOf(input as unknown as MessageLike[]), served);
     }
+
+    const idsOf = (messages: readonly MessageLike[] | null) =>
+        messages?.map((message) => (message.info as { id: string }).id);
 
     it("serves the last render narrowed to the requested rows, plus rows newer than it", () => {
         const input = conversation(sessionId, 3);
-        // The last render folded turn 1 into m[0] and tagged turn 2's reply.
-        const rendered = [
+        // The last pass folded turn 1 into m[0], tagged turn 2's reply and
+        // dropped turn 3's reply.
+        const served = [
             m0,
+            markerSummary,
             input[2],
             { ...input[3], parts: [{ type: "text", text: "§7§ assistant reply 2" }] },
             input[4],
         ] as unknown as MessageLike[];
-        capture(input, rendered);
+        remember(input, served);
 
-        // The compaction request drops the retained tail (turn 3) and carries a
-        // reply the render never saw.
-        const request = [...input.slice(0, 4)] as unknown as MessageLike[];
-        const result = renderCompactionRequestFromLkg(sessionId, request);
-        expect(result?.map((message) => (message.info as { id: string }).id)).toEqual([
-            "mc_m0",
-            "msg_u2",
-            "msg_a2",
-        ]);
+        // The compaction request leaves out the retained tail (turn 3).
+        const request = input.slice(0, 4) as unknown as MessageLike[];
+        const result = renderCompactionRequest(sessionId, request);
+        expect(idsOf(result)).toEqual(["mc_m0", "msg_marker_summary", "msg_u2", "msg_a2"]);
         expect(JSON.stringify(result)).toContain("§7§ assistant reply 2");
         expect(JSON.stringify(result)).not.toContain("user turn 1");
+        // A copy: the remembered render is out of reach of the host.
+        expect(result?.[0]).not.toBe(m0);
 
+        // Rows newer than the last pass come after its render, as OpenCode sent
+        // them; the reply that pass dropped stays out.
         const withNewer = [...input, ...turn(sessionId, 4)] as unknown as MessageLike[];
-        expect(
-            renderCompactionRequestFromLkg(sessionId, withNewer)?.map(
-                (message) => (message.info as { id: string }).id,
-            ),
-        ).toEqual(["mc_m0", "msg_u2", "msg_a2", "msg_u3", "msg_a3", "msg_u4", "msg_a4"]);
+        expect(idsOf(renderCompactionRequest(sessionId, withNewer))).toEqual([
+            "mc_m0",
+            "msg_marker_summary",
+            "msg_u2",
+            "msg_a2",
+            "msg_u3",
+            "msg_u4",
+            "msg_a4",
+        ]);
     });
 
     it("declines without a render, or when the render shares no row with the request", () => {
         const input = conversation(sessionId, 2);
-        expect(renderCompactionRequestFromLkg(sessionId, input as unknown as MessageLike[])).toBe(
-            null,
-        );
-        capture(input, [m0, ...(input as unknown as MessageLike[])]);
+        expect(renderCompactionRequest(sessionId, input as unknown as MessageLike[])).toBe(null);
+        remember(input, [m0, ...(input as unknown as MessageLike[])]);
         const unrelated = conversation("ses_other", 1).map((message) => ({
             ...message,
             info: { ...message.info, id: `other_${message.info.id}` },
         }));
-        expect(
-            renderCompactionRequestFromLkg(sessionId, unrelated as unknown as MessageLike[]),
-        ).toBe(null);
+        expect(renderCompactionRequest(sessionId, unrelated as unknown as MessageLike[])).toBe(
+            null,
+        );
+        clearCompactionRequest(sessionId);
+        expect(renderCompactionRequest(sessionId, input as unknown as MessageLike[])).toBe(null);
     });
 });
 
@@ -217,19 +238,22 @@ describe("a compaction request between two real passes", () => {
             lastHeuristicsTurnId: new Map<string, string>(),
         });
 
+        // Shipped order: the compaction's system transform runs before its messages
+        // transform. A prompt the signature list does not know, so only the window
+        // decides.
         markCompactionRequest(sessionId);
-        takeCompactionMessagesTransform(sessionId);
-        // A prompt the signature list does not know, so only the window decides.
         const system = ["An unrecognised summarizer prompt."];
         await handler({ sessionID: sessionId }, { system });
         expect(system).toEqual(["An unrecognised summarizer prompt."]);
         expect(getOrCreateSessionMeta(db, sessionId).systemPromptHash).toBe("stored-hash");
         expect(historyRefreshSessions.has(sessionId)).toBe(false);
-
-        // Control: once a real turn closes the window, the same differing prompt is
-        // a real change.
         takeCompactionMessagesTransform(sessionId);
-        await handler({ sessionID: sessionId }, { system: ["An unrecognised summarizer prompt."] });
+
+        // The real turn's system transform comes next and is handled normally:
+        // guidance is injected and a changed prompt is a real change.
+        const realTurn = ["You are the main agent with a changed prompt."];
+        await handler({ sessionID: sessionId }, { system: realTurn });
+        expect(realTurn[0]).toContain("## Magic Context");
         expect(historyRefreshSessions.has(sessionId)).toBe(true);
     });
 
@@ -308,6 +332,7 @@ describe("a compaction request between two real passes", () => {
         // OpenCode builds the compaction request from the history before the
         // retained tail (the last turn here).
         markCompactionRequest(sessionId);
+        expect(takeCompactionSystemTransform(sessionId)).toBe(true);
         const compactionHead = await run(conversation(sessionId, 2));
         expect(compactionHead.map((message) => message.info.id)).toEqual(
             passA.slice(0, compactionHead.length).map((message) => message.info.id),

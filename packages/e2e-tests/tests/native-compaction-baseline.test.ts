@@ -264,10 +264,10 @@ it(
         // The summary still covers Magic Context's history: the compartments ride
         // m[0] in the conversation handed to the compaction agent.
         expect(summaryRequest).toContain(HISTORY_SENTINEL);
-        // ...handed over from the last render, not from a transform pass that would
-        // persist state from the compaction request.
+        // ...handed over from the last pass's render, not from a transform pass that
+        // would persist state from the compaction request.
         expect(pluginLog().slice(logOffsetBeforeCompaction)).toContain(
-            "compaction request: served the last-known-good render",
+            "compaction request: served the last pass's render",
         );
 
         h.mock.setDefault(smallUsage("after-compaction"));
@@ -289,6 +289,10 @@ it(
         // and the host summary row is still left off the wire.
         expect(first).toContain(HISTORY_SENTINEL);
         expect(first).not.toContain(HOST_SUMMARY_SENTINEL);
+        // The real turn's system prompt is handled as usual: it still carries Magic
+        // Context's guidance, so recognising the compaction request did not swallow
+        // the next system-prompt hook call.
+        expect(first).toContain("## Magic Context");
 
         // The transform recognised the host's own compaction pair at the window head.
         expect(pluginLog()).toContain(
