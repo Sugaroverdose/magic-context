@@ -6,6 +6,7 @@ import { OpenCode } from "@opencode/client";
 import { Database } from "../../../plugin/src/shared/sqlite";
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";
 import {
+	inspectOpenFiles,
 	isolation,
 	type OpenCode2SpawnOptions,
 	spawnOpencode2,
@@ -180,6 +181,15 @@ test("a tool-result image reaches the provider as the host's own image block, an
 		}
 		// The defer appends to the priced pass: the priced pass's bytes are an exact prefix.
 		expect(sha(deferred.input!.slice(0, priced.input!.length))).toBe(sha(priced.input));
+
+		// Every database the host process group holds open lives under the throwaway root.
+		const host = run.host();
+		const openDatabases = inspectOpenFiles(host.pid!, host.root, host.env).filter((path) =>
+			/\.db(-wal|-shm)?$/.test(path),
+		);
+		expect(openDatabases.length).toBeGreaterThan(0);
+		for (const path of openDatabases) expect(path.startsWith(host.root)).toBe(true);
+		console.log(`host open databases: ${JSON.stringify(openDatabases)}`);
 	} catch (error) {
 		console.error(run.host().stderr().slice(-3000), log().slice(-6000));
 		throw error;
