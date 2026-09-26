@@ -250,6 +250,7 @@ export function parseCompartmentOutput(text: string): ParsedCompartmentOutput {
             .map((match) => unescapeXml(match[1].trim()))
             .filter(Boolean);
         if (!HISTORIAN_CATEGORIES.has(category)) {
+            if (items.length === 0) continue;
             droppedFactBlocks++;
             droppedFacts += items.length;
             log(`[historian] Dropped <facts> category ${category} (${items.length} facts)`);

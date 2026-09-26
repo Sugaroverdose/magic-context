@@ -386,9 +386,12 @@ pub fn parse_compartment_output(
                         .is_some_and(|m| !unescape_xml(m.as_str().trim()).is_empty())
                 })
                 .count();
+            if count == 0 {
+                continue;
+            }
             dropped_fact_blocks += 1;
             dropped_facts += count;
-            eprintln!("{}", format_dropped_fact_category(category, count));
+            tracing::warn!("{}", format_dropped_fact_category(category, count));
             continue;
         }
         for item_caps in fact_item_regex().captures_iter(block) {
@@ -1369,6 +1372,15 @@ mod tests {
             format_dropped_fact_category("PROJECT_RULS", 2),
             "[historian] Dropped <facts> category PROJECT_RULS (2 facts)"
         );
+    }
+
+    #[test]
+    fn fallback_ignores_tags_without_fact_items() {
+        let parsed = parse_compartment_output("<output><PROJECT_RULS>\n* One\n* Two\n</PROJECT_RULS><unprocessed_from>12</unprocessed_from></output>").unwrap();
+        assert!(parsed.facts.is_empty());
+        assert_eq!(parsed.unprocessed_from, Some(12));
+        assert_eq!(parsed.dropped_fact_blocks, 1);
+        assert_eq!(parsed.dropped_facts, 2);
     }
 
     #[derive(Debug, Deserialize)]

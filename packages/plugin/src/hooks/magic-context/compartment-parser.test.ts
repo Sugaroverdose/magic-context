@@ -24,6 +24,25 @@ describe("parseCompartmentOutput — v2 5-category facts", () => {
             logged.mockRestore();
         }
     });
+    it("logs only fallback tags containing facts", () => {
+        const logged = spyOn(logger, "log").mockImplementation(() => {});
+        try {
+            const parsed = parseCompartmentOutput(`<output>
+<PROJECT_RULS>\n* One\n* Two\n</PROJECT_RULS>
+<unprocessed_from>12</unprocessed_from>
+</output>`);
+            expect(parsed.facts).toEqual([]);
+            expect(parsed.unprocessedFrom).toBe(12);
+            expect(parsed.droppedFactBlocks).toBe(1);
+            expect(parsed.droppedFacts).toBe(2);
+            expect(logged.mock.calls.map(([message]) => message)).toEqual([
+                "[historian] Dropped <facts> category PROJECT_RULS (2 facts)",
+            ]);
+        } finally {
+            logged.mockRestore();
+        }
+    });
+
     it("parses each of the 5 world categories", () => {
         const parsed = parseCompartmentOutput(`
 <output>
