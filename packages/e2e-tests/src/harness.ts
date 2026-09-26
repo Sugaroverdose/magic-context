@@ -197,6 +197,32 @@ export class TestHarness implements HostHarness {
         );
     }
 
+    /**
+     * Run OpenCode's own compaction on a session, the request `/compact` sends.
+     * Resolves once the host has written its summary.
+     */
+    async compactSession(
+        sessionId: string,
+        model: { providerID: string; modelID: string } = {
+            providerID: "mock-anthropic",
+            modelID: "mock-sonnet",
+        },
+    ): Promise<void> {
+        const response = await fetch(
+            `${this.opencode.url}/session/${encodeURIComponent(sessionId)}/summarize`,
+            {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ ...model, auto: false }),
+            },
+        );
+        if (!response.ok) {
+            throw new Error(
+                `session compaction failed with HTTP ${response.status}: ${await response.text()}`,
+            );
+        }
+    }
+
     async removeSession(sessionId: string): Promise<void> {
         const response = await fetch(
             `${this.opencode.url}/session/${encodeURIComponent(sessionId)}`,

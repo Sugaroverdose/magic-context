@@ -49,6 +49,7 @@ import {
 import { hasTrustedAbsoluteWall } from "../../shared/window-geometry";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
+import { noteContextLimitResolution, provenFloorForModel } from "./context-limit-resolution";
 import {
     getMessageRemovedInfo,
     getMessageUpdatedAssistantInfo,
@@ -721,7 +722,15 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         sessionID: info.sessionID,
                     });
                     const sessionMeta = getOrCreateSessionMeta(deps.db, info.sessionID);
-                    const observedSafeInputTokens = sessionMeta.observedSafeInputTokens ?? 0;
+                    // A proven floor belongs to the model whose accepted request
+                    // proved it, the same rule resolveContextLimit applies. Carrying
+                    // another model's floor over would give this model a limit none
+                    // of its own requests supports.
+                    const observedSafeInputTokens = provenFloorForModel(
+                        sessionMeta.observedSafeInputTokens,
+                        sessionMeta.lastObservedModelKey,
+                        modelKey,
+                    );
                     const provenSafeInputTokens = successfulUsageProof
                         ? Math.max(observedSafeInputTokens, pressureInputTokens)
                         : observedSafeInputTokens;
@@ -780,6 +789,16 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     if (successfulUsageProof) {
                         contextLimit = Math.max(contextLimit, provenSafeInputTokens);
                     }
+                    noteContextLimitResolution(info.sessionID, {
+                        modelKey: modelKey ?? null,
+                        limit: contextLimit,
+                        catalog: catalogLimit ?? null,
+                        detected: getOverflowState(deps.db, info.sessionID, modelKey)
+                            .detectedContextLimit,
+                        provenFloor: successfulUsageProof
+                            ? provenSafeInputTokens
+                            : observedSafeInputTokens,
+                    });
                     const percentage =
                         contextLimit > 0 ? (pressureInputTokens / contextLimit) * 100 : 0;
                     sessionLog(
@@ -801,9 +820,11 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     updates.lastInputTokens = pressureInputTokens;
                     updates.lastUsageContextLimit = contextLimit;
                     updates.lastObservedModelKey = modelKey ?? null;
-                    if (successfulUsageProof) {
-                        updates.observedSafeInputTokens = provenSafeInputTokens;
-                    }
+                    // Stored together with the model key above, so a switch to a
+                    // model with no proof of its own stores no floor for it.
+                    updates.observedSafeInputTokens = successfulUsageProof
+                        ? provenSafeInputTokens
+                        : observedSafeInputTokens;
 
                     const historianFailureState = getHistorianFailureState(deps.db, info.sessionID);
                     if (historianFailureState.failureCount > 0 && percentage < 90) {

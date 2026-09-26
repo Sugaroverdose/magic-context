@@ -37,7 +37,8 @@ export type CanonicalMaterializeReason =
     | "ttl_expiry"
     | "epoch_change"
     | "coverage_fold"
-    | "profile_transition";
+    | "profile_transition"
+    | "host_compaction";
 
 export interface PendingTransformDecision {
     tsMs: number;
@@ -118,6 +119,7 @@ const canonicalReasons = new Set<string>([
     "epoch_change",
     "coverage_fold",
     "profile_transition",
+    "host_compaction",
 ]);
 
 const piReasonAliases: Record<string, CanonicalMaterializeReason> = {

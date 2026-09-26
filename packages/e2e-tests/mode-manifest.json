@@ -395,6 +395,21 @@
             "behavior": true
         },
         {
+            "path": "tests/native-compaction-baseline.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "a native OpenCode 1 /compact re-anchors the TypeScript m[0] baseline once on the next pass; Rust mode renders its baseline in the module and is outside this scenario",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/notice-loop-race.test.ts",
             "tier": "ts-only",
             "invocation": {
