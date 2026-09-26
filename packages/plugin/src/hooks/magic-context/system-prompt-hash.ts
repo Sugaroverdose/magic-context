@@ -83,6 +83,10 @@ function isInternalOpenCodeAgent(systemPromptContent: string): boolean {
         // compaction.txt opens with this exact line
         systemPromptContent.includes(
             "You are an anchored context summarization assistant for coding sessions.",
+        ) ||
+        // compaction.txt from OpenCode 1.18 on opens with this line instead
+        systemPromptContent.includes(
+            "You are a context summarization agent. You are given a conversation between a user and an agent.",
         )
     );
 }

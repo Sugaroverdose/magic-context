@@ -556,6 +556,30 @@ describe("system-prompt-hash skips OpenCode internal hidden agents (issue #52)",
         expect(system[0]).toBe(COMPACTION_PROMPT_HEAD);
     });
 
+    it("skips injection and keeps the stored hash for OpenCode 1.18's compaction prompt", async () => {
+        // OpenCode 1.18 rewrote compaction.txt. Without this signature the
+        // compaction request's prompt became the session's stored hash, and the
+        // next real turn folded again when its own prompt flipped the hash back.
+        useTempDataHome("sph-skip-compaction-118-");
+        const sessionId = "ses-compaction-118";
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, { systemPromptHash: "main-agent-hash-abc123" });
+        const historyRefreshSessions = new Set<string>();
+        const { handler } = buildHandler({ historyRefreshSessions });
+
+        const prompt =
+            "You are a context summarization agent. You are given a conversation between a user and an agent. Your goal is to produce a structured summary.";
+        const system = [prompt];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(system).toEqual([prompt]);
+        expect(getOrCreateSessionMeta(db, sessionId).systemPromptHash).toBe(
+            "main-agent-hash-abc123",
+        );
+        expect(historyRefreshSessions.has(sessionId)).toBe(false);
+    });
+
     it("does NOT update systemPromptHash for internal-agent calls", async () => {
         // Title-gen runs once on the first user turn with a totally
         // different system prompt than the main agent. If we updated the
