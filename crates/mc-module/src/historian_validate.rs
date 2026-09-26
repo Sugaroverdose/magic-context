@@ -363,8 +363,11 @@ pub fn parse_compartment_output(
             .unwrap_or_default()
     } else {
         let without_events = events_block_regex().replace_all(text, "");
-        compartment_regex()
-            .replace_all(&without_events, "")
+        let without_compartments = compartment_regex().replace_all(&without_events, "");
+        let without_side_channels =
+            facts_side_channel_regex().replace_all(&without_compartments, "");
+        facts_envelope_regex()
+            .replace_all(&without_side_channels, "")
             .to_string()
     };
 
@@ -1252,6 +1255,16 @@ fn tier_open_any_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"<p\d").unwrap())
 }
 
+fn facts_side_channel_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?s)<meta>.*?</meta>|<user_observations>.*?</user_observations>|<primer_candidates>.*?</primer_candidates>").unwrap())
+}
+
+fn facts_envelope_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"</?(?:output|compartments)>").unwrap())
+}
+
 fn facts_block_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r#"(?s)<facts>(.*?)</facts>"#).unwrap())
@@ -1280,7 +1293,9 @@ fn format_dropped_fact_category(category: &str, count: usize) -> String {
 
 fn category_block_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"(?s)<([A-Z][A-Z0-9_]*)>(.*?)</([A-Z][A-Z0-9_]*)>"#).unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r#"(?s)<([A-Za-z_][A-Za-z0-9_-]*)>(.*?)</([A-Za-z_][A-Za-z0-9_-]*)>"#).unwrap()
+    })
 }
 
 fn fact_item_regex() -> &'static Regex {
@@ -1346,10 +1361,10 @@ mod tests {
 
     #[test]
     fn unknown_fact_categories_report_every_drop() {
-        let parsed = parse_compartment_output("<output><facts><PROJECT_RULS>\n* One\n* Two\n</PROJECT_RULS><USER_DIRECTIVES>\n* Three\n</USER_DIRECTIVES></facts></output>").unwrap();
+        let parsed = parse_compartment_output("<output><facts><PROJECT_RULS>\n* One\n* Two\n</PROJECT_RULS><USER_DIRECTIVES>\n* Three\n</USER_DIRECTIVES><project-ruls>\n* Four\n</project-ruls></facts></output>").unwrap();
         assert!(parsed.facts.is_empty());
-        assert_eq!(parsed.dropped_fact_blocks, 2);
-        assert_eq!(parsed.dropped_facts, 3);
+        assert_eq!(parsed.dropped_fact_blocks, 3);
+        assert_eq!(parsed.dropped_facts, 4);
         assert_eq!(
             format_dropped_fact_category("PROJECT_RULS", 2),
             "[historian] Dropped <facts> category PROJECT_RULS (2 facts)"

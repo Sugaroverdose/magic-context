@@ -10,13 +10,15 @@ describe("parseCompartmentOutput — v2 5-category facts", () => {
 <PROJECT_RULES>\n* Keep valid fact.\n</PROJECT_RULES>
 <PROJECT_RULS>\n* Lost one\n* Lost two\n</PROJECT_RULS>
 <USER_DIRECTIVES>\n* Legacy fact\n</USER_DIRECTIVES>
+<project-ruls>\n* Lowercase typo\n</project-ruls>
 </facts></output>`);
             expect(parsed.facts).toHaveLength(1);
-            expect(parsed.droppedFactBlocks).toBe(2);
-            expect(parsed.droppedFacts).toBe(3);
+            expect(parsed.droppedFactBlocks).toBe(3);
+            expect(parsed.droppedFacts).toBe(4);
             expect(logged.mock.calls.map(([message]) => message)).toEqual([
                 "[historian] Dropped <facts> category PROJECT_RULS (2 facts)",
                 "[historian] Dropped <facts> category USER_DIRECTIVES (1 facts)",
+                "[historian] Dropped <facts> category project-ruls (1 facts)",
             ]);
         } finally {
             logged.mockRestore();

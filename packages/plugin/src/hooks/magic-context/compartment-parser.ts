@@ -88,7 +88,7 @@ const TIER_CLOSE_ANY_REGEX = /<\/p\d/;
 // Any tier's OPENING tag (`<p1>`…`<p9>`) — the over-capture guard: a tier body
 // must never swallow a following tier's opener.
 const TIER_OPEN_ANY_REGEX = /<p\d/;
-const CATEGORY_BLOCK_REGEX = /<([A-Z][A-Z0-9_]*)>(.*?)<\/\1>/gs;
+const CATEGORY_BLOCK_REGEX = /<([A-Za-z_][A-Za-z0-9_-]*)>(.*?)<\/\1>/gs;
 const HISTORIAN_CATEGORIES: ReadonlySet<string> = new Set(V2_MEMORY_CATEGORIES);
 const FACT_ITEM_REGEX = /^\s*\*\s*(.+)$/gm;
 const UNPROCESSED_REGEX = /<unprocessed_from>(\d+)<\/unprocessed_from>/;
@@ -234,14 +234,15 @@ export function parseCompartmentOutput(text: string): ParsedCompartmentOutput {
     const factsBlockMatch = text.match(FACTS_BLOCK_REGEX);
     // When a <facts> block is present (the v2 norm), scope extraction to it.
     // The fallback (legacy/transition outputs with bare category blocks) strips
-    // BOTH the events block AND every <compartment> body first — otherwise a
-    // category-shaped tag living inside a compartment's P1-P4 prose (or its
-    // attributes) would be misread as a promotable fact.
+    // events, compartment bodies and side channels first — otherwise a category
+    // tag in narrative prose or metadata would be misread as a fact.
     const factsScope = factsBlockMatch
         ? factsBlockMatch[1]
         : text
               .replace(EVENTS_BLOCK_REGEX, "")
-              .replace(/<compartment\s+[^>]*?\s*>.*?<\/compartment>/gs, "");
+              .replace(/<compartment\s+[^>]*?\s*>.*?<\/compartment>/gs, "")
+              .replace(/<(meta|user_observations|primer_candidates)>.*?<\/\1>/gs, "")
+              .replace(/<\/?(?:output|compartments)>/g, "");
     for (const categoryMatch of factsScope.matchAll(CATEGORY_BLOCK_REGEX)) {
         const category = categoryMatch[1];
         const blockContent = categoryMatch[2];
