@@ -735,7 +735,9 @@ export function measureTailHygiene(input: {
                         // Images the tool returned beside its text are billed as images.
                         const tokens =
                             memoizedTokens("toolOutput", output) +
-                            (part.type === "tool" ? estimateToolAttachmentImageTokens(part.state) : 0);
+                            (part.type === "tool"
+                                ? estimateToolAttachmentImageTokens(part.state)
+                                : 0);
                         const measured = snapshot({
                             key: `${key}\0toolOutput`,
                             kind: "toolOutput",

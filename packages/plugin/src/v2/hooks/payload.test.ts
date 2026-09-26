@@ -539,7 +539,12 @@ describe("adaptPayload", () => {
                 id: "msg-read",
                 role: "assistant",
                 content: [
-                    { type: "tool-call", id: "call-read", name: "read", input: { path: "pixel.png" } },
+                    {
+                        type: "tool-call",
+                        id: "call-read",
+                        name: "read",
+                        input: { path: "pixel.png" },
+                    },
                 ],
             },
             {

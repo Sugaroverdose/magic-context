@@ -37,7 +37,9 @@ function openTestDb() {
 
 function toolTag(db: Database) {
     return db
-        .prepare("SELECT tag_number, byte_size, token_count FROM tags WHERE session_id = ? AND type = 'tool'")
+        .prepare(
+            "SELECT tag_number, byte_size, token_count FROM tags WHERE session_id = ? AND type = 'tool'",
+        )
         .get(SESSION) as { tag_number: number; byte_size: number; token_count: number };
 }
 
@@ -65,7 +67,14 @@ describe("a tool result carrying an image, through the tagging pass", () => {
             {
                 id: "msg-read",
                 role: "assistant",
-                content: [{ type: "tool-call", id: "call-read", name: "read", input: { path: "pixel.png" } }],
+                content: [
+                    {
+                        type: "tool-call",
+                        id: "call-read",
+                        name: "read",
+                        input: { path: "pixel.png" },
+                    },
+                ],
             },
             {
                 role: "tool",
@@ -106,8 +115,7 @@ describe("a tool result carrying an image, through the tagging pass", () => {
                 protectedTagNumbers: new Set(),
             }).t;
         const withoutImage = structuredClone(payload.messages);
-        (withoutImage[0]!.parts[0] as { state: { attachments: unknown[] } }).state.attachments =
-            [];
+        (withoutImage[0]!.parts[0] as { state: { attachments: unknown[] } }).state.attachments = [];
         expect(hygiene(payload.messages) - hygiene(withoutImage)).toBe(IMAGE_TOKENS);
         expect(estimateMessageTokens(payload.messages[0]!).toolCall).toBeLessThan(200);
 
@@ -127,7 +135,12 @@ describe("a tool result carrying an image, through the tagging pass", () => {
     });
 
     it("OpenCode 1: tags the text output, leaves the attachment untouched, and bills it by pixels", () => {
-        const attachment = { type: "file", mime: "image/png", url: DATA_URL, filename: "pixel.png" };
+        const attachment = {
+            type: "file",
+            mime: "image/png",
+            url: DATA_URL,
+            filename: "pixel.png",
+        };
         const message: MessageLike = {
             info: { id: "msg-read", role: "assistant", sessionID: SESSION },
             parts: [

@@ -1,4 +1,4 @@
-import { isDroppedToolOutput } from '../../hooks/magic-context/ctx-reduce-nudge';
+import { isDroppedToolOutput } from "../../hooks/magic-context/ctx-reduce-nudge";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { log, sessionLog } from "../../shared/logger";
 import { hostMediaAsset } from "../fold/host-media";

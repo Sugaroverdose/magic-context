@@ -2,8 +2,8 @@ import {
     getLargestMeasuredToolDefinitionTokens,
     getMeasuredToolDefinitionTokens,
 } from "../../features/magic-context/tool-definition-tokens";
-import { providerMass, resolveDecisionCalibration } from "./decision-calibration";
 import { isDroppedToolOutput } from "./ctx-reduce-nudge";
+import { providerMass, resolveDecisionCalibration } from "./decision-calibration";
 import {
     estimateImageTokensFromDataUrl,
     estimateToolAttachmentImageTokens,
