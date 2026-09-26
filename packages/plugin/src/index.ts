@@ -33,12 +33,12 @@ import {
 import { recordToolDefinition } from "./features/magic-context/tool-definition-tokens";
 import { runDeferredV22Backfill } from "./features/magic-context/v22-deferred-backfill";
 import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
+import { markCompactionRequest } from "./hooks/magic-context/compaction-request";
 import {
     COMPARTMENT_AGENT_SYSTEM_PROMPT,
     COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
     HISTORIAN_EDITOR_SYSTEM_PROMPT,
 } from "./hooks/magic-context/compartment-prompt";
-import { markCompactionRequest } from "./hooks/magic-context/compaction-request";
 import { recordToolParameters } from "./hooks/magic-context/dropped-input-guard";
 import { createLiveSessionState } from "./hooks/magic-context/live-session-state";
 import {

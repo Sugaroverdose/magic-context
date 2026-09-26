@@ -200,7 +200,10 @@ describe("a compaction request between two real passes", () => {
         const sessionId = "ses_compaction_system";
         const db = openDatabase();
         getOrCreateSessionMeta(db, sessionId);
-        updateSessionMeta(db, sessionId, { systemPromptHash: "stored-hash", systemPromptTokens: 1 });
+        updateSessionMeta(db, sessionId, {
+            systemPromptHash: "stored-hash",
+            systemPromptTokens: 1,
+        });
         const historyRefreshSessions = new Set<string>();
         const systemPromptRefreshSessions = new Set<string>();
         const pendingMaterializationSessions = new Set<string>();
@@ -235,7 +238,10 @@ describe("a compaction request between two real passes", () => {
         const sessionId = "ses_compaction_signature";
         const db = openDatabase();
         getOrCreateSessionMeta(db, sessionId);
-        updateSessionMeta(db, sessionId, { systemPromptHash: "stored-hash", systemPromptTokens: 1 });
+        updateSessionMeta(db, sessionId, {
+            systemPromptHash: "stored-hash",
+            systemPromptTokens: 1,
+        });
         const historyRefreshSessions = new Set<string>();
         const { handler } = createSystemPromptHashHandler({
             db,
@@ -290,7 +296,9 @@ describe("a compaction request between two real passes", () => {
         const passA = await run(conversation(sessionId, 3));
         const metaAfterA = JSON.stringify(getOrCreateSessionMeta(db, sessionId));
         const tagsAfterA = JSON.stringify(
-            db.prepare("SELECT * FROM tags WHERE session_id = ? ORDER BY tag_number").all(sessionId),
+            db
+                .prepare("SELECT * FROM tags WHERE session_id = ? ORDER BY tag_number")
+                .all(sessionId),
         );
 
         // A historian publish lands between the passes. It is the next real

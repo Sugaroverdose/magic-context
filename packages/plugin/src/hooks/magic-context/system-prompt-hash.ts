@@ -15,14 +15,13 @@ import {
     createPromptSurfaceRuntime,
     promptSurfaceHashMaterial,
 } from "../../shared/prompt-surface-runtime";
+import { isCompactionSystemRequest } from "./compaction-request";
 import {
     ctxReduceSpawnPermissionReadNeeded,
     primeCtxReduceSpawnPermission,
     resolveCtxReduceAvailability,
     spawnAgentFromOpenCodeDb,
 } from "./ctx-reduce-availability";
-
-import { isCompactionSystemRequest } from "./compaction-request";
 import { estimateTokens } from "./read-session-formatting";
 
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
