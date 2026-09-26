@@ -63,7 +63,11 @@ import {
 import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
 import { historyLocalBudget } from "./decision-calibration";
 import { isHostRenderedSystemMessage } from "./host-served-rows";
-import { resolveHostServedBoundaryId } from "./read-session-chunk";
+import {
+    readRawSessionMessageIdOrdinalsForRange,
+    readRawSessionMessageOrdinalById,
+    resolveHostServedBoundaryId,
+} from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -977,7 +981,26 @@ export interface MaterializeM0Result {
     renderedMemoryIds: number[];
 }
 
-export type PrefixTrimStatus = "not-attempted" | "not-required" | "applied" | "refused";
+/**
+ * - `applied`: the boundary row was found and everything through it was cut.
+ * - `boundary-precedes-window`: the boundary is not in the live array because
+ *   every live row sorts after it (a host window that starts past the
+ *   boundary). Nothing is covered by the summary, so nothing is cut.
+ * - `applied-by-ordinal`: the boundary row is missing from the live array, and
+ *   the cut was made at a persisted ordinal instead (the boundary's own, or an
+ *   older compartment end when the boundary no longer resolves).
+ * - `refused`: no cut could be made this pass; the whole window is served.
+ *
+ * Only `applied` proves the trim went through the named boundary; the marker
+ * drain relies on that and treats every other status as unproven.
+ */
+export type PrefixTrimStatus =
+    | "not-attempted"
+    | "not-required"
+    | "applied"
+    | "boundary-precedes-window"
+    | "applied-by-ordinal"
+    | "refused";
 
 export interface PrefixTrimSourceOrder {
     /** Stable IDs in the exact order supplied by the host before this transform mutates the array. */
@@ -3357,6 +3380,251 @@ function findBoundaryIndex(
     return messages.findIndex((message) => message.info.id === served);
 }
 
+// ── Prefix trim when the boundary row is not in the live array ──────────
+//
+// The trim normally cuts through the boundary row by id. When that row is not
+// in the live array, the boundary's position in the session's persisted order
+// (the raw-message ordinals the historian numbers compartments in) says what
+// the cut should have been:
+//   - Every live row sorts after the boundary: the host window starts past it
+//     (for example a resumed session whose loaded history begins after the
+//     boundary). The summary covers nothing that is live, so there is nothing
+//     to cut. That is a successful trim, not a failure, on every pass.
+//   - Some live rows sort at or before the boundary, or the boundary no longer
+//     resolves at all: a degraded state. The whole window keeps being served
+//     until a cache-busting pass, which cuts at the boundary's ordinal (or, when
+//     the boundary itself is gone, at the newest older compartment end that
+//     still resolves; the summary covers that point too, so nothing is lost).
+//     Later defer passes replay that same cut so their bytes do not move.
+// The armed cut lives in process memory, like the compartment-injection
+// re-anchor: after a restart the first cache-busting pass arms it again.
+
+interface ArmedOrdinalCut {
+    boundary: string;
+    cutOrdinal: number;
+}
+
+interface AbsentBoundaryEpisode {
+    boundary: string;
+    passes: number;
+    deferLogged: boolean;
+}
+
+const armedOrdinalCutBySession = new BoundedSessionMap<ArmedOrdinalCut>(INJECTION_CACHE_MAX);
+const absentBoundaryEpisodeBySession = new BoundedSessionMap<AbsentBoundaryEpisode>(
+    INJECTION_CACHE_MAX,
+);
+/**
+ * Boundary already logged as sitting before every live row in persisted order,
+ * so the "nothing to cut" outcome is logged once rather than on every pass.
+ */
+const precedesWindowLoggedBySession = new BoundedSessionMap<string>(INJECTION_CACHE_MAX);
+
+/**
+ * Maximum number of older compartments inspected when a boundary that no longer
+ * resolves must be replaced by an older compartment end as the cut point.
+ */
+const REANCHOR_COMPARTMENT_SCAN_LIMIT = 20;
+/**
+ * Maximum number of trailing live rows (newest first) looked up in persisted
+ * order to prove the live window lies after the boundary. The newest rows are
+ * the ones certain to be persisted, so a few lookups settle it.
+ */
+const WINDOW_TAIL_PROBE_LIMIT = 5;
+
+export function resetPrefixTrimFallbackState(sessionId: string): void {
+    armedOrdinalCutBySession.delete(sessionId);
+    absentBoundaryEpisodeBySession.delete(sessionId);
+    precedesWindowLoggedBySession.delete(sessionId);
+}
+
+function persistedOrdinal(sessionId: string, messageId: string): number | null {
+    try {
+        return readRawSessionMessageOrdinalById(sessionId, messageId);
+    } catch {
+        return null;
+    }
+}
+
+function boundaryOrdinalOf(sessionId: string, boundary: string): number | null {
+    const direct = persistedOrdinal(sessionId, boundary);
+    if (direct !== null) return direct;
+    const served = resolveHostServedBoundaryId(sessionId, boundary);
+    return served === boundary ? null : persistedOrdinal(sessionId, served);
+}
+
+/**
+ * Index of the last live row whose persisted ordinal is at or before
+ * `cutOrdinal`, or -1. Cutting through that index is the same contiguous-prefix
+ * splice the id-based trim makes when it finds the boundary row.
+ */
+function lastLiveIndexAtOrBefore(
+    sessionId: string,
+    messages: readonly MessageLike[],
+    cutOrdinal: number,
+): number {
+    const covered = readRawSessionMessageIdOrdinalsForRange(sessionId, 1, cutOrdinal);
+    if (covered.size === 0) return -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const id = messages[index]?.info.id;
+        if (typeof id === "string" && covered.has(id)) return index;
+    }
+    return -1;
+}
+
+function someLiveRowSortsAfter(
+    sessionId: string,
+    messages: readonly MessageLike[],
+    ordinal: number,
+): boolean {
+    let probed = 0;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const id = messages[index]?.info.id;
+        if (typeof id !== "string" || id.length === 0) continue;
+        const liveOrdinal = persistedOrdinal(sessionId, id);
+        if (liveOrdinal !== null) return liveOrdinal > ordinal;
+        probed += 1;
+        if (probed >= WINDOW_TAIL_PROBE_LIMIT) return false;
+    }
+    return false;
+}
+
+/**
+ * The newest compartment end older than the boundary's compartment that still
+ * resolves in the persisted order. The cached summary covers the boundary's
+ * compartment, so it covers this older end too.
+ */
+function findReanchorOrdinal(
+    db: Database,
+    sessionId: string,
+    boundary: string,
+): { ordinal: number; messageId: string } | null {
+    const owner = db
+        .prepare(
+            "SELECT sequence FROM compartments WHERE session_id = ? AND end_message_id = ? ORDER BY sequence DESC LIMIT 1",
+        )
+        .get(sessionId, boundary) as { sequence: number } | null | undefined;
+    if (!owner) return null;
+    const older = db
+        .prepare(
+            "SELECT end_message_id FROM compartments WHERE session_id = ? AND sequence < ? AND end_message_id IS NOT NULL AND end_message_id != '' ORDER BY sequence DESC LIMIT ?",
+        )
+        .all(sessionId, owner.sequence, REANCHOR_COMPARTMENT_SCAN_LIMIT) as Array<{
+        end_message_id: string;
+    }>;
+    for (const row of older) {
+        const ordinal = boundaryOrdinalOf(sessionId, row.end_message_id);
+        if (ordinal !== null) return { ordinal, messageId: row.end_message_id };
+    }
+    return null;
+}
+
+function noteAbsentBoundaryPass(sessionId: string, boundary: string): AbsentBoundaryEpisode {
+    const current = absentBoundaryEpisodeBySession.get(sessionId);
+    const episode =
+        current && current.boundary === boundary
+            ? current
+            : { boundary, passes: 0, deferLogged: false };
+    episode.passes += 1;
+    absentBoundaryEpisodeBySession.set(sessionId, episode);
+    return episode;
+}
+
+function trimAtAbsentBoundary(
+    options: M0M1RenderOptions,
+    messages: MessageLike[],
+    boundary: string,
+    absentReason: string,
+): PrefixTrimStatus {
+    const { sessionId } = options;
+    const pass = options.isCacheBustingPass ? "priced" : "defer";
+    const cutAt = (cutOrdinal: number): void => {
+        const index = lastLiveIndexAtOrBefore(sessionId, messages, cutOrdinal);
+        if (index >= 0) messages.splice(0, index + 1);
+    };
+
+    let boundaryOrdinal: number | null = null;
+    try {
+        boundaryOrdinal = boundaryOrdinalOf(sessionId, boundary);
+        if (
+            boundaryOrdinal !== null &&
+            lastLiveIndexAtOrBefore(sessionId, messages, boundaryOrdinal) < 0 &&
+            someLiveRowSortsAfter(sessionId, messages, boundaryOrdinal)
+        ) {
+            armedOrdinalCutBySession.delete(sessionId);
+            absentBoundaryEpisodeBySession.delete(sessionId);
+            if (precedesWindowLoggedBySession.get(sessionId) !== boundary) {
+                precedesWindowLoggedBySession.set(sessionId, boundary);
+                sessionLog(
+                    sessionId,
+                    `prefix trim: boundary ${boundary} (ordinal ${boundaryOrdinal}) sorts before every live message; pass=${pass}; nothing to cut, whole window kept`,
+                );
+            }
+            return "boundary-precedes-window";
+        }
+    } catch (error) {
+        boundaryOrdinal = null;
+        sessionLog(
+            sessionId,
+            `prefix trim: ordinal lookup for boundary ${boundary} failed:`,
+            error,
+        );
+    }
+    precedesWindowLoggedBySession.delete(sessionId);
+
+    const armed = armedOrdinalCutBySession.get(sessionId);
+    if (!options.isCacheBustingPass && armed?.boundary === boundary) {
+        // Replay the cut the last cache-busting pass made, so this defer pass
+        // serves the same bytes.
+        try {
+            cutAt(armed.cutOrdinal);
+            return "applied-by-ordinal";
+        } catch (error) {
+            sessionLog(sessionId, `prefix trim: replaying ordinal cut failed:`, error);
+            return "refused";
+        }
+    }
+
+    const episode = noteAbsentBoundaryPass(sessionId, boundary);
+    if (!options.isCacheBustingPass) {
+        // Cutting now would change bytes on a pass that must replay the last
+        // served prefix. Serve the whole window; the next cache-busting pass cuts.
+        if (!episode.deferLogged) {
+            episode.deferLogged = true;
+            sessionLog(
+                sessionId,
+                `prefix trim: boundary ${boundary} absent from current messages; pass=${pass}; no in-pass trim applied (${absentReason}; ${boundaryOrdinal === null ? "boundary does not resolve in the persisted message order" : `boundary ordinal ${boundaryOrdinal} sorts inside the window`}; degraded pass ${episode.passes}; the next cache-busting pass cuts or re-anchors)`,
+            );
+        }
+        return "refused";
+    }
+
+    try {
+        const reanchor =
+            boundaryOrdinal === null ? findReanchorOrdinal(options.db, sessionId, boundary) : null;
+        const cutOrdinal = boundaryOrdinal ?? reanchor?.ordinal ?? null;
+        if (cutOrdinal !== null) {
+            cutAt(cutOrdinal);
+            armedOrdinalCutBySession.set(sessionId, { boundary, cutOrdinal });
+            sessionLog(
+                sessionId,
+                reanchor
+                    ? `prefix trim: boundary ${boundary} no longer resolves (${absentReason}; degraded pass ${episode.passes}); pass=${pass}; re-anchored at older compartment end ${reanchor.messageId} (ordinal ${cutOrdinal})`
+                    : `prefix trim: boundary ${boundary} absent from current messages (${absentReason}; degraded pass ${episode.passes}); pass=${pass}; cut at its persisted ordinal ${cutOrdinal}`,
+            );
+            return "applied-by-ordinal";
+        }
+    } catch (error) {
+        sessionLog(sessionId, `prefix trim: ordinal cut for boundary ${boundary} failed:`, error);
+    }
+    armedOrdinalCutBySession.delete(sessionId);
+    sessionLog(
+        sessionId,
+        `prefix trim: boundary ${boundary} absent from current messages; pass=${pass}; no in-pass trim applied (${absentReason}; boundary and every older compartment end fail to resolve in the persisted message order; degraded pass ${episode.passes}; whole window served)`,
+    );
+    return "refused";
+}
+
 function isSyntheticPrefixHead(message: MessageLike): boolean {
     if (
         message.info.id !== undefined ||
@@ -3445,7 +3713,12 @@ function trimToPreparedPrefix(
                     sourcePosition.get(boundary) ??
                     sourcePosition.get(resolveHostServedBoundaryId(options.sessionId, boundary));
                 if (boundaryPosition === undefined) {
-                    status = refuse("boundary absent from immutable source order");
+                    status = trimAtAbsentBoundary(
+                        options,
+                        options.messages,
+                        boundary,
+                        "boundary absent from immutable source order",
+                    );
                 } else {
                     let lastSourcePosition = -1;
                     let sawPersistedRow = false;
@@ -3481,6 +3754,7 @@ function trimToPreparedPrefix(
                     if (liveOrderError) status = refuse(liveOrderError);
                     else {
                         options.messages.splice(0, options.messages.length, ...retained);
+                        resetPrefixTrimFallbackState(options.sessionId);
                         status = "applied";
                     }
                 }
@@ -3489,13 +3763,15 @@ function trimToPreparedPrefix(
             const index = findBoundaryIndex(options.sessionId, options.messages, boundary);
             if (index >= 0) {
                 options.messages.splice(0, index + 1);
+                resetPrefixTrimFallbackState(options.sessionId);
                 status = "applied";
             } else {
-                sessionLog(
-                    options.sessionId,
-                    `prefix trim: boundary ${boundary} absent from current messages; pass=${options.isCacheBustingPass ? "priced" : "defer"}; no in-pass trim applied`,
+                status = trimAtAbsentBoundary(
+                    options,
+                    options.messages,
+                    boundary,
+                    "boundary absent from current messages",
                 );
-                status = "refused";
             }
         }
     }
