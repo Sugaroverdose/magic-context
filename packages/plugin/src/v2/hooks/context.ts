@@ -56,7 +56,7 @@ import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatt
 import { servedModuleM0Text } from "../../hooks/magic-context/rust-served-m0";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
-import { scheduleAfterBootQuiet } from '../../plugin/boot-quiet';
+import { scheduleAfterBootQuiet } from "../../plugin/boot-quiet";
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
 import { detectConflicts } from "../../shared/conflict-detector";
 import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
@@ -99,7 +99,7 @@ import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { RestoredRowCache } from "./restore-rows";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { createV2RustRefusalRecovery, resolveV2RustModeModuleClient } from "./rust-mode";
-import { runV2SessionProjectBackfill } from './session-project-backfill';
+import { runV2SessionProjectBackfill } from "./session-project-backfill";
 import {
     createV2RawMessageProvider,
     createV2RawMessageReader,
@@ -143,7 +143,11 @@ export async function cacheV2SessionDirectory(
             directories.set(sessionID, directory);
         }
     } catch (error) {
-        sessionLog(sessionID, "v2 session directory lookup failed; using the launch directory:", error);
+        sessionLog(
+            sessionID,
+            "v2 session directory lookup failed; using the launch directory:",
+            error,
+        );
     }
 }
 
