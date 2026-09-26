@@ -841,6 +841,18 @@ async function collectHistorianRuns(storageDirPath: string): Promise<HistorianRu
     }
 }
 
+/**
+ * Plugin logs an issue report reads for this host. The OpenCode 2 plugin writes
+ * under the `opencode2` temp subtree, so on an OpenCode 2 host its log comes
+ * first; the OpenCode 1 log follows because a machine that just upgraded has
+ * its earlier history there.
+ */
+export function openCodeIssueLogHarnesses(
+    hostGeneration: "v1" | "v2",
+): Array<"opencode" | "opencode2"> {
+    return hostGeneration === "v2" ? ["opencode2", "opencode"] : ["opencode"];
+}
+
 // ── Main entry ─────────────────────────────────────────────────────
 
 export async function collectDiagnostics(): Promise<DiagnosticReport> {
@@ -852,9 +864,6 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
     const storageResolution = getStorageResolution();
     const storageDirPath = storageResolution.path;
     const contextDbPath = join(storageDirPath, "context.db");
-
-    const logFiles = inspectMagicContextLogs("opencode");
-    const primaryLog = logFiles.find((file) => file.exists) ?? logFiles[0];
 
     // Resolve the MC compaction mode via the same loader + accessor the
     // plugin uses, so diagnostics never re-derives the compaction decision.
@@ -873,6 +882,10 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
     const opencodeInstallations = describeOpenCodeInstallations(detectOpenCodeInstallations());
     const activeInstallation = opencodeInstallations[0];
     const hostGeneration = openCodeHostGenerationFromVersion(activeInstallation?.version);
+    const logFiles = openCodeIssueLogHarnesses(hostGeneration)
+        .flatMap((harness) => inspectMagicContextLogs(harness))
+        .filter((file, index, all) => all.findIndex((other) => other.path === file.path) === index);
+    const primaryLog = logFiles.find((file) => file.exists) ?? logFiles[0];
     const conflictResult = detectConflicts(process.cwd(), { compactionEnabled, hostGeneration });
     const openCodeDatabaseResolution = resolveOpenCodeDbPath(hostGeneration);
     const recentSessions = await collectRecentSessions(openCodeDatabaseResolution, hostGeneration);

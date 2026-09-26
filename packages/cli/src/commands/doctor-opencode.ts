@@ -191,7 +191,7 @@ export function findUnknownConfiguredModels(
     configured: Array<{ agent: string; model: string; fallback: boolean }>,
     catalog: ReturnType<typeof parseOpenCodeModelCatalog>,
 ): Array<{ agent: string; model: string; fallback: boolean; unknown: "provider" | "model" }> {
-    return configured.flatMap((entry) => {
+    return configured.flatMap((entry): Array<typeof entry & { unknown: "provider" | "model" }> => {
         const [providerID, id] = entry.model.split("/", 2);
         if (!catalog.some((item) => item.providerID === providerID)) {
             return [{ ...entry, unknown: "provider" as const }];
