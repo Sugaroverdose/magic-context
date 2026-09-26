@@ -19,7 +19,13 @@ export interface TagEntry {
      *    region-hint prefix of the diff, so the agent still sees WHICH file and
      *    region it edited. Only produced when the smart_drops config is on.
      */
-    dropMode: "full" | "truncated" | "skeleton_real" | "edit_marker";
+    dropMode:
+        | "full"
+        | "truncated"
+        | "skeleton_real"
+        | "skeleton_stripped"
+        | "edit_marker"
+        | "edit_marker_stripped";
     toolName: string | null;
     inputByteSize: number;
     byteSize: number;

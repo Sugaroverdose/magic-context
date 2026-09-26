@@ -9,6 +9,16 @@ let buffer: string[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 const FLUSH_INTERVAL_MS = 500;
 const BUFFER_SIZE_LIMIT = 50;
+const MAX_BUFFERED_BYTES = 1024 * 1024;
+let bufferedBytes = 0;
+let droppedLines = 0;
+
+function boundBuffer(): void {
+    while (bufferedBytes > MAX_BUFFERED_BYTES && buffer.length > 0) {
+        bufferedBytes -= Buffer.byteLength(buffer.shift() ?? "");
+        droppedLines++;
+    }
+}
 const MAX_LOG_FILE_BYTES = 32 * 1024 * 1024;
 const SIZE_CHECK_INTERVAL_FLUSHES = 64;
 
@@ -141,11 +151,12 @@ function flush(): void {
         clearTimeout(flushTimer);
         flushTimer = null;
     }
-    if (buffer.length === 0) return;
-    const bufferedData = buffer.join("");
-    buffer = [];
+    if (buffer.length === 0 && droppedLines === 0) return;
+    const notice = droppedLines
+        ? `[${new Date().toISOString()}] [magic-context][global] logger dropped ${droppedLines} ${droppedLines === 1 ? "line" : "lines"}: buffer exceeded ${MAX_BUFFERED_BYTES} bytes while writes were pending\n`
+        : "";
     try {
-        const data = capLogData(bufferedData);
+        const data = capLogData(notice + buffer.join(""));
         const logFile = getMagicContextLogPath();
         ensureDir(logFile);
         let currentSize = getCurrentLogSize(logFile);
@@ -155,6 +166,9 @@ function flush(): void {
             currentSize = 0;
         }
         fs.appendFileSync(logFile, data, { encoding: "utf8", mode: 0o600 });
+        buffer = [];
+        bufferedBytes = 0;
+        droppedLines = 0;
         activeLogFile = logFile;
         activeLogSize = currentSize + dataSize;
         flushesSinceSizeCheck++;
@@ -163,6 +177,7 @@ function flush(): void {
         activeLogSize = null;
         flushesSinceSizeCheck = 0;
         recordSwallowedWrite(error);
+        boundBuffer();
     }
 }
 
@@ -186,7 +201,10 @@ export function log(message: string, data?: unknown): void {
                         `${data.message}${data.stack ? `\n${data.stack}` : ""}`,
                     )}`
                   : ` ${JSON.stringify(sanitizeConfigValue(data))}`;
-        buffer.push(`[${timestamp}] ${sanitizeDiagnosticText(message)}${serialized}\n`);
+        const line = `[${timestamp}] ${sanitizeDiagnosticText(message)}${serialized}\n`;
+        buffer.push(line);
+        bufferedBytes += Buffer.byteLength(line);
+        boundBuffer();
         if (buffer.length >= BUFFER_SIZE_LIMIT) {
             flush();
         } else {

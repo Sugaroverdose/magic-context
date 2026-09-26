@@ -159,7 +159,7 @@ forEachHost(import.meta.url, null, () => {
         expect(finalRow?.finish).toBe("length");
 
         const logPath = join(h.dataDir, "cortexkit", "magic-context-e2e.log");
-        const finalLine = `[${sessionId}] event message.updated: provider=mock-anthropic model=mock-sonnet hasUsageTokens=true tokens.input=${FINAL_STEP_USAGE.input_tokens} cache.read=${FINAL_STEP_USAGE.cache_read_input_tokens}`;
+        const finalLine = `[${sessionId}] event message.updated: provider=mock-anthropic model=mock-sonnet hasUsageTokens=true tokens.input=${FINAL_STEP_USAGE.input_tokens} cache.read=${FINAL_STEP_USAGE.cache_read_input_tokens} cache.write=${FINAL_STEP_USAGE.cache_creation_input_tokens} message.id=${finalRow?.id} session.id=${sessionId}`;
         const logged = await h.waitFor(
             () => {
                 if (!existsSync(logPath)) return null;

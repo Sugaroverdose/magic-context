@@ -269,6 +269,9 @@ export type TagTarget = {
     /** Real-argument skeleton: the call keeps the arguments the host gave it,
      * only the output becomes `[dropped §N§]` (`drop_mode = 'skeleton_real'`). */
     skeletonReal?: () => ToolDropResult;
+    /** New attachment-bearing skeletons omit media; legacy skeletons retain it. */
+    skeletonStripped?: () => ToolDropResult;
+    hasAttachments?: () => boolean;
     /** Total UTF-8 bytes of the string values in the call's input (see
      * tool-input-size.ts); null when the call is not on this pass's wire. */
     inputStringBytes?: () => number | null;
@@ -283,6 +286,7 @@ export type TagTarget = {
      * the same file: keep the call + filePath + a region hint of the diff,
      * output → [dropped §N§]. Used by smart-drops. */
     editMarker?: () => ToolDropResult;
+    editMarkerStripped?: () => ToolDropResult;
     /** Non-mutating: would drop()/truncate() actually reclaim bytes? Tool
      * targets only; absent on message/file targets. */
     canDrop?: () => boolean;

@@ -11,6 +11,7 @@ import {
     getTagById,
     openDatabase,
     queuePendingOp,
+    updateTagDropMode,
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import { createDroppedInputGuard } from "./dropped-input-guard";
@@ -166,6 +167,58 @@ describe("real-or-absent drops inside the newest-call window", () => {
             createHash("sha256").update(JSON.stringify(messages)).digest("hex");
         expect(passB.length).toBe(passA.length + 1);
         expect(sha(passB.slice(0, passA.length))).toBe(sha(passA));
+    });
+
+    it("keeps attachment-bearing priced-drop prefix hashes stable after append and defer", () => {
+        const db = freshDb();
+        const attachment = { type: "file", mime: "image/png", url: "data:image/png;base64,abcd" };
+        const build = (append: boolean): MessageLike[] => {
+            const call = toolTurn("m-image", "call-image", { path: "image.png" }, "image output");
+            (call.parts[0] as { state: { attachments?: unknown[] } }).state.attachments = [
+                attachment,
+            ];
+            return [
+                userTurn("m-start", "start"),
+                call,
+                ...(append ? [userTurn("m-next", "next")] : []),
+            ];
+        };
+        const priced = build(false);
+        const tagger = createTagger();
+        const { targets, batch } = tagMessages("ses-1", priced, tagger, db);
+        const tag = tagger.getToolTag("ses-1", "call-image", "m-image")!;
+        queuePendingOp(db, "ses-1", tag, "drop");
+        expect(applyPendingOperations("ses-1", db, targets, new Set())).toBe(true);
+        batch.finalize();
+        expect(getTagById(db, "ses-1", tag)?.dropMode).toBe("skeleton_stripped");
+        expect(
+            (servedPart(priced, "call-image")?.state as { attachments: unknown[] }).attachments,
+        ).toEqual([]);
+        const deferred = build(true);
+        const replayTagger = createTagger();
+        replayTagger.initFromDb("ses-1", db);
+        const replay = tagMessages("ses-1", deferred, replayTagger, db);
+        applyFlushedStatuses("ses-1", db, replay.targets);
+        replay.batch.finalize();
+        const sha = (rows: MessageLike[]) =>
+            createHash("sha256").update(JSON.stringify(rows)).digest("hex");
+        expect(sha(deferred.slice(0, priced.length))).toBe(sha(priced));
+
+        // A skeleton served by an older version retains its attachments on defer.
+        updateTagDropMode(db, "ses-1", tag, "skeleton_real");
+        const legacyA = build(false);
+        const legacyB = build(true);
+        for (const rows of [legacyA, legacyB]) {
+            const t = createTagger();
+            t.initFromDb("ses-1", db);
+            const tagged = tagMessages("ses-1", rows, t, db);
+            applyFlushedStatuses("ses-1", db, tagged.targets);
+            tagged.batch.finalize();
+        }
+        expect(
+            (servedPart(legacyA, "call-image")?.state as { attachments: unknown[] }).attachments,
+        ).toEqual([attachment]);
+        expect(sha(legacyB.slice(0, legacyA.length))).toBe(sha(legacyA));
     });
 
     it("lets a copied real-argument call through the dropped-input guard", () => {

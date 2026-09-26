@@ -630,7 +630,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
 
             sessionLog(
                 info.sessionID,
-                `event message.updated: provider=${info.providerID} model=${info.modelID} hasUsageTokens=${hasUsageTokens} tokens.input=${info.tokens?.input} cache.read=${info.tokens?.cache?.read} cache.write=${info.tokens?.cache?.write}`,
+                `event message.updated: provider=${info.providerID} model=${info.modelID} hasUsageTokens=${hasUsageTokens} tokens.input=${info.tokens?.input} cache.read=${info.tokens?.cache?.read} cache.write=${info.tokens?.cache?.write} message.id=${info.messageID} session.id=${info.sessionID}`,
             );
 
             const hasKnownUsage = hasUsageTokens || deps.contextUsageMap.has(info.sessionID);

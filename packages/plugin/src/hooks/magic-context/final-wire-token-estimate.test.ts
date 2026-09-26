@@ -40,6 +40,17 @@ function toolMessage(output: string): MessageLike {
 }
 
 describe("final outgoing-wire token estimate", () => {
+    it("counts attachments still sent with a legacy dropped skeleton", () => {
+        const row = toolMessage("[dropped §7§]");
+        const state = (row.parts[0] as { state: { attachments?: unknown[] } }).state;
+        const without = estimate([row]).messageTokens.toolCall;
+        state.attachments = [
+            { type: "file", mime: "image/png", url: "https://example.com/image.png" },
+        ];
+        expect(estimate([row]).messageTokens.toolCall - without).toBe(1200);
+        state.attachments = [];
+        expect(estimate([row]).messageTokens.toolCall).toBe(without);
+    });
     it("describes the final three post-transform message tails compactly", () => {
         const messages = [
             { info: { role: "assistant" }, parts: [{ type: "text" }] },

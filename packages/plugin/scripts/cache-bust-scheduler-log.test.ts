@@ -13,6 +13,7 @@ const session = "ses_ckios";
 const aTime = Date.parse("2026-09-20T12:48:01.103Z");
 const bTime = Date.parse("2026-09-20T12:48:26.943Z");
 const log = `[2026-09-20T12:47:52.749Z] [magic-context][${session}] transform scheduler: percentage=75.2% inputTokens=655813 cacheTtl=never lastResponseTime=1789908472447 decision=execute
+[2026-09-20T12:48:20.604Z] [magic-context][${session}] event message.updated: provider=mock model=test hasUsageTokens=true tokens.input=443412 cache.read=2 cache.write=0 message.id=msg_538 session.id=${session}
 [2026-09-20T12:48:20.605Z] [magic-context][${session}] transform scheduler: percentage=50.8% inputTokens=443412 cacheTtl=never lastResponseTime=1789908499627 decision=defer
 `;
 const execute: CacheBustDecisionAttribution = { timestampMs: Date.parse("2026-09-20T12:47:54.609Z"), decision: "execute", materialized: true, materializeReason: "pressure_refold", emergency: false, droppedTokens: 100, droppedCount: 366, inputTokens: 655813, flush: false, source: "transform_decisions" };

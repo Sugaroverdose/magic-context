@@ -841,9 +841,13 @@ function toTagEntry(row: TagRow): TagEntry {
                 ? "truncated"
                 : row.drop_mode === "skeleton_real"
                   ? "skeleton_real"
-                  : row.drop_mode === "edit_marker"
-                    ? "edit_marker"
-                    : "full",
+                  : row.drop_mode === "skeleton_stripped"
+                    ? "skeleton_stripped"
+                    : row.drop_mode === "edit_marker"
+                      ? "edit_marker"
+                      : row.drop_mode === "edit_marker_stripped"
+                        ? "edit_marker_stripped"
+                        : "full",
         toolName: row.tool_name ?? null,
         inputByteSize: row.input_byte_size ?? 0,
         byteSize: row.byte_size,
