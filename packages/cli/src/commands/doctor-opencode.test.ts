@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -12,6 +20,7 @@ import { computeLegacyRustDirIdentity } from "@magic-context/core/features/magic
 import { resolveOpenCodeDbPath } from "@magic-context/core/shared/opencode-db-path";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
+import { openExistingContextDatabase } from "../lib/database-access";
 import {
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION,
     OPENCODE_PLUGIN_NAME,
@@ -25,6 +34,7 @@ import {
     describeAutoUpdateStall,
     describeOpenCodeDatabaseDoctorCheck,
     findUndeclaredConfiguredVariants,
+    formatSharedDbRowCounts,
     getUserNpmrcPath,
     isPinnedOpenCodePluginSpecifier,
     migrateLegacyAgentEnabledConfigForDoctor,
@@ -91,7 +101,51 @@ describe("OpenCode model catalog parsing", () => {
             "/tmp/project",
         );
         expect(warnings).toEqual([
-            "Could not verify configured hidden-agent variants: this OpenCode host did not provide a readable model catalog. Start the background service with opencode service start, then check opencode api model.list --param directory=/tmp/project.",
+            "Could not verify configured hidden-agent models and variants: this OpenCode host did not provide a readable model catalog. Start the background service with opencode service start, then check opencode api model.list --param directory=/tmp/project.",
+        ]);
+    });
+    it("warns when a historian, dreamer or fallback model is not in the v2 host catalog", () => {
+        // Captured from OpenCode 2.0.12 in an isolated root with a dummy API key;
+        // only the anthropic provider is configured there.
+        const output = readFileSync(
+            join(import.meta.dir, "fixtures/opencode-2.0.12-model-list.json"),
+            "utf8",
+        );
+        const warnings: string[] = [];
+        checkConfiguredVariantCatalog(
+            {
+                // No variant anywhere: the model check must not depend on one.
+                historian: { model: "opencode-go/muse-spark-1.3-contributor" },
+                dreamer: {
+                    opencode: {
+                        model: "anthropic/claude-opus-5-5",
+                        fallback_models: ["anthropic/not-a-model"],
+                    },
+                },
+            },
+            "v2",
+            (message) => warnings.push(message),
+            () => ({ stdout: output, status: 0 }),
+            "/tmp/project",
+        );
+        expect(warnings).toEqual([
+            "historian model opencode-go/muse-spark-1.3-contributor names provider 'opencode-go', which this OpenCode host does not have. The historian cannot run on it; configure that provider in OpenCode or choose a model listed by opencode api model.list --param directory=/tmp/project.",
+            "dreamer fallback model anthropic/not-a-model is not offered by provider 'anthropic' on this OpenCode host. The dreamer cannot run on it; choose a model listed by opencode api model.list --param directory=/tmp/project.",
+        ]);
+    });
+    it("reports unknown models from the v1 verbose catalog too", () => {
+        const warnings: string[] = [];
+        checkConfiguredVariantCatalog(
+            { historian: { opencode: { model: "missing/model" } } },
+            "v1",
+            (message) => warnings.push(message),
+            () => ({
+                stdout: 'provider/model\n{\n  "id": "model",\n  "providerID": "provider",\n  "variants": {}\n}',
+                status: 0,
+            }),
+        );
+        expect(warnings).toEqual([
+            "historian model missing/model names provider 'missing', which this OpenCode host does not have. The historian cannot run on it; configure that provider in OpenCode or choose a model listed by opencode models --verbose.",
         ]);
     });
     it("retains the v1 verbose catalog check", () => {
@@ -116,6 +170,56 @@ describe("OpenCode model catalog parsing", () => {
                 `provider/model\n{\n  "id": "model",\n  "providerID": "provider",\n  "variants": {\n    "medium": {}\n  }\n}`,
             ),
         ).toEqual([{ providerID: "provider", id: "model", variants: { medium: {} } }]);
+    });
+});
+
+describe("doctor shared DB row counts", () => {
+    it("counts rows still in the write-ahead log through the read-only open", () => {
+        const dir = mkdtempSync(join(tmpdir(), "mc-doctor-wal-"));
+        const path = join(dir, "context.db");
+        const writer = new Database(path);
+        try {
+            initializeDatabase(writer);
+            runMigrations(writer);
+            // Keep every new row in the WAL, as a running plugin does between
+            // checkpoints.
+            writer.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;");
+            for (let index = 0; index < 5; index++) {
+                writer
+                    .prepare(
+                        `INSERT INTO memories
+                            (project_path, category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at)
+                         VALUES ('dir:6fb76e42d6dd', 'CONSTRAINTS', ?, ?, 1, 1, 1, 1)`,
+                    )
+                    .run(`content-${index}`, `hash-${index}`);
+            }
+            expect(statSync(`${path}-wal`).size).toBeGreaterThan(0);
+            const reader = openExistingContextDatabase(path, { readonly: true });
+            if (!reader) throw new Error("context DB vanished");
+            try {
+                expect(formatSharedDbRowCounts(reader)).toContain("memories=5");
+            } finally {
+                reader.close();
+            }
+        } finally {
+            writer.close();
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+    it("reports an unreadable count as n/a with its reason instead of 0", () => {
+        const db = {
+            prepare(sql: string) {
+                return {
+                    get() {
+                        if (sql.includes("memories")) throw new Error("database is locked");
+                        return { c: 3 };
+                    },
+                };
+            },
+        };
+        expect(formatSharedDbRowCounts(db)).toBe(
+            "tags=3, compartments=3, memories=n/a (database is locked), notes=3, dream_runs=3",
+        );
     });
 });
 

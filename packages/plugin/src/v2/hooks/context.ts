@@ -56,11 +56,12 @@ import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatt
 import { servedModuleM0Text } from "../../hooks/magic-context/rust-served-m0";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
+import { scheduleAfterBootQuiet } from "../../plugin/boot-quiet";
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
 import { detectConflicts } from "../../shared/conflict-detector";
 import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
 import { getErrorMessage } from "../../shared/error-message";
-import { sessionLog } from "../../shared/logger";
+import { log, sessionLog } from "../../shared/logger";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import {
     isSaneLimit,
@@ -98,6 +99,7 @@ import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { RestoredRowCache } from "./restore-rows";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { createV2RustRefusalRecovery, resolveV2RustModeModuleClient } from "./rust-mode";
+import { runV2SessionProjectBackfill } from "./session-project-backfill";
 import {
     createV2RawMessageProvider,
     createV2RawMessageReader,
@@ -116,6 +118,37 @@ const HIDDEN_SESSION_ERROR_GRACE_MS = 50;
 
 export function isBlockingV2TransformError(error: unknown): boolean {
     return error instanceof EmergencyFailClosedError || isFailClosedBlockingError(error);
+}
+
+/**
+ * Cache the directory the host bound a session to, looked up once per session.
+ *
+ * On OpenCode 1 the shared transform asks the SDK client for this and records
+ * the session-to-project binding (`session_projects`) only when the host
+ * answered. OpenCode 2 gives plugins no SDK client, so without this lookup the
+ * transform always fell back to the launch directory, never recorded a binding,
+ * and the Dashboard found no project for any OpenCode 2 session. The session's
+ * directory is fixed at creation, so one successful answer is kept for the
+ * session's lifetime; a failed lookup is retried on the next pass.
+ */
+export async function cacheV2SessionDirectory(
+    session: Pick<V2Context["session"], "get">,
+    sessionID: string,
+    directories: Map<string, string>,
+): Promise<void> {
+    if (directories.has(sessionID)) return;
+    try {
+        const directory = (await session.get({ sessionID }))?.location?.directory;
+        if (typeof directory === "string" && directory.length > 0) {
+            directories.set(sessionID, directory);
+        }
+    } catch (error) {
+        sessionLog(
+            sessionID,
+            "v2 session directory lookup failed; using the launch directory:",
+            error,
+        );
+    }
 }
 
 /**
@@ -566,6 +599,7 @@ export async function registerContext(context: V2Context) {
     const channel1: NonNullable<TransformDeps["channel1StateBySession"]> = new Map();
     const variants = new Map<string, string | undefined>();
     const agents = new Map<string, string>();
+    const sessionDirectories = new Map<string, string>();
     const historyRefreshSessions = new Set<string>();
     const pendingMaterializationSessions = new Set<string>();
     const lastHeuristicsTurnId = new Map<string, string>();
@@ -604,6 +638,14 @@ export async function registerContext(context: V2Context) {
     const openStoreReader = () =>
         new V2StoreReader(gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"));
     const pagedRead = createV2RawMessageReader(openStoreReader);
+    if (db && isDatabasePersisted(db)) {
+        const backfillDb = db;
+        scheduleAfterBootQuiet(() => {
+            runV2SessionProjectBackfill(backfillDb, openStoreReader).catch((error: unknown) =>
+                log("[session-project-backfill] OpenCode 2 backfill failed:", error),
+            );
+        });
+    }
     const readAllForConversion = (sessionID: string) =>
         readAllV2RawMessagesForConversion(openStoreReader, sessionID);
     // Refusal recovery only needs to know whether a user turn followed the refused
@@ -959,6 +1001,7 @@ export async function registerContext(context: V2Context) {
                 variant: draft.model.variant,
                 model: { providerID: draft.model.providerID, modelID: draft.model.id },
             });
+            await cacheV2SessionDirectory(context.session, draft.sessionID, sessionDirectories);
             // Background historian reads outlive the context callback. Keep its source
             // registered until plugin disposal, rather than falling back to the v1 store.
             if (!rawProviders.has(draft.sessionID))
@@ -1009,6 +1052,7 @@ export async function registerContext(context: V2Context) {
                 variantBySession: variants,
                 clearReasoningAge: config.clear_reasoning_age,
                 directory,
+                sessionDirectoryBySession: sessionDirectories,
                 projectPath: directory,
                 hiddenCompletionExecutor,
                 historianRunnable:
@@ -1274,6 +1318,7 @@ export async function registerContext(context: V2Context) {
         historyRefreshSessions,
         pendingMaterializationSessions,
         systemPromptRefreshSessions,
+        sessionDirectoryBySession: sessionDirectories,
     });
     const storageDir = getMagicContextStorageDir();
     const rpcServer = new MagicContextRpcServer(storageDir, directory);

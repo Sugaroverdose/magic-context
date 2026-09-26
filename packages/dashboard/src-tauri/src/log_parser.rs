@@ -10,6 +10,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy)]
 pub enum Harness {
     Opencode,
+    /// The OpenCode 2 plugin logs under its own `opencode2` temp subtree.
+    Opencode2,
     Pi,
     Omp,
 }
@@ -18,6 +20,7 @@ impl Harness {
     fn as_str(self) -> &'static str {
         match self {
             Harness::Opencode => "opencode",
+            Harness::Opencode2 => "opencode2",
             Harness::Pi => "pi",
             Harness::Omp => "omp",
         }
@@ -29,6 +32,7 @@ impl Harness {
 /// The plugin writes separate logs per harness so a single machine running
 /// each can produce an independent issue report:
 ///   - OpenCode → `${tmpdir}/opencode/magic-context/magic-context.log`
+///   - OpenCode 2 → `${tmpdir}/opencode2/magic-context/magic-context.log`
 ///   - Pi       → `${tmpdir}/pi/magic-context/magic-context.log`
 ///   - OMP      → `${tmpdir}/omp/magic-context/magic-context.log`
 ///
@@ -78,7 +82,7 @@ fn resolve_storage_dir() -> Option<PathBuf> {
 
 /// Return every distinct legacy and fleet log the dashboard can read.
 pub fn resolve_log_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::with_capacity(8);
+    let mut paths = Vec::with_capacity(10);
     if let Some(override_path) = std::env::var("MAGIC_CONTEXT_LOG_PATH")
         .ok()
         .map(|value| PathBuf::from(value.trim()))
@@ -86,7 +90,12 @@ pub fn resolve_log_paths() -> Vec<PathBuf> {
     {
         paths.push(override_path);
     }
-    for harness in [Harness::Opencode, Harness::Pi, Harness::Omp] {
+    for harness in [
+        Harness::Opencode,
+        Harness::Opencode2,
+        Harness::Pi,
+        Harness::Omp,
+    ] {
         let path = resolve_log_path_from_temp_dir(&std::env::temp_dir(), harness);
         if !paths.contains(&path) {
             paths.push(path);
@@ -96,6 +105,7 @@ pub fn resolve_log_paths() -> Vec<PathBuf> {
         let logs = storage_dir.join("logs");
         for name in [
             "magic-context.opencode.log",
+            "magic-context.opencode2.log",
             "magic-context.pi.log",
             "magic-context.omp.log",
             "magic-context.log",
@@ -1388,9 +1398,20 @@ mod tests {
         env.remove("MAGIC_CONTEXT_LOG_PATH");
 
         let paths = resolve_log_paths();
-        for harness in [Harness::Opencode, Harness::Pi, Harness::Omp] {
+        for harness in [
+            Harness::Opencode,
+            Harness::Opencode2,
+            Harness::Pi,
+            Harness::Omp,
+        ] {
             assert!(paths.contains(&resolve_log_path_for(harness)));
         }
+        assert!(paths
+            .iter()
+            .any(|path| path.ends_with("opencode2/magic-context/magic-context.log")));
+        assert!(paths
+            .iter()
+            .any(|path| path.ends_with("logs/magic-context.opencode2.log")));
         assert!(paths
             .iter()
             .any(|path| path.ends_with("logs/magic-context.opencode.log")));

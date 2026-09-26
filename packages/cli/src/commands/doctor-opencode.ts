@@ -146,6 +146,30 @@ import {
 
 const CLI_PACKAGE_NAME = "@cortexkit/magic-context";
 
+const SHARED_DB_ROW_COUNT_TABLES = ["tags", "compartments", "memories", "notes", "dream_runs"];
+
+/**
+ * Summarize row counts of the shared context DB. A count that cannot be read
+ * shows as `n/a` with the reason. It used to show as 0, which is
+ * indistinguishable from an empty table and made doctor contradict the rows
+ * the plugin and other SQLite readers could see.
+ */
+export function formatSharedDbRowCounts(db: {
+    prepare(sql: string): { get(...params: unknown[]): unknown };
+}): string {
+    return SHARED_DB_ROW_COUNT_TABLES.map((table) => {
+        try {
+            const row = db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as
+                | { c?: unknown }
+                | undefined;
+            return `${table}=${typeof row?.c === "number" ? row.c : "n/a"}`;
+        } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            return `${table}=n/a (${sanitizeDiagnosticText(reason)})`;
+        }
+    }).join(", ");
+}
+
 export function findUndeclaredConfiguredVariants(
     configured: Array<{ agent: string; model: string; variant: string }>,
     catalog: ReturnType<typeof parseOpenCodeModelCatalog>,
@@ -154,6 +178,28 @@ export function findUndeclaredConfiguredVariants(
         const [providerID, id] = entry.model.split("/", 2);
         const model = catalog.find((item) => item.providerID === providerID && item.id === id);
         return model !== undefined && !Object.hasOwn(model.variants, entry.variant);
+    });
+}
+
+/**
+ * Configured hidden-agent models this host's catalog does not list. A model
+ * whose provider is missing from the catalog entirely is reported as an unknown
+ * provider (typically a provider id that is not configured in OpenCode); a
+ * known provider without that model id is reported as an unknown model.
+ */
+export function findUnknownConfiguredModels(
+    configured: Array<{ agent: string; model: string; fallback: boolean }>,
+    catalog: ReturnType<typeof parseOpenCodeModelCatalog>,
+): Array<{ agent: string; model: string; fallback: boolean; unknown: "provider" | "model" }> {
+    return configured.flatMap((entry): Array<typeof entry & { unknown: "provider" | "model" }> => {
+        const [providerID, id] = entry.model.split("/", 2);
+        if (!catalog.some((item) => item.providerID === providerID)) {
+            return [{ ...entry, unknown: "provider" as const }];
+        }
+        if (!catalog.some((item) => item.providerID === providerID && item.id === id)) {
+            return [{ ...entry, unknown: "model" as const }];
+        }
+        return [];
     });
 }
 
@@ -174,6 +220,7 @@ export function checkConfiguredVariantCatalog(
     projectDir = process.cwd(),
 ): void {
     const configured: Array<{ agent: string; model: string; variant: string }> = [];
+    const models: Array<{ agent: string; model: string; fallback: boolean }> = [];
     const root = config && typeof config === "object" ? (config as Record<string, unknown>) : {};
     for (const agent of ["historian", "dreamer"] as const) {
         const section = root[agent];
@@ -181,21 +228,23 @@ export function checkConfiguredVariantCatalog(
         const block = (section as Record<string, unknown>).opencode ?? section;
         if (!block || typeof block !== "object") continue;
         const record = block as Record<string, unknown>;
-        const add = (entry: unknown, defaultVariant: unknown) => {
+        const add = (entry: unknown, defaultVariant: unknown, fallback: boolean) => {
             const value =
                 entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
             const model = typeof entry === "string" ? entry : value.model;
             const variant = value.variant ?? defaultVariant;
-            if (typeof model === "string" && typeof variant === "string" && model.includes("/")) {
-                configured.push({ agent, model, variant });
+            if (typeof model !== "string" || !model.includes("/")) return;
+            if (!models.some((known) => known.agent === agent && known.model === model)) {
+                models.push({ agent, model, fallback });
             }
+            if (typeof variant === "string") configured.push({ agent, model, variant });
         };
-        add(record.model, record.variant);
+        add(record.model, record.variant, false);
         if (Array.isArray(record.fallback_models)) {
-            for (const entry of record.fallback_models) add(entry, undefined);
+            for (const entry of record.fallback_models) add(entry, undefined, true);
         }
     }
-    if (configured.length === 0) return;
+    if (models.length === 0) return;
     const tempRoot = mkdtempSync(join(tmpdir(), "magic-context-opencode-catalog-"));
     try {
         const command =
@@ -210,9 +259,21 @@ export function checkConfiguredVariantCatalog(
                 : parseOpenCodeModelCatalog(result.stdout ?? "");
         if (result.error || result.status !== 0 || catalog.length === 0) {
             warn(
-                `Could not verify configured hidden-agent variants: this OpenCode host did not provide a readable model catalog. ${hostGeneration === "v2" ? "Start the background service with opencode service start, then check" : "Check"} ${guidance}.`,
+                `Could not verify configured hidden-agent models and variants: this OpenCode host did not provide a readable model catalog. ${hostGeneration === "v2" ? "Start the background service with opencode service start, then check" : "Check"} ${guidance}.`,
             );
             return;
+        }
+        // Nothing else reports this before a run: the historian or dreamer just
+        // fails each time it is due, and without a historian no history is
+        // ever compacted into compartments.
+        for (const entry of findUnknownConfiguredModels(models, catalog)) {
+            const [providerID] = entry.model.split("/", 1);
+            const role = `${entry.agent}${entry.fallback ? " fallback" : ""} model ${entry.model}`;
+            warn(
+                entry.unknown === "provider"
+                    ? `${role} names provider '${providerID}', which this OpenCode host does not have. The ${entry.agent} cannot run on it; configure that provider in OpenCode or choose a model listed by ${guidance}.`
+                    : `${role} is not offered by provider '${providerID}' on this OpenCode host. The ${entry.agent} cannot run on it; choose a model listed by ${guidance}.`,
+            );
         }
         for (const entry of findUndeclaredConfiguredVariants(configured, catalog)) {
             warn(
@@ -1788,32 +1849,7 @@ export async function runDoctor(
                 }
 
                 // Row counts across the major tables — informational, not pass/fail.
-                try {
-                    const counts: Record<string, number> = {};
-                    for (const table of [
-                        "tags",
-                        "compartments",
-                        "memories",
-                        "notes",
-                        "dream_runs",
-                    ]) {
-                        try {
-                            const row = db.prepare(`SELECT COUNT(*) as c FROM ${table}`).get() as
-                                | { c?: number }
-                                | undefined;
-                            counts[table] = row?.c ?? 0;
-                        } catch {
-                            // Table may not exist on a brand-new DB before migrations run
-                            counts[table] = 0;
-                        }
-                    }
-                    const summary = Object.entries(counts)
-                        .map(([k, v]) => `${k}=${v}`)
-                        .join(", ");
-                    log.info(`Shared DB row counts: ${summary}`);
-                } catch {
-                    // Don't fail the doctor on row-count introspection issues
-                }
+                log.info(`Shared DB row counts: ${formatSharedDbRowCounts(db)}`);
                 for (const stall of listShadowBackfillStalls(db)) {
                     warn(formatShadowBackfillStall(stall));
                 }

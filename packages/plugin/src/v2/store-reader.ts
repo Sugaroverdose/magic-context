@@ -388,6 +388,24 @@ export class V2StoreReader {
         });
     }
 
+    /**
+     * One page of host sessions with the directory each was created in, in
+     * ascending id order after `afterSessionID` (exclusive; null starts at the
+     * beginning). Feeds the session-to-project backfill.
+     */
+    sessionDirectoryPage(
+        afterSessionID: string | null,
+        limit: number,
+    ): Array<{ sessionId: string; directory: string }> {
+        const rows = this.db
+            .prepare(
+                `SELECT id, COALESCE(directory, '') AS directory FROM session_v2
+                 WHERE id > ? ORDER BY id ASC LIMIT ?`,
+            )
+            .all(afterSessionID ?? "", limit) as Array<{ id: string; directory: string }>;
+        return rows.map((row) => ({ sessionId: row.id, directory: row.directory }));
+    }
+
     storedMessageCount(sessionID: string): number {
         return trackDecodeOperation("storedMessageCount", () => {
             const row = this.db

@@ -19,6 +19,7 @@ export function createV2RpcLiveSessionState(
         | "historyRefreshSessions"
         | "pendingMaterializationSessions"
         | "systemPromptRefreshSessions"
+        | "sessionDirectoryBySession"
     >,
 ): LiveSessionState {
     return Object.assign(createLiveSessionState(), overrides);

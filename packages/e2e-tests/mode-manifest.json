@@ -859,6 +859,21 @@
             ]
         },
         {
+            "path": "tests/opencode2/session-project-binding.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Real OpenCode 2 host: a session in a git and in a non-git directory gets its session_projects binding (the Dashboard's project grouping) and the plugin logs under the opencode2 temp subtree; runs in the dedicated v2 lane",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/hidden-child-ga.test.ts",
             "tier": "excluded",
             "invocation": {

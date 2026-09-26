@@ -158,6 +158,8 @@ export interface V2Context {
         }): Promise<{ id: string }>;
         get(input: { sessionID: string }): Promise<{
             model?: { providerID: string; id: string; variant?: string };
+            /** The directory the host bound the session to when it was created. */
+            location?: { directory?: string };
         }>;
         switchModel(input: {
             sessionID: string;

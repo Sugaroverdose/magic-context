@@ -6,8 +6,21 @@ import { Database } from "@magic-context/core/shared/sqlite";
 import {
     collectOpenCodePluginCacheReport,
     collectRecentSessionsFromDatabase,
+    openCodeIssueLogHarnesses,
     type RecentSessionSummary,
 } from "./diagnostics-opencode";
+
+// The OpenCode 2 plugin logs to <tmp>/opencode2/magic-context/, not the
+// OpenCode 1 subtree; an issue report on an OpenCode 2 host that read only the
+// OpenCode 1 log attached a file that stopped growing at the upgrade.
+describe("issue report log selection", () => {
+    it("reads the OpenCode 2 plugin log first on an OpenCode 2 host", () => {
+        expect(openCodeIssueLogHarnesses("v2")).toEqual(["opencode2", "opencode"]);
+    });
+    it("reads only the OpenCode 1 plugin log on an OpenCode 1 host", () => {
+        expect(openCodeIssueLogHarnesses("v1")).toEqual(["opencode"]);
+    });
+});
 
 // Fixture caches live under a throwaway XDG_CACHE_HOME; the real cache is never read.
 describe("issue report plugin cache", () => {

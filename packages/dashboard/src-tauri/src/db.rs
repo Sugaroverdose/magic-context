@@ -362,6 +362,19 @@ pub fn open_opencode_readonly(
     Ok((conn, generation))
 }
 
+/// The table holding the host's sessions. OpenCode 2 keeps them in `session_v2`
+/// (same id, title, directory, project_id, parent_id, time_updated and
+/// time_archived columns); a fresh OpenCode 2 store has no `session` table at
+/// all, and a store converted from OpenCode 1 keeps only the pre-upgrade
+/// sessions there. Reading `session` on an OpenCode 2 store therefore lists no
+/// current session, which left the Projects page empty.
+fn opencode_session_table(generation: OpenCodeStoreGeneration) -> &'static str {
+    match generation {
+        OpenCodeStoreGeneration::V1 => "session",
+        OpenCodeStoreGeneration::V2 => "session_v2",
+    }
+}
+
 fn opencode_db_probe_descriptions(resolution: &OpenCodeDbResolution) -> Vec<String> {
     let channel_db_disabled = matches!(
         std::env::var("OPENCODE_DISABLE_CHANNEL_DB").as_deref(),
@@ -3039,11 +3052,16 @@ fn provider_model_label(provider: Option<&str>, model: Option<&str>) -> Option<S
         .map(|(provider, model)| format!("{provider}/{model}"))
 }
 
-const RECENT_OPENCODE_CACHE_SESSIONS_SQL: &str = "SELECT id, time_updated, NULLIF(title, '')
-     FROM session
+fn recent_opencode_cache_sessions_sql(generation: OpenCodeStoreGeneration) -> String {
+    format!(
+        "SELECT id, time_updated, NULLIF(title, '')
+     FROM {}
      WHERE time_archived IS NULL
      ORDER BY time_updated DESC, id DESC
-     LIMIT ?1 OFFSET ?2";
+     LIMIT ?1 OFFSET ?2",
+        opencode_session_table(generation)
+    )
+}
 
 const RECENT_OPENCODE_SESSION_MESSAGES_SQL: &str = "SELECT data
      FROM message
@@ -3136,7 +3154,8 @@ fn load_recent_opencode_cache_sessions_with_cache(
         .saturating_mul(5)
         .clamp(256, ABSOLUTE_MAX_SCANNED_SESSIONS);
     let batch_size = limit.saturating_mul(4).clamp(1, max_scanned_sessions);
-    let Ok(mut candidates_stmt) = conn.prepare(RECENT_OPENCODE_CACHE_SESSIONS_SQL) else {
+    let Ok(mut candidates_stmt) = conn.prepare(&recent_opencode_cache_sessions_sql(generation))
+    else {
         return Vec::new();
     };
     let harness = match generation {
@@ -3353,7 +3372,8 @@ pub fn load_cache_session_titles(
                 };
                 let placeholders = vec!["?"; opencode_ids.len()].join(",");
                 let sql = format!(
-                    "SELECT id, COALESCE(title, '') FROM session WHERE id IN ({placeholders})"
+                    "SELECT id, COALESCE(title, '') FROM {} WHERE id IN ({placeholders})",
+                    opencode_session_table(generation)
                 );
                 if let Ok(mut stmt) = conn.prepare(&sql) {
                     if let Ok(rows) = stmt.query_map(params_from_iter(opencode_ids.iter()), |row| {
@@ -3970,9 +3990,10 @@ pub fn get_projects_for_config(
                 OpenCodeStoreGeneration::V1 => Harness::Opencode,
                 OpenCodeStoreGeneration::V2 => Harness::Opencode2,
             };
-            if let Ok(mut stmt) = opencode.prepare(
-                "SELECT id, directory FROM session WHERE directory IS NOT NULL AND directory != ''",
-            ) {
+            if let Ok(mut stmt) = opencode.prepare(&format!(
+                "SELECT id, directory FROM {} WHERE directory IS NOT NULL AND directory != ''",
+                opencode_session_table(generation)
+            )) {
                 if let Ok(rows) = stmt.query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 }) {
@@ -4164,11 +4185,12 @@ fn mapped_session_directories(identities: &SessionIdentityMap) -> Vec<(String, S
                 OpenCodeStoreGeneration::V1 => Harness::Opencode,
                 OpenCodeStoreGeneration::V2 => Harness::Opencode2,
             };
-            if let Ok(mut stmt) = conn.prepare(
+            if let Ok(mut stmt) = conn.prepare(&format!(
                 "SELECT id, COALESCE(directory, '')
-                 FROM session
+                 FROM {}
                  WHERE directory IS NOT NULL AND directory != ''",
-            ) {
+                opencode_session_table(generation)
+            )) {
                 if let Ok(rows) = stmt.query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 }) {
@@ -4273,11 +4295,12 @@ fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -
                 OpenCodeStoreGeneration::V1 => Harness::Opencode,
                 OpenCodeStoreGeneration::V2 => Harness::Opencode2,
             };
-            if let Ok(mut stmt) = conn.prepare(
+            if let Ok(mut stmt) = conn.prepare(&format!(
                 "SELECT p.name, p.worktree, COUNT(s.id)
-                 FROM project p LEFT JOIN session s ON s.project_id = p.id
+                 FROM project p LEFT JOIN {} s ON s.project_id = p.id
                  GROUP BY p.id, p.name, p.worktree",
-            ) {
+                opencode_session_table(generation)
+            )) {
                 if let Ok(rows) = stmt.query_map([], |row| {
                     Ok((
                         row.get::<_, Option<String>>(0)?.unwrap_or_default(),
@@ -5988,13 +6011,14 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
     // to hide it from its own list, so the dashboard mirrors that and shows only
     // live sessions. This also keeps archived rows out of the project-card session
     // counts, which read through this same path.
-    let Ok(mut stmt) = conn.prepare(
+    let Ok(mut stmt) = conn.prepare(&format!(
         "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.name, ''), COALESCE(p.worktree, ''),
                 COALESCE(s.directory, ''), s.time_updated AS last_activity
-         FROM session s
+         FROM {} s
          LEFT JOIN project p ON p.id = s.project_id
          WHERE s.time_archived IS NULL",
-    ) else {
+        opencode_session_table(generation)
+    )) else {
         return Vec::new();
     };
 
@@ -6228,13 +6252,14 @@ fn load_opencode_store_child_session_ids() -> HashSet<String> {
     let Some(path) = resolve_opencode_db_path() else {
         return out;
     };
-    let Ok((conn, _)) = open_opencode_readonly(&path) else {
+    let Ok((conn, generation)) = open_opencode_readonly(&path) else {
         return out;
     };
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT id FROM session
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT id FROM {}
          WHERE parent_id IS NOT NULL AND TRIM(parent_id) != ''",
-    ) else {
+        opencode_session_table(generation)
+    )) else {
         return out;
     };
     if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
@@ -6313,10 +6338,13 @@ pub fn get_opencode_session_detail(
     };
     let (oc_conn, generation) = open_opencode_readonly(&opencode_db_path)?;
     let row = oc_conn.query_row(
-        "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.name, ''), COALESCE(p.worktree, ''),
+        &format!(
+            "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.name, ''), COALESCE(p.worktree, ''),
                 COALESCE(s.directory, ''),
-                COALESCE(json_object('id', s.id, 'title', s.title, 'directory', s.directory), '{}')
-         FROM session s LEFT JOIN project p ON p.id = s.project_id WHERE s.id = ?1",
+                COALESCE(json_object('id', s.id, 'title', s.title, 'directory', s.directory), '{{}}')
+         FROM {} s LEFT JOIN project p ON p.id = s.project_id WHERE s.id = ?1",
+            opencode_session_table(generation)
+        ),
         [session_id],
         |row| {
             Ok((
@@ -6658,7 +6686,10 @@ fn resolve_session_info(
         Err(_) => return result,
     };
 
-    let mut stmt = match conn.prepare("SELECT s.id, COALESCE(s.title, '') FROM session s") {
+    let mut stmt = match conn.prepare(&format!(
+        "SELECT s.id, COALESCE(s.title, '') FROM {} s",
+        opencode_session_table(generation)
+    )) {
         Ok(s) => s,
         Err(_) => return result,
     };
@@ -7915,8 +7946,14 @@ mod cache_session_list_query_tests {
 
     #[test]
     fn opencode_list_query_reads_only_paged_session_metadata() {
-        let sql = RECENT_OPENCODE_CACHE_SESSIONS_SQL.to_ascii_lowercase();
+        let sql =
+            recent_opencode_cache_sessions_sql(OpenCodeStoreGeneration::V1).to_ascii_lowercase();
         assert!(sql.contains("from session"));
+        assert!(
+            recent_opencode_cache_sessions_sql(OpenCodeStoreGeneration::V2)
+                .to_ascii_lowercase()
+                .contains("from session_v2")
+        );
         assert!(sql.contains("time_archived is null"));
         assert!(sql.contains("order by time_updated desc"));
         assert!(sql.contains("limit ?1 offset ?2"));
@@ -8282,6 +8319,41 @@ mod session_identity_map_tests {
         conn
     }
 
+    /// Tables of a fresh OpenCode 2 store as far as the dashboard reads them:
+    /// sessions live in `session_v2`, and there is no `session`, `message` or
+    /// `part` table (captured from a real OpenCode 2.0.18 host).
+    fn create_opencode2_db(data_home: &Path) -> Connection {
+        let path = opencode_db_path(data_home);
+        std::fs::create_dir_all(path.parent().expect("opencode parent")).expect("opencode dirs");
+        let conn = Connection::open(&path).expect("open opencode db");
+        conn.execute_batch(
+            "CREATE TABLE project (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                worktree TEXT NOT NULL
+            );
+            CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                project_id TEXT,
+                parent_id TEXT,
+                directory TEXT NOT NULL,
+                time_updated INTEGER NOT NULL,
+                time_archived INTEGER
+            );
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                time_created INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .expect("create opencode 2 schema");
+        conn
+    }
+
     fn insert_session_project(conn: &Connection, session_id: &str, harness: &str, identity: &str) {
         conn.execute(
             "INSERT INTO session_projects (session_id, harness, project_path, updated_at)
@@ -8488,6 +8560,54 @@ mod session_identity_map_tests {
             assert_eq!(card.session_count, 2);
             assert_eq!(card.primary_path, main.to_string_lossy().to_string());
             assert_eq!(card.display_name, "main-checkout");
+            assert_eq!(card.memory_count, 1);
+        });
+    }
+
+    #[test]
+    fn get_project_cards_lists_opencode2_sessions_from_session_v2_with_their_directory() {
+        with_temp_data_home(|data_home| {
+            let temp = tempfile::tempdir().expect("projects");
+            let project = temp.path().join("global");
+            std::fs::create_dir_all(&project).expect("project dir");
+            let project_path = project.to_string_lossy().to_string();
+
+            let context = create_context_db(data_home, true);
+            insert_session_project(&context, "ses_v2", "opencode2", "dir:6fb76e42d6dd");
+            context
+                .execute(
+                    "INSERT INTO memories (project_path, status) VALUES ('dir:6fb76e42d6dd', 'active')",
+                    [],
+                )
+                .expect("insert memory");
+
+            let oc = create_opencode2_db(data_home);
+            oc.execute(
+                "INSERT INTO project (id, name, worktree) VALUES ('p1', NULL, ?1)",
+                [project_path.as_str()],
+            )
+            .expect("insert project");
+            oc.execute(
+                "INSERT INTO session_v2 (id, title, project_id, directory, time_updated, time_archived)
+                 VALUES ('ses_v2', 'Live session', 'p1', ?1, 500, NULL)",
+                [project_path.as_str()],
+            )
+            .expect("insert v2 session");
+            drop(oc);
+
+            let sessions = list_opencode_sessions(&SessionFilter::default());
+            assert_eq!(sessions.len(), 1, "the OpenCode 2 session must be listed");
+            assert_eq!(sessions[0].harness, Harness::Opencode2);
+            assert_eq!(sessions[0].project_identity, "dir:6fb76e42d6dd");
+
+            let cards = get_project_cards(&context);
+            assert_eq!(cards.len(), 1, "the OpenCode 2 project must get a card");
+            let card = &cards[0];
+            assert_eq!(card.identity, "dir:6fb76e42d6dd");
+            assert_eq!(card.primary_path, project_path);
+            assert_eq!(card.display_name, "global");
+            assert_eq!(card.harnesses, vec![Harness::Opencode2]);
+            assert_eq!(card.session_count, 1);
             assert_eq!(card.memory_count, 1);
         });
     }
