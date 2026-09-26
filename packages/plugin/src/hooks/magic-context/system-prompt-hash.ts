@@ -22,6 +22,7 @@ import {
     spawnAgentFromOpenCodeDb,
 } from "./ctx-reduce-availability";
 
+import { isCompactionSystemRequest } from "./compaction-request";
 import { estimateTokens } from "./read-session-formatting";
 
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
@@ -83,6 +84,10 @@ function isInternalOpenCodeAgent(systemPromptContent: string): boolean {
         // compaction.txt opens with this exact line
         systemPromptContent.includes(
             "You are an anchored context summarization assistant for coding sessions.",
+        ) ||
+        // compaction.txt from OpenCode 1.18 on opens with this line instead
+        systemPromptContent.includes(
+            "You are a context summarization agent. You are given a conversation between a user and an agent.",
         )
     );
 }
@@ -233,6 +238,16 @@ export function createSystemPromptHashHandler(deps: {
     ): Promise<void> => {
         const sessionId = input.sessionID;
         if (!sessionId) return;
+
+        // OpenCode's native compaction runs this hook with the compaction agent's
+        // prompt while it builds the summary request. Storing that prompt's hash
+        // or advancing the sticky date would make the next real turn see its own
+        // prompt as a change and fold a second time; the host compaction already
+        // costs the one fold the replaced history needs.
+        if (isCompactionSystemRequest(sessionId)) {
+            sessionLog(sessionId, "system-prompt-hash skipped (OpenCode compaction request)");
+            return;
+        }
 
         // ── Skip OpenCode's internal hidden agents ──
         //

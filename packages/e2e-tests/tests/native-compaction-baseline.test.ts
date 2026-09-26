@@ -95,6 +95,14 @@ function readBaseline(sessionId: string): {
     };
 }
 
+function readSystemHash(sessionId: string): string {
+    const row = h
+        .contextDb()
+        .prepare("SELECT system_prompt_hash AS hash FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { hash: string | number | null } | null;
+    return row?.hash == null ? "" : String(row.hash);
+}
+
 function latestCompartmentEnd(sessionId: string): string | null {
     const row = h
         .contextDb()
@@ -239,8 +247,28 @@ it(
         // Native compaction. The mock answers the summary request.
         h.mock.setDefault(smallUsage(HOST_SUMMARY_SENTINEL));
         await h.waitForMockQuiescence({ label: "quiet before compaction" });
+        const hashBeforeCompaction = readSystemHash(sessionId);
+        expect(hashBeforeCompaction).not.toBe("");
+        const logOffsetBeforeCompaction = pluginLog().length;
         await h.compactSession(sessionId);
         await h.waitForMockQuiescence({ label: "quiet after compaction" });
+
+        // Building the compaction request runs this session's system-prompt hook with
+        // the compaction agent's prompt. That prompt must not become the session's
+        // stored hash, or the next real pass would see it flip back and fold again.
+        expect(readSystemHash(sessionId)).toBe(hashBeforeCompaction);
+        const summaryRequest = mainRequestBodies().find((body) =>
+            body.includes("context summarization agent"),
+        );
+        expect(summaryRequest).toBeDefined();
+        // The summary still covers Magic Context's history: the compartments ride
+        // m[0] in the conversation handed to the compaction agent.
+        expect(summaryRequest).toContain(HISTORY_SENTINEL);
+        // ...handed over from the last render, not from a transform pass that would
+        // persist state from the compaction request.
+        expect(pluginLog().slice(logOffsetBeforeCompaction)).toContain(
+            "compaction request: served the last-known-good render",
+        );
 
         h.mock.setDefault(smallUsage("after-compaction"));
         await h.sendPrompt(sessionId, AFTER_COMPACTION_PROMPT);
@@ -276,6 +304,16 @@ it(
             .slice(compactedAt)
             .filter((line) => line.includes(sessionId) && line.includes("rematerialized=true"));
         expect(foldsAfter).toHaveLength(1);
+
+        // Across the compaction request and the passes after it, one HARD fold in
+        // total, and it is the host-compaction trigger, not a system-hash flip.
+        const foldsSinceCompaction = pluginLog()
+            .slice(logOffsetBeforeCompaction)
+            .split("\n")
+            .filter((line) => line.includes(sessionId) && line.includes("rematerialized=true"));
+        expect(foldsSinceCompaction).toHaveLength(1);
+        expect(foldsSinceCompaction[0]).toContain("reason=host_compaction");
+        expect(readSystemHash(sessionId)).toBe(hashBeforeCompaction);
 
         assertOpenDatabasesAreThrowaway();
     },

@@ -61,6 +61,7 @@ import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import type { Database } from "../../shared/sqlite";
 import { createMagicContextCommandHandler } from "./command-handler";
+import { clearCompactionRequest } from "./compaction-request";
 import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import {
     deriveHistorianChunkTokens,
@@ -868,6 +869,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         onSessionDeleted: async (sessionId: string) => {
             rustRefusalRecovery?.forget(sessionId);
             dropSlot(sessionId, "session-deleted");
+            clearCompactionRequest(sessionId);
             try {
                 await transform.clearRustSession(sessionId);
             } finally {

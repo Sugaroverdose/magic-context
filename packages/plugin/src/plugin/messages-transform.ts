@@ -11,6 +11,10 @@ import {
     isProviderOverflowFailClosedProven,
 } from "../features/magic-context/storage-meta-persisted";
 import { updateSessionMeta } from "../features/magic-context/storage-meta-session";
+import {
+    renderCompactionRequestFromLkg,
+    takeCompactionMessagesTransform,
+} from "../hooks/magic-context/compaction-request";
 import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-closed";
 import { replayLkg, resolveLkgModelKeys } from "../hooks/magic-context/lkg-replay";
 import { dropSlot, getSlot, noteEntry } from "../hooks/magic-context/lkg-slot";
@@ -453,6 +457,31 @@ export function createMessagesTransformHandler(args: {
     };
 
     return async (input, output): Promise<MessageWithParts[]> => {
+        const compactionSessionId = resolveSessionId(output);
+        if (compactionSessionId && takeCompactionMessagesTransform(compactionSessionId)) {
+            // OpenCode is building its native compaction request from this history.
+            // It is not a turn of the session, so nothing may be persisted from it:
+            // hand the compaction agent the last render instead of running a pass.
+            const rendered = renderCompactionRequestFromLkg(
+                compactionSessionId,
+                output.messages as MessageLike[],
+            );
+            if (rendered) {
+                replaceMessagesInPlace(output, rendered as unknown as MessageWithParts[]);
+                sessionLog(
+                    compactionSessionId,
+                    `compaction request: served the last-known-good render (${rendered.length} messages); transform skipped`,
+                );
+                return output.messages;
+            }
+            // Without a last render there is no way to hand over m[0]/m[1]
+            // without running the transform, and the raw history may be far too
+            // large to summarise. Fall back to the ordinary pass.
+            sessionLog(
+                compactionSessionId,
+                "compaction request: no last-known-good render; running the ordinary transform",
+            );
+        }
         const inputMessages = [...output.messages];
         // Read before the transform runs: it mutates the shared message objects.
         const inputTailRole = wireTailRole(output.messages);

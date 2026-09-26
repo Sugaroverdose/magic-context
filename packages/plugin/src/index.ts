@@ -38,6 +38,7 @@ import {
     COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
     HISTORIAN_EDITOR_SYSTEM_PROMPT,
 } from "./hooks/magic-context/compartment-prompt";
+import { markCompactionRequest } from "./hooks/magic-context/compaction-request";
 import { recordToolParameters } from "./hooks/magic-context/dropped-input-guard";
 import { createLiveSessionState } from "./hooks/magic-context/live-session-state";
 import {
@@ -866,6 +867,12 @@ const server: Plugin = async (ctx) => {
             internalChildSessions: liveSessionState.internalChildSessions,
             tryReopenStorage,
         }) as unknown as NonNullable<Hooks["experimental.chat.messages.transform"]>,
+        // OpenCode runs this right before it builds its native compaction request
+        // through the two transform hooks. Marking the session lets both hooks
+        // tell that request apart from a real turn (see compaction-request.ts).
+        "experimental.session.compacting": async (input) => {
+            if (input.sessionID) markCompactionRequest(input.sessionID);
+        },
         "experimental.chat.system.transform": async (input, output) => {
             await magicContextRuntime.magicContext?.["experimental.chat.system.transform"]?.(
                 input,
