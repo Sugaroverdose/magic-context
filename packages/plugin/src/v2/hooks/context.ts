@@ -119,6 +119,33 @@ export function isBlockingV2TransformError(error: unknown): boolean {
 }
 
 /**
+ * Cache the directory the host bound a session to, looked up once per session.
+ *
+ * On OpenCode 1 the shared transform asks the SDK client for this and records
+ * the session-to-project binding (`session_projects`) only when the host
+ * answered. OpenCode 2 gives plugins no SDK client, so without this lookup the
+ * transform always fell back to the launch directory, never recorded a binding,
+ * and the Dashboard found no project for any OpenCode 2 session. The session's
+ * directory is fixed at creation, so one successful answer is kept for the
+ * session's lifetime; a failed lookup is retried on the next pass.
+ */
+export async function cacheV2SessionDirectory(
+    session: Pick<V2Context["session"], "get">,
+    sessionID: string,
+    directories: Map<string, string>,
+): Promise<void> {
+    if (directories.has(sessionID)) return;
+    try {
+        const directory = (await session.get({ sessionID }))?.location?.directory;
+        if (typeof directory === "string" && directory.length > 0) {
+            directories.set(sessionID, directory);
+        }
+    } catch (error) {
+        sessionLog(sessionID, "v2 session directory lookup failed; using the launch directory:", error);
+    }
+}
+
+/**
  * Every pre-provider refusal on OpenCode 2 ends the turn with `session.interrupt`, which
  * the host records as a bare `outcome: "interrupted"` row: no error text reaches the
  * transcript, and under `opencode service` the server's stderr goes nowhere. The only
@@ -566,6 +593,7 @@ export async function registerContext(context: V2Context) {
     const channel1: NonNullable<TransformDeps["channel1StateBySession"]> = new Map();
     const variants = new Map<string, string | undefined>();
     const agents = new Map<string, string>();
+    const sessionDirectories = new Map<string, string>();
     const historyRefreshSessions = new Set<string>();
     const pendingMaterializationSessions = new Set<string>();
     const lastHeuristicsTurnId = new Map<string, string>();
@@ -959,6 +987,7 @@ export async function registerContext(context: V2Context) {
                 variant: draft.model.variant,
                 model: { providerID: draft.model.providerID, modelID: draft.model.id },
             });
+            await cacheV2SessionDirectory(context.session, draft.sessionID, sessionDirectories);
             // Background historian reads outlive the context callback. Keep its source
             // registered until plugin disposal, rather than falling back to the v1 store.
             if (!rawProviders.has(draft.sessionID))
@@ -1009,6 +1038,7 @@ export async function registerContext(context: V2Context) {
                 variantBySession: variants,
                 clearReasoningAge: config.clear_reasoning_age,
                 directory,
+                sessionDirectoryBySession: sessionDirectories,
                 projectPath: directory,
                 hiddenCompletionExecutor,
                 historianRunnable:
@@ -1274,6 +1304,7 @@ export async function registerContext(context: V2Context) {
         historyRefreshSessions,
         pendingMaterializationSessions,
         systemPromptRefreshSessions,
+        sessionDirectoryBySession: sessionDirectories,
     });
     const storageDir = getMagicContextStorageDir();
     const rpcServer = new MagicContextRpcServer(storageDir, directory);
