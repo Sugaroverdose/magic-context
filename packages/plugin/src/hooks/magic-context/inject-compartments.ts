@@ -63,7 +63,7 @@ import {
 import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
 import { historyLocalBudget } from "./decision-calibration";
 import { isHostRenderedSystemMessage } from "./host-served-rows";
-import { resolveHostServedBoundaryId } from "./read-session-chunk";
+import { compareRawSessionMessageOrder, resolveHostServedBoundaryId } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -977,7 +977,24 @@ export interface MaterializeM0Result {
     renderedMemoryIds: number[];
 }
 
-export type PrefixTrimStatus = "not-attempted" | "not-required" | "applied" | "refused";
+/**
+ * - `applied`: the boundary row was found and everything through it was cut.
+ * - `boundary-precedes-window`: the boundary is not in the live array because
+ *   the live window starts after it in persisted order (a host window that
+ *   starts past the boundary). The summary covers nothing live; nothing is cut.
+ * - `refused`: no cut was made this pass and the whole window is served. For a
+ *   boundary missing from inside the window this is a counted degraded state
+ *   that the next cache-busting pass heals by moving the boundary.
+ *
+ * Only `applied` proves the trim went through the named boundary; the marker
+ * drain relies on that and treats every other status as unproven.
+ */
+export type PrefixTrimStatus =
+    | "not-attempted"
+    | "not-required"
+    | "applied"
+    | "boundary-precedes-window"
+    | "refused";
 
 export interface PrefixTrimSourceOrder {
     /** Stable IDs in the exact order supplied by the host before this transform mutates the array. */
@@ -3357,6 +3374,134 @@ function findBoundaryIndex(
     return messages.findIndex((message) => message.info.id === served);
 }
 
+// ── Prefix trim when the boundary row is not in the live array ──────────
+//
+// The trim cuts through the boundary row by id. When that row is not in the
+// live array, nothing is cut and the whole window is served, exactly as before;
+// what changes is only how the state is named and logged:
+//   - The first persisted live row sorts after the boundary: the host window
+//     starts past it (for example a resumed session whose loaded history begins
+//     after the boundary). The summary covers nothing that is live, so there is
+//     nothing to cut. That is a successful trim, reported once per boundary.
+//   - Otherwise (the boundary sorts inside the window but its row is missing,
+//     or it cannot be placed at all): a degraded state, counted per episode.
+//     It heals without a cut here: every cache-busting pass moves the baseline
+//     boundary to the latest compartment end (soft refresh or materialization),
+//     and once that boundary is in the window the id trim applies again.
+// The served bytes never depend on this classification, so it needs no state
+// that must survive a restart.
+
+interface AbsentBoundaryEpisode {
+    boundary: string;
+    passes: number;
+}
+
+const absentBoundaryEpisodeBySession = new BoundedSessionMap<AbsentBoundaryEpisode>(
+    INJECTION_CACHE_MAX,
+);
+/**
+ * Last "does the boundary sort before the window" verdict per session, keyed by
+ * the boundary and the first persisted live row it was compared with. Both only
+ * change when the host window or the baseline changes, so steady passes skip
+ * the store lookups.
+ */
+const precedesVerdictBySession = new BoundedSessionMap<{
+    boundary: string;
+    firstLiveId: string;
+    precedes: boolean;
+}>(INJECTION_CACHE_MAX);
+/**
+ * Boundary already logged as sitting before the live window, so the "nothing to
+ * cut" outcome is logged once per boundary rather than on every pass.
+ */
+const precedesWindowLoggedBySession = new BoundedSessionMap<string>(INJECTION_CACHE_MAX);
+
+export function resetPrefixTrimFallbackState(sessionId: string): void {
+    absentBoundaryEpisodeBySession.delete(sessionId);
+    precedesVerdictBySession.delete(sessionId);
+    precedesWindowLoggedBySession.delete(sessionId);
+}
+
+/**
+ * Rows a host compaction places at the head of its window although they are
+ * newer than the retained rows after them (OpenCode's filterCompacted returns
+ * [compaction request, summary, retained tail, rest]). They say nothing about
+ * where the window starts in persisted order.
+ */
+function isHostCompactionHeadRow(message: MessageLike): boolean {
+    if ((message.info as { summary?: unknown }).summary === true) return true;
+    return message.parts.some((part) => (part as { type?: unknown }).type === "compaction");
+}
+
+function firstPersistedLiveId(messages: readonly MessageLike[]): string | null {
+    for (const message of messages) {
+        const id = message.info.id;
+        if (typeof id !== "string" || id.length === 0) continue;
+        if (isHostRenderedSystemMessage(message) || isHostCompactionHeadRow(message)) continue;
+        return id;
+    }
+    return null;
+}
+
+function boundaryPrecedesWindow(sessionId: string, boundary: string, firstLiveId: string): boolean {
+    const cached = precedesVerdictBySession.get(sessionId);
+    if (cached && cached.boundary === boundary && cached.firstLiveId === firstLiveId) {
+        return cached.precedes;
+    }
+    let order: number | null = null;
+    try {
+        order = compareRawSessionMessageOrder(sessionId, boundary, firstLiveId);
+        const served = resolveHostServedBoundaryId(sessionId, boundary);
+        if (order === null && served !== boundary) {
+            order = compareRawSessionMessageOrder(sessionId, served, firstLiveId);
+        }
+    } catch (error) {
+        sessionLog(sessionId, `prefix trim: placing boundary ${boundary} failed:`, error);
+        order = null;
+    }
+    const precedes = order !== null && order < 0;
+    precedesVerdictBySession.set(sessionId, { boundary, firstLiveId, precedes });
+    return precedes;
+}
+
+/** Classify and log a boundary missing from the live array. Never mutates messages. */
+function classifyAbsentBoundary(
+    options: M0M1RenderOptions,
+    messages: readonly MessageLike[],
+    boundary: string,
+): PrefixTrimStatus {
+    const { sessionId } = options;
+    const pass = options.isCacheBustingPass ? "priced" : "defer";
+    const firstLiveId = firstPersistedLiveId(messages);
+    if (firstLiveId !== null && boundaryPrecedesWindow(sessionId, boundary, firstLiveId)) {
+        absentBoundaryEpisodeBySession.delete(sessionId);
+        if (precedesWindowLoggedBySession.get(sessionId) !== boundary) {
+            precedesWindowLoggedBySession.set(sessionId, boundary);
+            sessionLog(
+                sessionId,
+                `prefix trim: boundary ${boundary} sorts before the first live message ${firstLiveId}; pass=${pass}; nothing to cut, whole window kept`,
+            );
+        }
+        return "boundary-precedes-window";
+    }
+    precedesWindowLoggedBySession.delete(sessionId);
+
+    const current = absentBoundaryEpisodeBySession.get(sessionId);
+    const episode = current && current.boundary === boundary ? current : { boundary, passes: 0 };
+    episode.passes += 1;
+    absentBoundaryEpisodeBySession.set(sessionId, episode);
+    // Logged when the episode starts, and on every cache-busting pass: those are
+    // the passes expected to heal it by moving the baseline boundary, so one
+    // that stays degraded is worth seeing.
+    if (episode.passes === 1 || options.isCacheBustingPass) {
+        sessionLog(
+            sessionId,
+            `prefix trim: boundary ${boundary} absent from current messages; pass=${pass}; no in-pass trim applied (degraded pass ${episode.passes}; ${firstLiveId === null ? "no persisted live message to compare with" : `boundary does not sort before the first live message ${firstLiveId}`}; whole window served until a cache-busting pass moves the boundary into the window)`,
+        );
+    }
+    return "refused";
+}
+
 function isSyntheticPrefixHead(message: MessageLike): boolean {
     if (
         message.info.id !== undefined ||
@@ -3489,13 +3634,10 @@ function trimToPreparedPrefix(
             const index = findBoundaryIndex(options.sessionId, options.messages, boundary);
             if (index >= 0) {
                 options.messages.splice(0, index + 1);
+                resetPrefixTrimFallbackState(options.sessionId);
                 status = "applied";
             } else {
-                sessionLog(
-                    options.sessionId,
-                    `prefix trim: boundary ${boundary} absent from current messages; pass=${options.isCacheBustingPass ? "priced" : "defer"}; no in-pass trim applied`,
-                );
-                status = "refused";
+                status = classifyAbsentBoundary(options, options.messages, boundary);
             }
         }
     }

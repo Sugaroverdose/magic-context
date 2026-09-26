@@ -683,6 +683,57 @@ export function readRawSessionMessageOrdinalById(
     );
 }
 
+/**
+ * Compare two messages' positions in the session's persisted order without
+ * reading the rest of the session: negative when `leftId` comes first, positive
+ * when it comes after, 0 when they are the same row, null when either row is
+ * unknown here.
+ *
+ * OpenCode's store is compared on (time_created, id), the order raw-message
+ * ordinals are numbered in, with two primary-key lookups. A registered provider
+ * is compared by ordinal only when it can look one up by id directly; any other
+ * provider answers null rather than falling back to a whole-history read.
+ */
+export function compareRawSessionMessageOrder(
+    sessionId: string,
+    leftId: string,
+    rightId: string,
+): number | null {
+    const provider = sessionProviders.get(sessionId);
+    if (provider) {
+        if (!provider.readMessageOrdinalById) return null;
+        const left = provider.readMessageOrdinalById(leftId);
+        const right = provider.readMessageOrdinalById(rightId);
+        return left === null || right === null ? null : left - right;
+    }
+    if (!openCodeDbExists()) return null;
+    return withReadOnlySessionDb((db) => {
+        const lookup = db.prepare(
+            "SELECT time_created, id FROM message WHERE session_id = ? AND id = ? LIMIT 1",
+        );
+        const left = lookup.get(sessionId, leftId) as
+            | { time_created: unknown; id: unknown }
+            | null
+            | undefined;
+        const right = lookup.get(sessionId, rightId) as
+            | { time_created: unknown; id: unknown }
+            | null
+            | undefined;
+        if (
+            typeof left?.time_created !== "number" ||
+            typeof right?.time_created !== "number" ||
+            typeof left.id !== "string" ||
+            typeof right.id !== "string"
+        ) {
+            return null;
+        }
+        if (left.time_created !== right.time_created) {
+            return left.time_created - right.time_created;
+        }
+        return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+    });
+}
+
 export function readRawSessionMessageById(sessionId: string, messageId: string): RawMessage | null {
     const provider = sessionProviders.get(sessionId);
     if (provider?.readMessageById) {
