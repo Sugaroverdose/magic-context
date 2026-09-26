@@ -77,7 +77,7 @@ describe.skipIf(!prereqs.ok)(
             });
             host = await spawnOpencode2({
                 existingIsolation: fixture,
-                modelContextLimit: 24_000,
+                modelContextLimit: 128_000,
                 modelOutputLimit: 1_024,
                 magicContextConfig: {
                     transform_mode: "rust",
@@ -86,7 +86,7 @@ describe.skipIf(!prereqs.ok)(
                     dreamer: { disable: true },
                     // No `runner` here either: the plugin's pull loop is on by default.
                     historian: { opencode: { model: "openai/mock-model" } },
-                    execute_threshold_percentage: 40,
+                    execute_threshold_percentage: 15,
                     history_budget_percentage: 0.15,
                 },
             });

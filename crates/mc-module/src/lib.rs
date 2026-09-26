@@ -6443,6 +6443,7 @@ impl McHandler {
                 project_path: project_path.to_string(),
                 project_slug: project_slug.clone(),
                 model_chain: model_chain.to_vec(),
+                model_limits: parsed.historian_model_limits.clone(),
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
                 historian_context_limit_tokens: cfg
                     .historian_context_limit_known
@@ -6678,6 +6679,7 @@ impl McHandler {
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
                 model_chain,
+                model_limits: parsed.historian_model_limits.clone(),
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
                 historian_context_limit_tokens: cfg
                     .historian_context_limit_known

@@ -609,6 +609,7 @@ pub struct HistorianAssemblerConfig {
     pub project_path: String,
     pub project_slug: String,
     pub model_chain: Vec<String>,
+    pub model_limits: std::collections::BTreeMap<String, crate::historian::HistorianModelLimits>,
     pub token_budget: usize,
     pub historian_context_limit_tokens: Option<usize>,
     pub max_output_tokens: u32,
@@ -665,6 +666,7 @@ impl HistorianNoFireReason {
 pub struct AssembledHistorianFiring {
     pub prompt: String,
     pub model_chain: Vec<String>,
+    pub model_limits: std::collections::BTreeMap<String, crate::historian::HistorianModelLimits>,
     pub producer_source_tokens: usize,
     pub historian_context_limit_tokens: Option<usize>,
     pub max_output_tokens: u32,
@@ -719,6 +721,7 @@ impl AssembledHistorianFiring {
             producer_source_tokens: self.producer_source_tokens,
             historian_context_limit_tokens: self.historian_context_limit_tokens,
             fallback_context_limits: Default::default(),
+            model_limits: self.model_limits.clone(),
             max_output_tokens: self.max_output_tokens,
             from_ordinal: self.from_ordinal,
             to_ordinal: self.to_ordinal,
@@ -1039,6 +1042,7 @@ pub fn assemble_historian_firing(
 
     Ok(AssembleHistorianFiringOutcome::Fire(Box::new(
         AssembledHistorianFiring {
+            model_limits: config.model_limits.clone(),
             prompt,
             model_chain: config.model_chain,
             producer_source_tokens,
@@ -1927,6 +1931,7 @@ mod tests {
             &projection.blocks,
             &projection.identity_by_mid,
             HistorianAssemblerConfig {
+                model_limits: Default::default(),
                 session_id: "issue424-capacity".to_string(),
                 project_path: "/proj".to_string(),
                 project_slug: "proj".to_string(),
@@ -2191,6 +2196,7 @@ mod tests {
         ];
         let projection = project_messages(&messages).unwrap();
         let config = HistorianAssemblerConfig {
+            model_limits: Default::default(),
             session_id: "noise".to_string(),
             project_path: "/proj".to_string(),
             project_slug: "proj".to_string(),
@@ -2330,6 +2336,7 @@ mod tests {
             &projection.blocks,
             &projection.identity_by_mid,
             HistorianAssemblerConfig {
+                model_limits: Default::default(),
                 session_id: "ses-below-budget".to_string(),
                 project_path: "/proj".to_string(),
                 project_slug: "proj".to_string(),
@@ -2387,6 +2394,7 @@ mod tests {
             &projection.blocks,
             &projection.identity_by_mid,
             HistorianAssemblerConfig {
+                model_limits: Default::default(),
                 session_id: "ses-fold-only".to_string(),
                 project_path: "/proj".to_string(),
                 project_slug: "proj".to_string(),
@@ -2469,6 +2477,7 @@ mod tests {
             &projection.blocks,
             &projection.identity_by_mid,
             HistorianAssemblerConfig {
+                model_limits: Default::default(),
                 session_id: "ses-sparse".to_string(),
                 project_path: "/proj".to_string(),
                 project_slug: "proj".to_string(),

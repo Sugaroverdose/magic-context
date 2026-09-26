@@ -42,12 +42,12 @@ describe.skipIf(!rustPrereqs.ok)("rust historian: host runner by default on Open
 
     async function create(historianRunner: "broca" | null): Promise<RustTestHarness> {
         return await RustTestHarness.create({
-            modelContextLimit: 30_000,
+            modelContextLimit: 128_000,
             // No Broca process joins the daemon at all.
             startHistorianProducer: false,
             historianRunner,
             magicContextConfig: {
-                execute_threshold_percentage: 25,
+                execute_threshold_percentage: 15,
                 protected_tags: 1,
                 compressor: { enabled: false },
                 historian: {
@@ -91,7 +91,7 @@ describe.skipIf(!rustPrereqs.ok)("rust historian: host runner by default on Open
         }
         harness.mock.setDefault({
             text: "host runner trigger",
-            usage: { input_tokens: 27_000, output_tokens: 20, cache_creation_input_tokens: 2_000 },
+            usage: { input_tokens: 100_000, output_tokens: 20, cache_creation_input_tokens: 2_000 },
         });
         await harness.sendPrompt(sessionId, `host runner trigger: ${harness.ballast(2_000)}`);
         harness.mock.setDefault({
