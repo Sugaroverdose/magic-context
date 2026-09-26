@@ -53,7 +53,9 @@ import { getWindowReportsPath } from "../../features/magic-context/window-report
 import { createEventHandler as createPluginEventHandler } from "../../plugin/event";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { clearWindowOverlayCacheForTest, setWindowOverlayPath } from "../../shared/window-geometry";
+import { describeContextLimitChange } from "./context-limit-resolution";
 import { createEventHandler } from "./event-handler";
+import { resolveContextLimit as resolveLimitForTest } from "./event-resolvers";
 import { __ignoredNotificationTest } from "./send-session-notification";
 
 // These alert-content units supply idle authorization independently of the harness event hook.
@@ -1839,5 +1841,130 @@ describe("createEventHandler — compaction-off overflow gating (issue #266 S3)"
         const state = readOverflowState("ses-off-mu");
         expect(state.needsEmergencyRecovery).toBe(0);
         expect(state.detectedContextLimit).toBe(120000);
+    });
+});
+
+describe("createEventHandler — context limit stays stable for one session and model", () => {
+    // A 262,144-token model whose catalog output limit equals its window: the
+    // output reserve is capped at a quarter of the window, leaving 196,608 usable.
+    const CATALOG_USABLE = 196_608;
+    const twoModels = {
+        config: {
+            providers: async () => ({
+                data: {
+                    providers: [
+                        {
+                            id: "test-provider",
+                            models: {
+                                "model-a": { limit: { context: 262_144, output: 262_144 } },
+                                "model-b": { limit: { context: 262_144, output: 262_144 } },
+                            },
+                        },
+                    ],
+                },
+            }),
+        },
+    };
+
+    async function accepted(
+        handler: ReturnType<typeof createEventHandler>,
+        sessionID: string,
+        modelID: string,
+        input: number,
+    ): Promise<void> {
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        finish: "stop",
+                        sessionID,
+                        providerID: "test-provider",
+                        modelID,
+                        tokens: { input, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        });
+    }
+
+    function limitFor(db: ReturnType<typeof openDatabase>, sessionID: string, modelID: string) {
+        return resolveLimitForTest("test-provider", modelID, { db, sessionID });
+    }
+
+    it("does not let another model's accepted request raise this model's limit", async () => {
+        useTempDataHome("context-event-limit-drift-");
+        await refreshModelLimitsFromApi(twoModels);
+        const deps = { ...createDeps(new Map()), client: twoModels };
+        const handler = createEventHandler(deps);
+        const sessionID = "ses-limit-drift";
+
+        // Model A proves a prompt above its catalog budget: a learned increase.
+        await accepted(handler, sessionID, "model-a", 250_000);
+        expect(getOrCreateSessionMeta(deps.db, sessionID).lastUsageContextLimit).toBe(250_000);
+
+        // The session switches to model B. Before B's first reading, a pass
+        // resolves B at its catalog budget.
+        const beforeFirstReading = limitFor(deps.db, sessionID, "model-b");
+        expect(beforeFirstReading).toBe(CATALOG_USABLE);
+
+        // B's own request is accepted at 100K, below its catalog budget. Nothing
+        // about B changed, so the next pass must resolve B the same way.
+        await accepted(handler, sessionID, "model-b", 100_000);
+        expect(getOrCreateSessionMeta(deps.db, sessionID).lastUsageContextLimit).toBe(
+            CATALOG_USABLE,
+        );
+        expect(limitFor(deps.db, sessionID, "model-b")).toBe(beforeFirstReading);
+        await accepted(handler, sessionID, "model-b", 100_000);
+        expect(getOrCreateSessionMeta(deps.db, sessionID).lastUsageContextLimit).toBe(
+            CATALOG_USABLE,
+        );
+    });
+
+    it("keeps one model's learned limit across its consecutive readings", async () => {
+        useTempDataHome("context-event-limit-steady-");
+        await refreshModelLimitsFromApi(twoModels);
+        const deps = { ...createDeps(new Map()), client: twoModels };
+        const handler = createEventHandler(deps);
+        const sessionID = "ses-limit-steady";
+
+        await accepted(handler, sessionID, "model-a", 250_000);
+        const learned = limitFor(deps.db, sessionID, "model-a");
+        expect(learned).toBe(250_000);
+        for (const input of [150_000, 120_000, 180_000]) {
+            await accepted(handler, sessionID, "model-a", input);
+            expect(getOrCreateSessionMeta(deps.db, sessionID).lastUsageContextLimit).toBe(learned);
+            expect(limitFor(deps.db, sessionID, "model-a")).toBe(learned);
+        }
+    });
+});
+
+describe("describeContextLimitChange", () => {
+    const base = {
+        modelKey: "test-provider/model-a",
+        limit: 196_608,
+        catalog: 196_608,
+        detected: 0,
+        provenFloor: 150_000,
+    };
+
+    it("is silent when neither the limit nor the model changed", () => {
+        expect(describeContextLimitChange(base, { ...base, provenFloor: 160_000 })).toBeNull();
+    });
+
+    it("names the input that moved the limit", () => {
+        expect(
+            describeContextLimitChange(base, { ...base, limit: 250_000, provenFloor: 250_000 }),
+        ).toBe("context limit 196608 → 250000 (proven accepted input 150000 → 250000)");
+        expect(
+            describeContextLimitChange(base, { ...base, limit: 262_144, detected: 262_144 }),
+        ).toBe("context limit 196608 → 262144 (overflow-detected limit 0 → 262144)");
+    });
+
+    it("reports a limit change that no input explains", () => {
+        expect(describeContextLimitChange(base, { ...base, limit: 200_000 })).toBe(
+            "context limit 196608 → 200000 (no input changed)",
+        );
     });
 });
