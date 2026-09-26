@@ -51,6 +51,31 @@ export function estimateImageTokensFromDataUrl(url: string): number {
     return IMAGE_FALLBACK_TOKENS;
 }
 
+/**
+ * Image tokens of a tool part's `state.attachments`: the images a tool returned next to its
+ * text output (OpenCode's `read` on a PNG, for example). The provider bills each one as an
+ * image, so it is counted from its pixel dimensions, never from its base64 length. Other
+ * attachment types stay uncounted, as they are for message file parts. Callers skip a
+ * dropped output themselves: on OpenCode 2 the drop placeholder replaces the whole result,
+ * images included.
+ */
+export function estimateToolAttachmentImageTokens(state: unknown): number {
+    if (!state || typeof state !== "object") return 0;
+    const attachments = (state as { attachments?: unknown }).attachments;
+    if (!Array.isArray(attachments)) return 0;
+    let tokens = 0;
+    for (const attachment of attachments) {
+        if (!attachment || typeof attachment !== "object") continue;
+        const { mime, url } = attachment as { mime?: unknown; url?: unknown };
+        if (typeof mime !== "string" || !mime.startsWith("image/")) continue;
+        tokens +=
+            typeof url === "string" && url.startsWith("data:")
+                ? estimateImageTokensFromDataUrl(url)
+                : IMAGE_FALLBACK_TOKENS;
+    }
+    return tokens;
+}
+
 function clampImageTokens(n: number): number {
     if (n < 1) return 1;
     if (n > IMAGE_TOKEN_CAP) return IMAGE_TOKEN_CAP;

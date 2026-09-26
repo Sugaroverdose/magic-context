@@ -2,6 +2,7 @@
 
 import { describe, expect, it, spyOn } from "bun:test";
 import { Message } from "@opencode/ai/schema/messages";
+import { estimateMessageTokens } from "../../hooks/magic-context/final-wire-token-estimate";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import {
     createToolDropTarget,
@@ -510,6 +511,143 @@ describe("adaptPayload", () => {
                 type: "text",
                 text: "§1§ what is in this image?",
             });
+        });
+    });
+
+    // OpenCode 2's `read` tool returns an image as a `content` result: a text entry plus a
+    // `file` entry holding a data URI, which the host sends to the provider as an image block.
+    describe("#given a tool result that carries an image", () => {
+        // A PNG header for a 100x100 image followed by 30 KB of padding, so the base64
+        // payload is far larger than the image's pixel-based token cost.
+        const pngHeader = Buffer.from(
+            "89504e470d0a1a0a0000000d4948445200000064000000640806000000",
+            "hex",
+        );
+        const PNG = Buffer.concat([pngHeader, Buffer.alloc(30_000)]).toString("base64");
+        const fileEntry = {
+            type: "file",
+            uri: `data:image/png;base64,${PNG}`,
+            mime: "image/png",
+            name: "/work/pixel.png",
+        };
+        const imageResult = {
+            type: "content",
+            value: [{ type: "text", text: "Image read successfully" }, fileEntry],
+        };
+        const imageTurn = (): V2Message[] => [
+            {
+                id: "msg-read",
+                role: "assistant",
+                content: [
+                    {
+                        type: "tool-call",
+                        id: "call-read",
+                        name: "read",
+                        input: { path: "pixel.png" },
+                    },
+                ],
+            },
+            {
+                role: "tool",
+                content: [
+                    { type: "tool-result", id: "call-read", name: "read", result: imageResult },
+                ],
+            },
+        ];
+        const projected = (payload: ReturnType<typeof adaptPayload>) =>
+            payload.messages[0]?.parts[0] as {
+                state: { output: string; attachments?: Array<Record<string, unknown>> };
+            };
+        const resultOf = (context: SessionContext) => callsAndResults(context.messages).results[0];
+
+        it("#then the pipeline sees the text as output and the image as an attachment, not base64 text", () => {
+            const payload = adaptPayload(draft(imageTurn()));
+            const { state } = projected(payload);
+
+            expect(state.output).toBe("Image read successfully");
+            expect(state.output).not.toContain(PNG.slice(0, 40));
+            expect(state.attachments).toEqual([
+                {
+                    type: "file",
+                    mime: "image/png",
+                    url: fileEntry.uri,
+                    filename: "/work/pixel.png",
+                },
+            ]);
+        });
+
+        it("#then an unchanged result reaches the host as the same object", () => {
+            const context = draft(imageTurn());
+            adaptPayload(context).commit();
+
+            expect(resultOf(context)?.result).toBe(imageResult);
+        });
+
+        it("#then a tagged result keeps the host's file entry, by reference, next to the tagged text", () => {
+            const context = draft(imageTurn());
+            const payload = adaptPayload(context);
+            const { state } = projected(payload);
+            state.output = `§4§ ${state.output}`;
+            payload.commit();
+
+            expect(resultOf(context)?.result).toEqual({
+                type: "content",
+                value: [{ type: "text", text: "§4§ Image read successfully" }, fileEntry],
+            });
+            const value = (resultOf(context)?.result as { value: unknown[] }).value;
+            expect(value[1]).toBe(fileEntry);
+            for (const message of context.messages)
+                expect(() => Message.make(message)).not.toThrow();
+        });
+
+        it("#then a pipeline copy of the owning parts still rebuilds the same result", () => {
+            const context = draft(imageTurn());
+            const payload = adaptPayload(context);
+            const owner = payload.messages[0]!;
+            owner.parts = structuredClone(owner.parts);
+            projected(payload).state.output = `§4§ Image read successfully`;
+            payload.commit();
+
+            expect(resultOf(context)?.result).toEqual({
+                type: "content",
+                value: [{ type: "text", text: "§4§ Image read successfully" }, fileEntry],
+            });
+        });
+
+        it("#then a dropped result loses the image with the text", () => {
+            const context = draft(imageTurn());
+            const payload = adaptPayload(context);
+            const owner = payload.messages[0]!;
+            const target = createToolDropTarget(
+                "call-read",
+                [],
+                indexMessage(owner),
+                new ToolMutationBatch(payload.messages),
+                6,
+            );
+            expect(target.truncate()).toBe("truncated");
+            payload.commit();
+
+            expect(resultOf(context)?.result).toEqual({ type: "text", value: "[dropped §6§]" });
+        });
+
+        it("#then the token estimate counts the image by its pixels, not its base64 length", () => {
+            const payload = adaptPayload(draft(imageTurn()));
+            const estimate = estimateMessageTokens(payload.messages[0]!);
+            const text = estimateMessageTokens({
+                info: payload.messages[0]!.info,
+                parts: [
+                    {
+                        ...projected(payload),
+                        type: "tool",
+                        state: { ...projected(payload).state, attachments: [] },
+                    },
+                ],
+            });
+
+            // 100x100 pixels bill ceil(10000 / 750) = 14 image tokens.
+            expect(estimate.toolCall - text.toolCall).toBe(14);
+            expect(estimate.toolCall).toBeLessThan(200);
         });
     });
 });
