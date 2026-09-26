@@ -668,7 +668,7 @@ export const HistorianConfigSchema = AgentMetadataSchema.extend({
         })
         .optional()
         .describe(
-            "Controls for this process's historian pull loop, which answers runs queued by `historian.runner: \"host\"`. User-level config only — it decides whether this machine's provider account is spent on folds.",
+            "Controls for this process's historian pull loop, which answers runs the Rust module queues for the host runner (`historian.runner: \"host\"`, or unset on OpenCode 1 and OpenCode 2). User-level config only — it decides whether this machine's provider account is spent on folds.",
         ),
     two_pass: z
         .boolean()
