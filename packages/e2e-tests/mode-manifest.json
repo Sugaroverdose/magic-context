@@ -597,6 +597,21 @@
             ]
         },
         {
+            "path": "tests/opencode2/tool-result-image.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: an image the agent reads with the host's read tool comes back as a content tool result holding a file entry, which the host sends as a provider image block. With Magic Context loaded it must reach the provider as the host's own image block, never serialized into the tool output as base64 text, across a priced pass and the defer after it (whose shared prefix must be byte-identical), and after a host compaction checkpoint in the same process and after a host restart. The v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/commands-s2-keymap.test.ts",
             "tier": "excluded",
             "invocation": {

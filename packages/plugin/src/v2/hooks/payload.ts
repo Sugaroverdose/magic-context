@@ -1,3 +1,4 @@
+import { isDroppedToolOutput } from '../../hooks/magic-context/ctx-reduce-nudge';
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { log, sessionLog } from "../../shared/logger";
 import { hostMediaAsset } from "../fold/host-media";
@@ -30,6 +31,8 @@ interface ToolBridge {
     native?: Part;
     output: string;
     resultMessage?: V2Message;
+    /** The host result's `content` value when it carries files (see fileContentValue). */
+    files?: Part[];
 }
 
 /** True for an object structuredClone would flatten: anything other than a plain object or
@@ -81,6 +84,67 @@ function contentKey(value: unknown): string {
         return entry;
     };
     return JSON.stringify(plain(value));
+}
+
+/**
+ * The `content` value of a host tool result that carries files, or undefined. OpenCode 2's
+ * `read` tool returns an image as `{ type: "content", value: [{ type: "text" }, { type:
+ * "file", uri, mime }] }`, and the host turns each file entry into a provider image block.
+ * The TS pipeline only understands a tool's `output` string, so a result like this is
+ * projected as its text plus OpenCode 1-shaped `attachments`, never as serialized JSON:
+ * JSON would put the base64 payload into the model's context as text.
+ */
+function fileContentValue(result: Part | undefined): Part[] | undefined {
+    const value = result?.value;
+    if (result?.type !== "content" || !Array.isArray(value)) return undefined;
+    return value.some((item) => (item as Part | undefined)?.type === "file")
+        ? (value as Part[])
+        : undefined;
+}
+
+function contentValueText(value: Part[]): string {
+    return value
+        .filter((item) => item?.type === "text" && typeof item.text === "string")
+        .map((item) => item.text as string)
+        .join("\n");
+}
+
+/** File entries in the shape an OpenCode 1 tool part keeps in `state.attachments`, which is
+ * what the token estimates read. The host's own entries are never replaced by these. */
+function contentValueAttachments(value: Part[]): Part[] {
+    return value
+        .filter((item) => item?.type === "file")
+        .map((item) => ({
+            type: "file",
+            mime: item.mime,
+            url: item.uri,
+            ...(typeof item.name === "string" ? { filename: item.name } : {}),
+        }));
+}
+
+/**
+ * Rebuild a file-bearing tool result after the pipeline changed its text (a tag prefix, for
+ * example). The host's file entries are kept by reference and in their original positions, so
+ * the provider receives the same image blocks the host would send. All text entries become one
+ * entry holding the new text, placed where the first text entry was. A dropped or truncated
+ * result loses its files too: a drop exists to take the result out of the context, and an
+ * image kept next to its drop placeholder would still be billed.
+ */
+function rebuildFileContent(value: Part[], output: string): Part {
+    if (isDroppedToolOutput(output)) return { type: "text", value: output };
+    const rebuilt: Part[] = [];
+    let placed = false;
+    for (const item of value) {
+        if (item?.type !== "text") {
+            rebuilt.push(item);
+            continue;
+        }
+        if (placed) continue;
+        placed = true;
+        rebuilt.push({ ...item, text: output });
+    }
+    if (!placed && output) rebuilt.unshift({ type: "text", text: output });
+    return { type: "content", value: rebuilt };
 }
 
 function toolStateContent(state: Part): string {
@@ -153,9 +217,16 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
         call: Part | undefined,
         result: { part: Part; message: V2Message } | undefined,
     ): Part => {
-        const value = (result?.part.result as Part | undefined)?.value;
-        const output =
-            typeof value === "string" ? value : value === undefined ? "" : JSON.stringify(value);
+        const hostResult = result?.part.result as Part | undefined;
+        const value = hostResult?.value;
+        const files = fileContentValue(hostResult);
+        const output = files
+            ? contentValueText(files)
+            : typeof value === "string"
+              ? value
+              : value === undefined
+                ? ""
+                : JSON.stringify(value);
         const part = {
             type: "tool",
             callID: call?.id ?? result?.part.id,
@@ -164,9 +235,16 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                 input: structuredClone(call?.input ?? {}),
                 status: result ? "completed" : "running",
                 ...(result ? { output } : {}),
+                ...(files ? { attachments: contentValueAttachments(files) } : {}),
             },
         };
-        bridges.set(part, { call, result: result?.part, resultMessage: result?.message, output });
+        bridges.set(part, {
+            call,
+            result: result?.part,
+            resultMessage: result?.message,
+            output,
+            files,
+        });
         if (result) paired.add(result.part);
         return part;
     };
@@ -374,7 +452,9 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                             result:
                                 state.output === bridge.output
                                     ? bridge.result.result
-                                    : { type: "text", value: state.output },
+                                    : bridge.files && typeof state.output === "string"
+                                      ? rebuildFileContent(bridge.files, state.output)
+                                      : { type: "text", value: state.output },
                         };
                         if (bridge.resultMessage === original) content.push(result);
                         else following.push({ ...bridge.resultMessage, content: [result] });

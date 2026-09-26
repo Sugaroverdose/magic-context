@@ -3,7 +3,11 @@ import {
     getMeasuredToolDefinitionTokens,
 } from "../../features/magic-context/tool-definition-tokens";
 import { providerMass, resolveDecisionCalibration } from "./decision-calibration";
-import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
+import { isDroppedToolOutput } from "./ctx-reduce-nudge";
+import {
+    estimateImageTokensFromDataUrl,
+    estimateToolAttachmentImageTokens,
+} from "./image-token-estimate";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
 import { UNKNOWN_FIT_RATIO } from "./tokenizer-calibration";
@@ -108,6 +112,10 @@ export function estimateMessageTokens(message: MessageLike): MessageTokenEstimat
                     p.state?.output ?? p.state?.content ?? p.output ?? p.result ?? p.content,
                 );
                 toolCall += serializedTokens(p.state?.error);
+                // Images a tool returned beside its text (see estimateToolAttachmentImageTokens).
+                // A dropped result no longer carries them.
+                if (!(typeof p.state?.output === "string" && isDroppedToolOutput(p.state.output)))
+                    toolCall += estimateToolAttachmentImageTokens(p.state);
                 break;
             case "tool-call":
                 toolCall += serializedTokens(p.input ?? p.args);

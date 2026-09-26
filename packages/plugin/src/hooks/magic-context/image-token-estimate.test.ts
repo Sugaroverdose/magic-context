@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
+import {
+    estimateImageTokensFromDataUrl,
+    estimateToolAttachmentImageTokens,
+} from "./image-token-estimate";
 
 function makePngDataUrl(width: number, height: number): string {
     // Minimum valid PNG header + IHDR chunk with correct width/height.
@@ -38,6 +41,26 @@ function makePngDataUrl(width: number, height: number): string {
         .join("");
     return `data:image/png;base64,${btoa(binary)}`;
 }
+
+describe("estimateToolAttachmentImageTokens", () => {
+    test("sums image attachments by pixels and ignores other attachment types", () => {
+        const tokens = estimateToolAttachmentImageTokens({
+            output: "Image read successfully",
+            attachments: [
+                { type: "file", mime: "image/png", url: makePngDataUrl(1024, 768) },
+                { type: "file", mime: "image/png", url: "https://example.com/remote.png" },
+                { type: "file", mime: "application/pdf", url: "data:application/pdf;base64,AAAA" },
+            ],
+        });
+        // 1049 for the inline 1024x768 image, the 1200 fallback for the remote one.
+        expect(tokens).toBe(1049 + 1200);
+    });
+
+    test("is zero for a state without attachments", () => {
+        expect(estimateToolAttachmentImageTokens({ output: "text" })).toBe(0);
+        expect(estimateToolAttachmentImageTokens(undefined)).toBe(0);
+    });
+});
 
 describe("estimateImageTokensFromDataUrl", () => {
     test("PNG 1024x768 (typical screenshot)", () => {

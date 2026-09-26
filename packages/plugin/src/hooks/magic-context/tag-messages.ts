@@ -15,7 +15,10 @@ import { makeToolCompositeKey, type Tagger } from "../../features/magic-context/
 import { textMentionsRecentCommit } from "../../shared/commit-detection";
 import { isRecord } from "../../shared/record-type-guard";
 import { isReduceToolPart } from "./drop-stale-reduce-calls";
-import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
+import {
+    estimateImageTokensFromDataUrl,
+    estimateToolAttachmentImageTokens,
+} from "./image-token-estimate";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import { byteSize, isThinkingPart, prependTag } from "./tag-content-primitives";
@@ -922,9 +925,9 @@ export function tagMessages(
                         // Lazy: fires only on fresh insert. token_count = output tokens
                         // (mirrors byte_size=output); input/reasoning stored separately.
                         () => ({
-                            tokenCount: estimateTextTagTokenCount(
-                                stripTagPrefix(toolPart.state.output),
-                            ),
+                            tokenCount:
+                                estimateTextTagTokenCount(stripTagPrefix(toolPart.state.output)) +
+                                estimateToolAttachmentImageTokens(toolPart.state),
                             inputTokenCount,
                             reasoningTokenCount: getReasoningTokenCount(thinkingParts),
                         }),

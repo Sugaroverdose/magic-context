@@ -2,7 +2,10 @@ import { newestCtxReduceTagNumbers } from "../../features/magic-context/reclaim-
 import type { TagEntry } from "../../features/magic-context/types";
 import { isRecord } from "../../shared/record-type-guard";
 import { stableStringify } from "../../shared/stable-json";
-import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
+import {
+    estimateImageTokensFromDataUrl,
+    estimateToolAttachmentImageTokens,
+} from "./image-token-estimate";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
 import { isSyntheticTodoPart } from "./todo-view";
@@ -729,7 +732,10 @@ export function measureTailHygiene(input: {
                     if (isDropSentinel(output)) {
                         parts.push(excludedSnapshot(`${key}\0excludedOutput`, output));
                     } else {
-                        const tokens = memoizedTokens("toolOutput", output);
+                        // Images the tool returned beside its text are billed as images.
+                        const tokens =
+                            memoizedTokens("toolOutput", output) +
+                            (part.type === "tool" ? estimateToolAttachmentImageTokens(part.state) : 0);
                         const measured = snapshot({
                             key: `${key}\0toolOutput`,
                             kind: "toolOutput",
