@@ -9,9 +9,9 @@
  * boundary that sorts before the whole window: there is nothing to cut, and the
  * trim must say so instead of refusing on every pass. A boundary that sorts
  * inside the window but whose row is missing, or a boundary that no longer
- * resolves at all, is a degraded state: it keeps serving the whole window
- * until a cache-busting pass, cuts there, and every later defer pass replays
- * that exact cut.
+ * resolves at all, is a degraded state: the whole window is served on every
+ * pass, exactly as before, until a cache-busting pass moves the baseline
+ * boundary to a compartment end that is in the window and the id trim applies.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
@@ -28,6 +28,8 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     type InjectM0M1Result,
     injectM0M1,
+    type M0HardSignals,
+    type M0M1State,
     resetPrefixTrimFallbackState,
 } from "./inject-compartments";
 import { closeReadOnlySessionDb } from "./read-session-db";
@@ -184,30 +186,25 @@ describe("prefix trim with a boundary absent from the live window", () => {
         expect(deferGrown).toHaveLength(priced.length + 1);
     });
 
-    it("keeps serving the whole window on defer passes until a busting pass cuts at the boundary's ordinal", () => {
+    it("serves the whole window on every pass when the boundary sorts inside the window but its row is missing", () => {
         // The boundary row 12 sorts inside the window (rows 5..30) but is not
-        // in the live array.
+        // in the live array. No pass cuts: the served bytes stay what they were
+        // before, and the next baseline refresh is what heals it.
         seedOpenCodeSession(30);
         const db = contextDb();
         const boundary = idOf(12);
 
-        const deferBefore = liveWindow(5, 30, [12]);
-        const deferBeforeResult = servePass(db, deferBefore, boundary, false);
-        expect(deferBeforeResult.prefixTrimStatus).toBe("refused");
-        expect(ids(deferBefore)).toEqual([undefined, ...ids(liveWindow(5, 30, [12]))]);
-
-        const priced = liveWindow(5, 30, [12]);
-        const pricedResult = servePass(db, priced, boundary, true);
-        expect(pricedResult.prefixTrimStatus).toBe("applied-by-ordinal");
-        expect(ids(priced)).toEqual([undefined, ...ids(liveWindow(13, 30))]);
-
-        const deferAfter = liveWindow(5, 30, [12]);
-        const deferAfterResult = servePass(db, deferAfter, boundary, false);
-        expect(deferAfterResult.prefixTrimStatus).toBe("applied-by-ordinal");
-        expect(sha(deferAfter)).toBe(sha(priced));
+        const served: MessageLike[][] = [];
+        for (const busting of [false, true, false]) {
+            const live = liveWindow(5, 30, [12]);
+            expect(servePass(db, live, boundary, busting).prefixTrimStatus).toBe("refused");
+            expect(ids(live)).toEqual([undefined, ...ids(liveWindow(5, 30, [12]))]);
+            served.push(live);
+        }
+        expect(new Set(served.map(sha)).size).toBe(1);
     });
 
-    it("re-anchors a boundary that no longer resolves at the newest older compartment that does", () => {
+    it("serves the whole window when the boundary no longer resolves, even with older compartments that do", () => {
         seedOpenCodeSession(30);
         const db = contextDb();
         appendCompartments(db, SESSION_ID, [
@@ -230,24 +227,16 @@ describe("prefix trim with a boundary absent from the live window", () => {
                 content: "second",
             },
         ]);
-        const boundary = "msg_deleted_boundary";
-
-        const deferBefore = liveWindow(1, 30);
-        expect(servePass(db, deferBefore, boundary, false).prefixTrimStatus).toBe("refused");
-        expect(deferBefore).toHaveLength(31);
-
-        const priced = liveWindow(1, 30);
-        expect(servePass(db, priced, boundary, true).prefixTrimStatus).toBe("applied-by-ordinal");
-        expect(ids(priced)).toEqual([undefined, ...ids(liveWindow(9, 30))]);
-
-        const deferAfter = liveWindow(1, 30);
-        expect(servePass(db, deferAfter, boundary, false).prefixTrimStatus).toBe(
-            "applied-by-ordinal",
-        );
-        expect(sha(deferAfter)).toBe(sha(priced));
+        for (const busting of [false, true, false]) {
+            const live = liveWindow(1, 30);
+            expect(servePass(db, live, "msg_deleted_boundary", busting).prefixTrimStatus).toBe(
+                "refused",
+            );
+            expect(ids(live)).toEqual([undefined, ...ids(liveWindow(1, 30))]);
+        }
     });
 
-    it("still refuses, without cutting, when nothing gives a cut coordinate", () => {
+    it("still refuses, without cutting, when the boundary was never persisted", () => {
         seedOpenCodeSession(20);
         const db = contextDb();
         const boundary = "msg_never_persisted";
@@ -265,6 +254,69 @@ describe("prefix trim with a boundary absent from the live window", () => {
         const live = liveWindow(1, 20);
         expect(servePass(db, live, idOf(6), false).prefixTrimStatus).toBe("applied");
         expect(ids(live)).toEqual([undefined, ...ids(liveWindow(7, 20))]);
+    });
+});
+
+describe("recovery from a boundary missing inside the window", () => {
+    const hardSignals: M0HardSignals = {
+        systemHash: "sys-v1",
+        modelKey: "anthropic/opus",
+        cacheExpired: false,
+        lastResponseTime: 0,
+    };
+    const compartment = (sequence: number, from: number, to: number, body: string) => ({
+        sequence,
+        startMessage: from,
+        endMessage: to,
+        startMessageId: idOf(from),
+        endMessageId: idOf(to),
+        title: body,
+        content: body,
+        p1: body,
+    });
+
+    it("the next cache-busting pass moves the baseline into the window and trims by id", () => {
+        seedOpenCodeSession(20);
+        const db = contextDb();
+        const projectDirectory = mkdtempSync(join(tmpdir(), "mc-prefix-trim-recovery-"));
+        tempDirs.push(projectDirectory);
+        const run = (messages: MessageLike[], isCacheBustingPass: boolean) =>
+            injectM0M1({
+                db,
+                sessionId: SESSION_ID,
+                messages,
+                state: getOrCreateSessionMeta(db, SESSION_ID) as unknown as M0M1State,
+                projectPath: "/tmp/mc-prefix-trim-recovery",
+                projectDirectory,
+                historyBudgetTokens: 98_000,
+                isCacheBustingPass,
+                hardSignals,
+            });
+
+        // Baseline: compartment A ends at row 4 and is materialized into m[0]/m[1].
+        appendCompartments(db, SESSION_ID, [compartment(1, 1, 4, "Alpha")]);
+        const first = liveWindow(1, 20);
+        const firstResult = run(first, true);
+        expect(firstResult.preparedTrimBoundaryId).toBe(idOf(4));
+        expect(firstResult.prefixTrimStatus).toBe("applied");
+
+        // Compartment B (rows 5..10) is published; the baseline still names
+        // row 4, and the live array has lost row 4.
+        appendCompartments(db, SESSION_ID, [compartment(2, 5, 10, "Bravo")]);
+        const degraded = liveWindow(1, 20, [4]);
+        const degradedResult = run(degraded, false);
+        expect(degradedResult.preparedTrimBoundaryId).toBe(idOf(4));
+        expect(degradedResult.prefixTrimStatus).toBe("refused");
+        expect(ids(degraded).slice(-19)).toEqual(ids(liveWindow(1, 20, [4])));
+
+        // The next cache-busting pass refreshes m[1] and its baseline to B's end,
+        // which is in the window, so the ordinary id trim applies.
+        const healed = liveWindow(1, 20, [4]);
+        const healedResult = run(healed, true);
+        expect(healedResult.preparedTrimBoundaryId).toBe(idOf(10));
+        expect(healedResult.prefixTrimStatus).toBe("applied");
+        expect(healedResult.m1Text ?? "").toContain("Bravo");
+        expect(ids(healed).filter((id) => id !== undefined)).toEqual(ids(liveWindow(11, 20)));
     });
 });
 

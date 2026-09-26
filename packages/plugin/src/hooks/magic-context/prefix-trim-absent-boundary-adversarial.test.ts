@@ -2,16 +2,14 @@
 
 /**
  * Adversarial checks for the prefix trim when the stored compartment boundary
- * is not in the live message array (the ordinal fallback in
- * `trimAtAbsentBoundary`).
+ * is not in the live message array.
  *
  * The protected cache rule under test: a defer pass (not cache-busting) must
- * serve bytes whose prefix is byte-identical to what the last served pass sent;
- * a cut is applied for the first time only on a cache-busting pass.
- *
- * Tests written with `it.failing` assert that rule on a shape where the current
- * implementation breaks it. They pass while the break exists and turn red once
- * the implementation is fixed; at that point change them to plain `it`.
+ * serve bytes whose prefix is byte-identical to what the last served pass sent.
+ * A missing boundary never cuts, so every pass serves the whole window, the same
+ * bytes as before the absent-boundary classification existed; the shapes below
+ * (host rows deleted or inserted, a revert, a restart, OpenCode's compaction
+ * reorder) are the ones an ordinal-based cut got wrong.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
@@ -153,6 +151,14 @@ function liveRow(id: string, role: string, text: string): MessageLike {
     } as MessageLike;
 }
 
+/** OpenCode serves its compaction summary with `summary: true` on the message info. */
+function hostSummaryRow(id: string): MessageLike {
+    return {
+        info: { id, role: "assistant", sessionID: SESSION_ID, summary: true, finish: "stop" },
+        parts: [{ type: "text", text: "host summary of rows 1..9" }],
+    } as MessageLike;
+}
+
 function liveWindow(indexes: readonly number[]): MessageLike[] {
     return indexes.map((index) => liveRow(idOf(index), roleOf(index), `row ${index}`));
 }
@@ -222,20 +228,21 @@ describe("absent-boundary prefix trim: append-only defer passes keep the priced 
         expectAppendOnlyDefer(priced, defer);
     });
 
-    it("applied-by-ordinal at the boundary's own ordinal: priced A, append, defer B", () => {
+    it("boundary sorts inside the window, row missing: priced A, append, defer B", () => {
         createOpenCodeStore(range(1, 30).map((index) => regularRow(index)));
         const db = contextDb();
         const boundary = idOf(12);
         const window = (to: number) => liveWindow(range(5, to).filter((index) => index !== 12));
         const priced = window(30);
-        expect(servePass(db, priced, boundary, true).prefixTrimStatus).toBe("applied-by-ordinal");
+        expect(servePass(db, priced, boundary, true).prefixTrimStatus).toBe("refused");
+        expect(ids(priced)).toEqual([undefined, ...ids(window(30))]);
         insertRows([regularRow(31)]);
         const defer = window(31);
-        expect(servePass(db, defer, boundary, false).prefixTrimStatus).toBe("applied-by-ordinal");
+        expect(servePass(db, defer, boundary, false).prefixTrimStatus).toBe("refused");
         expectAppendOnlyDefer(priced, defer);
     });
 
-    it("applied-by-ordinal re-anchored at an older compartment end: priced A, append, defer B", () => {
+    it("boundary no longer resolves, older compartment end does: priced A, append, defer B", () => {
         createOpenCodeStore(range(1, 30).map((index) => regularRow(index)));
         const db = contextDb();
         appendCompartments(db, SESSION_ID, [
@@ -259,10 +266,11 @@ describe("absent-boundary prefix trim: append-only defer passes keep the priced 
             },
         ]);
         const priced = liveWindow(range(1, 30));
-        expect(servePass(db, priced, "msg_gone", true).prefixTrimStatus).toBe("applied-by-ordinal");
+        expect(servePass(db, priced, "msg_gone", true).prefixTrimStatus).toBe("refused");
+        expect(ids(priced)).toEqual([undefined, ...ids(liveWindow(range(1, 30)))]);
         insertRows([regularRow(31)]);
         const defer = liveWindow(range(1, 31));
-        expect(servePass(db, defer, "msg_gone", false).prefixTrimStatus).toBe("applied-by-ordinal");
+        expect(servePass(db, defer, "msg_gone", false).prefixTrimStatus).toBe("refused");
         expectAppendOnlyDefer(priced, defer);
     });
 
@@ -291,28 +299,25 @@ describe("absent-boundary prefix trim: append-only defer passes keep the priced 
     });
 });
 
-describe("absent-boundary prefix trim: attacks on the defer-pass replay", () => {
-    // The replay re-reads persisted ordinals on every defer pass and keeps only
-    // a numeric cut ordinal, so any change to the host rows at or before the
-    // cut moves the cut on a pass that must replay.
-    it.failing("a host row deleted before the cut does not move the replayed cut", () => {
+describe("absent-boundary prefix trim: host changes between a priced and a defer pass", () => {
+    // With no cut there is nothing for a change to host rows, a revert or a
+    // restart to move: each defer pass serves the priced bytes.
+    it("a host row deleted before the boundary does not change the defer bytes", () => {
         createOpenCodeStore(range(1, 30).map((index) => regularRow(index)));
         const db = contextDb();
         const boundary = idOf(12);
         const window = () => liveWindow(range(5, 30).filter((index) => index !== 12));
         const priced = window();
         servePass(db, priced, boundary, true);
-        expect(ids(priced)).toEqual([undefined, ...ids(liveWindow(range(13, 30)))]);
+        expect(ids(priced)).toEqual([undefined, ...ids(window())]);
 
         deleteRows([idOf(3)]);
         const defer = window();
         servePass(db, defer, boundary, false);
-        // Current behavior: ordinals 1..12 now reach row 13, so the defer
-        // pass cuts one row further than the priced pass did.
         expect(sha(defer)).toBe(sha(priced));
     });
 
-    it.failing("host rows inserted before the cut do not move the replayed cut", () => {
+    it("host rows inserted before the boundary do not change the defer bytes", () => {
         createOpenCodeStore(range(1, 30).map((index) => regularRow(index)));
         const db = contextDb();
         const boundary = idOf(12);
@@ -328,12 +333,10 @@ describe("absent-boundary prefix trim: attacks on the defer-pass replay", () => 
         ]);
         const defer = window();
         servePass(db, defer, boundary, false);
-        // Current behavior: ordinal 12 now lands on row 10, so row 11
-        // reappears in the defer pass.
         expect(sha(defer)).toBe(sha(priced));
     });
 
-    it.failing("after a revert past the boundary, a defer pass keeps the new user turn", () => {
+    it("after a revert past the boundary, a defer pass keeps the new user turn", () => {
         createOpenCodeStore(range(1, 30).map((index) => regularRow(index)));
         const db = contextDb();
         const boundary = idOf(12);
@@ -342,9 +345,8 @@ describe("absent-boundary prefix trim: attacks on the defer-pass replay", () => 
 
         // Revert to row 8: the host deletes rows 9..30 (including the boundary
         // row, which MC's compartments still name) and the user sends a new
-        // turn. The plugin's message.removed handler clears neither the stored
-        // compartments nor the in-memory armed cut, so the next defer pass still
-        // carries boundary msg 12 and replays cut ordinal 12.
+        // turn. The plugin's message.removed handler does not clear the stored
+        // compartments, so the next defer pass still carries boundary msg 12.
         deleteRows(range(9, 30).map(idOf));
         insertRows([
             { id: "msg_new_user", time: 40_000, info: { id: "msg_new_user", role: "user" } },
@@ -354,27 +356,21 @@ describe("absent-boundary prefix trim: attacks on the defer-pass replay", () => 
             liveRow("msg_new_user", "user", "the user's new prompt"),
         ];
         servePass(db, defer, boundary, false);
-        // Current behavior: the replay cuts at ordinal 12, which now
-        // covers the new user row (ordinal 9), so the model is sent the summary
-        // prefix alone and never sees the new prompt.
-        expect(ids(defer)).toContain("msg_new_user");
+        expect(ids(defer)).toEqual([undefined, ...ids(liveWindow(range(5, 8))), "msg_new_user"]);
     });
 
-    // The armed cut (the cut ordinal a busting pass chose, replayed by later
-    // defer passes) lives only in process memory. `resetPrefixTrimFallbackState`
-    // clears the same module-level maps a process restart starts without.
-    it.failing("a defer pass after a restart replays the cut the last busting pass served", () => {
+    // `resetPrefixTrimFallbackState` clears the same module-level maps a process
+    // restart starts without.
+    it("a defer pass after a restart serves the bytes the last busting pass served", () => {
         createOpenCodeStore(range(1, 30).map((index) => regularRow(index)));
         const db = contextDb();
         const boundary = idOf(12);
         const window = () => liveWindow(range(5, 30).filter((index) => index !== 12));
         const priced = window();
-        expect(servePass(db, priced, boundary, true).prefixTrimStatus).toBe("applied-by-ordinal");
+        expect(servePass(db, priced, boundary, true).prefixTrimStatus).toBe("refused");
 
         resetPrefixTrimFallbackState(SESSION_ID);
         const defer = window();
-        // Current behavior: status "refused" and the whole window is
-        // served, a byte change on a pass that must replay.
         servePass(db, defer, boundary, false);
         expect(sha(defer)).toBe(sha(priced));
     });
@@ -384,7 +380,7 @@ describe("absent-boundary prefix trim: OpenCode 1.18 filterCompacted reorder", (
     // filterCompacted returns [compaction user, summary, retained tail, rest]
     // when a compaction part carries tail_start_id, so the compaction user row
     // (newer than the tail) sits before older tail rows in the array.
-    it("cuts through the host compaction user row and summary when the boundary sorts inside the retained tail", () => {
+    it("keeps the host compaction user row and summary when the boundary sorts inside the retained tail", () => {
         const rows = range(1, 20).map((index) => regularRow(index));
         const compactionUser: SeedRow = {
             id: "msg_000021c",
@@ -413,23 +409,16 @@ describe("absent-boundary prefix trim: OpenCode 1.18 filterCompacted reorder", (
                 info: { id: compactionUser.id, role: "user", sessionID: SESSION_ID },
                 parts: [{ type: "compaction", auto: true, tail_start_id: idOf(10) }],
             } as MessageLike,
-            liveRow(summary.id, "assistant", "host summary of rows 1..9"),
+            hostSummaryRow(summary.id),
             ...liveWindow(range(10, 20).filter((index) => index !== 15)),
             ...liveWindow(range(23, 26)),
         ];
-        expect(servePass(db, reordered, boundary, true).prefixTrimStatus).toBe(
-            "applied-by-ordinal",
-        );
-        // The cut is the contiguous array prefix through row 14. It removes the
-        // compaction user row (ordinal 21, after the boundary) and the host
-        // summary (outside the ordinal space). m[1] covers ordinals 1..15, which
-        // includes everything the host summary summarized (rows 1..9), so the
-        // only content not covered by m[1] is the compaction request row itself.
-        expect(ids(reordered)).toEqual([
-            undefined,
-            ...ids(liveWindow(range(16, 20))),
-            ...ids(liveWindow(range(23, 26))),
-        ]);
+        const before = ids(reordered);
+        // The compaction request row sorts after the boundary, but the retained
+        // tail it heads does not, so this is not a window that starts past the
+        // boundary; nothing is cut either way.
+        expect(servePass(db, reordered, boundary, true).prefixTrimStatus).toBe("refused");
+        expect(ids(reordered)).toEqual([undefined, ...before]);
     });
 
     it("keeps the reordered window whole when the boundary sorts before the retained tail", () => {
@@ -458,7 +447,7 @@ describe("absent-boundary prefix trim: OpenCode 1.18 filterCompacted reorder", (
                 info: { id: compactionUser.id, role: "user", sessionID: SESSION_ID },
                 parts: [{ type: "compaction", auto: true, tail_start_id: idOf(10) }],
             } as MessageLike,
-            liveRow(summary.id, "assistant", "host summary of rows 1..9"),
+            hostSummaryRow(summary.id),
             ...liveWindow(range(10, 20)),
             ...liveWindow([23]),
         ];
@@ -479,7 +468,7 @@ describe("absent-boundary prefix trim: source-order branch", () => {
         };
     }
 
-    it("never cuts on an unarmed defer pass, cuts on the busting pass, and replays that cut", () => {
+    it("keeps master's refusal: the whole window on defer and busting passes", () => {
         createOpenCodeStore(range(1, 30).map((index) => regularRow(index)));
         const db = contextDb();
         const boundary = idOf(12);
@@ -494,14 +483,14 @@ describe("absent-boundary prefix trim: source-order branch", () => {
 
         const priced = window(30);
         expect(servePass(db, priced, boundary, true, sourceOrderFor(priced)).prefixTrimStatus).toBe(
-            "applied-by-ordinal",
+            "refused",
         );
-        expect(ids(priced)).toEqual([undefined, ...ids(liveWindow(range(13, 30)))]);
+        expect(ids(priced)).toEqual([undefined, ...ids(window(30))]);
 
         insertRows([regularRow(31)]);
         const defer = window(31);
         expect(servePass(db, defer, boundary, false, sourceOrderFor(defer)).prefixTrimStatus).toBe(
-            "applied-by-ordinal",
+            "refused",
         );
         expectAppendOnlyDefer(priced, defer);
     });
@@ -511,7 +500,7 @@ describe("absent-boundary prefix trim: source-order branch", () => {
 // seeds a large store: MC_538_COST_ROWS=135000 bun test <this file>.
 const costRows = Number(process.env.MC_538_COST_ROWS ?? "0");
 describe.skipIf(!(costRows > 0))("absent-boundary prefix trim: per-pass cost", () => {
-    it("reports the time of precedes-window and armed-replay passes", () => {
+    it("reports the time of precedes-window and degraded passes", () => {
         const rows: SeedRow[] = [];
         for (let index = 1; index <= costRows; index += 1) {
             const row = regularRow(index);
@@ -550,20 +539,21 @@ describe.skipIf(!(costRows > 0))("absent-boundary prefix trim: per-pass cost", (
         }
 
         // Degraded shape: the boundary sorts inside the window but its row is
-        // missing; one busting pass arms the cut, then defer passes replay it.
+        // missing. No cut; the first pass places the boundary, later passes
+        // reuse that verdict.
         const insideIndex = costRows - 50;
         const insideBoundary = idOf(insideIndex);
         const degradedWindow = () => liveWindow(tail.filter((index) => index !== insideIndex));
-        time("degraded busting pass (arms the cut)", () => {
+        time("degraded busting pass", () => {
             expect(servePass(db, degradedWindow(), insideBoundary, true).prefixTrimStatus).toBe(
-                "applied-by-ordinal",
+                "refused",
             );
         });
         for (let pass = 0; pass < 3; pass += 1) {
-            time(`armed replay defer pass ${pass}`, () => {
+            time(`degraded defer pass ${pass}`, () => {
                 expect(
                     servePass(db, degradedWindow(), insideBoundary, false).prefixTrimStatus,
-                ).toBe("applied-by-ordinal");
+                ).toBe("refused");
             });
         }
 
