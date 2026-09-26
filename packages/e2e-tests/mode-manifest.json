@@ -181,15 +181,34 @@
         {
             "path": "tests/desktop-command-first-session.test.ts",
             "tier": "ts-only",
-            "invocation": { "ts": true, "rust": false },
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
             "rationale": "Desktop command API on a new or existing OpenCode 1 session must publish an ignored result and idle without a model turn",
-            "contract_refs": ["TS-HARNESS"],
-            "hosts": ["opencode"],
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ],
             "behavior": true,
             "divergences": [
-                { "host": "opencode2", "reason": "OpenCode 2 has a native command carrier rather than the 1.18.x command.execute.before suppression hook", "contract_ref": "packages/plugin/PARITY.md#other-existing-host-carrier-exclusions" },
-                { "host": "pi", "reason": "Pi commands use native command registrations and UI notifications, not the OpenCode Desktop HTTP command endpoint", "contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only" },
-                { "host": "omp", "reason": "OMP uses the Pi-compatible command surface, not the OpenCode Desktop HTTP command endpoint", "contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only" }
+                {
+                    "host": "opencode2",
+                    "reason": "OpenCode 2 has a native command carrier rather than the 1.18.x command.execute.before suppression hook",
+                    "contract_ref": "packages/plugin/PARITY.md#other-existing-host-carrier-exclusions"
+                },
+                {
+                    "host": "pi",
+                    "reason": "Pi commands use native command registrations and UI notifications, not the OpenCode Desktop HTTP command endpoint",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only"
+                },
+                {
+                    "host": "omp",
+                    "reason": "OMP uses the Pi-compatible command surface, not the OpenCode Desktop HTTP command endpoint",
+                    "contract_ref": "packages/pi-plugin/PARITY.md#34-notice-holding-is-opencode-only"
+                }
             ]
         },
         {
@@ -685,50 +704,96 @@
         {
             "path": "tests/opencode2/dream-loop.test.ts",
             "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
             "rationale": "OpenCode 2.0.15 pinned-host tool-loop proof: scoped read, memory and search tools, retained calibrated prompt and results, host-applied mapping, denied tools, and child cleanup; runs in the dedicated v2 lane",
-            "contract_refs": ["OC2-S1"],
-            "hosts": ["opencode2"]
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
         },
         {
             "path": "tests/opencode2/converted-drop-replay.test.ts",
             "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
             "rationale": "Converted 1.x tool arc reduced via the real ctx_reduce tool and replayed on the pinned OpenCode 2 host; the runner validates every returned draft against the host schema",
-            "contract_refs": ["S2-MIGRATION", "OC2-S1"],
-            "hosts": ["opencode2"]
+            "contract_refs": [
+                "S2-MIGRATION",
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
         },
         {
             "path": "tests/opencode2/mural-media-schema.test.ts",
             "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
             "rationale": "The real OpenCode 2 host replays a persisted vision mural and validates m0 media against its own LLM schema",
-            "contract_refs": ["S2-MIGRATION", "OC2-S1"],
-            "hosts": ["opencode2"]
+            "contract_refs": [
+                "S2-MIGRATION",
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
         },
         {
             "path": "tests/opencode2/synthetic-todo-schema.test.ts",
             "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
             "rationale": "The real OpenCode 2 host with a native todowrite fixture captures todo state, then validates priced and cached synthetic reminder drafts against its own LLM schema",
-            "contract_refs": ["S2-MIGRATION", "OC2-S1"],
-            "hosts": ["opencode2"]
+            "contract_refs": [
+                "S2-MIGRATION",
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
         },
         {
             "path": "tests/opencode2/restart-system-prompt-change.test.ts",
             "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
             "rationale": "Restarts a real OpenCode 2 host with a config change that alters the system prompt and proves the change is folded exactly once, on the first pass after the restart, with a queued drop riding that fold and the following passes served from cache",
-            "contract_refs": ["OC2-S1"],
-            "hosts": ["opencode2"]
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
         },
         {
             "path": "tests/opencode2/reporter-emergency-drop.test.ts",
             "tier": "ts-only",
-            "invocation": { "ts": true, "rust": false },
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
             "rationale": "a converted 1.x store with a provider-proven over-window reading exercises the real 2.0.15 host schema after an explicit flush and tiered emergency drop; the OpenCode 2 CI lane installs the OpenCode 1 host this conversion needs",
-            "contract_refs": ["S2-MIGRATION", "OC2-S1"],
-            "hosts": ["opencode2"]
+            "contract_refs": [
+                "S2-MIGRATION",
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
         },
         {
             "path": "tests/opencode2/dreamer-s2-carrier.test.ts",
@@ -942,6 +1007,22 @@
             "rationale": "Boots the hermetic ck-subc daemon and ck-mc module behind the GA 2.0.5 host, so it only has meaning in the Rust invocation: it pins who decides when a Rust-mode session folds, by holding the usage the host measures fixed while the content the module measures changes",
             "contract_refs": [
                 "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/rust-mode-host-runner-default.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "the OpenCode 2 twin: with no historian.runner configured, a Rust-mode session folds through the host runner (the v2 hidden-completion carrier) with no Broca module present",
+            "contract_refs": [
+                "OC2-S1",
+                "HISTORIAN-PRODUCER"
             ],
             "hosts": [
                 "opencode2"
@@ -1562,6 +1643,22 @@
                 "rust": true
             },
             "rationale": "hermetic Broca producer publishes deterministic v2 compartments and proves outage/strict-validation failures",
+            "contract_refs": [
+                "RUST-E2E",
+                "HISTORIAN-PRODUCER"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/rust-host-runner-default.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "with no historian.runner configured, a Rust-mode OpenCode 1 session folds through the host runner (an OpenCode child session) with no Broca module present, and an explicit historian.runner still wins",
             "contract_refs": [
                 "RUST-E2E",
                 "HISTORIAN-PRODUCER"
