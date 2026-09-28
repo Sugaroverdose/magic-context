@@ -22,6 +22,7 @@ function executable(content: string): string {
 const engine = executable(`#!/bin/sh
 printf '%s\\n' "$@" > "$FAKE_CALLS"
 printf '%s\\n' "$FAKE_REPORT"
+printf '%s\\n' "$FAKE_STDERR" >&2
 exit "\${FAKE_EXIT:-0}"
 `);
 const lsof = executable(`#!/bin/sh
@@ -69,6 +70,7 @@ beforeEach(() => {
     process.env.FAKE_CALLS = join(dir, "calls");
     process.env.FAKE_REPORT = JSON.stringify(report);
     process.env.FAKE_EXIT = "0";
+    process.env.FAKE_STDERR = "";
     process.env.FAKE_LSOF_EXIT = "1";
     process.env.FAKE_LSOF_PID = "";
     const context = new Database(join(data, "context.db"));
@@ -239,4 +241,19 @@ test("malformed engine JSON fails as an internal error", () => {
     process.env.FAKE_REPORT = "not JSON";
     expect(run()).toBe(1);
     expect(output()).toContain("single_store_internal_error");
+});
+
+test("engine diagnostics preserve both timings and the structured internal error", () => {
+    process.env.FAKE_STDERR = "backup context.db: copy: 12.3s";
+    process.env.FAKE_REPORT = JSON.stringify({ status: "error", error: "transaction failed" });
+    process.env.FAKE_EXIT = "1";
+    expect(run()).toBe(1);
+    expect(output()).toContain("backup context.db: copy: 12.3s");
+    expect(output()).toContain("transaction failed");
+});
+
+test("successful engine diagnostics retain per-step times", () => {
+    process.env.FAKE_STDERR = "transaction: 1.2s";
+    expect(run()).toBe(0);
+    expect(output()).toContain("transaction: 1.2s");
 });

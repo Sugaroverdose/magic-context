@@ -265,8 +265,9 @@ export function runDoctorSingleStore(
             maxBuffer: 64 * 1024 * 1024,
         });
         if (result.error) throw result.error;
+        if (result.stderr.trim()) deps.print(result.stderr.trimEnd());
         if (result.status === 1) {
-            deps.print(`single_store_internal_error: ${result.stderr || result.stdout}`);
+            deps.print(`single_store_internal_error: ${result.stdout || result.stderr}`);
             return 1;
         }
         const report = JSON.parse(result.stdout) as Report;

@@ -2537,7 +2537,7 @@ fn backup(options: &EngineOptions) -> Result<(), EngineError> {
         .map(|dir| dir.display().to_string())
         .unwrap_or_default();
     eprintln!(
-        "Backup written to {backup}.\nTo undo: quit every host, then\n  rm -f {data}/context.db-wal {data}/context.db-shm {data}/store.db-wal {data}/store.db-shm\n  cp {backup}/context.db {backup}/store.db {data}/\nand reinstall the previous plugin and ck-mc (both refuse the migrated files).",
+        "Backup written to {backup}.\nTo undo: quit every host, then\n  rm -f {data}/context.db-wal {data}/context.db-shm {data}/store.db-wal {data}/store.db-shm\n  cp {backup}/context.db {backup}/store.db {data}/\nKeep the current plugin and ck-mc: TypeScript mode works as before; Rust mode refuses with MC-C14 until re-migrated.",
         backup = options.backup_dir.display()
     );
     Ok(())
