@@ -1,8 +1,8 @@
 /// <reference types="bun-types" />
 import { expect, test } from "bun:test";
 import { Database } from "../../shared/sqlite";
-import { MIGRATIONS, runMigrations } from "./migrations";
 import { insertMemory } from "./memory/storage-memory";
+import { MIGRATIONS, runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
 
 test("v92 steps over populated v91 without changing domain or mirror rows", () => {

@@ -1177,8 +1177,8 @@ describe("map-memories module applier", () => {
         try {
             const projectIdentity = "git:module-map-fallback";
             const dir = tempProject();
-            execFileSync("git", ["init", "-q"], { cwd: dir });
-            execFileSync("git", ["add", "src/fact.ts"], { cwd: dir });
+            execFileSync("git", ["init", "-q"], { windowsHide: true, cwd: dir });
+            execFileSync("git", ["add", "src/fact.ts"], { windowsHide: true, cwd: dir });
             writeFileSync(
                 path.join(dir, "src", "untracked.ts"),
                 "export const draft = true;",

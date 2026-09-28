@@ -4,11 +4,11 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-    initializeDatabase,
-    closeDatabase,
-} from "@magic-context/core/features/magic-context/storage-db";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
+import {
+    closeDatabase,
+    initializeDatabase,
+} from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { runDoctorSingleStore } from "./doctor-single-store";
 
@@ -105,7 +105,7 @@ function run(extra = {}, freeBytes = Number.MAX_SAFE_INTEGER) {
                 expect(command).toBe("lsof");
                 expect(args).toContain(join(data, "context.db"));
                 expect(args).toContain(join(data, "store.db"));
-                return spawnSync(lsof, args, options);
+                return spawnSync(lsof, args, { ...options, windowsHide: true });
             },
             freeBytes: () => freeBytes,
         },

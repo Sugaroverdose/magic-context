@@ -6,10 +6,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
     DOCTOR_HELP,
-    SINGLE_STORE_HELP,
     LIST_HIDDEN_SESSIONS_HELP,
     MERGE_IDENTITY_HELP,
     SETUP_HELP,
+    SINGLE_STORE_HELP,
     subcommandHelp,
 } from "./cli-help";
 

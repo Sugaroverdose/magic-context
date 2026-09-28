@@ -536,9 +536,7 @@ describe("migrateOpenCodeSessionToPi", () => {
                     mkdirSync: (path, options) => mkdirSync(path, options),
                 },
             }),
-        ).toThrow(
-            "(MC-C14)",
-        );
+        ).toThrow("(MC-C14)");
         expect(writes).toEqual([]);
         expect(readJournalRows(cortexkitDb)).toEqual([]);
     });

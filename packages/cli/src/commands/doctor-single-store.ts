@@ -259,7 +259,7 @@ export function runDoctorSingleStore(
         if (options.skipForeign) args.push("--skip-foreign");
         for (const preference of options.prefer ?? []) args.push("--prefer", preference);
         if (options.acceptIdChange) args.push("--accept-id-change");
-        const result = spawnSync(binary, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+        const result = spawnSync(binary, args, { windowsHide: true, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
         if (result.error) throw result.error;
         if (result.status === 1) {
             deps.print(`single_store_internal_error: ${result.stderr || result.stdout}`);
