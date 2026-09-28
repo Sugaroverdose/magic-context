@@ -576,6 +576,50 @@ describe("Rust mode authority adapter", () => {
         });
     });
 
+    it("sends the frozen known-model TTL to the Rust module", async () => {
+        const sessionId = "rust-known-model-ttl";
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const ttls: unknown[] = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method === "transform") {
+                    ttls.push([
+                        body?.cache_ttl,
+                        (body?.pass_inputs as Record<string, unknown>)?.cache_ttl,
+                    ]);
+                }
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: makeMessages(sessionId) }
+                    : { ok: true };
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.cacheTtlConfig = "5m";
+        const transform = createRustModeTransform(deps, { moduleClient });
+        const messages = makeMessages(sessionId);
+        messages[0].info.model = { providerID: "openai", modelID: "gpt-6" };
+        await transform.run(
+            sessionId,
+            messages,
+            { messages: [...messages] },
+            makeMeta(db, sessionId),
+        );
+        deps.cacheTtlConfig = "1m";
+        await transform.run(
+            sessionId,
+            messages,
+            { messages: [...messages] },
+            makeMeta(db, sessionId),
+        );
+        expect(ttls).toEqual([
+            ["30m", "30m"],
+            ["30m", "30m"],
+        ]);
+        expect(getOrCreateSessionMeta(db, sessionId).cacheTtl).toBe("30m");
+    });
+
     it("serves 2048-message SOFT+, SOFT and HARD native wires with the original SHA256", async () => {
         for (const decision of ["SOFT+", "SOFT", "HARD"]) {
             const sessionId = `rust-native-byte-identity-${decision}`;

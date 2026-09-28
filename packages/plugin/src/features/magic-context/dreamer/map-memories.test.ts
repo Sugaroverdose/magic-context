@@ -561,8 +561,8 @@ describe("mapMemories disposition", () => {
             // The host rejects both in-repo untracked paths and paths outside the
             // repository. The mixed manifest proves the fallback is all-rejected,
             // not a special case for only one rejection reason.
-            execFileSync("git", ["init", "-q"], { cwd: dir });
-            execFileSync("git", ["add", "src/fact.ts"], { cwd: dir });
+            execFileSync("git", ["init", "-q"], { windowsHide: true, cwd: dir });
+            execFileSync("git", ["add", "src/fact.ts"], { windowsHide: true, cwd: dir });
             writeFileSync(
                 path.join(dir, "src", "untracked.ts"),
                 "export const draft = true;",
