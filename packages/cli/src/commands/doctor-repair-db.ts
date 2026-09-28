@@ -10,6 +10,7 @@ import {
     rmSync,
     statSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { ensureContextStoreUuid } from "@magic-context/core/features/magic-context/context-store-uuid";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
@@ -23,6 +24,8 @@ import { inspectLivePiProcesses } from "@magic-context/core/shared/rpc-utils";
 import { Database, type Database as DatabaseType } from "@magic-context/core/shared/sqlite";
 
 import { type PromptIO, promptIO } from "../lib/prompts";
+import { probeHostProcessesUsing } from "./doctor-opencode2-cache";
+import { canonicalStoragePath, processReferencesStorage } from "./doctor-storage-holders";
 
 const ROW_COUNT_TABLES = ["tags", "compartments", "memories", "notes", "dream_runs"] as const;
 const DATABASE_SUFFIXES = ["", "-wal", "-shm"] as const;
@@ -70,8 +73,27 @@ interface SalvageResult {
     schemaVersionAfter?: number;
 }
 
-export function defaultInspectHolders(storageDir: string): DatabaseHolderInspection {
-    const rpc = inspectRpcServerDiscovery(storageDir);
+interface HolderInspectionDeps {
+    defaultStorageDir: string;
+    inspectRpc: typeof inspectRpcServerDiscovery;
+    inspectPi: typeof inspectLivePiProcesses;
+    probeFiles: typeof probeHostProcessesUsing;
+    processReferences: typeof processReferencesStorage;
+}
+
+export function defaultInspectHolders(
+    storageDir: string,
+    overrides: Partial<HolderInspectionDeps> = {},
+): DatabaseHolderInspection {
+    const deps: HolderInspectionDeps = {
+        defaultStorageDir: join(homedir(), ".local", "share", "cortexkit", "magic-context"),
+        inspectRpc: inspectRpcServerDiscovery,
+        inspectPi: inspectLivePiProcesses,
+        probeFiles: probeHostProcessesUsing,
+        processReferences: processReferencesStorage,
+        ...overrides,
+    };
+    const rpc = deps.inspectRpc(storageDir);
     if (rpc.state === "unreadable") {
         const arm = rpc.unreadableArm === "parse" ? "could not be parsed" : "could not be read";
         return {
@@ -83,7 +105,29 @@ export function defaultInspectHolders(storageDir: string): DatabaseHolderInspect
 
     const blockers =
         rpc.state === "live" ? rpc.serverPids.map((pid) => `OpenCode server (PID ${pid})`) : [];
-    const pi = inspectLivePiProcesses();
+    const pi = deps.inspectPi();
+    if (canonicalStoragePath(storageDir) !== canonicalStoragePath(deps.defaultStorageDir)) {
+        // Non-default stores require an explicit host path. A process named Pi
+        // is not enough: open target files or a configured storage path identify holders.
+        const holders = deps.probeFiles({
+            files: ["context.db", "store.db"].flatMap((name) =>
+                DATABASE_SUFFIXES.map((suffix) => join(storageDir, `${name}${suffix}`)),
+            ),
+            directories: [],
+        });
+        if (holders.status === "unknown") {
+            return { safe: false, blockers, uncertainty: holders.reason };
+        }
+        if (holders.status === "in_use") {
+            blockers.push(...holders.pids.map((pid) => `database holder (PID ${pid})`));
+        }
+        const candidates = new Set([...pi.processIds, ...(pi.inconclusivePids ?? [])]);
+        for (const pid of candidates) {
+            if (deps.processReferences(pid, storageDir))
+                blockers.push(`Pi/OMP harness (PID ${pid})`);
+        }
+        return { safe: blockers.length === 0, blockers };
+    }
     if (pi.state === "unreadable" || pi.state === "inconclusive") {
         return {
             safe: false,
