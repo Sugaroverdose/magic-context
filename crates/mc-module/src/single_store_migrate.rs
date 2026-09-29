@@ -2725,7 +2725,7 @@ pub fn run(options: &EngineOptions, hooks: &mut dyn EngineHooks) -> Result<Repor
     if store_version >= schema::SINGLE_STORE_MIGRATION_VERSION {
         if !marker.0 {
             return Err(split_refusal(
-                "store.db is at migration 61 without its marker".into(),
+                format!("store.db is at migration {store_version} without its marker"),
                 &context_state,
                 &marker,
             ));
