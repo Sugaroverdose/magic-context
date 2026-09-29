@@ -134,16 +134,30 @@ impl McStore {
         session: &str,
         cached: &[ResolvedContextBoundary],
     ) -> Result<bool, McStoreError> {
-        self.context_read(|conn| {
-            let mut stmt = conn.prepare_cached("SELECT sequence, start_message, end_message, COALESCE(start_message_id, ''), COALESCE(end_message_id, ''), start_block_index, end_block_index FROM compartments WHERE session_id=?1")?;
-            let rows = stmt.query_map(params![session], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, Option<i64>>(6)?)))?;
-            for row in rows {
-                let (sequence, start, end, start_id, end_id, start_block, end_block) = row?;
-                if start_block.is_some() && end_block.is_some() { continue; }
-                if !cached.iter().any(|b| b.sequence == sequence && b.source_start_message == start && b.source_end_message == end && b.source_start_message_id == start_id && b.source_end_message_id == end_id && b.source_start_block_index == start_block && b.source_end_block_index == end_block) { return Ok(false); }
+        for row in self.load_raw_context_compartments(session)? {
+            // Fully indexed rows need no host-coordinate overlay. Every other
+            // row requires the fingerprint of this exact shared row, including
+            // its summary, before a stored coordinate may be reused.
+            if crate::split_flat_block_id(&row.start_message_id).is_some()
+                && crate::split_flat_block_id(&row.end_message_id).is_some()
+            {
+                continue;
             }
-            Ok(true)
-        })
+            let mut matched = false;
+            for boundary in cached
+                .iter()
+                .filter(|boundary| boundary.sequence == row.sequence)
+            {
+                if boundary.identifies(&row)? {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn cached_context_boundaries(
@@ -534,6 +548,7 @@ mod tests {
         store
             .apply_authority_state_sync(request(&[boundary()], 0))
             .unwrap();
+        let previously_cached = store.cached_context_boundaries("raw").unwrap();
         store
             .with_context_conn_for_test(|conn| {
                 conn.execute_batch(
@@ -541,6 +556,9 @@ mod tests {
                 )
             })
             .unwrap();
+        assert!(!store
+            .context_boundaries_resolved("raw", &previously_cached)
+            .unwrap());
         assert!(store.cached_context_boundaries("raw").unwrap().is_empty());
         assert_eq!(
             store.load_compartments("raw").unwrap()[0].content,
