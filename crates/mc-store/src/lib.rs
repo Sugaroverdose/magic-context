@@ -3079,6 +3079,72 @@ const MIGRATIONS: &[Migration] = &[
         version: 61,
         statements: single_store_schema::MIGRATION_61_SQL,
     },
+    Migration {
+        version: 62,
+        // Keep summary writes proportional to changed rows. The primary key on
+        // (session_id, tag_number) makes the rare maximum lookup an index lookup.
+        // Even a same-session UPDATE advances twice, as it did before this migration.
+        statements: r#"
+        DROP TRIGGER mc_tags_cache_generation_delete;
+        DROP TRIGGER mc_tags_cache_generation_update;
+        CREATE TRIGGER mc_tags_cache_generation_delete AFTER DELETE ON mc_tags BEGIN
+            UPDATE mc_tag_cache_generations SET
+                generation = generation + 1,
+                tag_count = tag_count - 1,
+                max_tag_number = CASE WHEN OLD.tag_number = max_tag_number
+                    THEN (SELECT COALESCE(MAX(tag_number), 0) FROM mc_tags
+                          WHERE session_id = OLD.session_id)
+                    ELSE max_tag_number END
+            WHERE session_id = OLD.session_id;
+            INSERT INTO mc_tag_cache_generations(session_id, generation, tag_count, max_tag_number)
+            SELECT OLD.session_id, 1,
+                   (SELECT COUNT(*) FROM mc_tags WHERE session_id = OLD.session_id),
+                   (SELECT COALESCE(MAX(tag_number), 0) FROM mc_tags WHERE session_id = OLD.session_id)
+            WHERE NOT EXISTS (SELECT 1 FROM mc_tag_cache_generations WHERE session_id = OLD.session_id);
+        END;
+        CREATE TRIGGER mc_tags_cache_generation_update AFTER UPDATE ON mc_tags
+        WHEN OLD.session_id <> NEW.session_id BEGIN
+            UPDATE mc_tag_cache_generations SET
+                generation = generation + 1,
+                tag_count = tag_count - 1,
+                max_tag_number = CASE WHEN OLD.tag_number = max_tag_number
+                    THEN (SELECT COALESCE(MAX(tag_number), 0) FROM mc_tags
+                          WHERE session_id = OLD.session_id)
+                    ELSE max_tag_number END
+            WHERE session_id = OLD.session_id;
+            INSERT INTO mc_tag_cache_generations(session_id, generation, tag_count, max_tag_number)
+            SELECT OLD.session_id, 1,
+                   (SELECT COUNT(*) FROM mc_tags WHERE session_id = OLD.session_id),
+                   (SELECT COALESCE(MAX(tag_number), 0) FROM mc_tags WHERE session_id = OLD.session_id)
+            WHERE NOT EXISTS (SELECT 1 FROM mc_tag_cache_generations WHERE session_id = OLD.session_id);
+            UPDATE mc_tag_cache_generations SET
+                generation = generation + 1,
+                tag_count = tag_count + 1,
+                max_tag_number = MAX(max_tag_number, NEW.tag_number)
+            WHERE session_id = NEW.session_id;
+            INSERT INTO mc_tag_cache_generations(session_id, generation, tag_count, max_tag_number)
+            SELECT NEW.session_id, 1,
+                   (SELECT COUNT(*) FROM mc_tags WHERE session_id = NEW.session_id),
+                   (SELECT COALESCE(MAX(tag_number), 0) FROM mc_tags WHERE session_id = NEW.session_id)
+            WHERE NOT EXISTS (SELECT 1 FROM mc_tag_cache_generations WHERE session_id = NEW.session_id);
+        END;
+        CREATE TRIGGER mc_tags_cache_generation_update_same_session AFTER UPDATE ON mc_tags
+        WHEN OLD.session_id = NEW.session_id BEGIN
+            UPDATE mc_tag_cache_generations SET
+                generation = generation + 2,
+                max_tag_number = CASE WHEN OLD.tag_number = max_tag_number
+                    THEN (SELECT COALESCE(MAX(tag_number), 0) FROM mc_tags
+                          WHERE session_id = OLD.session_id)
+                    ELSE MAX(max_tag_number, NEW.tag_number) END
+            WHERE session_id = OLD.session_id;
+            INSERT INTO mc_tag_cache_generations(session_id, generation, tag_count, max_tag_number)
+            SELECT NEW.session_id, 2,
+                   (SELECT COUNT(*) FROM mc_tags WHERE session_id = NEW.session_id),
+                   (SELECT COALESCE(MAX(tag_number), 0) FROM mc_tags WHERE session_id = NEW.session_id)
+            WHERE NOT EXISTS (SELECT 1 FROM mc_tag_cache_generations WHERE session_id = NEW.session_id);
+        END;
+        "#,
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -16940,6 +17006,7 @@ mod tests {
     // Adversarial gate over the claim-lane migration and the single-store marker
     // migration as one merged chain.
     mod gate_a1_b0;
+    mod tag_cache_migration;
 
     fn descriptor(dir: &std::path::Path) -> StorageDescriptor {
         StorageDescriptor {
