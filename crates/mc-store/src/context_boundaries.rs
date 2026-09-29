@@ -143,8 +143,49 @@ impl McStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::single_store_domain::{ContextDomain, SqliteContextDomain};
     use crate::ModuleStateSyncRequest;
     use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+    use rusqlite::{Connection, Transaction};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
+
+    struct RewriteAfterSnapshot {
+        inner: SqliteContextDomain,
+        writer: Mutex<Connection>,
+        fired: AtomicBool,
+    }
+
+    impl ContextDomain for RewriteAfterSnapshot {
+        fn read(
+            &self,
+            callback: &mut dyn FnMut(&Connection) -> rusqlite::Result<()>,
+        ) -> Result<(), McStoreError> {
+            self.inner.read(callback)?;
+            if !self.fired.swap(true, Ordering::SeqCst) {
+                self.writer.lock().unwrap().execute_batch("BEGIN IMMEDIATE; UPDATE compartments SET end_message=3, end_message_id='m2' WHERE session_id='raw'; COMMIT;").unwrap();
+            }
+            Ok(())
+        }
+        fn write(
+            &self,
+            tables: &[&str],
+            callback: &mut dyn FnMut(&Transaction<'_>) -> rusqlite::Result<()>,
+        ) -> Result<(), McStoreError> {
+            self.inner.write(tables, callback)
+        }
+    }
+
+    fn install_snapshot_race(store: &McStore, dir: &std::path::Path) {
+        let path = dir.join("context.db");
+        store.install_context_domain(Arc::new(RewriteAfterSnapshot {
+            inner: SqliteContextDomain::open(&path).unwrap(),
+            writer: Mutex::new(Connection::open(&path).unwrap()),
+            fired: AtomicBool::new(false),
+        }));
+    }
 
     fn descriptor(path: &std::path::Path) -> StorageDescriptor {
         StorageDescriptor {
@@ -284,6 +325,98 @@ mod tests {
         assert_eq!(read[0].start_message_id, "m1#1");
         assert_eq!(read[0].end_message_id, "m4#2");
         assert!(store.context_boundaries_resolved("raw", &[]).unwrap());
+    }
+
+    #[test]
+    #[ignore = "KNOWN DEFECT: shared row changes after context snapshot but before store cache commit"]
+    fn snapshot_then_host_rewrite_must_not_commit_stale_coordinates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        install_snapshot_race(&store, dir.path());
+        let outcome = store.apply_authority_state_sync(request(&[boundary()], 0));
+        assert_eq!(
+            store.load_raw_context_compartments("raw").unwrap()[0].end_message_id,
+            "m2"
+        );
+        let cached = store.cached_context_boundaries("raw").unwrap();
+        assert!(
+            outcome.is_err() || cached.is_empty(),
+            "stale snapshot committed to store.db: {cached:?}"
+        );
+    }
+
+    #[test]
+    fn rewrite_between_module_passes_invalidates_overlay_and_recovers_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        store.with_context_conn_for_test(|tx| tx.execute_batch("UPDATE compartments SET end_message=3, end_message_id='m2' WHERE session_id='raw'")).unwrap();
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].end_message_id,
+            "m2"
+        );
+        assert!(store.apply_authority_state_sync(request(&[], 1)).is_err());
+        let mut changed = boundary();
+        changed.source_end_message = 3;
+        changed.source_end_message_id = "m2".into();
+        changed.end_message = 2;
+        changed.end_message_id = "m2#0".into();
+        let rows = [changed];
+        let mut update = request(&rows, 1);
+        update.seed_boundary_id = Some("m2#0");
+        store.apply_authority_state_sync(update).unwrap();
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].end_message_id,
+            "m2#0"
+        );
+        let mut defer = request(&[], 2);
+        defer.seed_boundary_id = Some("m2#0");
+        store.apply_authority_state_sync(defer).unwrap();
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].end_message_id,
+            "m2#0"
+        );
+    }
+
+    #[test]
+    fn host_rewrite_before_snapshot_is_rejected_and_next_pass_adopts_new_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store.with_context_conn_for_test(|tx| tx.execute_batch("UPDATE compartments SET end_message=3, end_message_id='m2' WHERE session_id='raw'")).unwrap();
+        assert!(store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap_err()
+            .to_string()
+            .contains("snapshot changed"));
+        let mut updated = boundary();
+        updated.source_end_message = 3;
+        updated.source_end_message_id = "m2".into();
+        updated.end_message = 2;
+        updated.end_message_id = "m2#0".into();
+        let rows = [updated];
+        let mut sync = request(&rows, 0);
+        sync.seed_boundary_id = Some("m2#0");
+        store.apply_authority_state_sync(sync).unwrap();
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].end_message_id,
+            "m2#0"
+        );
+        store
+            .apply_authority_state_sync({
+                let mut next = request(&[], 1);
+                next.seed_boundary_id = Some("m2#0");
+                next
+            })
+            .unwrap();
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].end_message_id,
+            "m2#0"
+        );
     }
 
     #[test]
