@@ -12,7 +12,7 @@
     },
     "allow_home_project": {
       "default": false,
-      "description": "Allow Magic Context sessions launched from the exact canonical home directory. The home session uses its deterministic dir: identity so pre-gate memories reconnect. USER-LEVEL ONLY: project config is ignored. The home identity is excluded from registry seed exports, never resolves descendants by containment, and cannot join a workspace.",
+      "description": "Allow Magic Context sessions launched from the exact canonical home directory. A non-git home uses its deterministic dir: identity; a home repository uses its git: identity. USER-LEVEL ONLY: project config is ignored. The home identity is excluded from registry seed exports, never resolves descendants by containment, and cannot join a workspace.",
       "type": "boolean"
     },
     "mural": {
@@ -1907,6 +1907,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "promotion_threshold": {
+                  "default": 3,
                   "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
                   "x-mc-live-reload": true,
                   "type": "number",
@@ -1930,6 +1931,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "promotion_threshold": {
+                  "default": 2,
                   "description": "promote-primers: min recurring source days before promotion is considered (default: 2)",
                   "x-mc-live-reload": true,
                   "type": "number",

@@ -251,7 +251,7 @@ function countIndexedHookMessage(sessionId: string, messageId: string): number {
 }
 
 describe("magic-context hook", () => {
-    it("constructs with directory fallback when load-time identity resolution throws", () => {
+    it("leaves the project unbound when git fails before any durable identity is known", () => {
         process.env.XDG_DATA_HOME = makeTempDir("hook-identity-fallback-data-");
         const projectDir = makeTempDir("hook-identity-fallback-project-");
         mkdirSync(join(projectDir, ".git"));
@@ -265,7 +265,7 @@ describe("magic-context hook", () => {
         const deps = createMockDeps();
         deps.directory = projectDir;
 
-        expect(createMagicContextHook(deps)).not.toBeNull();
+        expect(createMagicContextHook(deps)).toBeNull();
     });
 
     it("constructs and resolves a project when sandbox policy denies realpath for the home directory", () => {

@@ -79,7 +79,7 @@ describe("CLI --help per subcommand", () => {
         [["setup"], "Usage: magic-context setup"],
         [["doctor"], "Usage: magic-context doctor [options]"],
         [["doctor", "single-store", "migrate"], "Usage: magic-context doctor single-store migrate"],
-        [["doctor", "merge-identity"], "Usage: magic-context doctor merge-identity"],
+        [["doctor", "merge-identities"], "Usage: magic-context doctor merge-identities"],
         [["doctor", "list-hidden-sessions"], "Usage: magic-context doctor list-hidden-sessions"],
         [["doctor", "migrate"], "Magic Context doctor migrate"],
         [["doctor", "migrate-session"], "doctor migrate-session"],

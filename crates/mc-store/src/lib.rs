@@ -4850,7 +4850,9 @@ pub struct McTagRow {
     pub kind: String,
     pub token_count: i64,
     pub created_at_ms: i64,
-    pub source_bytes: Vec<u8>,
+    /// Shared and immutable, so cloning a row (the module's tag cache does this when it
+    /// appends new rows to a retained baseline) never copies the stored source payload.
+    pub source_bytes: std::sync::Arc<[u8]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9069,7 +9071,7 @@ impl McStore {
                     kind: input.kind.clone(),
                     token_count: input.token_count.max(0),
                     created_at_ms,
-                    source_bytes: input.source_bytes.clone(),
+                    source_bytes: input.source_bytes.as_slice().into(),
                 });
             }
             Ok(out)
@@ -15623,7 +15625,7 @@ fn tag_row_from_sql(r: &rusqlite::Row<'_>) -> rusqlite::Result<McTagRow> {
         kind: r.get(2)?,
         token_count: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
         created_at_ms: r.get(4)?,
-        source_bytes: r.get(5)?,
+        source_bytes: r.get::<_, Vec<u8>>(5)?.into(),
     })
 }
 
@@ -18021,7 +18023,7 @@ mod tests {
             kind: "message".to_string(),
             token_count: 4,
             created_at_ms: 10,
-            source_bytes: b"authored text".to_vec(),
+            source_bytes: b"authored text".as_slice().into(),
         }];
         let temporal_marks = [TemporalMarkInput {
             ordinal: 1,
@@ -18114,7 +18116,7 @@ mod tests {
             kind: "message".to_string(),
             token_count: 1,
             created_at_ms: 1,
-            source_bytes: b"text".to_vec(),
+            source_bytes: b"text".as_slice().into(),
         }];
         let marks = [TemporalMarkInput {
             ordinal: 1,
@@ -18932,7 +18934,7 @@ mod tests {
             "a later larger observation raises the durable token count"
         );
         assert_eq!(
-            all[0].source_bytes, b"message source",
+            &*all[0].source_bytes, b"message source",
             "pre-overlay provenance is immutable after the first mint"
         );
         let token_sum_ids = ["m1#0".to_string(), "m3#0".to_string()]
@@ -20557,7 +20559,9 @@ mod tests {
             .unwrap();
         assert_eq!(tag_source_columns, 1);
         assert_eq!(
-            migrated.load_tags_for_session("legacy").unwrap()[0].source_bytes,
+            migrated.load_tags_for_session("legacy").unwrap()[0]
+                .source_bytes
+                .to_vec(),
             Vec::<u8>::new(),
             "migration preserves old tag rows with explicit unknown provenance"
         );

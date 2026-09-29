@@ -6,6 +6,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { insertMemory } from "../../features/magic-context/memory";
+import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
+import * as embeddingDrain from "../../features/magic-context/memory/single-store-embedding-drain";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { ensureMuralRendered } from "../../features/magic-context/mural/render-trigger";
 import {
@@ -51,7 +53,7 @@ import * as logger from "../../shared/logger";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { promptSurfaceConfigIdentity } from "../../shared/prompt-surface";
 import { createPromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
-import { Database } from "../../shared/sqlite";
+import { Database, withPrivilegedWriter, withSqliteTransformPass } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { deriveWindowGeometry } from "../../shared/window-geometry";
 import { createCtxSearchTools } from "../../tools/ctx-search/tools";
@@ -319,6 +321,82 @@ function authoritySeqMismatch(durableSeq: number): Error & {
 }
 
 describe("Rust mode authority adapter", () => {
+    it("shared-store embedding drain does not inherit foreground SQLite retries", async () => {
+        const sessionId = "ses-shared-store-background-drain";
+        sessions.push(sessionId);
+        installRawProvider(sessionId);
+        const db = makeDb();
+        const probe = new Database(":memory:");
+        const busy = Object.assign(new Error("drain busy"), { code: "SQLITE_BUSY" });
+        const exec = spyOn(probe, "exec").mockImplementation(() => {
+            throw busy;
+        });
+        const wait = spyOn(Atomics, "wait").mockReturnValue("timed-out");
+        const drain = spyOn(
+            embeddingDrain,
+            "drainSingleStoreEmbeddingWatermarks",
+        ).mockImplementation(async () => {
+            expect(() => withPrivilegedWriter(probe, () => {})).toThrow("drain busy");
+            expect(exec).toHaveBeenCalledTimes(1);
+            expect(wait).not.toHaveBeenCalled();
+            return 0;
+        });
+        try {
+            const moduleClient: RustModeModuleClient = {
+                call: async ({ method }) =>
+                    method === "transform"
+                        ? { decision: "SOFT+", native_messages: [] }
+                        : { ok: true },
+            };
+            const runner = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+            const messages = makeMessages(sessionId);
+            await withSqliteTransformPass(() =>
+                runner.run(
+                    sessionId,
+                    messages,
+                    { messages: [...messages] },
+                    makeMeta(db, sessionId),
+                ),
+            );
+            expect(drain).toHaveBeenCalledTimes(1);
+            expect(exec).toHaveBeenCalledTimes(1);
+        } finally {
+            drain.mockRestore();
+            exec.mockRestore();
+            wait.mockRestore();
+            probe.close();
+        }
+    });
+    it("routes shared-store requests through the resolved session directory", async () => {
+        const sessionId = "ses-shared-store-directory-root";
+        sessions.push(sessionId);
+        installRawProvider(sessionId);
+        const db = makeDb();
+        const roots: string[] = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async (args) => {
+                roots.push(args.projectRoot);
+                throw new Error("stop after routing");
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.directory = "/launch/root-a";
+        deps.sessionDirectoryBySession?.set(sessionId, "/session/root-b");
+        const runner = createRustModeTransform(deps, { moduleClient });
+        const messages = makeMessages(sessionId);
+        await expect(
+            runner.run(sessionId, messages, { messages: [...messages] }, makeMeta(db, sessionId)),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
+        expect(roots.length).toBeGreaterThan(0);
+        expect(roots.every((root) => root === "/session/root-b")).toBe(true);
+        expect(
+            db
+                .prepare(
+                    "SELECT project_path FROM session_projects WHERE session_id=? AND harness='opencode'",
+                )
+                .get(sessionId),
+        ).toEqual({ project_path: resolveProjectIdentityForSession("/session/root-b", false) });
+    });
     it("transports the host-resolved output_reserve as Rust usable_soft", () => {
         const resolved = deriveWindowGeometry(
             "openai-codex",
@@ -833,7 +911,9 @@ describe("Rust mode authority adapter", () => {
         const output = { messages: [...input] as unknown[] };
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
         try {
-            await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+            await expect(
+                transform.run(sessionId, input, output, makeMeta(db, sessionId)),
+            ).rejects.toBeInstanceOf(EmergencyFailClosedError);
             expect(output.messages).toEqual(input);
             expect(JSON.stringify(output.messages)).not.toContain("must not be served");
             expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
@@ -1256,7 +1336,9 @@ describe("Rust mode authority adapter", () => {
         const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
         const input = makeMessages(sessionId);
 
-        await transform.run(sessionId, input, { messages: input }, makeMeta(db, sessionId));
+        await expect(
+            transform.run(sessionId, input, { messages: input }, makeMeta(db, sessionId)),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
 
         expect(getPersistedNoteNudge(db, sessionId).triggerPending).toBe(false);
     });
@@ -1374,7 +1456,11 @@ describe("Rust mode authority adapter", () => {
 
     it("binds every served Rust pass class to the provider assistant decision row", async () => {
         const db = makeFileDb();
-        const bindProviderAssistant = async (sessionId: string, messageId: string) => {
+        const bindProviderAssistant = async (
+            sessionId: string,
+            messageId: string,
+            served = true,
+        ) => {
             expect(
                 scheduleOpenCodeTransformDecisionWrite({
                     db,
@@ -1382,7 +1468,7 @@ describe("Rust mode authority adapter", () => {
                     messageId,
                     inputTokens: 123,
                 }),
-            ).toBe(true);
+            ).toBe(served);
             await new Promise((resolve) => setTimeout(resolve, 5));
         };
 
@@ -1434,22 +1520,26 @@ describe("Rust mode authority adapter", () => {
         });
         for (let index = 0; index < 3; index += 1) {
             const messages = makeMessages(failureSession);
-            await failureTransform.run(
-                failureSession,
-                messages,
-                { messages },
-                makeMeta(db, failureSession),
-            );
-            await bindProviderAssistant(failureSession, `error-response-${index}`);
+            await expect(
+                failureTransform.run(
+                    failureSession,
+                    messages,
+                    { messages },
+                    makeMeta(db, failureSession),
+                ),
+            ).rejects.toBeInstanceOf(EmergencyFailClosedError);
+            await bindProviderAssistant(failureSession, `error-response-${index}`, false);
         }
         const parkedMessages = makeMessages(failureSession);
-        await failureTransform.run(
-            failureSession,
-            parkedMessages,
-            { messages: parkedMessages },
-            makeMeta(db, failureSession),
-        );
-        await bindProviderAssistant(failureSession, "parked-response");
+        await expect(
+            failureTransform.run(
+                failureSession,
+                parkedMessages,
+                { messages: parkedMessages },
+                makeMeta(db, failureSession),
+            ),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
+        await bindProviderAssistant(failureSession, "parked-response", false);
 
         const fullSyncSession = `rust-decision-full-sync-${Date.now()}`;
         sessions.push(fullSyncSession);
@@ -1462,13 +1552,15 @@ describe("Rust mode authority adapter", () => {
             moduleClient: fullSyncClient,
         });
         const fullSyncMessages = makeMessages(fullSyncSession);
-        await fullSyncTransform.run(
-            fullSyncSession,
-            fullSyncMessages,
-            { messages: fullSyncMessages },
-            makeMeta(db, fullSyncSession),
-        );
-        await bindProviderAssistant(fullSyncSession, "full-sync-response");
+        await expect(
+            fullSyncTransform.run(
+                fullSyncSession,
+                fullSyncMessages,
+                { messages: fullSyncMessages },
+                makeMeta(db, fullSyncSession),
+            ),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
+        await bindProviderAssistant(fullSyncSession, "full-sync-response", false);
 
         expect(
             db
@@ -1498,24 +1590,6 @@ describe("Rust mode authority adapter", () => {
             {
                 message_id: "classifier-response-3",
                 decision: "passthrough",
-                materialized: 0,
-                materialize_reason: null,
-            },
-            ...Array.from({ length: 3 }, (_, index) => ({
-                message_id: `error-response-${index}`,
-                decision: "error",
-                materialized: 0,
-                materialize_reason: null,
-            })),
-            {
-                message_id: "parked-response",
-                decision: "parked",
-                materialized: 0,
-                materialize_reason: null,
-            },
-            {
-                message_id: "full-sync-response",
-                decision: "need_full_sync",
                 materialized: 0,
                 materialize_reason: null,
             },
@@ -1694,7 +1768,9 @@ describe("Rust mode authority adapter", () => {
         const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
         const output = { messages: input as unknown[] };
 
-        await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+        await expect(
+            transform.run(sessionId, input, output, makeMeta(db, sessionId)),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
 
         expect(output.messages).toBe(input);
         expect(output.messages[0]).toEqual(input[0]);
@@ -2356,12 +2432,9 @@ describe("Rust mode authority adapter", () => {
         });
 
         const firstInput = makeMessages(sessionId);
-        await transform.run(
-            sessionId,
-            firstInput,
-            { messages: firstInput },
-            makeMeta(db, sessionId),
-        );
+        await expect(
+            transform.run(sessionId, firstInput, { messages: firstInput }, makeMeta(db, sessionId)),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
 
         const syntheticInput = [
             ...makeMessages(sessionId),
@@ -2370,12 +2443,14 @@ describe("Rust mode authority adapter", () => {
                 parts: [{ type: "text", text: "drop spent tool output", synthetic: true }],
             },
         ];
-        await transform.run(
-            sessionId,
-            syntheticInput,
-            { messages: syntheticInput },
-            makeMeta(db, sessionId),
-        );
+        await expect(
+            transform.run(
+                sessionId,
+                syntheticInput,
+                { messages: syntheticInput },
+                makeMeta(db, sessionId),
+            ),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
 
         expect(getChannel2NudgeState(db, sessionId)).toBe("");
         expect(promptAsync).not.toHaveBeenCalled();
@@ -2629,8 +2704,13 @@ describe("Rust mode authority adapter", () => {
                 transforms += 1;
                 // Second pass: the module lost the delta base. Third pass: the module
                 // times out and the adapter serves its last good array.
-                if (transforms === 2) return { status: "need_full_sync" };
-                if (transforms === 4) throw new Error("rust module transform timed out");
+                if (transforms === 2)
+                    return {
+                        status: "need_full_sync",
+                        need_full_sync_reason: "native_prefix_unavailable",
+                    };
+                if (transforms === 4 || transforms === 5)
+                    throw new Error("rust module transform timed out");
                 return { decision: "SOFT+", native_messages: native };
             },
         };
@@ -2655,6 +2735,13 @@ describe("Rust mode authority adapter", () => {
             logSpy.mockClear();
 
             await runPass(); // need_full_sync, then the full-array retry
+            expect(
+                logSpy.mock.calls.some(
+                    ([, line]) =>
+                        line ===
+                        "need_full_sync retry=full ordinal_memo=kept reason=native_prefix_unavailable",
+                ),
+            ).toBe(true);
             await runPass(); // module timeout, served from the last good array
             rows.push({
                 id: `m-${String(ROWS + 1).padStart(6, "0")}`,
@@ -2664,7 +2751,7 @@ describe("Rust mode authority adapter", () => {
             });
             await runPass(); // the resumed turn with one new message
 
-            expect(transforms).toBe(5);
+            expect(transforms).toBe(6);
             expect(store.ordinalRows).toBeLessThanOrEqual(MODULE_ORDINAL_PAGE_SIZE);
             expect(store.fullReads).toBe(0);
             const ordinalLines = logSpy.mock.calls
@@ -2684,7 +2771,7 @@ describe("Rust mode authority adapter", () => {
             store.ordinalRows = 0;
             logSpy.mockClear();
             await runPass();
-            expect(transforms).toBe(6);
+            expect(transforms).toBe(7);
             expect(store.ordinalRows).toBeLessThanOrEqual(2 * MODULE_ORDINAL_PAGE_SIZE);
             expect(store.fullReads).toBe(0);
             const removalLines = logSpy.mock.calls
@@ -2840,21 +2927,28 @@ describe("Rust mode authority adapter", () => {
         try {
             const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
             const output = { messages: [] as unknown[] };
-            await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
+            await expect(
+                transform.run(sessionId, messages, output, makeMeta(db, sessionId)),
+            ).rejects.toBeInstanceOf(EmergencyFailClosedError);
 
             const seriesStarts = transformCalls.filter(
                 ({ body }) => body.transform_page_index === 0,
             );
             expect(seriesStarts).toHaveLength(1);
             expect(transformCalls.at(-1)?.attemptClass).toBe("transform_series_execute");
-            // One seed message: the cold-start floor plus one per-message increment.
-            expect(transformCalls.at(-1)?.timeoutMs).toBe(15_002);
+            // Give cold execution and its one identical-final-page retry the full 45-second timeout.
+            expect(transformCalls.at(-1)?.timeoutMs).toBe(45_000);
+            const finals = transformCalls.filter(
+                ({ body }) => body.transform_page_complete === true,
+            );
+            expect(finals).toHaveLength(2);
+            expect(finals[0].body).toEqual(finals[1].body);
             expect(
                 transformCalls
-                    .slice(0, -1)
+                    .filter(({ body }) => body.transform_page_complete !== true)
                     .every(({ attemptClass }) => attemptClass === "transform_page_upload"),
             ).toBe(true);
-            expect(output.messages).toEqual(messages);
+            expect(output.messages).toEqual([]);
             const logged = logSpy.mock.calls
                 .filter(([loggedSession]) => loggedSession === sessionId)
                 .map(([, message]) => message);
@@ -2869,7 +2963,7 @@ describe("Rust mode authority adapter", () => {
         }
     });
 
-    it("falls through after a second paged transform series mismatch", async () => {
+    it("refuses after a second paged transform series mismatch", async () => {
         const sessionId = `rust-series-restart-bound-${Date.now()}`;
         sessions.push(sessionId);
         const db = makeDb();
@@ -2896,12 +2990,14 @@ describe("Rust mode authority adapter", () => {
         try {
             const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
             const output = { messages: [] as unknown[] };
-            await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
+            await expect(
+                transform.run(sessionId, messages, output, makeMeta(db, sessionId)),
+            ).rejects.toBeInstanceOf(EmergencyFailClosedError);
 
             const seriesStarts = transformBodies.filter((page) => page.transform_page_index === 0);
             expect(seriesStarts).toHaveLength(2);
             expect(new Set(seriesStarts.map((page) => page.transform_page_id)).size).toBe(1);
-            expect(output.messages).toEqual(messages);
+            expect(output.messages).toEqual([]);
             const logged = logSpy.mock.calls
                 .filter(([loggedSession]) => loggedSession === sessionId)
                 .map(([, message]) => message);
@@ -3519,7 +3615,7 @@ describe("Rust mode authority adapter", () => {
         expect(pagedWire).toContain("large delta");
     });
 
-    it("serves raw instead of stale LKG after a stable-id content mutation", async () => {
+    it("refuses instead of replaying stale LKG after a stable-id content mutation", async () => {
         const sessionId = `rust-lkg-content-${Date.now()}`;
         sessions.push(sessionId);
         const db = makeDb();
@@ -3548,7 +3644,9 @@ describe("Rust mode authority adapter", () => {
         (input[0]?.parts[0] as { text: string }).text = "same id, current content";
         failTransform = true;
         const output = { messages: [...input] as unknown[] };
-        await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+        await expect(
+            transform.run(sessionId, input, output, makeMeta(db, sessionId)),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
 
         expect(output.messages).toEqual(input);
         expect((output.messages[0] as MessageLike).parts[0]).toEqual({
@@ -3599,9 +3697,11 @@ describe("Rust mode authority adapter", () => {
 
         const secondInput = makeMessages(sessionId);
         const secondOutput = { messages: [...secondInput] as unknown[] };
-        await transform.run(sessionId, secondInput, secondOutput, makeMeta(db, sessionId));
+        await expect(
+            transform.run(sessionId, secondInput, secondOutput, makeMeta(db, sessionId)),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
 
-        expect(secondOutput.messages).toEqual(secondInput);
+        // Refusal can follow an in-place managed edit, but no sendable result is returned.
         expect(getSlot(sessionId)).toBeUndefined();
         expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
     });
@@ -3715,7 +3815,9 @@ describe("Rust mode authority adapter", () => {
         scheduled.shift()!();
         unavailable = true;
         const output = { messages: [...input] as unknown[] };
-        await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+        await expect(
+            transform.run(sessionId, input, output, makeMeta(db, sessionId)),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
         expect(JSON.stringify(output.messages)).toBe(JSON.stringify(input));
         expect(JSON.stringify(output.messages)).not.toContain("captured module output");
     });
@@ -4103,7 +4205,9 @@ describe("Rust mode authority adapter", () => {
         });
         const input = makeMessages(sessionId);
 
-        await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
+        await expect(
+            transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId)),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
         scheduled.shift()?.();
         expect(getSlot(sessionId)).toBeUndefined();
 
@@ -4165,6 +4269,61 @@ describe("Rust mode authority adapter", () => {
         await expect(transform.run(sessionId, input, output, meta)).rejects.toBeInstanceOf(
             EmergencyFailClosedError,
         );
+        expect(output.messages).toEqual([]);
+    });
+
+    it("retries a fold timeout with the identical final page and longer budget before parking", async () => {
+        const sessionId = `rust-fold-timeout-retry-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const calls: Array<{ body: unknown; timeoutMs?: number }> = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body, timeoutMs }) => {
+                if (method !== "transform") return { ok: true };
+                calls.push({ body: structuredClone(body), timeoutMs });
+                if (calls.length === 1)
+                    throw Object.assign(new Error("request deadline"), { code: "ETIMEDOUT" });
+                return {
+                    decision: "HARD",
+                    native_messages: [
+                        {
+                            info: { id: "m1", role: "user", sessionID: sessionId },
+                            parts: [{ type: "text", text: "managed fold" }],
+                        },
+                    ],
+                };
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.pendingMaterializationSessions.add(sessionId);
+        const transform = createRustModeTransform(deps, { moduleClient });
+        const output = { messages: [] as unknown[] };
+        await transform.run(sessionId, makeMessages(sessionId), output, makeMeta(db, sessionId));
+        expect(calls).toHaveLength(2);
+        expect(calls[0].body).toEqual(calls[1].body);
+        expect(calls.map((call) => call.timeoutMs)).toEqual([45_000, 45_000]);
+        expect(JSON.stringify(output.messages)).toContain("managed fold");
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+        expect(transform.getState(sessionId).parked).toBe(false);
+    });
+
+    it("refuses a module timeout without LKG instead of serving raw", async () => {
+        const sessionId = `rust-timeout-no-lkg-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method === "transform") throw new Error("rust module request timed out");
+                return { ok: true };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const output = { messages: [] as unknown[] };
+        await expect(
+            transform.run(sessionId, makeMessages(sessionId), output, makeMeta(db, sessionId)),
+        ).rejects.toThrow("Magic Context's engine is reconnecting");
         expect(output.messages).toEqual([]);
     });
 
@@ -4286,7 +4445,7 @@ describe("Rust mode authority adapter", () => {
         expect(output.messages).toEqual([]);
     });
 
-    it("preserves raw fail-open when the estimate fits the known context limit", async () => {
+    it("refuses unmanaged fallback even when the estimate fits the known context limit", async () => {
         const sessionId = `rust-raw-fits-${Date.now()}`;
         sessions.push(sessionId);
         const db = makeDb();
@@ -4315,8 +4474,8 @@ describe("Rust mode authority adapter", () => {
 
         await expect(
             transform.run(sessionId, input, output, makeMeta(db, sessionId)),
-        ).resolves.toBeUndefined();
-        expect(output.messages).toEqual(input);
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
+        expect(output.messages).toEqual([]);
     });
 
     it("parks a typed non-retryable state-sync failure after the first pass", async () => {
@@ -4348,12 +4507,14 @@ describe("Rust mode authority adapter", () => {
                 },
             });
             const first = makeMessages(sessionId);
-            await transform.run(
-                sessionId,
-                first,
-                { messages: first as unknown[] },
-                makeMeta(db, sessionId),
-            );
+            await expect(
+                transform.run(
+                    sessionId,
+                    first,
+                    { messages: first as unknown[] },
+                    makeMeta(db, sessionId),
+                ),
+            ).rejects.toBeInstanceOf(EmergencyFailClosedError);
 
             expect(transform.getState(sessionId).parked).toBe(true);
             expect(stateSyncCalls).toBe(1);
@@ -4364,18 +4525,20 @@ describe("Rust mode authority adapter", () => {
                     .filter(([loggedSession]) => loggedSession === sessionId)
                     .map(([, message]) => message)
                     .find((message) => message.startsWith("rust pass:")),
-            ).toContain("decision=error reason=state_sync_non_retryable served_from=raw");
+            ).toContain("decision=error reason=state_sync_non_retryable served_from=refused");
 
             for (let pass = 0; pass < 2; pass += 1) {
                 const parked = makeMessages(sessionId);
-                await transform.run(
-                    sessionId,
-                    parked,
-                    { messages: parked as unknown[] },
-                    makeMeta(db, sessionId),
-                );
+                await expect(
+                    transform.run(
+                        sessionId,
+                        parked,
+                        { messages: parked as unknown[] },
+                        makeMeta(db, sessionId),
+                    ),
+                ).rejects.toBeInstanceOf(EmergencyFailClosedError);
             }
-            expect(stateSyncCalls).toBe(1);
+            expect(stateSyncCalls).toBe(3);
             expect(transformCalls).toBe(0);
         } finally {
             logSpy.mockRestore();
@@ -4520,7 +4683,7 @@ describe("Rust mode authority adapter", () => {
         }
     });
 
-    it("passes through raw input, parks after three failures, then probes on the fifth pass", async () => {
+    it("parked without LKG retries the recovered module on the next pass even when raw exceeds the limit", async () => {
         const sessionId = `rust-failure-${Date.now()}`;
         sessions.push(sessionId);
         const db = makeDb();
@@ -4546,19 +4709,19 @@ describe("Rust mode authority adapter", () => {
         for (let pass = 1; pass <= 3; pass += 1) {
             const input = makeMessages(sessionId);
             const output = { messages: input as unknown[] };
-            await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+            await expect(
+                transform.run(sessionId, input, output, makeMeta(db, sessionId)),
+            ).rejects.toBeInstanceOf(EmergencyFailClosedError);
             expect(output.messages).toBe(input);
         }
         expect(transform.getState(sessionId).parked).toBe(true);
         expect(toastCalls).toBe(1);
         shouldFail = false;
-        for (let pass = 0; pass < 2; pass += 1) {
-            const input = makeMessages(sessionId);
-            const output = { messages: input as unknown[] };
-            await transform.run(sessionId, input, output, makeMeta(db, sessionId));
-            if (pass === 0) expect(output.messages).toBe(input);
-            else expect(output.messages).toEqual([{ role: "assistant", parts: [] }]);
-        }
+        recordDetectedContextLimit(db, sessionId, 1, "test-provider/test-model");
+        const input = makeMessages(sessionId);
+        const output = { messages: input as unknown[] };
+        await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+        expect(output.messages).toEqual([{ role: "assistant", parts: [] }]);
         expect(transform.getState(sessionId).parked).toBe(false);
         expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
         expect(transform.getState(sessionId).warningSent).toBe(false);
@@ -4589,23 +4752,27 @@ describe("Rust mode authority adapter", () => {
 
         for (let pass = 0; pass < 3; pass += 1) {
             const input = makeMessages(sessionId);
-            await transform.run(
-                sessionId,
-                input,
-                { messages: input as unknown[] },
-                makeMeta(db, sessionId),
-            );
+            await expect(
+                transform.run(
+                    sessionId,
+                    input,
+                    { messages: input as unknown[] },
+                    makeMeta(db, sessionId),
+                ),
+            ).rejects.toBeInstanceOf(EmergencyFailClosedError);
         }
         expect(transform.getState(sessionId).parked).toBe(true);
         expect(transformCalls).toBe(3);
 
         const input = makeMessages(sessionId);
-        await transform.run(
-            sessionId,
-            input,
-            { messages: input as unknown[] },
-            makeMeta(db, sessionId),
-        );
+        await expect(
+            transform.run(
+                sessionId,
+                input,
+                { messages: input as unknown[] },
+                makeMeta(db, sessionId),
+            ),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
         expect(transformCalls).toBe(4);
         expect(transform.getState(sessionId).parked).toBe(true);
     });
@@ -4656,7 +4823,7 @@ describe("Rust mode authority adapter", () => {
         expect(transform.getState(sessionId).parked).toBe(true);
     });
 
-    it("keeps below-95 failures on the existing fallback ladder", async () => {
+    it("refuses below-95 failures when LKG is unavailable", async () => {
         const sessionId = `rust-below-fail-closed-${Date.now()}`;
         sessions.push(sessionId);
         const db = makeDb();
@@ -4687,7 +4854,9 @@ describe("Rust mode authority adapter", () => {
         ] as MessageLike[];
         const output = { messages: [...input] as unknown[] };
 
-        await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+        await expect(
+            transform.run(sessionId, input, output, makeMeta(db, sessionId)),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
 
         expect(output.messages).toEqual(input);
         expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
@@ -5410,7 +5579,9 @@ describe("delta prefix-mutation guard", () => {
         );
         for (let retry = 0; retry < 2; retry += 1) {
             const output = { messages: mutated as unknown[] };
-            await transform.run(sessionId, mutated, output, makeMeta(db, sessionId));
+            await expect(
+                transform.run(sessionId, mutated, output, makeMeta(db, sessionId)),
+            ).rejects.toBeInstanceOf(EmergencyFailClosedError);
             expect(output.messages).toBe(mutated);
         }
         expect(transform.getState(sessionId).consecutiveFailures).toBe(2);
@@ -5476,6 +5647,279 @@ describe("Rust stalled transform probe", () => {
                 once: true,
             });
         });
+
+    it("direct Rust entry grants acquisition retries to the awaited pass", async () => {
+        const sessionId = `rust-foreground-scope-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let injecting = false;
+        let attempts = 0;
+        let callbacks = 0;
+        const exec = db.exec.bind(db);
+        const intercepted = spyOn(db, "exec").mockImplementation((sql) => {
+            if (injecting && sql === "BEGIN IMMEDIATE" && ++attempts === 1)
+                throw Object.assign(new Error("busy"), { code: "SQLITE_BUSY" });
+            return exec(sql);
+        });
+        const wait = spyOn(Atomics, "wait").mockReturnValue("timed-out");
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                injecting = true;
+                try {
+                    withPrivilegedWriter(db, () => {
+                        callbacks++;
+                    });
+                } finally {
+                    injecting = false;
+                }
+                return {
+                    decision: "SOFT+",
+                    native_messages: [
+                        { role: "assistant", parts: [{ type: "text", text: "scoped result" }] },
+                    ],
+                };
+            },
+        };
+        try {
+            const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+            const output = { messages: [] as unknown[] };
+            await transform.run(
+                sessionId,
+                makeMessages(sessionId),
+                output,
+                makeMeta(db, sessionId),
+            );
+            expect(attempts).toBe(2);
+            expect(callbacks).toBe(1);
+            expect(JSON.stringify(output.messages)).toContain("scoped result");
+        } finally {
+            intercepted.mockRestore();
+            wait.mockRestore();
+        }
+    });
+
+    it("gives need_full_sync a fresh full-wire budget after a nearly exhausted delta", async () => {
+        const sessionId = `rust-full-sync-fresh-budget-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installAvailabilityDb(sessionId, {});
+        installRawProvider(sessionId);
+        const clock = fakeClock();
+        const calls: Array<{ body: Record<string, unknown>; timeoutMs?: number; at: number }> = [];
+        const native = [
+            { role: "assistant", parts: [{ type: "text", text: "slow full retry completed" }] },
+        ];
+        const moduleClient: RustModeModuleClient = {
+            invalidateStateSyncCapabilities: () => undefined,
+            call: async ({ method, body, timeoutMs }) => {
+                if (method !== "transform") return { ok: true };
+                calls.push({
+                    body: structuredClone(body) as Record<string, unknown>,
+                    timeoutMs,
+                    at: clock.now(),
+                });
+                if (calls.length === 2) {
+                    await new Promise((resolve) => clock.setTimeout(resolve, 14000));
+                    return { status: "need_full_sync" };
+                }
+                if (calls.length === 3)
+                    await new Promise((resolve) => clock.setTimeout(resolve, 20000));
+                return { decision: "SOFT+", native_messages: native };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+            clockForTests: clock,
+        });
+        const first = makeMessages(sessionId);
+        await transform.run(sessionId, first, { messages: [...first] }, makeMeta(db, sessionId));
+        const second = makeMessages(sessionId);
+        const output = { messages: [...second] as unknown[] };
+        const outcome = transform.run(sessionId, second, output, makeMeta(db, sessionId)).then(
+            () => "served",
+            (error) => error,
+        );
+        await clock.waitForDelay(14000);
+        expect(calls[1].body.tail_delta).toBeDefined();
+        expect(calls[1].timeoutMs).toBe(15000);
+        await clock.advance(14000);
+        await clock.waitForDelay(20000);
+        expect(calls[2].body.tail_delta).toBeUndefined();
+        expect(calls[2].at).toBe(14000);
+        expect(calls[2].timeoutMs).toBe(45000);
+        await clock.advance(20000);
+        expect(await outcome).toBe("served");
+        expect(clock.now()).toBe(34000);
+        expect(calls).toHaveLength(3);
+        expect(output.messages).toEqual(native);
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+    });
+
+    it("polls an applying final page until committed without another execution", async () => {
+        const sessionId = `rust-applying-replay-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const clock = fakeClock();
+        let executions = 0;
+        const pages: unknown[] = [];
+        const budgets: number[] = [];
+        const native = [
+            {
+                info: { id: "m1", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "committed fold" }],
+            },
+        ];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body, timeoutMs }) => {
+                if (method !== "transform") return { ok: true };
+                pages.push(structuredClone(body));
+                budgets.push(timeoutMs!);
+                if (executions === 0) {
+                    executions++;
+                    throw Object.assign(new Error("request deadline"), { code: "ETIMEDOUT" });
+                }
+                if (clock.now() < 750)
+                    throw Object.assign(new Error("the final transform page is being applied"), {
+                        code: "authority_transform_page_in_progress",
+                    });
+                return { decision: "HARD", row_version: 7, native_messages: native };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+            clockForTests: clock,
+        });
+        const output = { messages: [] as unknown[] };
+        const outcome = transform
+            .run(sessionId, makeMessages(sessionId), output, makeMeta(db, sessionId))
+            .then(
+                () => "served",
+                (error) => error,
+            );
+        await clock.waitForDelay(250);
+        await clock.advance(750);
+        expect(await outcome).toBe("served");
+        expect(executions).toBe(1);
+        expect(pages).toHaveLength(5);
+        for (const page of pages) expect(page).toEqual(pages[0]);
+        expect(budgets).toEqual([45000, 45000, 44750, 44500, 44250]);
+        expect(output.messages).toEqual(native);
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+    });
+
+    it("in-progress final-page polling expires at one fixed completion deadline", async () => {
+        const sessionId = `rust-applying-deadline-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const clock = fakeClock();
+        let calls = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                if (++calls === 1)
+                    throw Object.assign(new Error("request deadline"), { code: "ETIMEDOUT" });
+                throw Object.assign(new Error("still applying"), {
+                    code: "authority_transform_page_in_progress",
+                });
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+            clockForTests: clock,
+        });
+        const outcome = transform
+            .run(sessionId, makeMessages(sessionId), { messages: [] }, makeMeta(db, sessionId))
+            .then(
+                () => "served",
+                (error) => error,
+            );
+        await clock.waitForDelay(250);
+        await clock.advance(45000);
+        expect(await outcome).toBeInstanceOf(EmergencyFailClosedError);
+        expect(calls).toBeGreaterThan(2);
+        expect(calls).toBeLessThanOrEqual(181);
+        expect(clock.now()).toBe(45000);
+    });
+
+    it("parked no-LKG uses a short hard health deadline but admits a healthy slow module", async () => {
+        const sessionId = `rust-park-probe-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const clock = fakeClock();
+        let phase: "failing" | "hung" | "healthy" = "failing";
+        let fullCalls = 0;
+        let probes = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, timeoutMs }) => {
+                if (method === "session.status") {
+                    probes++;
+                    expect(timeoutMs).toBeLessThanOrEqual(2000);
+                    if (phase === "hung") return new Promise(() => {});
+                    return { ok: true };
+                }
+                if (method !== "transform") return { ok: true };
+                fullCalls++;
+                if (phase === "failing") throw new Error("module unavailable");
+                if (phase === "hung") return new Promise(() => {});
+                await new Promise((resolve) => clock.setTimeout(resolve, 5000));
+                return {
+                    decision: "HARD",
+                    native_messages: [
+                        {
+                            info: { id: "m1", role: "user", sessionID: sessionId },
+                            parts: [{ type: "text", text: "healthy but slow" }],
+                        },
+                    ],
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+            clockForTests: clock,
+        });
+        for (let i = 0; i < 3; i++)
+            await expect(
+                transform.run(
+                    sessionId,
+                    makeMessages(sessionId),
+                    { messages: [] },
+                    makeMeta(db, sessionId),
+                ),
+            ).rejects.toBeInstanceOf(EmergencyFailClosedError);
+        expect(transform.getState(sessionId).parked).toBe(true);
+        phase = "hung";
+        const hung = transform
+            .run(sessionId, makeMessages(sessionId), { messages: [] }, makeMeta(db, sessionId))
+            .then(
+                () => "served",
+                (error) => error,
+            );
+        await clock.waitForDelay(2000);
+        await clock.advance(2000);
+        expect(await hung).toBeInstanceOf(EmergencyFailClosedError);
+        expect(fullCalls).toBe(3);
+        expect(probes).toBe(1);
+        phase = "healthy";
+        const output = { messages: [] as unknown[] };
+        const healthy = transform.run(
+            sessionId,
+            makeMessages(sessionId),
+            output,
+            makeMeta(db, sessionId),
+        );
+        await clock.waitForDelay(5000);
+        await clock.advance(5000);
+        await healthy;
+        expect(fullCalls).toBe(4);
+        expect(probes).toBeGreaterThanOrEqual(2);
+        expect(JSON.stringify(output.messages)).toContain("healthy but slow");
+        expect(transform.getState(sessionId).parked).toBe(false);
+    });
 
     it("waits for the original transform after a healthy probe without sending a duplicate", async () => {
         const sessionId = `rust-stall-probe-${Date.now()}`;
@@ -6105,7 +6549,9 @@ describe("LKG durability across restarts", () => {
                 },
             ] as MessageLike[];
             const output = { messages: [...divergedInput] as unknown[] };
-            await restarted.run(sessionId, divergedInput, output, makeMeta(db, sessionId));
+            await expect(
+                restarted.run(sessionId, divergedInput, output, makeMeta(db, sessionId)),
+            ).rejects.toBeInstanceOf(EmergencyFailClosedError);
             expect(output.messages).toEqual(divergedInput);
             expect(getSlot(sessionId)).toBeUndefined();
             expect(durableSlotCount(db, sessionId)).toBe(0);
@@ -6206,6 +6652,11 @@ describe("raw fallback refusal copy and early abort", () => {
             expect(refusalLine).toBeDefined();
             expect(refusalLine).toContain("early_abort=true");
             expect(refusalLine).toContain("estimated=skipped");
+            const passLine = logSpy.mock.calls
+                .map((call) => String(call[1] ?? ""))
+                .find((line) => line.startsWith("rust pass:"));
+            expect(passLine).toContain("served_from=refused");
+            expect(passLine).not.toContain("served_from=raw");
         } finally {
             logSpy.mockRestore();
         }
@@ -6270,12 +6721,14 @@ describe("raw fallback refusal copy and early abort", () => {
         });
         for (let pass = 0; pass < RUST_FAILURE_PARK_THRESHOLD; pass += 1) {
             const input = makeMessages(sessionId);
-            await transform.run(
-                sessionId,
-                input,
-                { messages: input as unknown[] },
-                makeMeta(db, sessionId),
-            );
+            await expect(
+                transform.run(
+                    sessionId,
+                    input,
+                    { messages: input as unknown[] },
+                    makeMeta(db, sessionId),
+                ),
+            ).rejects.toBeInstanceOf(EmergencyFailClosedError);
         }
         expect(parkedMessages).toEqual([ENGINE_RECONNECTING_USER_MESSAGE]);
     });
@@ -6430,7 +6883,7 @@ it("serves a fitting LKG with an envelope from another measured model", async ()
     expect(transform.getState(sessionId).lkgRepresentationFrozen).toBe(true);
 });
 
-it("unknown calibrated raw fallback refuses a locally fitting request and admits a safe request", async () => {
+it("unknown calibrated raw fallback refuses both locally fitting and safe unmanaged requests", async () => {
     for (const [limit, allowed] of [
         [10000, false],
         [50000, true],
@@ -6452,7 +6905,9 @@ it("unknown calibrated raw fallback refuses a locally fitting request and admits
         const input = makeMessages(sessionId);
         const output = { messages: [...input] as unknown[] };
         if (allowed) {
-            await transform.run(sessionId, input, output, meta);
+            await expect(transform.run(sessionId, input, output, meta)).rejects.toBeInstanceOf(
+                EmergencyFailClosedError,
+            );
             expect(output.messages).toEqual(input);
         } else {
             await expect(transform.run(sessionId, input, output, meta)).rejects.toMatchObject({
@@ -6729,7 +7184,8 @@ it("fails after the second authority mismatch in one transform pass", async () =
     const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
     const output = { messages: messages as unknown[] };
 
-    await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
+    await expect(transform.run(sessionId, messages, output, makeMeta(db, sessionId)))
+        .rejects.toBeInstanceOf(EmergencyFailClosedError);
 
     expect(methods).toEqual(["state_sync", "state_sync"]);
     expect(transform.getState(sessionId).lastAckedSeq).toBe(4);

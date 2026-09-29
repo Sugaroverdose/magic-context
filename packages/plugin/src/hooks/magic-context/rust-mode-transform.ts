@@ -47,6 +47,11 @@ import { log, sessionLog } from "../../shared/logger";
 import { getSdkOutputLimit, getSdkWindowGeometry } from "../../shared/models-dev-cache";
 import { promptSurfaceConfigIdentity, resolvePromptSurface } from "../../shared/prompt-surface";
 import { createPromptSurfaceGuidanceEpochCache } from "../../shared/prompt-surface-runtime";
+import {
+    isTransientSqliteError,
+    withoutSqliteTransformPass,
+    withSqliteTransformPass,
+} from "../../shared/sqlite";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
 import {
     cachedToolPermissionDenied,
@@ -123,6 +128,7 @@ import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
 import { singleStoreMigrationRequiredFailure } from "./single-store-refusal";
+import { StorageBusyRefusalError } from "./storage-busy-refusal";
 import { STORE_AHEAD_OF_BINARY_CODE, storeAheadOfBinaryFailure } from "./store-ahead-refusal";
 import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
 import { computeSyntheticCallId, normalizeTodoStateJson } from "./todo-view";
@@ -1508,8 +1514,10 @@ export function createRustModeTransform(
     const promptSurfaceGuidanceEpochs = deps.promptSurfaceRuntime
         ? createPromptSurfaceGuidanceEpochCache(deps.promptSurfaceRuntime)
         : undefined;
-    const scheduleLkgCapture =
+    const captureScheduler =
         options.scheduleLkgCapture ?? ((capture: () => void) => setImmediate(capture));
+    const scheduleLkgCapture = (capture: () => void) =>
+        withoutSqliteTransformPass(() => captureScheduler(capture));
     const installNativeMessages = options.installNativeMessagesForTests ?? replaceMessagesInPlace;
     const rawFallbackEstimator =
         options.rawFallbackEstimatorForTests ?? estimateFinalWireInputTokens;
@@ -1617,6 +1625,7 @@ export function createRustModeTransform(
     const callModule = async (
         args: Parameters<RustModeModuleClient["call"]>[0],
         attemptTimeoutMs = args.timeoutMs ?? timeoutMs,
+        allowTimeoutRetry = true,
     ): Promise<unknown> => {
         const controller = new AbortController();
         const body = isRecord(args.body) ? args.body : {};
@@ -1635,14 +1644,62 @@ export function createRustModeTransform(
                       },
                   )
                 : new Error("rust module request timed out");
-        const timer = clock.setTimeout(() => controller.abort(timeoutError), attemptTimeoutMs);
+        let rejectDeadline!: (error: Error) => void;
+        const deadline = new Promise<never>((_resolve, reject) => {
+            rejectDeadline = reject;
+        });
+        const timer = clock.setTimeout(() => {
+            controller.abort(timeoutError);
+            rejectDeadline(timeoutError);
+        }, attemptTimeoutMs);
         try {
-            return await options.moduleClient.call({
-                ...args,
-                signal: controller.signal,
-                timeoutMs: attemptTimeoutMs,
-            });
+            return await Promise.race([
+                options.moduleClient.call({
+                    ...args,
+                    signal: controller.signal,
+                    timeoutMs: attemptTimeoutMs,
+                }),
+                deadline,
+            ]);
         } catch (error) {
+            const timedOut =
+                controller.signal.aborted ||
+                (error instanceof Error && /timed out|deadline/i.test(error.message));
+            if (
+                allowTimeoutRetry &&
+                options.moduleTimeoutMs === undefined &&
+                args.method === "transform" &&
+                body.transform_page_complete === true &&
+                timedOut
+            ) {
+                clock.clearTimeout(timer);
+                // Retry only the identical content-addressed final page. The module
+                // checks its generation and final digest and replays a completed result;
+                // no state-sync, page upload or host mutation is repeated here.
+                sessionLog(
+                    args.sessionId,
+                    "rust transform deadline: waiting up to 45000ms for identical final-page completion",
+                );
+                const completionDeadline = clock.now() + 45_000;
+                for (;;) {
+                    const remaining = completionDeadline - clock.now();
+                    if (remaining <= 0) throw timeoutError;
+                    try {
+                        return await callModule(args, remaining, false);
+                    } catch (retryError) {
+                        if (
+                            moduleFailureCode(retryError) !== "authority_transform_page_in_progress"
+                        )
+                            throw retryError;
+                        // The original execution is still applying. Re-submit only
+                        // its identical final page after yielding, until its cached
+                        // committed result is available or this one budget expires.
+                        const wait = Math.min(250, completionDeadline - clock.now());
+                        if (wait <= 0) throw timeoutError;
+                        await new Promise<void>((resolve) => clock.setTimeout(resolve, wait));
+                    }
+                }
+            }
             if (controller.signal.aborted) throw timeoutError;
             throw error;
         } finally {
@@ -1824,12 +1881,23 @@ export function createRustModeTransform(
             return false;
         }
         const keys = resolveLkgModelKeys(currentMessages);
+        const replayModel =
+            modelFromMessages(currentMessages) ??
+            deps.liveModelBySession?.get(sessionId) ??
+            hostModelFallback(sessionId);
         const replay = replayLkg({
             sessionId,
             messages: currentMessages,
             modelKey: keys.modelKey,
             providerKey: keys.providerKey,
             entry,
+            prepareReplay: (messages) =>
+                replayRustModeBindingMismatchStrips({
+                    db: deps.db,
+                    sessionId,
+                    messages,
+                    resolvedProviderID: replayModel?.providerID,
+                }),
         });
         if (!replay.ok) {
             const state = states.get(sessionId);
@@ -1837,16 +1905,6 @@ export function createRustModeTransform(
             sessionLog(sessionId, replay.reason);
             return false;
         }
-        const replayModel =
-            modelFromMessages(currentMessages) ??
-            deps.liveModelBySession?.get(sessionId) ??
-            hostModelFallback(sessionId);
-        replayRustModeBindingMismatchStrips({
-            db: deps.db,
-            sessionId,
-            messages: replay.messages as MessageLike[],
-            resolvedProviderID: replayModel?.providerID,
-        });
         const trustedReplayLimit = replayModel
             ? resolveTrustedContextLimit(replayModel.providerID, replayModel.modelID, {
                   db: deps.db,
@@ -2144,6 +2202,10 @@ export function createRustModeTransform(
                 (providerOverflowProven || persistedProviderEmergency);
         }
         const serveRawFallback = (cause?: unknown): void => {
+            servedFrom = "refused";
+            if (!deps.compactionOff && isTransientSqliteError(cause)) {
+                throw new StorageBusyRefusalError(cause, "rust-mode-transform");
+            }
             const contextLimit =
                 transformGeometry?.usable_hard ??
                 resolvedContextLimit ??
@@ -2195,7 +2257,12 @@ export function createRustModeTransform(
             } else {
                 throw new RawFallbackContextLimitError(Number.POSITIVE_INFINITY, 0, { cause });
             }
+            if (!deps.compactionOff) {
+                servedFrom = "refused";
+                throw new EmergencyFailClosedError(ENGINE_RECONNECTING_USER_MESSAGE, { cause });
+            }
             replaceMessagesInPlace(output, messages);
+            servedFrom = "raw";
         };
         const finishPass = (applied: boolean, served = true): void => {
             const elapsedAt = applied && appliedAt !== undefined ? appliedAt : performance.now();
@@ -2355,17 +2422,51 @@ export function createRustModeTransform(
                 );
                 if (replayed) {
                     servedFrom = "lkg";
-                } else {
-                    servedFrom = "raw";
-                    try {
-                        serveRawFallback();
-                    } catch (error) {
-                        finishPass(false, false);
-                        throw error;
-                    }
+                    finishPass(false);
+                    return;
                 }
-                finishPass(false);
-                return;
+                // Parking only saves work when a safe cached prompt can serve.
+                // With no LKG, try the module now instead of refusing four turns
+                // out of five even after it has recovered.
+                decision = "pending";
+            }
+            // A parked session without a usable replay should recover immediately
+            // when the module is alive, but must not spend another full transform
+            // deadline discovering an unresponsive module on every user turn.
+            try {
+                await callModule(
+                    {
+                        sessionId,
+                        projectRoot: recoveryProjectRoot,
+                        method: "session.status",
+                        body: { method: "session.status", v: 1, session_id: sessionId },
+                        bypassSessionLane: true,
+                    },
+                    options.healthProbeTimeoutMsForTests ?? RUST_HEALTH_PROBE_TIMEOUT_MS,
+                    false,
+                );
+            } catch (error) {
+                decision = "parked";
+                if (replayLastGood(sessionId, messages, output, sessionMeta.systemPromptTokens)) {
+                    servedFrom = "lkg";
+                    finishPass(false);
+                    return;
+                }
+                if (deps.compactionOff) {
+                    serveRawFallback(error);
+                    finishPass(false);
+                    return;
+                }
+                servedFrom = "refused";
+                sessionLog(
+                    sessionId,
+                    "rust parked health probe failed; refusing without a full request",
+                    error,
+                );
+                finishPass(false, false);
+                throw new EmergencyFailClosedError(ENGINE_RECONNECTING_USER_MESSAGE, {
+                    cause: error,
+                });
             }
         }
         timings.preflight = performance.now() - passStartedAt;
@@ -2993,6 +3094,9 @@ export function createRustModeTransform(
                 detail = "",
             ): Promise<TransformSeriesResult> => {
                 const pagingStartedAt = performance.now();
+                // Classify the payload being sent, not the original pass: need_full_sync
+                // replaces a cheap tail delta with a potentially large full-array request.
+                const fullWire = !isRecord(payload.tail_delta);
                 // A one-page content-addressed envelope lets the module replay a completed
                 // request when only its response was lost, without executing the transform twice.
                 const pages = buildPagedModuleTransformPayloads(
@@ -3025,7 +3129,16 @@ export function createRustModeTransform(
                         const attemptTimeoutMs =
                             options.moduleTimeoutMs ??
                             (attemptClass === "transform_series_execute"
-                                ? transformColdStartExecuteTimeoutMs(seedMessageCount)
+                                ? Math.max(
+                                      fullWire
+                                          ? transformColdStartExecuteTimeoutMs(seedMessageCount)
+                                          : timeoutMs,
+                                      protectionFloorCacheBustingPass ||
+                                          fullWire ||
+                                          passInputs.emergency_recovery_armed === true
+                                          ? 45_000
+                                          : timeoutMs,
+                                  )
                                 : attemptClass === "transform_page_upload"
                                   ? TRANSFORM_PAGE_UPLOAD_TIMEOUT_MS
                                   : timeoutMs);
@@ -3127,7 +3240,14 @@ export function createRustModeTransform(
                     // rows, which the module's missing delta base says nothing about. Clearing
                     // it here made the retry (or the next pass) re-read every stored row of
                     // the session before dispatch, 57 s on a 124k-row session.
-                    sessionLog(sessionId, "need_full_sync retry=full ordinal_memo=kept");
+                    sessionLog(
+                        sessionId,
+                        `need_full_sync retry=full ordinal_memo=kept reason=${
+                            typeof response.need_full_sync_reason === "string"
+                                ? response.need_full_sync_reason
+                                : "unknown"
+                        }`,
+                    );
                 } else {
                     sessionLog(
                         sessionId,
@@ -3710,8 +3830,10 @@ export function createRustModeTransform(
             heapHolder.wireCaches.set(sessionId, pendingWireCache);
             timings.bookkeeping += performance.now() - bookkeepingStartedAt - timings.delivery;
             appliedAt = performance.now();
-            // Shared-store writes carry embedding watermarks independently of cache projections.
-            void drainSingleStoreEmbeddingWatermarks(deps.db).catch((error) => {
+            // Embedding work is background maintenance, not a foreground transform writer.
+            void withoutSqliteTransformPass(() =>
+                drainSingleStoreEmbeddingWatermarks(deps.db),
+            ).catch((error) => {
                 sessionLog(sessionId, "single-store embedding drain failed (ignored):", error);
             });
             finishPass(true);
@@ -3752,6 +3874,10 @@ export function createRustModeTransform(
                 );
             }
             if (emergencyFailClosed) {
+                if (!deps.compactionOff && isTransientSqliteError(error)) {
+                    finishPass(false, false);
+                    throw new StorageBusyRefusalError(error, "rust-mode-emergency");
+                }
                 // At 95% of a trusted limit, or while provider overflow recovery is armed,
                 // any adapter failure aborts. Parking controls retry cadence, not fallback admission.
                 sessionLog(sessionId, "mc_rust_emergency_refusal before_lkg");
@@ -3825,13 +3951,13 @@ export function createRustModeTransform(
             sessionMeta: ReturnType<typeof getOrCreateSessionMeta>,
         ): Promise<void> => {
             try {
-                await run(sessionId, messages, output, sessionMeta);
+                await withSqliteTransformPass(() => run(sessionId, messages, output, sessionMeta));
             } finally {
                 // The pass is the loop's clock. A run can only be queued by a pass, so
                 // looking right after one is when there is most likely something to
                 // take. Never awaited: the fold the loop picks up takes minutes and the
                 // response this pass just built is already correct without it.
-                void resolveHostRunner()?.pump(sessionId);
+                void withoutSqliteTransformPass(() => resolveHostRunner()?.pump(sessionId));
             }
         },
         async clearSession(sessionId: string): Promise<void> {

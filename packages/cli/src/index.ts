@@ -134,7 +134,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
                 const { runDoctorSingleStoreCli } = await import("./commands/doctor-single-store");
                 return runDoctorSingleStoreCli(rest.slice(1));
             }
-            if (rest[0] === "merge-identity") {
+            if (rest[0] === "merge-identities" || rest[0] === "merge-identity") {
                 const { runMergeIdentityCli } = await import("./commands/doctor-merge-identity");
                 return runMergeIdentityCli(rest.slice(1));
             }

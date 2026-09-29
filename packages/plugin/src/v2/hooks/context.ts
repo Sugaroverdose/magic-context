@@ -16,7 +16,7 @@ import {
     formatFailClosedBlockingSummary,
     isFailClosedBlockingError,
 } from "../../features/magic-context/fail-closed-block";
-import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import {
@@ -56,14 +56,20 @@ import {
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
+import { getSlot } from "../../hooks/magic-context/lkg-slot";
 import { createModuleToolBackends } from "../../hooks/magic-context/module-tool-backends";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
 import { setBoundedRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
 import { servedModuleM0Text } from "../../hooks/magic-context/rust-served-m0";
+import {
+    STORAGE_BUSY_MESSAGE,
+    StorageBusyRefusalError,
+} from "../../hooks/magic-context/storage-busy-refusal";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { scheduleAfterBootQuiet } from "../../plugin/boot-quiet";
+import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
 import { detectConflicts } from "../../shared/conflict-detector";
 import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
@@ -84,6 +90,12 @@ import {
 } from "../../shared/prompt-surface-runtime";
 import { pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
+import {
+    isTransientSqliteError,
+    withoutSqliteTransformPass,
+    withPrivilegedWriter,
+    withSqliteTransformPass,
+} from "../../shared/sqlite";
 import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
 import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-descriptions";
 import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
@@ -100,6 +112,7 @@ import { DeletedSessionTombstones } from "./deleted-session-tombstones";
 import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { startDreamTrigger } from "./dream-trigger";
 import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
+import { V2LkgSystemReplay } from "./lkg-system";
 import { modelLimitCacheWarm, warmModelLimitCacheFromCatalog } from "./model-limit-cache";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
@@ -107,12 +120,13 @@ import { RestoredRowCache } from "./restore-rows";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { createV2RustRefusalRecovery, resolveV2RustModeModuleClient } from "./rust-mode";
 import { runV2SessionProjectBackfill } from "./session-project-backfill";
-import { createV2StorageGate } from "./storage-gate";
+import { createV2StorageGate, probeV2StorageAtBoot } from "./storage-gate";
 import {
     dropStorageNotices,
     formatStorageRecoveryNotice,
     formatStorageRefusalNotice,
     hasStorageNoticeShape,
+    STORAGE_NOTICE_PREFIX,
 } from "./storage-notice";
 import {
     createV2RawMessageProvider,
@@ -488,7 +502,9 @@ export async function registerContext(context: V2Context) {
             log(`[magic-context] v2 storage unavailable: ${message}`);
         },
     });
-    let db: ReturnType<typeof openDatabase> | undefined = storage.probe();
+    // Let slow healthy storage finish before fixing the tool list for this host.
+    // Discovery yields to HTTP while setup waits, with a bounded degraded fallback.
+    let db: ReturnType<typeof openDatabase> | undefined = await probeV2StorageAtBoot(storage);
     const storageOpenedAtBoot = db !== undefined;
     let storageRecoveryAnnounced = false;
     const storageNoticeBySession = new Map<string, string>();
@@ -501,12 +517,18 @@ export async function registerContext(context: V2Context) {
      * the provider.
      */
     const storeStorageNotice = (sessionID: string, text: string, what: string): void => {
-        void context.session
-            .wait({ sessionID })
-            .then(() => deliverSynthetic(context, sessionID, text))
-            .catch((error: unknown) =>
-                sessionLog(sessionID, `v2 storage ${what} notice could not be delivered:`, error),
-            );
+        void withoutSqliteTransformPass(() =>
+            context.session
+                .wait({ sessionID })
+                .then(() => deliverSynthetic(context, sessionID, text))
+                .catch((error: unknown) =>
+                    sessionLog(
+                        sessionID,
+                        `v2 storage ${what} notice could not be delivered:`,
+                        error,
+                    ),
+                ),
+        );
     };
     /**
      * Tell the user why a turn is refused for missing storage. The host records a
@@ -617,12 +639,23 @@ export async function registerContext(context: V2Context) {
                 // child reaches the host's delete route directly — through the registration
                 // the child recorded when it was created, never through whichever service
                 // happens to be registered now.
-                remove: (input: { sessionID: string; owner?: HostServiceOwner }) =>
-                    removeHostSession(input.sessionID, input.owner),
+                remove: (input: {
+                    sessionID: string;
+                    owner?: HostServiceOwner;
+                    directory?: string;
+                }) =>
+                    removeHostSession(
+                        input.sessionID,
+                        input.owner,
+                        process.env,
+                        fetch,
+                        input.directory,
+                    ),
             },
             {
                 db: database,
-                projectIdentity: resolveProjectIdentity(directory) ?? directory,
+                projectIdentity:
+                    resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
                 hook: hiddenChildHook,
                 keepSubagents: config.keep_subagents === true,
                 ensureAgent: () => (hiddenAgentsReady ??= context.agent.reload()),
@@ -635,7 +668,9 @@ export async function registerContext(context: V2Context) {
         );
     const dreamerAtBoot = config.dreamer;
     const startDreamer = (executor: HiddenCompletionExecutor) =>
-        dreamerAtBoot && !dreamerAtBoot.disable
+        resolveProjectIdentityForSession(directory, config.allow_home_project) &&
+        dreamerAtBoot &&
+        !dreamerAtBoot.disable
             ? startDreamTrigger(context, {
                   config: dreamerAtBoot,
                   sample: () => {
@@ -647,14 +682,19 @@ export async function registerContext(context: V2Context) {
                       config,
                       () => liveConfigReader.poll().effective,
                   ),
-                  projectIdentity: () => resolveProjectIdentity(directory) ?? directory,
+                  projectIdentity: () =>
+                      resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
                   language: config.language,
                   mural: config.mural,
               })
             : undefined;
     // Both stay undefined after a refused start until recoverHiddenWork wires them.
     let hiddenCompletionExecutor: HiddenCompletionExecutor | undefined =
-        db && isDatabasePersisted(db) ? await createHiddenExecutor(db) : undefined;
+        db &&
+        isDatabasePersisted(db) &&
+        resolveProjectIdentityForSession(directory, config.allow_home_project)
+            ? await createHiddenExecutor(db)
+            : undefined;
     let dreamTrigger = hiddenCompletionExecutor
         ? startDreamer(hiddenCompletionExecutor)
         : undefined;
@@ -669,19 +709,21 @@ export async function registerContext(context: V2Context) {
      * so unlike tools they can start mid-session. Returns whether they are wired.
      */
     const recoverHiddenWork = (database: NonNullable<typeof db>): Promise<boolean> =>
-        (hiddenWorkRecovery ??= (async () => {
-            try {
-                hiddenCompletionExecutor ??= await createHiddenExecutor(database);
-                dreamTrigger ??= startDreamer(hiddenCompletionExecutor);
-                return true;
-            } catch (error) {
-                log(
-                    "[magic-context] v2 historian and dreamer could not start after recovery:",
-                    error,
-                );
-                return false;
-            }
-        })());
+        !resolveProjectIdentityForSession(directory, config.allow_home_project)
+            ? Promise.resolve(false)
+            : (hiddenWorkRecovery ??= (async () => {
+                  try {
+                      hiddenCompletionExecutor ??= await createHiddenExecutor(database);
+                      dreamTrigger ??= startDreamer(hiddenCompletionExecutor);
+                      return true;
+                  } catch (error) {
+                      log(
+                          "[magic-context] v2 historian and dreamer could not start after recovery:",
+                          error,
+                      );
+                      return false;
+                  }
+              })());
     const sampleHistorian = () => {
         const fresh = historianRunConfig(config, liveConfigReader.poll().effective);
         const models = resolveHistorianModel(fresh, "opencode");
@@ -772,6 +814,7 @@ export async function registerContext(context: V2Context) {
               readRowsFrom,
           })
         : undefined;
+    const lkgSystems = new V2LkgSystemReplay();
     let transform: ReturnType<typeof createTransform> | undefined;
     let systemPrompt: ReturnType<typeof createSystemPromptHashHandler> | undefined;
     const systemPromptRefreshSessions = new Set<string>();
@@ -787,6 +830,9 @@ export async function registerContext(context: V2Context) {
     ): Promise<boolean> => {
         let unsafe = false;
         try {
+            // A turn may await the one in-flight recovery; unlike setup it needs
+            // durable state before transforming. Process discovery yields meanwhile.
+            await storage.probe();
             db = storage.require();
             getOrCreateSessionMeta(db, draft.sessionID);
             const reader = new V2StoreReader(
@@ -922,9 +968,12 @@ export async function registerContext(context: V2Context) {
             db,
             sessionId: draft.sessionID,
             state,
-            projectPath: resolveProjectIdentity(directory) ?? directory,
+            projectPath:
+                resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
             projectDirectory: directory,
-            memoryEnabled: config.memory.enabled,
+            memoryEnabled:
+                config.memory.enabled &&
+                !!resolveProjectIdentityForSession(directory, config.allow_home_project),
             memoryInjectionBudgetTokens: config.memory.injection_budget_tokens,
             hardSignals: {
                 systemHash: foldDigest(JSON.stringify(draft.system)),
@@ -1009,7 +1058,7 @@ export async function registerContext(context: V2Context) {
                 reader.close();
             }
         });
-    await context.session.hook("context", async (draft) => {
+    const runManagedContext = async (draft: SessionContext): Promise<void> => {
         // Learn the host's message and attachment classes, so attachments on rows restored
         // after a host checkpoint can be rebuilt in the host's own shape.
         rememberHostMedia(draft.messages);
@@ -1018,6 +1067,21 @@ export async function registerContext(context: V2Context) {
         // A deletion that races an in-flight pass must not let that pass rebuild
         // the state just cleared by the one deletion event.
         if (deletedSessions.has(draft.sessionID)) return;
+        const systemAtEntry = structuredClone(draft.system);
+        const slotAtEntry = getSlot(draft.sessionID);
+        const restoreLkgSystem = () => {
+            if (
+                !lkgSystems.restore(
+                    draft.sessionID,
+                    getSlot(draft.sessionID),
+                    systemAtEntry,
+                    draft.system,
+                )
+            ) {
+                sessionLog(draft.sessionID, "lkg_system_state_mismatch");
+                throw new Error("LKG system identity is unavailable or changed");
+            }
+        };
         const isMagicContextSynthetic = (id: string) =>
             isAdmittedSynthetic(context, draft.sessionID, id);
         // Storing a notice in an idle OpenCode 2 session starts a turn of its own.
@@ -1040,7 +1104,8 @@ export async function registerContext(context: V2Context) {
             modelID: draft.model.id,
         });
         variants.set(draft.sessionID, draft.model.variant);
-        if (!modelLimitCacheWarm()) void warmModelLimitCacheFromCatalog(context);
+        if (!modelLimitCacheWarm())
+            void withoutSqliteTransformPass(() => warmModelLimitCacheFromCatalog(context));
         agents.set(draft.sessionID, draft.agent);
         // Per-model descriptions are applied to this request's draft only.
         // `context.tool.transform` must never be called from here: the host keeps
@@ -1049,11 +1114,14 @@ export async function registerContext(context: V2Context) {
         // descriptions become the baseline every later request (any session,
         // any model) starts from. Registration happens once, in tools.ts.
         applyV2PromptSurfaceTools(draft, promptSurfaceRuntime, config.prompt_surface);
-        // Measured after the descriptions are final, so the Tool Defs row and the tool-set hash
-        // describe the bytes this request sends rather than the host's unedited catalog.
-        recordV2ToolDefinitions(draft);
         let postFold = false;
         try {
+            // Check writer admission before best-effort setup writers can each spend
+            // their own busy timeout. No transform callback runs in this transaction.
+            const admissionDb = db ?? storage.current();
+            if (!compactionOff && admissionDb) withPrivilegedWriter(admissionDb, () => undefined);
+            // Measure only after admission and after per-model descriptions are final.
+            recordV2ToolDefinitions(draft);
             // Only a failure to read or record usage refuses here. A high reading is
             // left to the transform below: its force band and emergency path are what
             // reduce an over-limit session, and refusing ahead of them would refuse
@@ -1112,7 +1180,9 @@ export async function registerContext(context: V2Context) {
             systemPrompt ??= createSystemPromptHashHandler({
                 db,
                 dreamerEnabled: config.dreamer !== undefined && !config.dreamer.disable,
-                memoryEnabled: config.memory.enabled,
+                memoryEnabled:
+                    config.memory.enabled &&
+                    !!resolveProjectIdentityForSession(directory, config.allow_home_project),
                 language: config.language,
                 promptSurface: config.prompt_surface,
                 promptSurfaceRuntime,
@@ -1237,7 +1307,10 @@ export async function registerContext(context: V2Context) {
                 onRustModeParked: (sessionId, message) =>
                     pushNotification(
                         "toast",
-                        { message: `Rust Magic Context paused: ${message}`, variant: "warning" },
+                        {
+                            message: `Rust Magic Context paused: ${message}`,
+                            variant: "warning",
+                        },
                         sessionId,
                     ),
                 promptSurface: config.prompt_surface,
@@ -1368,7 +1441,17 @@ export async function registerContext(context: V2Context) {
                     );
             }
             const mapped = adaptPayload(draft, admitted);
-            await transform({}, mapped);
+            await createMessagesTransformHandler({
+                magicContext: { "experimental.chat.messages.transform": transform },
+                compactionOff,
+                propagateUnexpectedErrors: true,
+                onLkgReplay: restoreLkgSystem,
+            })(
+                {},
+                mapped as unknown as Parameters<
+                    ReturnType<typeof createMessagesTransformHandler>
+                >[1],
+            );
             mapped.commit();
             if (db) {
                 await deliverPendingChannel2(
@@ -1402,8 +1485,66 @@ export async function registerContext(context: V2Context) {
                     );
                 }
             }
+            const capturedSlot = getSlot(draft.sessionID);
+            if (
+                capturedSlot &&
+                (!slotAtEntry ||
+                    capturedSlot.capturedAt !== slotAtEntry.capturedAt ||
+                    capturedSlot.captureSequence !== slotAtEntry.captureSequence ||
+                    capturedSlot.jsonPrefix !== slotAtEntry.jsonPrefix)
+            ) {
+                lkgSystems.capture(draft.sessionID, capturedSlot, systemAtEntry, draft.system);
+            }
         } catch (error) {
             if (error instanceof V2ContextRefusal) throw error;
+            if (
+                !compactionOff &&
+                (isTransientSqliteError(error) || error instanceof StorageBusyRefusalError)
+            ) {
+                if (isTransientSqliteError(error)) {
+                    const mapped = adaptPayload(draft);
+                    try {
+                        await createMessagesTransformHandler({
+                            onLkgReplay: restoreLkgSystem,
+                            magicContext: {
+                                "experimental.chat.messages.transform": async () => {
+                                    throw error;
+                                },
+                            },
+                        })(
+                            {},
+                            mapped as unknown as Parameters<
+                                ReturnType<typeof createMessagesTransformHandler>
+                            >[1],
+                        );
+                        mapped.commit();
+                        return;
+                    } catch (replayError) {
+                        if (!(replayError instanceof StorageBusyRefusalError)) throw replayError;
+                    }
+                }
+                const refusal =
+                    error instanceof StorageBusyRefusalError
+                        ? error
+                        : new StorageBusyRefusalError(error, "v2-context");
+                pushNotification(
+                    "toast",
+                    { message: STORAGE_BUSY_MESSAGE, variant: "error" },
+                    draft.sessionID,
+                );
+                storeStorageNotice(
+                    draft.sessionID,
+                    `${STORAGE_NOTICE_PREFIX}${STORAGE_BUSY_MESSAGE}`,
+                    "busy",
+                );
+                await refuseBeforeProvider(
+                    context.session,
+                    draft.sessionID,
+                    "storage-busy",
+                    refusal,
+                );
+                throw new V2ContextRefusal(STORAGE_BUSY_MESSAGE, { cause: refusal });
+            }
             if (isBlockingV2TransformError(error)) {
                 // These errors mean the shared transform cannot prove a safe prompt.
                 // Native compaction owns recovery when Magic Context compaction is off.
@@ -1438,10 +1579,13 @@ export async function registerContext(context: V2Context) {
                 console.warn("[magic-context] v2 context unavailable", error);
             }
         }
-    });
+    };
+    await context.session.hook("context", (draft) =>
+        withSqliteTransformPass(() => runManagedContext(draft)),
+    );
     // Warm eagerly for cold sidebar/status reads; a failed startup warm releases
     // its latch and the context hook above retries after the host catalog settles.
-    void warmModelLimitCacheFromCatalog(context);
+    void withoutSqliteTransformPass(() => warmModelLimitCacheFromCatalog(context));
     // OpenCode 2 never runs the v1 server() lane. Start the RPC surface here so
     // the terminal TUI can read the v2 lane's draft-authoritative session state.
     const rpcLiveSessionState = createV2RpcLiveSessionState({
@@ -1462,6 +1606,13 @@ export async function registerContext(context: V2Context) {
         config,
         client: undefined,
         liveSessionState: rpcLiveSessionState,
+        getDatabase: () => {
+            try {
+                return storage.require();
+            } catch {
+                return null;
+            }
+        },
         rustModeModuleClient,
         hiddenCompletionExecutor: storageOpenedAtBoot
             ? hiddenCompletionExecutor
@@ -1508,7 +1659,8 @@ export async function registerContext(context: V2Context) {
         void runManualDreamNow({
             db: runDb,
             dreamer: manualDreamer,
-            projectIdentity: resolveProjectIdentity(directory) ?? directory,
+            projectIdentity:
+                resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
             directory,
             language: config.language,
             mural: config.mural,

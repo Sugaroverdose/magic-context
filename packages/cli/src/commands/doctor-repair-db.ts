@@ -172,7 +172,7 @@ function copyBackupBundle(dbPath: string, stamp: string): BackupBundle {
     return { basePath, copiedPaths };
 }
 
-function copyDatabaseBundle(sourceBase: string, destinationBase: string): string[] {
+export function copyDatabaseBundle(sourceBase: string, destinationBase: string): string[] {
     const copiedPaths: string[] = [];
     for (const suffix of DATABASE_SUFFIXES) {
         const source = `${sourceBase}${suffix}`;

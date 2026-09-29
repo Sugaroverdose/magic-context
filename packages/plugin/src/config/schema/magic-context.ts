@@ -487,11 +487,16 @@ const DreamTaskBaseConfigSchema = z
     })
     .strict();
 
+export const DREAM_TASK_PROMOTION_DEFAULTS = {
+    "review-user-memories": 3,
+    "promote-primers": 2,
+} as const;
+
 const PromotionThresholdSchema = z
     .number()
     .min(2)
     .max(20)
-    .optional()
+    .default(DREAM_TASK_PROMOTION_DEFAULTS["review-user-memories"])
     .describe(
         "review-user-memories: min candidate observations before promotion is considered (default: 3)",
     );
@@ -499,7 +504,7 @@ const PrimerPromotionThresholdSchema = z
     .number()
     .min(2)
     .max(20)
-    .optional()
+    .default(DREAM_TASK_PROMOTION_DEFAULTS["promote-primers"])
     .describe(
         "promote-primers: min recurring source days before promotion is considered (default: 2)",
     );
@@ -548,8 +553,10 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
 
 function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigSchema> {
     const base: z.input<typeof DreamTaskConfigSchema> = { schedule: DEFAULT_TASK_SCHEDULES[task] };
-    if (task === "review-user-memories") base.promotion_threshold = 3;
-    if (task === "promote-primers") base.promotion_threshold = 2;
+    if (task === "review-user-memories")
+        base.promotion_threshold = DREAM_TASK_PROMOTION_DEFAULTS["review-user-memories"];
+    if (task === "promote-primers")
+        base.promotion_threshold = DREAM_TASK_PROMOTION_DEFAULTS["promote-primers"];
     return base;
 }
 
@@ -888,7 +895,7 @@ export interface MuralConfig {
 
 export interface MagicContextConfig {
     enabled: boolean;
-    /** User-level setting that lets a session started exactly in the canonical home directory use a deterministic directory identity. */
+    /** User-level setting that lets a session in the canonical home directory use project memory. */
     allow_home_project: boolean;
     mural: MuralConfig;
     /** Selects the runtime implementation for this project. Rust mode is experimental and requires user-level subc configuration. */
@@ -1074,7 +1081,7 @@ export const MagicContextConfigSchema = z
             .boolean()
             .default(false)
             .describe(
-                "Allow Magic Context sessions launched from the exact canonical home directory. The home session uses its deterministic dir: identity so pre-gate memories reconnect. USER-LEVEL ONLY: project config is ignored. The home identity is excluded from registry seed exports, never resolves descendants by containment, and cannot join a workspace.",
+                "Allow Magic Context sessions launched from the exact canonical home directory. A non-git home uses its deterministic dir: identity; a home repository uses its git: identity. USER-LEVEL ONLY: project config is ignored. The home identity is excluded from registry seed exports, never resolves descendants by containment, and cannot join a workspace.",
             ),
         mural: z
             .object({

@@ -1,7 +1,6 @@
 import type { ProtectedTokensTierOverrides } from "../../config/project-security";
 
 import {
-    resolveProjectIdentity,
     resolveProjectIdentityForSession,
     takeDubiousOwnershipProjectIdentityWarning,
 } from "../../features/magic-context/memory/project-identity";
@@ -67,6 +66,7 @@ import type { ModelInput } from "../../shared/model-resolution";
 import { getSdkContextLimit } from "../../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
+import { withoutSqliteTransformPass } from "../../shared/sqlite";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { replayCavemanCompression } from "./caveman-cleanup";
 import { commitCompactionModeRecord, reconcileCompactionMode } from "./compaction-off-transition";
@@ -203,14 +203,14 @@ function maybeSendProjectIdentityWarning(
     if (!deps.client) return;
     const warning = takeDubiousOwnershipProjectIdentityWarning(directory);
     if (!warning) return;
-    void sendStatusNotification(deps.client, sessionId, warning, notificationParams).catch(
-        (error) => {
-            sessionLog(
-                sessionId,
-                `project identity warning delivery failed: ${error instanceof Error ? error.message : String(error)}`,
-            );
-        },
-    );
+    void withoutSqliteTransformPass(() =>
+        sendStatusNotification(deps.client, sessionId, warning, notificationParams),
+    ).catch((error) => {
+        sessionLog(
+            sessionId,
+            `project identity warning delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    });
 }
 
 export function clearMessageTokensCache(sessionId: string, messageId?: string): void {
@@ -762,7 +762,9 @@ export function createTransform(deps: TransformDeps) {
         }
 
         if (deps.client !== undefined) {
-            scheduleReconciliation(db, sessionId, host.hostMessageReconciliationSource);
+            withoutSqliteTransformPass(() =>
+                scheduleReconciliation(db, sessionId, host.hostMessageReconciliationSource),
+            );
         }
 
         const tUserMsg = performance.now();
@@ -940,7 +942,7 @@ export function createTransform(deps: TransformDeps) {
             await rustModeTransform.run(sessionId, messages, output, sessionMeta);
             // Rust returns before the TypeScript post-pass hook below. Run the
             // host-owned embedding trigger after either implementation publishes.
-            deps.maybeAutoEmbedSession?.(sessionId);
+            withoutSqliteTransformPass(() => deps.maybeAutoEmbedSession?.(sessionId));
             return;
         }
 
@@ -1322,11 +1324,13 @@ export function createTransform(deps: TransformDeps) {
                     };
                     usagePercentageSynthetic = true;
                 } else if (recoveryNoHeadEscapeActive && deps.client) {
-                    void sendStatusNotification(
-                        deps.client,
-                        sessionId,
-                        "Magic Context can't compact yet — the recent history is a single in-progress block. Continuing; it will compact once the block completes. Run `/ctx-recomp` if this persists.",
-                        runNotificationParams(sessionId) ?? {},
+                    void withoutSqliteTransformPass(() =>
+                        sendStatusNotification(
+                            deps.client,
+                            sessionId,
+                            "Magic Context can't compact yet — the recent history is a single in-progress block. Continuing; it will compact once the block completes. Run `/ctx-recomp` if this persists.",
+                            runNotificationParams(sessionId) ?? {},
+                        ),
                     );
                 }
             } catch (error) {
@@ -1668,11 +1672,13 @@ export function createTransform(deps: TransformDeps) {
                 `transform: historian recovery triggered on session load after ${historianFailureState.failureCount} failure(s)`,
             );
             if (deps.client) {
-                void sendStatusNotification(
-                    deps.client,
-                    sessionId,
-                    `## Historian recovery\n\nHistorian previously failed ${historianFailureState.failureCount} time(s), so Magic Context is retrying history comparting immediately after restart.`,
-                    notificationParams,
+                void withoutSqliteTransformPass(() =>
+                    sendStatusNotification(
+                        deps.client,
+                        sessionId,
+                        `## Historian recovery\n\nHistorian previously failed ${historianFailureState.failureCount} time(s), so Magic Context is retrying history comparting immediately after restart.`,
+                        notificationParams,
+                    ),
                 );
             }
         }
@@ -1687,7 +1693,7 @@ export function createTransform(deps: TransformDeps) {
         // first call per directory in a new process spawns `git rev-list`.
         const memoryProjectDirectory = compartmentDirectory || process.cwd();
         const projectIdentity = deps.memoryConfig?.enabled
-            ? resolveProjectIdentity(memoryProjectDirectory)
+            ? resolveProjectIdentityForSession(memoryProjectDirectory, deps.allowHomeProject)
             : undefined;
         if (deps.memoryConfig?.enabled) {
             maybeSendProjectIdentityWarning(
@@ -1709,7 +1715,9 @@ export function createTransform(deps: TransformDeps) {
         // (session dir == launch dir) costs nothing extra.
         const sessionProjectIdentity =
             projectIdentity ??
-            (sessionDirectory ? resolveProjectIdentity(sessionDirectory) : deps.projectPath);
+            (sessionDirectory
+                ? resolveProjectIdentityForSession(sessionDirectory, deps.allowHomeProject)
+                : deps.projectPath);
         const sessionIdentityForBinding = sessionDirectory
             ? resolveProjectIdentityForSession(sessionDirectory, deps.allowHomeProject)
             : undefined;
@@ -2672,7 +2680,9 @@ export function createTransform(deps: TransformDeps) {
                 // copy is detached from live messages.
                 const capturedSlot = getInMemorySlot(sessionId);
                 if (capturedSlot) {
-                    setImmediate(() => saveLkgSlotToDb(db, sessionId, capturedSlot));
+                    withoutSqliteTransformPass(() =>
+                        setImmediate(() => saveLkgSlotToDb(db, sessionId, capturedSlot)),
+                    );
                 }
             }
             if (postTransformResult.bustedThisPass && !captured) {
@@ -2864,7 +2874,7 @@ export function createTransform(deps: TransformDeps) {
             `transform completed in ${elapsed}ms (${messages.length} messages, ${targets.size} targets, watermark: ${watermark})`,
         );
 
-        deps.maybeAutoEmbedSession?.(sessionId);
+        withoutSqliteTransformPass(() => deps.maybeAutoEmbedSession?.(sessionId));
 
         const bindingRecovery = postTransformResult.thinkingBindingRecovery;
         if (bindingRecovery) {

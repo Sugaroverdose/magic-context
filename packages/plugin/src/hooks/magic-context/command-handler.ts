@@ -424,9 +424,21 @@ async function executeDreaming(
 
     try {
         const summary = await deps.dreamer.runManual(task);
+        // The starting backlog was already sent before the run, over the same task list.
+        // Re-read the end backlog over that list too, so both panels show the same tasks
+        // (the runner only reports the tasks it selected).
         await deps.sendNotification(
             sessionId,
-            summarizeManualDream(summary),
+            summarizeManualDream({
+                ...summary,
+                // An empty map suppresses the summary's own start panel.
+                backlogBefore: {},
+                backlogAfter: readDreamTaskBacklogsSafely(
+                    deps.db,
+                    deps.dreamer.projectPath,
+                    backlogTasks,
+                ),
+            }),
             dreamNotificationParams,
         );
     } catch (error) {
