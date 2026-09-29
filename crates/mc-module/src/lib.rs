@@ -17022,8 +17022,17 @@ fn format_note_body(note: &StoredNote, now_ms: i64) -> String {
             .as_deref()
             .unwrap_or("No condition recorded")
     };
+    let failure = if note.status == "pending" {
+        note.ready_reason
+            .as_deref()
+            .filter(|reason| reason.starts_with("Condition can't be checked:"))
+            .map(|reason| format!("\n  {reason}"))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     format!(
-        "{head}\n  {}: {condition}",
+        "{head}\n  {}: {condition}{failure}",
         if note.status == "ready" {
             "Condition met"
         } else {
@@ -28107,6 +28116,51 @@ mod tests {
                 .status,
             "ready"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_recovers_pre_and_post_migration_compilation_metadata() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+        for (content, provider, config, at, status) in [
+            ("legacy condition", None, None, None, None),
+            ("compiled condition", Some("retina-local-fs"), Some("{\"kind\":\"path_exists\"}"), Some(123), Some("compiled")),
+        ] {
+            store.insert_project_note(NoteWriteInput {
+                project_path: "/repo",
+                route_project_root: None,
+                session_id: Some("session"),
+                content,
+                surface_condition: Some(content),
+                compiled_provider: provider,
+                compiled_config: config,
+                compiled_at: at,
+                compile_status: status,
+                anchor_block_id: None,
+                anchor_ordinal: None,
+                now_ms: 1,
+            }).unwrap();
+        }
+        let old = store.get_note_by_id("/repo", "session", 1).unwrap().unwrap();
+        assert_eq!(old.compiled_provider, None);
+        assert_eq!(old.compile_status, None);
+        let new = store.get_note_by_id("/repo", "session", 2).unwrap().unwrap();
+        assert_eq!(new.compiled_provider.as_deref(), Some("retina-local-fs"));
+        assert_eq!(new.compiled_config.as_deref(), Some("{\"kind\":\"path_exists\"}"));
+        assert_eq!(new.compiled_at, Some(123));
+        assert_eq!(new.compile_status.as_deref(), Some("compiled"));
+
+        drop(handler);
+        drop(store);
+        let reopened = McStore::open(&dev_descriptor_at(dir.path().join("data").to_str().unwrap())).unwrap();
+        let durable = reopened.get_note_by_id("/repo", "session", 2).unwrap().unwrap();
+        assert_eq!(durable.compiled_provider.as_deref(), Some("retina-local-fs"));
+        assert_eq!(durable.compiled_at, Some(123));
+        assert_eq!(durable.compile_status.as_deref(), Some("compiled"));
     }
 
     #[tokio::test(flavor = "current_thread")]
