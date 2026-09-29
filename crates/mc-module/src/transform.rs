@@ -22955,6 +22955,7 @@ pub(crate) mod tests {
             r#"[{"content":"State sync todo","status":"in_progress","priority":"high"}]"#;
         let loaded = s.load("todo-sync").unwrap();
         s.apply_authority_state_sync(ModuleStateSyncRequest {
+            resolved_compartment_boundaries: &[],
             session_id: "todo-sync",
             project_path: "git:proj",
             shadow_generation: loaded.meta.shadow_generation,
@@ -37265,6 +37266,7 @@ pub(crate) mod tests {
         }];
         store
             .apply_authority_state_sync(ModuleStateSyncRequest {
+                resolved_compartment_boundaries: &[],
                 session_id: "seeded-drops",
                 project_path: "git:proj",
                 shadow_generation: 0,
@@ -37983,6 +37985,7 @@ pub(crate) mod tests {
             .unwrap();
         store
             .apply_authority_state_sync(ModuleStateSyncRequest {
+                resolved_compartment_boundaries: &[],
                 session_id: "seeded-trim",
                 project_path: "git:proj",
                 shadow_generation: 0,

@@ -1006,6 +1006,7 @@ it("AFT warm inventory sends only boundary-owned seeds with one raw batch", asyn
                             generation: 1,
                             max_compartment_sequence: 1499,
                             boundary_id: "tail0#0",
+                            context_boundaries_resolved: true,
                         },
                     };
                 if (args.method === "session.status") return { state_sync: null };

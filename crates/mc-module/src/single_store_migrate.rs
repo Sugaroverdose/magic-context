@@ -279,6 +279,7 @@ pub struct Report {
     pub projects: Vec<ProjectReport>,
     pub render_check: RenderCheck,
     pub sessions_reset: usize,
+    pub normalized_context_compartments: usize,
     pub store_db_bytes: StoreBytes,
     /// Wall time of the one transaction and of the `VACUUM` after it.
     pub transaction_ms: Option<u64>,
@@ -399,6 +400,8 @@ const COMPARTMENT_COLUMNS: &[&str] = &[
     "created_at",
     "harness",
     "rebase_status",
+    "start_block_index",
+    "end_block_index",
 ];
 /// The fields that say what a compartment is about (title through legacy flag). The
 /// message coordinates are left out: the host and the module record the same boundary in
@@ -1744,26 +1747,44 @@ fn unclassified(session: &str, table: &str, id: i64) -> EngineError {
 }
 
 impl<'a> Copier<'a> {
-    fn session_src(&self, session: &str, source: &Source) -> SessionSrc {
+    fn session_src(&self, session: &str, source: &Source) -> Result<SessionSrc, EngineError> {
         let harness = self.sessions.harness_of(session);
         let empty = Vec::new();
-        SessionSrc {
+        Ok(SessionSrc {
             compartments: source
                 .compartments
                 .get(session)
                 .unwrap_or(&empty)
                 .iter()
                 .map(|row| {
-                    COMPARTMENT_COLUMNS
+                    let start = get(row, "start_message_id");
+                    let end = get(row, "end_message_id");
+                    let (start_id, start_block) =
+                        mc_store::context_boundaries::canonical_boundary_parts(
+                            as_text(&start).unwrap_or(""),
+                        )?;
+                    let (end_id, end_block) =
+                        mc_store::context_boundaries::canonical_boundary_parts(
+                            as_text(&end).unwrap_or(""),
+                        )?;
+                    Ok(COMPARTMENT_COLUMNS
                         .iter()
                         .map(|column| match *column {
                             "harness" => text(&harness),
                             "rebase_status" => text("ok"),
+                            "start_message_id" => text(start_id),
+                            "end_message_id" => text(end_id),
+                            "start_block_index" => {
+                                start_block.map(SqlValue::Integer).unwrap_or(SqlValue::Null)
+                            }
+                            "end_block_index" => {
+                                end_block.map(SqlValue::Integer).unwrap_or(SqlValue::Null)
+                            }
                             other => get(row, other),
                         })
-                        .collect()
+                        .collect())
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, EngineError>>()?,
             events: source
                 .events
                 .get(session)
@@ -1795,7 +1816,7 @@ impl<'a> Copier<'a> {
                         .collect()
                 })
                 .collect(),
-        }
+        })
     }
 
     fn desired_events(
@@ -1837,7 +1858,7 @@ impl<'a> Copier<'a> {
             .get(session_id)
             .cloned()
             .unwrap_or_else(|| UNATTRIBUTED.to_string());
-        let session = self.session_src(session_id, source);
+        let session = self.session_src(session_id, source)?;
 
         // Everything is classified against the compartments as they were before this run.
         let context_candidates = session_rows(
@@ -2349,7 +2370,7 @@ fn verify(
     }
     // Every copied session's compartments equal the store's, sequence for sequence.
     for session in copied_sessions {
-        let src = copier.session_src(session, source);
+        let src = copier.session_src(session, source)?;
         let context: Vec<Vec<SqlValue>> = read_rows(
             conn,
             &format!(
@@ -2864,6 +2885,54 @@ pub fn write_fresh_context_flag(
     }
 }
 
+fn normalize_context_compartment_boundaries(
+    conn: &Connection,
+    now: i64,
+) -> Result<usize, EngineError> {
+    let mut stmt = conn.prepare("SELECT id, session_id, COALESCE(start_message_id, ''), COALESCE(end_message_id, ''), start_block_index, end_block_index FROM ctx.compartments")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    let mut count = 0;
+    let mut sessions = BTreeSet::new();
+    for (id, session, start, end, old_start_block, old_end_block) in rows {
+        let (start_id, start_block) =
+            mc_store::context_boundaries::canonical_boundary_parts(&start)?;
+        let (end_id, end_block) = mc_store::context_boundaries::canonical_boundary_parts(&end)?;
+        if start_id == start && end_id == end {
+            continue;
+        }
+        if start_block
+            .zip(old_start_block)
+            .is_some_and(|(a, b)| a != b)
+            || end_block.zip(old_end_block).is_some_and(|(a, b)| a != b)
+        {
+            return refuse(
+                VERIFY_MISMATCH,
+                format!("compartment {id} has conflicting flat and indexed boundaries"),
+            );
+        }
+        conn.execute("UPDATE ctx.compartments SET start_message_id=?1, end_message_id=?2, start_block_index=?3, end_block_index=?4 WHERE id=?5", params![start_id, end_id, start_block.or(old_start_block), end_block.or(old_end_block), id])?;
+        sessions.insert(session);
+        count += 1;
+    }
+    // Rebuild frozen TypeScript prefixes whose boundary representation changed.
+    for session in sessions {
+        conn.execute("INSERT INTO ctx.m0_mutation_log(session_id, mutation_type, target_id, queued_at) VALUES (?1, 'compartment_upgrade', NULL, ?2)", params![session, now])?;
+    }
+    Ok(count)
+}
+
 fn migrate_in_transaction(
     conn: &Connection,
     options: &EngineOptions,
@@ -2920,6 +2989,8 @@ fn migrate_in_transaction(
             [],
         )?;
     }
+    let normalized_context_compartments =
+        normalize_context_compartment_boundaries(conn, options.now_ms)?;
     let mut copier = Copier {
         conn,
         file_uuid,
@@ -3050,6 +3121,7 @@ fn migrate_in_transaction(
         projects: projects_report,
         render_check,
         sessions_reset,
+        normalized_context_compartments,
         ..Report::default()
     };
     report.store_db_bytes.before = file_len(&options.store_db);

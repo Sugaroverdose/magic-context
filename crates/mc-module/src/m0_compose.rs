@@ -633,6 +633,7 @@ mod tests {
         store.seed_user_profile_for_test(profile, 1).unwrap();
         store
             .apply_authority_state_sync(ModuleStateSyncRequest {
+                resolved_compartment_boundaries: &[],
                 session_id: "ses",
                 project_path: "git:proj",
                 shadow_generation: 0,

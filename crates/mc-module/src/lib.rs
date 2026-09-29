@@ -1435,6 +1435,8 @@ struct ModuleStateSyncWire {
     #[serde(default)]
     seed_boundary_id: Option<String>,
     #[serde(default)]
+    resolved_compartment_boundaries: Vec<mc_store::ResolvedContextBoundary>,
+    #[serde(default)]
     last_todo_state: Option<String>,
     /// Unit tests only: the compartments a host would already have written to context.db
     /// for the session. Production senders no longer carry them, and a production build
@@ -8131,7 +8133,19 @@ impl McHandler {
                         }
                     }
                 };
+            let context_boundaries_resolved = match store
+                .context_boundaries_resolved(&session_id, &meta.resolved_compartment_boundaries)
+            {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    return HandlerOutcome::Error {
+                        code: "store_load_failed".into(),
+                        message: error.to_string(),
+                    }
+                }
+            };
             return respond(json!({ "state_sync_inventory": {
+                "context_boundaries_resolved": context_boundaries_resolved,
                 "generation": meta.shadow_generation,
                 "max_compartment_sequence": if meta.initialized { sequence } else { -1 },
                 "boundary_id": if meta.initialized && !boundary.is_empty() { Some(boundary) } else { None },
@@ -11166,6 +11180,7 @@ impl McHandler {
             hook();
         }
         match store.apply_authority_state_sync(ModuleStateSyncRequest {
+            resolved_compartment_boundaries: &parsed.resolved_compartment_boundaries,
             session_id: &binding.session,
             project_path: &root_path,
             shadow_generation: parsed.shadow_generation,
@@ -15568,6 +15583,7 @@ fn assemble_state_sync_seed(
         .rev()
         .find_map(|batch| batch.note_evaluation_available);
     let mut final_batch = batches.pop().expect("final seed batch");
+    let mut resolved_compartment_boundaries = Vec::new();
     let mut drop_seeds = Vec::new();
     let mut pending_agent_drops = Vec::new();
     let mut auto_search_hint_decisions = Vec::new();
@@ -15577,6 +15593,7 @@ fn assemble_state_sync_seed(
     #[cfg(test)]
     let mut compartments = Vec::new();
     for mut batch in batches {
+        resolved_compartment_boundaries.append(&mut batch.resolved_compartment_boundaries);
         #[cfg(test)]
         compartments.append(&mut batch.compartments);
         drop_seeds.append(&mut batch.drop_seeds);
@@ -15588,6 +15605,7 @@ fn assemble_state_sync_seed(
         }
         strip_seeds.append(&mut batch.strip_seeds);
     }
+    resolved_compartment_boundaries.append(&mut final_batch.resolved_compartment_boundaries);
     drop_seeds.append(&mut final_batch.drop_seeds);
     pending_agent_drops.append(&mut final_batch.pending_agent_drops);
     auto_search_hint_decisions.append(&mut final_batch.auto_search_hint_decisions);
@@ -15610,6 +15628,7 @@ fn assemble_state_sync_seed(
         seed_batch_total: None,
         seed_complete: None,
         seed_boundary_id: final_batch.seed_boundary_id,
+        resolved_compartment_boundaries,
         last_todo_state: final_batch.last_todo_state,
         acked_watermarks: final_batch.acked_watermarks,
         drop_seeds,

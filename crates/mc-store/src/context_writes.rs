@@ -160,6 +160,10 @@ fn upsert_compartments_tx(
     let stored = read_session_compartments(tx, session_id)?;
     let mut outcome = UpsertOutcome::default();
     for compartment in desired {
+        let (start_id, start_block) =
+            crate::context_boundaries::canonical_boundary_parts(&compartment.start_message_id)?;
+        let (end_id, end_block) =
+            crate::context_boundaries::canonical_boundary_parts(&compartment.end_message_id)?;
         match stored
             .iter()
             .find(|(_, row)| row.sequence == compartment.sequence)
@@ -172,14 +176,14 @@ fn upsert_compartments_tx(
                             end_message_id = ?5, title = ?6, content = ?7, p1 = ?8, p2 = ?9,
                             p3 = ?10, p4 = ?11, importance = ?12, episode_type = ?13,
                             legacy = ?14, created_at = ?15, p1_embedding = NULL,
-                            p1_embedding_model_id = NULL
+                            p1_embedding_model_id = NULL, start_block_index = ?16, end_block_index = ?17
                       WHERE id = ?1",
                     params![
                         id,
                         compartment.start_message,
                         compartment.end_message,
-                        compartment.start_message_id,
-                        compartment.end_message_id,
+                        start_id,
+                        end_id,
                         compartment.title,
                         compartment.content,
                         compartment.p1,
@@ -190,6 +194,8 @@ fn upsert_compartments_tx(
                         compartment.episode_type,
                         compartment.legacy as i64,
                         compartment.created_at,
+                        start_block,
+                        end_block,
                     ],
                 )?;
                 outcome.updated += 1;
@@ -352,11 +358,11 @@ fn apply_lineage_copy_tx(
         "INSERT INTO compartments (
              session_id, sequence, start_message, end_message, start_message_id,
              end_message_id, title, content, p1, p2, p3, p4, importance, episode_type,
-             legacy, created_at, harness
+             legacy, created_at, harness, start_block_index, end_block_index
          )
          SELECT ?1, sequence, start_message, end_message, start_message_id,
                 end_message_id, title, content, p1, p2, p3, p4, importance, episode_type,
-                legacy, created_at, harness
+                legacy, created_at, harness, start_block_index, end_block_index
            FROM compartments WHERE session_id = ?2",
         params![target_key, source_key],
     )?;

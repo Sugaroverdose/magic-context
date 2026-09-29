@@ -3158,8 +3158,15 @@ export const MIGRATIONS: Migration[] = [
     },
     {
         version: 92,
-        description: "store-level offline single-store migration state",
+        description: "store-level offline single-store state and canonical compartment boundaries",
         up(db: Database): void {
+            // A summary rebuild stages retained compartments before replacing them;
+            // its staging rows must preserve the block indices as well.
+            for (const table of ["compartments", "recomp_compartments"]) {
+                if (!tableExists(db, table)) continue;
+                ensureColumn(db, table, "start_block_index", "INTEGER");
+                ensureColumn(db, table, "end_block_index", "INTEGER");
+            }
             db.exec(`
                 CREATE TABLE IF NOT EXISTS single_store_state (
                     id INTEGER PRIMARY KEY CHECK (id = 1),

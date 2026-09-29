@@ -307,7 +307,7 @@ pub const DOMAIN_TABLE_FINGERPRINTS: &[(&str, &str)] = &[
     ),
     (
         "compartments",
-        "80ddceb8c04ee4642fb3c15807e93fd04e62b774fff6f4b146f1906307f08338",
+        "0b8353ff0e21178c2577a28825eea941b515e3c539092f2d5c799eb7c83688a4",
     ),
     (
         "context_privilege_state",
@@ -1101,17 +1101,21 @@ fn insert_compartments(
     let mut statement = tx.prepare(
         "INSERT INTO compartments
            (session_id, sequence, start_message, end_message, start_message_id, end_message_id,
-            title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness, start_block_index, end_block_index)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
     )?;
     for compartment in &publish.compartments {
+        let (start_id, start_block) =
+            mc_store::context_boundaries::canonical_boundary_parts(&compartment.start_message_id)?;
+        let (end_id, end_block) =
+            mc_store::context_boundaries::canonical_boundary_parts(&compartment.end_message_id)?;
         statement.execute(params![
             publish.session_id,
             compartment.sequence,
             compartment.start_message,
             compartment.end_message,
-            compartment.start_message_id,
-            compartment.end_message_id,
+            start_id,
+            end_id,
             compartment.title,
             compartment.content,
             compartment.p1,
@@ -1123,6 +1127,8 @@ fn insert_compartments(
             compartment.legacy_flag(),
             compartment.created_at,
             publish.harness,
+            start_block,
+            end_block,
         ])?;
         ids.push(tx.last_insert_rowid());
     }

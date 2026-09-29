@@ -1007,3 +1007,22 @@ fn an_unknown_column_is_named_with_the_statement_that_drops_it() {
         "{message}"
     );
 }
+
+#[test]
+fn migration_splits_module_boundaries_and_normalizes_existing_context_rows() {
+    let fixture = Fixture::new(Extras::default());
+    fixture.store().execute("UPDATE mc_compartments SET start_message_id='m1#0', end_message_id='m5#2' WHERE session_id=?1 AND sequence=1", params![SESSION]).unwrap();
+    fixture.context().execute_batch("UPDATE compartments SET start_message_id='m1#0', end_message_id='m5#2' WHERE id=101;
+        INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at)
+        VALUES ('context-only-flat', 1, 1, 2, 'raw-a#1', 'raw-b#3', 'kept', 'kept body', 1);").unwrap();
+    let report = fixture.migrate();
+    assert_eq!(report.normalized_context_compartments, 2);
+    assert!(report.render_check.passed > 0);
+    let context = fixture.context();
+    let row: (String, String, Option<i64>, Option<i64>) = context.query_row("SELECT start_message_id, end_message_id, start_block_index, end_block_index FROM compartments WHERE id=101", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+    assert_eq!(row, ("m1".into(), "m5".into(), Some(0), Some(2)));
+    let row: (String, String, Option<i64>, Option<i64>) = context.query_row("SELECT start_message_id, end_message_id, start_block_index, end_block_index FROM compartments WHERE session_id='context-only-flat'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+    assert_eq!(row, ("raw-a".into(), "raw-b".into(), Some(1), Some(3)));
+    let mutations: i64 = context.query_row("SELECT COUNT(*) FROM m0_mutation_log WHERE session_id='context-only-flat' AND mutation_type='compartment_upgrade'", [], |row| row.get(0)).unwrap();
+    assert_eq!(mutations, 1);
+}

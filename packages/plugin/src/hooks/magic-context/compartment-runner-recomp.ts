@@ -62,7 +62,7 @@ function insertRecompCompartmentRows(
     // promote path. Must match compartment-storage.ts insertCompartmentRows column
     // order. legacy=0 when P1 present, else 1 (flat).
     const stmt = db.prepare(
-        "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness, start_block_index, end_block_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     for (const c of compartments) {
         const hasTiers = typeof c.p1 === "string" && c.p1.length > 0;
@@ -84,6 +84,8 @@ function insertRecompCompartmentRows(
             hasTiers ? 0 : 1,
             now,
             getHarness(),
+            c.startBlockIndex ?? null,
+            c.endBlockIndex ?? null,
         );
     }
 }

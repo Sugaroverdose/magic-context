@@ -127,6 +127,7 @@ import { RECOVERY_NO_HEAD_LIMIT } from "./protected-tail-boundary";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
+import { SharedCompartmentBoundaryError } from "./shared-compartment-boundaries";
 import { singleStoreMigrationRequiredFailure } from "./single-store-refusal";
 import { StorageBusyRefusalError } from "./storage-busy-refusal";
 import { STORE_AHEAD_OF_BINARY_CODE, storeAheadOfBinaryFailure } from "./store-ahead-refusal";
@@ -3838,6 +3839,12 @@ export function createRustModeTransform(
             });
             finishPass(true);
         } catch (error) {
+            if (error instanceof SharedCompartmentBoundaryError) {
+                decision = "error";
+                materializeReason = error.code;
+                finishPass(false, false);
+                throw new EmergencyFailClosedError(error.message, { cause: error });
+            }
             const migration = singleStoreMigrationRequiredFailure(error);
             if (migration) {
                 decision = "error";

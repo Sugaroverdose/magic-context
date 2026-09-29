@@ -45,6 +45,10 @@ import {
     readRawSessionSeedTail,
 } from "./read-session-chunk";
 import type { RawMessageParts } from "./read-session-raw";
+import {
+    type ResolvedContextBoundary,
+    resolveSharedCompartmentBoundaries,
+} from "./shared-compartment-boundaries";
 
 export interface ModuleWatermarks {
     compartment_sequence: number;
@@ -142,6 +146,7 @@ export interface ModuleStateSyncPayload {
         seed_batch_total?: number;
         seed_complete?: boolean;
         seed_boundary_id?: string | null;
+        resolved_compartment_boundaries?: ResolvedContextBoundary[];
         last_todo_state?: string;
         acked_watermarks?: ModuleWatermarks;
         drop_seeds?: ModuleDropSeed[];
@@ -182,7 +187,11 @@ export interface ModuleStateSyncPass {
 
 export interface ModuleStateSyncOptions {
     timing?: StateSyncTiming;
-    seedInventory?: { maxCompartmentSequence: number; boundaryId: string | null };
+    seedInventory?: {
+        maxCompartmentSequence: number;
+        boundaryId: string | null;
+        contextBoundariesResolved?: boolean;
+    };
     shouldAbortSeed?: () => boolean;
     /** Enable the authority sender's one-time durable-sequence adoption. */
     authority?: boolean;
@@ -623,6 +632,7 @@ function buildStripSeeds(args: { db: ContextDatabase; sessionId: string }): Modu
 }
 
 type SeedItem =
+    | { kind: "context_boundary"; value: ResolvedContextBoundary }
     | { kind: "drop_seed"; value: ModuleDropSeed }
     | { kind: "pending_agent_drop"; value: ModulePendingDropSeed }
     | { kind: "note_nudge_anchor"; value: ModuleNoteNudgeAnchorSeed }
@@ -640,6 +650,7 @@ export function buildPagedModuleStateSyncPayloads(
         expectedShadowSeq: number;
         seedId: string;
         seedBoundaryId: string | null;
+        resolvedBoundaries?: ResolvedContextBoundary[];
         dropSeeds?: ModuleDropSeed[];
         dropSeedSkipped?: number;
         pendingDropSeeds?: ModulePendingDropSeed[];
@@ -660,6 +671,9 @@ export function buildPagedModuleStateSyncPayloads(
     maxPageBytes = MODULE_PAGE_MAX_BYTES,
 ): ModuleStateSyncPayload[] {
     const items: SeedItem[] = [
+        ...(args.resolvedBoundaries ?? []).map(
+            (value) => ({ kind: "context_boundary", value }) as const,
+        ),
         ...(args.dropSeeds ?? []).map((value) => ({ kind: "drop_seed", value }) as const),
         ...(args.pendingDropSeeds ?? []).map(
             (value) => ({ kind: "pending_agent_drop", value }) as const,
@@ -674,6 +688,7 @@ export function buildPagedModuleStateSyncPayloads(
     ];
 
     type SeedBatch = {
+        resolvedBoundaries: ResolvedContextBoundary[];
         dropSeeds: ModuleDropSeed[];
         pendingAgentDrops: ModulePendingDropSeed[];
         noteNudgeAnchors: ModuleNoteNudgeAnchorSeed[];
@@ -682,6 +697,7 @@ export function buildPagedModuleStateSyncPayloads(
     };
 
     const emptyBatch = (): SeedBatch => ({
+        resolvedBoundaries: [],
         dropSeeds: [],
         pendingAgentDrops: [],
         noteNudgeAnchors: [],
@@ -690,7 +706,8 @@ export function buildPagedModuleStateSyncPayloads(
     });
 
     const appendItem = (batch: SeedBatch, item: SeedItem): void => {
-        if (item.kind === "drop_seed") batch.dropSeeds.push(item.value);
+        if (item.kind === "context_boundary") batch.resolvedBoundaries.push(item.value);
+        else if (item.kind === "drop_seed") batch.dropSeeds.push(item.value);
         else if (item.kind === "pending_agent_drop") batch.pendingAgentDrops.push(item.value);
         else if (item.kind === "note_nudge_anchor") batch.noteNudgeAnchors.push(item.value);
         else if (item.kind === "auto_search_hint") batch.autoSearchHintDecisions.push(item.value);
@@ -701,6 +718,7 @@ export function buildPagedModuleStateSyncPayloads(
         index: number;
         total: number;
         complete: boolean;
+        resolvedBoundaries: ResolvedContextBoundary[];
         dropSeeds?: ModuleDropSeed[];
         pendingAgentDrops: ModulePendingDropSeed[];
         noteNudgeAnchors: ModuleNoteNudgeAnchorSeed[];
@@ -722,6 +740,9 @@ export function buildPagedModuleStateSyncPayloads(
             seed_batch_index: input.index,
             seed_batch_total: input.total,
             seed_complete: input.complete,
+            ...(args.resolvedBoundaries !== undefined
+                ? { resolved_compartment_boundaries: input.resolvedBoundaries }
+                : {}),
             ...(args.dropSeeds !== undefined ? { drop_seeds: input.dropSeeds } : {}),
             ...(args.pendingDropSeeds !== undefined
                 ? { pending_agent_drops: input.pendingAgentDrops }
@@ -1027,11 +1048,24 @@ export async function buildModuleStateSyncPayload(args: {
     const channel2NudgeState = args.force
         ? getChannel2NudgeState(args.pass.db, args.pass.sessionId)
         : undefined;
+    const resolvedBoundaries =
+        inventory?.contextBoundariesResolved === true
+            ? []
+            : resolveSharedCompartmentBoundaries(args.pass.db, args.pass.sessionId);
+    const tailBoundary = resolvedBoundaries.at(-1);
+    // A whole-message tail records what TypeScript has already summarized.
+    // Indexed module publications can still be waiting for permission to rebuild
+    // the cached prefix; reconnecting must not advance their trim boundary early.
+    const hostBoundary =
+        tailBoundary && tailBoundary.source_end_block_index === null
+            ? tailBoundary.end_message_id
+            : null;
     const payloadArgs = {
+        resolvedBoundaries,
         moduleGeneration: args.state.moduleGeneration,
         expectedShadowSeq: args.state.lastAckedSeq,
         seedId: args.seedId ?? randomUUID(),
-        seedBoundaryId: inventory?.boundaryId ?? null,
+        seedBoundaryId: hostBoundary ?? inventory?.boundaryId ?? null,
         dropSeeds:
             dropSeedState && dropSeedState.seeds.length > 0 ? dropSeedState.seeds : undefined,
         dropSeedSkipped:
@@ -1279,6 +1313,8 @@ export async function syncModuleState(args: {
                         ...args.options,
                         seedInventory: {
                             maxCompartmentSequence: inventory.max_compartment_sequence as number,
+                            contextBoundariesResolved:
+                                inventory.context_boundaries_resolved === true,
                             boundaryId: inventory.boundary_id as string | null,
                         },
                     };

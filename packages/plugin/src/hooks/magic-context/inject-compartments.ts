@@ -8,6 +8,7 @@ import {
     escapeXmlContent,
     getCompartments,
     getLastCompartmentEndMessageId,
+    isPartialCompartmentEnd,
     type SessionFact,
 } from "../../features/magic-context/compartment-storage";
 import {
@@ -435,7 +436,16 @@ export function prepareCompartmentInjection(
                     prepared.compartmentEndMessageId,
                 );
                 if (cutoffIndex >= 0) {
-                    const remaining = messages.slice(cutoffIndex + 1);
+                    const remaining = messages.slice(
+                        cutoffIndex +
+                            (isPartialCompartmentEnd(
+                                db,
+                                sessionId,
+                                prepared.compartmentEndMessageId,
+                            )
+                                ? 0
+                                : 1),
+                    );
                     messages.splice(0, messages.length, ...remaining);
                 } else {
                     // Boundary message not in array — covered messages were already
@@ -639,8 +649,9 @@ export function prepareCompartmentInjection(
         // Natural boundary is visible — normal splice, and any degraded-mode
         // bookkeeping from earlier passes is cleared.
         clearDegradedRebuild(sessionId);
-        skippedVisibleMessages = cutoffIndex + 1;
-        const remaining = messages.slice(cutoffIndex + 1);
+        skippedVisibleMessages =
+            cutoffIndex + (isPartialCompartmentEnd(db, sessionId, trimEndMessageId) ? 0 : 1);
+        const remaining = messages.slice(skippedVisibleMessages);
         messages.splice(0, messages.length, ...remaining);
         resultEndMessageId = trimEndMessageId;
     } else {
@@ -672,8 +683,12 @@ export function prepareCompartmentInjection(
                     reAnchorCompartment.endMessageId,
                 );
                 if (reAnchorCutoff >= 0) {
-                    skippedVisibleMessages = reAnchorCutoff + 1;
-                    const remaining = messages.slice(reAnchorCutoff + 1);
+                    skippedVisibleMessages =
+                        reAnchorCutoff +
+                        (isPartialCompartmentEnd(db, sessionId, reAnchorCompartment.endMessageId)
+                            ? 0
+                            : 1);
+                    const remaining = messages.slice(skippedVisibleMessages);
                     messages.splice(0, messages.length, ...remaining);
                     resultEndMessage = reAnchorCompartment.endMessage;
                     resultEndMessageId = reAnchorCompartment.endMessageId;
@@ -3727,7 +3742,12 @@ function trimToPreparedPrefix(
                             break;
                         }
                         lastSourcePosition = position;
-                        if (position > boundaryPosition) retained.push(message);
+                        if (
+                            position > boundaryPosition ||
+                            (position === boundaryPosition &&
+                                isPartialCompartmentEnd(options.db, options.sessionId, boundary))
+                        )
+                            retained.push(message);
                     }
                     if (liveOrderError) status = refuse(liveOrderError);
                     else {
@@ -3739,7 +3759,11 @@ function trimToPreparedPrefix(
         } else {
             const index = findBoundaryIndex(options.sessionId, options.messages, boundary);
             if (index >= 0) {
-                options.messages.splice(0, index + 1);
+                options.messages.splice(
+                    0,
+                    index +
+                        (isPartialCompartmentEnd(options.db, options.sessionId, boundary) ? 0 : 1),
+                );
                 resetPrefixTrimFallbackState(options.sessionId);
                 status = "applied";
             } else {

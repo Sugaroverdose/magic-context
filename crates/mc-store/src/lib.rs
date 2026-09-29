@@ -13,6 +13,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod context_boundaries;
+pub use context_boundaries::ResolvedContextBoundary;
 pub mod context_writes;
 mod historian_claim;
 pub mod single_store_domain;
@@ -4410,6 +4412,10 @@ pub struct FrozenDecisionCalibration {
 /// The non-CoreState durable blob: bootstrap + epoch-detection + coverage watermark.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModuleMeta {
+    /// Host ordinals and module block IDs used for rendering, only while the shared
+    /// row's original IDs, block indices, and ordinals still match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_compartment_boundaries: Vec<ResolvedContextBoundary>,
     /// Durable bootstrap has completed. A seeded session may still await its first module fold
     /// while `bootstrap_seed_fold_pending` is true.
     pub initialized: bool,
@@ -5490,6 +5496,7 @@ pub struct ModuleStripSeedRow {
 }
 
 pub struct ModuleStateSyncRequest<'a> {
+    pub resolved_compartment_boundaries: &'a [ResolvedContextBoundary],
     pub session_id: &'a str,
     pub project_path: &'a str,
     pub shadow_generation: u64,
@@ -10654,15 +10661,42 @@ impl McStore {
             .map_err(|e| ModuleStateSyncError::Serde(e.to_string()))?;
         // A declared seed boundary is checked against the session's compartments, which
         // live in context.db; they are read before the store.db transaction, never inside it.
-        let seed_compartments = if request.seed_boundary_id.is_some() {
-            self.load_compartments(request.session_id)?
+        let mut seed_compartments = if request.seed_boundary_id.is_some()
+            || !request.resolved_compartment_boundaries.is_empty()
+        {
+            self.load_raw_context_compartments(request.session_id)?
         } else {
             Vec::new()
         };
         let published_end = seed_compartments
             .iter()
+            .filter(|compartment| split_flat_block_id(&compartment.end_message_id).is_some())
             .map(|compartment| compartment.end_message)
             .max();
+        for boundary in request.resolved_compartment_boundaries {
+            let row = seed_compartments
+                .iter_mut()
+                .find(|row| boundary.matches(row))
+                .ok_or_else(|| ModuleStateSyncError::InvalidSeedBoundary {
+                    declared: request.seed_boundary_id.unwrap_or("").to_string(),
+                    detail: format!(
+                        "context boundary snapshot changed at sequence {}",
+                        boundary.sequence
+                    ),
+                })?;
+            if !boundary.preserves_source_ids()
+                || boundary.start_message < 1
+                || boundary.end_message < boundary.start_message
+                || split_flat_block_id(&boundary.start_message_id).is_none()
+                || split_flat_block_id(&boundary.end_message_id).is_none()
+            {
+                return Err(ModuleStateSyncError::InvalidSeedBoundary {
+                    declared: request.seed_boundary_id.unwrap_or("").to_string(),
+                    detail: "invalid host-resolved context boundary".into(),
+                });
+            }
+            boundary.apply(row);
+        }
         let outcome = self.inner.with_conn_fenced(|tx| {
             let row = tx
                 .query_row(
@@ -10710,6 +10744,9 @@ impl McStore {
                 });
             }
 
+            if !request.resolved_compartment_boundaries.is_empty() {
+                meta.resolved_compartment_boundaries = request.resolved_compartment_boundaries.to_vec();
+            }
             if let Some(declared) = request.seed_boundary_id {
                 let adoption = match validated_seed_boundary(declared, &seed_compartments) {
                     Ok(adoption) => adoption,
@@ -10720,28 +10757,19 @@ impl McStore {
                         })
                     }
                 };
-                // An initialized row already has a materialized boundary. Which side wins
-                // depends on whose coverage ends later:
-                // - Seed at or behind the module's coverage: the TypeScript mirror is lagging
-                //   (for example a second adapter process force-seeding a stale mirror).
-                //   Adopting it would move only the trim cursor back while the module's newer
-                //   m0/m1 bytes stay, so the next defer would re-emit the already-folded
-                //   interval as raw tail messages. The module keeps its boundary.
-                // - Seed strictly after the module's coverage: the session ran under
-                //   TypeScript authority after its last Rust pass and the host folded further.
-                //   OpenCode's compaction marker has usually cut the module's old boundary out
-                //   of the live array, so keeping it would arm `pending_rewrite` and serve
-                //   every later pass raw with no way back. The seed is adopted like a bootstrap
-                //   seed: `bootstrap_seed_fold_pending` makes the next transform pass fold once
-                //   from the adopted coverage, and later defers replay that fold.
-                // "The module's coverage" includes compartments the module historian has already
-                // published but not yet folded. A mirror of those is not ahead of the module:
-                // the module folds them itself on a priced pass, so a restarted adapter's seed
-                // must not force that fold early onto a pass the scheduler would defer.
-                // A row with no folded coverage (compaction off, or nothing folded yet) has no
-                // boundary to strand, so it keeps its state as before.
+                // A changed whole-message range is what TypeScript has already summarized,
+                // including a rebuild that shortened the covered range. Adopt it and
+                // rebuild the module's prefix once. Indexed module publications can
+                // still be waiting for permission to replace the cached prefix;
+                // reconnecting alone must not force that replacement early.
+                let host_authored_tail = request.resolved_compartment_boundaries.iter().any(|tail| {
+                    tail.sequence == adoption.max_sequence && tail.source_end_block_index.is_none() && tail.end_message_id == declared
+                });
+                let host_coverage_changed = host_authored_tail && (core.boundary_id != adoption.boundary_id
+                    || meta.coverage_ordinal != Some(adoption.coverage_end_ordinal)
+                    || meta.coverage_start_ordinal != Some(adoption.coverage_start_ordinal));
                 let seed_ahead_of_module = meta.initialized
-                    && match meta.coverage_ordinal {
+                    && (host_coverage_changed || match meta.coverage_ordinal {
                         Some(folded_end) => {
                             let module_end = published_end
                                 .and_then(|end| u64::try_from(end).ok())
@@ -10749,7 +10777,7 @@ impl McStore {
                             adoption.coverage_end_ordinal > module_end
                         }
                         None => false,
-                    };
+                    });
                 if meta.initialized && !seed_ahead_of_module {
                     tracing::info!(
                         "mc-store: retained materialized boundary {:?} over state-sync seed {:?} at or behind it for session {}",
@@ -10976,6 +11004,12 @@ impl McStore {
         self.inner.with_conn(|conn| {
             single_store_schema::apply_compartment_dates(conn, session_id, compartments)
         })?;
+        let boundaries = self.cached_context_boundaries(session_id)?;
+        for row in compartments {
+            if let Some(boundary) = boundaries.iter().find(|boundary| boundary.matches(row)) {
+                boundary.apply(row);
+            }
+        }
         Ok(())
     }
 
@@ -10985,18 +11019,22 @@ impl McStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<StoredCompartment>, McStoreError> {
-        let mut rows = self.context_read(|conn| {
-            let mut stmt = conn.prepare_cached(&format!(
-                "SELECT {COMPARTMENT_SELECT_COLUMNS}
-                 FROM compartments WHERE session_id = ?1 ORDER BY sequence ASC"
-            ))?;
-            let mapped = stmt
-                .query_map(params![session_id], Self::stored_compartment_from_row)?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(mapped)
-        })?;
+        let mut rows = self.load_raw_context_compartments(session_id)?;
         self.apply_compartment_dates(session_id, &mut rows)?;
         Ok(rows)
+    }
+
+    fn load_raw_context_compartments(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<StoredCompartment>, McStoreError> {
+        self.context_read(|conn| {
+            let mut stmt = conn.prepare_cached(&format!(
+                "SELECT {COMPARTMENT_SELECT_COLUMNS} FROM compartments WHERE session_id = ?1 ORDER BY sequence ASC"
+            ))?;
+            let rows = stmt.query_map(params![session_id], Self::stored_compartment_from_row)?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
     }
 
     /// Read only structural boundaries from one snapshot, without summary bodies.
@@ -11004,9 +11042,9 @@ impl McStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<CompartmentBoundary>, McStoreError> {
-        self.context_read(|conn| {
+        let mut rows = self.context_read(|conn| {
             let mut stmt = conn.prepare_cached(
-                "SELECT sequence, start_message, end_message, COALESCE(end_message_id, '')
+                "SELECT sequence, start_message, end_message, COALESCE(CASE WHEN end_block_index IS NULL THEN end_message_id ELSE end_message_id || '#' || end_block_index END, '')
                  FROM compartments WHERE session_id = ?1 ORDER BY sequence ASC",
             )?;
             let rows = stmt
@@ -11020,7 +11058,19 @@ impl McStore {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
-        })
+        })?;
+        let boundaries = self.cached_context_boundaries(session_id)?;
+        for row in &mut rows {
+            if let Some(boundary) = boundaries
+                .iter()
+                .find(|boundary| boundary.matches_boundary(row))
+            {
+                row.start_message = boundary.start_message;
+                row.end_message = boundary.end_message;
+                row.end_message_id.clone_from(&boundary.end_message_id);
+            }
+        }
+        Ok(rows)
     }
 
     /// Return the greatest message ordinal covered by a session's compartments without
@@ -11036,6 +11086,14 @@ impl McStore {
             if let Some(mut hook) = hook {
                 hook(self);
             }
+        }
+        if !self.cached_context_boundaries(session_id)?.is_empty() {
+            return Ok(self
+                .load_compartment_boundaries(session_id)?
+                .iter()
+                .map(|row| row.end_message)
+                .max()
+                .unwrap_or(0));
         }
         self.context_read(|conn| {
             conn.query_row(
@@ -11067,19 +11125,30 @@ impl McStore {
             return Ok(Vec::new());
         }
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let boundaries = serde_json::to_string(&self.cached_context_boundaries(session_id)?)
+            .map_err(|error| McStoreError::Serde(error.to_string()))?;
         let mut rows = self.context_read(|conn| {
             let mut stmt = conn.prepare(&format!(
-                "SELECT {COMPARTMENT_SELECT_COLUMNS}
-                   FROM compartments
-                  WHERE session_id = ?1
-                    AND end_message >= ?2
-                    AND start_message <= ?3
-                  ORDER BY sequence ASC
-                  LIMIT ?4"
+                "WITH resolved AS (
+                     SELECT c.*, b.value AS boundary
+                     FROM compartments c LEFT JOIN json_each(?5) b ON
+                       c.sequence = json_extract(b.value, '$.sequence')
+                       AND c.start_message = json_extract(b.value, '$.source_start_message')
+                       AND c.end_message = json_extract(b.value, '$.source_end_message')
+                       AND COALESCE(c.start_message_id, '') = json_extract(b.value, '$.source_start_message_id')
+                       AND c.start_block_index IS json_extract(b.value, '$.source_start_block_index')
+                       AND COALESCE(c.end_message_id, '') = json_extract(b.value, '$.source_end_message_id')
+                       AND c.end_block_index IS json_extract(b.value, '$.source_end_block_index')
+                     WHERE c.session_id = ?1
+                   )
+                   SELECT {COMPARTMENT_SELECT_COLUMNS} FROM resolved
+                   WHERE COALESCE(json_extract(boundary, '$.end_message'), end_message) >= ?2
+                     AND COALESCE(json_extract(boundary, '$.start_message'), start_message) <= ?3
+                   ORDER BY sequence ASC LIMIT ?4"
             ))?;
             let mapped = stmt
                 .query_map(
-                    params![session_id, start, end, limit],
+                    params![session_id, start, end, limit, boundaries],
                     Self::stored_compartment_from_row,
                 )?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -15238,19 +15307,22 @@ fn insert_compartment_tx(
     c: &StoredCompartment,
     harness: &str,
 ) -> rusqlite::Result<i64> {
+    let (start_id, start_block) =
+        context_boundaries::canonical_boundary_parts(&c.start_message_id)?;
+    let (end_id, end_block) = context_boundaries::canonical_boundary_parts(&c.end_message_id)?;
     tx.execute(
         "INSERT INTO compartments
            (session_id, sequence, start_message, end_message, start_message_id,
             end_message_id, title, content, p1, p2, p3, p4,
-            importance, episode_type, legacy, created_at, harness)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            importance, episode_type, legacy, created_at, harness, start_block_index, end_block_index)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         params![
             session_id,
             sequence,
             c.start_message,
             c.end_message,
-            &c.start_message_id,
-            &c.end_message_id,
+            start_id,
+            end_id,
             &c.title,
             &c.content,
             c.p1.as_deref(),
@@ -15262,6 +15334,8 @@ fn insert_compartment_tx(
             c.legacy as i64,
             c.created_at,
             harness,
+            start_block,
+            end_block,
         ],
     )?;
     Ok(tx.last_insert_rowid())
@@ -15636,7 +15710,7 @@ const GLANCE_PAGE: usize = 1000;
 /// The `compartments` columns a [`StoredCompartment`] is read from. `context.db` has no
 /// date columns, so the two date slots read NULL and are filled from `store.db`'s
 /// `mc_compartment_dates` afterwards.
-const COMPARTMENT_SELECT_COLUMNS: &str = "sequence, start_message, end_message, start_message_id, end_message_id, NULL, NULL, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at";
+const COMPARTMENT_SELECT_COLUMNS: &str = "sequence, start_message, end_message, CASE WHEN start_block_index IS NULL THEN start_message_id ELSE start_message_id || '#' || start_block_index END, CASE WHEN end_block_index IS NULL THEN end_message_id ELSE end_message_id || '#' || end_block_index END, NULL, NULL, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at";
 
 /// The `notes` columns a [`StoredNote`] is read from. `updated_at` is read twice: once as
 /// the row's timestamp and once as its compare-and-set token.

@@ -14,7 +14,7 @@ function getInsertCompartmentStatement(db: Database): PreparedStatement {
     let stmt = insertCompartmentStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness, start_block_index, end_block_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         insertCompartmentStatements.set(db, stmt);
     }
@@ -40,6 +40,9 @@ export interface Compartment {
     endMessage: number;
     startMessageId: string;
     endMessageId: string;
+    /** NULL/absent covers a whole message; an indexed end keeps that message raw to preserve later blocks. */
+    startBlockIndex?: number | null;
+    endBlockIndex?: number | null;
     title: string;
     /** v2: P1 tier text (fullest). Legacy rows: flat v1 content. Always present (NOT NULL). */
     content: string;
@@ -84,6 +87,8 @@ interface CompartmentRow {
     end_message: number;
     start_message_id: string;
     end_message_id: string;
+    start_block_index?: number | null;
+    end_block_index?: number | null;
     title: string;
     content: string;
     p1: string | null;
@@ -159,6 +164,9 @@ export interface CompartmentInput {
     endMessage: number;
     startMessageId: string;
     endMessageId: string;
+    /** NULL/absent covers a whole message; an indexed end keeps that message raw to preserve later blocks. */
+    startBlockIndex?: number | null;
+    endBlockIndex?: number | null;
     title: string;
     /** v2: P1 tier text. Legacy/compressor inserts: flat content. */
     content: string;
@@ -202,6 +210,8 @@ function insertCompartmentRows(
             hasTiers || isNoContentCompartment(compartment) ? 0 : 1,
             now,
             getHarness(),
+            compartment.startBlockIndex ?? null,
+            compartment.endBlockIndex ?? null,
         );
     }
 }
@@ -227,6 +237,8 @@ function toCompartment(row: CompartmentRow): Compartment {
         endMessage: row.end_message,
         startMessageId: row.start_message_id,
         endMessageId: row.end_message_id,
+        ...(row.start_block_index != null ? { startBlockIndex: row.start_block_index } : {}),
+        ...(row.end_block_index != null ? { endBlockIndex: row.end_block_index } : {}),
         title: row.title,
         content: row.content,
         p1: row.p1 ?? null,
@@ -539,7 +551,7 @@ export function saveRecompStagingPass(
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
 
         const compartmentStmt = db.prepare(
-            "INSERT OR REPLACE INTO recomp_compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance, episode_type, pass_number, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO recomp_compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance, episode_type, pass_number, created_at, harness, start_block_index, end_block_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         for (const c of compartments) {
             compartmentStmt.run(
@@ -560,6 +572,8 @@ export function saveRecompStagingPass(
                 passNumber,
                 now,
                 getHarness(),
+                c.startBlockIndex ?? null,
+                c.endBlockIndex ?? null,
             );
         }
 
@@ -587,6 +601,8 @@ export function getRecompStaging(db: Database, sessionId: string): RecompStaging
         endMessage: row.end_message,
         startMessageId: row.start_message_id,
         endMessageId: row.end_message_id,
+        ...(row.start_block_index != null ? { startBlockIndex: row.start_block_index } : {}),
+        ...(row.end_block_index != null ? { endBlockIndex: row.end_block_index } : {}),
         title: row.title,
         content: row.content,
         p1: row.p1 ?? null,
@@ -774,6 +790,8 @@ interface RecompCompartmentRow {
     end_message: number;
     start_message_id: string;
     end_message_id: string;
+    start_block_index?: number | null;
+    end_block_index?: number | null;
     title: string;
     content: string;
     p1: string | null;
@@ -827,4 +845,19 @@ export function escapeXmlAttr(s: string): string {
 
 export function escapeXmlContent(s: string): string {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** An indexed end may leave later blocks uncovered, so the host must retain the whole message. */
+export function isPartialCompartmentEnd(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+): boolean {
+    return Boolean(
+        db
+            .prepare(
+                "SELECT 1 FROM compartments WHERE session_id=? AND end_message_id=? AND end_block_index IS NOT NULL LIMIT 1",
+            )
+            .get(sessionId, messageId),
+    );
 }

@@ -129,6 +129,7 @@ Slice A reached the module over subc (`window/b2-slice-b1:packages/cli/src/comma
 1. **Nothing has the files open.** The command lists `context.db`, `store.db` and their `-wal`/`-shm` files (the suffix list is `packages/cli/src/commands/doctor-repair-db.ts:28`).
    - It asks `lsof` through `probeHostProcessesUsing` (`packages/cli/src/commands/doctor-opencode2-cache.ts:76-97`). If `lsof` fails, the answer is "unknown" and the command refuses; it never treats a failure as "free" (`:90-91`).
    - It adds the RPC-server and Pi/OMP liveness check `doctor repair-db` uses (`defaultInspectHolders`, `doctor-repair-db.ts:73-99`).
+   - The default live directory retains conservative global Pi/OMP liveness refusal. For a non-default target, only target-file holders or processes whose readable command/environment references that directory block. Unrelated ambiguous Pi processes do not; an `lsof` failure still refuses. Repair and migration share this check.
    - Refusal: `single_store_files_in_use` with one line per holder, `<kind> (PID n)`, and "quit OpenCode, Pi and ck-mc (`ck stop magic-context`) and run again".
 2. **Versions.**
    - `context.db` must be exactly v92 after the opener ran; it records versions in `schema_migrations`.
@@ -265,7 +266,7 @@ INSERT OR IGNORE INTO single_store_state(id, state) VALUES (1, 'required');
 - It is additive, so a plugin that starts before the doctor runs does no harm. Rust mode stays refused (3.6) and TS mode works.
 - It bumps `LATEST_SUPPORTED_VERSION` (`storage-db:109`) and `BUILT_CONTEXT_FENCE_VERSION` (`host_store:67`) to 92.
 - Older plugins then fail closed at their fence (`docs/architecture/storage.md:30`).
-- The copy needs no other `context.db` schema change. Dates go to the `store.db` cache, and every copied column already exists.
+- v92 also adds nullable `start_block_index INTEGER` and `end_block_index INTEGER` to `compartments` and its recompaction staging table, `recomp_compartments`. The migration remains additive over populated v91 tables. Dates stay in the `store.db` cache. Because v92 is unshipped, this extends v92 rather than consuming v93; scratch databases made with an earlier B2 draft must be recreated from their pre-cutover backups.
 
 **`store.db` migration 61.** It carries:
 
@@ -422,6 +423,23 @@ Claude Code sessions driven directly by the module have no `session_projects` ro
   - On `required` it refuses the turn with the MC-C14 sentence, without calling the module.
   - It maps the module's `single_store_migration_required` frame to a new `SingleStoreMigrationRequiredError`, handled like `StoreAheadOfBinaryError` (`packages/plugin/src/hooks/magic-context/store-ahead-refusal.ts:37`, `:83`): not a module failure, no LKG replay, no parking, turn refused (`docs/architecture/rust-module.md:43`, `:61-66`). Facade tools reply with the sentence.
 - **TypeScript mode.** It runs as before. The one exception is a project still listed in `authority_managed` on an unmigrated file: its memory and note writes would hit the guard triggers. `ctx_memory`, `ctx_note` and the dreamer then answer with the MC-C14 sentence instead of the trigger's error.
+
+### 3.7 Canonical compartment boundaries and cold adoption
+
+Both runtimes share one stored boundary representation:
+
+- `start_message_id` and `end_message_id` are **raw host message IDs**, never module flat IDs.
+- `start_block_index` and `end_block_index` are nullable integers. NULL means a whole-message boundary; a non-null index names the block within that raw message.
+- The TypeScript historian writes raw IDs and NULL indices. Rust publication splits its internal `<mid>#<index>` coordinates before writing; Rust readers reconstruct those internal coordinates from the canonical columns. Recompaction staging and same-host session cloning preserve the indices.
+- The offline engine splits copied module boundaries and normalizes flat IDs already present in `context.db`, inside the same atomic transaction. Its report includes `normalized_context_compartments`. Sessions whose existing boundaries were normalized receive an existing `m0_mutation_log` notification so a frozen TypeScript prefix rebuilds once.
+
+A cold switch from TypeScript to Rust resolves whole-message boundaries against the host's immutable raw-message list. Missing starts or ends heal only from a contiguous neighbour (or the first raw message for an initial missing start), as in the prior TypeScript seed path. If no range is provable, the adapter refuses visibly with `context_compartment_boundary_unresolved`; it neither invents coverage nor serves a last-known-good prefix over an unproven boundary.
+
+Only boundary coordinates and date labels travel in `resolved_compartment_boundaries` metadata: no summaries, facts, memories, or notes. The module checks the source coordinates against the shared row and persists the read-coordinate cache in existing session metadata. Cached coordinates apply only while the original raw IDs, block indices, and ordinals still match. The inventory reports whether this cache remains valid, avoiding a new raw-history scan on a warm seed. Restart does not discard it. This is a cache, not another authoritative compartment table.
+
+TypeScript conservatively keeps a message raw whenever its covered end has a non-null block index; it never drops the uncovered blocks. Both direct-ID and immutable-source-order trimming obey this rule. Native host compaction markers cannot represent partial messages and must not advance over such an end. Pi retains the prefix at a partial boundary rather than letting its split-tool orphan cleanup discard an uncovered suffix. This can duplicate covered content, but cannot lose uncovered content.
+
+Other consumers: `ctx_expand` uses ordinal ranges and can safely return the whole boundary message; dates now resolve by canonical raw IDs; same-host cloning and recompaction retain indices. Dashboard readers display summaries and inclusive ordinal spans, not permission to discard raw messages. Cross-host OpenCode-to-Pi conversion refuses indexed boundaries before staging or journalling because its current entry map cannot faithfully translate partial blocks; TypeScript recompaction to whole-message boundaries is required first.
 
 ## 4. What gets deleted
 

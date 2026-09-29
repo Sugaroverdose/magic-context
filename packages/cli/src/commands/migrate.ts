@@ -1390,7 +1390,27 @@ export function migrateOpenCodeSessionToPi(
         const cwd = session.directory ?? session.path ?? process.cwd();
         const outputDir = join(piSessionsRoot, projectPathToPiDirSlug(cwd));
         const targetHarness = opts.targetHarness ?? "pi";
-        if (cortexkitDb !== null) assertNoUnmigratedAuthority(cortexkitDb);
+        if (cortexkitDb !== null) {
+            assertNoUnmigratedAuthority(cortexkitDb);
+            const boundaryColumns = stmt<{ name: string }>(
+                cortexkitDb,
+                "PRAGMA table_info(compartments)",
+            )
+                .all()
+                .map((column) => column.name)
+                .filter((name) => name === "start_block_index" || name === "end_block_index");
+            if (
+                boundaryColumns.length > 0 &&
+                stmt(
+                    cortexkitDb,
+                    `SELECT 1 FROM compartments WHERE session_id=? AND (${boundaryColumns.map((name) => `${name} IS NOT NULL`).join(" OR ")}) LIMIT 1`,
+                ).get(session.id)
+            ) {
+                throw new Error(
+                    "partial_message_compartments_require_recompaction: cross-host migration cannot translate block boundaries into Pi entries. Recompact the session in TypeScript mode before migrating it.",
+                );
+            }
+        }
 
         // Journal-backed runs (real cortexkit DB, not a dry run) reconcile any
         // interrupted attempts FIRST, then claim this migration's identity.

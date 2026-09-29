@@ -168,3 +168,27 @@ const PINNED: Record<string, string[]> = {
     sourceOrderFound: ["fde86711883560fc", "0ec71e798e4c1e9b"],
     sourceOrderInvalid: ["ddbde1ceead49af4"],
 };
+
+it("keeps a partial end-boundary message and its uncovered blocks raw on direct and source-order trims", () => {
+    emptyDataHome();
+    const db = contextDb();
+    db.prepare(
+        "INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, end_block_index, title, content, created_at) VALUES (?, 1, 1, 2, ?, ?, 0, 'partial', 'covers only the first block', 1)",
+    ).run(SESSION_ID, idOf(1), idOf(2));
+    for (const sourceOrder of [
+        undefined,
+        { messageIds: [idOf(1), idOf(2), idOf(3)], syntheticHeadCount: 0, invalidReason: null },
+    ]) {
+        const make = () => {
+            const messages = liveWindow(1, 3);
+            messages[1].parts.push({ type: "text", text: "UNCOVERED_SUFFIX" });
+            return messages;
+        };
+        const first = make();
+        const digest = pass(db, first, idOf(2), false, sourceOrder);
+        expect(first.some((message) => message.info.id === idOf(1))).toBe(false);
+        expect(first.some((message) => message.info.id === idOf(2))).toBe(true);
+        expect(JSON.stringify(first)).toContain("UNCOVERED_SUFFIX");
+        expect(pass(db, make(), idOf(2), false, sourceOrder)).toBe(digest);
+    }
+});

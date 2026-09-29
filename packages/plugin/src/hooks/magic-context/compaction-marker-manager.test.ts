@@ -205,6 +205,27 @@ afterEach(() => {
 });
 
 describe("applyDeferredCompactionMarker — outcomes", () => {
+    it("never places a whole-message native marker over a partial block boundary", () => {
+        const dataHome = useTempDataHome("partial-block-marker-");
+        const opencodeDb = createOpenCodeDb(dataHome);
+        insertUserMessage(opencodeDb, "msg-boundary", "ses-partial", 1_000);
+        closeQuietly(opencodeDb);
+        const db = openDatabase();
+        insertCompartment(db, "ses-partial", 10, "msg-boundary");
+        db.prepare(
+            "UPDATE compartments SET end_block_index=0 WHERE session_id='ses-partial'",
+        ).run();
+        db.prepare("INSERT INTO session_meta(session_id) VALUES ('ses-partial')").run();
+        for (const trusted of [
+            undefined,
+            { ordinal: 10, endMessageId: "msg-boundary", rowVersion: 1 },
+        ]) {
+            expect(
+                applyDeferredCompactionMarker(db, "ses-partial", makePending(), dataHome, trusted),
+            ).toEqual({ kind: "stale-skip", reason: "partial-message-boundary" });
+            expect(getPersistedCompactionMarkerState(db, "ses-partial")).toBeNull();
+        }
+    });
     it("returns `applied` on the happy path (no existing marker)", () => {
         const dataHome = useTempDataHome("apply-deferred-applied-");
         const opencodeDb = createOpenCodeDb(dataHome);

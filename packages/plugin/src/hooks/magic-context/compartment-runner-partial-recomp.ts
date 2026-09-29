@@ -117,6 +117,8 @@ function compartmentToInput(c: Compartment, newSequence: number): CompartmentInp
         endMessage: c.endMessage,
         startMessageId: c.startMessageId,
         endMessageId: c.endMessageId,
+        startBlockIndex: c.startBlockIndex,
+        endBlockIndex: c.endBlockIndex,
         title: c.title,
         content: c.content,
         // v2: preserve paraphrase tiers + scoring on prior/tail compartments that

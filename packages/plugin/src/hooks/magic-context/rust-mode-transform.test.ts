@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { insertMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import * as embeddingDrain from "../../features/magic-context/memory/single-store-embedding-drain";
@@ -321,6 +322,44 @@ function authoritySeqMismatch(durableSeq: number): Error & {
 }
 
 describe("Rust mode authority adapter", () => {
+    it("unprovable shared boundaries fail by name without replay or parking", async () => {
+        const sessionId = "ses-unprovable-shared-boundaries";
+        sessions.push(sessionId);
+        installRawProvider(sessionId);
+        const db = makeDb();
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 2,
+                startMessageId: "missing-start",
+                endMessageId: "missing-end",
+                title: "missing coverage",
+                content: "cannot infer both boundaries",
+            },
+        ]);
+        const methods: string[] = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                methods.push(method);
+                return { ok: true };
+            },
+        };
+        const runner = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        for (let pass = 0; pass < 4; pass++) {
+            const messages = makeMessages(sessionId);
+            await expect(
+                runner.run(
+                    sessionId,
+                    messages,
+                    { messages: [...messages] },
+                    makeMeta(db, sessionId),
+                ),
+            ).rejects.toThrow("context_compartment_boundary_unresolved");
+        }
+        expect(methods).not.toContain("transform");
+        expect(runner.getState(sessionId).parked).toBe(false);
+    });
     it("shared-store embedding drain does not inherit foreground SQLite retries", async () => {
         const sessionId = "ses-shared-store-background-drain";
         sessions.push(sessionId);
@@ -7184,8 +7223,9 @@ it("fails after the second authority mismatch in one transform pass", async () =
     const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
     const output = { messages: messages as unknown[] };
 
-    await expect(transform.run(sessionId, messages, output, makeMeta(db, sessionId)))
-        .rejects.toBeInstanceOf(EmergencyFailClosedError);
+    await expect(
+        transform.run(sessionId, messages, output, makeMeta(db, sessionId)),
+    ).rejects.toBeInstanceOf(EmergencyFailClosedError);
 
     expect(methods).toEqual(["state_sync", "state_sync"]);
     expect(transform.getState(sessionId).lastAckedSeq).toBe(4);

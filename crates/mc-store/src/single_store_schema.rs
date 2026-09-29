@@ -479,7 +479,7 @@ pub fn read_context_compartments(
     session_id: &str,
 ) -> rusqlite::Result<Vec<StoredCompartment>> {
     let mut statement = conn.prepare_cached(
-        "SELECT sequence, start_message, end_message, start_message_id, end_message_id,
+        "SELECT sequence, start_message, end_message, CASE WHEN start_block_index IS NULL THEN start_message_id ELSE start_message_id || '#' || start_block_index END, CASE WHEN end_block_index IS NULL THEN end_message_id ELSE end_message_id || '#' || end_block_index END,
                 NULL, NULL, title, content, p1, p2, p3, p4, importance,
                 episode_type, legacy, created_at
            FROM compartments WHERE session_id = ?1 ORDER BY sequence ASC",
