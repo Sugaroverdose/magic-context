@@ -41,6 +41,8 @@ import {
 } from "./rust-runner/hermetic-subc";
 
 export interface RustTestHarnessOptions {
+    /** Preallocated throwaway paths for database-copy drills. dispose() removes dataDir's parent. */
+    existingEnv?: IsolatedEnv;
     /** magic-context USER-tier config overrides (thresholds, memory, etc.). */
     magicContextConfig?: Record<string, unknown>;
     /** Extra opencode.json config. Merged onto test defaults. */
@@ -250,7 +252,7 @@ export class RustTestHarness {
         // Env first: the daemon must write its connection file into
         // <dataDir>/cortexkit/run/ before opencode boots and the plugin's Rust
         // client connects on the first transform.
-        const env = createIsolatedEnv();
+        const env = options.existingEnv ?? createIsolatedEnv();
         if (options.seedModuleStorePath) {
             const moduleStoreDir = join(env.dataDir, "cortexkit", "magic-context");
             mkdirSync(moduleStoreDir, { recursive: true });
