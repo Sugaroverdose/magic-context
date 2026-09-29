@@ -617,19 +617,22 @@ mod tests {
         let old = cortexkit_store::open_sqlite(&descriptor(dir.path())).unwrap();
         let outcome = old.migrate(STORE_NAMESPACE, &old_chain).unwrap();
         assert!(outcome.store_ahead());
-        assert_eq!(outcome.recorded, SINGLE_STORE_MIGRATION_VERSION);
+        assert_eq!(outcome.recorded, crate::LATEST_MIGRATION_VERSION);
         let marker = old.with_conn(crate::read_single_store_marker).unwrap();
         assert!(marker.is_some(), "the marker is set as well");
     }
 
-    /// An empty store takes migration 61 on open and stamps the marker as a fresh install;
+    /// An empty store takes the bundled chain on open and stamps the marker as a fresh install;
     /// a store holding a domain row is refused and keeps its rows and its version.
     #[test]
     fn open_migrates_an_empty_store_and_refuses_a_populated_one() {
         let dir = tempfile::tempdir().unwrap();
         drop(crate::McStore::open(&descriptor(dir.path())).unwrap());
         let conn = Connection::open(dir.path().join("store.db")).unwrap();
-        assert_eq!(recorded_store_version(&conn).unwrap(), 61);
+        assert_eq!(
+            recorded_store_version(&conn).unwrap(),
+            crate::LATEST_MIGRATION_VERSION
+        );
         let (set, stamp, by): (i64, Option<i64>, String) = conn
             .query_row(
                 "SELECT single_store, single_store_set_at_ms, single_store_set_by FROM mc_privilege_state",
