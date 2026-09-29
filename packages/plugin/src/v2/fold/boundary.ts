@@ -1,3 +1,4 @@
+import { hasPartialCompartmentEndThrough } from "../../features/magic-context/compartment-storage";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import {
     getPersistedCompactionMarkerState,
@@ -58,6 +59,9 @@ export function createV2RustCompactionMarkerStrategy(
     return {
         ...v2CompactionMarkerStrategy,
         applyDeferred: (db, sessionId, pending): MarkerUpdateOutcome => {
+            if (hasPartialCompartmentEndThrough(db, sessionId, pending.ordinal)) {
+                return { kind: "stale-skip", reason: "partial-message-boundary" };
+            }
             const existing = getPersistedCompactionMarkerState(db as ContextDatabase, sessionId);
             if (existing && existing.boundaryOrdinal >= pending.ordinal) {
                 return { kind: "already-current" };
@@ -144,6 +148,18 @@ export function trimToRecordedBoundary(
     if (!boundaryId) return 0;
     const start = messages.findIndex((message) => message.id === boundaryId);
     if (start <= 0) return 0;
-    messages.splice(0, start);
-    return start;
+    const partial = db
+        .prepare(
+            "SELECT end_message_id FROM compartments WHERE session_id=? AND end_block_index IS NOT NULL ORDER BY sequence LIMIT 1",
+        )
+        .get(sessionId) as { end_message_id: string } | undefined;
+    const partialIndex = partial
+        ? messages.findIndex((message) => message.id === partial.end_message_id)
+        : -1;
+    // The recorded cut can predate this guard; never remove a visible
+    // partially covered message even when that old cut lies after it.
+    const safeStart = partialIndex >= 0 ? Math.min(start, partialIndex) : start;
+    if (safeStart <= 0) return 0;
+    messages.splice(0, safeStart);
+    return safeStart;
 }

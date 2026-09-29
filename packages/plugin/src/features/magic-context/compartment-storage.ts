@@ -848,6 +848,20 @@ export function escapeXmlContent(s: string): string {
 }
 
 /** An indexed end may leave later blocks uncovered, so the host must retain the whole message. */
+export function hasPartialCompartmentEndThrough(
+    db: Database,
+    sessionId: string,
+    endOrdinal: number,
+): boolean {
+    return Boolean(
+        db
+            .prepare(
+                "SELECT 1 FROM compartments WHERE session_id=? AND end_message<=? AND end_block_index IS NOT NULL LIMIT 1",
+            )
+            .get(sessionId, endOrdinal),
+    );
+}
+
 export function isPartialCompartmentEnd(
     db: Database,
     sessionId: string,

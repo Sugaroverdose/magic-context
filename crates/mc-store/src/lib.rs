@@ -10778,7 +10778,8 @@ impl McStore {
             .filter(|compartment| split_flat_block_id(&compartment.end_message_id).is_some())
             .map(|compartment| compartment.end_message)
             .max();
-        for boundary in request.resolved_compartment_boundaries {
+        let mut resolved_boundaries = request.resolved_compartment_boundaries.to_vec();
+        for boundary in &mut resolved_boundaries {
             let row = seed_compartments
                 .iter_mut()
                 .find(|row| boundary.matches(row))
@@ -10800,6 +10801,7 @@ impl McStore {
                     detail: "invalid host-resolved context boundary".into(),
                 });
             }
+            boundary.bind_to_row(row)?;
             boundary.apply(row);
         }
         let outcome = self.inner.with_conn_fenced(|tx| {
@@ -10850,7 +10852,7 @@ impl McStore {
             }
 
             if !request.resolved_compartment_boundaries.is_empty() {
-                meta.resolved_compartment_boundaries = request.resolved_compartment_boundaries.to_vec();
+                meta.resolved_compartment_boundaries = resolved_boundaries.clone();
             }
             if let Some(declared) = request.seed_boundary_id {
                 let adoption = match validated_seed_boundary(declared, &seed_compartments) {
@@ -11053,7 +11055,22 @@ impl McStore {
         let commit_ms = (timing_started.elapsed().as_secs_f64() * 1000.0 - import_ms).max(0.0);
         tracing::debug!("mc-state-sync-timing side=store session={} import_ms={:.3} drop_seed_units_ms={:.3} commit_ms={:.3} compartments={} tags={}", request.session_id, import_ms, drop_seed_units_ms, commit_ms, seed_compartments.len(), request.drop_seeds.len());
         match outcome {
-            ModuleStateSyncTxnOutcome::Committed(result) => Ok(result),
+            ModuleStateSyncTxnOutcome::Committed(result) => {
+                // A host may rewrite a context.db row while the store.db cache
+                // transaction runs. cached_context_boundaries hashes each original
+                // row and excludes entries whose shared row has changed; requiring
+                // every new entry here catches a rewrite during this transaction.
+                if !resolved_boundaries.is_empty()
+                    && self.cached_context_boundaries(request.session_id)?.len()
+                        != resolved_boundaries.len()
+                {
+                    return Err(ModuleStateSyncError::InvalidSeedBoundary {
+                        declared: request.seed_boundary_id.unwrap_or("").to_string(),
+                        detail: "context boundary snapshot changed during state sync".into(),
+                    });
+                }
+                Ok(result)
+            }
             ModuleStateSyncTxnOutcome::GenerationMismatch { found } => {
                 Err(ModuleStateSyncError::GenerationMismatch {
                     expected: request.shadow_generation,

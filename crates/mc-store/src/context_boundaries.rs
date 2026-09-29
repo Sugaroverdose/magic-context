@@ -3,6 +3,7 @@
 use crate::{CompartmentBoundary, McStore, McStoreError, StoredCompartment};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Split the module's `<raw-message-id>#<block-index>` into the shared table's two columns.
 pub fn canonical_boundary_parts(id: &str) -> rusqlite::Result<(&str, Option<i64>)> {
@@ -30,12 +31,21 @@ pub struct ResolvedContextBoundary {
     pub source_start_block_index: Option<i64>,
     #[serde(default)]
     pub source_end_block_index: Option<i64>,
+    #[serde(default)]
+    pub source_row_identity: String,
     pub start_message: i64,
     pub end_message: i64,
     pub start_message_id: String,
     pub end_message_id: String,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+}
+
+/// Hash the complete compartment row: changing its summary without moving its
+/// message boundaries must still invalidate cached host-to-module coordinates.
+fn row_identity(row: &StoredCompartment) -> Result<String, McStoreError> {
+    let bytes = serde_json::to_vec(row).map_err(|error| McStoreError::Serde(error.to_string()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 impl ResolvedContextBoundary {
@@ -76,6 +86,17 @@ impl ResolvedContextBoundary {
             )
     }
 
+    pub(crate) fn bind_to_row(&mut self, row: &StoredCompartment) -> Result<(), McStoreError> {
+        self.source_row_identity = row_identity(row)?;
+        Ok(())
+    }
+
+    pub(crate) fn identifies(&self, row: &StoredCompartment) -> Result<bool, McStoreError> {
+        Ok(!self.source_row_identity.is_empty()
+            && self.matches(row)
+            && self.source_row_identity == row_identity(row)?)
+    }
+
     pub(crate) fn apply(&self, row: &mut StoredCompartment) {
         row.start_message = self.start_message;
         row.end_message = self.end_message;
@@ -113,16 +134,30 @@ impl McStore {
         session: &str,
         cached: &[ResolvedContextBoundary],
     ) -> Result<bool, McStoreError> {
-        self.context_read(|conn| {
-            let mut stmt = conn.prepare_cached("SELECT sequence, start_message, end_message, COALESCE(start_message_id, ''), COALESCE(end_message_id, ''), start_block_index, end_block_index FROM compartments WHERE session_id=?1")?;
-            let rows = stmt.query_map(params![session], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, Option<i64>>(6)?)))?;
-            for row in rows {
-                let (sequence, start, end, start_id, end_id, start_block, end_block) = row?;
-                if start_block.is_some() && end_block.is_some() { continue; }
-                if !cached.iter().any(|b| b.sequence == sequence && b.source_start_message == start && b.source_end_message == end && b.source_start_message_id == start_id && b.source_end_message_id == end_id && b.source_start_block_index == start_block && b.source_end_block_index == end_block) { return Ok(false); }
+        for row in self.load_raw_context_compartments(session)? {
+            // Fully indexed rows need no host-coordinate overlay. Every other
+            // row requires the fingerprint of this exact shared row, including
+            // its summary, before a stored coordinate may be reused.
+            if crate::split_flat_block_id(&row.start_message_id).is_some()
+                && crate::split_flat_block_id(&row.end_message_id).is_some()
+            {
+                continue;
             }
-            Ok(true)
-        })
+            let mut matched = false;
+            for boundary in cached
+                .iter()
+                .filter(|boundary| boundary.sequence == row.sequence)
+            {
+                if boundary.identifies(&row)? {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn cached_context_boundaries(
@@ -132,19 +167,74 @@ impl McStore {
         let json: Option<String> = self.inner.with_conn(|conn| {
             conn.query_row("SELECT COALESCE(json_extract(meta, '$.resolved_compartment_boundaries'), '[]') FROM mc_cache_state WHERE session_id=?1", params![session], |row| row.get(0)).optional()
         })?;
-        json.map(|value| {
-            serde_json::from_str(&value).map_err(|error| McStoreError::Serde(error.to_string()))
-        })
-        .transpose()
-        .map(Option::unwrap_or_default)
+        let cached: Vec<ResolvedContextBoundary> = json
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| McStoreError::Serde(error.to_string()))
+            })
+            .transpose()?
+            .unwrap_or_default();
+        if cached.is_empty() {
+            return Ok(cached);
+        }
+        let rows = self.load_raw_context_compartments(session)?;
+        let mut valid = Vec::new();
+        for boundary in cached {
+            if let Some(row) = rows.iter().find(|row| row.sequence == boundary.sequence) {
+                if boundary.identifies(row)? {
+                    valid.push(boundary);
+                }
+            }
+        }
+        Ok(valid)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::single_store_domain::{ContextDomain, SqliteContextDomain};
     use crate::ModuleStateSyncRequest;
     use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+    use rusqlite::{Connection, Transaction};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
+
+    struct RewriteAfterSnapshot {
+        inner: SqliteContextDomain,
+        writer: Mutex<Connection>,
+        fired: AtomicBool,
+    }
+
+    impl ContextDomain for RewriteAfterSnapshot {
+        fn read(
+            &self,
+            callback: &mut dyn FnMut(&Connection) -> rusqlite::Result<()>,
+        ) -> Result<(), McStoreError> {
+            self.inner.read(callback)?;
+            if !self.fired.swap(true, Ordering::SeqCst) {
+                self.writer.lock().unwrap().execute_batch("BEGIN IMMEDIATE; UPDATE compartments SET end_message=3, end_message_id='m2' WHERE session_id='raw'; COMMIT;").unwrap();
+            }
+            Ok(())
+        }
+        fn write(
+            &self,
+            tables: &[&str],
+            callback: &mut dyn FnMut(&Transaction<'_>) -> rusqlite::Result<()>,
+        ) -> Result<(), McStoreError> {
+            self.inner.write(tables, callback)
+        }
+    }
+
+    fn install_snapshot_race(store: &McStore, dir: &std::path::Path) {
+        let path = dir.join("context.db");
+        store.install_context_domain(Arc::new(RewriteAfterSnapshot {
+            inner: SqliteContextDomain::open(&path).unwrap(),
+            writer: Mutex::new(Connection::open(&path).unwrap()),
+            fired: AtomicBool::new(false),
+        }));
+    }
 
     fn descriptor(path: &std::path::Path) -> StorageDescriptor {
         StorageDescriptor {
@@ -165,6 +255,7 @@ mod tests {
             source_end_message_id: "m4".into(),
             source_start_block_index: None,
             source_end_block_index: None,
+            source_row_identity: String::new(),
             start_message: 1,
             end_message: 4,
             start_message_id: "m1#0".into(),
@@ -284,6 +375,222 @@ mod tests {
         assert_eq!(read[0].start_message_id, "m1#1");
         assert_eq!(read[0].end_message_id, "m4#2");
         assert!(store.context_boundaries_resolved("raw", &[]).unwrap());
+    }
+
+    #[test]
+    fn snapshot_then_host_rewrite_must_not_commit_stale_coordinates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        install_snapshot_race(&store, dir.path());
+        let outcome = store.apply_authority_state_sync(request(&[boundary()], 0));
+        assert_eq!(
+            store.load_raw_context_compartments("raw").unwrap()[0].end_message_id,
+            "m2"
+        );
+        let cached = store.cached_context_boundaries("raw").unwrap();
+        assert!(
+            outcome.is_err() || cached.is_empty(),
+            "stale snapshot committed to store.db: {cached:?}"
+        );
+    }
+
+    #[test]
+    fn rewrite_between_module_passes_invalidates_overlay_and_recovers_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        store.with_context_conn_for_test(|tx| tx.execute_batch("UPDATE compartments SET end_message=3, end_message_id='m2' WHERE session_id='raw'")).unwrap();
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].end_message_id,
+            "m2"
+        );
+        assert!(store.apply_authority_state_sync(request(&[], 1)).is_err());
+        let mut changed = boundary();
+        changed.source_end_message = 3;
+        changed.source_end_message_id = "m2".into();
+        changed.end_message = 2;
+        changed.end_message_id = "m2#0".into();
+        let rows = [changed];
+        let mut update = request(&rows, 1);
+        update.seed_boundary_id = Some("m2#0");
+        store.apply_authority_state_sync(update).unwrap();
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].end_message_id,
+            "m2#0"
+        );
+        let mut defer = request(&[], 2);
+        defer.seed_boundary_id = Some("m2#0");
+        store.apply_authority_state_sync(defer).unwrap();
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].end_message_id,
+            "m2#0"
+        );
+    }
+
+    #[test]
+    fn host_rewrite_before_snapshot_is_rejected_and_next_pass_adopts_new_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store.with_context_conn_for_test(|tx| tx.execute_batch("UPDATE compartments SET end_message=3, end_message_id='m2' WHERE session_id='raw'")).unwrap();
+        assert!(store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap_err()
+            .to_string()
+            .contains("snapshot changed"));
+        let mut updated = boundary();
+        updated.source_end_message = 3;
+        updated.source_end_message_id = "m2".into();
+        updated.end_message = 2;
+        updated.end_message_id = "m2#0".into();
+        let rows = [updated];
+        let mut sync = request(&rows, 0);
+        sync.seed_boundary_id = Some("m2#0");
+        store.apply_authority_state_sync(sync).unwrap();
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].end_message_id,
+            "m2#0"
+        );
+        store
+            .apply_authority_state_sync({
+                let mut next = request(&[], 1);
+                next.seed_boundary_id = Some("m2#0");
+                next
+            })
+            .unwrap();
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].end_message_id,
+            "m2#0"
+        );
+    }
+
+    #[test]
+    fn same_count_rewrite_and_reconnect_do_not_serve_old_coordinates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        store.with_context_conn_for_test(|conn| conn.execute_batch(
+            "UPDATE compartments SET start_message=3, start_message_id='m2', end_message=5, end_message_id='m4' WHERE session_id='raw'"
+        )).unwrap();
+        assert!(!store
+            .context_boundaries_resolved("raw", &store.cached_context_boundaries("raw").unwrap())
+            .unwrap());
+        let served = store.load_compartments("raw").unwrap();
+        assert_eq!(
+            (served[0].start_message, served[0].start_message_id.as_str()),
+            (3, "m2")
+        );
+        let mut replacement = boundary();
+        replacement.source_start_message = 3;
+        replacement.source_start_message_id = "m2".into();
+        replacement.start_message = 2;
+        replacement.start_message_id = "m2#0".into();
+        store
+            .apply_authority_state_sync(request(&[replacement], 1))
+            .unwrap();
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].start_message_id,
+            "m2#0"
+        );
+        drop(store);
+        let reopened = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        reopened
+            .apply_authority_state_sync(request(&[], 2))
+            .unwrap();
+        assert_eq!(
+            reopened.load_compartments("raw").unwrap()[0].start_message_id,
+            "m2#0"
+        );
+    }
+
+    #[test]
+    fn coordinate_rebase_to_an_indexed_end_invalidates_old_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        store
+            .with_context_conn_for_test(|conn| {
+                conn.execute_batch(
+                    "UPDATE compartments SET end_block_index=1 WHERE session_id='raw'",
+                )
+            })
+            .unwrap();
+        let cached = store.cached_context_boundaries("raw").unwrap();
+        assert!(cached.is_empty());
+        assert!(!store
+            .context_boundaries_resolved("raw", &[boundary()])
+            .unwrap());
+        let served = store.load_compartments("raw").unwrap();
+        assert_eq!(served[0].end_message_id, "m4#1");
+        assert_eq!(served[0].end_message, 5);
+        assert!(store
+            .apply_authority_state_sync(request(&[boundary()], 1))
+            .unwrap_err()
+            .to_string()
+            .contains("snapshot changed"));
+    }
+
+    #[test]
+    fn same_coordinates_with_rewritten_content_invalidate_cached_row_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        let previously_cached = store.cached_context_boundaries("raw").unwrap();
+        store
+            .with_context_conn_for_test(|conn| {
+                conn.execute_batch(
+                    "UPDATE compartments SET content='rewritten summary' WHERE session_id='raw'",
+                )
+            })
+            .unwrap();
+        assert!(!store
+            .context_boundaries_resolved("raw", &previously_cached)
+            .unwrap());
+        assert!(store.cached_context_boundaries("raw").unwrap().is_empty());
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].content,
+            "rewritten summary"
+        );
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].end_message_id,
+            "m4"
+        );
+    }
+
+    #[test]
+    fn removed_tail_never_reappears_from_coordinate_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        store
+            .with_context_conn_for_test(|conn| {
+                conn.execute_batch("DELETE FROM compartments WHERE session_id='raw'")
+            })
+            .unwrap();
+        assert!(store.load_compartments("raw").unwrap().is_empty());
+        assert!(store
+            .load_raw_context_compartments("raw")
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .context_boundaries_resolved("raw", &store.cached_context_boundaries("raw").unwrap())
+            .unwrap());
     }
 
     #[test]

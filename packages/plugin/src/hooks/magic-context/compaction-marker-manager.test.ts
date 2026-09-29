@@ -205,6 +205,39 @@ afterEach(() => {
 });
 
 describe("applyDeferredCompactionMarker — outcomes", () => {
+    it("a native marker after a partial end cannot erase its uncovered suffix", () => {
+        const dataHome = useTempDataHome("partial-adjacent-marker-");
+        const opencodeDb = createOpenCodeDb(dataHome);
+        insertUserMessage(opencodeDb, "msg-boundary", "ses-partial-adjacent", 1_000);
+        insertUserMessage(opencodeDb, "msg-next", "ses-partial-adjacent", 2_000);
+        closeQuietly(opencodeDb);
+        const db = openDatabase();
+        insertCompartment(db, "ses-partial-adjacent", 10, "msg-boundary");
+        db.prepare(
+            "UPDATE compartments SET end_block_index=0 WHERE session_id='ses-partial-adjacent'",
+        ).run();
+        appendCompartments(db, "ses-partial-adjacent", [
+            {
+                sequence: 1,
+                startMessage: 11,
+                endMessage: 11,
+                startMessageId: "msg-next",
+                endMessageId: "msg-next",
+                title: "next",
+                content: "next",
+            },
+        ]);
+        db.prepare("INSERT INTO session_meta(session_id) VALUES ('ses-partial-adjacent')").run();
+        const outcome = applyDeferredCompactionMarker(
+            db,
+            "ses-partial-adjacent",
+            makePending({ ordinal: 11, endMessageId: "msg-next" }),
+            dataHome,
+        );
+        expect(outcome).toEqual({ kind: "stale-skip", reason: "partial-message-boundary" });
+        expect(getPersistedCompactionMarkerState(db, "ses-partial-adjacent")).toBeNull();
+    });
+
     it("never places a whole-message native marker over a partial block boundary", () => {
         const dataHome = useTempDataHome("partial-block-marker-");
         const opencodeDb = createOpenCodeDb(dataHome);
