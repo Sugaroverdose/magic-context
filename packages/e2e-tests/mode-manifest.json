@@ -3,6 +3,22 @@
     "header": "CI push workflows run the manifest-derived TypeScript suites and the Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh. The tag release workflow also runs the Rust invocation; both Rust lanes require public sibling path dependencies (../commons and ../subconscious).",
     "entries": [
         {
+            "path": "tests/opencode2/storage-boot-readiness.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "OpenCode 2 keeps host startup responsive while opening the shared SQLite store",
+            "contract_refs": ["TS-HARNESS"],
+            "hosts": ["opencode2"]
+        },
+        {
+            "path": "tests/opencode2/storage-busy.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "OpenCode 2 real SQLite locks exercise foreground retries, paired LKG replay and bounded background waits",
+            "contract_refs": ["TS-HARNESS"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/adv-identical-bytes-hard.test.ts",
             "tier": "excluded",
             "invocation": {
