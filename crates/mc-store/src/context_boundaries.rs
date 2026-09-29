@@ -228,6 +228,14 @@ mod tests {
         assert!(reopened
             .context_boundaries_resolved("raw", &reopened.cached_context_boundaries("raw").unwrap())
             .unwrap());
+        // On reconnect the host omits compartment coordinates already cached here.
+        reopened
+            .apply_authority_state_sync(request(&[], 1))
+            .unwrap();
+        assert_eq!(
+            reopened.load_compartments("raw").unwrap()[0].end_message_id,
+            "m4#0"
+        );
     }
     #[test]
     fn a_host_recompaction_can_shorten_shared_coverage_without_rewriting_ids() {

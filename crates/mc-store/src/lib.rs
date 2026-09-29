@@ -10664,7 +10664,14 @@ impl McStore {
         let mut seed_compartments = if request.seed_boundary_id.is_some()
             || !request.resolved_compartment_boundaries.is_empty()
         {
-            self.load_raw_context_compartments(request.session_id)?
+            if request.resolved_compartment_boundaries.is_empty() {
+                // Reconnecting hosts omit resolved compartment IDs/ordinals already cached here.
+                self.load_compartments(request.session_id)?
+            } else {
+                // Check new host coordinates against context.db's raw IDs and ordinals,
+                // not against a previous cache's substituted values.
+                self.load_raw_context_compartments(request.session_id)?
+            }
         } else {
             Vec::new()
         };

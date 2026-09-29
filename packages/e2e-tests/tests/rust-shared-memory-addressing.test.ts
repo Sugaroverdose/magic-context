@@ -1,14 +1,12 @@
 /// <reference types="bun-types" />
 
 /**
- * Rust mode renders workspace-shared memories owned by OTHER projects in
- * <project-memory>, but the module mirrors only the authority project's own
- * rows. Those ids therefore have no module counterpart and never gain one.
+ * Rust mode reads workspace-shared memories directly from context.db. The same
+ * ID is readable from a neighbouring project when workspace policy allows it,
+ * but that does not grant permission to mutate the neighbour's row.
  *
- * This scenario drives the real hermetic stack and asserts the three outcomes a
- * reader needs from such an id: a read is served, a mutation is refused with a
- * reason that is honestly permanent, and one such id in a batch no longer costs
- * the caller the ids that did resolve.
+ * This real-stack scenario checks shared reads, scoped write refusal, and
+ * per-ID results for a mixed batch.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -50,8 +48,7 @@ describe.skipIf(!rustPrereqs.ok)("rust mode workspace-shared memory addressing",
         async () => {
             const sessionId = await h.createSession();
 
-            // One TS-mode write bootstraps this project's identity and gives the
-            // module a row of its own to mirror.
+            // A TypeScript write initializes the project's identity and its shared memory row.
             let bootstrapWrite = false;
             h.mock.addMatcher((body) => {
                 if (
@@ -106,9 +103,8 @@ describe.skipIf(!rustPrereqs.ok)("rust mode workspace-shared memory addressing",
                 projectIdentity = ownRow?.project_path ?? "";
                 ownMemoryId = ownRow?.id ?? 0;
 
-                // A workspace that shares CONSTRAINTS between this project and a
-                // neighbour, plus the neighbour's shared memory: exactly the rows
-                // <project-memory> renders by host id and the module never mirrors.
+                // Share the CONSTRAINTS category between these projects and add a
+                // neighbouring project's memory. Both runtimes use the same context.db IDs.
                 seedDb.transaction(() => {
                     seedDb
                         .prepare(
@@ -153,22 +149,11 @@ describe.skipIf(!rustPrereqs.ok)("rust mode workspace-shared memory addressing",
             expect(foreignMemoryId).toBeGreaterThan(0);
 
             await h.restart({ rust: true });
-            await h.sendPrompt(sessionId, "activate Rust authority over the seeded memories");
+            await h.sendPrompt(sessionId, "activate Rust mode over the seeded shared memories");
             await h.waitForRustPasses(1);
 
-            // The foreign row has no module mapping, by construction.
-            const moduleDb = new Database(
-                join(h.env.dataDir, "cortexkit", "magic-context", "store.db"),
-                { readonly: true },
-            );
-            try {
-                const mirrored = moduleDb
-                    .prepare("SELECT COUNT(*) AS count FROM mc_memories WHERE host_row_id = ?")
-                    .get(foreignMemoryId) as { count: number };
-                expect(mirrored.count).toBe(0);
-            } finally {
-                moduleDb.close();
-            }
+            expect(h.contextDb().prepare("SELECT project_path FROM memories WHERE id=?").get(foreignMemoryId))
+                .toEqual({ project_path: FOREIGN_PROJECT });
 
             let toolUseCount = 0;
             const invokeMemoryTool = async (
@@ -239,8 +224,8 @@ describe.skipIf(!rustPrereqs.ok)("rust mode workspace-shared memory addressing",
                 },
                 "try to curate the shared memory through ctx_memory",
             );
-            expect(mutation).toContain("not owned by this project's module");
-            expect(mutation).toContain("retrying will not help");
+            expect(mutation).toContain(`Memory with ID ${foreignMemoryId} was not found`);
+            expect(mutation).not.toContain("Updated memory");
 
             const mixed = await invokeMemoryTool(
                 { action: "get", ids: [ownMemoryId, foreignMemoryId, 987_654] },

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { moduleRawBlockMappings } from "../../plugin/src/hooks/magic-context/module-wire";
 import { RustTestHarness } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
 
@@ -80,6 +81,34 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
                 }
                 await Bun.sleep(200);
             }
+
+            // Native markers discard an entire message; an indexed end normally forbids
+            // that. Prove this fixture's end is the message's final CK block before
+            // setting NULL to declare whole-message coverage. No suffix is discarded.
+            h.mock.setDefault({ text: "whole-boundary probe", usage: { input_tokens: 500, output_tokens: 20 } });
+            const contextWriter = new Database(join(h.env.dataDir, "cortexkit", "magic-context", "context.db"));
+            contextWriter.exec("PRAGMA busy_timeout=5000");
+            try {
+                for (let attempt = 0; attempt < 5; attempt++) {
+                    await Bun.sleep(100);
+                    const raw = await h.listMessages(sessionId);
+                    const rows = contextWriter.query("SELECT id,end_message_id,end_block_index FROM compartments WHERE session_id=? AND end_block_index IS NOT NULL").all(sessionId) as Array<{id:number,end_message_id:string,end_block_index:number}>;
+                    for (const row of rows) {
+                        const message = raw.find(message => message.info.id === row.end_message_id);
+                        expect(message).toBeDefined();
+                        const parts = message!.parts.filter(part => part.type !== "step-start" && part.type !== "step-finish");
+                        expect(parts.length).toBeGreaterThan(0);
+                        expect(parts.every(part => part.type === "text")).toBe(true);
+                        expect(row.end_block_index).toBe(moduleRawBlockMappings({ id: message!.info.id, role: message!.info.role, parts: message!.parts } as never).at(-1)?.blockIndex);
+                        contextWriter.query("UPDATE compartments SET end_block_index=NULL WHERE id=?").run(row.id);
+                    }
+                    // Restart the host so state_sync refreshes its cache after the fixture change.
+                    await h.restart({ rust: true });
+                    await h.sendPrompt(sessionId, `publish certified whole-message marker ${attempt}`);
+                    const count = (opencodeDb.query("SELECT count(*) AS n FROM part WHERE session_id=? AND json_extract(data,'$.type')='compaction' AND json_extract(data,'$.auto')=1").get(sessionId) as {n:number}).n;
+                    if (count > 0) break;
+                }
+            } finally { contextWriter.close(); }
 
             const summaryRows = opencodeDb
                 .prepare(
