@@ -192,3 +192,35 @@ it("keeps a partial end-boundary message and its uncovered blocks raw on direct 
         expect(pass(db, make(), idOf(2), false, sourceOrder)).toBe(digest);
     }
 });
+
+it("keeps large tool, image, and signed thinking suffixes unchanged through append-only defers", () => {
+    emptyDataHome();
+    const db = contextDb();
+    db.prepare(
+        "INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, end_block_index, title, content, created_at) VALUES (?, 1, 1, 2, ?, ?, 0, 'partial', 'covered block', 1)",
+    ).run(SESSION_ID, idOf(1), idOf(2));
+    const suffixes = [
+        { type: "tool", content: "TOOL_UNCOVERED_" + "x".repeat(128_000) },
+        { type: "file", mime: "image/png", url: "data:image/png;base64," + "A".repeat(8_192) },
+        { type: "thinking", thinking: "SIGNED_UNCOVERED", signature: "signed-original-bytes" },
+    ];
+    for (const suffix of suffixes) {
+        for (const ordered of [false, true]) {
+            const make = (append: boolean) => {
+                const messages = liveWindow(1, append ? 4 : 3);
+                messages[1].parts.push(structuredClone(suffix));
+                return messages;
+            };
+            const order = (messages: MessageLike[]) => ordered ? sourceOrderOf(messages) : undefined;
+            const first = make(false);
+            pass(db, first, idOf(2), true, order(first));
+            const prefix = JSON.stringify(first);
+            expect(first.filter((message) => message.info.id === idOf(2))).toHaveLength(1);
+            expect(first.find((message) => message.info.id === idOf(2))?.parts[1]).toEqual(suffix);
+            const defer = make(true);
+            pass(db, defer, idOf(2), false, order(defer));
+            expect(JSON.stringify(defer.slice(0, first.length))).toBe(prefix);
+            expect(defer.filter((message) => message.info.id === idOf(2))).toHaveLength(1);
+        }
+    }
+});

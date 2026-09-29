@@ -287,6 +287,98 @@ mod tests {
     }
 
     #[test]
+    fn same_count_rewrite_and_reconnect_do_not_serve_old_coordinates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        store.with_context_conn_for_test(|conn| conn.execute_batch(
+            "UPDATE compartments SET start_message=3, start_message_id='m2', end_message=5, end_message_id='m4' WHERE session_id='raw'"
+        )).unwrap();
+        assert!(!store
+            .context_boundaries_resolved("raw", &store.cached_context_boundaries("raw").unwrap())
+            .unwrap());
+        let served = store.load_compartments("raw").unwrap();
+        assert_eq!(
+            (served[0].start_message, served[0].start_message_id.as_str()),
+            (3, "m2")
+        );
+        let mut replacement = boundary();
+        replacement.source_start_message = 3;
+        replacement.source_start_message_id = "m2".into();
+        replacement.start_message = 2;
+        replacement.start_message_id = "m2#0".into();
+        store
+            .apply_authority_state_sync(request(&[replacement], 1))
+            .unwrap();
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].start_message_id,
+            "m2#0"
+        );
+        drop(store);
+        let reopened = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        reopened
+            .apply_authority_state_sync(request(&[], 2))
+            .unwrap();
+        assert_eq!(
+            reopened.load_compartments("raw").unwrap()[0].start_message_id,
+            "m2#0"
+        );
+    }
+
+    #[test]
+    fn coordinate_rebase_to_an_indexed_end_invalidates_old_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        store
+            .with_context_conn_for_test(|conn| {
+                conn.execute_batch(
+                    "UPDATE compartments SET end_block_index=1 WHERE session_id='raw'",
+                )
+            })
+            .unwrap();
+        let cached = store.cached_context_boundaries("raw").unwrap();
+        assert!(!store.context_boundaries_resolved("raw", &cached).unwrap());
+        let served = store.load_compartments("raw").unwrap();
+        assert_eq!(served[0].end_message_id, "m4#1");
+        assert_eq!(served[0].end_message, 5);
+        assert!(store
+            .apply_authority_state_sync(request(&cached, 1))
+            .unwrap_err()
+            .to_string()
+            .contains("snapshot changed"));
+    }
+
+    #[test]
+    fn removed_tail_never_reappears_from_coordinate_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        store
+            .with_context_conn_for_test(|conn| {
+                conn.execute_batch("DELETE FROM compartments WHERE session_id='raw'")
+            })
+            .unwrap();
+        assert!(store.load_compartments("raw").unwrap().is_empty());
+        assert!(store
+            .load_raw_context_compartments("raw")
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .context_boundaries_resolved("raw", &store.cached_context_boundaries("raw").unwrap())
+            .unwrap());
+    }
+
+    #[test]
     fn changed_shared_boundaries_do_not_reuse_or_adopt_stale_cache_coordinates() {
         let dir = tempfile::tempdir().unwrap();
         let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
