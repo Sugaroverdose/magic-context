@@ -667,6 +667,29 @@ fn a_second_run_reports_already_migrated_and_writes_nothing() {
 }
 
 #[test]
+fn a_store_upgraded_to_62_remains_recognized_as_migrated() {
+    let fixture = Fixture::new(Extras::default());
+    fixture.migrate();
+    let descriptor = cortexkit_store_types::StorageDescriptor {
+        module_id: "magic-context".to_string(),
+        storage_namespace: "magic-context".to_string(),
+        isolation: cortexkit_store_types::Isolation::Module,
+        backend: cortexkit_store_types::StorageBackend::Sqlite {
+            path: fixture.store_db.to_string_lossy().into_owned(),
+        },
+    };
+    drop(mc_store::McStore::open(&descriptor).unwrap());
+    assert_eq!(
+        schema::recorded_store_version(&fixture.store()).unwrap(),
+        62
+    );
+    let before = fixture.digest();
+    let report = run(&fixture.options("backup-again"), &mut NoHooks).unwrap();
+    assert_eq!(report.status, "already_migrated");
+    assert_eq!(fixture.digest(), before);
+}
+
+#[test]
 fn a_dry_run_reports_and_leaves_both_files_unchanged() {
     let fixture = Fixture::new(Extras::default());
     let before = fixture.digest();
