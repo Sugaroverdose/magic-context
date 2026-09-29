@@ -70,7 +70,12 @@ for (const seconds of [7, 60]) {
             await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(80000) });
             const requests = () => host.mock.requests().filter(request => request.body.model === "mock-model" && JSON.stringify(request).includes(text));
             if (seconds === 7) {
+                // session.wait can observe an idle state before the resumed hook has
+                // delivered its request. Wait for the actual provider capture instead.
+                const deadline = started + 80_000;
+                while (requests().length === 0 && Date.now() < deadline) await Bun.sleep(50);
                 expect(requests().length).toBeGreaterThan(0);
+                expect(JSON.stringify(requests())).toContain("<session-history>");
                 expect(Date.now() - started).toBeGreaterThan(5000);
             } else {
                 expect(requests()).toHaveLength(0);
@@ -94,7 +99,7 @@ for (const seconds of [7, 60]) {
             await locker.exited;
         } catch (error) {
             console.error(`storage-busy fixture ${fixture.root}`, error, host.stderr());
-            console.error(readFileSync(logPath, "utf8"));
+            if (existsSync(logPath)) console.error(readFileSync(logPath, "utf8"));
             throw error;
         } finally {
             locker?.kill();

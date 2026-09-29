@@ -61,6 +61,16 @@ function thrownBy(run: () => unknown): unknown {
 }
 
 describe("createV2StorageGate", () => {
+    it("restores the steady-state busy timeout after the nonblocking default open", async () => {
+        const dataHome = mkdtempSync(join(tmpdir(), "v2-storage-gate-timeout-"));
+        tempDirs.push(dataHome);
+        process.env.XDG_DATA_HOME = dataHome;
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
+        __setRpcIdentityTestHooks({ processListExecFileSync: (() => "") as typeof execFileSync });
+        const database = await createV2StorageGate().probe();
+        expect(database).toBeDefined();
+        expect(database!.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 5000 });
+    });
     it("re-attempts a failed open at most once per interval and names the failure", async () => {
         const clock = manualClock();
         let opens = 0;

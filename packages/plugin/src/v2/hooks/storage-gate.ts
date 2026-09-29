@@ -7,7 +7,10 @@ import {
     getDatabasePersistenceError,
     isDatabasePersisted,
 } from "../../features/magic-context/storage";
-import { openDatabaseAsync } from "../../features/magic-context/storage-db";
+import {
+    BOOT_SQLITE_BUSY_TIMEOUT_MS,
+    openDatabaseAsync,
+} from "../../features/magic-context/storage-db";
 import { describeStorageUnavailability } from "../../features/magic-context/storage-unavailable-reason";
 import { getErrorMessage } from "../../shared/error-message";
 
@@ -53,7 +56,15 @@ export interface V2StorageGateOptions {
  * cause is gone.
  */
 export function createV2StorageGate(options: V2StorageGateOptions = {}): V2StorageGate {
-    const open = options.open ?? (() => openDatabaseAsync({ busyTimeoutMs: 0 }));
+    const open =
+        options.open ??
+        (async () => {
+            const opened = await openDatabaseAsync({ busyTimeoutMs: 0 });
+            // Boot probes must yield instead of blocking HTTP. Once ready, restore the
+            // normal per-attempt wait used by foreground retries and background writers.
+            opened?.exec(`PRAGMA busy_timeout=${BOOT_SQLITE_BUSY_TIMEOUT_MS}`);
+            return opened;
+        });
     const now = options.now ?? (() => Date.now());
     const interval = options.reopenIntervalMs ?? V2_STORAGE_REOPEN_INTERVAL_MS;
     let db: ContextDatabase | undefined;

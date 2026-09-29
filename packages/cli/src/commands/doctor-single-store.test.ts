@@ -257,3 +257,9 @@ test("successful engine diagnostics retain per-step times", () => {
     expect(run()).toBe(0);
     expect(output()).toContain("transaction: 1.2s");
 });
+
+test("completed migration prints transaction and vacuum timings from the engine report", () => {
+    process.env.FAKE_REPORT = JSON.stringify({ ...report, transaction_ms: 123, vacuum_ms: 45 });
+    expect(run()).toBe(0);
+    expect(output()).toContain("Transaction: 123 ms; vacuum: 45 ms");
+});

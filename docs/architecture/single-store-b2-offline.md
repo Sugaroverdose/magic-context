@@ -326,7 +326,7 @@ Any failure rolls back both files.
 
 ### 2.12 Report
 
-The report prints, per project: the winner, the per-table counts, orphans kept, and whether the project was refused or skipped. It also prints the sample size and result of the render check, the number of sessions reset, the backup path, and `store.db` sizes before and after `VACUUM`. The same JSON goes into `single_store_state.report_json`.
+The report prints, per project: the winner, the per-table counts, orphans kept, and whether the project was refused or skipped. It also prints the sample size and result of the render check, the number of sessions reset, the backup path, and `store.db` sizes before and after `VACUUM`. The transaction's report goes into `single_store_state.report_json` before commit. The returned report additionally contains the completed transaction/VACUUM timings and post-VACUUM size; the CLI prints those final measurements rather than starting another metadata write after commit.
 
 ## 3. Runtime after the migration
 
@@ -437,7 +437,7 @@ A cold switch from TypeScript to Rust resolves whole-message boundaries against 
 
 Only boundary coordinates and date labels travel in `resolved_compartment_boundaries` metadata: no summaries, facts, memories, or notes. The module checks the source coordinates against the shared row and persists the read-coordinate cache in existing session metadata. Cached coordinates apply only while the original raw IDs, block indices, and ordinals still match. The inventory reports whether this cache remains valid, avoiding a new raw-history scan on a warm seed. Restart does not discard it. This is a cache, not another authoritative compartment table.
 
-TypeScript conservatively keeps a message raw whenever its covered end has a non-null block index; it never drops the uncovered blocks. Both direct-ID and immutable-source-order trimming obey this rule. Native host compaction markers cannot represent partial messages and must not advance over such an end. Pi retains the prefix at a partial boundary rather than letting its split-tool orphan cleanup discard an uncovered suffix. This can duplicate covered content, but cannot lose uncovered content.
+TypeScript conservatively keeps a message raw whenever its covered end has a non-null block index; it never drops the uncovered blocks. Both direct-ID and immutable-source-order trimming obey this rule. Whole-message native compaction markers cannot represent partial ends and must not advance over them. OpenCode 2's module-boundary record instead trims only before the nearest user turn, retaining that turn and its partial boundary message. Pi retains the prefix at a partial boundary rather than letting its split-tool orphan cleanup discard an uncovered suffix. This can duplicate covered content, but cannot lose uncovered content.
 
 Other consumers: `ctx_expand` uses ordinal ranges and can safely return the whole boundary message; dates now resolve by canonical raw IDs; same-host cloning and recompaction retain indices. Dashboard readers display summaries and inclusive ordinal spans, not permission to discard raw messages. Cross-host OpenCode-to-Pi conversion refuses indexed boundaries before staging or journalling because its current entry map cannot faithfully translate partial blocks; TypeScript recompaction to whole-message boundaries is required first.
 

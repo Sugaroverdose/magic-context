@@ -93,6 +93,8 @@ interface Report {
     render_check: { sampled: number; passed: boolean | number; seed: number | string };
     sessions_reset: number;
     normalized_context_compartments?: number;
+    transaction_ms?: number | null;
+    vacuum_ms?: number | null;
     store_db_bytes: { before: number; after: number };
     refusal?: { code: string; message: string };
 }
@@ -275,6 +277,11 @@ export function runDoctorSingleStore(
         if (!["migrated", "already_migrated", "dry_run", "refused"].includes(report.status))
             throw new Error("Invalid engine report status");
         if (report.backup_dir) undo(report.backup_dir, data, deps.print);
+        if (report.transaction_ms != null) {
+            deps.print(
+                `Transaction: ${report.transaction_ms} ms; vacuum: ${report.vacuum_ms == null ? "not run" : `${report.vacuum_ms} ms`}`,
+            );
+        }
         if (report.status === "migrated" || report.status === "dry_run") {
             deps.print(
                 `Normalized existing context compartment boundaries: ${report.normalized_context_compartments ?? 0}`,
