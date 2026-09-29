@@ -3,6 +3,7 @@
 use crate::{CompartmentBoundary, McStore, McStoreError, StoredCompartment};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Split the module's `<raw-message-id>#<block-index>` into the shared table's two columns.
 pub fn canonical_boundary_parts(id: &str) -> rusqlite::Result<(&str, Option<i64>)> {
@@ -30,12 +31,21 @@ pub struct ResolvedContextBoundary {
     pub source_start_block_index: Option<i64>,
     #[serde(default)]
     pub source_end_block_index: Option<i64>,
+    #[serde(default)]
+    pub source_row_identity: String,
     pub start_message: i64,
     pub end_message: i64,
     pub start_message_id: String,
     pub end_message_id: String,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+}
+
+/// Hash the complete compartment row: changing its summary without moving its
+/// message boundaries must still invalidate cached host-to-module coordinates.
+fn row_identity(row: &StoredCompartment) -> Result<String, McStoreError> {
+    let bytes = serde_json::to_vec(row).map_err(|error| McStoreError::Serde(error.to_string()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 impl ResolvedContextBoundary {
@@ -74,6 +84,17 @@ impl ResolvedContextBoundary {
                 self.source_end_block_index,
                 &row.end_message_id,
             )
+    }
+
+    pub(crate) fn bind_to_row(&mut self, row: &StoredCompartment) -> Result<(), McStoreError> {
+        self.source_row_identity = row_identity(row)?;
+        Ok(())
+    }
+
+    pub(crate) fn identifies(&self, row: &StoredCompartment) -> Result<bool, McStoreError> {
+        Ok(!self.source_row_identity.is_empty()
+            && self.matches(row)
+            && self.source_row_identity == row_identity(row)?)
     }
 
     pub(crate) fn apply(&self, row: &mut StoredCompartment) {
@@ -132,11 +153,25 @@ impl McStore {
         let json: Option<String> = self.inner.with_conn(|conn| {
             conn.query_row("SELECT COALESCE(json_extract(meta, '$.resolved_compartment_boundaries'), '[]') FROM mc_cache_state WHERE session_id=?1", params![session], |row| row.get(0)).optional()
         })?;
-        json.map(|value| {
-            serde_json::from_str(&value).map_err(|error| McStoreError::Serde(error.to_string()))
-        })
-        .transpose()
-        .map(Option::unwrap_or_default)
+        let cached: Vec<ResolvedContextBoundary> = json
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| McStoreError::Serde(error.to_string()))
+            })
+            .transpose()?
+            .unwrap_or_default();
+        if cached.is_empty() {
+            return Ok(cached);
+        }
+        let rows = self.load_raw_context_compartments(session)?;
+        let mut valid = Vec::new();
+        for boundary in cached {
+            if let Some(row) = rows.iter().find(|row| row.sequence == boundary.sequence) {
+                if boundary.identifies(row)? {
+                    valid.push(boundary);
+                }
+            }
+        }
+        Ok(valid)
     }
 }
 
@@ -206,6 +241,7 @@ mod tests {
             source_end_message_id: "m4".into(),
             source_start_block_index: None,
             source_end_block_index: None,
+            source_row_identity: String::new(),
             start_message: 1,
             end_message: 4,
             start_message_id: "m1#0".into(),
@@ -328,7 +364,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "KNOWN DEFECT: shared row changes after context snapshot but before store cache commit"]
     fn snapshot_then_host_rewrite_must_not_commit_stale_coordinates() {
         let dir = tempfile::tempdir().unwrap();
         let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
@@ -477,15 +512,44 @@ mod tests {
             })
             .unwrap();
         let cached = store.cached_context_boundaries("raw").unwrap();
-        assert!(!store.context_boundaries_resolved("raw", &cached).unwrap());
+        assert!(cached.is_empty());
+        assert!(!store
+            .context_boundaries_resolved("raw", &[boundary()])
+            .unwrap());
         let served = store.load_compartments("raw").unwrap();
         assert_eq!(served[0].end_message_id, "m4#1");
         assert_eq!(served[0].end_message, 5);
         assert!(store
-            .apply_authority_state_sync(request(&cached, 1))
+            .apply_authority_state_sync(request(&[boundary()], 1))
             .unwrap_err()
             .to_string()
             .contains("snapshot changed"));
+    }
+
+    #[test]
+    fn same_coordinates_with_rewritten_content_invalidate_cached_row_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        store
+            .with_context_conn_for_test(|conn| {
+                conn.execute_batch(
+                    "UPDATE compartments SET content='rewritten summary' WHERE session_id='raw'",
+                )
+            })
+            .unwrap();
+        assert!(store.cached_context_boundaries("raw").unwrap().is_empty());
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].content,
+            "rewritten summary"
+        );
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].end_message_id,
+            "m4"
+        );
     }
 
     #[test]

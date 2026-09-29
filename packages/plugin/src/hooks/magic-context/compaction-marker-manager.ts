@@ -24,7 +24,7 @@ import {
 } from "../../features/magic-context/compaction-marker";
 import {
     getCompartmentsByEndMessageId,
-    isPartialCompartmentEnd,
+    hasPartialCompartmentEndThrough,
 } from "../../features/magic-context/compartment-storage";
 import {
     getPersistedCompactionMarkerState,
@@ -259,7 +259,7 @@ export function applyDeferredCompactionMarker(
             trustedBoundary.endMessageId === pending.endMessageId;
         // Host compaction markers discard whole messages. An indexed end may leave
         // later blocks unsummarized, so such a marker would lose those blocks.
-        const validation = isPartialCompartmentEnd(db, sessionId, pending.endMessageId)
+        const validation = hasPartialCompartmentEndThrough(db, sessionId, pending.ordinal)
             ? "partial-message-boundary"
             : responseFencesTarget
               ? "ok"
@@ -395,6 +395,9 @@ export function updateCompactionMarkerAfterPublication(
         return false;
     }
 
+    if (hasPartialCompartmentEndThrough(db, sessionId, lastCompartmentEnd)) {
+        return false;
+    }
     const existing = getPersistedCompactionMarkerState(db, sessionId);
     const removedSummaryMessageId = existing?.summaryMessageId ?? null;
 

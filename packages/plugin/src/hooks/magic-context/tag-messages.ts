@@ -872,8 +872,23 @@ export function tagMessages(
                     message,
                     setContent: (content) => {
                         if (textPart.text === content) return false;
+                        const partialEnd = messageId
+                            ? (db
+                                  .prepare(
+                                      "SELECT end_block_index FROM compartments WHERE session_id=? AND end_message_id=? AND end_block_index IS NOT NULL LIMIT 1",
+                                  )
+                                  .get(sessionId, messageId) as
+                                  | { end_block_index: number }
+                                  | undefined)
+                            : undefined;
+                        if (partialEnd && partIndex > partialEnd.end_block_index) return false;
                         textPart.text = content;
                         for (const tp of thinkingParts) {
+                            if (
+                                partialEnd &&
+                                message.parts.indexOf(tp) > partialEnd.end_block_index
+                            )
+                                continue;
                             if (tp.thinking !== undefined) tp.thinking = "[cleared]";
                             if (tp.text !== undefined) tp.text = "[cleared]";
                         }
@@ -1009,6 +1024,16 @@ export function tagMessages(
                                 ? (prev as { text: string }).text
                                 : "";
                         if (prevText === content) return false;
+                        if (messageId) {
+                            const partialEnd = db
+                                .prepare(
+                                    "SELECT end_block_index FROM compartments WHERE session_id=? AND end_message_id=? AND end_block_index IS NOT NULL LIMIT 1",
+                                )
+                                .get(sessionId, messageId) as
+                                | { end_block_index: number }
+                                | undefined;
+                            if (partialEnd && partIndex > partialEnd.end_block_index) return false;
+                        }
                         messageParts[partIndex] = {
                             type: "text",
                             text: content,
@@ -1032,7 +1057,30 @@ export function tagMessages(
     logTransformTiming(sessionId, "tag.assignToolTag", performance.now() - accAssignToolTag);
     logTransformTiming(sessionId, "tag.saveSource", performance.now() - accSaveSource);
 
+    const partialEnds =
+        toolTagByCallId.size > 0
+            ? new Map(
+                  (
+                      db
+                          .prepare(
+                              "SELECT end_message_id, end_block_index FROM compartments WHERE session_id=? AND end_block_index IS NOT NULL",
+                          )
+                          .all(sessionId) as Array<{
+                          end_message_id: string;
+                          end_block_index: number;
+                      }>
+                  ).map((row) => [row.end_message_id, row.end_block_index]),
+              )
+            : new Map<string, number>();
     for (const [compositeKey, tagId] of toolTagByCallId) {
+        const occurrences = toolCallIndex.get(compositeKey)?.occurrences ?? [];
+        const touchesUncoveredPart = occurrences.some(({ message, part }) => {
+            const messageId = message.info.id;
+            if (typeof messageId !== "string") return false;
+            const partialEnd = partialEnds.get(messageId);
+            return partialEnd !== undefined && message.parts.indexOf(part) > partialEnd;
+        });
+        if (touchesUncoveredPart) continue;
         const thinkingParts = toolThinkingByCallId.get(compositeKey) ?? [];
         targets.set(
             tagId,

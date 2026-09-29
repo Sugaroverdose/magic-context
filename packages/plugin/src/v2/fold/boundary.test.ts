@@ -162,16 +162,29 @@ describe("createV2RustCompactionMarkerStrategy", () => {
 });
 
 describe("trimToRecordedBoundary", () => {
-    it("KNOWN DEFECT: a V2 recorded boundary after an indexed end retains its uncovered blocks", () => {
+    it("a V2 recorded boundary after an indexed end retains its uncovered blocks", () => {
         const db = useTempDataHome();
         getOrCreateSessionMeta(db, "ses-indexed-v2");
-        db.prepare("INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, end_block_index, title, content, created_at) VALUES ('ses-indexed-v2', 0, 1, 4, 'u1', 'a2', 0, 'partial', 'covered', 1)").run();
+        db.prepare(
+            "INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, end_block_index, title, content, created_at) VALUES ('ses-indexed-v2', 0, 1, 4, 'u1', 'a2', 0, 'partial', 'covered', 1)",
+        ).run();
         const strategy = createV2RustCompactionMarkerStrategy((_sessionId, endMessageId) =>
-            resolveBoundaryUserMessage(history, endMessageId));
-        strategy.applyDeferred(db, "ses-indexed-v2", { ordinal: 7, endMessageId: "a4", publishedAt: Date.now() });
+            resolveBoundaryUserMessage(history, endMessageId),
+        );
+        strategy.applyDeferred(db, "ses-indexed-v2", {
+            ordinal: 7,
+            endMessageId: "a4",
+            publishedAt: Date.now(),
+        });
         const messages = [
             { id: "u1", parts: [{ type: "text", text: "before" }] },
-            { id: "a2", parts: [{ type: "text", text: "covered" }, { type: "file", url: "UNCOVERED_FILE" }] },
+            {
+                id: "a2",
+                parts: [
+                    { type: "text", text: "covered" },
+                    { type: "file", url: "UNCOVERED_FILE" },
+                ],
+            },
             { id: "a3", parts: [{ type: "text", text: "after" }] },
             { id: "u3", parts: [{ type: "text", text: "tail" }] },
         ];
@@ -180,7 +193,13 @@ describe("trimToRecordedBoundary", () => {
         const prefix = JSON.stringify(messages);
         const defer = [
             { id: "u1", parts: [{ type: "text", text: "before" }] },
-            { id: "a2", parts: [{ type: "text", text: "covered" }, { type: "file", url: "UNCOVERED_FILE" }] },
+            {
+                id: "a2",
+                parts: [
+                    { type: "text", text: "covered" },
+                    { type: "file", url: "UNCOVERED_FILE" },
+                ],
+            },
             { id: "a3", parts: [{ type: "text", text: "after" }] },
             { id: "u3", parts: [{ type: "text", text: "tail" }] },
             { id: "a4", parts: [{ type: "text", text: "append" }] },

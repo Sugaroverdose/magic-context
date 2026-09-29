@@ -209,19 +209,55 @@ describe("Pi memory budget selection", () => {
 });
 
 describe("trimPiMessagesToBoundary", () => {
-    it("context_edit of a partially covered entry retains the edited suffix and does not trim across it", () => {
-        const edited = [user("old"), user("edited UNCOVERED_SUFFIX"), user("append")];
-        const ids = ["old", "partial", "append"];
-        expect(__test.trimPiMessagesToBoundary(edited, ids, "partial", true, "ses-edit", true)).toBe(0);
-        expect(JSON.stringify(edited)).toContain("UNCOVERED_SUFFIX");
-        const prefix = JSON.stringify(edited);
-        const defer = [user("old"), user("edited UNCOVERED_SUFFIX"), user("append"), user("later")];
-        expect(__test.trimPiMessagesToBoundary(defer, [...ids, "later"], "partial", true, "ses-edit", true)).toBe(0);
-        expect(JSON.stringify(defer.slice(0, edited.length))).toBe(prefix);
-        const removedByHost = [user("old"), user("append")];
-        expect(__test.trimPiMessagesToBoundary(removedByHost, ["old", "append"], "partial", true, "ses-edit", true)).toBe(0);
-        expect(removedByHost).toHaveLength(2);
-    });
+	it("context_edit of a partially covered entry retains the edited suffix and does not trim across it", () => {
+		const edited = [
+			user("old"),
+			user("edited UNCOVERED_SUFFIX"),
+			user("append"),
+		];
+		const ids = ["old", "partial", "append"];
+		expect(
+			__test.trimPiMessagesToBoundary(
+				edited,
+				ids,
+				"partial",
+				true,
+				"ses-edit",
+				true,
+			),
+		).toBe(0);
+		expect(JSON.stringify(edited)).toContain("UNCOVERED_SUFFIX");
+		const prefix = JSON.stringify(edited);
+		const defer = [
+			user("old"),
+			user("edited UNCOVERED_SUFFIX"),
+			user("append"),
+			user("later"),
+		];
+		expect(
+			__test.trimPiMessagesToBoundary(
+				defer,
+				[...ids, "later"],
+				"partial",
+				true,
+				"ses-edit",
+				true,
+			),
+		).toBe(0);
+		expect(JSON.stringify(defer.slice(0, edited.length))).toBe(prefix);
+		const removedByHost = [user("old"), user("append")];
+		expect(
+			__test.trimPiMessagesToBoundary(
+				removedByHost,
+				["old", "append"],
+				"partial",
+				true,
+				"ses-edit",
+				true,
+			),
+		).toBe(0);
+		expect(removedByHost).toHaveLength(2);
+	});
 	it("sweeps non-contiguous toolResults whose assistant toolCall was trimmed", () => {
 		const messages = [
 			assistant(["call-a"]),
