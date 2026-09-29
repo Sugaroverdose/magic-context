@@ -2708,10 +2708,10 @@ pub fn run(options: &EngineOptions, hooks: &mut dyn EngineHooks) -> Result<Repor
 
     let store_conn = open_existing(&options.store_db)?;
     let store_version = schema::recorded_store_version(&store_conn)?;
-    if store_version > schema::SINGLE_STORE_MIGRATION_VERSION {
+    if store_version > mc_store::LATEST_MIGRATION_VERSION {
         return refuse(
             VERSION_MISMATCH,
-            format!("store.db is v{store_version}, newer than this ck-mc knows (v{}); context.db is v{version}", schema::SINGLE_STORE_MIGRATION_VERSION),
+            format!("store.db is v{store_version}, newer than this ck-mc knows (v{}); context.db is v{version}", mc_store::LATEST_MIGRATION_VERSION),
         );
     }
     let marker = if schema::table_exists(&store_conn, "main", "mc_privilege_state")? {
@@ -2722,10 +2722,10 @@ pub fn run(options: &EngineOptions, hooks: &mut dyn EngineHooks) -> Result<Repor
     let context_migrated = context_state
         .as_ref()
         .is_some_and(|state| state.state == "migrated");
-    if store_version == schema::SINGLE_STORE_MIGRATION_VERSION {
+    if store_version >= schema::SINGLE_STORE_MIGRATION_VERSION {
         if !marker.0 {
             return Err(split_refusal(
-                "store.db is at migration 61 without its marker".into(),
+                format!("store.db is at migration {store_version} without its marker"),
                 &context_state,
                 &marker,
             ));
