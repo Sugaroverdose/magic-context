@@ -1754,7 +1754,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "token_budget": {
-                  "description": "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -1775,7 +1775,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "token_budget": {
-                  "description": "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -1796,7 +1796,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "token_budget": {
-                  "description": "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -1817,7 +1817,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "token_budget": {
-                  "description": "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -1838,7 +1838,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "token_budget": {
-                  "description": "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -1859,7 +1859,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "token_budget": {
-                  "description": "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -1881,7 +1881,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "token_budget": {
-                  "description": "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -1911,7 +1911,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "token_budget": {
-                  "description": "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -1939,7 +1939,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "token_budget": {
-                  "description": "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -1961,7 +1961,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "token_budget": {
-                  "description": "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -1991,7 +1991,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "token_budget": {
-                  "description": "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -2020,7 +2020,7 @@
                   "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
                 "token_budget": {
-                  "description": "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
