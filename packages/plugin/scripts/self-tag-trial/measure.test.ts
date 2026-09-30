@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { measure, hasMisplacedTextTag, type Event } from "./measure";
-import { sanitizeProviderError } from "./live-adapter";
+import { sanitizeProviderError, generationSettings } from "./live-adapter";
 
 test("provider errors redact authorization and bare credential values", () => {
     const fake = "fixture-secret-not-a-real-credential";
@@ -49,4 +49,9 @@ test("canonical prefix, malformed notation and incidental tags are measured sepa
     const rows = measure(events, "session", "B", "literal-head", id => id === "good" ? 2 : 3);
     expect(rows[0].correct).toBe(true); expect(rows[0].byteIdentity).toBe(true);
     expect(rows[1].malformed).toBe(true); expect(rows[1].misplaced).toBe(true); expect(rows[1].wellFormed).toBe(false);
+});
+
+test("only D enables thinking and raises the relay output cap", () => {
+    for (const variant of ["A", "B", "C"] as const) expect(generationSettings(variant)).toEqual({ thinking: { type: "disabled" }, max_tokens: 512 });
+    expect(generationSettings("D")).toEqual({ thinking: { type: "enabled" }, max_tokens: 4096 });
 });

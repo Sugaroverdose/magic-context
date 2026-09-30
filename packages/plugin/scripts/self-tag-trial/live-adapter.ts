@@ -1,5 +1,5 @@
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { forbiddenOpenPaths } from "./bootstrap";
 import type { ModelCaller } from "./host-adapter";
@@ -9,8 +9,13 @@ import { MagicContextConfigSchema } from "../../src/config/schema/magic-context"
 export type ProviderCall = {
     index: number; model: string; responseModel?: string; status?: number; messages: number; tools: number;
     text: string; reasoning: string; calls: Record<string, unknown>[]; servedDroppedTags: number[];
-    usage?: Record<string, number>; finish?: string; durationMs?: number; error?: string;
+    thinking?: string; maxTokens?: number; reasoningTokens?: number | null;
+    usage?: Record<string, any>; finish?: string; durationMs?: number; error?: string;
 };
+
+export function generationSettings(variant: Variant): { thinking: { type: string }; max_tokens: number } {
+    return { thinking: { type: variant === "D" ? "enabled" : "disabled" }, max_tokens: variant === "D" ? 4096 : 512 };
+}
 
 export function sanitizeProviderError(message: string, authorization: string): string {
     const key = authorization.replace(/^Bearer\s+/i, "");
@@ -48,17 +53,18 @@ export class DeepSeekCaller implements ModelCaller {
         for (const dir of ["data/opencode", "config/opencode", "cache", "home", "work"]) mkdirSync(join(this.root, dir), { recursive: true });
         copyFileSync(stagedAuth, this.authCopy);
         chmodSync(this.authCopy, 0o600);
-        writeFileSync(this.capture, "");
+        if (existsSync(this.capture)) this.captureOffset = readFileSync(this.capture, "utf8").trim().split("\n").filter(Boolean).length;
+        else writeFileSync(this.capture, "");
         writeFileSync(join(this.root, "control.json"), JSON.stringify({ variant: "A", head: false }));
         this.server = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 255, fetch: async req => {
             const body = await req.text();
             const parsed = JSON.parse(body);
             if (this.calls.length >= 400) throw new Error("Live trial provider-call budget exceeded");
-            parsed.thinking = { type: "disabled" };
-            parsed.max_tokens = 512;
+            const variant = JSON.parse(readFileSync(join(this.root, "control.json"), "utf8")).variant;
+            Object.assign(parsed, generationSettings(variant));
             const call: ProviderCall = { index: this.calls.length + 1, model: parsed.model,
                 messages: parsed.messages?.length ?? 0, tools: parsed.tools?.length ?? 0,
-                text: "", reasoning: "", calls: [],
+                text: "", reasoning: "", calls: [], thinking: parsed.thinking.type, maxTokens: parsed.max_tokens, reasoningTokens: null,
                 servedDroppedTags: [...new Set([...JSON.stringify((parsed.messages ?? []).filter((message: any) => message.role === "tool")).matchAll(/\[dropped §(\d+)§\]/g)].map(match => Number(match[1])))] };
             this.calls.push(call);
             if (this.requireDroppedTag !== undefined && !call.servedDroppedTags.includes(this.requireDroppedTag)) {
@@ -96,7 +102,10 @@ export class DeepSeekCaller implements ModelCaller {
                         if (!line.startsWith("data:") || line.slice(5).trim() === "[DONE]") continue;
                         const event = JSON.parse(line.slice(5));
                         if (event.model) call.responseModel = event.model;
-                        if (event.usage) call.usage = event.usage;
+                        if (event.usage) {
+                            call.usage = event.usage;
+                            call.reasoningTokens = event.usage.completion_tokens_details?.reasoning_tokens ?? event.usage.reasoning_tokens ?? null;
+                        }
                         for (const choice of event.choices ?? []) {
                             if (choice.finish_reason) call.finish = choice.finish_reason;
                             const delta = choice.delta ?? {};
@@ -122,7 +131,7 @@ export class DeepSeekCaller implements ModelCaller {
             plugin: [`file://${resolve(import.meta.dir, "host-plugin.mjs")}`], enabled_providers: ["deepseek"], model, small_model: model,
             autoupdate: false, compaction: { auto: false, prune: false },
             provider: { deepseek: { npm: "@ai-sdk/openai-compatible", name: "DeepSeek trial", options: { baseURL: `http://127.0.0.1:${this.server.port}/v1` },
-                models: { "deepseek-flash": { name: "DeepSeek v4.1 Flash", limit: { context: 128000, output: 2048 }, options: { thinking: { type: "disabled" } } } } } },
+                models: { "deepseek-flash": { name: "DeepSeek v4.1 Flash", limit: { context: 128000, output: 4096 }, options: { thinking: { type: "disabled" } } } } } },
             agent: { trial: { mode: "primary", prompt: "Answer fixture questions concisely in one or two sentences. Follow explicit tool requests. Use only trial_read, trial_echo, trial_list, and ctx_reduce. Do not access any host files, credentials, or network tools.",
                 tools: { "*": false, trial_read: true, trial_echo: true, trial_list: true, ctx_reduce: true } }, title: { disable: true } },
         };
@@ -156,6 +165,7 @@ export class DeepSeekCaller implements ModelCaller {
         this.client = createOpencodeClient({ baseUrl: this.url });
     }
     async start(variant: Variant, scenario: string): Promise<string> {
+        this.requireDroppedTag = undefined;
         writeFileSync(join(this.root, "control.json"), JSON.stringify({ variant, head: scenario === "literal-head" }));
         const response = await this.client.session.create({ body: { title: `self-tag ${variant} ${scenario}` } });
         if (!response.data?.id) throw new Error("Session creation failed");
