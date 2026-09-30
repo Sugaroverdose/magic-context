@@ -214,6 +214,39 @@ const LIVE_BINDING_400_BODY = {
 };
 
 describe("createEventHandler", () => {
+    for (const [providerID, modelID] of [
+        ["google-vertex-anthropic", "claude-sonnet-5-5@20260930"],
+        ["amazon-bedrock", "anthropic.claude-opus-5-5-v1:0"],
+        ["vertex-eu-anthropic", "claude-fable-5-1"],
+    ]) {
+        it(`arms binding recovery via ${providerID}/${modelID}`, async () => {
+            useTempDataHome("context-event-cloud-binding-");
+            const deps = createDeps(new Map());
+            const handler = createEventHandler(deps);
+            await handler({
+                event: {
+                    type: "message.updated",
+                    properties: {
+                        info: {
+                            id: "failed-shell",
+                            role: "assistant",
+                            sessionID: "ses-cloud-binding",
+                            providerID,
+                            modelID,
+                            error: {
+                                status: 400,
+                                data: { message: JSON.stringify(LIVE_BINDING_400_BODY) },
+                            },
+                        },
+                    },
+                },
+            });
+            expect(getThinkingBindingRecoveryTarget(deps.db, "ses-cloud-binding")).toBe(
+                "all_reasoning_bearing_assistants",
+            );
+        });
+    }
+
     it("observes both user and assistant message events without a transform pass", async () => {
         useTempDataHome("context-event-activity-");
         const deps = createDeps(new Map());

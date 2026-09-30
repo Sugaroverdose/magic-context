@@ -232,25 +232,28 @@ export function detectThinkingBindingMismatch(error: unknown): ThinkingBindingMi
 
 /**
  * True for the models whose signed thinking blocks Anthropic binds to the
- * request prefix: Claude Fable 5.1 and Claude Opus 5.5. Accounts created on or
- * after 2026-08-31 get a 400 on these models when anything before a replayed
- * thinking block changed. Only the first-party `anthropic` provider is covered;
- * Bedrock and Vertex enforce the same rule but are not handled here.
+ * request prefix: Claude Fable 5.1, Claude Opus 5.5 and Claude Sonnet 5.5.
+ * Accounts created on or after 2026-08-31 enforce this on the Claude API,
+ * Vertex and Bedrock. Match the family regardless of route: proactive stripping
+ * runs only when a pass already rebuilds the cached prefix. A false positive
+ * costs reasoning on those passes; a false negative risks a binding 400.
  */
 export function isPrefixBoundThinkingModel(
-    providerID: string | null | undefined,
+    _providerID: string | null | undefined,
     modelID: string | null | undefined,
 ): boolean {
-    if (providerID?.toLowerCase() !== "anthropic" || !modelID) return false;
-    return (
-        isFable51ThinkingBindingModel(providerID, modelID) ||
-        /(?:^|[-_.])opus[-_.]?5[-_.]5(?:$|[-_.])/i.test(modelID)
+    if (!modelID) return false;
+    return /(?:^|[-_.:/])(?:fable[-_.]?5[-_.]1|(?:opus|sonnet)[-_.]?5[-_.]5)(?:$|[-_.:/@])/i.test(
+        modelID,
     );
 }
 
 /**
  * True only for canonical Anthropic Fable 5.1 model identifiers. Binding
- * recovery uses isPrefixBoundThinkingModel instead, which also covers Opus 5.5.
+ * recovery uses isPrefixBoundThinkingModel instead, which also covers Opus 5.5,
+ * Sonnet 5.5 and cloud routes. The variant-cache policy uses this narrower
+ * check to recognize Fable 5.1, whose cached prefix survives effort changes;
+ * that measured cache behavior is separate from prefix binding.
  */
 export function isFable51ThinkingBindingModel(
     providerID: string | null | undefined,

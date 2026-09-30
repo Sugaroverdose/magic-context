@@ -8,6 +8,7 @@ import { join } from "node:path";
 import todoRideGolden from "../../../../../crates/mc-module/testdata/todo-ride-only.json";
 
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
+import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import {
     addProcessedImageStrippedIds,
@@ -9016,7 +9017,7 @@ describe("pending-ops and heuristics permission labels", () => {
     });
 });
 
-// Claude Fable 5.1 and Claude Opus 5.5 bind each signed thinking block to every
+// Claude Fable 5.1, Opus 5.5 and Sonnet 5.5 bind each signed thinking block to every
 // byte served before it, so a pass that busts the cache removes every thinking
 // block still on the wire (the provider would drop it or reject the request).
 // Every later pass replays the removal byte-identically; a defer pass never
@@ -9200,6 +9201,93 @@ describe("proactive strip of thinking on busting passes", () => {
         expect(sha256(passB.slice(0, passA.length))).toBe(sha256(passA));
         expect(reasoningCount(findMessage(passB, "assistant-four"))).toBe(1);
     });
+
+    for (const [providerID, modelID] of [
+        ["google-vertex-anthropic", "claude-sonnet-5-5@20260930"],
+        ["vertex-eu-anthropic", "claude-opus-5-5"],
+        ["amazon-bedrock", "us.anthropic.claude-fable-5-1-v1:0"],
+    ]) {
+        it(`TS and Rust-mode host strip/replay parity for ${providerID}/${modelID}`, async () => {
+            openDb();
+            const outputs: MessageLike[][] = [];
+            for (const rustMode of [false, true]) {
+                const sessionId = `ses-cloud-parity-${rustMode}`;
+                const postprocess = async (messages: MessageLike[], busting: boolean) => {
+                    const enabled = isPrefixBoundThinkingModel(providerID, modelID);
+                    if (rustMode) {
+                        return runRustModePostprocess({
+                            db,
+                            sessionId,
+                            messages,
+                            fullFeatureMode: true,
+                            resolvedProviderID: providerID,
+                            thinkingBindingRecoveryEnabledForModel: enabled,
+                            cacheBustingPass: busting,
+                            tagger: createTagger(),
+                            ctxReduceAvailability: { callable: true, frozen: true },
+                        });
+                    }
+                    return runPostTransformPhase(
+                        basePostTransformArgs(db, sessionId, messages, {
+                            resolvedProviderID: providerID,
+                            thinkingBindingRecoveryEnabledForModel: enabled,
+                            ...(busting
+                                ? { pendingMaterializationSessions: new Set([sessionId]) }
+                                : { schedulerDecision: "defer" as const }),
+                        }),
+                    );
+                };
+                const cloudSession = () => {
+                    const messages = buildSession(sessionId, "rebuilt prefix");
+                    messages.push({
+                        info: { id: "reasoning-only", role: "assistant", sessionID: sessionId },
+                        parts: [{ type: "redacted_thinking", data: "signed-redacted" }],
+                    } as unknown as MessageLike);
+                    return messages;
+                };
+                const cloudAssistants = [...ALL_ASSISTANTS, "reasoning-only"];
+                const initial = cloudSession();
+                const original = JSON.stringify(initial);
+                expect((await postprocess(initial, false)).proactiveThinkingStrip).toBeNull();
+                expect(JSON.stringify(initial)).toBe(original);
+                const bust = cloudSession();
+                expect((await postprocess(bust, true)).proactiveThinkingStrip).toEqual({
+                    messageIds: cloudAssistants,
+                });
+                expect(findMessage(bust, "reasoning-only").parts).toEqual([
+                    { type: "text", text: "[dropped]" },
+                ]);
+                for (const id of cloudAssistants) {
+                    expect(reasoningCount(findMessage(bust, id))).toBe(0);
+                }
+                for (let pass = 0; pass < 2; pass++) {
+                    const replay = appendTurn(cloudSession(), sessionId, "four");
+                    expect((await postprocess(replay, false)).proactiveThinkingStrip).toBeNull();
+                    expect(JSON.stringify(replay.slice(0, bust.length))).toBe(JSON.stringify(bust));
+                    expect(reasoningCount(findMessage(replay, "assistant-four"))).toBe(1);
+                }
+                const lkg = cloudSession();
+                replayRustModeBindingMismatchStrips({
+                    db,
+                    sessionId,
+                    messages: lkg,
+                    resolvedProviderID: providerID,
+                });
+                expect(JSON.stringify(lkg)).toBe(JSON.stringify(bust));
+                const recovery = appendTurn(cloudSession(), sessionId, "recovery");
+                armThinkingBindingRecovery(db, sessionId, "all_reasoning_bearing_assistants");
+                expect(
+                    (await postprocess(recovery, false)).thinkingBindingRecovery?.messageIds,
+                ).toContain("assistant-recovery");
+                expect(reasoningCount(findMessage(recovery, "assistant-recovery"))).toBe(0);
+                outputs.push(bust);
+            }
+            // Session routing metadata differs; provider-facing parts must not.
+            expect(outputs[0].map((message) => message.parts)).toEqual(
+                outputs[1].map((message) => message.parts),
+            );
+        });
+    }
 
     it("replays a strip byte-identically on a reasoning-only assistant with a trailing blank", async () => {
         openDb();

@@ -324,7 +324,7 @@ describe("Pi provider failure recovery", () => {
 	});
 });
 
-// Claude Fable 5.1 and Claude Opus 5.5 bind each thinking block to every byte
+// Claude Fable 5.1, Opus 5.5 and Sonnet 5.5 bind each thinking block to every byte
 // served before it, so a busting pass removes every thinking block still on the
 // wire; later passes replay the removal byte-identically, and a defer pass never
 // starts one.
@@ -377,13 +377,14 @@ describe("Pi proactive strip of thinking on busting passes", () => {
 		busting: boolean,
 		entryIds: readonly string[] = ENTRY_IDS,
 		model = "claude-opus-5-5",
+		provider = "anthropic",
 	) {
 		applyPiThinkingBindingRecovery({
 			db: database,
 			sessionId,
 			messages,
 			entryIds,
-			provider: "anthropic",
+			provider,
 			model,
 			endOfPassOrder: true,
 		});
@@ -392,7 +393,7 @@ describe("Pi proactive strip of thinking on busting passes", () => {
 			sessionId,
 			messages,
 			entryIds,
-			provider: "anthropic",
+			provider,
 			model,
 			cacheBustingPass: busting,
 			report: () => {},
@@ -431,6 +432,82 @@ describe("Pi proactive strip of thinking on busting passes", () => {
 		expect(sha256(passB.messages.slice(0, passA.length))).toBe(sha256(passA));
 		expect(thinkingCount(passB.messages.at(-1))).toBe(1);
 	});
+
+	for (const [provider, model] of [
+		["google-vertex-anthropic", "claude-sonnet-5-5@20260930"],
+		["amazon-bedrock", "anthropic.claude-opus-5-5-v1:0"],
+	]) {
+		it(`recovers a binding 400 via ${provider}`, () => {
+			const database = db();
+			const sessionId = `pi-cloud-recovery-${provider}`;
+			expect(
+				handlePiProviderFailure({
+					db: database,
+					sessionId,
+					message: {
+						role: "assistant",
+						provider,
+						model,
+						stopReason: "error",
+						errorStatus: 400,
+						errorMessage: "thinking block is bound to a different conversation",
+					},
+				}),
+			).toEqual({ kind: "thinking_binding", armed: true });
+			const messages = session();
+			expect(
+				applyPiThinkingBindingRecovery({
+					db: database,
+					sessionId,
+					messages,
+					entryIds: ENTRY_IDS,
+					provider,
+					model,
+				})?.entryIds,
+			).toEqual(["a1", "a2", "a3"]);
+			expect([1, 3, 5].map((index) => thinkingCount(messages[index]))).toEqual([
+				0, 0, 0,
+			]);
+		});
+
+		it(`strips on rebuild and replays byte-identically via ${provider}`, () => {
+			const database = db();
+			const sessionId = `pi-cloud-${provider}`;
+			const first = session();
+			const before = JSON.stringify(first);
+			expect(
+				serve(database, sessionId, first, false, ENTRY_IDS, model, provider),
+			).toBeNull();
+			expect(JSON.stringify(first)).toBe(before);
+			const rebuilt = session("rebuilt prefix");
+			expect(
+				serve(database, sessionId, rebuilt, true, ENTRY_IDS, model, provider),
+			).toEqual({
+				entryIds: ["a1", "a2", "a3"],
+			});
+			expect([1, 3, 5].map((index) => thinkingCount(rebuilt[index]))).toEqual([
+				0, 0, 0,
+			]);
+			for (let pass = 0; pass < 2; pass++) {
+				const replay = withFreshTurn(session("rebuilt prefix"));
+				expect(
+					serve(
+						database,
+						sessionId,
+						replay.messages,
+						false,
+						replay.entryIds,
+						model,
+						provider,
+					),
+				).toBeNull();
+				expect(JSON.stringify(replay.messages.slice(0, rebuilt.length))).toBe(
+					JSON.stringify(rebuilt),
+				);
+				expect(thinkingCount(replay.messages.at(-1))).toBe(1);
+			}
+		});
+	}
 
 	it("never strips on a defer pass", () => {
 		const database = db();
