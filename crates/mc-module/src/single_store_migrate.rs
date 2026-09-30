@@ -502,7 +502,11 @@ fn placeholders(count: usize) -> String {
         .join(", ")
 }
 
-pub(crate) fn read_named_rows(conn: &Connection, sql: &str, args: &[SqlValue]) -> rusqlite::Result<Vec<Row>> {
+pub(crate) fn read_named_rows(
+    conn: &Connection,
+    sql: &str,
+    args: &[SqlValue],
+) -> rusqlite::Result<Vec<Row>> {
     let mut statement = conn.prepare(sql)?;
     let names: Vec<String> = statement
         .column_names()
@@ -1910,9 +1914,7 @@ fn decide_history(
     };
     let kept = match (wrote_last, owner) {
         (Some(last), Some(owner)) if last == owner => Some((last, HistoryReason::WroteLast)),
-        (Some(last), None) if ends_at_least_as_late(last) => {
-            Some((last, HistoryReason::WroteLast))
-        }
+        (Some(last), None) if ends_at_least_as_late(last) => Some((last, HistoryReason::WroteLast)),
         (None, Some(owner)) => Some((owner, HistoryReason::ProjectOwner)),
         _ => None,
     };
@@ -2087,7 +2089,13 @@ impl<'a> Copier<'a> {
         let kept = decision.as_ref().map(|decision| decision.kept);
         self.history.extend(decision);
         if kept == Some(Winner::Context) {
-            return self.keep_context_history(session_id, &project, source, &session, context_history);
+            return self.keep_context_history(
+                session_id,
+                &project,
+                source,
+                &session,
+                context_history,
+            );
         }
 
         // Everything is classified against the compartments as they were before this run.
@@ -2259,9 +2267,11 @@ impl<'a> Copier<'a> {
         let unchanged: BTreeSet<i64> = context_history
             .iter()
             .filter(|row| {
-                as_i64(&row[1]).and_then(|sequence| session.compartment(sequence)).is_some_and(
-                    |store| store[COMPARTMENT_CONTENT_FIELDS] == row[COMPARTMENT_CONTENT_FIELDS],
-                )
+                as_i64(&row[1])
+                    .and_then(|sequence| session.compartment(sequence))
+                    .is_some_and(|store| {
+                        store[COMPARTMENT_CONTENT_FIELDS] == row[COMPARTMENT_CONTENT_FIELDS]
+                    })
             })
             .filter_map(|row| as_i64(&row[1]))
             .collect();
@@ -2273,20 +2283,27 @@ impl<'a> Copier<'a> {
         let context_events: Vec<(i64, Vec<SqlValue>)> =
             session_rows(self.conn, "compartment_events", EVENT_COLUMNS, session_id)?;
         let desired = self.desired_events(session_id, session)?;
-        let (eligible, superseded): (Vec<usize>, Vec<usize>) = (0..desired.len())
-            .partition(|index| match session.events[*index].1 {
+        let (eligible, superseded): (Vec<usize>, Vec<usize>) =
+            (0..desired.len()).partition(|index| match session.events[*index].1 {
                 Some(sequence) => unchanged.contains(&sequence),
                 None => true,
             });
-        let wanted: Vec<Vec<SqlValue>> =
-            eligible.iter().map(|index| desired[*index].clone()).collect();
+        let wanted: Vec<Vec<SqlValue>> = eligible
+            .iter()
+            .map(|index| desired[*index].clone())
+            .collect();
         let (missing, _) = match_multiset(&wanted, &context_events);
         let counts = self.counts(project, "compartment_events");
         counts.source += desired.len();
         counts.kept += wanted.len() - missing.len();
         counts.superseded += superseded.len();
         for index in missing {
-            insert_row(self.conn, "ctx.compartment_events", EVENT_COLUMNS, &wanted[index])?;
+            insert_row(
+                self.conn,
+                "ctx.compartment_events",
+                EVENT_COLUMNS,
+                &wanted[index],
+            )?;
             self.counts(project, "compartment_events").copied += 1;
         }
 
@@ -2296,14 +2313,14 @@ impl<'a> Copier<'a> {
             CANDIDATE_COLUMNS,
             session_id,
         )?;
-        let (eligible, superseded): (Vec<&Vec<SqlValue>>, Vec<&Vec<SqlValue>>) =
-            session.candidates.iter().partition(|values| {
-                match (as_i64(&values[2]), as_i64(&values[3])) {
-                    (Some(start), Some(end)) if start <= end && end - start <= 10_000 => {
-                        (start..=end).all(|sequence| unchanged.contains(&sequence))
-                    }
-                    _ => false,
+        let (eligible, superseded): (Vec<&Vec<SqlValue>>, Vec<&Vec<SqlValue>>) = session
+            .candidates
+            .iter()
+            .partition(|values| match (as_i64(&values[2]), as_i64(&values[3])) {
+                (Some(start), Some(end)) if start <= end && end - start <= 10_000 => {
+                    (start..=end).all(|sequence| unchanged.contains(&sequence))
                 }
+                _ => false,
             });
         let wanted: Vec<Vec<SqlValue>> = eligible.into_iter().cloned().collect();
         let (missing, _) = match_multiset(&wanted, &context_candidates);
@@ -2323,7 +2340,8 @@ impl<'a> Copier<'a> {
 
         // Only the heading dates of compartments both copies agree on are known to fit.
         for row in source.compartments.get(session_id).into_iter().flatten() {
-            if !as_i64(&get(row, "sequence")).is_some_and(|sequence| unchanged.contains(&sequence)) {
+            if !as_i64(&get(row, "sequence")).is_some_and(|sequence| unchanged.contains(&sequence))
+            {
                 continue;
             }
             self.conn.execute(

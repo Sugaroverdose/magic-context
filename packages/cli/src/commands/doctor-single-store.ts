@@ -22,7 +22,10 @@ export interface SingleStoreOptions {
     dryRun?: boolean;
     skipForeign?: boolean;
     prefer?: string[];
-    /** `<session>=store|context` for sessions whose two copies of history diverged. */
+    /**
+     * `<session>=store|context`: which file's compartments to keep for a session whose
+     * history in store.db and context.db diverged and the migration would not choose.
+     */
     preferHistory?: string[];
     acceptIdChange?: boolean;
 }

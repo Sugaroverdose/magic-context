@@ -27,7 +27,15 @@ fn open_rw(path: &Path) -> Connection {
     Connection::open(path).unwrap()
 }
 
-fn compartment(conn: &Connection, id: i64, sequence: i64, start: i64, end: i64, title: &str, created: i64) {
+fn compartment(
+    conn: &Connection,
+    id: i64,
+    sequence: i64,
+    start: i64,
+    end: i64,
+    title: &str,
+    created: i64,
+) {
     conn.execute(
         "INSERT INTO compartments(id, session_id, sequence, start_message, end_message,
              start_message_id, end_message_id, title, content, p1, importance, created_at)
@@ -126,7 +134,11 @@ impl Fixture {
         let store_backup = backup.join("store.db");
         mc_store::migrate_store_to_pre_single_store(&store_backup).unwrap();
         let store = open_rw(&store_backup);
-        for (sequence, start, end, title) in [(0, 1, 10, "zero"), (1, 11, 20, "one"), (2, 21, 25, "two by the module")] {
+        for (sequence, start, end, title) in [
+            (0, 1, 10, "zero"),
+            (1, 11, 20, "one"),
+            (2, 21, 25, "two by the module"),
+        ] {
             store
                 .execute(
                     "INSERT INTO mc_compartments(session_id, sequence, start_message, end_message,
@@ -138,7 +150,9 @@ impl Fixture {
         }
         drop(store);
 
-        // The live pair as the old migration rule and the historian after it left it.
+        // The live pair: the migration put the store's version of sequence 2 in place and
+        // deleted sequences 3 and 4; the historian then wrote two new compartments over
+        // the same messages.
         let live_context = root.join("context.db");
         let live_store = root.join("store.db");
         std::fs::copy(backup.join("context.db"), &live_context).unwrap();
@@ -172,7 +186,9 @@ impl Fixture {
         .unwrap();
         drop(live);
         let store = open_rw(&live_store);
-        store.execute_batch(mc_store::single_store_schema::MIGRATION_61_CREATE_SQL).unwrap();
+        store
+            .execute_batch(mc_store::single_store_schema::MIGRATION_61_CREATE_SQL)
+            .unwrap();
         for sequence in 0..=4 {
             store
                 .execute(
@@ -252,7 +268,10 @@ impl Fixture {
                 let mut rows: Vec<String> = statement
                     .query_map([], |row| {
                         (0..width)
-                            .map(|index| row.get::<_, SqlValue>(index).map(|value| format!("{value:?}")))
+                            .map(|index| {
+                                row.get::<_, SqlValue>(index)
+                                    .map(|value| format!("{value:?}"))
+                            })
                             .collect::<Result<Vec<_>, _>>()
                             .map(|values| values.join("|"))
                     })
@@ -270,6 +289,17 @@ impl Fixture {
     }
 }
 
+/// The `session_meta` columns the repair clears, then the marker state it keeps.
+type SessionMetaAfter = (
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+);
+
 fn expect_refusal(result: Result<RepairReport, EngineError>, code: &str) {
     match result {
         Err(EngineError::Refused(refusal)) => assert_eq!(refusal.code, code, "{refusal:?}"),
@@ -284,19 +314,57 @@ fn the_preview_names_the_truncated_session_and_writes_nothing() {
     let report = run(&fixture.options()).unwrap();
     assert_eq!(fixture.digest(), before);
     assert_eq!(report.status, "preview");
-    assert_eq!(report.sessions.len(), 1, "the session deleted since is not offered");
+    assert_eq!(
+        report.sessions.len(),
+        1,
+        "the session deleted since is not offered"
+    );
     let plan = &report.sessions[0];
     assert_eq!(plan.session, SESSION);
     assert_eq!(plan.project.as_deref(), Some(PROJECT));
-    assert_eq!((plan.backup.compartments, plan.backup.end_message), (5, Some(50)));
-    assert_eq!((plan.live.compartments, plan.live.end_message), (5, Some(48)));
+    assert_eq!(
+        (plan.backup.compartments, plan.backup.end_message),
+        (5, Some(50))
+    );
+    assert_eq!(
+        (plan.live.compartments, plan.live.end_message),
+        (5, Some(48))
+    );
     // Sequence 0 only gained the block indexes the migration filled in: still kept.
-    assert_eq!((plan.kept, plan.restored, plan.removed, plan.tail), (2, 3, 3, 0));
+    assert_eq!(
+        (plan.kept, plan.restored, plan.removed, plan.tail),
+        (2, 3, 3, 0)
+    );
     assert_eq!(plan.removed_sequences, Some((2, 4)));
-    assert_eq!(plan.compartment_events, RowChange { restored: 3, removed: 2 });
-    assert_eq!(plan.chunk_embeddings, RowChange { restored: 2, removed: 1 });
-    assert_eq!(plan.user_memory_candidates, RowChange { restored: 1, removed: 1 });
-    assert_eq!(plan.after, Extent { compartments: 5, max_sequence: Some(4), end_message: Some(50) });
+    assert_eq!(
+        plan.compartment_events,
+        RowChange {
+            restored: 3,
+            removed: 2
+        }
+    );
+    assert_eq!(
+        plan.chunk_embeddings,
+        RowChange {
+            restored: 2,
+            removed: 1
+        }
+    );
+    assert_eq!(
+        plan.user_memory_candidates,
+        RowChange {
+            restored: 1,
+            removed: 1
+        }
+    );
+    assert_eq!(
+        plan.after,
+        Extent {
+            compartments: 5,
+            max_sequence: Some(4),
+            end_message: Some(50)
+        }
+    );
 }
 
 #[test]
@@ -328,14 +396,15 @@ fn apply_restores_the_backup_history_with_its_ids_and_dependents() {
         "the backup's events are back; the store copy and the re-summarised row's are gone"
     );
     assert_eq!(
-        fixture.ids("SELECT compartment_id FROM compartment_chunk_embeddings ORDER BY compartment_id"),
+        fixture
+            .ids("SELECT compartment_id FROM compartment_chunk_embeddings ORDER BY compartment_id"),
         vec![13, 14]
     );
     assert_eq!(
         fixture.ids("SELECT id FROM user_memory_candidates ORDER BY id"),
         vec![200, 201]
     );
-    let meta: (Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>, Option<String>, Option<String>, String, Option<String>) = live
+    let meta: SessionMetaAfter = live
         .query_row(
             "SELECT cached_m0_bytes, cached_m1_bytes, cached_m0_max_compartment_seq, cached_m0_last_baseline_end_message_id,
                     pending_compaction_marker_state, memory_block_cache, compaction_marker_state
@@ -346,16 +415,27 @@ fn apply_restores_the_backup_history_with_its_ids_and_dependents() {
         .unwrap();
     assert_eq!(
         meta,
-        (None, None, None, None, None, String::new(), Some("{\"boundaryOrdinal\":50}".into())),
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            String::new(),
+            Some("{\"boundaryOrdinal\":50}".into())
+        ),
         "cached m[0] and the pending marker move are cleared; the host's marker state is kept"
     );
     assert_eq!(
-        fixture.ids("SELECT COUNT(*) FROM m0_mutation_log WHERE mutation_type = 'compartment_delete'"),
+        fixture
+            .ids("SELECT COUNT(*) FROM m0_mutation_log WHERE mutation_type = 'compartment_delete'"),
         vec![1]
     );
     let store = open_rw(&fixture.live_store);
     let dates: Vec<i64> = store
-        .prepare("SELECT sequence FROM mc_compartment_dates WHERE session_id = ?1 ORDER BY sequence")
+        .prepare(
+            "SELECT sequence FROM mc_compartment_dates WHERE session_id = ?1 ORDER BY sequence",
+        )
         .unwrap()
         .query_map(params![SESSION], |row| row.get(0))
         .unwrap()
@@ -363,9 +443,16 @@ fn apply_restores_the_backup_history_with_its_ids_and_dependents() {
         .unwrap();
     assert_eq!(dates, vec![0, 1], "dates of the restored range are dropped");
     let meta: String = store
-        .query_row("SELECT meta FROM mc_cache_state WHERE session_id = ?1", params![SESSION], |row| row.get(0))
+        .query_row(
+            "SELECT meta FROM mc_cache_state WHERE session_id = ?1",
+            params![SESSION],
+            |row| row.get(0),
+        )
         .unwrap();
-    assert!(meta.contains("\"project_memory_epoch_pending\":true"), "{meta}");
+    assert!(
+        meta.contains("\"project_memory_epoch_pending\":true"),
+        "{meta}"
+    );
     assert!(fixture.root.join("repair-backup/MANIFEST.tsv").exists());
     // A second preview has nothing left to do.
     assert!(run(&fixture.options()).unwrap().sessions.is_empty());
@@ -383,7 +470,11 @@ fn compartments_past_the_backup_end_are_kept_and_renumbered() {
     assert_eq!(report.sessions[0].tail, 1);
     let tail: (i64, String) = fixture
         .live()
-        .query_row("SELECT sequence, title FROM compartments WHERE id = 22", [], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_row(
+            "SELECT sequence, title FROM compartments WHERE id = 22",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .unwrap();
     assert_eq!(tail, (5, "new after the backup".into()));
 }
@@ -403,14 +494,20 @@ fn a_session_with_a_historian_run_in_progress_refuses_and_is_left_unchanged() {
     let fixture = Fixture::new();
     fixture
         .live()
-        .execute("UPDATE session_meta SET compartment_in_progress = 1 WHERE session_id = ?1", params![SESSION])
+        .execute(
+            "UPDATE session_meta SET compartment_in_progress = 1 WHERE session_id = ?1",
+            params![SESSION],
+        )
         .unwrap();
     let rows_before = fixture.ids("SELECT id FROM compartments ORDER BY id");
     let mut options = fixture.options();
     options.apply = true;
     options.backup_dir = Some(fixture.root.join("b"));
     expect_refusal(run(&options), SESSION_BUSY);
-    assert_eq!(fixture.ids("SELECT id FROM compartments ORDER BY id"), rows_before);
+    assert_eq!(
+        fixture.ids("SELECT id FROM compartments ORDER BY id"),
+        rows_before
+    );
 }
 
 #[test]
@@ -428,17 +525,30 @@ fn a_backup_of_another_file_refuses() {
     let fixture = Fixture::new();
     fixture
         .live()
-        .execute("UPDATE context_store_meta SET value = 'uuid-2' WHERE key = 'store_uuid'", [])
+        .execute(
+            "UPDATE context_store_meta SET value = 'uuid-2' WHERE key = 'store_uuid'",
+            [],
+        )
         .unwrap();
     expect_refusal(run(&fixture.options()), BACKUP_MISMATCH);
 }
 
 #[test]
 fn the_command_line_needs_a_backup_dir_to_apply() {
-    let base: Vec<String> = ["--context-db", "c", "--store-db", "s", "--from-backup", "b", "--session", "x", "--apply"]
-        .iter()
-        .map(|arg| arg.to_string())
-        .collect();
+    let base: Vec<String> = [
+        "--context-db",
+        "c",
+        "--store-db",
+        "s",
+        "--from-backup",
+        "b",
+        "--session",
+        "x",
+        "--apply",
+    ]
+    .iter()
+    .map(|arg| arg.to_string())
+    .collect();
     assert!(parse_args(&base).is_err());
     let mut with_dir = base.clone();
     with_dir.extend(["--backup-dir".to_string(), "d".to_string()]);

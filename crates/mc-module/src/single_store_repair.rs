@@ -235,7 +235,8 @@ fn open(options: &RepairOptions, writable: bool) -> Result<Connection, EngineErr
     } else {
         OpenFlags::SQLITE_OPEN_READ_ONLY
     };
-    let conn = Connection::open_with_flags(&options.context_db, access | OpenFlags::SQLITE_OPEN_URI)?;
+    let conn =
+        Connection::open_with_flags(&options.context_db, access | OpenFlags::SQLITE_OPEN_URI)?;
     conn.busy_timeout(std::time::Duration::from_millis(u64::from(
         CONTEXT_BUSY_TIMEOUT_MS,
     )))?;
@@ -275,7 +276,10 @@ fn shared_columns(conn: &Connection, table: &str) -> Result<Vec<String>, EngineE
             format!("the backup's {table} has column {missing}, which the live context.db lacks"),
         ));
     }
-    Ok(live.into_iter().filter(|column| backup.contains(column)).collect())
+    Ok(live
+        .into_iter()
+        .filter(|column| backup.contains(column))
+        .collect())
 }
 
 fn store_uuid(conn: &Connection, schema: &str) -> rusqlite::Result<Option<String>> {
@@ -431,7 +435,10 @@ fn count(conn: &Connection, sql: &str, args: &[SqlValue]) -> rusqlite::Result<us
 fn extent(rows: &[Row]) -> Extent {
     Extent {
         compartments: rows.len(),
-        max_sequence: rows.iter().filter_map(|row| as_i64(&get(row, "sequence"))).max(),
+        max_sequence: rows
+            .iter()
+            .filter_map(|row| as_i64(&get(row, "sequence")))
+            .max(),
         end_message: rows
             .iter()
             .filter_map(|row| as_i64(&get(row, "end_message")))
@@ -533,12 +540,13 @@ fn plan_session(conn: &Connection, session: &str, columns: &[String]) -> Result<
     let backup_max_sequence = backup_extent.max_sequence.unwrap_or(-1);
     let first_restored_sequence = backup
         .iter()
-        .filter(|row| {
-            as_i64(&get(row, "id")).is_some_and(|id| !kept.contains(&id))
-        })
+        .filter(|row| as_i64(&get(row, "id")).is_some_and(|id| !kept.contains(&id)))
         .filter_map(|row| as_i64(&get(row, "sequence")))
         .min();
-    let tail_ids: Vec<i64> = tail.iter().filter_map(|row| as_i64(&get(row, "id"))).collect();
+    let tail_ids: Vec<i64> = tail
+        .iter()
+        .filter_map(|row| as_i64(&get(row, "id")))
+        .collect();
     let tail_reach = tail
         .iter()
         .filter_map(|row| as_i64(&get(row, "end_message")))
@@ -716,7 +724,9 @@ fn apply_session(
         )?;
     }
     conn.execute(
-        &format!("DELETE FROM main.compartment_chunk_embeddings WHERE compartment_id IN ({removed})"),
+        &format!(
+            "DELETE FROM main.compartment_chunk_embeddings WHERE compartment_id IN ({removed})"
+        ),
         [],
     )?;
     conn.execute(
@@ -824,7 +834,7 @@ fn apply_session(
     let meta_columns = columns_of(conn, "main", "session_meta")?;
     let resets: Vec<&(&str, ResetValue)> = SESSION_META_RESETS
         .iter()
-        .filter(|(column, _)| meta_columns.contains(&column.to_string()))
+        .filter(|(column, _)| meta_columns.contains(*column))
         .collect();
     if !resets.is_empty() {
         let assignments = resets
@@ -899,7 +909,9 @@ fn verify_session(
         &[text(session)],
     )?;
     if negative > 0 {
-        return Err(mismatch(format!("session {session} has parked sequences left")));
+        return Err(mismatch(format!(
+            "session {session} has parked sequences left"
+        )));
     }
     let orphaned = count(
         conn,
@@ -1024,7 +1036,9 @@ pub fn run(options: &RepairOptions) -> Result<RepairReport, EngineError> {
     // Leave checkpointing to the hosts. A checkpoint run by this connection's COMMIT
     // copies the whole write-ahead log into a multi-gigabyte file, and a running host
     // waiting on context.db would wait for it.
-    conn.query_row("PRAGMA main.wal_autocheckpoint = 0", [], |row| row.get::<_, i64>(0))?;
+    conn.query_row("PRAGMA main.wal_autocheckpoint = 0", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
     let columns = shared_columns(&conn, "compartments")?;
     let mut repaired = Vec::new();
     for plan in &plans {

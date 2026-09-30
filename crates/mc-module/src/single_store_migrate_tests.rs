@@ -1256,7 +1256,10 @@ fn a_session_whose_store_copy_is_ahead_takes_it() {
             .collect::<Vec<_>>(),
         vec![(0, 10), (1, 20), (2, 30)]
     );
-    assert_eq!(rows[0].0, 500, "the shared compartment keeps its context id");
+    assert_eq!(
+        rows[0].0, 500,
+        "the shared compartment keeps its context id"
+    );
     let decision = history_decision(&report).unwrap();
     assert_eq!(
         (decision.kept, decision.reason),
@@ -1289,7 +1292,10 @@ fn diverged_history_refuses_until_a_copy_is_preferred() {
     seed_history(
         &fixture,
         CONTEXT_PROJECT,
-        &[(0, 1, 10, "zero", 100), (1, 11, 30, "one by the module", 300)],
+        &[
+            (0, 1, 10, "zero", 100),
+            (1, 11, 30, "one by the module", 300),
+        ],
         &[
             (0, 1, 10, "zero", 100),
             (1, 11, 20, "one by typescript", 200),
