@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { log } from "./logger";
 import { PI_IMAGE_NAMES, piHarnessKindFromExecutable } from "./pi-executable";
+import { canonicalProjectDirectory } from "./project-directory-key";
 
 export type ProcessKind = "OpenCode server" | "OpenCode instance (TUI/CLI)" | "Pi" | "process";
 
@@ -68,8 +69,27 @@ export function isOwnRpcServerRecord(
 /**
  * Stable hash for a project directory — scopes RPC port files per-project
  * so multiple OpenCode instances don't collide.
+ *
+ * The server that writes a discovery file and the TUI that looks it up often
+ * receive the same directory spelled differently (macOS `/var` vs
+ * `/private/var`; on Windows drive-letter case, separators, a trailing
+ * separator, `\\?\` prefixes, 8.3 short names). Both hash the one canonical
+ * spelling from `canonicalProjectDirectory`, so any of those spellings finds the
+ * same file.
  */
 export function projectHash(directory: string): string {
+    return createHash("sha256")
+        .update(canonicalProjectDirectory(directory))
+        .digest("hex")
+        .slice(0, 16);
+}
+
+/**
+ * The hash builds up to 0.44.4 used: the spelling as given, minus trailing
+ * slashes. Lookups also read that directory so a TUI can still find an older
+ * server (and tell the user it is older).
+ */
+export function legacyProjectHash(directory: string): string {
     const normalized = directory.replace(/\/+$/, "");
     return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
@@ -77,6 +97,16 @@ export function projectHash(directory: string): string {
 /** Directory containing per-process RPC discovery files for a project. */
 export function rpcPortDir(storageDir: string, directory: string): string {
     return join(storageDir, "rpc", projectHash(directory));
+}
+
+/**
+ * Every directory a lookup reads for this project: the canonical one servers
+ * write now, and the pre-canonical one older servers wrote.
+ */
+export function rpcPortDirsForLookup(storageDir: string, directory: string): string[] {
+    const canonical = rpcPortDir(storageDir, directory);
+    const legacy = join(storageDir, "rpc", legacyProjectHash(directory));
+    return legacy === canonical ? [canonical] : [canonical, legacy];
 }
 
 /** Per-process RPC port file path. */
@@ -92,7 +122,7 @@ export function rpcPortFilePath(
 
 /** Legacy single-port file used by v0.18.0 and earlier. */
 export function legacyRpcPortFilePath(storageDir: string, directory: string): string {
-    return join(rpcPortDir(storageDir, directory), "port");
+    return join(storageDir, "rpc", legacyProjectHash(directory), "port");
 }
 
 export type PidLiveness = "alive" | "dead" | "inconclusive";
@@ -121,8 +151,21 @@ const WINDOWS_CIM_PROBE_TIMEOUT_MS = 5_000;
 const WINDOWS_PROCESS_SNAPSHOT_TTL_MS = 2_000;
 const MAX_ANCESTOR_WALK_DEPTH = 16;
 const OPEN_CODE_COMMAND_MARKERS = ["opencode", "node", "bun", "electron"];
+// CreationDate is formatted in the query as an ISO-8601 UTC string. Left as a
+// DateTime, ConvertTo-Json's output depends on the PowerShell edition (Windows
+// PowerShell 5.1 can emit `\/Date(ms)\/` or an object wrapping it; PowerShell 7
+// emits a local-offset string), and a start time the parser cannot read turns
+// every live RPC holder's identity check inconclusive.
 const WINDOWS_CIM_COMMAND =
-    "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,CreationDate | ConvertTo-Json -Compress";
+    "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,@{Name='CreationDate';Expression={if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null }}} | ConvertTo-Json -Compress";
+/**
+ * Output limit for process-list commands. A full Win32_Process listing with
+ * command lines routinely exceeds the 1 MiB `execFileSync` default (browser and
+ * editor processes carry very long command lines); past the limit the call
+ * throws ENOBUFS and the probe falls back to tasklist, which reports no start
+ * times.
+ */
+const PROCESS_LIST_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const PI_HARNESS_ARC_MARKERS = [
     "pi-coding-agent",
     "oh-my-pi",
@@ -529,6 +572,7 @@ function execProcessList(
         exec(file, [...args], {
             encoding: "utf8",
             timeout,
+            maxBuffer: PROCESS_LIST_MAX_BUFFER_BYTES,
             stdio: ["ignore", "pipe", "pipe"],
             windowsHide: true,
         }),
@@ -536,6 +580,11 @@ function execProcessList(
 }
 
 function parseWindowsCreationDate(value: unknown): number | null {
+    // Windows PowerShell 5.1 can serialize a DateTime carrying extended
+    // properties as { value: "\/Date(ms)\/", DisplayHint, DateTime }.
+    if (value !== null && typeof value === "object" && "value" in value) {
+        return parseWindowsCreationDate((value as { value: unknown }).value);
+    }
     if (typeof value === "number" && Number.isFinite(value)) {
         return value > 1e12 ? value : value * 1_000;
     }

@@ -92,6 +92,27 @@ export interface MigrationOnOpenRefusal {
 
 let lastMigrationOnOpenRefusal: MigrationOnOpenRefusal | null = null;
 
+/**
+ * A schema migration this process ran at startup even though an RPC discovery
+ * record from another OpenCode server named a PID that could not be checked
+ * (no process list, or no way to tell a live server from a reused PID).
+ * `enforceMigrationOnOpenGuard` lets the migration proceed in that case, so
+ * the status dialog reports it: if the PID was a live server on an older
+ * build, that server is now reading a store with a schema version higher than
+ * the newest one it supports.
+ */
+export interface UnconfirmedMigrationHolders {
+    pids: number[];
+    fromVersion: number;
+    toVersion: number;
+}
+
+let lastUnconfirmedMigrationHolders: UnconfirmedMigrationHolders | null = null;
+
+export function getUnconfirmedMigrationHolders(): UnconfirmedMigrationHolders | null {
+    return lastUnconfirmedMigrationHolders;
+}
+
 export function getSchemaFenceRejection(): {
     persistedVersion: number;
     supportedVersion: number;
@@ -107,6 +128,7 @@ export function getMigrationOnOpenRefusal(): MigrationOnOpenRefusal | null {
 export function __resetSchemaFenceStateForTests(): void {
     lastSchemaFenceRejection = null;
     lastMigrationOnOpenRefusal = null;
+    lastUnconfirmedMigrationHolders = null;
 }
 
 export const LATEST_SUPPORTED_VERSION = 91;
@@ -813,6 +835,14 @@ function enforceMigrationOnOpenGuard(
     ) {
         lastMigrationOnOpenRefusal = null;
         logInconclusiveMigrationProbes(dbPath, discovery, piDiscovery);
+        const uncertainPids = discovery.inconclusivePids ?? [];
+        if (uncertainPids.length > 0) {
+            lastUnconfirmedMigrationHolders = {
+                pids: [...uncertainPids],
+                fromVersion: persistedVersion,
+                toVersion: latestSupportedVersion,
+            };
+        }
         return true;
     }
     const blockingPids = [...new Set([...discovery.serverPids, ...piPids])].sort(

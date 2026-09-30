@@ -12,10 +12,11 @@ import {
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
-	buildStatusView,
+	buildStatusViewFor,
 	STATUS_COLUMN_GAP,
 	statusColumnsFor,
 } from "@magic-context/core/shared/status-view";
+import { checkLocalStatusSource } from "@magic-context/core/shared/status-view-check";
 import {
 	clearPiChannel1State,
 	setPiChannel1Baseline,
@@ -948,9 +949,12 @@ Warning: History compression could not finish this turn. It will retry automatic
 				{ db, projectIdentity: resolveProjectIdentity(process.cwd()) },
 				sessionId,
 			);
-			const view = buildStatusView(statusViewSourceFromPiDetail(detail), {
-				version: "0.0.0",
-			});
+			const view = buildStatusViewFor(
+				checkLocalStatusSource(statusViewSourceFromPiDetail(detail)),
+				{
+					version: "0.0.0",
+				},
+			);
 			const lines = renderPiStatusOverlay(detail, plainTheme(), 74);
 
 			// Section titles appear in the model's order, and every row label the
@@ -1002,9 +1006,12 @@ Warning: History compression could not finish this turn. It will retry automatic
 		try {
 			const innerWidth = 96;
 			const lines = renderPiStatusOverlay(detail, plainTheme(), innerWidth);
-			const view = buildStatusView(statusViewSourceFromPiDetail(detail), {
-				version: "0.0.0",
-			});
+			const view = buildStatusViewFor(
+				checkLocalStatusSource(statusViewSourceFromPiDetail(detail)),
+				{
+					version: "0.0.0",
+				},
+			);
 			// The shared model decides the layout and sizes each column from its own
 			// widest section, so a value never wraps inside its column.
 			const layout = statusColumnsFor(view.sections, innerWidth);
@@ -1065,9 +1072,12 @@ Warning: History compression could not finish this turn. It will retry automatic
 		try {
 			const innerWidth = 60;
 			const lines = renderPiStatusOverlay(detail, plainTheme(), innerWidth);
-			const view = buildStatusView(statusViewSourceFromPiDetail(detail), {
-				version: "0.0.0",
-			});
+			const view = buildStatusViewFor(
+				checkLocalStatusSource(statusViewSourceFromPiDetail(detail)),
+				{
+					version: "0.0.0",
+				},
+			);
 
 			// Walk the sections in model order: each title is alone on its own
 			// line, followed by its rows, each padded to the full inner width.
@@ -1178,10 +1188,34 @@ it("Pi status includes config generation and last reload warning", () => {
 			"Config reload failed /tmp/magic-context.jsonc: malformed",
 		);
 		expect(
-			buildStatusView(statusViewSourceFromPiDetail(detail), {
-				version: "test",
-			}).sections.some((section) => section.title === "Config"),
+			buildStatusViewFor(
+				checkLocalStatusSource(statusViewSourceFromPiDetail(detail)),
+				{
+					version: "test",
+				},
+			).sections.some((section) => section.title === "Config"),
 		).toBe(true);
+	} finally {
+		closeQuietly(db);
+	}
+});
+
+it("a Pi snapshot the status model cannot draw renders the unavailable view instead of throwing", () => {
+	const db = createTestDb();
+	try {
+		const detail = buildPiStatusDetail(
+			{ getAllTools: () => [] } as never,
+			fakeContext("ses-status-malformed") as never,
+			{ db, projectIdentity: resolveProjectIdentity(process.cwd()) },
+			"ses-status-malformed",
+		);
+		// The shared model formats usagePercentage with toFixed; a snapshot
+		// without it used to throw out of the overlay's render.
+		const broken = { ...detail, usagePercentage: undefined } as never;
+		const text = renderPiStatusOverlay(broken, plainTheme(), 74).join("\n");
+		expect(text).toContain("Status unavailable");
+		expect(text).toContain("incomplete status data");
+		expect(text).toContain("usagePercentage");
 	} finally {
 		closeQuietly(db);
 	}

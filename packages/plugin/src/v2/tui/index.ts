@@ -1,7 +1,10 @@
 import { jsx } from "@opentui/solid/jsx-runtime";
 import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
 import { flushLogger, log } from "../../shared/logger";
+import { pluginPackageVersion } from "../../shared/plugin-package-version";
 import type { SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
+import { buildUnavailableStatusView } from "../../shared/status-view";
+import { statusVersionNotice } from "../../shared/status-view-check";
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../../tui/compaction-off";
 import {
     type CommandRpcResult,
@@ -15,14 +18,16 @@ import {
     requestFlush,
     requestRecomp,
     requestWrapup,
+    type StatusDetailResult,
 } from "../../tui/data/context-db";
 import {
     type SocketNotification,
     startNotificationSocket,
     stopNotificationSocket,
 } from "../../tui/data/notification-socket";
+import { directoryForSession } from "../../tui/data/session-directory";
 import { eventSessionID } from "./events";
-import { mountV1Sidebar, type V1SidebarMount } from "./sidebar-mount";
+import { mountV1Sidebar, sessionDirectory, type V1SidebarMount } from "./sidebar-mount";
 import { mountV1StatusDialog, type V1StatusDialogMount } from "./status-dialog-mount";
 import type { V2KeymapLayer, V2SidebarState, V2TuiContext } from "./types";
 
@@ -83,7 +88,24 @@ export function sidebarText(snapshot: SidebarSnapshot | undefined): string {
  *
  * Exported for test access.
  */
-export function statusText(detail: StatusDetail): string {
+export function statusText(
+    detail: Pick<
+        StatusDetail,
+        | "contextLimit"
+        | "usagePercentage"
+        | "inputTokens"
+        | "compaction_enabled"
+        | "historianRunning"
+        | "compartmentCount"
+        | "memoryBlockCount"
+        | "memoryCount"
+        | "pendingOpsCount"
+        | "configGeneration"
+        | "configAdoptedAt"
+        | "configReloadFailure"
+        | "lastTransformError"
+    >,
+): string {
     const context =
         detail.contextLimit > 0
             ? `${detail.usagePercentage.toFixed(1)}% (${compactTokens(detail.inputTokens)}/${compactTokens(detail.contextLimit)} tokens)`
@@ -114,6 +136,35 @@ export function statusText(detail: StatusDetail): string {
     ].join("\n");
 }
 
+/**
+ * Plain-text status for one checked result: the status lines above, or the
+ * "status unavailable" view as text when there is no usable snapshot. A
+ * server/UI version difference is named first in both cases.
+ *
+ * Exported for test access.
+ */
+export function statusTextFor(status: StatusDetailResult): string {
+    if (status.state === "unavailable") {
+        const view = buildUnavailableStatusView(status.reason, status.versions, {
+            version: pluginPackageVersion() ?? "unknown",
+        });
+        return [
+            `${view.headline.left.text}: ${view.headline.right.text}`,
+            ...view.sections.flatMap((section) =>
+                section.rows.map((row) => `${row.label}: ${row.value}`),
+            ),
+            ...view.warnings.map((warning) => warning.text),
+        ].join("\n");
+    }
+    const notice = statusVersionNotice(status.versions);
+    const text = statusText({
+        ...status.source,
+        historianRunning: status.extras.historianRunning,
+        lastTransformError: status.extras.lastTransformError,
+    });
+    return notice ? `${notice}\n${text}` : text;
+}
+
 function currentSessionID(context: V2TuiContext): string | null {
     const route = context.ui.router.current();
     return route.type === "session" && route.sessionID ? route.sessionID : null;
@@ -129,6 +180,11 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         { initial: { snapshots: {} } },
     );
 
+    // The TUI can show a session from another directory than the one it
+    // started in; session-scoped calls go to that session's own server.
+    const directoryOf = (sessionID: string): string =>
+        directoryForSession(sessionDirectory(context, sessionID), directory);
+
     const refresh = async (sessionID: string, force = false): Promise<void> => {
         if (!sessionID || inflight.has(sessionID)) return;
         const now = Date.now();
@@ -136,7 +192,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         refreshedAt.set(sessionID, now);
         inflight.add(sessionID);
         try {
-            const snapshot = await loadSidebarSnapshot(sessionID, directory);
+            const snapshot = await loadSidebarSnapshot(sessionID, directoryOf(sessionID));
             updateSidebar((draft) => {
                 draft.snapshots[sessionID] = snapshot;
             });
@@ -151,19 +207,14 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
             context.ui.toast.show({ message: "No active session", variant: "warning" });
             return false;
         }
-        const result = await loadStatusDetail(target, directory);
+        const result = await loadStatusDetail(target, directoryOf(target));
         if (currentSessionID(context) !== target) return false;
-        if (!result.ok) {
-            context.ui.toast.show({
-                message: "Magic Context status is unavailable",
-                variant: "warning",
-            });
-            return false;
-        }
+        // A result without a usable snapshot still opens the dialog, which then
+        // names why the status is unavailable.
         const mounted = statusDialog;
         if (mounted) {
             try {
-                mounted.show(result.detail);
+                mounted.show(result);
                 return true;
             } catch (error) {
                 // A component that throws while opening would leave the host
@@ -175,7 +226,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         }
         await context.ui.dialog.alert({
             title: "Magic Context status",
-            message: statusText(result.detail),
+            message: statusTextFor(result),
         });
         return true;
     };
@@ -185,7 +236,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
             context.ui.toast.show({ message: "No active session", variant: "warning" });
             return false;
         }
-        const count = await getCompartmentCount(target, directory);
+        const count = await getCompartmentCount(target, directoryOf(target));
         if (currentSessionID(context) !== target) return false;
         if (!count.ok) {
             context.ui.toast.show({ message: "Unable to load recomp details", variant: "error" });
@@ -202,7 +253,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
             label: { confirm: "Run recomp", cancel: "Cancel" },
         });
         if (!confirmed) return true;
-        const requested = await requestRecomp(target);
+        const requested = await requestRecomp(target, directoryOf(target));
         context.ui.toast.show({
             message: requested
                 ? "Recomp requested; historian will start shortly"
@@ -501,6 +552,11 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
 
     startNotificationSocket({
         getSessionId: () => currentSessionID(context),
+        // Follow the shown session's own server, whose commands push its dialogs.
+        getSessionDirectory: () => {
+            const sessionID = currentSessionID(context);
+            return sessionID ? directoryOf(sessionID) : null;
+        },
         onNotification: handleNotification,
     });
     console.info("[magic-context] @cortexkit/opencode-magic-context v2 TUI setup");

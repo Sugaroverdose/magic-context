@@ -3,13 +3,13 @@
 import { createMemo } from "solid-js"
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { StatusDialog } from "./dialogs/status-dialog"
-import { renderUserFacingFailure, userFacingFailureCode } from '../shared/user-facing-codes';
 import {
     createSidebarContentSlot,
     kickRecompProgressRefresh,
     refreshSidebarSnapshot,
 } from "./slots/sidebar-content"
-import { closeRpc, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp, type EmbedDetail, type StatusDetail } from "./data/context-db"
+import { closeRpc, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp, type EmbedDetail } from "./data/context-db"
+import { directoryForSession } from "./data/session-directory"
 import { startNotificationSocket, stopNotificationSocket, type SocketNotification } from "./data/notification-socket"
 import { isCompactionEnabled } from "../config/agent-disable"
 import { loadPluginConfig } from "../config"
@@ -125,6 +125,20 @@ function getSessionId(api: TuiPluginApi): string | null {
     return null
 }
 
+/**
+ * The directory whose Magic Context server owns this session, which is not
+ * necessarily the directory the TUI started in (see `directoryForSession`).
+ */
+function sessionDirectory(api: TuiPluginApi, sessionId: string): string {
+    let reported: unknown
+    try {
+        reported = api.state.session.get(sessionId)?.directory
+    } catch {
+        // Session state not available yet: fall back to the startup directory.
+    }
+    return directoryForSession(reported, api.state.path.directory ?? "")
+}
+
 function getModelKeyFromMessages(api: TuiPluginApi, sessionId: string): string | undefined {
     try {
         const msgs = api.state.session.messages(sessionId)
@@ -156,7 +170,7 @@ async function showRecompDialog(api: TuiPluginApi, targetSessionId = getSessionI
         return false
     }
 
-    const countResult = await getCompartmentCount(sessionId, api.state.path.directory ?? "")
+    const countResult = await getCompartmentCount(sessionId, sessionDirectory(api, sessionId))
     // Ack only after the dialog is actually shown for the same active session;
     // route switches while the RPC detail load is in flight must leave it pending.
     if (getSessionId(api) !== sessionId) return false
@@ -180,7 +194,7 @@ async function showRecompDialog(api: TuiPluginApi, targetSessionId = getSessionI
                 "Proceed?",
             ].join("\n")}
             onConfirm={async () => {
-                const requested = await requestRecomp(sessionId)
+                const requested = await requestRecomp(sessionId, sessionDirectory(api, sessionId))
                 if (!requested) {
                     showToast(api, { message: "Recomp request failed", variant: "error" })
                     return
@@ -206,22 +220,15 @@ async function showStatusDialog(
         return false
     }
 
-    const directory = api.state.path.directory ?? ""
+    const directory = sessionDirectory(api, sessionId)
     const modelKey = getModelKeyFromMessages(api, sessionId)
     const result = await loadStatusDetail(sessionId, directory, modelKey)
     if (getSessionId(api) !== sessionId) return false
-    if (!result.ok) {
-        console.error(
-            `[magic-context] status unavailable code=${userFacingFailureCode("status_unavailable")}: ${result.error}`,
-        )
-        showToast(api, {
-            message: renderUserFacingFailure("status_unavailable"),
-            variant: "warning",
-        })
-        return false
-    }
-
-    api.ui.dialog.replace(() => <StatusDialog api={api} s={result.detail} />)
+    // A result without a usable snapshot still opens the dialog: it shows the
+    // "status unavailable" view naming the reason (RPC error, a directory the
+    // server keeps no state for, missing fields, a server/UI version
+    // difference) instead of a toast that disappears.
+    api.ui.dialog.replace(() => <StatusDialog api={api} status={result} />)
     return true
 }
 
@@ -247,7 +254,7 @@ async function showEmbedDialog(api: TuiPluginApi, targetSessionId = getSessionId
         api.ui.toast({ message: "No active session", variant: "warning" })
         return false
     }
-    const directory = api.state.path.directory ?? ""
+    const directory = sessionDirectory(api, sessionId)
     const detail = await loadEmbedDetail(sessionId, directory)
     if (getSessionId(api) !== sessionId) return false
     api.ui.dialog.replace(() => <EmbedDialog api={api} detail={detail} />)
@@ -747,6 +754,11 @@ const tui: TuiPlugin = async (api, _options, meta) => {
 
     startNotificationSocket({
         getSessionId: () => getSessionId(api),
+        // Follow the shown session's own server, whose commands push its dialogs.
+        getSessionDirectory: () => {
+            const sessionId = getSessionId(api)
+            return sessionId ? sessionDirectory(api, sessionId) : null
+        },
         onNotification: handleNotification,
     })
 

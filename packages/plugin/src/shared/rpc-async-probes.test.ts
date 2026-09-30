@@ -192,6 +192,35 @@ test("boot storage wait stays responsive with a locked v90 store and slow Window
     }
 });
 
+test("Windows PowerShell 5.1 wrapped creation dates still prove a holder's identity", async () => {
+    __setRpcIdentityTestHooks({ platform: "win32" });
+    __setAsyncProcessProbeForTests(async () =>
+        JSON.stringify([
+            {
+                ProcessId: 10376,
+                ParentProcessId: 1,
+                Name: "opencode.exe",
+                CommandLine: "opencode.exe",
+                CreationDate: {
+                    value: "/Date(1790763300123)/",
+                    DisplayHint: 2,
+                    DateTime: "Wednesday, September 30, 2026 12:15:00 PM",
+                },
+            },
+            {
+                ProcessId: 10377,
+                ParentProcessId: 1,
+                Name: "opencode.exe",
+                CommandLine: "opencode.exe",
+                CreationDate: "2026-09-30T10:15:00.1234567Z",
+            },
+        ]),
+    );
+    const result = await inspectProcessesAsync();
+    expect(result.evidence(10376).startTime).toBe(1790763300123);
+    expect(result.evidence(10377).startTime).toBe(1790763300123);
+});
+
 test("a timed-out refresh retains confirmed blockers until a successful process scan", async () => {
     let now = 1000;
     __setRpcIdentityTestHooks({ platform: "win32", nowMs: () => now });

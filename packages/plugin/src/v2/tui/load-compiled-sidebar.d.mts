@@ -28,7 +28,11 @@ export interface V1Event {
 
 /** The slice of OpenCode 1's `TuiPluginApi` the sidebar component actually uses. */
 export interface V1SidebarApi {
-    readonly state: { readonly path: { readonly directory: string } };
+    readonly state: {
+        readonly path: { readonly directory: string };
+        /** The shown session's own directory, so the sidebar asks that directory's server. */
+        readonly session: { get(sessionID: string): { readonly directory?: string } | undefined };
+    };
     readonly renderer: { requestRender(): void };
     readonly event: { on(type: string, handler: (event: V1Event) => void): () => void };
 }

@@ -4,6 +4,7 @@ import type { TuiSlotPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/
 import packageJson from "../../../package.json"
 import { badgeTextColor } from '../badge-contrast';
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
+import { directoryForSession } from "../data/session-directory"
 import { formatThresholdPercent } from "../../shared/format-threshold"
 import { renderUserFacingFailure } from "../../shared/user-facing-codes"
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../compaction-off"
@@ -534,7 +535,10 @@ const SidebarContent = (props: {
         const sid = props.sessionID()
         if (!sid) return
         const sequence = ++snapshotRequestSequence
-        const directory = props.api.state.path.directory ?? ""
+        const directory = directoryForSession(
+            props.api.state.session?.get?.(sid)?.directory,
+            props.api.state.path.directory ?? "",
+        )
         void loadSidebarSnapshot(sid, directory)
             .then((data) => {
                 // Guard against a session switch while this load was in flight:
@@ -600,7 +604,10 @@ const SidebarContent = (props: {
             return
         }
         const sequence = ++snapshotRequestSequence
-        const directory = props.api.state.path.directory ?? ""
+        const directory = directoryForSession(
+            props.api.state.session?.get?.(sid)?.directory,
+            props.api.state.path.directory ?? "",
+        )
         void loadSidebarSnapshot(sid, directory)
             .then((data) => {
                 if (
