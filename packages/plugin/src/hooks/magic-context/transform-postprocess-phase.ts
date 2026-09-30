@@ -110,6 +110,7 @@ import {
     type MaterializeDecision,
     mustMaterialize,
     type PrefixTrimSourceOrder,
+    type PrefixTrimStatus,
     type PreparedCompartmentInjection,
     prepareCachedM0M1Replay,
     renderCompartmentInjection,
@@ -1458,6 +1459,8 @@ export interface PostTransformPhaseResult {
     droppedCount: number;
     emergency: boolean;
     bustedThisPass: boolean;
+    /** How the delivered prefix cut the raw conversation; null when no m[0]/m[1] prefix was delivered. */
+    prefixTrimStatus: PrefixTrimStatus | null;
     /** Pending flag applied to the live output; the caller clears it only after the live lane succeeds. */
     thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null;
     /** Thinking this busting pass removed because its own edit invalidated it. */
@@ -3521,6 +3524,7 @@ export async function runPostTransformPhase(
         droppedCount,
         emergency,
         bustedThisPass,
+        prefixTrimStatus: deliveredPrefix?.prefixTrimStatus ?? null,
         thinkingBindingRecovery,
         proactiveThinkingStrip,
     };

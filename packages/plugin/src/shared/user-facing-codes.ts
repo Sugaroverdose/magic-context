@@ -18,6 +18,12 @@ export const USER_FACING_FAILURES = {
             "History compression is paused because this session's saved summaries no longer line up with its messages.",
         action: "Run /ctx-recomp to rebuild them.",
     },
+    history_boundary_unresolved: {
+        code: "MC-H04",
+        sentence:
+            "This request was not sent: the message that marks where this session's history summary ends is missing from the OpenCode store, and without it the request is larger than the model's context window.",
+        action: "Run /ctx-recomp to rebuild the history summary.",
+    },
     recomp_unavailable: {
         code: "MC-R01",
         sentence: "History compression could not be rebuilt.",

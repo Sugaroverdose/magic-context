@@ -1672,11 +1672,27 @@ export function registerRpcHandlers(
             "../hooks/magic-context/send-session-notification"
         );
         log(`[rpc] recomp requested for session ${sessionId}`);
+        // The historian needs a way to run hidden completions: OpenCode 1 opens
+        // child sessions through its SDK client, OpenCode 2 through the hidden
+        // completion executor. With neither there is nothing to run it on, and
+        // saying so beats a generic rebuild failure.
+        if (!args.client && !args.hiddenCompletionExecutor) {
+            return {
+                ok: false,
+                error: "History rebuild is unavailable: this host gave Magic Context no way to run the historian.",
+            };
+        }
         const ctx = await buildManagedCtx(db);
-        // Fire-and-forget; outcome is force-persisted so a multi-minute recomp's
-        // result stays visible in scrollback instead of a 5s toast.
+        // Fire-and-forget. OpenCode 1 force-persists the outcome as a chat row so a
+        // multi-minute recomp's result stays in scrollback instead of a 5s toast.
+        // OpenCode 2 has no SDK client to write that row with, so the outcome goes
+        // to the result dialog on the notification channel, as wrapup's does.
         void runManagedRecomp(ctx, sessionId)
             .then((message) => {
+                if (!args.client) {
+                    pushResultDialog(sessionId, "Recomp", message);
+                    return;
+                }
                 void sendIgnoredMessage(
                     args.client,
                     sessionId,

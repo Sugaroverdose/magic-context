@@ -201,8 +201,9 @@ export async function executePartialRecompInternal(
         const stagedFacts: { category: string; content: string }[] = [];
 
         // ── Resolve project memories for historian fact dedup context ─────
-        // Intentional: session.get failure is non-fatal — we fall back to deps.directory
-        const parentSessionResponse = await client.session
+        // Intentional: session.get failure is non-fatal — we fall back to deps.directory.
+        // OpenCode 2 hands the runner no SDK client, so the lookup is skipped there.
+        const parentSessionResponse = await client?.session
             .get({ path: { id: sessionId } })
             .catch(() => null);
         const parentSession = normalizeSDKResponse(
@@ -438,6 +439,7 @@ export async function executePartialRecompInternal(
 
             const validatedPass = await runValidatedHistorianPass({
                 client,
+                hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
                 db,
                 parentSessionId: sessionId,
                 sessionDirectory,

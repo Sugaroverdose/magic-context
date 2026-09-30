@@ -55,6 +55,10 @@ import {
 import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import {
+    type HistoryBoundaryRepair,
+    repairMissingHistoryBoundary,
+} from "../../hooks/magic-context/history-boundary-repair";
+import {
     createChatMessageHook,
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
@@ -70,6 +74,7 @@ import {
     StorageBusyRefusalError,
 } from "../../hooks/magic-context/storage-busy-refusal";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
+import { UnresolvedHistoryBoundaryError } from "../../hooks/magic-context/unresolved-history-boundary";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { scheduleAfterBootQuiet } from "../../plugin/boot-quiet";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
@@ -94,6 +99,7 @@ import {
 import { pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import {
+    type Database,
     isTransientSqliteError,
     withAsyncPrivilegedWriter,
     withoutSqliteTransformPass,
@@ -149,7 +155,40 @@ import { resolveUsageReading } from "./usage-reading";
 const HIDDEN_SESSION_ERROR_GRACE_MS = 50;
 
 export function isBlockingV2TransformError(error: unknown): boolean {
-    return error instanceof EmergencyFailClosedError || isFailClosedBlockingError(error);
+    return (
+        error instanceof EmergencyFailClosedError ||
+        error instanceof UnresolvedHistoryBoundaryError ||
+        isFailClosedBlockingError(error)
+    );
+}
+
+/**
+ * Check the history boundary against the host store before a pass restores or
+ * trims against it, and re-anchor it when the store proves it gone. Absence is
+ * proven only by the store answering "no such row" for a session it holds rows
+ * for; a session the store has no rows for proves nothing. A failed check never
+ * blocks the turn: the pass goes on as before, and the request-size guard in
+ * the transform still stops an untrimmed request that would not fit.
+ */
+export function checkHistoryBoundary(
+    db: Database,
+    reader: Pick<V2StoreReader, "earliestSequence" | "sequenceForId">,
+    sessionID: string,
+    hostCompacted: boolean,
+): HistoryBoundaryRepair | undefined {
+    try {
+        const storeHasSession = reader.earliestSequence(sessionID) !== undefined;
+        return repairMissingHistoryBoundary({
+            db,
+            sessionId: sessionID,
+            hostCompacted,
+            isInHostStore: (messageId) =>
+                storeHasSession ? reader.sequenceForId(sessionID, messageId) !== undefined : null,
+        });
+    } catch (error) {
+        sessionLog(sessionID, "history boundary check failed; continuing without repair", error);
+        return undefined;
+    }
 }
 
 /**
@@ -1356,6 +1395,21 @@ export async function registerContext(context: V2Context) {
             let submitted: string | undefined;
             try {
                 const cut = reader.latestCompaction(draft.sessionID);
+                // Before anything restores or trims against the history boundary,
+                // make sure the host store still has it. Only TypeScript mode keeps
+                // its boundary in the compartments this checks; Rust mode's module
+                // owns its own.
+                const boundaryRepair =
+                    !rustModeModuleClient && db && !compactionOff
+                        ? checkHistoryBoundary(db, reader, draft.sessionID, cut !== undefined)
+                        : undefined;
+                if (
+                    boundaryRepair?.kind === "repaired" ||
+                    boundaryRepair?.kind === "baseline-reset"
+                ) {
+                    historyRefreshSessions.add(draft.sessionID);
+                    pendingMaterializationSessions.add(draft.sessionID);
+                }
                 const incoming = cut && draft.messages.find((message) => message.id === cut.id);
                 postFold = cut !== undefined;
                 if (cut && !incoming)
@@ -1389,13 +1443,21 @@ export async function registerContext(context: V2Context) {
                     const moduleBoundarySeq = moduleBoundaryID
                         ? reader.sequenceForId(draft.sessionID, moduleBoundaryID)
                         : undefined;
-                    const boundaryID = (
-                        db
-                            .prepare(
-                                "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id = ?",
-                            )
-                            .get(draft.sessionID) as { id: string | null } | null
-                    )?.id;
+                    // After a boundary repair the cached prefix is gone and this pass
+                    // rebuilds it against the anchor, so restore from the anchor: the
+                    // same rows every later pass restores from the rebuilt baseline.
+                    const boundaryID =
+                        (
+                            db
+                                .prepare(
+                                    "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id = ?",
+                                )
+                                .get(draft.sessionID) as { id: string | null } | null
+                        )?.id ??
+                        (boundaryRepair?.kind === "repaired" ||
+                        boundaryRepair?.kind === "baseline-reset"
+                            ? boundaryRepair.anchorEndMessageId
+                            : null);
                     // Restore only rows after the cached message prefix and before the host
                     // checkpoint; older rows are already present in the cached messages. The
                     // first fold has no cached prefix, so it starts immediately before the
@@ -1570,6 +1632,15 @@ export async function registerContext(context: V2Context) {
                 // These errors mean the shared transform cannot prove a safe prompt.
                 // Native compaction owns recovery when Magic Context compaction is off.
                 if (!compactionOff) {
+                    // The host records an interrupted turn without its reason, so
+                    // say on the TUI's notification channel what the user can do.
+                    if (error instanceof UnresolvedHistoryBoundaryError) {
+                        pushNotification(
+                            "toast",
+                            { message: error.message, variant: "error" },
+                            draft.sessionID,
+                        );
+                    }
                     await refuseBeforeProvider(
                         context.session,
                         draft.sessionID,
