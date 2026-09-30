@@ -164,7 +164,7 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    fn new(code: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &str, message: impl Into<String>) -> Self {
         Refusal {
             code: code.to_string(),
             message: message.into(),
@@ -172,7 +172,7 @@ impl Refusal {
         }
     }
 
-    fn with_detail(mut self, detail: Value) -> Self {
+    pub(crate) fn with_detail(mut self, detail: Value) -> Self {
         self.detail = detail;
         self
     }
@@ -463,20 +463,20 @@ const REPORT_TABLES: &[&str] = &[
     "user_memory_candidates",
 ];
 
-type Row = BTreeMap<String, SqlValue>;
+pub(crate) type Row = BTreeMap<String, SqlValue>;
 
-fn get(row: &Row, name: &str) -> SqlValue {
+pub(crate) fn get(row: &Row, name: &str) -> SqlValue {
     row.get(name).cloned().unwrap_or(SqlValue::Null)
 }
 
-fn as_i64(value: &SqlValue) -> Option<i64> {
+pub(crate) fn as_i64(value: &SqlValue) -> Option<i64> {
     match value {
         SqlValue::Integer(value) => Some(*value),
         _ => None,
     }
 }
 
-fn as_text(value: &SqlValue) -> Option<&str> {
+pub(crate) fn as_text(value: &SqlValue) -> Option<&str> {
     match value {
         SqlValue::Text(value) => Some(value.as_str()),
         _ => None,
@@ -502,7 +502,7 @@ fn placeholders(count: usize) -> String {
         .join(", ")
 }
 
-fn read_named_rows(conn: &Connection, sql: &str, args: &[SqlValue]) -> rusqlite::Result<Vec<Row>> {
+pub(crate) fn read_named_rows(conn: &Connection, sql: &str, args: &[SqlValue]) -> rusqlite::Result<Vec<Row>> {
     let mut statement = conn.prepare(sql)?;
     let names: Vec<String> = statement
         .column_names()
@@ -604,7 +604,7 @@ fn update_row(
     Ok(())
 }
 
-fn table_exists(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
+pub(crate) fn table_exists(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)
              OR EXISTS(SELECT 1 FROM ctx.sqlite_master WHERE type = 'table' AND name = ?1)",
@@ -2853,6 +2853,21 @@ fn log_step(step: &str, started: Instant) {
 /// most of the migration's wall time, so they run side by side rather than one after the
 /// other.
 fn backup(options: &EngineOptions) -> Result<(), EngineError> {
+    backup_files(options)?;
+    let data = options
+        .context_db
+        .parent()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default();
+    eprintln!(
+        "Backup written to {backup}.\nTo undo: quit every host, then\n  rm -f {data}/context.db-wal {data}/context.db-shm {data}/store.db-wal {data}/store.db-shm\n  cp {backup}/context.db {backup}/store.db {data}/\nKeep the current plugin and ck-mc: TypeScript mode works as before; Rust mode refuses with MC-C14 until re-migrated.",
+        backup = options.backup_dir.display()
+    );
+    Ok(())
+}
+
+/// The copy-and-check half of [`backup`], without the migration's undo instructions.
+pub(crate) fn backup_files(options: &EngineOptions) -> Result<(), EngineError> {
     std::fs::create_dir_all(&options.backup_dir)?;
     let mut manifest = String::from("name\tsource\tschema_version\tsha256\n");
     for (name, source) in [
@@ -2905,15 +2920,6 @@ fn backup(options: &EngineOptions) -> Result<(), EngineError> {
         ));
     }
     std::fs::write(options.backup_dir.join("MANIFEST.tsv"), manifest)?;
-    let data = options
-        .context_db
-        .parent()
-        .map(|dir| dir.display().to_string())
-        .unwrap_or_default();
-    eprintln!(
-        "Backup written to {backup}.\nTo undo: quit every host, then\n  rm -f {data}/context.db-wal {data}/context.db-shm {data}/store.db-wal {data}/store.db-shm\n  cp {backup}/context.db {backup}/store.db {data}/\nKeep the current plugin and ck-mc: TypeScript mode works as before; Rust mode refuses with MC-C14 until re-migrated.",
-        backup = options.backup_dir.display()
-    );
     Ok(())
 }
 
@@ -2987,7 +2993,7 @@ fn file_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
-fn open_existing(path: &Path) -> Result<Connection, EngineError> {
+pub(crate) fn open_existing(path: &Path) -> Result<Connection, EngineError> {
     if !path.exists() {
         return Err(EngineError::Internal(format!(
             "{} does not exist",
