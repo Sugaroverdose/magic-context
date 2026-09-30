@@ -134,8 +134,8 @@ describe("status payloads the dialog receives", () => {
     });
 
     test("an error envelope names the server's error", () => {
-        // What a 0.42.6 server answers once a newer build has migrated the
-        // shared store past its fence (observed on the real host).
+        // What a 0.42.6 server answered on a real host once a newer build had
+        // migrated the shared store to a schema version it does not support.
         const view = render({ error: "unavailable" });
         expect(reasonRow(view)).toBe("server did not answer");
         expect(warningText(view)).toContain("did not return status: unavailable");

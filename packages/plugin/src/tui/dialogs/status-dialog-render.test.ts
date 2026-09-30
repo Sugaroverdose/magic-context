@@ -1,71 +1,21 @@
 /**
- * Renders the shipped, compiled `/ctx-status` dialog
- * (`src/tui-compiled/dialogs/status-dialog.tsx`) for every status payload the
- * dialog can receive, and checks that each one draws and none throws.
+ * Renders the shipped, compiled `/ctx-status` dialog for every status payload
+ * the dialog can receive, and checks that each one draws and none throws.
  *
- * Before issue 584 the dialog read the RPC reply unchecked: a reply without
+ * Previously the dialog read the RPC reply unchecked: a reply without
  * `usagePercentage` (the server's `{ disabled: true }` answer for a home
  * directory or a paused project identity) threw inside the view memo, and
  * OpenCode's crash screen then reported the follow-on
  * "undefined is not an object (evaluating 'view().headline')".
  *
- * The compiled component imports its runtime from OpenCode's
- * `opentui:runtime-module:*` registry. Bare Bun has none, so this file
- * registers the same modules from this package's own dependencies before
- * loading the component.
+ * The rendering happens in `scripts/render-compiled-status-dialog.ts`, a child
+ * process, because it has to register OpenCode's runtime module registry and
+ * that registration cannot be undone inside this test process.
  */
 import { beforeAll, describe, expect, test } from "bun:test";
-import { plugin } from "bun";
+import { join } from "node:path";
 import { checkStatusDetailPayload, statusRpcFailure } from "../../shared/status-view-check";
-import { runtimeModuleId, TUI_RUNTIME_SPECIFIERS } from "../../shared/tui-runtime-specifiers";
 import type { StatusDetailResult } from "../data/context-db";
-
-type TestRender = (
-    node: () => unknown,
-    options: { width: number; height: number },
-) => Promise<{ renderOnce(): Promise<void>; captureCharFrame(): string }>;
-
-type CompiledDialog = {
-    StatusDialog(props: { api: unknown; status: StatusDetailResult }): unknown;
-};
-
-let testRender: TestRender;
-let dialog: CompiledDialog;
-
-beforeAll(async () => {
-    const loaded = new Map<string, Record<string, unknown>>();
-    for (const specifier of TUI_RUNTIME_SPECIFIERS) loaded.set(specifier, await import(specifier));
-    plugin({
-        name: "opentui-runtime-registry-for-tests",
-        setup(build) {
-            for (const specifier of TUI_RUNTIME_SPECIFIERS) {
-                build.module(runtimeModuleId(specifier), () => ({
-                    exports: loaded.get(specifier) ?? {},
-                    loader: "object",
-                }));
-            }
-        },
-    });
-    testRender = (loaded.get("@opentui/solid") as { testRender: TestRender }).testRender;
-    dialog = (await import("../../tui-compiled/dialogs/status-dialog.tsx")) as CompiledDialog;
-});
-
-const THEME = {
-    accent: "#ffcc00",
-    text: "#ffffff",
-    textMuted: "#888888",
-    warning: "#ff8800",
-    error: "#ff0000",
-};
-
-async function frameFor(status: StatusDetailResult): Promise<string> {
-    const setup = await testRender(
-        () => dialog.StatusDialog({ api: { theme: { current: THEME } }, status }),
-        { width: 110, height: 50 },
-    );
-    await setup.renderOnce();
-    return setup.captureCharFrame();
-}
 
 const UI = "0.44.5";
 
@@ -104,49 +54,68 @@ const COMPLETE = {
     compressionUsage: null,
     memoryCount: 0,
 };
+const { pluginVersion: _omitted, ...OLDER_SERVER } = COMPLETE;
+
+const CASES: Array<{ name: string; status: StatusDetailResult; expected: string[] }> = [
+    {
+        name: "a complete snapshot",
+        status: checkStatusDetailPayload(COMPLETE, UI),
+        expected: ["Magic Context Status", "12.5% / 65%"],
+    },
+    {
+        name: "an RPC transport failure",
+        status: statusRpcFailure("connect ECONNREFUSED"),
+        expected: ["Status unavailable", "server did not answer"],
+    },
+    {
+        name: "an error envelope",
+        status: checkStatusDetailPayload({ error: "unavailable" }, UI),
+        expected: ["Status unavailable", "server did not answer"],
+    },
+    {
+        name: "the home-directory reply",
+        status: checkStatusDetailPayload({ sessionId: "s", disabled: true }, UI),
+        expected: ["Status unavailable", "home directory"],
+    },
+    {
+        name: "the paused-identity reply",
+        status: checkStatusDetailPayload({ sessionId: "s", disabled: true, paused: true }, UI),
+        expected: ["Status unavailable", "memory paused"],
+    },
+    {
+        name: "an empty reply",
+        status: checkStatusDetailPayload({}, UI),
+        expected: ["Status unavailable", "incomplete status data"],
+    },
+    {
+        name: "an older server's snapshot",
+        status: checkStatusDetailPayload(OLDER_SERVER, UI),
+        expected: ["12.5% / 65%", "An older Magic Context server"],
+    },
+];
+
+let results: Array<{ frame?: string; error?: string }> = [];
+
+beforeAll(() => {
+    const script = join(import.meta.dir, "../../../scripts/render-compiled-status-dialog.ts");
+    const child = Bun.spawnSync(["bun", script], {
+        stdin: new TextEncoder().encode(JSON.stringify(CASES.map((entry) => entry.status))),
+        stdout: "pipe",
+        stderr: "pipe",
+        windowsHide: true,
+    });
+    if (child.exitCode !== 0) {
+        throw new Error(`render script failed: ${child.stderr.toString()}`);
+    }
+    results = JSON.parse(child.stdout.toString());
+}, 60_000);
 
 describe("compiled /ctx-status dialog", () => {
-    test("draws a complete snapshot", async () => {
-        const frame = await frameFor(checkStatusDetailPayload(COMPLETE, UI));
-        expect(frame).toContain("Magic Context Status");
-        expect(frame).toContain("12.5% / 65%");
-    });
-
-    const unavailable: Array<[string, () => StatusDetailResult, string]> = [
-        [
-            "an RPC transport failure",
-            () => statusRpcFailure("connect ECONNREFUSED"),
-            "server did not answer",
-        ],
-        [
-            "an error envelope",
-            () => checkStatusDetailPayload({ error: "unavailable" }, UI),
-            "server did not answer",
-        ],
-        [
-            "the home-directory reply",
-            () => checkStatusDetailPayload({ sessionId: "s", disabled: true }, UI),
-            "home directory",
-        ],
-        [
-            "the paused-identity reply",
-            () => checkStatusDetailPayload({ sessionId: "s", disabled: true, paused: true }, UI),
-            "memory paused",
-        ],
-        ["an empty reply", () => checkStatusDetailPayload({}, UI), "incomplete status data"],
-    ];
-    for (const [name, status, reason] of unavailable) {
-        test(`draws ${name} as the unavailable view`, async () => {
-            const frame = await frameFor(status());
-            expect(frame).toContain("Status unavailable");
-            expect(frame).toContain(reason);
+    for (const [index, entry] of CASES.entries()) {
+        test(`draws ${entry.name} without throwing`, () => {
+            const result = results[index];
+            expect(result?.error).toBeUndefined();
+            for (const text of entry.expected) expect(result?.frame).toContain(text);
         });
     }
-
-    test("draws an older server's snapshot and names the older server", async () => {
-        const { pluginVersion: _omitted, ...older } = COMPLETE;
-        const frame = await frameFor(checkStatusDetailPayload(older, UI));
-        expect(frame).toContain("12.5% / 65%");
-        expect(frame).toContain("An older Magic Context server");
-    });
 });

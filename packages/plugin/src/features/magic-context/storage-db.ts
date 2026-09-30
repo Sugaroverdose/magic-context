@@ -93,11 +93,13 @@ export interface MigrationOnOpenRefusal {
 let lastMigrationOnOpenRefusal: MigrationOnOpenRefusal | null = null;
 
 /**
- * An on-open migration this process ran although another OpenCode server's RPC
- * record named a PID whose liveness or identity could not be checked. The
- * guard continues in that case (see `enforceMigrationOnOpenGuard`), so the
- * status dialog reports it: if that PID was a live older build, it is now
- * running against a store newer than its fence.
+ * A schema migration this process ran at startup even though an RPC discovery
+ * record from another OpenCode server named a PID that could not be checked
+ * (no process list, or no way to tell a live server from a reused PID).
+ * `enforceMigrationOnOpenGuard` lets the migration proceed in that case, so
+ * the status dialog reports it: if the PID was a live server on an older
+ * build, that server is now reading a store with a schema version higher than
+ * the newest one it supports.
  */
 export interface UnconfirmedMigrationHolders {
     pids: number[];

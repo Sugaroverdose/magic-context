@@ -165,7 +165,12 @@ export interface StatusViewSource {
     readonly compactionEnabled?: boolean;
     /** Failure codes to print under the sections, already selected by the host. */
     readonly warnings?: readonly UserFacingFailureKey[];
-    /** The store was migrated at startup while these RPC holder PIDs could not be checked. */
+    /**
+     * Set when this server migrated the shared store at startup while other
+     * OpenCode servers (these PIDs, from their RPC discovery records) could not
+     * be checked; if one was an older build still running, it now reads a
+     * store newer than it supports.
+     */
     readonly unconfirmedMigrationHolders?: {
         readonly pids: readonly number[];
         readonly fromVersion: number;
