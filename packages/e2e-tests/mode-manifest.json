@@ -2484,6 +2484,22 @@
             ]
         },
         {
+            "path": "tests/historian-no-tools.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "real OpenCode 1.18.30 and Pi hosts serialize zero tool definitions for every historian variant, even with a user override granting tools; it needs installed host binaries and a throwaway TMPDIR, so it runs by hand outside the mode lanes",
+            "contract_refs": [
+                "HISTORIAN-NO-TOOLS"
+            ],
+            "hosts": [
+                "opencode",
+                "pi"
+            ]
+        },
+        {
             "path": "tests/opencode2/storage-boot-readiness.test.ts",
             "tier": "ts-only",
             "invocation": {
