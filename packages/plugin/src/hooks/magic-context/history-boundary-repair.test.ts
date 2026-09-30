@@ -8,6 +8,7 @@ import {
 import {
     appendCompartments,
     getCompartments,
+    getLastCompartmentEndMessageId,
 } from "../../features/magic-context/compartment-storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
@@ -24,7 +25,10 @@ afterEach(() => {
     db = undefined;
 });
 
-/** Three compartments ending at m-2, m-4 and m-6, and a cached pair on the newest end. */
+/**
+ * Three compartments ending at host messages m-2, m-4 and m-6, and a cached
+ * m[0]/m[1] prefix whose recorded boundary is the newest end.
+ */
 function seed(options: { baseline?: string | null; latestEndId?: string } = {}): Database {
     const database = new Database(":memory:");
     initializeDatabase(database);
@@ -135,18 +139,32 @@ describe("repairMissingHistoryBoundary", () => {
         expect(getCompartments(database, SESSION).map((row) => row.endMessageId)).toEqual(["m-2"]);
     });
 
-    it("treats a newest compartment with no end_message_id (the fork shape) as unanchored", () => {
+    it("keeps a newest compartment with no end_message_id (the fork shape) and bounds at the newest id", () => {
+        // A compartment without an end id cannot be placed, but that says nothing
+        // about the store, so it is kept. The boundary is the newest end id.
         const database = seed({ latestEndId: "", baseline: "m-4" });
         const result = repairMissingHistoryBoundary({
             db: database,
             sessionId: SESSION,
             isInHostStore: store(["m-2", "m-4", "m-6"]),
         });
+        expect(result).toEqual({ kind: "intact" });
+        expect(getCompartments(database, SESSION)).toHaveLength(3);
+        expect(getLastCompartmentEndMessageId(database, SESSION)).toBe("m-4");
+    });
+
+    it("re-anchors past an id-less newest compartment when the newest end id is gone", () => {
+        const database = seed({ latestEndId: "", baseline: "m-4" });
+        const result = repairMissingHistoryBoundary({
+            db: database,
+            sessionId: SESSION,
+            isInHostStore: store(["m-2"]),
+        });
         expect(result).toEqual({
             kind: "repaired",
-            missingEndMessageId: "(no end_message_id)",
-            anchorEndMessageId: "m-4",
-            droppedSequences: [2],
+            missingEndMessageId: "m-4",
+            anchorEndMessageId: "m-2",
+            droppedSequences: [1, 2],
         });
     });
 
@@ -226,8 +244,8 @@ describe("repairMissingHistoryBoundary", () => {
     });
 
     it("leaves a pair recorded before the first compartment alone", () => {
-        // Its replay covers none of the compartments, so their raw rows are meant
-        // to be served until the next priced pass folds them in.
+        // Replaying that cached pair covers none of the compartments, so their raw
+        // rows are meant to be served until the next cache-busting pass folds them in.
         const database = seed({ baseline: null });
         expect(
             repairMissingHistoryBoundary({

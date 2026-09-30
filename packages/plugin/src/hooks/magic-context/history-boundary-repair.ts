@@ -169,20 +169,22 @@ export function repairMissingHistoryBoundary(args: {
 }): HistoryBoundaryRepair {
     const { db, sessionId, isInHostStore } = args;
     const compartments = getCompartments(db, sessionId);
-    if (compartments.length === 0) return { kind: "intact" };
-    const latestIndex = compartments.length - 1;
-    const latest = compartments[latestIndex] as Compartment;
-    const latestEnd = typeof latest.endMessageId === "string" ? latest.endMessageId : "";
+    // The boundary is the newest compartment that has an end id at all. Newer
+    // compartments without one (legacy rows, or rows carried into a forked
+    // session) are not the boundary: they keep rendering, and the boundary
+    // functions trim at the newest id instead. Having no id says nothing about
+    // the store, so on its own it never causes a removal.
+    let latestIndex = compartments.length - 1;
+    while (latestIndex >= 0 && !compartments[latestIndex]?.endMessageId) latestIndex -= 1;
+    if (latestIndex < 0) return { kind: "intact" };
+    const latestEnd = (compartments[latestIndex] as Compartment).endMessageId;
 
-    const latestPresent = latestEnd.length === 0 ? false : isInHostStore(latestEnd);
+    const latestPresent = isInHostStore(latestEnd);
     if (latestPresent === null) return { kind: "unknown" };
 
     if (!latestPresent) {
-        const missing = latestEnd.length === 0 ? "(no end_message_id)" : latestEnd;
-        const problem =
-            latestEnd.length === 0
-                ? "newest compartment has no end_message_id"
-                : `newest compartment end ${latestEnd} is not in the host store`;
+        const missing = latestEnd;
+        const problem = `newest compartment end ${latestEnd} is not in the host store`;
         const anchor = findAnchor(compartments, latestIndex, isInHostStore);
         if (anchor === "unknown") return { kind: "unknown" };
         if (anchor === null) {

@@ -277,8 +277,8 @@ async function buildSession(label: string): Promise<Scenario> {
 /**
  * A converted store gives the history rows new part identities, so the drops
  * the plugin recorded for them no longer apply and the rows come back at full
- * size (the reported session: thousands of tags, none of them dropped). Undo
- * the drops here so the restored history is served at the size the report saw.
+ * size (issue 590's session had thousands of tags and none of them dropped).
+ * Undo the drops here so the restored history is served at that full size.
  */
 function forgetDrops(scenario: Scenario): void {
 	const path = contextDbPath(scenario.host);
@@ -371,7 +371,7 @@ test("a deleted history boundary re-anchors on one rebuild pass and the request 
 	}
 }, 600_000);
 
-test("a newest compartment with no end_message_id (the fork shape) re-anchors the same way", async () => {
+test("a newest compartment with no end_message_id (the fork shape) bounds at the newest end id", async () => {
 	const scenario = await buildSession("no-end-id");
 	try {
 		const { sessionId } = scenario;
@@ -379,8 +379,8 @@ test("a newest compartment with no end_message_id (the fork shape) re-anchors th
 		const latest = rows.at(-1)!;
 		const anchor = rows.at(-2)!;
 		await scenario.host.stopHost();
-		// The row is still in the host store; only the compartment lost its anchor,
-		// as the forked session in the report did.
+		// The row is still in the host store; only the compartment lost its end id,
+		// as in the forked session of issue 590.
 		expect(
 			writeRows(
 				contextDbPath(scenario.host),
@@ -394,21 +394,30 @@ test("a newest compartment with no end_message_id (the fork shape) re-anchors th
 		expect(recordOpenFiles(scenario.host, "no-end-id")).toEqual([]);
 		scenario.setEnforced(true);
 		scenario.oversized.length = 0;
-		const start = scenario.mock.requests().length;
-		const marker = "turn after the newest compartment lost its end id";
-		await turn(scenario.client, sessionId, marker);
-		const served = servedFor(scenario, marker, start);
-		const sizes = served.map((request) => requestTokens(request.body));
+		// A priced pass recomputes the cached boundary from the compartments. It
+		// used to come out empty here, so every row the host compacted away was
+		// restored and served uncut.
+		await scenario.client.session.command({ sessionID: sessionId, name: "ctx-flush", text: "" });
+		const sizes: number[] = [];
+		for (const marker of [
+			"priced turn after the newest compartment lost its end id",
+			"replayed turn after the newest compartment lost its end id",
+		]) {
+			const start = scenario.mock.requests().length;
+			await turn(scenario.client, sessionId, marker);
+			const served = servedFor(scenario, marker, start);
+			expect(served).toHaveLength(1);
+			sizes.push(requestTokens(served[0]!.body));
+		}
 		console.log(`[missing-boundary] no-end-id served=${JSON.stringify(sizes)} oversized=${JSON.stringify(scenario.oversized)}`);
-		expect(served).toHaveLength(1);
-		expect(sizes[0]).toBeLessThan(WINDOW);
+		for (const size of sizes) expect(size).toBeLessThan(WINDOW);
 		expect(scenario.oversized).toEqual([]);
+		// Nothing is removed: the id-less compartment keeps rendering, and the
+		// boundary is the newest compartment that has an end id.
 		const after = compartments(scenario.host, sessionId);
-		expect(after.at(-1)?.endMessageId).toBe(anchor.endMessageId);
-		await waitForLog(
-			scenario.logPath,
-			"history boundary repair: newest compartment has no end_message_id",
-		);
+		expect(after).toHaveLength(rows.length);
+		expect(after.at(-1)?.endMessageId).toBe("");
+		expect(baselineBoundary(scenario.host, sessionId)).toBe(anchor.endMessageId);
 	} catch (error) {
 		console.error(
 			scenario.host.stderr(),

@@ -415,7 +415,8 @@ export function createMessagesTransformHandler(args: {
             } else if (sessionId) {
                 sessionLog(sessionId, "lkg_miss");
             }
-            // No last good request could stand in, and the untrimmed request does
+            // The LKG replay above (the last request this session served
+            // successfully) could not stand in, and the untrimmed request does
             // not fit the window: refuse the turn rather than hand the provider a
             // request it will reject (or, on OpenCode 1, the raw input messages,
             // which are just as large).

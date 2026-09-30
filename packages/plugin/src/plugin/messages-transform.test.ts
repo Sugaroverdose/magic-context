@@ -113,7 +113,8 @@ describe("createMessagesTransformHandler — error boundary (issue #23)", () => 
 
     it("refuses an uncut over-window request when no last good request can stand in", async () => {
         // Unlike an ordinary transform error, this one must not fall through to
-        // the input messages: they are the same whole window the guard stopped.
+        // the input messages: they are the same uncut, over-window
+        // conversation the transform refused to send.
         const handler = createMessagesTransformHandler({
             magicContext: {
                 "experimental.chat.messages.transform": async () => {
