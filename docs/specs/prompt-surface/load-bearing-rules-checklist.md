@@ -1004,7 +1004,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** A summary under session-history lacks required detail.
 - **Mechanism:** Pass the heading's start/end ordinal range to recover the original conversation.
 - **Consequence:** Exact historical context can be restored from the summary boundary.
-- **Source evidence:** `Recover the original conversation`
+- **Source evidence:** `Earlier turns are summarized in <session-history>`
 
 | Variant | Applicability status |
 | --- | --- |
@@ -1028,7 +1028,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** The requested transcript exceeds the recovery budget.
 - **Mechanism:** Return a raw transcript capped at about 15K tokens and identify where to continue.
 - **Consequence:** The agent can continue recovery without receiving an unbounded result.
-- **Source evidence:** `Recover the original conversation`
+- **Source evidence:** `capped at ~15K tokens; an oversized range returns the head and says where to continue.`
 
 | Variant | Applicability status |
 | --- | --- |
@@ -1052,7 +1052,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** The agent needs to choose one message or tool call from a range.
 - **Mechanism:** Use verbose mode to list each message ordinal separately with per-part previews and tool output sizes.
 - **Consequence:** The agent can select a precise ordinal before full recovery.
-- **Source evidence:** `Recover the original conversation`
+- **Source evidence:** `verbose=true lists each message separately with its ordinal and a per-part preview (tool calls with output sizes)`
 
 | Variant | Applicability status |
 | --- | --- |
@@ -1076,7 +1076,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** One exact message or dropped tool output is needed.
 - **Mechanism:** Pass message=N to return all text parts and complete tool input/output for that ordinal.
 - **Consequence:** A previously dropped output is recovered from storage rather than fabricated.
-- **Source evidence:** `Recover the original conversation`
+- **Source evidence:** `message=N returns that one message in full — every text part and every tool call's complete input and output`
 
 | Variant | Applicability status |
 | --- | --- |
@@ -1100,7 +1100,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** A requested range is after the last compacted compartment.
 - **Mechanism:** Treat that range as already visible live context and do not expand it.
 - **Consequence:** The tool does not duplicate visible content and burn output tokens.
-- **Source evidence:** `Recover the original conversation`
+- **Source evidence:** `Ranges after the last compartment are your live tail — already visible, not expandable.`
 
 | Variant | Applicability status |
 | --- | --- |

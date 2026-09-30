@@ -548,7 +548,7 @@
         "file": "packages/plugin/src/tools/ctx-expand/constants.ts",
         "symbol": "CTX_EXPAND_DESCRIPTION",
         "lines": "1-11",
-        "evidence": "Recover the original conversation"
+        "evidence": "Returns the raw transcript as [N] U:/A: lines"
       },
       "sharedAcrossPresets": false,
       "composedIn": [
@@ -1152,7 +1152,7 @@
       "operativeCondition": "A summary under session-history lacks required detail.",
       "mechanism": "Pass the heading's start/end ordinal range to recover the original conversation.",
       "consequence": "Exact historical context can be restored from the summary boundary.",
-      "evidence": "Recover the original conversation"
+      "evidence": "Earlier turns are summarized in <session-history>"
     },
     {
       "id": "T-007",
@@ -1163,7 +1163,7 @@
       "operativeCondition": "The requested transcript exceeds the recovery budget.",
       "mechanism": "Return a raw transcript capped at about 15K tokens and identify where to continue.",
       "consequence": "The agent can continue recovery without receiving an unbounded result.",
-      "evidence": "Recover the original conversation"
+      "evidence": "capped at ~15K tokens; an oversized range returns the head and says where to continue."
     },
     {
       "id": "T-008",
@@ -1174,7 +1174,7 @@
       "operativeCondition": "The agent needs to choose one message or tool call from a range.",
       "mechanism": "Use verbose mode to list each message ordinal separately with per-part previews and tool output sizes.",
       "consequence": "The agent can select a precise ordinal before full recovery.",
-      "evidence": "Recover the original conversation"
+      "evidence": "verbose=true lists each message separately with its ordinal and a per-part preview (tool calls with output sizes)"
     },
     {
       "id": "T-009",
@@ -1185,7 +1185,7 @@
       "operativeCondition": "One exact message or dropped tool output is needed.",
       "mechanism": "Pass message=N to return all text parts and complete tool input/output for that ordinal.",
       "consequence": "A previously dropped output is recovered from storage rather than fabricated.",
-      "evidence": "Recover the original conversation"
+      "evidence": "message=N returns that one message in full — every text part and every tool call's complete input and output"
     },
     {
       "id": "T-010",
@@ -1196,7 +1196,7 @@
       "operativeCondition": "A requested range is after the last compacted compartment.",
       "mechanism": "Treat that range as already visible live context and do not expand it.",
       "consequence": "The tool does not duplicate visible content and burn output tokens.",
-      "evidence": "Recover the original conversation"
+      "evidence": "Ranges after the last compartment are your live tail — already visible, not expandable."
     },
     {
       "id": "T-011",
