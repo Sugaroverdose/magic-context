@@ -83,6 +83,23 @@ const transform = createTransform({
 });
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 console.error(`replaying ${messages.length} visible messages`);
+if (process.env.PERF_TRIGGER_ONLY === "1") {
+    const { checkCompartmentTrigger, buildTriggerInMemoryTail } = await load("hooks/magic-context/compartment-trigger.ts");
+    const { getOrCreateSessionMeta } = await load("features/magic-context/storage.ts");
+    const meta = getOrCreateSessionMeta(db, sessionId);
+    meta.compartmentInProgress = false;
+    for (let pass = 0; pass < 2; pass++) {
+        const tail = buildTriggerInMemoryTail(db, sessionId, messages);
+        const start = performance.now();
+        const result = checkCompartmentTrigger(db, sessionId, meta,
+            { percentage: meta.lastContextPercentage, inputTokens: meta.lastInputTokens },
+            meta.lastContextPercentage, 65, 32000, 6, {enabled: true, min_clusters: 3},
+            undefined, 200000, tail);
+        console.log(JSON.stringify({ pass, wallMs: performance.now() - start, inMemoryTail: tail !== undefined,
+            shouldFire: result.shouldFire, reason: result.reason, boundary: result.boundarySnapshot?.lastCompartmentEndMessageId }));
+    }
+    db.close(); host.close(); process.exit(0);
+}
 if (process.env.PERF_INJECTION_ONLY === "1") {
     const { prepareCompartmentInjection } = await load("hooks/magic-context/inject-compartments.ts");
     for (let pass = 0; pass < 3; pass++) {
