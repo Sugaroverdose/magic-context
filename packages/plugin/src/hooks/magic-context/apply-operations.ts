@@ -1,5 +1,6 @@
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import {
+    getDroppedTagsByNumbers,
     getPendingOps,
     getTagsBySession,
     removePendingOp,
@@ -506,7 +507,9 @@ export function applyFlushedStatuses(
     preloadedTags?: TagEntry[],
 ): boolean {
     let didMutateMessage = false;
-    const tags = preloadedTags ?? getTagsBySession(db, sessionId);
+    // Rows without a target in the visible output cannot change that output.
+    // Restrict fallback callers, including Pi, to dropped tags in the target map.
+    const tags = preloadedTags ?? getDroppedTagsByNumbers(db, sessionId, [...targets.keys()]);
 
     for (const tag of tags) {
         if (tag.status === "dropped") {

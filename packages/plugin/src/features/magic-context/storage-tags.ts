@@ -972,7 +972,31 @@ export function markWhitespaceAssistantTagInert(
 export function getInertWhitespaceAssistantTags(
     db: Database,
     sessionId: string,
+    messageIds?: readonly string[],
 ): InertWhitespaceAssistantTag[] {
+    if (messageIds) {
+        // The fingerprint index lets the wire reader seek each visible owner instead
+        // of scanning every compacted tag. Keep the unscoped API for reduction tools.
+        const statement = db.prepare(
+            `SELECT tag_number AS tagNumber, entry_fingerprint AS entryFingerprint
+             FROM tags
+             WHERE session_id = ? AND type = 'message' AND status = 'compacted'
+               AND entry_fingerprint >= ? AND entry_fingerprint < ?`,
+        );
+        return [...new Set(messageIds)].flatMap((messageId) => {
+            const prefix = `${WHITESPACE_ASSISTANT_INERT_FINGERPRINT_PREFIX}${messageId}:p`;
+            const rows = statement.all(sessionId, prefix, `${prefix.slice(0, -1)}q`) as Array<{
+                tagNumber: number;
+                entryFingerprint: string;
+            }>;
+            return rows.map((row) => ({
+                tagNumber: row.tagNumber,
+                contentId: row.entryFingerprint.slice(
+                    WHITESPACE_ASSISTANT_INERT_FINGERPRINT_PREFIX.length,
+                ),
+            }));
+        });
+    }
     const rows = db
         .prepare(
             `SELECT tag_number AS tagNumber, entry_fingerprint AS entryFingerprint

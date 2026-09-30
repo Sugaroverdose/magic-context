@@ -55,16 +55,22 @@ const TOOL_OWNER_CACHE_KEY_SEP = "\x00";
 type InertWhitespaceTag = ReturnType<typeof getInertWhitespaceAssistantTags>[number];
 const inertWhitespaceCache = new WeakMap<
     ContextDatabase,
-    Map<string, { tagsVersion: number; tags: InertWhitespaceTag[] }>
+    Map<string, { tagsVersion: number; ownersKey: string; tags: InertWhitespaceTag[] }>
 >();
 
 function getCachedInertWhitespaceAssistantTags(
     db: ContextDatabase,
     sessionId: string,
     tagger: Tagger,
+    messages: readonly MessageLike[],
 ): InertWhitespaceTag[] {
+    const messageIds = messages.flatMap((message) =>
+        typeof message.info.id === "string" ? [message.info.id] : [],
+    );
+    const ownersKey = JSON.stringify(messageIds);
     const tagsVersion = tagger.getLoadedTagsVersion?.(sessionId, db);
-    if (tagsVersion === undefined) return getInertWhitespaceAssistantTags(db, sessionId);
+    if (tagsVersion === undefined)
+        return getInertWhitespaceAssistantTags(db, sessionId, messageIds);
 
     let bySession = inertWhitespaceCache.get(db);
     if (!bySession) {
@@ -72,10 +78,10 @@ function getCachedInertWhitespaceAssistantTags(
         inertWhitespaceCache.set(db, bySession);
     }
     const cached = bySession.get(sessionId);
-    if (cached?.tagsVersion === tagsVersion) return cached.tags;
+    if (cached?.tagsVersion === tagsVersion && cached.ownersKey === ownersKey) return cached.tags;
 
-    const tags = getInertWhitespaceAssistantTags(db, sessionId);
-    bySession.set(sessionId, { tagsVersion, tags });
+    const tags = getInertWhitespaceAssistantTags(db, sessionId, messageIds);
+    bySession.set(sessionId, { tagsVersion, ownersKey, tags });
     return tags;
 }
 
@@ -512,7 +518,7 @@ export function tagMessages(
         string,
         Array<{ partIndex: number; tagNumber: number }>
     >();
-    for (const tag of getCachedInertWhitespaceAssistantTags(db, sessionId, tagger)) {
+    for (const tag of getCachedInertWhitespaceAssistantTags(db, sessionId, tagger, messages)) {
         inertWhitespaceTagNumbers.add(tag.tagNumber);
         tagger.bindTag(sessionId, tag.contentId, tag.tagNumber);
         const scoped = /^(.*):p(\d+)$/.exec(tag.contentId);
