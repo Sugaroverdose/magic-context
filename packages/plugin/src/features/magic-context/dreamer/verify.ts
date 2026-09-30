@@ -66,25 +66,26 @@ import {
  * Per-memory verified_at (no global watermark): a timed-out batch banks what it
  * checked; the next run continues. Cost is unique-file-bounded like map, but
  * verify reads DEEPER (it checks claims, not just locates files), so it batches
- * SMALLER than map (~50 vs 80; harness: 96 memories peaked ~177K). No max-turns;
+ * SMALLER than map because deeper reads replay more prompt tokens. No max-turns;
  * a batch that fails to emit a manifest banks nothing and is retried next run.
  *
- * Apply is cache-NEUTRAL: update/archive route through queueMemoryMutation (the
- * m[1] supersede-delta), never bumping the project memory epoch — the dreamer
+ * Apply is cache-NEUTRAL: update/archive route through queueMemoryMutation,
+ * never bumping the project memory epoch — the dreamer
  * must never bust the prompt cache.
  */
 
-// Verify reads deeper than map → smaller batch keeps peak context under a 128K
-// window with margin (harness: 96 mapped → ~177K on a large-window model).
-const VERIFY_BATCH_SIZE = 50;
+// Historical Gemini invocations matched to saved verification results used about
+// 115K tokens per memory. Doubling for runs with more tools keeps five below the 1.36M soft
+// limit, leaving room for a final manifest (see docs/reports/verify-token-budget-2026-09-30.md).
+const VERIFY_BATCH_SIZE = 5;
 // One batch already exhausts the configured model fallback chain. A second
 // identical provider-shaped completion means continuing this run only hammers
 // the same outage, so leave the remaining memories for the scheduler retry.
 const IDENTICAL_PROVIDER_FAILURE_BATCH_LIMIT = 2;
 
 /**
- * Minimum wall-clock budget for one 50-memory verify batch. Verify reads deeper
- * than map, whose 80-memory batch already gets this floor, so an even split of
+ * Minimum wall-clock budget for one verify batch. Verify reads deeper
+ * than map, which already gets this floor, so an even split of
  * the task deadline across many batches (120 s for ten batches in 20 minutes)
  * cannot finish one tool loop. A batch below the floor is not started; its
  * memories keep their old verified_at and a later run picks them up.

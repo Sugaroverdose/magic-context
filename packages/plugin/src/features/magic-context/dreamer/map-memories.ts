@@ -48,32 +48,31 @@ import { DreamTokenBudgetExceeded } from "./token-budget";
 
 /**
  * map-memories: ONE-TIME-style backfill that locates the backing file(s) for
- * every UNMAPPED project memory (or marks it file-independent), so the verify
- * task can run incrementally from the start (verify gates on "files changed
- * since THIS memory's verification" — which needs a mapping to exist).
+ * every UNMAPPED project memory (or marks it file-independent), so verify can
+ * select memories whose backing files changed since their last verification.
  *
  * Self-maintaining: the gate is "unmapped memories exist", so the expensive
  * initial pool backfill happens once (across batches), then only the cheap
  * trickle of newly-added memories is mapped on later runs.
  *
- * Cost is bounded by the UNIQUE-FILE working set, not the memory count —
- * memories share files, so a large batch reads each hot file once and maps every
- * memory citing it in one turn. The shadow harness showed ~100 memories peaking
- * at ~100K context in ~41 turns (FASTER per-memory than 25), so we batch LARGE.
+ * Shared files can reduce reads, but cumulative prompt replay, not just peak
+ * context, must fit the token budget. Small batches bank progress before the
+ * next investigation and leave unmapped memories resumable.
  * No max-turns (the agent's maxSteps cap is the only ceiling); a batch that
  * fails to emit a manifest simply leaves its memories unmapped for the next run.
  */
 
-// Batch LARGE — chunking destroys file-read reuse. 80 keeps a batch comfortably
-// under the agent's 60-step cap (harness: 100 memories ≈ 41 turns) with margin,
-// and peak context well under a 128K window. A 200+ pool → ~3 batches.
-const MAP_BATCH_SIZE = 80;
+// Historical Gemini invocations matched to saved mappings used about 96K tokens
+// per memory. Doubling for runs with more tools puts six at 1.15M, below the 1.2M
+// soft limit; peak context alone
+// was not a reliable cost bound (see docs/reports/verify-token-budget-2026-09-30.md).
+const MAP_BATCH_SIZE = 6;
 
 /**
- * Minimum wall-clock budget for one 80-memory agentic mapping batch. The mapper's
- * harness history needed about 41 turns for a 100-memory batch, but does not record
- * reliable wall time; mirror compress-cues' proven four-minute floor rather than
- * starting a batch with a deadline that cannot finish. Large backfills then bank
+ * Minimum wall-clock budget for one agentic mapping batch. Keep the existing
+ * four-minute floor even with smaller batches: reducing the memory count does
+ * not bound the latency of a slow provider or an individual tool investigation.
+ * Large backfills then bank
  * each committed batch and resume their remainder on a later run.
  */
 export const MAP_BATCH_FLOOR_MS = 240_000;

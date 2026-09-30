@@ -151,7 +151,7 @@ describe("mapMemories disposition", () => {
         try {
             const projectIdentity = "git:map-deadline";
             const dir = tempProject();
-            for (let index = 0; index < 81; index += 1) {
+            for (let index = 0; index < 7; index += 1) {
                 insertMemory(db, {
                     projectPath: projectIdentity,
                     category: "ARCHITECTURE",
@@ -168,7 +168,7 @@ describe("mapMemories disposition", () => {
 
             expect(result).toEqual({
                 mapped: 0,
-                independent: 80,
+                independent: 6,
                 batches: 1,
                 remaining: 1,
                 complete: false,
@@ -184,12 +184,12 @@ describe("mapMemories disposition", () => {
         try {
             const projectIdentity = "git:map-floor-primary";
             const dir = tempProject();
-            // 881 memories produce 12 batches. The old even split assigned only
+            // 67 memories produce 12 batches. The old even split assigned only
             // 100 seconds (1,200,000 / 12) to each batch, below the agentic floor.
             const defaultDeadlineMs = 20 * 60 * 1000;
             expect(Math.floor(defaultDeadlineMs / 12)).toBe(100_000);
             expect(computeMapBatchSliceMs(defaultDeadlineMs, 12)).toBe(MAP_BATCH_FLOOR_MS);
-            for (let index = 0; index < 881; index += 1) {
+            for (let index = 0; index < 67; index += 1) {
                 insertMemory(db, {
                     projectPath: projectIdentity,
                     category: "ARCHITECTURE",
@@ -212,13 +212,13 @@ describe("mapMemories disposition", () => {
             expect(promptCalls).toBe(1);
             expect(result).toEqual({
                 mapped: 0,
-                independent: 80,
+                independent: 6,
                 batches: 1,
-                remaining: 801,
+                remaining: 61,
                 complete: false,
                 stopReason: "deadline",
             });
-            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toHaveLength(801);
+            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toHaveLength(61);
         } finally {
             closeQuietly(db);
         }
@@ -229,7 +229,7 @@ describe("mapMemories disposition", () => {
         try {
             const projectIdentity = "git:map-floor-stop";
             const dir = tempProject();
-            for (let index = 0; index < 81; index += 1) {
+            for (let index = 0; index < 7; index += 1) {
                 insertMemory(db, {
                     projectPath: projectIdentity,
                     category: "ARCHITECTURE",
@@ -249,7 +249,7 @@ describe("mapMemories disposition", () => {
             expect(promptCalls).toBe(1);
             expect(result).toEqual({
                 mapped: 0,
-                independent: 80,
+                independent: 6,
                 batches: 1,
                 remaining: 1,
                 complete: false,
@@ -267,7 +267,7 @@ describe("mapMemories disposition", () => {
             const projectIdentity = "git:map-timeout-breaker";
             const dir = tempProject();
             // Three batches prove the third is left unattempted by the two-timeout breaker.
-            for (let index = 0; index < 241; index += 1) {
+            for (let index = 0; index < 19; index += 1) {
                 insertMemory(db, {
                     projectPath: projectIdentity,
                     category: "ARCHITECTURE",
@@ -288,7 +288,7 @@ describe("mapMemories disposition", () => {
                 mapped: 0,
                 independent: 0,
                 batches: 0,
-                remaining: 241,
+                remaining: 19,
                 complete: false,
                 stopReason: "timeout-circuit-breaker",
             });
@@ -302,7 +302,7 @@ describe("mapMemories disposition", () => {
         try {
             const projectIdentity = "git:map-host-timeout-breaker";
             const dir = tempProject();
-            for (let index = 0; index < 241; index += 1) {
+            for (let index = 0; index < 19; index += 1) {
                 insertMemory(db, {
                     projectPath: projectIdentity,
                     category: "ARCHITECTURE",
@@ -393,7 +393,7 @@ describe("mapMemories disposition", () => {
         try {
             const projectIdentity = "git:map-floor-resume";
             const dir = tempProject();
-            for (let index = 0; index < 161; index += 1) {
+            for (let index = 0; index < 13; index += 1) {
                 insertMemory(db, {
                     projectPath: projectIdentity,
                     category: "ARCHITECTURE",
@@ -407,8 +407,8 @@ describe("mapMemories disposition", () => {
             }) as never;
 
             const first = await mapMemories(args);
-            expect(first).toMatchObject({ independent: 80, batches: 1, remaining: 81 });
-            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toHaveLength(81);
+            expect(first).toMatchObject({ independent: 6, batches: 1, remaining: 7 });
+            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toHaveLength(7);
 
             args.deadline = Date.now() + 2 * MAP_BATCH_FLOOR_MS;
             args.client = successfulMapClient() as never;
@@ -416,7 +416,7 @@ describe("mapMemories disposition", () => {
 
             expect(second).toEqual({
                 mapped: 0,
-                independent: 81,
+                independent: 7,
                 batches: 2,
                 remaining: 0,
                 complete: true,
@@ -427,13 +427,13 @@ describe("mapMemories disposition", () => {
         }
     });
 
-    test("commits a 79/80 closed subset and retries only its omitted id", async () => {
+    test("commits a 5/6 closed subset and retries only its omitted id", async () => {
         const db = freshDb();
         try {
             const projectIdentity = "git:map-omission-retry";
             const dir = tempProject();
             const memoryIds: number[] = [];
-            for (let index = 0; index < 80; index += 1) {
+            for (let index = 0; index < 6; index += 1) {
                 memoryIds.push(
                     insertMemory(db, {
                         projectPath: projectIdentity,
@@ -451,7 +451,7 @@ describe("mapMemories disposition", () => {
                     // truncated, so its returned mappings can commit immediately. Only
                     // its one absent id is present in the retry prompt.
                     expect(ids).toHaveLength(1);
-                    expect(getMemoryVerifications(db, memoryIds).size).toBe(79);
+                    expect(getMemoryVerifications(db, memoryIds).size).toBe(5);
                     expect(getMemoryVerifications(db, ids).has(ids[0] as number)).toBe(false);
                 }
                 const returnedIds = call === 1 ? ids.slice(0, -1) : ids;
@@ -467,15 +467,15 @@ describe("mapMemories disposition", () => {
             const initialPrompt = promptIds[0];
             const retryPrompt = promptIds[1];
             if (!initialPrompt || !retryPrompt) throw new Error("missing prompt fixture");
-            expect(initialPrompt).toHaveLength(80);
+            expect(initialPrompt).toHaveLength(6);
             expect([...initialPrompt].sort((a, b) => a - b)).toEqual(
                 [...memoryIds].sort((a, b) => a - b),
             );
             expect(retryPrompt).toEqual([initialPrompt[initialPrompt.length - 1]]);
-            expect(progress).toEqual([79, 80]);
+            expect(progress).toEqual([5, 6]);
             expect(result).toEqual({
                 mapped: 0,
-                independent: 80,
+                independent: 6,
                 batches: 2,
                 remaining: 0,
                 complete: true,
@@ -1313,7 +1313,7 @@ test("a budget-finalized mapping manifest banks its closed subset", async () => 
                 content: `Another mapping fact ${index} for the next run.`,
             }),
         );
-        const covered = [memory, ...others.slice(0, 9)];
+        const covered = selectMapMemoryInputs(db, projectIdentity, dir).slice(0, 2);
         const messages: unknown[] = [];
         let sends = 0;
         let aborted = false;
@@ -1350,7 +1350,7 @@ test("a budget-finalized mapping manifest banks its closed subset", async () => 
                                 id: "final",
                                 role: "assistant",
                                 finish: "stop",
-                                tokens: { input: 1 },
+                                tokens: { input: 25 },
                                 time: { created: 3, completed: 4 },
                             },
                             parts: [
@@ -1375,16 +1375,16 @@ test("a budget-finalized mapping manifest banks its closed subset", async () => 
         } as never;
         const result = await mapMemories(args);
         expect(sends).toBe(2);
-        expect(result.mapped).toBe(10);
-        expect(result.remaining).toBe(42);
+        expect(result.mapped).toBe(2);
+        expect(result.remaining).toBe(50);
         expect(result.complete).toBe(false);
         expect(
             selectMapMemoryInputs(db, projectIdentity, dir)
                 .map((item) => item.id)
                 .sort((a, b) => a - b),
         ).toEqual(
-            others
-                .slice(9)
+            [memory, ...others]
+                .filter((item) => !covered.some((entry) => entry.id === item.id))
                 .map((item) => item.id)
                 .sort((a, b) => a - b),
         );

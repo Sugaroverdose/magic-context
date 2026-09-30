@@ -1181,7 +1181,7 @@ describe("createDreamTaskExecutor — verify-broad disposition", () => {
         const project = "/repo/verify-broad-result";
         seedTaskScheduleState(db, project, "verify-broad", null, null, "0 3 * * 0");
         const memories = [];
-        for (let i = 0; i < 51; i += 1) {
+        for (let i = 0; i < 6; i += 1) {
             const memory = insertMemory(db, {
                 projectPath: project,
                 category: "ARCHITECTURE",
@@ -1259,7 +1259,7 @@ describe("createDreamTaskExecutor — verify-broad disposition", () => {
         expect(task.error).toBeUndefined();
         expect(task.progress).toContain("verify-broad cycle");
         expect(task.progress).toContain("remain");
-        expect(task.backlog).toMatchObject({ pendingAtStart: 51, pendingAtEnd: 1, processed: 50 });
+        expect(task.backlog).toMatchObject({ pendingAtStart: 6, pendingAtEnd: 1, processed: 5 });
     });
 
     test("surfaces provider-outage completions as transient task failures", async () => {
@@ -1483,7 +1483,7 @@ describe("createDreamTaskExecutor — map-memories disposition", () => {
     test("records banked deadline progress as completed and advances lastRunAt", async () => {
         db = freshDb();
         const project = "/repo/map-banked-progress";
-        for (let index = 0; index < 81; index += 1) {
+        for (let index = 0; index < 7; index += 1) {
             insertMemory(db, {
                 projectPath: project,
                 category: "ARCHITECTURE",
@@ -1569,14 +1569,14 @@ describe("createDreamTaskExecutor — map-memories disposition", () => {
                 backlog?: { pendingAtStart: number; pendingAtEnd: number; processed: number };
             };
             expect(summary.progress).toContain(
-                "committed 80 mapping(s) (mapped 0, independent 80); 1 remain",
+                "committed 6 mapping(s) (mapped 0, independent 6); 1 remain",
             );
             expect(summary.backlog).toEqual({
-                pendingAtStart: 81,
-                totalAtStart: 81,
+                pendingAtStart: 7,
+                totalAtStart: 7,
                 pendingAtEnd: 1,
-                totalAtEnd: 81,
-                processed: 80,
+                totalAtEnd: 7,
+                processed: 6,
             });
         } finally {
             nowSpy.mockRestore();
