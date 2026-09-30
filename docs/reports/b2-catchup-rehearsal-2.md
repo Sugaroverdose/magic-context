@@ -2,7 +2,7 @@
 
 ## Result
 
-`integration/b2-offline` now contains master v0.44.4 (160 commits). Every code gate passes on the merged tip except one Rust E2E file: `opencode2/rust-mode-fold-cadence` (Rust mode on OpenCode 2 only, which is not a migration target). Its cause is a B2 change made after the first rehearsal, not this merge; see "Rust E2E notes". The full drill passed on fresh scrubbed copies of today's live stores:
+`integration/b2-offline` now contains master v0.44.4 (160 commits). Every code gate passes on the final tip. That includes all 54 Rust E2E files and `opencode2/rust-mode-fold-cadence`, which failed until the OpenCode 2 boundary fix described in "Follow-up: OpenCode 2 partial-end boundaries". The full drill passed on fresh scrubbed copies of today's live stores:
 
 - migrate with its lsof refusal, backup and undo printout, and 362/362 identical render samples;
 - an OpenCode 1.18.30 drive on the migrated copy;
@@ -74,7 +74,7 @@ The Rust module (`crates/`) merged without textual conflicts. Master's crate cha
 | `cargo clippy -j 4 --locked --workspace --all-targets -- -D warnings` | pass |
 | `cargo test -j 4 --locked --workspace` | 1652 passed, 0 failed, 18 ignored |
 | `bun run build:dists`, CLI build, `bun test scripts/built-context-fence.test.ts` | pass. Plugin, Pi and CLI chunks each carry `LATEST_SUPPORTED_VERSION = 92`. |
-| Rust hermetic E2E (manifest Rust lane, serial, one fresh-process retry) **53 of 54 pass** (one on its retry: `opencode2/rust-mode-host-runner-default`). `opencode2/rust-mode-fold-cadence` fails deterministically; see below. |
+| Rust hermetic E2E (manifest Rust lane, serial, one fresh-process retry) | Before the boundary fix: 53 of 54 (fold-cadence failed). **After the fix: 54 of 54, none on retry**, run in four foreground chunks (`rust-e2e-final-results.txt`). |
 
 ## Rehearsal drill
 
@@ -201,7 +201,49 @@ After restarting in TS mode, a new session on the same store was served normally
 - **Backup timings** under a heavily loaded machine: `context.db` 63.8 s against 49.4 s before; transaction 11.6 s and VACUUM 11.6 s on the first run, 3.1 s and 5.9 s on the remigration.
 - **New behaviour carried over from master.** Auto-embedding is re-armed when the Rust module publishes compartments. See conflict resolution 5.
 
-## Rust E2E notes
+## Follow-up: OpenCode 2 partial-end boundaries
+
+The owner chose to record the boundary at partial ends and to cap the trim on coverage (commit `afcc1adf54`).
+
+**Why it failed.** The partial-end guard from `6d6b2bff94` stopped OpenCode 2 Rust mode from trimming after the first fold, in two places:
+
+- `applyDeferred` refused any fold that ended partway through a message.
+- `trimToRecordedBoundary` capped the cut at the earliest compartment that ever had an `end_block_index`.
+
+**What the block indices mean.** `historian_chunk.rs:527-547` builds each chunk line from all blocks of its host message, and `last_block_id` anchors the line at the message's **last** block. So both indices on a published row are last-block anchors.
+
+`scripts/b2-drill/fold-anchor-probe.ts` shows this on a real hermetic fold (`fold-anchor-probe.log`): each of the 8 rows ends at the end message's last block (`end_block_index 1`, 2 module blocks). Each successor starts at `end_message + 1`, with the start message's own last-block anchor (`#0`, 1 block). This also explains the earlier drive rows: seq1 ended at 27#0 because message 27 has one block, and seq2 started at 28#1 because message 28 has two, anchored at its last. That was no gap, and the ordinal validator (`historian_validate.rs:1023-1084`) rejects skipped messages.
+
+**Change.**
+
+- `applyDeferred` resolves the boundary from the partial message itself, as the nearest user turn at or before it. The cut lands after the last whole turn, and the partial message stays in the array raw.
+- `trimToRecordedBoundary` caps the cut at the earliest indexed end whose remainder is **not** covered, using one indexed self-join. The next compartment covers the remainder when it continues on the same message at a later block, or on the next message ordinal. Exact `end+1` / `0` start indices cannot be required, because starts are last-block anchors.
+- The latest compartment (no successor) and any end followed by a gap stay protected.
+- The OpenCode 1 and Pi marker paths are untouched.
+
+**Proof.**
+
+- Unit tests pass:
+  - a partial published end records the preceding user turn, and the trim keeps the partial message;
+  - a same-message continuation is trimmable;
+  - a last-block end followed by the next message is trimmable;
+  - a gap stays protected, with the uncovered blocks still in the array;
+  - the existing "retains its uncovered blocks" test passes unchanged.
+- Mutations:
+  - restoring the stale-skip reddens the four new tests;
+  - treating any successor as covering reddens the gap test and the existing retain test;
+  - restoring the earliest-partial cap reddens the two trimmable tests.
+- `opencode2/rust-mode-fold-cadence` passes 3/3 (final oc_input 15 against 29 untrimmed).
+- `pure-replay-differential --ts-only` is IDENTICAL on all four defers against both `cd6b03ba` and master.
+- The OpenCode 1 compaction-marker, prefix-trim replay and shared-boundary tests (30) and Pi `inject-compartments-pi` (66) pass. The fix does not touch them.
+
+**Lock.** The sibling `subconscious` moved to subc-core 0.20.47. The lock was bumped (`887bb40d24`), and `cargo build --locked --release -p mc-module` passes.
+
+**Final plugin suite.** 5983 pass, 3 fail. The three failures are storage-boot tests on the default store: `createV2StorageGate … busy timeout`, `explicit shared storage resolution … finite boot busy timeout`, and `initializeDatabase legacy index ordering … shared OpenCode and Pi boot paths`. Each timed out at 30 s. The same tests passed in the full run an hour earlier (5982/0).
+
+Alone, those three files fail the same way (plus an async boot-timing test) on the final tip, on an exported tree of the pre-fix tip `d81f296f7b`, and on master. The machine was then running about 859 processes at load 22–35, and these opens inspect live processes. This is environmental, not caused by the branch. Typecheck and lint pass.
+
+## Rust E2E notes (before the boundary fix)
 
 The lane was run serially with the runner's per-file command and one fresh-process retry. The tool's background timeout killed the first run after 25 files; the remaining files ran through the same command (`rust-e2e.log`, `rust-e2e-resume.log`, `rust-e2e-results.txt`).
 
