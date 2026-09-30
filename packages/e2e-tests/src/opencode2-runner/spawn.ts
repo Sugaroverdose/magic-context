@@ -382,6 +382,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 			cwd: fixture.cwd,
 			env: fixture.env,
 			detached: true,
+			windowsHide: true,
 			stdio: ["ignore", "pipe", "pipe"],
 		},
 	);

@@ -2540,6 +2540,14 @@
             "hosts": [
                 "opencode2"
             ]
+        },
+        {
+            "path": "tests/opencode2/generate.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 2 generate hook: managed prefix and applied drops, read-only database, pure replay and counterfactual next-main wire identity",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
         }
     ]
 }
