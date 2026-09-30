@@ -183,8 +183,10 @@ try {
         const messages = JSON.stringify((await h.client.session.messages({ path: { id: sessionId } })).data);
         const pluginLog = existsSync(h.logPath) ? await Bun.file(h.logPath).text() : "";
         const shown = /MC-C14|one-time migration/.test(messages) || /MC-C14|one-time migration/.test(refusal);
+        const match = /.{0,160}(?:MC-C14|one-time migration).{0,160}/.exec(messages);
         log("rust-refusal", {
             shownInSession: shown,
+            excerpt: match?.[0],
             inLog: /MC-C14|one-time migration/.test(pluginLog),
             refusal: refusal.slice(0, 400),
         });
@@ -232,7 +234,8 @@ try {
         // 3. Note write, read, and search.
         await callTool(h, sessionId, "ctx_note", {
             action: "write",
-            content: "B2 drill note\nZEBRA-QUARTZ drill marker for search.",
+            // ctx_note read lists titles, so the searchable marker sits in the title line.
+            content: "B2 drill note ZEBRA-QUARTZ\nThe drill marker ctx_search must find.",
         });
         const notes = await callTool(h, sessionId, "ctx_note", { action: "read" });
         if (!notes.includes("ZEBRA-QUARTZ")) throw new Error("note read did not return the drill note");
@@ -285,8 +288,25 @@ try {
             throw new Error("ctx_expand did not return original folded messages");
         }
 
-        // 6. Restarts: the history head must survive a module and a host restart.
-        const headBefore = JSON.stringify(h.lastMainMessages()[0]);
+        // 6. Restarts: the history head must survive a module and a host restart. Folds
+        // can still be landing from the pressure turns, so first wait until two
+        // consecutive defers serve the same head over an unchanged compartment count.
+        let headBefore = "";
+        let countBefore = -1;
+        for (let i = 1; i <= 15; i += 1) {
+            h.mock.setDefault({
+                text: `settle ${i}`,
+                usage: { input_tokens: 2_000, output_tokens: 20, cache_read_input_tokens: 1_500 },
+            });
+            await h.sendPrompt(sessionId, `drill settle ${i}`);
+            await Bun.sleep(1_000);
+            const head = JSON.stringify(h.lastMainMessages()[0]);
+            const count = compartmentQuery().length;
+            if (head === headBefore && count === countBefore) break;
+            headBefore = head;
+            countBefore = count;
+        }
+        log("settled", { compartments: countBefore });
         await h.subc.restartModule();
         await h.sendPrompt(sessionId, "after module restart");
         const headAfterModule = JSON.stringify(h.lastMainMessages()[0]);

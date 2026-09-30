@@ -39,7 +39,8 @@ const log = (event: string, detail: Record<string, unknown> = {}) =>
     console.log(JSON.stringify({ at: new Date().toISOString(), event, ...detail }));
 
 const counts = () => {
-    const db = new Database(contextPath, { readonly: true });
+    // Read-write open: a WAL-mode copy without its -shm file cannot be opened read-only.
+    const db = new Database(contextPath);
     try {
         return db
             .query("SELECT COUNT(*) AS compartments, COUNT(DISTINCT session_id) AS sessions FROM compartments")
@@ -50,6 +51,18 @@ const counts = () => {
 };
 
 log("pi-package", { packageJson: resolvePiPackageJson("pi") });
+// The harness refuses to finish if any recorded subagent call used a real model, and a
+// copied real store carries months of such audit rows from real sessions. Remove only
+// those historical audit rows from this copy, so the guard judges this run's calls.
+{
+    const db = new Database(contextPath);
+    try {
+        const removed = db.run("DELETE FROM subagent_invocations").changes;
+        log("historical-audit-rows-removed", { removed });
+    } finally {
+        db.close();
+    }
+}
 const before = counts();
 const h = await PiTestHarness.create({
     sharedDataDir: dataDir,
