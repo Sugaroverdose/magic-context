@@ -5,6 +5,19 @@ import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 
 const root = join(process.env.TMPDIR ?? "/tmp", "magic-context", "issue-587");
+const probeHome = join(root, "probe-home");
+for (const [name, directory] of Object.entries({
+	HOME: probeHome,
+	XDG_CONFIG_HOME: join(probeHome, "config"),
+	XDG_DATA_HOME: join(probeHome, "data"),
+	XDG_CACHE_HOME: join(probeHome, "cache"),
+	XDG_STATE_HOME: join(probeHome, "state"),
+	XDG_RUNTIME_DIR: join(probeHome, "runtime"),
+	TMPDIR: join(probeHome, "tmp"),
+})) {
+	mkdirSync(directory, { recursive: true });
+	process.env[name] = directory;
+}
 process.env.MAGIC_CONTEXT_STORAGE_DIR = join(root, "probe-mc");
 process.env.MAGIC_CONTEXT_LOG_PATH = join(
 	root,
@@ -510,6 +523,16 @@ for (const version of ["v1", "v2"]) {
 		);
 	}
 }
+const probeLsof = spawnSync("lsof", ["-p", String(process.pid)], {
+	encoding: "utf8",
+}).stdout;
+assert.ok(
+	probeLsof
+		.split("\n")
+		.filter((line) => /\.db(?:-wal|-shm)?$/.test(line))
+		.every((line) => line.includes(root)),
+);
+evidence.push({ probeLsof });
 writeFileSync(join(root, "evidence.json"), JSON.stringify(evidence, null, 2));
 console.log(
 	JSON.stringify(
