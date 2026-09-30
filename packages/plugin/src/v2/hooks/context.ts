@@ -114,6 +114,7 @@ import { registerV2Commands } from "./commands";
 import { DeletedSessionTombstones } from "./deleted-session-tombstones";
 import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { startDreamTrigger } from "./dream-trigger";
+import { V2GenerateReplay } from "./generate";
 import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
 import { hiddenTerminalError } from "./hidden-terminal-error";
 import { V2LkgSystemReplay } from "./lkg-system";
@@ -571,6 +572,7 @@ export async function registerContext(context: V2Context) {
             ? await registerTools(context, db, config, moduleToolBackends?.backends)
             : undefined;
     const usage: TransformDeps["contextUsageMap"] = new Map();
+    const generateReplay = new V2GenerateReplay();
     await context.session.hook("http.response", async (draft) => {
         if (!db || draft.kind !== "primary" || draft.response.ok) return;
         const detection = detectOverflow(await draft.response.clone().text());
@@ -963,6 +965,7 @@ export async function registerContext(context: V2Context) {
                     pendingMaterializationSessions.delete(sessionID);
                     lastHeuristicsTurnId.delete(sessionID);
                     restoredRows.forget(sessionID);
+                    generateReplay.forget(sessionID);
                     systemPromptRefreshSessions.delete(sessionID);
                     systemPrompt?.clearSession(sessionID);
                     tagger.cleanup(sessionID);
@@ -1602,8 +1605,30 @@ export async function registerContext(context: V2Context) {
         }
     };
     await context.session.hook("context", (draft) =>
-        withSqliteTransformPass(() => runManagedContext(draft)),
+        withSqliteTransformPass(async () => {
+            const anchor = draft.messages.at(-1)?.id;
+            await runManagedContext(draft);
+            // The shared last-good-request slot is saved before m[0] is replaced
+            // by a host checkpoint message. Save the final message array here
+            // so side questions reuse the exact history handed back to the host.
+            if (
+                !compactionOff &&
+                draft.messages.some(
+                    (message) =>
+                        message.id === HEAD_IDS[0] ||
+                        message.content.some(
+                            (part) =>
+                                typeof part.text === "string" &&
+                                part.text.includes("<session-history>"),
+                        ),
+                )
+            )
+                generateReplay.capture(draft, anchor);
+        }),
     );
+    await context.session.hook("generate", async (draft) => {
+        if (!compactionOff && !deletedSessions.has(draft.sessionID)) generateReplay.apply(draft);
+    });
     // Warm eagerly for cold sidebar/status reads; a failed startup warm releases
     // its latch and the context hook above retries after the host catalog settles.
     void withoutSqliteTransformPass(() => warmModelLimitCacheFromCatalog(context));

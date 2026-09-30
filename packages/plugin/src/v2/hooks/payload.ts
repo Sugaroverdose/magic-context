@@ -53,7 +53,7 @@ function containsHostInstance(value: unknown): boolean {
 
 /** Deep copy that keeps class instances by reference, so a pipeline edit to the copy cannot
  * reach the host's draft while the host's own objects survive the round trip. */
-function clonePreservingInstances<T>(value: T): T {
+export function clonePreservingInstances<T>(value: T): T {
     if (isHostInstance(value)) return value;
     if (Array.isArray(value)) return value.map(clonePreservingInstances) as T;
     if (value && typeof value === "object") {
