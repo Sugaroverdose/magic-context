@@ -1,5 +1,31 @@
 import { describe, expect, test } from "bun:test";
-import { hasLengthCappedOutput } from "./assistant-message-extractor";
+import {
+    describeAssistantSettlement,
+    extractLatestAssistantText,
+    hasLengthCappedOutput,
+} from "./assistant-message-extractor";
+
+test("reasoning-only and tool-only turns stay out of manifest text and retain finish diagnostics", () => {
+    for (const [type, finish] of [
+        ["reasoning", "stop"],
+        ["tool", "tool-calls"],
+    ]) {
+        const messages = [
+            {
+                info: { role: "assistant", finish },
+                parts: [{ type, text: "private or tool data" }],
+            },
+        ];
+        expect(extractLatestAssistantText(messages)).toBeNull();
+        expect(describeAssistantSettlement(messages)).toContain(`finish=${finish}`);
+    }
+    expect(
+        describeAssistantSettlement({
+            tokenLog: { finish_reason: "length" },
+            reasoning: "private",
+        }),
+    ).toBe("finish=length, reasoning=true");
+});
 
 describe("hasLengthCappedOutput", () => {
     test("detects OpenCode assistant info.finish", () => {

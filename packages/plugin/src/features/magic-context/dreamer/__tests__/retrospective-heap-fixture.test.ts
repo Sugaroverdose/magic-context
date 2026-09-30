@@ -34,7 +34,7 @@ export async function measureRetrospective(provider: RetrospectiveRawProvider) {
     };
     const client = {
         session: {
-            list: async () => ({ data: [] }),
+            list: async () => ({ data: [{ id: "ses-parent", title: "ordinary session" }] }),
             create: async () => {
                 sample();
                 return { data: { id: "retro-child" } };

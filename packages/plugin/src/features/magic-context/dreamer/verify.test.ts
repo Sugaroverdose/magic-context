@@ -94,7 +94,7 @@ function verifyArgs(db: Database, sessionDirectory: string, projectIdentity: str
         db,
         client: {} as never,
         projectIdentity,
-        parentSessionId: undefined,
+        parentSessionId: "ses-parent",
         sessionDirectory,
         holderId,
         leaseKey,

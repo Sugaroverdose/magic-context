@@ -1,3 +1,4 @@
+import { promptAsyncAndWaitForIdle } from "../../shared/prompt-async-transport";
 import { drainNotifications } from "../../shared/rpc-notifications";
 /// <reference types="bun-types" />
 
@@ -2405,4 +2406,39 @@ describe("createEventHandler — usage is recorded before the model-limit refres
         expect(contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(95_000);
         expect(getOrCreateSessionMeta(deps.db, SESSION).lastInputTokens).toBe(95_000);
     });
+});
+
+it("forwards an early dreamer model error into its active asynchronous wait", async () => {
+    useTempDataHome("context-dreamer-provider-error-");
+    const handler = createEventHandler(createDeps(new Map()));
+    const message =
+        "The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed deepseek-v4-flash";
+    const client = {
+        session: {
+            messages: async () => ({ data: [] }),
+            status: async () => ({ data: {} }),
+            promptAsync: async () => {
+                await handler({
+                    event: {
+                        type: "session.error",
+                        properties: {
+                            sessionID: "ses-dreamer-error",
+                            error: { name: "APIError", data: { statusCode: 400, message } },
+                        },
+                    },
+                });
+                return {};
+            },
+        },
+    } as never;
+    await expect(
+        promptAsyncAndWaitForIdle(
+            client,
+            {
+                path: { id: "ses-dreamer-error" },
+                body: { parts: [{ type: "text", text: "map" }] },
+            },
+            { pollIntervalMs: 1, startGraceMs: 20 },
+        ),
+    ).rejects.toThrow(`${message} (status=400)`);
 });

@@ -62,7 +62,7 @@ function classifyArgs(db: Database, projectIdentity: string): ClassifyArgs {
         db,
         client: {} as never,
         projectIdentity,
-        parentSessionId: undefined,
+        parentSessionId: "ses-parent",
         sessionDirectory: process.cwd(),
         holderId,
         leaseKey,

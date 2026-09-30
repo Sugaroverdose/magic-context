@@ -62,7 +62,7 @@ export async function measurePrimerRefresh(
         session: {
             list: async () => {
                 sample();
-                return { data: [] };
+                return { data: [{ id: "ses-parent", title: "ordinary session" }] };
             },
             create: async () => {
                 sample();

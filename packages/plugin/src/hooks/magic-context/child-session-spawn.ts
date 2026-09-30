@@ -91,6 +91,14 @@ export async function createChildSessionWithFence(
         return null;
     }
 
+    // Agent.hidden only hides the agent picker. OpenCode's session picker and
+    // Desktop error notifications use parentID, so background work must wait
+    // for an ordinary session rather than creating a visible root at startup.
+    if (args.title.startsWith("magic-context-dream") && !args.parentSessionId) {
+        sessionLog("dreamer", "child session deferred: no parent session is available");
+        return null;
+    }
+
     return args.client.session.create({
         body: {
             ...(args.parentSessionId ? { parentID: args.parentSessionId } : {}),

@@ -53,7 +53,7 @@ function mapArgs(db: Database, sessionDirectory: string, projectIdentity: string
         db,
         client: {} as never,
         projectIdentity,
-        parentSessionId: undefined,
+        parentSessionId: "ses-parent",
         sessionDirectory,
         holderId,
         leaseKey,
