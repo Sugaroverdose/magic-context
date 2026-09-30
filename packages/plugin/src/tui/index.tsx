@@ -754,6 +754,11 @@ const tui: TuiPlugin = async (api, _options, meta) => {
 
     startNotificationSocket({
         getSessionId: () => getSessionId(api),
+        // Follow the shown session's own server, whose commands push its dialogs.
+        getSessionDirectory: () => {
+            const sessionId = getSessionId(api)
+            return sessionId ? sessionDirectory(api, sessionId) : null
+        },
         onNotification: handleNotification,
     })
 

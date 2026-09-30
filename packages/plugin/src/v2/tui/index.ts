@@ -552,6 +552,11 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
 
     startNotificationSocket({
         getSessionId: () => currentSessionID(context),
+        // Follow the shown session's own server, whose commands push its dialogs.
+        getSessionDirectory: () => {
+            const sessionID = currentSessionID(context);
+            return sessionID ? directoryOf(sessionID) : null;
+        },
         onNotification: handleNotification,
     });
     console.info("[magic-context] @cortexkit/opencode-magic-context v2 TUI setup");

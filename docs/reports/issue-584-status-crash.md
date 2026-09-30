@@ -374,15 +374,44 @@ directory.
   to) answers `{ disabled: true }` for this session, and the project instance
   answers 2 / 3. The TUI showed the project instance's numbers.
 
-Not verified on OpenCode 2:
+Not verified on OpenCode 2: a v0.44.4 "before" run. Its `dist/` was not
+built.
 
-- A v0.44.4 "before" run on OpenCode 2. Its `dist/` was not built.
-- The typed `/ctx-status` slash command. It opened no dialog in this run, and
-  neither log recorded the command. The palette entry calls the same TUI
-  function, so the likely gap is between the host's server-side command and
-  the TUI's notification socket. That socket still connects to the startup
-  directory's server, while the command runs in the project's instance. This
-  is not confirmed.
+### The notification socket follows the session too
+
+The typed `/ctx-status` slash command runs as the host's server-side command,
+in the server instance that owns the session. It asks the TUI to open the
+dialog through a push over the notification socket. That socket was still
+bound to the startup directory's server, so on OpenCode 2.0.20 the push never
+reached the TUI. The typed command opened nothing, while the palette entry,
+which calls the TUI function directly, worked.
+
+Fix: `startNotificationSocket` takes `getSessionDirectory`, and
+`resolveNotificationTarget` (`tui/data/context-db.ts`) subscribes the socket
+to the shown session's own server. It falls back first to the server that
+claims the session through `session-owner`, then to the startup server, so
+session-less notifications keep arriving. The session watcher moves the socket
+when the shown session's directory changes, at most once every 10 s, so a
+session whose server has not started yet does not cause a reconnect every
+second. OpenCode 1 and OpenCode 2 both pass the session directory.
+
+Tests: `notification-socket.test.ts` › `subscribes to the server of the
+shown session's directory, not the startup one` and `moves the socket when the
+shown session changes directory`, with two real servers. Both go red when the
+session directory is ignored.
+
+Real-host proof. Both runs used a TUI started in `HOME`, the project session
+opened from `/sessions`, the typed `/ctx-status` command (the server command
+entry), throwaway roots, the mock provider, and `lsof` showing only the
+root's databases.
+
+- OpenCode 2.0.20: the project's dialog opened, with "Compartments (2)" and
+  Memory Active 3. Before this change the same step opened nothing.
+- OpenCode 1.18.30: the project's dialog opened, with "Compartments (2)". The
+  log shows `command ctx-status: pushed show-status-dialog to TUI` for the
+  project session. On OpenCode 1 this path already worked after the client
+  change, because both server instances run in one process and share its
+  notification bus. It now also goes through the session's own server.
 
 ## Side findings (not changed)
 

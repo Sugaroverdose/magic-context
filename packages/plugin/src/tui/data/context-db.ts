@@ -81,6 +81,61 @@ function clientForDirectory(directory: string): MagicContextRpcClient | null {
 }
 
 /**
+ * The server the notification socket should subscribe to: the one that owns
+ * the shown session's directory, so a push from the command that session runs
+ * (for example `/ctx-status` asking to open its dialog) reaches this TUI. That
+ * is the startup directory's server when no session is shown or the session is
+ * in the startup directory. A session directory with no discovery file falls
+ * back to the server that claims the session, then to the startup server so
+ * session-less notifications still arrive.
+ */
+export async function resolveNotificationTarget(
+    sessionDirectory: string | null,
+    sessionId: string | null,
+): Promise<{
+    client: MagicContextRpcClient;
+    directory: string;
+    endpoint: { port: number; token: string | null; instanceId: string | null };
+} | null> {
+    const startup = rpcClient;
+    if (!startup) return null;
+    const directory = sessionDirectory ?? "";
+    let client = clientForDirectory(directory) ?? startup;
+    let endpoint = await client.resolveEndpoint();
+    if (!endpoint && client !== startup && sessionId) {
+        const owner = await MagicContextRpcClient.findSessionOwner(
+            getMagicContextStorageDir(),
+            sessionId,
+        );
+        if (owner) {
+            sessionDirectoryClients.get(directory)?.reset();
+            sessionDirectoryClients.set(directory, owner);
+            client = owner;
+            endpoint = await owner.resolveEndpoint();
+        }
+    }
+    if (endpoint) {
+        return {
+            client,
+            directory: client === startup ? (rpcClientDirectory ?? "") : directory,
+            endpoint,
+        };
+    }
+    if (client === startup) return null;
+    const startupEndpoint = await startup.resolveEndpoint();
+    return startupEndpoint
+        ? { client: startup, directory: rpcClientDirectory ?? "", endpoint: startupEndpoint }
+        : null;
+}
+
+/** The directory whose server a notification subscription for `sessionDirectory` targets first. */
+export function notificationDirectoryFor(sessionDirectory: string | null): string {
+    const directory = sessionDirectory ?? "";
+    if (!directory || directory === rpcClientDirectory) return rpcClientDirectory ?? "";
+    return directory;
+}
+
+/**
  * Call a session-scoped RPC on the server that owns the session's directory.
  * When no server is filed under that directory (the host spelled it in a way
  * the canonical form still does not match), every live local server is asked
