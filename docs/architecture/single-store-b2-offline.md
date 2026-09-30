@@ -296,7 +296,9 @@ What older builds do:
 
 The two flags carry the same stamp: `single_store_state.migrated_at = mc_privilege_state.single_store_set_at_ms`. The module compares them at start (3.6), which binds this `store.db` to this `context.db`.
 
-**Fresh installs.** When `McStore::open` applies 61 to an empty store, the module then writes `single_store_state` to `migrated` with the same stamp and an empty report, in one `BEGIN IMMEDIATE` on `context.db`. It also clears the `authority_managed` and mirror rows. Nothing needs moving, so a new Rust-mode user never has to run the doctor.
+**Fresh installs.** A host-less install (for example Claude Code through Thalamus, or a module test rig) must first run `npx @cortexkit/magic-context doctor store init`. This provisions `context.db` through the same TypeScript schema/migration path hosts use, reports its path and schema version, and leaves an existing store unchanged (refusing a newer schema). It honours `XDG_DATA_HOME` and `MAGIC_CONTEXT_STORAGE_DIR`; no OpenCode or Pi session is needed. `setup` also provisions the store, except in dry-run mode. The module deliberately does not create this database itself.
+
+When `McStore::open` applies store migration 61 to an empty store, the module then writes `single_store_state` to `migrated` with the same stamp and an empty report, in one `BEGIN IMMEDIATE` on `context.db`. It also clears the `authority_managed` and mirror rows. Nothing needs moving, so a new Rust-mode user never has to run `doctor single-store migrate`.
 
 ### 2.10 Verification before `COMMIT`
 

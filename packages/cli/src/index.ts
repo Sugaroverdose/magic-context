@@ -66,6 +66,7 @@ function printUsage(): void {
     console.log("    doctor --issue   Collect diagnostics and open a GitHub issue");
     console.log("    doctor --issue --report <path>  Write diagnostics without prompting");
     console.log("    doctor --clear   Interactive cache cleanup picker");
+    console.log("    doctor store init   Provision context.db without a host");
     console.log("    doctor --check-v22-backfill       Show v22 memory backfill status");
     console.log("    doctor --retry-v22-backfill       Retry failed v22 memory backfill rows");
     console.log("    doctor --rekey-v22-dir-identity <path>  Re-key legacy dir identity rows");
@@ -130,6 +131,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         if (command === "doctor") {
             if (!(await runSqlitePreflight())) return 1;
 
+            if (rest[0] === "store") {
+                const { runDoctorStoreCli } = await import("./commands/doctor-store");
+                return runDoctorStoreCli(rest.slice(1));
+            }
             if (rest[0] === "single-store") {
                 const { runDoctorSingleStoreCli } = await import("./commands/doctor-single-store");
                 return runDoctorSingleStoreCli(rest.slice(1));

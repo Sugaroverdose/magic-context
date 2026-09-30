@@ -209,6 +209,11 @@ export const USER_FACING_FAILURES = {
         sentence: "Magic Context is temporarily unavailable.",
         action: "Retry in a moment.",
     },
+    context_db_missing: {
+        code: "MC-C15",
+        sentence: "Magic Context has no context.db.",
+        action: "Run `npx @cortexkit/magic-context doctor store init`, then restart ck-mc.",
+    },
     single_store_migration_required: {
         code: "MC-C14",
         sentence: "Magic Context's Rust mode needs a one-time migration of its store.",

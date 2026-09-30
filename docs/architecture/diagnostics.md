@@ -45,6 +45,7 @@ User-facing problems carry stable `MC-*` codes (`user-facing-codes.ts`), each wi
 Flags and subcommands:
 
 - `--fix` applies safe repairs; `--issue` (or `--report`) builds a redacted diagnostic bundle and opens a GitHub issue, falling back to a file you can attach when submission fails.
+- `store init` provisions `context.db` at the current schema fence without a host, and reports its path and version. Existing stores are inspected without changes; a newer schema is refused. It honours `XDG_DATA_HOME` and `MAGIC_CONTEXT_STORAGE_DIR`. Non-dry-run `setup` also runs this provisioning step.
 - `repair-db` repairs a corrupt `context.db` after copying it to a backup bundle.
 - `merge-identity` merges two project identities that are the same project.
 - `drain-authority <project>` returns memory and note authority from the Rust module to TypeScript.
