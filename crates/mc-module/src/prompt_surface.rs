@@ -22,7 +22,7 @@ const GUIDANCE_LIGHT_NO_REDUCE: Option<&str> =
 const TOOL_LIGHT_DESCRIPTIONS: Option<&[(&str, &str)]> = Some(&[
     (
         "ctx_reduce",
-        r#"Stamp an item as no longer needed for the work ahead. Not a delete: stamping QUEUES it, the item stays readable until Magic Context clears stamped items in one sweep, newest tags are protected, and a cleared item goes to the archive (recent: a [dropped §N§] placeholder; older: removed) recoverable via ctx_expand(message=N). The question is "does this need to stay on my desk for what comes next?" — a file you keep editing stays, the grep that found it goes. Stamp used reads/searches/outputs, acted-on build/test output, redundant dumps, extracted pasted payloads; keep user messages, your own text, unresolved errors, raw evidence, exact wording that may matter. Look at each tag; never blanket-stamp "1-50". Grammar: "3-5", "1,2,9", "1-5,8,12-15"."#,
+        r#"Stamp an item as no longer needed for the work ahead. Not a delete: stamping QUEUES it, the item stays readable until Magic Context clears stamped items in one sweep, newest tags are protected, and a cleared item goes to the archive (recent: a [dropped §N§] placeholder; older: removed) recoverable via ctx_expand(tag=N). The question is "does this need to stay on my desk for what comes next?" — a file you keep editing stays, the grep that found it goes. Stamp used reads/searches/outputs, acted-on build/test output, redundant dumps, extracted pasted payloads; keep user messages, your own text, unresolved errors, raw evidence, exact wording that may matter. Look at each tag; never blanket-stamp "1-50". Grammar: "3-5", "1,2,9", "1-5,8,12-15"."#,
     ),
     (
         "ctx_memory",
@@ -30,11 +30,11 @@ const TOOL_LIGHT_DESCRIPTIONS: Option<&[(&str, &str)]> = Some(&[
     ),
     (
         "ctx_search",
-        r#"Search the archive — everything that ever happened here that is not on your desk: memories not in <project-memory>, compacted conversation, commits, notes. Phrase query as a natural-language question carrying the exact terms you expect ("where is the opencode source code path?", "why did we choose SQLite over postgres?", "how does the dreamer lease work?") — a keyword stack finds less. Sources (omit for all): memory (rules, conventions), message (compacted conversation; hits carry ordinals for ctx_expand), git_commit (when did this change), note (parked follow-ups). Memory ids alone (`#7234`) resolve directly. from/to restrict every source to an inclusive UTC date range."#,
+        r#"Search the archive — everything that ever happened here that is not on your desk: memories not in <project-memory>, compacted conversation, commits, notes. Phrase query as a natural-language question carrying the exact terms you expect ("where is the opencode source code path?", "why did we choose SQLite over postgres?", "how does the dreamer lease work?") — a keyword stack finds less. Sources (omit for all): memory (rules, conventions), message (compacted conversation; hits carry ordinals for ctx_expand), git_commit (when did this change), primer (reusable project Q&A the dreamer distils from recurring questions), note (parked follow-ups). Memory ids alone (`#7234`) resolve directly. from/to restrict every source to an inclusive UTC date range."#,
     ),
     (
         "ctx_expand",
-        "Recover raw conversation behind a <session-history> heading or around a ctx_search hit: ctx_expand(start, end) returns [N] U:/A: lines (~15K-token cap; oversized ranges return the head and where to continue). verbose=true lists messages with per-part previews to pick one; message=N returns that message in full, including a tool output released with ctx_reduce. Ranges after the last compartment are your live tail, not expandable.",
+        "Recover one item with tag=N (a §N§ or dropped placeholder number), not a message ordinal; text or one tool call with full input/output. message=N and start/end are whole-message ordinals from history/search, never tag numbers. Recover raw conversation behind a <session-history> heading or around a ctx_search hit: ctx_expand(start, end) returns [N] U:/A: lines (~15K-token cap; oversized ranges return the head and where to continue). verbose=true lists messages with per-part previews to pick one; message=N returns that message in full, including a tool output released with ctx_reduce. Ranges after the last compartment are your live tail, not expandable.",
     ),
     (
         "ctx_note",
@@ -42,7 +42,7 @@ const TOOL_LIGHT_DESCRIPTIONS: Option<&[(&str, &str)]> = Some(&[
     ),
 ]);
 
-const CTX_REDUCE_DESCRIPTION: &str = r#"Stamp an item on your desk as no longer needed for the work ahead. Not a delete: stamping QUEUES it, the item stays fully readable until Magic Context clears stamped items in one sweep, and the newest tags are protected so stamping recent output is harmless. A cleared item goes to the archive — a recent one leaves a `[dropped §N§]` placeholder, an older one leaves nothing — and `ctx_expand(message=N)` is the way back. So the question before stamping is not "have I finished reading this?" but "does this need to stay on my desk for what comes next?" — a file you read and will keep editing stays; the grep that found it goes.
+const CTX_REDUCE_DESCRIPTION: &str = r#"Stamp an item on your desk as no longer needed for the work ahead. Not a delete: stamping QUEUES it, the item stays fully readable until Magic Context clears stamped items in one sweep, and the newest tags are protected so stamping recent output is harmless. A cleared item goes to the archive — a recent one leaves a `[dropped §N§]` placeholder, an older one leaves nothing — and `ctx_expand(tag=N)` is the way back. So the question before stamping is not "have I finished reading this?" but "does this need to stay on my desk for what comes next?" — a file you read and will keep editing stays; the grep that found it goes.
 
 Stamp: file reads, search results and tool outputs the work ahead no longer needs; build/test output after you acted on it; repeated or redundant dumps; data written to disk; status/log output that only confirmed what you expected; a large block pasted inside a user message once you have used it.
 Keep: user messages (never stamp one for its directive), your own conversation text, unresolved errors, raw evidence you haven't extracted yet, and outputs whose exact wording may still matter.
@@ -60,10 +60,11 @@ fn schema_with_preset_descriptions(
     let descriptions: &[(&str, &str)] = match tool_id {
         "ctx_reduce" => &[("drop", "Tag IDs: \"3-5\", \"1,2,9\", \"1-5,8,12-15\".")],
         "ctx_expand" => &[
-            ("start", "First ordinal — a compartment's start or a search hit."),
-            ("end", "Last ordinal, inclusive."),
+            ("tag", "Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone."),
+            ("start", "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number."),
+            ("end", "Last message ordinal of the range, inclusive, not a tag number."),
             ("verbose", "With start/end: one entry per message with previews instead of the transcript."),
-            ("message", "Recover ONE message in full by ordinal; use without start/end."),
+            ("message", "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone."),
         ],
         "ctx_note" => &[
             ("action", "write | read | update | dismiss (default: write with content, else read)."),

@@ -142,7 +142,7 @@ describe("registerMagicContextTools", () => {
 					"limit",
 					"offset",
 				],
-				ctx_expand: ["start", "end", "verbose", "message"],
+				ctx_expand: ["start", "end", "verbose", "message", "tag"],
 				ctx_reduce: ["drop"],
 			};
 			for (const [name, fields] of Object.entries(expectedFields)) {

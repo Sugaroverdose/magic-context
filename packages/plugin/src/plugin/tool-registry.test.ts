@@ -82,7 +82,7 @@ describe("createToolRegistry — memory gating", () => {
         const tools = buildRegistry({});
         const expectedFields: Record<string, string[]> = {
             ctx_reduce: ["drop"],
-            ctx_expand: ["start", "end", "verbose", "message"],
+            ctx_expand: ["start", "end", "verbose", "message", "tag"],
             ctx_note: [
                 "action",
                 "content",

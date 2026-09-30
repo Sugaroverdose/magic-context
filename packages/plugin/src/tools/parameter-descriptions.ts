@@ -5,12 +5,13 @@ export const FULL_PARAMETER_DESCRIPTIONS = {
         drop: 'Tag IDs to drop: "3-5", "1,2,9", "1-5,8,12-15".',
     },
     ctx_expand: {
-        start: "First ordinal of the range — a compartment's start, or an ordinal from a ctx_search hit.",
-        end: "Last ordinal of the range, inclusive — a compartment's end.",
+        tag: "Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone.",
+        start: "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
+        end: "Last message ordinal of the range, inclusive, not a tag number.",
         verbose:
             "With start/end: one entry per message with ordinal and per-part preview instead of the transcript.",
         message:
-            "Recover ONE message in full by ordinal (all text, all tool inputs and outputs). Use alone, without start/end.",
+            "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
     },
     ctx_note: {
         action: "write | read | update | dismiss. Defaults to write when content is given, else read.",
@@ -46,10 +47,12 @@ export const LIGHT_PARAMETER_DESCRIPTIONS = {
         drop: 'Tag IDs: "3-5", "1,2,9", "1-5,8,12-15".',
     },
     ctx_expand: {
-        start: "First ordinal — a compartment's start or a search hit.",
-        end: "Last ordinal, inclusive.",
+        tag: "Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone.",
+        start: "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
+        end: "Last message ordinal of the range, inclusive, not a tag number.",
         verbose: "With start/end: one entry per message with previews instead of the transcript.",
-        message: "Recover ONE message in full by ordinal; use without start/end.",
+        message:
+            "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
     },
     ctx_note: {
         action: "write | read | update | dismiss (default: write with content, else read).",

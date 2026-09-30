@@ -30,6 +30,7 @@ import {
 } from "@magic-context/core/tools/ctx-expand/constants";
 import { resolveCtxExpandMode } from "@magic-context/core/tools/ctx-expand/mode";
 import {
+	renderItemByTag,
 	renderMessageByOrdinal,
 	renderVerboseRange,
 } from "@magic-context/core/tools/ctx-expand/render";
@@ -39,16 +40,22 @@ import { readPiSessionMessages } from "../read-session-pi";
 
 const ParamsSchema = Type.Object(
 	{
+		tag: Type.Optional(
+			Type.Union([Type.Number(), Type.String()], {
+				description:
+					"Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone.",
+			}),
+		),
 		start: Type.Optional(
 			Type.Number({
 				description:
-					"First ordinal of the range — a compartment's start, or an ordinal from a ctx_search hit.",
+					"First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
 			}),
 		),
 		end: Type.Optional(
 			Type.Number({
 				description:
-					"Last ordinal of the range, inclusive — a compartment's end.",
+					"Last message ordinal of the range, inclusive, not a tag number.",
 			}),
 		),
 		verbose: Type.Optional(
@@ -60,7 +67,7 @@ const ParamsSchema = Type.Object(
 		message: Type.Optional(
 			Type.Number({
 				description:
-					"Recover ONE message in full by ordinal (all text, all tool inputs and outputs). Use alone, without start/end.",
+					"Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
 			}),
 		),
 	},
@@ -100,7 +107,7 @@ export function createCtxExpandTool(
 			_onUpdate,
 			ctx,
 		) {
-			params = unwrapImitatedReducedArgs(params, ["message", "start"], {
+			params = unwrapImitatedReducedArgs(params, ["tag", "message", "start"], {
 				start: "number",
 				end: "number",
 				verbose: "boolean",
@@ -123,6 +130,9 @@ export function createCtxExpandTool(
 				const mode = resolveCtxExpandMode(params, "positive");
 				if (mode.kind === "error") {
 					return err(mode.message);
+				}
+				if (mode.kind === "tag") {
+					return ok(renderItemByTag(deps.db, sessionId, mode.tag, "text"));
 				}
 				if (mode.kind === "message") {
 					return ok(renderMessageByOrdinal(sessionId, mode.message));

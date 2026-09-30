@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-
+import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
 	assistantToolCall,
 	createTestDb,
@@ -124,4 +124,41 @@ describe("Pi ctx_expand required-all filler", () => {
 		expect(textOf(rangeClean)).toContain("No messages found in range 1-3");
 		expect(textOf(messageClean)).toContain("No message at ordinal 2");
 	});
+});
+
+it("Pi tag recovery pairs the raw invocation and result without returning siblings", async () => {
+	const db = createTestDb();
+	const sessionId = "ses-pi-tag";
+	const messages = [
+		userMessage("original text", 1),
+		assistantToolCall("call-1", "Read", { path: "PLAN.md" }),
+		toolResultMessage("call-1", "original output"),
+	];
+	const ctx = fakeContext(
+		sessionId,
+		process.cwd(),
+		["entry-0", "entry-1", "entry-2"],
+		messages,
+	);
+	const tagger = createTagger();
+	tagger.assignTag(sessionId, "entry-0:p0", "message", 10, db);
+	tagger.assignToolTag(sessionId, "call-1", "entry-1", 10, db);
+	try {
+		const tool = createCtxExpandTool({ db });
+		const call = (tag: number | string) =>
+			tool.execute(
+				"expand",
+				{ tag },
+				new AbortController().signal,
+				undefined,
+				ctx as never,
+			);
+		expect(textOf(await call("§1§"))).toContain("original text");
+		const result = textOf(await call("tag 2"));
+		expect(result).toContain("PLAN.md");
+		expect(result).toContain("original output");
+		expect(textOf(await call(99))).toContain("no tag 99 in this session");
+	} finally {
+		db.close();
+	}
 });

@@ -1,4 +1,6 @@
-export const CTX_EXPAND_DESCRIPTION = `Recover the original conversation behind your compacted history.
+export const CTX_EXPAND_DESCRIPTION = `Recover original content that is no longer on your desk. It takes two kinds of number, and they are never interchangeable:
+- \`tag=N\`: the number from a §N§ tag or a \`[dropped §N§]\` placeholder. Returns that one item whole: a text, or a tool call with its full input and output.
+- \`message=N\`, \`start\`/\`end\`: message ordinals, the positions shown in \`<session-history>\` headings (\`## start-end\`) and in \`ctx_search\` hits. An ordinal counts whole messages; a tag counts each text and tool result separately, so the same number points at different things.
 
 Earlier turns are summarized in <session-history> under \`## start-end · date · title\` headings; each heading stands for the raw messages in that ordinal range. When the summary isn't enough — exact wording, a value, an error message, the reasoning behind a decision — expand the range: ctx_expand(start=120, end=245). Also works around a ctx_search message hit: start=N-10, end=N+5. Ranges after the last compartment are your live tail — already visible, not expandable.
 
