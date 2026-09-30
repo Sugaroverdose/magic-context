@@ -51,6 +51,7 @@ pub const VERIFY_MISMATCH: &str = "single_store_verify_mismatch";
 pub const RENDER_MISMATCH: &str = "single_store_render_mismatch";
 pub const FINGERPRINT_MISMATCH: &str = "single_store_fingerprint_mismatch";
 pub const BACKUP_DIR_EXISTS: &str = "single_store_backup_dir_exists";
+pub const HISTORY_DIVERGED: &str = "single_store_history_diverged";
 
 /// The lowest `context.db` version that carries `single_store_state`.
 pub const MIN_CONTEXT_VERSION: i64 = 92;
@@ -119,6 +120,8 @@ pub struct EngineOptions {
     pub dry_run: bool,
     pub skip_foreign: bool,
     pub prefer: BTreeMap<String, Winner>,
+    /// Which copy of a session's history to keep when the evidence cannot decide it.
+    pub prefer_history: BTreeMap<String, Winner>,
     pub accept_id_change: bool,
     pub build: String,
     pub now_ms: i64,
@@ -141,6 +144,7 @@ impl EngineOptions {
             dry_run: false,
             skip_foreign: false,
             prefer: BTreeMap::new(),
+            prefer_history: BTreeMap::new(),
             accept_id_change: false,
             build: schema::build_identity(),
             now_ms,
@@ -247,6 +251,9 @@ pub struct TableCounts {
     /// `context.db` events pointing at a compartment that no longer exists anywhere, left
     /// in place.
     pub orphans_kept: usize,
+    /// Store rows not copied because the session's `context.db` history was newer and
+    /// replaced the compartments they describe. They stay in the backup.
+    pub superseded: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
@@ -278,6 +285,8 @@ pub struct Report {
     pub migrated_by: Option<String>,
     pub projects: Vec<ProjectReport>,
     pub render_check: RenderCheck,
+    /// Every session whose two copies of history differed, with the copy kept and why.
+    pub history: Vec<HistoryDecision>,
     pub sessions_reset: usize,
     pub normalized_context_compartments: usize,
     pub store_db_bytes: StoreBytes,
@@ -408,6 +417,8 @@ const COMPARTMENT_COLUMNS: &[&str] = &[
 /// different spellings, and that is one compartment written two ways, not a rewrite.
 const COMPARTMENT_CONTENT_FIELDS: std::ops::RangeInclusive<usize> = 6..=14;
 const COMPARTMENT_P1: usize = 8;
+const COMPARTMENT_END_MESSAGE: usize = 3;
+const COMPARTMENT_CREATED_AT: usize = 15;
 
 const EVENT_COLUMNS: &[&str] = &[
     "session_id",
@@ -746,66 +757,71 @@ struct AuthorityRow {
     state: String,
 }
 
-/// Decide, for every project with store rows, which side's memories and notes win.
-/// Returns the decision per project, or the refusal naming every project that could not
-/// be decided.
-fn classify_projects(
-    conn: &Connection,
-    projects: &BTreeSet<String>,
-    file_uuid: &str,
-    options: &EngineOptions,
-) -> Result<BTreeMap<String, Classification>, EngineError> {
-    let mut authority: BTreeMap<String, Vec<AuthorityRow>> = BTreeMap::new();
-    if schema::table_exists(conn, "main", "mc_authority")? {
-        let mut statement = conn.prepare(
-            "SELECT project, context_store_uuid, domain, state FROM main.mc_authority
-              WHERE domain IN ('memories', 'notes')",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                AuthorityRow {
-                    uuid: row.get(1)?,
-                    domain: row.get(2)?,
-                    state: row.get(3)?,
-                },
-            ))
-        })?;
-        for row in rows {
-            let (project, row) = row?;
-            authority.entry(project).or_default().push(row);
-        }
-    }
-    let managed: BTreeSet<String> = if table_exists(conn, "authority_managed")? {
-        conn.prepare("SELECT project_path FROM ctx.authority_managed")?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<_, _>>()?
-    } else {
-        BTreeSet::new()
-    };
+/// Who each project's authority rows say owns its memories and notes.
+#[derive(Debug, Default)]
+struct Authority {
+    rows: BTreeMap<String, Vec<AuthorityRow>>,
+    /// Projects `context.db` records as handed over to the module.
+    managed: BTreeSet<String>,
+}
 
-    let mut decided = BTreeMap::new();
-    let mut transition = Vec::new();
-    let mut foreign = Vec::new();
-    for project in projects {
-        let rows = authority
+/// What the authority rows say about one project.
+enum Ownership {
+    /// Rows exist, but none for this `context.db`.
+    Foreign(BTreeSet<String>),
+    /// This file's rows name one side for both domains.
+    Owned(Winner),
+    /// The rows disagree with each other or with `authority_managed`: the project was
+    /// being handed over when the migration ran.
+    InTransition {
+        memories: String,
+        notes: String,
+        managed: bool,
+    },
+}
+
+impl Authority {
+    fn read(conn: &Connection) -> rusqlite::Result<Self> {
+        let mut authority = Authority::default();
+        if schema::table_exists(conn, "main", "mc_authority")? {
+            let mut statement = conn.prepare(
+                "SELECT project, context_store_uuid, domain, state FROM main.mc_authority
+                  WHERE domain IN ('memories', 'notes')",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    AuthorityRow {
+                        uuid: row.get(1)?,
+                        domain: row.get(2)?,
+                        state: row.get(3)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (project, row) = row?;
+                authority.rows.entry(project).or_default().push(row);
+            }
+        }
+        if table_exists(conn, "authority_managed")? {
+            authority.managed = conn
+                .prepare("SELECT project_path FROM ctx.authority_managed")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<_, _>>()?;
+        }
+        Ok(authority)
+    }
+
+    /// A project with no authority rows at all was never handed over: TypeScript owns it.
+    fn ownership(&self, project: &str, file_uuid: &str) -> Ownership {
+        let rows = self
+            .rows
             .get(project)
             .map(Vec::as_slice)
             .unwrap_or_default();
         let own: Vec<&AuthorityRow> = rows.iter().filter(|row| row.uuid == file_uuid).collect();
-        let is_managed = managed.contains(project);
-        if let Some(winner) = options.prefer.get(project) {
-            decided.insert(project.clone(), Classification::Wins(*winner));
-            continue;
-        }
         if own.is_empty() && !rows.is_empty() {
-            if options.skip_foreign {
-                decided.insert(project.clone(), Classification::Skipped);
-            } else {
-                let uuids: BTreeSet<&str> = rows.iter().map(|row| row.uuid.as_str()).collect();
-                foreign.push(json!({"project": project, "context_store_uuids": uuids}));
-            }
-            continue;
+            return Ownership::Foreign(rows.iter().map(|row| row.uuid.clone()).collect());
         }
         let state = |domain: &str| {
             own.iter()
@@ -814,20 +830,56 @@ fn classify_projects(
                 .unwrap_or("TS")
         };
         let (memories, notes) = (state("memories"), state("notes"));
-        let decision = match (memories, notes, is_managed) {
-            ("MODULE", "MODULE", true) => Some(Winner::Store),
-            ("TS", "TS", false) => Some(Winner::Context),
-            _ => None,
-        };
-        match decision {
-            Some(winner) => {
+        let managed = self.managed.contains(project);
+        match (memories, notes, managed) {
+            ("MODULE", "MODULE", true) => Ownership::Owned(Winner::Store),
+            ("TS", "TS", false) => Ownership::Owned(Winner::Context),
+            _ => Ownership::InTransition {
+                memories: memories.to_string(),
+                notes: notes.to_string(),
+                managed,
+            },
+        }
+    }
+}
+
+/// Decide, for every project with store rows, which side's memories and notes win.
+/// Returns the decision per project, or the refusal naming every project that could not
+/// be decided.
+fn classify_projects(
+    authority: &Authority,
+    projects: &BTreeSet<String>,
+    file_uuid: &str,
+    options: &EngineOptions,
+) -> Result<BTreeMap<String, Classification>, EngineError> {
+    let mut decided = BTreeMap::new();
+    let mut transition = Vec::new();
+    let mut foreign = Vec::new();
+    for project in projects {
+        if let Some(winner) = options.prefer.get(project) {
+            decided.insert(project.clone(), Classification::Wins(*winner));
+            continue;
+        }
+        match authority.ownership(project, file_uuid) {
+            Ownership::Foreign(uuids) => {
+                if options.skip_foreign {
+                    decided.insert(project.clone(), Classification::Skipped);
+                } else {
+                    foreign.push(json!({"project": project, "context_store_uuids": uuids}));
+                }
+            }
+            Ownership::Owned(winner) => {
                 decided.insert(project.clone(), Classification::Wins(winner));
             }
-            None => transition.push(json!({
+            Ownership::InTransition {
+                memories,
+                notes,
+                managed,
+            } => transition.push(json!({
                 "project": project,
                 "memories": memories,
                 "notes": notes,
-                "authority_managed": is_managed,
+                "authority_managed": managed,
                 "flags": [format!("--prefer {project}=store"), format!("--prefer {project}=context")],
             })),
         }
@@ -919,6 +971,14 @@ struct Copier<'a> {
     store_memory_ids: HashSet<i64>,
     /// Mappings whose memory no longer exists in `store.db`; not copied.
     orphan_mappings: usize,
+    authority: &'a Authority,
+    prefer: &'a BTreeMap<String, Winner>,
+    prefer_history: &'a BTreeMap<String, Winner>,
+    /// Sessions whose two copies of history differed, and which copy was kept.
+    history: Vec<HistoryDecision>,
+    /// The compartments of each session whose `context.db` history was kept, as they
+    /// were before the copy; verification checks they are still exactly that.
+    context_kept: BTreeMap<String, Vec<Vec<SqlValue>>>,
 }
 
 impl<'a> Copier<'a> {
@@ -1737,6 +1797,156 @@ fn match_multiset(
     (missing, unmatched)
 }
 
+/// Why the migration kept one copy of a session's history over the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryReason {
+    /// Every compartment of the other copy is in this one, unchanged; this one has more.
+    Superset,
+    /// Both copies changed compartments the other lacks. This copy's changes are the
+    /// newer ones and its project was owned by the side that wrote it.
+    WroteLast,
+    /// Both copies changed compartments at the same time (the store rewrote rows the
+    /// mirror had copied with the same timestamps), and the project's owner decides.
+    ProjectOwner,
+    /// `--prefer-history` named this copy.
+    Preferred,
+}
+
+/// The report line for one session whose two copies of history differed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HistoryDecision {
+    pub session: String,
+    pub project: String,
+    pub kept: Winner,
+    pub reason: HistoryReason,
+    pub store_compartments: usize,
+    pub context_compartments: usize,
+    pub store_end_message: Option<i64>,
+    pub context_end_message: Option<i64>,
+}
+
+/// One side's view of a session's history, for deciding which copy was being written.
+struct HistorySide {
+    rows: usize,
+    /// Rows the other copy lacks at the same sequence or holds with different content.
+    changed: usize,
+    /// The newest `created_at` among those rows.
+    newest_change: Option<i64>,
+    end_message: Option<i64>,
+}
+
+fn history_side(mine: &[Vec<SqlValue>], theirs: &[Vec<SqlValue>]) -> HistorySide {
+    let by_sequence: HashMap<Option<i64>, &Vec<SqlValue>> =
+        theirs.iter().map(|row| (as_i64(&row[1]), row)).collect();
+    let same = |row: &Vec<SqlValue>| {
+        by_sequence.get(&as_i64(&row[1])).is_some_and(|other| {
+            other[COMPARTMENT_CONTENT_FIELDS] == row[COMPARTMENT_CONTENT_FIELDS]
+        })
+    };
+    let changed: Vec<&Vec<SqlValue>> = mine.iter().filter(|row| !same(row)).collect();
+    HistorySide {
+        rows: mine.len(),
+        changed: changed.len(),
+        newest_change: changed
+            .iter()
+            .filter_map(|row| as_i64(&row[COMPARTMENT_CREATED_AT]))
+            .max(),
+        end_message: mine
+            .iter()
+            .filter_map(|row| as_i64(&row[COMPARTMENT_END_MESSAGE]))
+            .max(),
+    }
+}
+
+/// Decide which copy of one session's history the migration keeps: the copy that was
+/// being written. A copy that holds every compartment of the other, unchanged, is kept
+/// whatever mode its project was in, because keeping it loses nothing; this is what
+/// covers both a stalled mirror (the store ahead) and a project that went back to
+/// TypeScript (`context.db` ahead). When both copies changed compartments the other
+/// lacks, the newer changes win, but only when the project's owner agrees or is
+/// unknown; equal timestamps fall back to the owner. Anything else is refused rather
+/// than guessed, since the losing copy's history would be gone.
+fn decide_history(
+    session_id: &str,
+    project: &str,
+    store: &[Vec<SqlValue>],
+    context: &[Vec<SqlValue>],
+    owner: Option<Winner>,
+    preferred: Option<Winner>,
+) -> Result<Option<HistoryDecision>, EngineError> {
+    let store_side = history_side(store, context);
+    let context_side = history_side(context, store);
+    let decision = |kept: Winner, reason: HistoryReason| HistoryDecision {
+        session: session_id.to_string(),
+        project: project.to_string(),
+        kept,
+        reason,
+        store_compartments: store_side.rows,
+        context_compartments: context_side.rows,
+        store_end_message: store_side.end_message,
+        context_end_message: context_side.end_message,
+    };
+    if context_side.changed == 0 && store_side.changed == 0 {
+        return Ok(None);
+    }
+    if let Some(kept) = preferred {
+        return Ok(Some(decision(kept, HistoryReason::Preferred)));
+    }
+    if context_side.changed == 0 {
+        return Ok(Some(decision(Winner::Store, HistoryReason::Superset)));
+    }
+    if store_side.changed == 0 {
+        return Ok(Some(decision(Winner::Context, HistoryReason::Superset)));
+    }
+    let wrote_last = match store_side.newest_change.cmp(&context_side.newest_change) {
+        std::cmp::Ordering::Greater => Some(Winner::Store),
+        std::cmp::Ordering::Less => Some(Winner::Context),
+        std::cmp::Ordering::Equal => None,
+    };
+    let ends_at_least_as_late = |side: Winner| match side {
+        Winner::Store => store_side.end_message >= context_side.end_message,
+        Winner::Context => context_side.end_message >= store_side.end_message,
+    };
+    let kept = match (wrote_last, owner) {
+        (Some(last), Some(owner)) if last == owner => Some((last, HistoryReason::WroteLast)),
+        (Some(last), None) if ends_at_least_as_late(last) => {
+            Some((last, HistoryReason::WroteLast))
+        }
+        (None, Some(owner)) => Some((owner, HistoryReason::ProjectOwner)),
+        _ => None,
+    };
+    if let Some((kept, reason)) = kept {
+        return Ok(Some(decision(kept, reason)));
+    }
+    let side = |side: &HistorySide| {
+        json!({
+            "compartments": side.rows,
+            "changed": side.changed,
+            "newest_change_at": side.newest_change,
+            "end_message": side.end_message,
+        })
+    };
+    Err(Refusal::new(
+        HISTORY_DIVERGED,
+        format!(
+            "session {session_id} ({project}) has history in both files that the other lacks, and neither copy is clearly the one being written; keeping either would drop the other's compartments. Choose with --prefer-history {session_id}=store or --prefer-history {session_id}=context"
+        ),
+    )
+    .with_detail(json!({
+        "session": session_id,
+        "project": project,
+        "project_owner": owner,
+        "store": side(&store_side),
+        "context": side(&context_side),
+        "flags": [
+            format!("--prefer-history {session_id}=store"),
+            format!("--prefer-history {session_id}=context"),
+        ],
+    }))
+    .into())
+}
+
 fn unclassified(session: &str, table: &str, id: i64) -> EngineError {
     Refusal::new(
         UNCLASSIFIED_ROWS,
@@ -1859,6 +2069,26 @@ impl<'a> Copier<'a> {
             .cloned()
             .unwrap_or_else(|| UNATTRIBUTED.to_string());
         let session = self.session_src(session_id, source)?;
+        let context_history = self.context_compartments(session_id)?;
+        let owner = self.prefer.get(&project).copied().or_else(|| {
+            match self.authority.ownership(&project, &self.file_uuid) {
+                Ownership::Owned(winner) if project != UNATTRIBUTED => Some(winner),
+                _ => None,
+            }
+        });
+        let decision = decide_history(
+            session_id,
+            &project,
+            &session.compartments,
+            &context_history,
+            owner,
+            self.prefer_history.get(session_id).copied(),
+        )?;
+        let kept = decision.as_ref().map(|decision| decision.kept);
+        self.history.extend(decision);
+        if kept == Some(Winner::Context) {
+            return self.keep_context_history(session_id, &project, source, &session, context_history);
+        }
 
         // Everything is classified against the compartments as they were before this run.
         let context_candidates = session_rows(
@@ -1995,6 +2225,123 @@ impl<'a> Copier<'a> {
                 ],
             )?;
         }
+        Ok(())
+    }
+
+    /// Every compartment of a session in `context.db`, in column order, by sequence.
+    fn context_compartments(&self, session_id: &str) -> rusqlite::Result<Vec<Vec<SqlValue>>> {
+        Ok(read_rows(
+            self.conn,
+            &format!(
+                "SELECT id, {} FROM ctx.compartments WHERE session_id = ?1 ORDER BY sequence",
+                column_list(COMPARTMENT_COLUMNS)
+            ),
+            &[text(session_id)],
+            COMPARTMENT_COLUMNS.len(),
+        )?
+        .into_iter()
+        .map(|(_, values)| values)
+        .collect())
+    }
+
+    /// Keep a session's `context.db` history because it was the copy being written. No
+    /// context row is changed or deleted. A store event or candidate is added only where it
+    /// describes compartments both copies hold unchanged and the context lacks it; the rest
+    /// describe compartments the context rewrote and are left in the backup.
+    fn keep_context_history(
+        &mut self,
+        session_id: &str,
+        project: &str,
+        source: &Source,
+        session: &SessionSrc,
+        context_history: Vec<Vec<SqlValue>>,
+    ) -> Result<(), EngineError> {
+        let unchanged: BTreeSet<i64> = context_history
+            .iter()
+            .filter(|row| {
+                as_i64(&row[1]).and_then(|sequence| session.compartment(sequence)).is_some_and(
+                    |store| store[COMPARTMENT_CONTENT_FIELDS] == row[COMPARTMENT_CONTENT_FIELDS],
+                )
+            })
+            .filter_map(|row| as_i64(&row[1]))
+            .collect();
+        let counts = self.counts(project, "compartments");
+        counts.source += session.compartments.len();
+        counts.kept += unchanged.len();
+        counts.superseded += session.compartments.len() - unchanged.len();
+
+        let context_events: Vec<(i64, Vec<SqlValue>)> =
+            session_rows(self.conn, "compartment_events", EVENT_COLUMNS, session_id)?;
+        let desired = self.desired_events(session_id, session)?;
+        let (eligible, superseded): (Vec<usize>, Vec<usize>) = (0..desired.len())
+            .partition(|index| match session.events[*index].1 {
+                Some(sequence) => unchanged.contains(&sequence),
+                None => true,
+            });
+        let wanted: Vec<Vec<SqlValue>> =
+            eligible.iter().map(|index| desired[*index].clone()).collect();
+        let (missing, _) = match_multiset(&wanted, &context_events);
+        let counts = self.counts(project, "compartment_events");
+        counts.source += desired.len();
+        counts.kept += wanted.len() - missing.len();
+        counts.superseded += superseded.len();
+        for index in missing {
+            insert_row(self.conn, "ctx.compartment_events", EVENT_COLUMNS, &wanted[index])?;
+            self.counts(project, "compartment_events").copied += 1;
+        }
+
+        let context_candidates = session_rows(
+            self.conn,
+            "user_memory_candidates",
+            CANDIDATE_COLUMNS,
+            session_id,
+        )?;
+        let (eligible, superseded): (Vec<&Vec<SqlValue>>, Vec<&Vec<SqlValue>>) =
+            session.candidates.iter().partition(|values| {
+                match (as_i64(&values[2]), as_i64(&values[3])) {
+                    (Some(start), Some(end)) if start <= end && end - start <= 10_000 => {
+                        (start..=end).all(|sequence| unchanged.contains(&sequence))
+                    }
+                    _ => false,
+                }
+            });
+        let wanted: Vec<Vec<SqlValue>> = eligible.into_iter().cloned().collect();
+        let (missing, _) = match_multiset(&wanted, &context_candidates);
+        let counts = self.counts(project, "user_memory_candidates");
+        counts.source += session.candidates.len();
+        counts.kept += wanted.len() - missing.len();
+        counts.superseded += superseded.len();
+        for index in missing {
+            insert_row(
+                self.conn,
+                "ctx.user_memory_candidates",
+                CANDIDATE_COLUMNS,
+                &wanted[index],
+            )?;
+            self.counts(project, "user_memory_candidates").copied += 1;
+        }
+
+        // Only the heading dates of compartments both copies agree on are known to fit.
+        for row in source.compartments.get(session_id).into_iter().flatten() {
+            if !as_i64(&get(row, "sequence")).is_some_and(|sequence| unchanged.contains(&sequence)) {
+                continue;
+            }
+            self.conn.execute(
+                "INSERT OR REPLACE INTO main.mc_compartment_dates(
+                     session_id, sequence, start_message_id, end_message_id, start_date, end_date
+                 ) VALUES (?1, ?2, COALESCE(?3, ''), COALESCE(?4, ''), ?5, ?6)",
+                params![
+                    session_id,
+                    get(row, "sequence"),
+                    get(row, "start_message_id"),
+                    get(row, "end_message_id"),
+                    get(row, "start_date"),
+                    get(row, "end_date"),
+                ],
+            )?;
+        }
+        self.context_kept
+            .insert(session_id.to_string(), context_history);
         Ok(())
     }
 
@@ -2383,7 +2730,13 @@ fn verify(
         .into_iter()
         .map(|(_, values)| values)
         .collect();
-        if !src.compartments.is_empty() && context != src.compartments {
+        if let Some(before) = copier.context_kept.get(session) {
+            if &context != before {
+                return Err(mismatch(format!(
+                    "session {session}'s context history was to be kept but changed during the copy"
+                )));
+            }
+        } else if !src.compartments.is_empty() && context != src.compartments {
             return Err(mismatch(format!(
                 "session {session}'s context compartments differ from the store's after the copy"
             )));
@@ -2964,7 +3317,8 @@ fn migrate_in_transaction(
             projects.insert(project.to_string());
         }
     }
-    let decided = classify_projects(conn, &projects, &file_uuid, options)?;
+    let authority = Authority::read(conn)?;
+    let decided = classify_projects(&authority, &projects, &file_uuid, options)?;
     log_step("read and classify", step);
     let step = Instant::now();
     let skipped_projects: BTreeSet<&String> = decided
@@ -3010,6 +3364,11 @@ fn migrate_in_transaction(
             .filter_map(|row| as_i64(&get(row, "id")))
             .collect(),
         orphan_mappings: 0,
+        authority: &authority,
+        prefer: &options.prefer,
+        prefer_history: &options.prefer_history,
+        history: Vec::new(),
+        context_kept: BTreeMap::new(),
     };
     for (project, decision) in &decided {
         let Classification::Wins(winner) = *decision else {
@@ -3094,7 +3453,14 @@ fn migrate_in_transaction(
     verify(conn, &copier, &source, &decided, &copied_sessions)?;
     log_step("verify", step);
     let step = Instant::now();
-    let render_check = render_check(conn, &sessions, &skipped_sessions, &store_wins, options)?;
+    // A session whose context history was kept has nothing to compare: the store copy it
+    // would be checked against is the one the migration left behind.
+    let unmoved_sessions: BTreeSet<String> = skipped_sessions
+        .iter()
+        .cloned()
+        .chain(copier.context_kept.keys().cloned())
+        .collect();
+    let render_check = render_check(conn, &sessions, &unmoved_sessions, &store_wins, options)?;
     log_step("render check", step);
 
     let mut projects_report: Vec<ProjectReport> = Vec::new();
@@ -3112,6 +3478,7 @@ fn migrate_in_transaction(
         }
         projects_report.push(entry);
     }
+    let history = std::mem::take(&mut copier.history);
     projects_report.extend(copier.reports.into_values());
     let mut report = Report {
         status: "migrated".into(),
@@ -3120,6 +3487,7 @@ fn migrate_in_transaction(
         migrated_by: Some(options.build.clone()),
         projects: projects_report,
         render_check,
+        history,
         sessions_reset,
         normalized_context_compartments,
         ..Report::default()
@@ -3293,7 +3661,7 @@ fn check_claude_code_ids(
 
 // ── Command line ────────────────────────────────────────────────────────────
 
-const USAGE: &str = "usage: ck-mc single-store-migrate --context-db <path> --store-db <path> --backup-dir <dir> [--dry-run] [--skip-foreign] [--prefer <project>=store|context]... [--accept-id-change]";
+const USAGE: &str = "usage: ck-mc single-store-migrate --context-db <path> --store-db <path> --backup-dir <dir> [--dry-run] [--skip-foreign] [--prefer <project>=store|context]... [--prefer-history <session>=store|context]... [--accept-id-change]";
 
 /// Parse the command line into options. `Err` carries the usage error.
 pub fn parse_args(args: &[String]) -> Result<EngineOptions, String> {
@@ -3304,6 +3672,7 @@ pub fn parse_args(args: &[String]) -> Result<EngineOptions, String> {
     let mut skip_foreign = false;
     let mut accept_id_change = false;
     let mut prefer = BTreeMap::new();
+    let mut prefer_history = BTreeMap::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         let mut value = |name: &str| {
@@ -3324,6 +3693,16 @@ pub fn parse_args(args: &[String]) -> Result<EngineOptions, String> {
                     .ok_or_else(|| format!("--prefer takes <project>=store|context, got {raw}"))?;
                 prefer.insert(project.to_string(), winner);
             }
+            "--prefer-history" => {
+                let raw = value("--prefer-history")?;
+                let parsed = raw
+                    .rsplit_once('=')
+                    .and_then(|(session, side)| Some((session, Winner::parse(side)?)));
+                let (session, winner) = parsed.ok_or_else(|| {
+                    format!("--prefer-history takes <session>=store|context, got {raw}")
+                })?;
+                prefer_history.insert(session.to_string(), winner);
+            }
             "--dry-run" => dry_run = true,
             "--skip-foreign" => skip_foreign = true,
             "--accept-id-change" => accept_id_change = true,
@@ -3339,6 +3718,7 @@ pub fn parse_args(args: &[String]) -> Result<EngineOptions, String> {
     options.skip_foreign = skip_foreign;
     options.accept_id_change = accept_id_change;
     options.prefer = prefer;
+    options.prefer_history = prefer_history;
     Ok(options)
 }
 
