@@ -1250,3 +1250,129 @@ async fn hostless_store_init_first_transform_through_real_daemon() {
     assert_eq!(state, "migrated");
     assert_eq!(by, stamp);
 }
+
+/// Replay host-wire fixtures against a caller-provided pair of cloned stores.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MC_PLANNING_CLONE, MC_PLANNING_FIXTURES, MC_PLANNING_MODULE and MC_PLANNING_DAEMON"]
+async fn planning_clones_through_real_daemon() {
+    let root = PathBuf::from(std::env::var_os("MC_PLANNING_CLONE").unwrap())
+        .canonicalize()
+        .unwrap();
+    assert!(root.starts_with(
+        std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join("magic-context/perf-planning")
+    ));
+    let fixtures: Vec<Value> = serde_json::from_slice(
+        &fs::read(std::env::var_os("MC_PLANNING_FIXTURES").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let runtime = root.join("runtime");
+    let config = root.join("config");
+    let data = root.join("data");
+    let project = root.parent().unwrap().join("replay-project");
+    for dir in [&runtime, &project] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    PROJECT_BASE.set(project.canonicalize().unwrap()).unwrap();
+    write_empty_config(&config);
+    let daemon = spawn_daemon(
+        &PathBuf::from(std::env::var_os("MC_PLANNING_DAEMON").unwrap()),
+        &runtime,
+        &config,
+        &data,
+    );
+    wait_for_connection_file(&daemon.connection_file, START_TIMEOUT).await;
+    let module = spawn_module_with_differential(
+        &PathBuf::from(std::env::var_os("MC_PLANNING_MODULE").unwrap()),
+        &daemon.connection_file,
+        &data,
+        true,
+    );
+    let consumer = SubcConsumer::connect(&daemon.connection_file, fast_consumer_options())
+        .await
+        .unwrap();
+    wait_for_module_registration(&consumer, START_TIMEOUT).await;
+    for pid in [daemon.child.id(), module.child.id()] {
+        let output = Command::new("lsof")
+            .args(["-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        let db_lines: Vec<_> = text.lines().filter(|line| line.contains(".db")).collect();
+        for line in &db_lines {
+            assert!(
+                line.contains(root.to_str().unwrap()),
+                "non-clone database opened: {line}"
+            );
+        }
+        println!("planning-lsof pid={pid}: {}", db_lines.join("\n"));
+    }
+    for fixture in fixtures {
+        let session = fixture["session_id"].as_str().unwrap();
+        let mut request = fixture.clone();
+        let raw = request
+            .as_object_mut()
+            .unwrap()
+            .remove("raw_messages")
+            .unwrap();
+        let raw = raw.as_array().unwrap();
+        let mut decoded = mc_module::codec::decode_opencode(raw).messages;
+        for (message, native) in decoded.iter_mut().zip(raw) {
+            message.ordinal = native["absolute_ordinal"].as_u64().unwrap();
+            message.ck.meta.ordinal = Some(message.ordinal);
+        }
+        request["messages"] = serde_json::to_value(decoded).unwrap();
+        request["native_messages"] = serde_json::to_value(raw).unwrap();
+        request["serve_native"] = json!(true);
+        let mut previous_served = Vec::new();
+        for pass in 0..15 {
+            request["nonce"] = json!(pass);
+            let response = call(&consumer, request.clone()).await;
+            assert_eq!(response["status"], "ok", "{response}");
+            println!(
+                "planning-clone session={session} pass={pass} action={} timings={} historian={}",
+                response["action"], response["timings"], response["historian"]
+            );
+            assert!(
+                response["native_messages"].is_array(),
+                "probe must compare the actual native served output"
+            );
+            let served = serde_json::to_vec(&json!({"ck_messages": response["ck_messages"], "native_messages": response["native_messages"]})).unwrap();
+            if pass > 0 && pass % 3 != 0 {
+                assert_eq!(
+                    served, previous_served,
+                    "nonce-only defer must replay identical served bytes"
+                );
+            }
+            fs::write(root.join(format!("{session}-{pass}-served.json")), &served).unwrap();
+            previous_served = served;
+            fs::write(
+                root.join(format!("{session}-{pass}-response.json")),
+                serde_json::to_vec(&response).unwrap(),
+            )
+            .unwrap();
+            if pass >= 2 {
+                assert_eq!(
+                    response["action"], "SOFT+",
+                    "fixture must reach managed defer"
+                );
+            }
+            if pass % 3 == 2 {
+                let messages = request["messages"].as_array_mut().unwrap();
+                let ordinal = messages.last().unwrap()["ordinal"].as_u64().unwrap() + 1;
+                let id = format!("planning-delta-{pass}");
+                let text = "Read-only performance replay: continue the implementation and run the targeted verification.";
+                messages.push(ck(&id, ordinal, text));
+                request["native_messages"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({
+                        "info": {"id": id, "role": "user"},
+                        "parts": [{"type": "text", "text": text}]
+                    }));
+            }
+        }
+    }
+}

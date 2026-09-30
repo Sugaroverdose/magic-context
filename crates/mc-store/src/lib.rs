@@ -7038,6 +7038,7 @@ pub struct McStore {
     /// Where the domain rows live. The module installs it right after opening the store;
     /// until then every domain read and write refuses with `context_not_installed`.
     context: std::sync::RwLock<Option<Arc<dyn ContextDomain>>>,
+    context_boundary_cache: Mutex<context_boundaries::BoundaryValidationCache>,
     #[cfg(any(test, feature = "test-support"))]
     abandon_historian_hook: AbandonHistorianHook,
     #[cfg(any(test, feature = "test-support"))]
@@ -7050,6 +7051,8 @@ pub struct McStore {
     tag_payload_query_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     state_load_query_count: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
+    compartment_payload_query_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     historian_side_channel_fail_once: Mutex<BTreeSet<String>>,
     /// Route roots a test keyed by a project identity; see `set_route_identity_for_test`.
@@ -7310,6 +7313,11 @@ impl McStore {
 
     /// Install the `context.db` connections domain rows are read from and written to.
     pub fn install_context_domain(&self, domain: Arc<dyn ContextDomain>) {
+        let mut cache = self
+            .context_boundary_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *cache = Default::default();
         *self
             .context
             .write()
@@ -7607,6 +7615,7 @@ impl McStore {
             tag_cache_namespace: NEXT_TAG_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed),
             facade_mutation_lock: Mutex::new(()),
             context: std::sync::RwLock::new(None),
+            context_boundary_cache: Mutex::new(Default::default()),
             #[cfg(any(test, feature = "test-support"))]
             abandon_historian_hook: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(any(test, feature = "test-support"))]
@@ -7619,6 +7628,8 @@ impl McStore {
             tag_payload_query_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             state_load_query_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            compartment_payload_query_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             historian_side_channel_fail_once: Mutex::new(BTreeSet::new()),
             #[cfg(any(test, feature = "test-support"))]
@@ -11173,13 +11184,24 @@ impl McStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<StoredCompartment>, McStoreError> {
-        self.context_read(|conn| {
-            let mut stmt = conn.prepare_cached(&format!(
-                "SELECT {COMPARTMENT_SELECT_COLUMNS} FROM compartments WHERE session_id = ?1 ORDER BY sequence ASC"
-            ))?;
-            let rows = stmt.query_map(params![session_id], Self::stored_compartment_from_row)?.collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
+        self.context_read(|conn| self.load_raw_context_compartments_tx(conn, session_id))
+    }
+
+    fn load_raw_context_compartments_tx(
+        &self,
+        conn: &rusqlite::Connection,
+        session_id: &str,
+    ) -> rusqlite::Result<Vec<StoredCompartment>> {
+        #[cfg(any(test, feature = "test-support"))]
+        self.compartment_payload_query_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {COMPARTMENT_SELECT_COLUMNS} FROM compartments WHERE session_id = ?1 ORDER BY sequence ASC"
+        ))?;
+        let rows = stmt
+            .query_map(params![session_id], Self::stored_compartment_from_row)?
+            .collect();
+        rows
     }
 
     /// Read only structural boundaries from one snapshot, without summary bodies.
@@ -11205,10 +11227,14 @@ impl McStore {
             Ok(rows)
         })?;
         let boundaries = self.cached_context_boundaries(session_id)?;
+        let mut by_sequence = HashMap::new();
+        for boundary in &boundaries {
+            by_sequence.entry(boundary.sequence).or_insert(boundary);
+        }
         for row in &mut rows {
-            if let Some(boundary) = boundaries
-                .iter()
-                .find(|boundary| boundary.matches_boundary(row))
+            if let Some(boundary) = by_sequence
+                .get(&row.sequence)
+                .filter(|boundary| boundary.matches_boundary(row))
             {
                 row.start_message = boundary.start_message;
                 row.end_message = boundary.end_message;

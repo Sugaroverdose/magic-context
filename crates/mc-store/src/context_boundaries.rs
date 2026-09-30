@@ -132,6 +132,19 @@ fn matches_canonical_id(raw: &str, index: Option<i64>, module_id: &str) -> bool 
     }
 }
 
+#[derive(Default)]
+pub(crate) struct BoundaryValidationCache {
+    entries: std::collections::VecDeque<BoundaryValidationEntry>,
+}
+
+struct BoundaryValidationEntry {
+    session: String,
+    source_json: String,
+    domain: std::sync::Arc<dyn crate::ContextDomain>,
+    data_version: i64,
+    valid: Vec<ResolvedContextBoundary>,
+}
+
 impl McStore {
     /// Whether every shared row has exact block indices or matching cached host
     /// coordinates, so reconnecting need not scan the raw messages again.
@@ -173,23 +186,72 @@ impl McStore {
         let json: Option<String> = self.inner.with_conn(|conn| {
             conn.query_row("SELECT COALESCE(json_extract(meta, '$.resolved_compartment_boundaries'), '[]') FROM mc_cache_state WHERE session_id=?1", params![session], |row| row.get(0)).optional()
         })?;
-        let cached: Vec<ResolvedContextBoundary> = json
-            .map(|value| {
-                serde_json::from_str(&value).map_err(|error| McStoreError::Serde(error.to_string()))
-            })
-            .transpose()?
-            .unwrap_or_default();
-        if cached.is_empty() {
-            return Ok(cached);
+        let json = json.unwrap_or_else(|| "[]".into());
+        if json == "[]" {
+            return Ok(Vec::new());
         }
-        let rows = self.load_raw_context_compartments(session)?;
+        let mut cache = self
+            .context_boundary_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let domain = self.context_domain()?;
+        // data_version changes for every commit by another connection, including direct SQL
+        // repairs that do not advance any semantic watermark. Read it in the same snapshot
+        // as the bodies on a miss. The persisted overlay JSON is a separate cache input:
+        // state sync can replace coordinates without changing context.db.
+        let (version, rows, hit) = self.context_read(|conn| {
+            let version = if domain.has_stable_read_connection() {
+                Some(conn.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?)
+            } else {
+                None
+            };
+            let hit = version.and_then(|version| {
+                cache.entries.iter().position(|entry| {
+                    entry.session == session
+                        && entry.source_json == json
+                        && std::sync::Arc::ptr_eq(&entry.domain, &domain)
+                        && entry.data_version == version
+                })
+            });
+            if hit.is_some() {
+                return Ok((version, Vec::new(), hit));
+            }
+            let rows = self.load_raw_context_compartments_tx(conn, session)?;
+            Ok((version, rows, None))
+        })?;
+        if let Some(index) = hit {
+            let entry = cache.entries.remove(index).expect("cache hit index");
+            let valid = entry.valid.clone();
+            cache.entries.push_back(entry);
+            return Ok(valid);
+        }
+        let cached: Vec<ResolvedContextBoundary> =
+            serde_json::from_str(&json).map_err(|error| McStoreError::Serde(error.to_string()))?;
+        let mut by_sequence = std::collections::HashMap::new();
+        for row in &rows {
+            by_sequence.entry(row.sequence).or_insert(row);
+        }
         let mut valid = Vec::new();
         for boundary in cached {
-            if let Some(row) = rows.iter().find(|row| row.sequence == boundary.sequence) {
+            if let Some(row) = by_sequence.get(&boundary.sequence) {
                 if boundary.identifies(row)? {
                     valid.push(boundary);
                 }
             }
+        }
+        if let Some(data_version) = version {
+            cache.entries.retain(|entry| entry.session != session);
+            // Keep only validated coordinates, not summary bodies; bound interleaved sessions.
+            if cache.entries.len() >= 8 {
+                cache.entries.pop_front();
+            }
+            cache.entries.push_back(BoundaryValidationEntry {
+                session: session.into(),
+                source_json: json,
+                domain,
+                data_version,
+                valid: valid.clone(),
+            });
         }
         Ok(valid)
     }
@@ -301,6 +363,131 @@ mod tests {
     fn seed(store: &McStore) {
         store.with_context_conn_for_test(|conn| conn.execute_batch("INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at) VALUES ('raw', 0, 2, 5, 'm1', 'm4', 'summary', 'body', 1)")).unwrap();
     }
+    #[test]
+    fn stable_boundary_validation_reads_bodies_once_and_reloads_external_publications() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        let expected = store.cached_context_boundaries("raw").unwrap();
+        let before = store
+            .compartment_payload_query_count
+            .load(Ordering::Relaxed);
+        for _ in 0..12 {
+            assert_eq!(store.cached_context_boundaries("raw").unwrap(), expected);
+            assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 4);
+        }
+        assert_eq!(
+            store
+                .compartment_payload_query_count
+                .load(Ordering::Relaxed),
+            before,
+            "stable passes must not reload summary bodies"
+        );
+        let writer = Connection::open(dir.path().join("context.db")).unwrap();
+        // A direct same-count, same-sequence repair bypasses semantic revision logs.
+        writer
+            .execute(
+                "UPDATE compartments SET content='external repair' WHERE session_id='raw'",
+                [],
+            )
+            .unwrap();
+        assert!(store.cached_context_boundaries("raw").unwrap().is_empty());
+        assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 5);
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].content,
+            "external repair"
+        );
+        writer.execute_batch("INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at) VALUES ('raw', 1, 6, 9, 'm5', 'm8', 'later', 'published elsewhere', 2)").unwrap();
+        assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 9);
+    }
+
+    #[test]
+    fn boundary_validation_reloads_when_only_cached_coordinates_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 4);
+        store.inner.with_conn(|conn| conn.execute_batch(
+            "UPDATE mc_cache_state SET meta=json_set(meta, '$.resolved_compartment_boundaries[0].end_message', 3) WHERE session_id='raw'"
+        )).unwrap();
+        assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 3);
+        // Preserve the earlier coordinate if legacy metadata repeats a sequence.
+        store.inner.with_conn(|conn| conn.execute_batch(
+            "UPDATE mc_cache_state SET meta=json_insert(meta, '$.resolved_compartment_boundaries[#]', json_set(json_extract(meta, '$.resolved_compartment_boundaries[0]'), '$.end_message', 7)) WHERE session_id='raw'"
+        )).unwrap();
+        assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 3);
+    }
+
+    #[test]
+    #[ignore = "set MC_PLANNING_CLONE to an APFS clone root under the system temporary directory"]
+    fn cloned_boundary_validation_profile() {
+        let root =
+            std::path::PathBuf::from(std::env::var_os("MC_PLANNING_CLONE").expect("clone root"));
+        let root = root.canonicalize().unwrap();
+        assert!(root.starts_with(
+            std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join("magic-context/perf-planning")
+        ));
+        let store = McStore::open(&descriptor(&root.join("data/cortexkit/magic-context"))).unwrap();
+        store.install_context_domain(Arc::new(
+            SqliteContextDomain::open(&root.join("data/cortexkit/magic-context/context.db"))
+                .unwrap(),
+        ));
+        let output = std::process::Command::new("lsof")
+            .args(["-p", &std::process::id().to_string()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        for line in String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains(".db"))
+        {
+            assert!(
+                line.contains(root.to_str().unwrap()),
+                "non-clone database opened: {line}"
+            );
+            println!("boundary-profile-lsof {line}");
+        }
+        println!(
+            "profile pid={} clone={}",
+            std::process::id(),
+            root.display()
+        );
+        for session in [
+            "ses_227ce5788ffeRPA9THoPLOQreO",
+            "ses_313660571ffeZTsf4koSJwk50Q",
+        ] {
+            let mut samples = Vec::new();
+            for pass in 0..13 {
+                let started = std::time::Instant::now();
+                let first = store.cached_context_boundaries(session).unwrap();
+                let end = store.max_compartment_end_ordinal(session).unwrap();
+                let second = store.cached_context_boundaries(session).unwrap();
+                assert_eq!(first, second);
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "boundary-profile session={session} pass={pass} ms={:.3} rows={} end={end}",
+                    samples[pass],
+                    first.len()
+                );
+            }
+            samples.remove(0);
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "boundary-profile session={session} warm_median_ms={:.3}",
+                (samples[5] + samples[6]) / 2.0
+            );
+        }
+    }
+
     #[test]
     fn echoed_materialized_boundary_is_retained_when_a_newer_compartment_exists() {
         let dir = tempfile::tempdir().unwrap();

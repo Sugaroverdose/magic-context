@@ -39,6 +39,12 @@ pub trait ContextDomain: Send + Sync {
         write: &mut dyn FnMut(&Transaction<'_>) -> rusqlite::Result<()>,
     ) -> Result<(), McStoreError>;
 
+    /// Whether reads always use the same connection, distinct from all writers.
+    /// Only such readers can use SQLite's connection-local data_version for cache validation.
+    fn has_stable_read_connection(&self) -> bool {
+        false
+    }
+
     /// What the domain reports on the status surface: where it is and what its schema
     /// fence found. Null when it has nothing to report.
     fn status(&self) -> serde_json::Value {
@@ -104,6 +110,10 @@ impl SqliteContextDomain {
 }
 
 impl ContextDomain for SqliteContextDomain {
+    fn has_stable_read_connection(&self) -> bool {
+        true
+    }
+
     fn read(
         &self,
         read: &mut dyn FnMut(&Connection) -> rusqlite::Result<()>,
