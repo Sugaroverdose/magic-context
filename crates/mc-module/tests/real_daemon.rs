@@ -596,6 +596,8 @@ fn spawn_daemon(
         // real `~/.local/share/cortexkit/run/logs/subc.log` and interleaves test boots
         // with production ones. Sharing the module's data home mirrors production layout.
         .env("XDG_DATA_HOME", data_home)
+        .env_remove("MAGIC_CONTEXT_TEST_DATA_DIR")
+        .env_remove("MAGIC_CONTEXT_STORAGE_DIR")
         .env("HOME", config_dir)
         .env_remove(subc_protocol::SUBC_MODULE_ID_ENV)
         .env_remove(subc_protocol::SUBC_LAUNCH_NONCE_ENV)
@@ -628,7 +630,11 @@ fn spawn_module_with_differential(
         .arg("--subc")
         .arg(connection_file)
         .env(subc_protocol::SUBC_MODULE_ID_ENV, MODULE_ID)
+        .env_remove(subc_protocol::SUBC_LAUNCH_NONCE_ENV)
+        .env_remove(subc_os::LAUNCH_NONCE_FD_ENV)
         .env("XDG_DATA_HOME", data_home)
+        .env_remove("MAGIC_CONTEXT_TEST_DATA_DIR")
+        .env_remove("MAGIC_CONTEXT_STORAGE_DIR")
         .env(
             "XDG_CONFIG_HOME",
             data_home.parent().unwrap().join("config"),
@@ -789,6 +795,7 @@ fn ensure_binary(manifest_dir: &Path, path: PathBuf, cargo_args: &[&str]) -> Pat
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let output = Command::new("cargo")
+        .env("CARGO_BUILD_JOBS", "2")
         .args(cargo_args)
         .current_dir(manifest_dir)
         .output()
@@ -1095,4 +1102,151 @@ impl Drop for StopSupervisedModule<'_> {
             .env_remove(subc_os::LAUNCH_NONCE_FD_ENV)
             .output();
     }
+}
+
+/// Provision through the public CLI before starting ck-mc, without an OpenCode or Pi
+/// session creating context.db first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hostless_store_init_first_transform_through_real_daemon() {
+    let workspace = workspace_root();
+    let subconscious = subconscious_root(&workspace);
+    let target = workspace.join("target/store-init-subc");
+    let daemon_bin = ensure_binary(
+        &subconscious,
+        target.join("debug/ck-subc"),
+        &[
+            "build",
+            "--locked",
+            "-j",
+            "2",
+            "-p",
+            "subc-core",
+            "--bin",
+            "ck-subc",
+            "--target-dir",
+            target.to_str().unwrap(),
+        ],
+    );
+    let module_bin = PathBuf::from(env!("CARGO_BIN_EXE_ck-mc"));
+    let parent = std::env::temp_dir().join("magic-context/store-init");
+    fs::create_dir_all(&parent).unwrap();
+    let temp = TempRoot(parent.join(format!(
+        "daemon-{}-{}",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )));
+    let runtime = temp.0.join("runtime");
+    let config = temp.0.join("config");
+    let data = temp.0.join("data");
+    let project = temp.0.join("project");
+    for dir in [&runtime, &data, &project] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    write_empty_config(&config);
+    let context_path = data.join("cortexkit/magic-context/context.db");
+    assert!(!context_path.exists());
+    let output = Command::new("bun")
+        .args([
+            "run",
+            "packages/cli/src/index.ts",
+            "doctor",
+            "store",
+            "init",
+        ])
+        .current_dir(&workspace)
+        .env("HOME", &config)
+        .env("XDG_CONFIG_HOME", &config)
+        .env("XDG_DATA_HOME", &data)
+        .env_remove("MAGIC_CONTEXT_TEST_DATA_DIR")
+        .env_remove("MAGIC_CONTEXT_STORAGE_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "store init failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        context_path.exists(),
+        "doctor store init must create context.db"
+    );
+    let daemon = spawn_daemon(&daemon_bin, &runtime, &config, &data);
+    wait_for_connection_file(&daemon.connection_file, START_TIMEOUT).await;
+    let _module =
+        spawn_module_with_differential(&module_bin, &daemon.connection_file, &data, false);
+    let consumer = SubcConsumer::connect(&daemon.connection_file, fast_consumer_options())
+        .await
+        .unwrap();
+    let identity = BindIdentity::new(project, "mc-module-test", "hostless");
+    let target = RouteTarget::ToolProvider {
+        module_id: MODULE_ID.to_string(),
+    };
+    let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+    loop {
+        let probe = consumer
+            .call(
+                target.clone(),
+                identity.clone(),
+                serde_json::to_vec(&json!({"kind":"status", "v":1})).unwrap(),
+                fast_call_options(),
+            )
+            .await;
+        if !matches!(&probe, Err(e) if format!("{e:?}").contains("unknown_module")) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "module did not register"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let bytes = consumer.call(target, identity, serde_json::to_vec(&json!({
+        "kind": "transform", "v": 2, "serializer_profile": "owned-llmrunner",
+        "session_id": "hostless", "render_config": "cfg0", "full_array_fingerprint": "fp-hostless",
+        "messages": [ck("first", 1, "hello")]
+    })).unwrap(), fast_call_options()).await.unwrap();
+    let response: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        response["status"], "ok",
+        "first transform failed: {response}"
+    );
+    let store = rusqlite::Connection::open_with_flags(
+        data.join("cortexkit/magic-context/store.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let version: i64 = store
+        .query_row(
+            "SELECT version FROM cortexkit_schema_version WHERE namespace = 'mc_cache' AND version = 61",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 61);
+    let stamp: String = store
+        .query_row(
+            "SELECT single_store_set_by FROM mc_privilege_state WHERE id = 1 AND single_store = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        stamp.ends_with("+fresh"),
+        "unexpected fresh marker: {stamp}"
+    );
+    let context = rusqlite::Connection::open_with_flags(
+        context_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let (state, by): (String, String) = context
+        .query_row(
+            "SELECT state, migrated_by FROM single_store_state WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "migrated");
+    assert_eq!(by, stamp);
 }

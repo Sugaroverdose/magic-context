@@ -11,6 +11,7 @@ import type { HarnessAdapter } from "../adapters/types";
 import { ensureDocsProposalGitignore } from "../lib/docs-proposal-gitignore";
 import { resolveAdaptersForCommand } from "../lib/harness-select";
 import { intro, log, note, outro } from "../lib/prompts";
+import { runDoctorStoreInit } from "./doctor-store";
 import { runSetup as runOmpSetup } from "./setup-omp";
 import { runSetup as runOpenCodeSetup } from "./setup-opencode";
 import { runSetup as runPiSetup } from "./setup-pi";
@@ -31,6 +32,11 @@ export async function runSetup(argv: string[]): Promise<number> {
     } catch (error) {
         log.error(error instanceof Error ? error.message : String(error));
         outro("Setup stopped — correct the command arguments and try again.");
+        return 1;
+    }
+
+    if (!dryRun && runDoctorStoreInit(log.info) !== 0) {
+        outro("Setup stopped — shared store initialization failed.");
         return 1;
     }
 

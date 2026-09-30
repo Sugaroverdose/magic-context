@@ -60,6 +60,7 @@ export const DOCTOR_HELP = [
     ...HARNESS_LINES,
     "",
     "  Subcommands (each accepts --help):",
+    "    store init                  Provision context.db without a host",
     "    single-store migrate        Move Rust domain rows into context.db offline",
     "    migrate                     Migrate an OpenCode session to Pi or OMP JSONL",
     "    migrate-session             Re-home an OpenCode session to another directory",
@@ -120,6 +121,8 @@ export function subcommandHelp(argv: readonly string[]): string | null {
     if (command === "setup") return SETUP_HELP;
     if (command !== "doctor") return null;
     const subcommand = rest[0];
+    if (subcommand === "store")
+        return "Usage: magic-context doctor store init\n\nCreate context.db at the current schema fence. Existing stores are reported without changes.\nHonours XDG_DATA_HOME and MAGIC_CONTEXT_STORAGE_DIR; no harness is required.";
     if (subcommand === "single-store") return SINGLE_STORE_HELP;
     if (subcommand === "merge-identity" || subcommand === "merge-identities")
         return MERGE_IDENTITY_HELP;

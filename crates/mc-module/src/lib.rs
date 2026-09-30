@@ -473,6 +473,9 @@ impl StoreRefusal {
             Self::NeverAcked => "store_unavailable",
             Self::Opening { .. } => "store_opening",
             Self::LeaseWait { .. } => "store_lease_wait",
+            Self::Failed { reason_code, .. } if reason_code == "context_db_missing" => {
+                "context_db_missing"
+            }
             Self::Failed { .. } => "store_open_failed",
             Self::StoreAhead { .. } => STORE_AHEAD_OF_BINARY_REFUSAL_REASON,
             Self::SingleStore { code, .. } => code,
@@ -569,6 +572,12 @@ impl StoreRefusal {
     /// logs. A store that is ahead of this binary gets its own sentence: "retry in a moment" would
     /// be wrong advice, because no retry fixes it.
     fn into_facade_outcome(self) -> HandlerOutcome {
+        if self.code() == "context_db_missing" {
+            return HandlerOutcome::Error {
+                code: self.code().to_string(),
+                message: "Magic Context has no context.db. Run `npx @cortexkit/magic-context doctor store init`, then restart ck-mc.".to_string(),
+            };
+        }
         if let Self::SingleStore { code, .. } = &self {
             return HandlerOutcome::ErrorWithDetail {
                 code: code.to_string(),
@@ -19280,6 +19289,24 @@ mod tests {
     /// The handle is a bare `Option`, so its emptiness cannot say WHICH state holds. These two
     /// states need opposite operator actions (wait for the other process to exit vs. find out why
     /// no ack arrived), so one shared code would be useless in both.
+    #[test]
+    fn missing_context_db_facade_refusal_names_provisioning_command() {
+        let refusal = StoreRefusal::Failed {
+            reason_code: "context_db_missing".to_string(),
+            reason: "no context.db".to_string(),
+            origin: "test",
+            descriptor: "scratch".to_string(),
+        };
+        assert_eq!(refusal.code(), "context_db_missing");
+        match refusal.into_facade_outcome() {
+            HandlerOutcome::Error { code, message } => {
+                assert_eq!(code, "context_db_missing");
+                assert!(message.contains("npx @cortexkit/magic-context doctor store init"));
+            }
+            _ => panic!("expected a user-facing missing-store refusal"),
+        }
+    }
+
     #[tokio::test]
     async fn store_refusal_discriminates_a_lease_wait_from_a_missing_ack() {
         let dir = tempfile::tempdir().unwrap();

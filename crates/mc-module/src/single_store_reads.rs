@@ -41,7 +41,10 @@ impl ModuleContextDomain {
         if !path.exists() {
             return Err(context_error(
                 "context_db_missing",
-                format!("no context.db at {}", path.display()),
+                format!(
+                    "no context.db at {}; run `npx @cortexkit/magic-context doctor store init` to provision it",
+                    path.display()
+                ),
             ));
         }
         let writer = HostStore::open(path).map_err(host_error)?;
@@ -299,6 +302,22 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn missing_context_db_refuses_with_provisioning_command_without_creating_it() {
+        let parent = std::env::temp_dir().join("magic-context/store-init");
+        std::fs::create_dir_all(&parent).unwrap();
+        let dir = tempfile::tempdir_in(parent).unwrap();
+        let path = dir.path().join("context.db");
+        let error = ModuleContextDomain::open(&path)
+            .err()
+            .expect("missing store refused");
+        assert!(error.to_string().contains("context_db_missing"));
+        assert!(error
+            .to_string()
+            .contains("npx @cortexkit/magic-context doctor store init"));
+        assert!(!path.exists());
     }
 
     #[test]
