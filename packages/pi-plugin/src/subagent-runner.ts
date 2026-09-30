@@ -593,7 +593,6 @@ function resolveSubagentExtensionEntry(
 
 const PI_READ_ONLY_BUILTINS = ["read", "grep", "find", "ls"] as const;
 const PI_AFT_READ_TOOLS = ["aft_outline", "aft_zoom", "aft_search"] as const;
-const PI_HISTORIAN_TOOLS = [...PI_READ_ONLY_BUILTINS, "aft_search"] as const;
 
 /**
  * Set of subagent agent ids that get ctx_memory in the lean child extension.
@@ -644,18 +643,11 @@ const STRICT_TOOL_ALLOWLIST_ENTRIES: readonly (readonly [
 ])[] = [
 	["dreamer-retrospective", ["ctx_search"]],
 	["smart-note-compiler", []],
-	// Pi's live historian runner uses this Magic Context-specific id for first
-	// pass, repair, two-pass editor, and recomp prompts. It
-	// summarizes/offloads host-rendered input and may inspect local files, but it
-	// must not mutate source or memory. Keep only read-only Pi built-ins plus
-	// aft_search (no aft_outline/aft_zoom, no ctx_* tools).
-	["magic-context-historian", PI_HISTORIAN_TOOLS],
-	// Shared OpenCode agent ids that can be passed by tests or future Pi callers.
-	// Same historian surface as magic-context-historian: local read/search only,
-	// optional aft_search, never writes or ctx_* tools.
-	["historian", PI_HISTORIAN_TOOLS],
-	["historian-recomp", PI_HISTORIAN_TOOLS],
-	["historian-editor", PI_HISTORIAN_TOOLS],
+	// First pass, repair, recomp and editor prompts transform supplied text into XML without tools.
+	["magic-context-historian", []],
+	["historian", []],
+	["historian-recomp", []],
+	["historian-editor", []],
 	// classify-memories: a pure metadata transform (prompt in → XML out). ZERO
 	// tools — it scores from the memory text and the host applies the columns.
 	["dreamer-classifier", []],

@@ -695,7 +695,7 @@ export const HistorianConfigSchema = AgentMetadataSchema.extend({
         .array(z.enum(["*", "read", "aft_outline", "aft_zoom", "aft_search"]))
         .default([])
         .describe(
-            'OpenCode only. Tools to REMOVE from the historian\'s default allow-list [read, aft_outline, aft_zoom, aft_search]. Applies to both historian and historian-editor agents. Use ["*"] to strip all tool definitions from the model request — this prevents weak instruction-following models (e.g. mistral-small-latest) from entering tool-calling loops. Individual tool names remove just that tool. Note: a user-supplied historian.permission override can re-allow a tool that disallowed_tools removed — disallowed_tools sets the baseline, permission overrides take precedence. (default: [])',
+            "Legacy compatibility setting. Historians, recomp and editor passes always run with zero tools and locked permissions; this list no longer changes their tool surface. (default: [])",
         ),
 }).optional();
 export type HistorianConfig = NonNullable<z.infer<typeof HistorianConfigSchema>>;

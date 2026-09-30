@@ -592,8 +592,7 @@ describe("subagent-runner pure helpers", () => {
 			"--no-skills",
 			"--no-prompt-templates",
 			"--no-context-files",
-			"--tools",
-			"read,grep,find,ls,aft_search",
+			"--no-tools",
 			"--system-prompt",
 			TEST_SYSTEM_PROMPT_PATH,
 			"--model",
@@ -850,7 +849,7 @@ describe("subagent-runner pure helpers", () => {
 
 		expect(args).toContain("--no-context-files");
 		expect(args.indexOf("--no-context-files")).toBeLessThan(
-			args.indexOf("--tools"),
+			args.indexOf("--no-tools"),
 		);
 	});
 
@@ -871,9 +870,7 @@ describe("subagent-runner pure helpers", () => {
 			expect(historianArgs).toContain("--no-rules");
 			expect(historianArgs).not.toContain("--no-prompt-templates");
 			expect(historianArgs).not.toContain("--no-context-files");
-			expect(historianArgs).toEqual(
-				expect.arrayContaining(["--tools", "read,grep,glob"]),
-			);
+			expect(historianArgs).toEqual(expect.arrayContaining(["--no-tools"]));
 
 			const dreamerArgs = buildArgsForTest({
 				...baseOptions,
@@ -966,14 +963,19 @@ describe("subagent-runner pure helpers", () => {
 		expect(args).not.toContain("--no-tools");
 	});
 
-	it("locks historian to an explicit read-only allow-list", () => {
-		const historianArgs = buildArgsForTest({
-			...baseOptions,
-			agent: "historian",
-		});
-		expect(historianArgs).toEqual(
-			expect.arrayContaining(["--tools", "read,grep,find,ls,aft_search"]),
-		);
+	it("locks every historian variant to zero tools even with discovered extensions", () => {
+		for (const agent of [
+			"magic-context-historian",
+			"historian",
+			"historian-recomp",
+			"historian-editor",
+		]) {
+			const args = buildArgsForTest({ ...baseOptions, agent });
+			expect(args).toContain("--no-tools");
+			expect(args).not.toContain("--tools");
+			expect(args).not.toContain("--no-extensions");
+			expect(__test.STRICT_TOOL_ALLOWLIST.get(agent)).toEqual([]);
+		}
 	});
 
 	it("translates every strict Pi allow-list into valid OMP built-ins", () => {
@@ -1151,9 +1153,7 @@ describe("subagent-runner pure helpers", () => {
 			"historian-editor",
 		]) {
 			const tools = toolListFor(agent);
-			expect(tools).toContain("aft_search");
-			expect(tools).not.toContain("aft_outline");
-			expect(tools).not.toContain("aft_zoom");
+			expect(tools).toEqual([]);
 		}
 
 		for (const agent of [
@@ -3021,8 +3021,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 			"--no-skills",
 			"--no-prompt-templates",
 			"--no-context-files",
-			"--tools",
-			"read,grep,find,ls,aft_search",
+			"--no-tools",
 			"--system-prompt",
 			expect.stringMatching(/system-prompt\.txt$/),
 			"--model",

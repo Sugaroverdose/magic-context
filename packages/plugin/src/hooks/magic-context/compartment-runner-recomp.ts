@@ -33,7 +33,6 @@ import { updateCompactionMarkerAfterPublication } from "./compaction-marker-mana
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-drop-queue";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
-import { cleanupHistorianStateFile } from "./compartment-runner-incremental";
 import type { CandidateCompartment, CompartmentRunnerDeps } from "./compartment-runner-types";
 import {
     getReducedRecompTokenBudget,
@@ -168,7 +167,6 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
     }
     const leaseHolderId = holderId;
     // State file for the current pass — hoisted to be accessible in finally{}
-    let currentStateFilePath: string | undefined;
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 
     try {
@@ -702,6 +700,5 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
     } finally {
         updateSessionMeta(db, sessionId, { compartmentInProgress: false });
-        cleanupHistorianStateFile(currentStateFilePath);
     }
 }
