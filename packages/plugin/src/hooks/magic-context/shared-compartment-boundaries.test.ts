@@ -118,3 +118,49 @@ test("unprovable coverage refuses by name rather than inventing ordinals", () =>
         "context_compartment_boundary_unresolved",
     );
 });
+
+test("large legacy compartment history reads the ordinal basis once", () => {
+    const db = new Database(":memory:");
+    initializeDatabase(db);
+    runMigrations(db);
+    cleanup.push(() => db.close());
+    const messages: RawMessage[] = Array.from({ length: 100000 }, (_, index) => ({
+        id: `m${index}`,
+        ordinal: index + 1,
+        role: "user",
+        parts: [{ type: "text", text: "x" }],
+    }));
+    const byId = new Map(messages.map((message) => [message.id, message]));
+    let ordinalReads = 0;
+    let endpointReads = 0;
+    cleanup.push(
+        setRawMessageProvider("large-boundaries", {
+            readMessages: () => messages,
+            readMessageIdOrdinals: () => {
+                ordinalReads += 1;
+                return new Map(messages.map((message) => [message.id, message.ordinal]));
+            },
+            readMessagePartsById: (id) => {
+                endpointReads += 1;
+                return byId.get(id) ?? null;
+            },
+            getMessageCount: () => messages.length,
+        }),
+    );
+    appendCompartments(
+        db,
+        "large-boundaries",
+        Array.from({ length: 2000 }, (_, sequence) => ({
+            sequence,
+            startMessage: 1,
+            endMessage: 100000,
+            startMessageId: "m0",
+            endMessageId: "m99999",
+            title: "summary",
+            content: "x",
+        })),
+    );
+    expect(resolveSharedCompartmentBoundaries(db, "large-boundaries")).toHaveLength(2000);
+    expect(ordinalReads).toBe(1);
+    expect(endpointReads).toBe(2);
+});

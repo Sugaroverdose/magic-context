@@ -1,8 +1,8 @@
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { moduleRawBlockMappings } from "./module-wire";
 import {
+    readRawSessionMessageIdOrdinals,
     readRawSessionMessageIdOrdinalsForRange,
-    readRawSessionMessageOrdinalById,
     readRawSessionMessagePartsById,
 } from "./read-session-chunk";
 import { formatDate } from "./temporal-awareness";
@@ -52,10 +52,15 @@ export function resolveSharedCompartmentBoundaries(
     // in the module's existing date cache, so they need no host-history lookup.
     if (rows.every((row) => row.start_block_index !== null && row.end_block_index !== null))
         return [];
+    // Read message-ID ordinals once and reuse them for every compartment endpoint,
+    // avoiding a separate scan of session history for each start and end.
+    const ordinals = readRawSessionMessageIdOrdinals(sessionId);
+    const rawById = new Map<string, ReturnType<typeof readRawSessionMessagePartsById>>();
     const endpoint = (rawId: string, blockIndex: number | null, edge: "start" | "end") => {
-        const raw = readRawSessionMessagePartsById(sessionId, rawId);
-        const ordinal =
-            raw?.id === rawId ? readRawSessionMessageOrdinalById(sessionId, rawId) : null;
+        if (!rawById.has(rawId))
+            rawById.set(rawId, readRawSessionMessagePartsById(sessionId, rawId));
+        const raw = rawById.get(rawId) ?? null;
+        const ordinal = raw?.id === rawId ? (ordinals.get(rawId) ?? null) : null;
         const block =
             blockIndex !== null
                 ? blockIndex
