@@ -1,139 +1,199 @@
-# Issue 582: self-tag trial — harness delivered, live measurement blocked
+# Issue 582: live DeepSeek self-tag trial
 
-## Status and decision boundary
+**Actual API response identity: `deepseek-flash`.** Every measured benchmark response returned that exact `model` field. DeepSeek's [pricing/model page](https://api-docs.deepseek.com/quick_start/pricing), accessed 2026-09-30, maps this alias to **DeepSeek-V4.1-Flash**; the responses themselves do not expose an immutable v4.1 snapshot ID. The person supplying model access authorized `deepseek-flash` after the API rejected `deepseek-v4.1-flash` and listed `deepseek-flash` as its supported Flash name. No other model was benchmarked.
 
-**No real models were called. This report cannot answer whether models reliably self-tag.** Live measurement is blocked on the operator's credential decision. The task owner explicitly narrowed this delivery to the real tagging probes, trial plumbing, and an isolated OpenCode 1.18.30 mock-provider proof, and instructed the worker to stop before any real model call.
+## Result
 
-Broca was not used. Its historian route takes `prompt` and optional `system` (`crates/mc-module/src/historian_producer.rs:801-854`); the owner confirmed that Broca owns the transcript/tool loop and cannot replay the required native tagged history. There was no approved connection-file environment in this worker. No credentials, live configuration, or live databases were read or copied.
+**B improves compliance, but does not make self-tagging reliable enough for a byte-identity invariant.** Across seven sessions per variant, stripped-and-retagged text equaled raw provider text for **114/153 A text parts (74.5%)** and **142/153 B text parts (92.8%)**. B's first reply was correct in all seven sessions, but its first text-plus-parallel-tools reply was missing the tag in **every session**. Correct prefix numbers were not the problem: there were **zero wrong numeric prefixes**. Missing prefixes, tag-only tool framing, and mid-text/dangling tags still broke byte identity.
 
-**Do not use the offline/control percentages below as evidence of model compliance.** They exercise plumbing. In offline variant B the harness deliberately constructs the expected number from real tagger assignments; this is an oracle control, not an LLM.
+This is a small, controlled benchmark, not a general result about other models, thinking mode, or provider WebSocket cache behavior. The measured property is the exact assistant-text equality those continuation routes need. A 92.8% success rate is not an every-reply guarantee.
 
-## Exact tagging rule, read and exercised
+## Real tagging rule
 
-The counter is session-global, not per-message and not derived by scanning visible `§N§` strings. Allocation uses the maximum of memory counter, persisted counter, and database maximum, plus one (`packages/plugin/src/features/magic-context/tagger.ts:438-488`; reload reconciliation at `:809-855`). Existing identities reuse their numbers. Numbers do not ordinarily rewind after a drop.
+Allocation is session-global, not a scan of visible tag-shaped strings. The allocator reconciles the memory counter, persisted counter, and database maximum, then allocates one more; existing identities reuse their number (`packages/plugin/src/features/magic-context/tagger.ts:438-488,809-855`). Removing old message text or tool outputs does not ordinarily rewind the counter.
 
-The tagger walks messages and parts in array order (`packages/plugin/src/hooks/magic-context/tag-messages.ts:564-581`). Each nonblank text part with a message ID uses the identity `messageId:p<partIndex>` (`:727-733`), resolves an existing identity, or assigns the next number (`:805-838`). Prefix injection is exactly the production `prependTag` call (`:862-864`). Fresh whitespace-only assistant parts consume no number (`:731-800`). Reasoning is accounted on text/tool tags, not tagged independently (`:572-575`, `:826-836`, `:917-938`).
+All abbreviated colon-prefixed references in the following paragraphs refer to `packages/plugin/src/hooks/magic-context/tag-messages.ts`.
 
-Tools are important: an invocation without a completed output does **not** allocate a fresh number. Output-bearing tool parts allocate through `assignToolTag` only when needed, using `(session, owner message, call ID)` (`:588-725`, `:888-938`). Separate results pair to owners through FIFO resolution (`:590-615`). Parallel completed tools each consume a number in part order. An existing tool result reuses its assigned tool tag. In OpenCode, completed tool parts live on the assistant message.
+`tagMessages` walks messages and parts in array order (`packages/plugin/src/hooks/magic-context/tag-messages.ts:564-581`). Nonblank text uses identity `messageId:p<partIndex>` (`:727-733`), resolves an existing number or assigns a new one (`:805-838`), and gets the production prefix at `:862-864`. Fresh whitespace-only assistant text consumes no tag (`:731-800`). Reasoning is accounted on text/tool tags, not independently prefixed (`:572-575,826-836,917-938`).
 
-Observed first-pass probes (one user part already received `§1§`):
+An invocation without a completed output does not allocate a fresh tool tag. Completed tool outputs allocate through `assignToolTag`, keyed by session, owner message, and call ID (`:588-725,888-938`); separate tool-result messages pair to the invocation owner through FIFO resolution (`:590-615`). Parallel completed tools consume successive numbers in part order. OpenCode normally stores completed tool parts on the invoking assistant message.
 
-| New assistant parts, in order | Numbers observed |
+Cases executed through the production tagger, with a preceding user text already tagged 1:
+
+| New parts, in order | Actual assigned numbers |
 |---|---|
-| text `one` | text 2 |
-| text `one`, text `two` | text 2, text 3 |
-| reasoning, text | reasoning none, text 2 |
-| text, completed tool | text 2, tool output 3 |
-| completed tool A, completed tool B, text | tool output 2, tool output 3, text 4 |
-| invocation only | none until its result exists |
-| whitespace-only text | none |
-| invocation plus separate tool-result message | output 2, bound to invocation owner |
+| one text | 2 |
+| two texts | 2, 3 |
+| reasoning, text | reasoning none; text 2 |
+| text, completed tool | text 2; output 3 |
+| completed tool A, completed tool B, text | outputs 2, 3; text 4 |
+| invocation only | none until a result exists |
+| whitespace-only assistant text | none |
+| invocation plus separate result message | output 2, bound to invocation owner |
 
-Raw probe arrays and assignments are in `issue-582-self-tag-probes.json`; these are produced by **real `tagMessages`**, not a numbering simulation. Unit tests additionally exercise persistence, parallel output order, and materialized reduction.
+Raw arrays and assignments are committed in `issue-582-self-tag-probes.json`. These drive real `tagMessages`, not a simulated counter. The surrounding in-process controls also use `createTransform`, `applyPendingOperations`, and batch finalization.
 
-### Implication for the proposed instruction
+Consequently “one more than the highest visible tag” is not universally equivalent to allocation: earlier new text/tool parts can consume numbers, absent history can hide the maximum, and quoted head strings can be much larger. In this sample, well-formed emitted text prefixes nevertheless always matched the actual assignments. The head fixture explicitly labels `§9001§` as a quoted literal, so this is not an adversarial test of an unexplained high-numbered string.
 
-“One more than the highest visible tag” is sufficient only when that visible maximum equals the allocator counter and no earlier newly allocated part precedes the text. It is not a universal allocation rule: multiple text parts require distinct numbers; completed tools preceding text consume numbers; dropped/absent content can hide the maximum; quoted head strings can exceed the actual counter. The mock head contains literal `§9001§`, while the next assistant gets 2, not 9002. This is a structural ambiguity worth testing live, not proof that any particular model fails.
+## Guidance and execution conditions
 
-## Guidance variants
-
-Base A uses the **full primary, with-`ctx_reduce`** section from `buildMagicContextSection(null, 0, true)` unchanged (`packages/plugin/src/agents/magic-context-prompt.ts:157-168,203-206`). In the real host, Magic Context composes the normal system guidance; the wrapper delegates first, then appends B as an additional system entry. The mock proof records both system surfaces and checks that only B contains the addition.
-
-B adds exactly:
+A is the product's **full guidance for a primary assistant with the `ctx_reduce` tool available**, unchanged. Its composer is `buildMagicContextSection` (`packages/plugin/src/agents/magic-context-prompt.ts:157-168,203-206`). The harness wrapper first delegates to the real system hook; only B appends this exact additional system entry:
 
 > Start the text of each reply with exactly §N§ followed by one space, where N is one more than the highest tag number in the conversation. Never write tags anywhere else: not mid-text, not in tool arguments, and not on tool-call-only replies.
 
-C was not attempted: no live B failure exists to justify an example.
+No C variant was run. OpenCode 1.18.30 hosted the built Magic Context dist from this worktree. Provider generation was non-thinking (`thinking.type=disabled`) with a 512-token output cap, applied identically by the relay. The small fixture answers did not require long output; no benchmark response finished with a length-limit reason. No fixed seed or temperature was imposed.
 
-## Harness and reproducibility
+### Primary and supplemental cohorts
 
-All committed implementation is under `packages/plugin/scripts/self-tag-trial/`. No product code, product guidance, tagger, architecture document, or structure document was changed.
+“Fresh” starts an empty session. “Reduced” requests removal of an older fixture tool output via `ctx_reduce`. “Literal-head” adds quoted `§9001§` text to the injected memory/history head. A dropped output is represented by `[dropped §N§]` when production rules retain its tool-call skeleton.
 
-- `bootstrap.ts`: isolates HOME, XDG paths, plugin storage, logging, and host DB before dynamic imports. Throwaway DBs live below `$TMPDIR/magic-context/self-tag-trial/`.
-- `engine.ts`: OpenCode-shaped arrays; actual `createTransform`; actual `tagMessages`, `applyPendingOperations`, batch finalization; persistence strip; append; next-pass assignment and text readback. The direct engine has no host client, so no real synthetic m[0]/m[1] (the two leading injected history/memory messages) is composed there. It explicitly drives pending operations with a set protecting the five newest allocated tags to exercise their materialization independently of host usage scheduling. Reduction queues the same storage operation consumed by the production helper; it does not implement an alternative drop algorithm.
-- `probes.ts`, `engine.test.ts`: exact part-numbering and byte-identity controls.
-- `offline.ts`: six deterministic multi-turn plumbing sessions (A/B × fresh/reduced/literal record), each 12 user turns; four-step tool loops on turns 3 and 8, mixed text/tools, parallel tools, reasoning, and tool-only responses. Reduced sessions queue a `ctx_reduce`-shaped operation for tool 31; production passes produce `[dropped §31§]`. Final sessions reach reply positions above 20. The literal-record offline case is a user record, **not** a real head; real head testing belongs to the host proof.
-- `scenarios.ts`: 12-turn prompt manifests for the eventual host-driven live sessions. Their tools are deterministic fixture read, echo, and list. Real live runs are intentionally not wired to credentials.
-- `host-adapter.ts`: one native model-caller interface (`send`, `close`) and the OpenCode implementation. The only currently enabled factory is mock-backed; an operator-authorized provider factory must be added before live runs. OpenCode, not a flattened prompt adapter, owns the native roles/tool loop and persistence.
-- `host-plugin.mjs`: harness-only wrapper around this worktree's built `dist/index.js`. It captures `experimental.text.complete` **before** delegating to Magic Context, then records the stripped text. It records messages after the real transform and system after the real composer. The raw capture does not depend on ordering two independently registered plugins. It adds deterministic `trial_read`, `trial_echo`, `trial_list`; `ctx_reduce` remains Magic Context's real tool. For the literal-head proof only, it appends a quoted memory string to the real synthetic m[0] **after** delegation. No test-only product hook is needed.
-- `host-probe.ts`: A/B pinned-host proof, two text turns plus one parallel mixed tool turn; validates raw capture, persisted strip, next-pass replay, B guidance, deterministic tools, real head literals, and sampled `lsof` isolation. Rows lacking a subsequent pass are marked `pending-next-pass`, never counted as byte-identical successes.
+- **Primary:** six sessions per variant, two each of fresh, reduced, and literal-head; 16 user turns each, including requested 3–6-step tool loops on turns 3 and 8, mixed text/tools and parallel calls. Every session actually made parallel calls. Reply positions extend beyond 20. Requested real `ctx_reduce` calls ran, but these sessions did **not** serve a dropped placeholder.
+- **Supplemental:** one reduced session per variant, 18 user turns each. A deterministic large **tool result**, not user-only padding, displaced the protected tail. Pending reductions still did not materialize until the host was restarted and the session continued, creating a fresh transform/cache decision. Both continued sessions then served the target placeholder to actual DeepSeek requests before counting the scenario as fulfilled.
 
-From repository root:
+There were harness setup mistakes, retained rather than hidden: early configuration used invalid `protected_tokens=0`; the primary and first supplemental attempt also used invalid `transform_mode=typescript` instead of `ts`. Magic Context therefore fell back to its product defaults. Both variants in the primary cohort used the same defaults and real full guidance; the tagging measurements remain real, but the intended reduced protection setting was not active. The final supplemental host validates its configuration with the production schema, uses `transform_mode=ts` and `protected_tokens=4000`, and disables background historian/dreamer work. **Do not treat the pooled results as one perfectly homogeneous configuration.** Primary results are also reported separately below.
+
+The failed supplemental attempt, interrupted pilot, and their spend are preserved separately and excluded from benchmark rates. The valid A supplemental session was resumed, not discarded and replaced with a nicer answer. B was likewise resumed after its pending operation failed to appear on the wire. No product code was changed to force a drop or repair a model answer.
+
+## What the loop measured
+
+The host owns native roles, history and tool execution. `host-plugin.mjs` wraps the real built plugin rather than relying on relative ordering of two separate plugins:
+
+1. The actual messages transform composes tags and synthetic head messages m[0]/m[1], the two leading history/memory records. The literal-head scenario appends the quoted memory fixture to the real m[0].
+2. The relay forwards the provider request; it never records HTTP headers. It separately observes streamed raw text, tool arguments, actual response model, finish reason and usage.
+3. `experimental.text.complete` captures raw text **before** delegating to Magic Context, then records the stripped text.
+4. The next real transform is observed. Raw message/part IDs locate the first subsequent replay; the allocated number is independently read from the same session's throwaway tag database.
+5. A final flush runs the real transform, captures the last reply, then throws **before** any further provider call. Both mock and live adapters assert that flushing did not increment request count. Flushes are not counted as paid replies or user benchmark turns.
+
+Every benchmark session verifies that provider-stream text and the pre-strip hook text agree, and that paid provider calls correspond one-to-one with observed assistant replies. There are no unobserved final replies counted as successes.
+
+The production strip removes leading, global complete, malformed, dangling and stray tag notation, then trims whitespace (`packages/plugin/src/hooks/magic-context/tag-content-primitives.ts:88-96`). Correct numbers alone do not establish byte equality. Comparisons are exact string/UTF-8 text identity, with no normalization of spaces or punctuation.
+
+Metric definitions: `wellFormed` means a closed leading `§digits§`; `canonicalPrefix` additionally requires the following ASCII space. `malformed` detects lettered, dangling or otherwise incomplete section-mark notation, including mid-text instances. A closed tag-only frame such as `§34§` is not malformed notation, but it is misplaced tool framing, has no taggable persisted text, and is not a correct-number success. Tool-only replies with **no raw text** have separate denominators. Raw streamed arguments are checked as well as arguments delivered to native tools.
+
+## Overall benchmark results — seven sessions per variant
+
+Each provider reply had at most one raw text part in this run. The 325 benchmark replies contain 306 raw text parts and 19 genuinely text-free tool-only replies.
+
+| Variant | Replies | Raw text parts | Closed leading tag | Canonical prefix | Correct number | Wrong number | Malformed notation | Misplaced tags | Byte-identical text |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A | 167 | 153 | 117 | 116 | 116 | 0 | 6 | 6 | 114 (74.5%) |
+| B | 158 | 153 | 146 | 145 | 145 | 0 | 3 | 4 | 142 (92.8%) |
+
+A had 14 and B had 5 text-free tool-only replies; none contained tags in arguments. There was one **tag-only text frame accompanying tools** in each variant, counted in the raw-text columns rather than disguised as a successful text-free reply. Malformed and misplaced categories overlap. The signed numeric delta is emitted number minus the tagger's allocated number. None was nonzero; malformed `§28a§` is not converted into a guessed numeric error.
+
+### By reply position (all benchmark sessions)
+
+Buckets are disjoint: 1, 2–5, 6–20, and **strictly greater than 20**. Position counts every assistant reply, including text-free tool replies; denominators below count raw text parts at those positions.
+
+| Variant | Position | Text parts | Closed tag | Correct number | Wrong number | Malformed | Misplaced | Byte-identical |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| A | 1 | 7 | 0 | 0 | 0 | 0 | 0 | 0 |
+| A | 2–5 | 24 | 12 | 11 | 0 | 0 | 1 | 11 |
+| A | 6–20 | 96 | 79 | 79 | 0 | 6 | 5 | 77 |
+| A | >20 | 26 | 26 | 26 | 0 | 0 | 0 | 26 |
+| B | 1 | 7 | 7 | 7 | 0 | 0 | 0 | 0 | 7 |
+| B | 2–5 | 28 | 21 | 21 | 0 | 0 | 0 | 21 |
+| B | 6–20 | 101 | 101 | 100 | 0 | 3 | 4 | 97 |
+| B | >20 | 17 | 17 | 17 | 0 | 0 | 0 | 17 |
+
+Late-session success is encouraging but does not erase early failures. A's tendency to start copying prefixes after tagged history is served is visible here; B fixes the initial reply but not the first mixed tool reply.
+
+### Cohorts kept separate
+
+| Cohort | Variant | Sessions | Calls | Text parts | Correct number | Byte-identical |
+|---|---|---:|---:|---:|---:|---:|
+| Primary, product-default fallback | A | 6 | 138 | 129 | 97 | 96 (74.4%) |
+| Primary, product-default fallback | B | 6 | 132 | 131 | 124 | 122 (93.1%) |
+| Supplemental, validated config and restart | A | 1 | 29 | 24 | 19 | 18 |
+| Supplemental, validated config and restart | B | 1 | 26 | 22 | 21 | 20 |
+
+### Real dropped-history proof
+
+| Variant | Supplemental session | Target | Durable status | Provider requests that actually served it |
+|---|---|---:|---|---|
+| A | `ses_f0d195cb8ffebp1ygdGT8mjsmo` | 28 | dropped | calls 27–29 |
+| B | `ses_f0d0ceb8affersrAuCX1brRsg2` | 24 | dropped | calls 53–55 |
+
+The proof checks three independent observations: an actual tool-result placeholder in the transformed wire, durable `tags.status='dropped'`, and the target number in the relay's **outgoing provider tool-result messages**. For resumed B, the relay refused to make a paid call if the required target was absent. It was present. Thus these are not merely queued reductions or model-written placeholder text. The protection window prevents recent tool outputs from being dropped. It considers **tool rows only**, always includes at least the newest three tool tags, and walks backwards until their stored token counts reach the configured budget (`packages/plugin/src/features/magic-context/protection-window.ts:104-118,168-203`); user-only padding was not an adequate way to age this window. No tail-protection product fix is included in this trial.
+
+## Rows and answer quality
+
+Complete raw text, first 60 characters, actual assignment, signed delta, notation/location flags, byte identity, response model and usage are committed in JSONL/CSV, not only percentages. Representative primary rows:
+
+| Variant / scenario | Session | Position | Raw beginning | Assigned | Outcome |
+|---|---|---:|---|---:|---|
+| A / fresh | `ses_f0d2dc6dfffe5HvngA0c8pWK6k` | 1 | `Apples: 3, pears: 4, total: 7.` | 2 | no prefix; byte mismatch |
+| B / fresh | `ses_f0d2d307effePqboiMimisWXLM` | 3 | `I'll start by reading the fixture and listing the directory` | 6 | missing prefix with parallel calls |
+| A / literal-head | `ses_f0d2aae28ffe2FwtvetaVLVwH7` | 16 | `§28a§ 3 plus 4 equals 7.` | 29 | malformed prefix; no guessed numeric delta |
+| B / reduced | `ses_f0d2731deffeAcXLQC6sJgo6Y1` | 16 | `§34§` | none | tag-only tool framing; byte mismatch |
+| B / reduced | `ses_f0d2c9f01ffesqMT1l2ohzrewN` | 17 | `§35§ Done — I queued a drop for §25,` | 35 | correct leading number; dangling mid-text tag; byte mismatch |
+
+Three actual answer/trace examples from this one model (A/B variants):
+
+1. **Mixed-tool preamble:** B wrote “I'll start by reading the fixture and listing the directory in parallel.” It is a useful explanation and the native parallel calls really happened, but the missing leading tag defeats the instruction. This failure recurred in all seven B sessions.
+2. **Normal arithmetic with malformed tagging:** A wrote “§28a§ 3 plus 4 equals 7.” The arithmetic is correct; the notation is not. B generally preserved normal concise prose while adding a correct prefix. No quality score is assigned and no broad claim about coding ability follows from fruit arithmetic.
+3. **Correct prefix, damaged retained trace:** B wrote “§35§ Done — I queued a drop for §25, the completed directory-listing output; it's held for now…” and then correctly explained 3+4=7. Persistence removed the dangling tag reference. A also wrote “Stamped — §25's drop is queued…”; its retained text lost the handle and became awkward. The instruction did not eliminate these inline-tag/trace defects.
+
+The quoted fixture answers are substantively correct. There is no obvious degradation from B in these selected examples, but the unnecessary tag-only tool frame and inline malformed handles are real damage, not numerical successes to gloss over. The literal-head sessions never produced a well-formed 9002 prefix (one more than the quoted 9001); all their well-formed prefixes used the real lower allocation numbers.
+
+## Calls, tokens and spend
+
+| Phase | Provider calls | Input tokens | Output tokens | Included in benchmark rates? |
+|---|---:|---:|---:|---|
+| Primary | 270 | 1,222,444 | 9,009 | yes |
+| Successful supplemental sessions, including their continuations | 55 | 379,394 | 1,761 | yes |
+| Interrupted pilot | 150 | 563,259 | 5,292 | no |
+| Failed supplemental configuration attempt | 25 | 346,320 | 1,030 | no |
+| Unsupported model spelling setup | 2 HTTP 400 requests | no completion usage | none | no |
+
+**Total: 502 requests, 500 model calls with completion usage, 2,511,417 input tokens and 17,092 output tokens.** Input splits into 2,313,344 cache-hit and 198,073 cache-miss tokens. One pilot call was not checkpointed when its host was stopped; its usage was recovered from the isolated host's recorded end-of-model-step token counters. Its response-model field was not recovered or guessed. All 325 benchmark responses have independently captured model identity and pre-strip text.
+
+Using the cited DeepSeek Flash rates, estimated spend for **all phases**, including debugging, is **$0.0469 off-peak to $0.0938 peak**. This is a token-based estimate, not a read of the operator's balance or invoice. The documentation lists cache-hit $0.003/$0.006, cache-miss $0.15/$0.30, and output $0.60/$1.20 per million tokens for off-peak/peak. No credential or billing endpoint was queried to calculate cost.
+
+## Credential handling and isolation
+
+The operator staged only the DeepSeek entry under `$TMPDIR/magic-context/self-tag-trial/creds/auth.json`, mode 600. It was copied, without printing its contents, into each throwaway host's `data/opencode/auth.json` and kept mode 600. The original staging file was deleted after the primary cohort; the operator explicitly restaged it for the supplemental sessions.
+
+**The staging file, including its restaged replacement at the same path, and all known copied auth files are now deleted.** Deletion was checked for the primary, pilot, failed supplemental, and final supplemental roots. No live auth file, live config, live database, or credential table was read. No key appears in report/data. The relay never records headers, so no Authorization header is present in the dumps; error messages are additionally sanitized against both the complete authorization value and bare key before recording.
+
+Hosts use fresh HOME/XDG/config/cache/store directories under the trial temporary root and a minimal child environment, with only `deepseek` enabled. The sole live endpoint is the relay forwarding to `https://api.deepseek.com/v1/chat/completions`. Native file/network tools are disabled for the agent; deterministic fixture tools and real `ctx_reduce` are available. Title generation is disabled. `lsof -Fn -p <host pid>` before/after sessions is committed in the summaries, and every sampled forbidden-live-path list is empty. These are sampled host-PID checks, not continuous tracing of every descendant.
+
+No product code, product guidance, tagger, ARCHITECTURE.md or STRUCTURE.md changed.
+
+## Artifacts and verification
+
+- `issue-582-self-tag-live.{jsonl,csv}`, `-summary.json`, `-analysis.json`: primary rows, native snapshots, provider stream records, usage and lsof proof.
+- `issue-582-self-tag-supplement.*`: actual dropped-history sessions and outgoing `servedDroppedTags` evidence.
+- `issue-582-self-tag-all.jsonl`, `-aggregate.json`: 325 benchmark rows with cohort labels and pooled/position tables plus all-phase spend.
+- `issue-582-self-tag-pilot.*`, `issue-582-self-tag-supplement-failed.*`: excluded attempts and their raw rows/costs. The interrupted pilot's incomplete session is not counted as a completed session.
+- Existing `-probes.json`, `-offline.jsonl`, `-offline-snapshots.json`: real production-code plumbing controls, not model-compliance evidence.
+- `issue-582-self-tag-host-proof.json` and `-rows.jsonl`: deterministic pinned-host proof, including a no-paid-call final flush.
+
+Harness entry points are under `packages/plugin/scripts/self-tag-trial/`: `live.ts`, `live-adapter.ts`, `host-plugin.mjs`, `measure.ts`, `analyze.ts`, `aggregate.ts`, and recovery/control scripts. Use `bun .../live.ts <output-prefix>` only with an operator-staged mode-600 credential; it does not discover credentials. The factory validates Magic Context config before host launch. The read tool uses the committed fixture file; echo and listing are deterministic fake results. Adding file-backed fixture reading preserves the exact bytes used in the measured runs. `reduction-supplement` selects two bounded sessions; `resume-A`/`resume-B` continue their existing isolated histories. Successful completion deletes staged and copied files. On failure, the copied credential is deleted while the staged file is retained for an explicitly authorized retry; an operator abandoning the run must delete the staging file.
+
+A safe redaction-control mutation, using only a fake unit-test credential, made exactly `provider errors redact authorization and bare credential values` fail while the other ten tests passed. The staged source was restored and the six measurement tests passed again; no mutated code was committed or used for live calls.
+
+Typical setup and checks, from repository root:
 
 ```sh
-bun install --frozen-lockfile
-bun run --cwd packages/plugin build
 BASE="${TMPDIR:-/tmp}/magic-context/self-tag-trial"
 mkdir -p "$BASE/host"
 bun add --cwd "$BASE/host" --exact opencode-ai@1.18.30
-bun packages/plugin/scripts/self-tag-trial/probes.ts docs/reports/issue-582-self-tag-probes.json
-bun packages/plugin/scripts/self-tag-trial/offline.ts docs/reports/issue-582-self-tag-offline.jsonl
-PATH="$BASE/host/node_modules/.bin:$PATH" bun packages/plugin/scripts/self-tag-trial/host-probe.ts docs/reports/issue-582-self-tag-host-proof.json
+bun install --frozen-lockfile
+bun run --cwd packages/plugin build
+# The operator stages the approved auth.json, without printing it.
+bun packages/plugin/scripts/self-tag-trial/live.ts docs/reports/issue-582-self-tag-live
+# Supplemental runs require explicit restaging after primary cleanup.
+bun packages/plugin/scripts/self-tag-trial/live.ts docs/reports/issue-582-self-tag-supplement reduction-supplement
+bun packages/plugin/scripts/self-tag-trial/analyze.ts docs/reports/issue-582-self-tag-live
+bun packages/plugin/scripts/self-tag-trial/analyze.ts docs/reports/issue-582-self-tag-supplement
+bun packages/plugin/scripts/self-tag-trial/aggregate.ts
 bun run --cwd packages/plugin typecheck
-bun test packages/plugin/scripts/self-tag-trial/engine.test.ts
+bun test packages/plugin/scripts/self-tag-trial/engine.test.ts packages/plugin/scripts/self-tag-trial/measure.test.ts
 ```
 
-Verification: package typecheck passed; five focused unit tests passed; A/B mock host proof passed. A safe fence mutation returned no forbidden paths: only `live-store fence rejects forbidden lsof entries` failed, while the four tagging/persistence tests stayed green; staging/restoration left no mutation diff. Formatting was attempted with `bunx --no-install biome format --write packages/plugin/scripts/self-tag-trial` but the repository's existing `biome.json` contains a `rules.preset` key rejected by the installed Biome. No formatter edits occurred.
+The current factory fixes the invalid configuration used in the recorded primary cohort; a new run uses the validated configuration rather than reproducing that fallback mistake. Model outputs are not expected to reproduce deterministically.
 
-The dependency install modified no tracked manifest or lockfile. The pinned host was installed only in the throwaway root. The worktree's standard build succeeded; generated files remained unchanged/untracked build output was not committed.
+Verification commands: plugin package typecheck; focused engine/measurement tests; pinned mock host probe; live per-session provider/hook equality, actual DB number readback and last-reply flush guards; independent outgoing placeholder checks; sampled lsof fence; explicit credential deletion checks; and git whitespace checks. No new dependency or lockfile change was required for this follow-up. The earlier standard plugin build supplies unchanged product dist. The repository formatter still rejects its existing `rules.preset` configuration; no unrelated formatter cleanup is included.
 
-## Mock host end-to-end evidence
-
-`issue-582-self-tag-host-proof.json` contains the provider request bodies, instrumented native messages including actual synthetic m[0]/m[1], raw/stripped hook events, and full sampled `lsof -Fn -p <host pid>` output for each variant. `issue-582-self-tag-host-proof-rows.jsonl` contains the measured reply rows. These are **mock provider responses, not model behavior**.
-
-For both A and B:
-
-| Boundary | Observed text |
-|---|---|
-| Scripted provider text / pre-strip hook capture | `§2§ RAW_SENTINEL` |
-| Post-Magic Context persistence hook | `RAW_SENTINEL` |
-| Next actual host transform | `§2§ RAW_SENTINEL` |
-
-The proof asserts those three values directly, rather than computing the expected tag with the implementation under test. A later scripted reply mixes `§6§ Inspecting fixtures.` with parallel `trial_read`/`trial_list` calls. The actual next loop contains fixture outputs `apples=3` and `README.md` and literal `§9001§` in the head.
-
-Two mock sessions produced 10 provider requests: 8 main-agent calls plus 2 title-generation calls. Mock-declared usage totals: **980 input tokens, 70 output tokens**. These are synthetic usage values and imply neither paid spend nor live-model token counts. Real-model calls, real-model tokens, and real-model spend: **0**.
-
-`lsof` evidence is a sampled host-PID check, not continuous tracing or a proof about every descendant. Both samples contain **zero forbidden live-store/config paths**, and each host data directory is checked below the trial run's temporary root. Full evidence is committed, not just an assertion in this report.
-
-## Offline rows (plumbing controls only)
-
-Raw rows: `issue-582-self-tag-offline.jsonl` (122 replies, 108 text rows and 14 tool-only rows). Snapshots: `issue-582-self-tag-offline-snapshots.json`. A never constructs self-tags. B constructs correct self-tags on final responses only; intermediate tool-loop text deliberately stays untagged. Therefore these counts are expected by construction and say nothing about instruction efficacy.
-
-| Control variant | Reply positions | Text rows | Well-formed starts | Correct number | Byte-identical |
-|---|---|---:|---:|---:|---:|
-| A | 1 | 3 | 0 | 0 | 0 |
-| A | 2–5 | 9 | 0 | 0 | 0 |
-| A | 6–20 | 41 | 0 | 0 | 0 |
-| A | 20+ (strictly >20) | 1 | 0 | 0 | 0 |
-| B | 1 | 3 | 3 | 3 | 3 |
-| B | 2–5 | 9 | 3 | 3 | 3 |
-| B | 6–20 | 41 | 29 | 29 | 29 |
-| B | 20+ (strictly >20) | 1 | 1 | 1 | 1 |
-
-Example literal rows, not percentages alone. “Assigned” is the actual allocated tag number; byte identity compares raw provider text with stripped-and-retagged text on the next pass:
-
-| Model/control | Variant | Session | Position | Raw beginning | Assigned | Outcome |
-|---|---|---|---:|---|---:|---|
-| offline-control-not-a-model | A | A-fresh | 1 | `There are seven fruit.` | 2 | untagged; byte mismatch |
-| offline-control-not-a-model | B | B-fresh | 1 | `§2§ There are seven fruit.` | 2 | correct; byte identical |
-| offline-control-not-a-model | B | B-fresh | 3 | `Inspecting the fixture.` | 6 | untagged tool-loop text; byte mismatch |
-
-The engine records signed numeric error, malformed notation, mid-text tags/tool-argument tags, and byte comparison independently. Unit controls include wrong `§9002§` (assigned 4, delta +8998), malformed `§5\">`, and mid-text `§12§`. The persistence function removes leading, global complete, malformed, dangling and stray notation **and trims whitespace** (`packages/plugin/src/hooks/magic-context/tag-content-primitives.ts:88-96`). A correct number alone is insufficient: trailing whitespace or incidental literal tags still defeat byte identity.
-
-## Live results — blocked, not zero-percent compliance
-
-`issue-582-self-tag-live.csv` has only its schema header. No synthetic model rows are included there. Per-model/per-variant and position-bucket tables remain unmeasured:
-
-| Requested model | A sessions/calls/tokens | B sessions/calls/tokens | Quality examples | Status |
-|---|---|---|---|---|
-| gpt-5.6-luna | not run | not run | unavailable | credentials decision pending |
-| gpt-5.6-sol | not run | not run | unavailable | credentials decision pending |
-| Gemini Flash 3.7 or 3.8 | not run | not run | unavailable | credentials decision pending |
-| deepseek-v4-flash | not run | not run | unavailable | credentials decision pending |
-| Claude Sonnet 5 or Opus 5.5 | not run | not run | unavailable | credentials decision pending |
-
-For each eventual model × variant × bucket (1, 2–5, 6–20, >20), populate well-formed starts, correct numbers, signed wrong-number deltas, malformed notation, misplaced tags, byte identity, and denominators with raw rows. Tool-only messages need separate denominators, not missing-tag failures. Add 2–3 actual quoted answer examples per model, comparing A/B qualitatively. No answer-quality conclusion is possible from a scripted provider.
-
-### Next action for the owner
-
-Authorize the throwaway host's credential/provider route without copying secrets into this repository; add the approved provider factory to the single host adapter; drive the three prompt manifests per model/variant; correlate raw hook message/part IDs with subsequent real transform parts and DB assignments. Flush the last reply through a next pass before counting it. Use the real host's `ctx_reduce` call and confirm placeholders were actually served. Verify full guidance remains A unchanged/B appended, and retain actual usage/call counts. Only then decide whether explicit self-tagging is reliable enough for cache identity. The present delivery is a reproducible prerequisite, **not the completed live trial**.
+**Decision supported by this trial:** explicit self-tagging helps this Flash model, especially on the first reply, but the tested B wording does not meet the required every-reply/cache-byte contract. Fixing the first mixed-tool preamble and preventing inline/tag-only output would require a further experiment or a different mechanism; this report does not assume either fix works.

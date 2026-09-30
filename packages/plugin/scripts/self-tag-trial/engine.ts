@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { buildMagicContextSection } from "../../src/agents/magic-context-prompt";
 import { closeDatabase, openDatabase, queuePendingOp } from "../../src/features/magic-context/storage";
 import { createTagger } from "../../src/features/magic-context/tagger";
@@ -29,7 +31,7 @@ export function guidance(variant: Variant): string {
 }
 export function fakeTool(call: Call): string {
     switch (call.name) {
-        case "read": return "fixture.txt: apples=3, pears=4, total=7\n";
+        case "read": return "fixture.txt: " + readFileSync(new URL("./fixtures/fixture.txt", import.meta.url), "utf8");
         case "echo": return `${String(call.input.text ?? "fixture echo")}\n`;
         case "list": return "fixture.txt\nREADME.md\n";
         case "ctx_reduce": return "Queued for reduction.";

@@ -31,7 +31,8 @@ for (const variant of ["A", "B"] as const) {
         if (mixed.filter(e => e.kind === "tool").length !== 2) throw new Error("Parallel fake tools did not run");
         const wireText = JSON.stringify(mixed.filter(e => e.kind === "wire"));
         if (!wireText.includes("apples=3") || !wireText.includes("README.md") || !wireText.includes("§9001§")) throw new Error("Fixture tools or literal head missing");
-        records.push({ variant, raw, stripped, replay, events: [...first, ...second, ...mixed], isolation: caller.isolation(), requests: caller.harness.requests().map((r: { body: unknown }) => r.body) });
+        const flush = await caller.flush();
+        records.push({ variant, raw, stripped, replay, events: [...first, ...second, ...mixed, ...flush], isolation: caller.isolation(), requests: caller.harness.requests().map((r: { body: unknown }) => r.body) });
     } finally { await caller.close(); }
 }
 const out = process.argv[2] ?? `${root}/host-probe.json`;

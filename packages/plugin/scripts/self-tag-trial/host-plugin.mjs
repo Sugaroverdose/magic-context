@@ -1,9 +1,12 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { tool } from "@opencode-ai/plugin";
 
 const instruction = "Start the text of each reply with exactly §N§ followed by one space, where N is one more than the highest tag number in the conversation. Never write tags anywhere else: not mid-text, not in tool arguments, and not on tool-call-only replies.";
 const record = (event) => appendFileSync(process.env.SELF_TAG_CAPTURE, JSON.stringify(event) + "\n");
+const control = () => process.env.SELF_TAG_CONTROL
+    ? JSON.parse(readFileSync(process.env.SELF_TAG_CONTROL, "utf8"))
+    : { variant: process.env.SELF_TAG_VARIANT, head: !!process.env.SELF_TAG_HEAD_FIXTURE };
 
 export default {
     id: "self-tag-trial",
@@ -17,7 +20,7 @@ export default {
             ...hooks,
             tool: {
                 ...hooks.tool,
-                trial_read: tool({ description: "Read deterministic fixture.txt", args: {}, execute: async () => "fixture.txt: apples=3, pears=4, total=7\n" }),
+                trial_read: tool({ description: "Read deterministic fixture.txt; padding=true also returns a large irrelevant reference appendix", args: { padding: tool.schema.boolean().optional() }, execute: async ({ padding }) => "fixture.txt: " + readFileSync(new URL("./fixtures/fixture.txt", import.meta.url), "utf8") + (padding ? "Reference appendix (not fruit counts):\n" + "reference line: alpha beta gamma delta epsilon zeta eta theta iota kappa\n".repeat(500) : "") }),
                 trial_echo: tool({ description: "Run deterministic echo", args: { text: tool.schema.string() }, execute: async ({ text }) => `${text}\n` }),
                 trial_list: tool({ description: "List deterministic fixture directory", args: {}, execute: async () => "fixture.txt\nREADME.md\n" }),
             },
@@ -29,15 +32,22 @@ export default {
             },
             "experimental.chat.system.transform": async (input, output) => {
                 await system?.(input, output);
-                if (process.env.SELF_TAG_VARIANT === "B") output.system.push(instruction);
+                if (control().variant === "B") output.system.push(instruction);
                 record({ kind: "system", system: output.system });
             },
             "experimental.chat.messages.transform": async (input, output) => {
                 await transform?.(input, output);
-                if (process.env.SELF_TAG_HEAD_FIXTURE && output.messages[0]?.info.syntheticHead) {
+                if (control().head && output.messages[0]?.info.syntheticHead) {
                     output.messages[0].parts[0].text += "\n<project-memory>Quoted earlier handle: §9001§ is a literal, not a live tag.</project-memory>";
                 }
                 record({ kind: "wire", messages: output.messages });
+                // Capture the final reply after Magic Context transforms history, then stop
+                // before OpenCode sends another provider request.
+                const latestUser = [...output.messages].reverse().find(message => message.info.role === "user" && message.info.id && !message.info.syntheticHead);
+                if (latestUser?.parts.some(part => part.type === "text" && part.text.includes("__SELF_TAG_FLUSH_ONLY__"))) {
+                    record({ kind: "flush", session: output.messages.at(-1)?.info.sessionID });
+                    throw new Error("SELF_TAG_FLUSH_ONLY: transform captured; provider call intentionally prevented");
+                }
             },
             "tool.execute.before": async (input, output) => {
                 record({ kind: "tool", input, args: output.args });

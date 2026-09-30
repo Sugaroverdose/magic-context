@@ -11,6 +11,7 @@ import { forbiddenOpenPaths } from "./bootstrap";
 
 export interface ModelCaller {
     send(prompt: string): Promise<unknown[]>;
+    flush(): Promise<unknown[]>;
     close(): Promise<void>;
 }
 
@@ -40,6 +41,20 @@ export class OpenCodeCaller implements ModelCaller {
     script(responses: MockResponse[]): void { this.harness.mock.script(responses); }
     async send(prompt: string): Promise<unknown[]> {
         await this.harness.sendPrompt(this.session, prompt, { timeoutMs: 60000 });
+        return this.events();
+    }
+    async flush(): Promise<unknown[]> {
+        const count = this.harness.requests().length;
+        await this.harness.client.session.prompt({ path: { id: this.session }, body: {
+            model: { providerID: "mock-anthropic", modelID: "mock-sonnet" },
+            parts: [{ type: "text", text: "__SELF_TAG_FLUSH_ONLY__" }],
+        } });
+        if (this.harness.requests().length !== count) throw new Error("Flush invoked mock provider");
+        const events = this.events();
+        if (!(events as any[]).some(e => e.kind === "flush")) throw new Error("Flush transform did not execute");
+        return events;
+    }
+    private events(): unknown[] {
         const lines = readFileSync(this.capture, "utf8").trim().split("\n");
         const events = lines.slice(this.offset).map(line => JSON.parse(line));
         this.offset = lines.length;
