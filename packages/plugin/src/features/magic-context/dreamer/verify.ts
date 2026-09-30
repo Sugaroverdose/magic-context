@@ -74,10 +74,13 @@ import {
  * must never bust the prompt cache.
  */
 
-// Historical Gemini invocations matched to saved verification results used about
-// 115K tokens per memory. Doubling for runs with more tools keeps five below the 1.36M soft
-// limit, leaving room for a final manifest (see docs/reports/verify-token-budget-2026-09-30.md).
-const VERIFY_BATCH_SIZE = 5;
+// A 14-day Gemini fit predicts ~1.73M prompt tokens for 20 memories, including
+// ~600K fixed per-child overhead (~69% of the 2.5M incremental default budget).
+// Broad verification fits ~2.00M at 20, below 70% of its 3M default budget.
+// Both leave room to finalize without repeatedly paying overhead for tiny batches.
+// Observed costs vary widely around these means; heavy batches can still finalize
+// early (docs/reports/verify-token-budget-2026-09-30.md).
+const VERIFY_BATCH_SIZE = 20;
 // One batch already exhausts the configured model fallback chain. A second
 // identical provider-shaped completion means continuing this run only hammers
 // the same outage, so leave the remaining memories for the scheduler retry.

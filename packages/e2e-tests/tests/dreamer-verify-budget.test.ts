@@ -3,13 +3,13 @@
 /**
  * Verify's per-batch floor on a real OpenCode 1 host.
  *
- * verify used to split its deadline evenly across every five-memory batch in
- * scope. With 15 memories and a five-minute budget that is 100 s a batch, which
+ * verify used to split its deadline evenly across every 20-memory batch in
+ * scope. With 60 memories and a five-minute budget that is 100 s a batch, which
  * a batch taking two minutes can never meet: the first batch timed out, the run
  * threw, nothing was banked, and the scheduler hot-retried the same split.
  *
  * Here each verify batch takes about 120 s. The first batch now gets the 240 s
- * floor and banks its five verdicts; the remaining budget cannot give a second
+ * floor and banks its 20 verdicts; the remaining budget cannot give a second
  * batch the floor, so the run stops cleanly instead of starting it.
  */
 
@@ -65,7 +65,7 @@ it(
         const sessionId = await h.createSession();
         await h.sendPrompt(sessionId, "bootstrap turn for the verify budget scenario");
         const identity = projectIdentity(h);
-        const ids = seedMappedMemories(h, identity, 15);
+        const ids = seedMappedMemories(h, identity, 60);
 
         const startedAt = Date.now();
         const dream = startDream(h, sessionId, TASK);
@@ -83,10 +83,10 @@ it(
             JSON.stringify({ elapsedMs, state, verifyRequests: verifyRequests.map((r) => r.length), rows }),
         );
 
-        // One batch ran, got past the old 100 s split, and banked all five verdicts.
+        // One batch ran, got past the old 100 s split, and banked all 20 verdicts.
         expect(verifyRequests).toHaveLength(1);
-        expect(verifyRequests[0]).toHaveLength(5);
-        expect(countBanked(h, ids)).toBe(5);
+        expect(verifyRequests[0]).toHaveLength(20);
+        expect(countBanked(h, ids)).toBe(20);
         expect(rows).toHaveLength(1);
         expect(rows[0]?.status).toBe("completed");
         expect((rows[0]?.ended_at ?? 0) - (rows[0]?.started_at ?? 0)).toBeGreaterThanOrEqual(

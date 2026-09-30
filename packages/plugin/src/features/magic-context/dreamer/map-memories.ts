@@ -62,11 +62,12 @@ import { DreamTokenBudgetExceeded } from "./token-budget";
  * fails to emit a manifest simply leaves its memories unmapped for the next run.
  */
 
-// Historical Gemini invocations matched to saved mappings used about 96K tokens
-// per memory. Doubling for runs with more tools puts six at 1.15M, below the 1.2M
-// soft limit; peak context alone
-// was not a reliable cost bound (see docs/reports/verify-token-budget-2026-09-30.md).
-const MAP_BATCH_SIZE = 6;
+// A 14-day Gemini fit predicts ~1.75M prompt tokens for 20 memories, including
+// ~880K fixed per-child overhead. This is ~70% of the 2.5M default budget; smaller
+// batches repeatedly pay that overhead and reduce backfill throughput.
+// Outcome counts omit remapping and observed costs vary widely, so this is not
+// an upper bound (docs/reports/verify-token-budget-2026-09-30.md).
+const MAP_BATCH_SIZE = 20;
 
 /**
  * Minimum wall-clock budget for one agentic mapping batch. Keep the existing

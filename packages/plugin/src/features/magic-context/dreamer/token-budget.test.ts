@@ -21,6 +21,19 @@ describe("dreamer prompt-token budget", () => {
             MagicContextConfigSchema.parse({ dreamer: { tasks: { verify: { token_budget: 0 } } } }),
         ).toThrow();
     });
+    test("sizes memory tool-loop defaults for twenty-memory batches without changing other budgets", () => {
+        const tasks = buildDreamTaskRuntimeConfigs(
+            MagicContextConfigSchema.parse({}).dreamer,
+            "opencode",
+        );
+        expect(tasks.find((task) => task.task === "verify")?.tokenBudget).toBe(2_500_000);
+        expect(tasks.find((task) => task.task === "verify-broad")?.tokenBudget).toBe(3_000_000);
+        expect(tasks.find((task) => task.task === "map-memories")?.tokenBudget).toBe(2_500_000);
+        expect(tasks.find((task) => task.task === "curate")?.tokenBudget).toBe(1_500_000);
+        expect(tasks.find((task) => task.task === "retrospective")?.tokenBudget).toBe(300_000);
+        expect(tasks.find((task) => task.task === "maintain-docs")?.tokenBudget).toBe(1_600_000);
+        expect(tasks.find((task) => task.task === "refresh-primers")?.tokenBudget).toBe(350_000);
+    });
     test("does not finalize work under the soft limit", () => {
         const guard = createDreamTokenBudget(100);
         expect(guard.charge(30, 40, 9)).toBe("continue");

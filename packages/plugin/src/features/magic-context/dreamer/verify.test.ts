@@ -243,7 +243,7 @@ describe("runVerify disposition", () => {
         try {
             const projectIdentity = "git:verify-deadline";
             const dir = tempProject();
-            addMappedMemories(db, projectIdentity, 6);
+            addMappedMemories(db, projectIdentity, 21);
             const args = verifyArgs(db, dir, projectIdentity);
             args.forceBroad = true;
             args.client = successfulVerifyClient(() => {
@@ -252,7 +252,7 @@ describe("runVerify disposition", () => {
 
             const result = await runVerify(args);
 
-            expect(result.verified).toBe(5);
+            expect(result.verified).toBe(20);
             expect(result.remaining).toBe(1);
             expect(result.complete).toBe(false);
         } finally {
@@ -522,7 +522,7 @@ describe("runVerify disposition", () => {
         try {
             const projectIdentity = "git:verify-broad-cycle";
             const dir = tempProject();
-            addMappedMemories(db, projectIdentity, 6);
+            addMappedMemories(db, projectIdentity, 21);
             seedTaskScheduleState(db, projectIdentity, "verify-broad", null, null, "0 3 * * 0");
             const args = verifyArgs(db, dir, projectIdentity);
             args.forceBroad = true;
@@ -531,7 +531,7 @@ describe("runVerify disposition", () => {
             }) as never;
 
             const first = await runVerify(args);
-            expect(first.verified).toBe(5);
+            expect(first.verified).toBe(20);
             expect(first.remaining).toBe(1);
             expect(first.complete).toBe(false);
             const cycleStart = getTaskScheduleState(
@@ -634,7 +634,7 @@ describe("runVerify disposition", () => {
         try {
             const projectIdentity = "git:verify-provider-circuit";
             const dir = tempProject();
-            addMappedMemories(db, projectIdentity, 11);
+            addMappedMemories(db, projectIdentity, 41);
             seedTaskScheduleState(db, projectIdentity, "verify-broad", null, null, "0 3 * * 0");
             const scripted = scriptedVerifyClient(() => ({
                 kind: "provider-failure",
@@ -656,7 +656,7 @@ describe("runVerify disposition", () => {
         try {
             const projectIdentity = "git:verify-provider-resume";
             const dir = tempProject();
-            addMappedMemories(db, projectIdentity, 6);
+            addMappedMemories(db, projectIdentity, 21);
             seedTaskScheduleState(db, projectIdentity, "verify-broad", null, null, "0 3 * * 0");
             const scripted = scriptedVerifyClient((promptCall) =>
                 promptCall === 1
@@ -699,7 +699,7 @@ describe("runVerify disposition", () => {
         try {
             const projectIdentity = "git:verify-below-floor";
             const dir = tempProject();
-            addMappedMemories(db, projectIdentity, 6);
+            addMappedMemories(db, projectIdentity, 21);
             const scripted = scriptedVerifyClient(() => ({ kind: "manifest" }));
             const args = verifyArgs(db, dir, projectIdentity);
             args.client = scripted.client as never;
@@ -709,7 +709,7 @@ describe("runVerify disposition", () => {
 
             expect(scripted.promptCalls()).toBe(0);
             expect(result.complete).toBe(false);
-            expect(result.remaining).toBe(6);
+            expect(result.remaining).toBe(21);
             expect(result.stopReason).toBe("deadline");
         } finally {
             closeQuietly(db);
@@ -733,7 +733,7 @@ describe("runVerify disposition", () => {
             const dir = tempProject();
             // Ten batches in a 20-minute run: an even split would be 120 s each,
             // shorter than an agentic tool loop needs.
-            addMappedMemories(db, projectIdentity, 50);
+            addMappedMemories(db, projectIdentity, 200);
             const args = verifyArgs(db, dir, projectIdentity);
             args.deadline = Date.now() + 20 * 60_000;
             args.client = successfulVerifyClient(() => {
@@ -744,7 +744,7 @@ describe("runVerify disposition", () => {
 
             expect(slices).toHaveLength(1);
             expect(slices[0]).toBeGreaterThanOrEqual(VERIFY_BATCH_FLOOR_MS);
-            expect(result.verified).toBe(5);
+            expect(result.verified).toBe(20);
             expect(result.complete).toBe(false);
         } finally {
             spy.mockRestore();
@@ -770,7 +770,7 @@ describe("runVerify disposition", () => {
             try {
                 const projectIdentity = `git:verify-batch-timeout-${label.replaceAll(" ", "-")}`;
                 const dir = tempProject();
-                addMappedMemories(db, projectIdentity, 15);
+                addMappedMemories(db, projectIdentity, 60);
                 let promptCalls = 0;
                 let manifest = "";
                 const aborted: string[] = [];
@@ -805,8 +805,8 @@ describe("runVerify disposition", () => {
                 // The timed-out batch does not end the run with a thrown failure, and
                 // the third batch is not started with the same doomed budget.
                 expect(promptCalls).toBe(2);
-                expect(result.verified).toBe(5);
-                expect(result.remaining).toBe(10);
+                expect(result.verified).toBe(20);
+                expect(result.remaining).toBe(40);
                 expect(result.complete).toBe(false);
                 expect(result.stopReason).toBe("batch-timeout");
                 // This double throws our slice message directly rather than letting a
@@ -1462,12 +1462,12 @@ describe("verify module applier", () => {
 });
 
 for (const budgeted of [true, false]) {
-    test(`${budgeted ? "budget-finalized verification banks" : "non-budget verification rejects"} a 2/7 manifest`, async () => {
+    test(`${budgeted ? "budget-finalized verification banks" : "non-budget verification rejects"} a 2/22 manifest`, async () => {
         const db = freshDb();
         try {
             const project = "git:budget-verify";
             const dir = gitProject();
-            const items = Array.from({ length: 7 }, (_, index) =>
+            const items = Array.from({ length: 22 }, (_, index) =>
                 insertMemory(db, {
                     projectPath: project,
                     category: "ARCHITECTURE",
@@ -1543,7 +1543,7 @@ for (const budgeted of [true, false]) {
             const result = await runVerify(args);
             expect(sends).toBe(budgeted ? 2 : 1);
             expect(result.verified).toBe(budgeted ? 2 : 0);
-            expect(result.remaining).toBe(budgeted ? 5 : 7);
+            expect(result.remaining).toBe(budgeted ? 20 : 22);
             const stored = getMemoryVerifications(
                 db,
                 items.map((item) => item.id),
@@ -1567,7 +1567,7 @@ for (const budgeted of [true, false]) {
                 args.client = resumed.client as never;
                 args.tokenBudget = undefined;
                 args.deadline = Date.now() + VERIFY_BATCH_FLOOR_MS + 60_000;
-                expect((await runVerify(args)).verified).toBe(5);
+                expect((await runVerify(args)).verified).toBe(20);
             }
         } finally {
             closeQuietly(db);

@@ -56,7 +56,12 @@ for (const mode of [
 				import.meta.dir,
 				"../../plugin/src/index.ts",
 			);
-			const task = mode === "map" ? "map-memories" : "verify-broad";
+			const task =
+				mode === "map"
+					? "map-memories"
+					: mode === "normal"
+						? "verify"
+						: "verify-broad";
 			const normal = mode === "normal" || mode === "map";
 			const config = dreamerConfig("verify-broad", 5);
 			(config.tasks as Record<string, unknown>)["verify-broad"] = {
@@ -86,7 +91,7 @@ for (const mode of [
 					);
 					try {
 						ids = Array.from(
-							{ length: 6 },
+							{ length: 20 },
 							(_, index) =>
 								insertMemory(db as never, {
 									projectPath: identity,
@@ -97,7 +102,8 @@ for (const mode of [
 					} finally {
 						db.close();
 					}
-				} else ids = seedMappedMemories(h, identity, mode === "normal" ? 5 : 1);
+				} else
+					ids = seedMappedMemories(h, identity, mode === "normal" ? 20 : 1);
 				let steps = 0;
 				let finalizeRequests = 0;
 				let refusalRequests = 0;
@@ -112,13 +118,13 @@ for (const mode of [
 					const finalize = payload.includes(FINALIZE);
 					if (finalize) finalizeRequests++;
 					if (payload.includes(REFUSED)) refusalRequests++;
-					if (normal && steps >= ids.length * (mode === "map" ? 1 : 2)) {
+					if (normal && steps >= 15) {
 						return {
 							text:
 								mode === "map"
 									? `<mappings>${ids.map((id) => `<memory id="${id}" independent="true"/>`).join("")}</mappings>`
 									: `<verify>${ids.map((id) => `<verified id="${id}"/>`).join("")}</verify>`,
-							usage: usage(),
+							usage: usage(10_000, 100_000),
 						};
 					}
 					if (finalize && mode === "completed") {
@@ -143,16 +149,18 @@ for (const mode of [
 							},
 						],
 						stop_reason: "tool_use" as const,
-						usage: finalize
-							? usage(1, 60_000)
-							: mode === "coarse" && steps === 10
-								? usage(210_000, 120_000)
-								: usage(),
+						usage: normal
+							? usage(10_000, 100_000)
+							: finalize
+								? usage(1, 60_000)
+								: mode === "coarse" && steps === 10
+									? usage(210_000, 120_000)
+									: usage(),
 						delayMs: 1_200,
 					};
 				});
 				const dream = startDream(h, parent, task);
-                const activeHarness = h;
+				const activeHarness = h;
 				await h.waitFor(
 					() =>
 						readDreamerInvocations(activeHarness, parent).some(
@@ -188,7 +196,7 @@ for (const mode of [
 					expect(finalizeRequests).toBe(0);
 					expect(rows).toHaveLength(1);
 					expect(rows[0]?.status).toBe("completed");
-					if (mode === "normal") expect(banked).toBe(5);
+					if (mode === "normal") expect(banked).toBe(20);
 					else {
 						const db = openTestDb(
 							join(h.dataDir, "cortexkit", "magic-context", "context.db"),
@@ -201,7 +209,7 @@ for (const mode of [
 										.prepare("SELECT COUNT(*) AS n FROM memory_verifications")
 										.get() as { n: number }
 								).n,
-							).toBe(6);
+							).toBe(20);
 						} finally {
 							db.close();
 						}
