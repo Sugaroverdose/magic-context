@@ -701,6 +701,7 @@ fn apply_session(
     columns: &[String],
     now: i64,
 ) -> Result<(), EngineError> {
+    let step = std::time::Instant::now();
     let session = work.plan.session.as_str();
     let dangling_before = dangling_events(conn, session)?;
     let removed = id_list(&work.removed_ids);
@@ -840,7 +841,11 @@ fn apply_session(
         )?;
     }
 
-    verify_session(conn, work, columns, dangling_before)
+    eprintln!("written in {:.2}s", step.elapsed().as_secs_f64());
+    let step = std::time::Instant::now();
+    let verified = verify_session(conn, work, columns, dangling_before);
+    eprintln!("verified in {:.2}s", step.elapsed().as_secs_f64());
+    verified
 }
 
 fn columns_of(conn: &Connection, schema: &str, table: &str) -> rusqlite::Result<BTreeSet<String>> {
@@ -1016,25 +1021,36 @@ pub fn run(options: &RepairOptions) -> Result<RepairReport, EngineError> {
     );
 
     let conn = open(options, true)?;
+    // Leave checkpointing to the hosts. A checkpoint run by this connection's COMMIT
+    // copies the whole write-ahead log into a multi-gigabyte file, and a running host
+    // waiting on context.db would wait for it.
+    conn.query_row("PRAGMA main.wal_autocheckpoint = 0", [], |row| row.get::<_, i64>(0))?;
     let columns = shared_columns(&conn, "compartments")?;
     let mut repaired = Vec::new();
     for plan in &plans {
+        let started = std::time::Instant::now();
         conn.execute_batch("BEGIN IMMEDIATE")?;
         // Planned again inside the transaction: the historian may have published since
         // the preview.
         let outcome = check_idle(&conn, &plan.session, options.now_ms)
             .and_then(|()| plan_session(&conn, &plan.session, &columns))
             .and_then(|work| {
+                eprintln!("planned in {:.2}s", started.elapsed().as_secs_f64());
                 apply_session(&conn, &work, &columns, options.now_ms)?;
                 Ok(work)
             });
         match outcome {
             Ok(work) => {
                 conn.execute_batch("COMMIT")?;
+                // How long context.db's write lock was held, which a running host waits on.
+                let held = started.elapsed();
                 reset_store_caches(options, &work)?;
                 eprintln!(
-                    "repaired {}: {} compartments restored, {} removed",
-                    work.plan.session, work.plan.restored, work.plan.removed
+                    "repaired {}: {} compartments restored, {} removed; write transaction {:.2}s",
+                    work.plan.session,
+                    work.plan.restored,
+                    work.plan.removed,
+                    held.as_secs_f64()
                 );
                 repaired.push(work.plan);
             }
