@@ -231,21 +231,41 @@ export function detectThinkingBindingMismatch(error: unknown): ThinkingBindingMi
 }
 
 /**
- * True for the models whose signed thinking blocks Anthropic binds to the
- * request prefix: Claude Fable 5.1, Claude Opus 5.5 and Claude Sonnet 5.5.
- * Accounts created on or after 2026-08-31 enforce this on the Claude API,
- * Vertex and Bedrock. Match the family regardless of route: proactive stripping
- * runs only when a pass already rebuilds the cached prefix. A false positive
- * costs reasoning on those passes; a false negative risks a binding 400.
+ * Claude models whose signed thinking blocks Anthropic binds to the request
+ * prefix, as `[family, major, minor]`. The source of truth is Anthropic's
+ * preserved-thinking page
+ * (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking,
+ * "Keeping the prefix unchanged"); add a row when it names a new model.
+ */
+export const PREFIX_BOUND_THINKING_MODELS: ReadonlyArray<readonly [string, number, number]> = [
+    ["fable", 5, 1],
+    ["opus", 5, 5],
+    ["sonnet", 5, 5],
+];
+
+// One pattern built from the list: the family, then the version with `-`, `_`
+// or `.` between parts, bounded so `sonnet-5-50` or `notsonnet-5-5` never match.
+// The trailing boundary also accepts Vertex `@date` and Bedrock `:0` suffixes.
+const PREFIX_BOUND_THINKING_PATTERN = new RegExp(
+    `(?:^|[-_.:/])(?:${PREFIX_BOUND_THINKING_MODELS.map(
+        ([family, major, minor]) => `${family}[-_.]?${major}[-_.]${minor}`,
+    ).join("|")})(?:$|[-_.:/@])`,
+    "i",
+);
+
+/**
+ * True for a model in PREFIX_BOUND_THINKING_MODELS on any route. Accounts
+ * created on or after 2026-08-31 enforce the binding on the Claude API, Vertex
+ * and Bedrock, so the provider is deliberately ignored. Proactive stripping
+ * runs only when a pass already rebuilds the cached prefix: a false positive
+ * costs reasoning on those passes, a false negative risks a binding 400.
  */
 export function isPrefixBoundThinkingModel(
     _providerID: string | null | undefined,
     modelID: string | null | undefined,
 ): boolean {
     if (!modelID) return false;
-    return /(?:^|[-_.:/])(?:fable[-_.]?5[-_.]1|(?:opus|sonnet)[-_.]?5[-_.]5)(?:$|[-_.:/@])/i.test(
-        modelID,
-    );
+    return PREFIX_BOUND_THINKING_PATTERN.test(modelID);
 }
 
 /**
