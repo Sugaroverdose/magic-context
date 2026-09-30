@@ -702,11 +702,15 @@ export function createTransform(deps: TransformDeps) {
         const historianRun = deps.resolveHistorianRun?.();
         const messages = output.messages as MessageLike[];
         const passOutcome = createPassOutcome();
-        const lkgInput = projectLkgEntry(messages);
+        const tSessionId = performance.now();
         const sessionId = findSessionId(messages);
         if (!sessionId) {
             return;
         }
+        logTransformTiming(sessionId, "findSessionId", tSessionId, `messages=${messages.length}`);
+        const tLkgEntry = performance.now();
+        const lkgInput = projectLkgEntry(messages);
+        logTransformTiming(sessionId, "lkg.entryProjection", tLkgEntry);
         const resolvedSessionId = sessionId;
         const runNotificationParams = (sid: string) => {
             const params = deps.getNotificationParams?.(sid) ?? {};
@@ -716,7 +720,6 @@ export function createTransform(deps: TransformDeps) {
         };
         beginLkgPass(sessionId);
         clearOpenCodePendingTransformDecision(sessionId);
-        logTransformTiming(sessionId, "findSessionId", startTime, `messages=${messages.length}`);
 
         const db = deps.db;
 
