@@ -62,7 +62,13 @@ mc_dir=${MAGIC_CONTEXT_STORAGE_DIR:-$HOME/.local/share/cortexkit/magic-context}
 read_version() {
     local path=$1 sql=$2 value
     [[ -f "$path" ]] || die "missing live store: $path"
-    value=$(sqlite3 -readonly "$path" "$sql") || die "cannot read schema version from $path"
+    # A WAL-mode store closed cleanly has no -wal/-shm files, and a read-only
+    # connection cannot create them (SQLITE_CANTOPEN). With no -wal file every
+    # committed page is in the main file, so an immutable read sees the same data.
+    if ! value=$(sqlite3 -readonly "$path" "$sql" 2>/dev/null); then
+        [[ ! -e "$path-wal" ]] || die "cannot read schema version from $path"
+        value=$(sqlite3 "file:$path?immutable=1" "$sql") || die "cannot read schema version from $path"
+    fi
     [[ "$value" =~ ^[0-9]+$ ]] || die "invalid schema version from $path: $value"
     printf '%s\n' "$value"
 }
