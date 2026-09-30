@@ -13,6 +13,7 @@ Sources (omit for all):
 - memory — rules, constraints, conventions; "what's our convention for X"
 - message — the raw conversation behind compacted history; "did we discuss this"; hits carry ordinals for ctx_expand(start=N-10, end=N+5)
 - git_commit — commit history; "when did this change" (pair with message for regression hunts)
+- primer — reusable project Q&A the dreamer distils from recurring questions; "have we answered this before"
 - note — parked follow-ups with their recorded text; "did we leave a follow-up"
 Use from/to to restrict every source to an inclusive UTC date range.`;
 export const DEFAULT_CTX_SEARCH_LIMIT = 10;

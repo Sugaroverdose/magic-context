@@ -93,7 +93,9 @@ describe("createToolRegistry — memory gating", () => {
                 "note_ids",
             ],
             ctx_search: ["query", "limit", "from", "to", "sources"],
-            ctx_memory: ["action", "content", "category", "ids", "limit", "reason"],
+            // No `limit`: it only sized the dreamer-only list action, which now
+            // lives on ctx_memory_list (issue 575).
+            ctx_memory: ["action", "content", "category", "ids", "reason"],
         };
 
         for (const [name, fields] of Object.entries(expectedFields)) {

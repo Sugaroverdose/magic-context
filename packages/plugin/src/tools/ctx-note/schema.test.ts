@@ -5,7 +5,7 @@ import { CTX_NOTE_LIGHT_DESCRIPTION } from "../light-descriptions";
 import { CTX_NOTE_DESCRIPTION } from "./constants";
 
 const NOTE_IDS_DESCRIPTION =
-    "Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write.";
+    "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.";
 
 const pluginSchemaSource = readFileSync(resolve(import.meta.dir, "tools.ts"), "utf8");
 const piSchemaSource = readFileSync(

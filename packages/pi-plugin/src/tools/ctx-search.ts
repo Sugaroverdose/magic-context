@@ -77,7 +77,7 @@ const ParamsSchema = Type.Object(
 				]),
 				{
 					description:
-						"Restrict to these sources; omit for all. [] searches none.",
+						"Restrict to these sources; omitting it or passing [] searches every source.",
 				},
 			),
 		),

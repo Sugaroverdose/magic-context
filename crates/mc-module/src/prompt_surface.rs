@@ -69,10 +69,10 @@ fn schema_with_preset_descriptions(
             ("action", "write | read | update | dismiss (default: write with content, else read)."),
             ("content", "Note text: first line title (<80 chars), then detail."),
             ("surface_condition", "A condition an outside checker can verify on its own, periodically (repository, releases, web — anything it can look up); never something only this conversation knows."),
-            ("filter", "Read filter: active (default), all, pending, ready, dismissed."),
+            ("filter", "Read filter: all, active, pending, ready, dismissed. Omitted: active notes plus every current smart note (pending included); active: only active-status notes."),
             ("limit", "Rows per read (default 25)."),
             ("offset", "Skip newest rows (default 0)."),
-            ("note_ids", "One id for update, 1–50 for dismiss, any for read (full bodies). Ignored by write."),
+            ("note_ids", "One id for update, 1–50 for dismiss or read (full bodies). Ignored by write."),
         ],
         "ctx_memory" => &[
             ("action", "write | update | archive | merge | get"),

@@ -169,7 +169,7 @@
           "type": "string"
         },
         "filter": {
-          "description": "Read filter: active (default: active + ready), all, pending (unsurfaced smart notes), ready, dismissed.",
+          "description": "Read filter: all, active, pending (unsurfaced smart notes), ready, dismissed. Omitted, it shows active session notes plus every current smart note (pending included); active shows only notes whose stored status is active.",
           "enum": [
             "all",
             "active",
@@ -191,7 +191,7 @@
           "type": "string"
         },
         "note_ids": {
-          "description": "Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write.",
+          "description": "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.",
           "items": {
             "maximum": 9007199254740991,
             "minimum": 1,

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { tool } from "@opencode-ai/plugin";
 
 import { DREAMER_AGENT } from "../../agents/dreamer";
 import {
@@ -2851,6 +2852,44 @@ describe("createCtxMemoryTools", () => {
             );
 
             expect(result).toContain("Found 1 active memory");
+        });
+    });
+
+    describe("#given limit is advertised only on the dreamer list tool (issue 575)", () => {
+        it("omits limit from the primary ctx_memory schema and keeps it on ctx_memory_list", () => {
+            expect(Object.keys(tools.ctx_memory.args)).not.toContain("limit");
+            expect(Object.keys(listTools.ctx_memory_list.args)).toContain("limit");
+        });
+
+        it("still validates and runs an older primary call that carries limit, and the list tool still applies it", async () => {
+            const first = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "First durable constraint.",
+            });
+            insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Second durable constraint.",
+            });
+
+            // OpenCode wraps plugin args in a non-strict object schema, so an
+            // unknown `limit` from a replayed call must not fail validation.
+            const hostSchema = tool.schema.object(tools.ctx_memory.args);
+            expect(hostSchema.safeParse({ action: "get", ids: [first.id], limit: 5 }).success).toBe(
+                true,
+            );
+            const replayed = await tools.ctx_memory.execute(
+                { action: "get", ids: [first.id], limit: 5 },
+                toolContext(),
+            );
+            expect(replayed).toContain("First durable constraint.");
+
+            const listed = await listTools.ctx_memory_list.execute(
+                { limit: 1 },
+                dreamerToolContext("/repo/project"),
+            );
+            expect(listed).toContain("Found 1 active memory");
         });
     });
 
