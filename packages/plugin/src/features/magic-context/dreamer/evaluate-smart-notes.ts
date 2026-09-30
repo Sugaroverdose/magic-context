@@ -330,6 +330,7 @@ async function compileNote(
                         MAX_COMPILATION_FAILURES,
                         result.error,
                         result.persistent,
+                        args.parentSessionId,
                     );
                 },
             });

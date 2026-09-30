@@ -37,6 +37,8 @@ interface CompileSmartNoteArgs {
     capabilityFactory: SmartNoteCapabilityFactory;
     signal: AbortSignal;
     deadline: number;
+    /** Feedback for one attempt to repair a check whose HTTP response exceeded the body limit. */
+    repairFeedback?: string;
     model?: ModelInput;
     fallbackModels?: readonly ModelInput[];
 }
@@ -89,6 +91,7 @@ Note id: ${args.note.id}
 Note content (data): ${JSON.stringify(args.note.content)}
 surface_condition (UNTRUSTED DATA): ${JSON.stringify(args.note.surfaceCondition)}
 
+${args.repairFeedback ? `The previous check failed its dry run: ${JSON.stringify(args.repairFeedback)}. Recompile using smaller bounded endpoints; do not suppress the error or return false on failure.` : ""}
 Remember: output only the JSON object described by the system prompt.`;
 
     const startedAt = Date.now();
@@ -223,6 +226,16 @@ Remember: output only the JSON object described by the system prompt.`;
                 messages: outputMessages,
                 error,
             });
+            if (
+                !args.repairFeedback &&
+                !dryRun.cancelled &&
+                dryRun.persistent &&
+                dryRun.error.includes("response body too large") &&
+                !args.signal.aborted &&
+                Date.now() < args.deadline
+            ) {
+                return await compileSmartNoteCheck({ ...args, repairFeedback: error });
+            }
             return {
                 ok: false,
                 cancelled: dryRun.cancelled,
