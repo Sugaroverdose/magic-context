@@ -59,6 +59,8 @@ type RawCompartmentRow = {
     end_message: number;
     start_message_id: string;
     end_message_id: string;
+    start_block_index: number | null;
+    end_block_index: number | null;
     title: string;
     content: string;
     p1: string | null;
@@ -366,11 +368,20 @@ export function copySessionStateForClone(
             };
         }
 
+        const compartmentColumns = db.prepare("PRAGMA table_info(compartments)").all() as {
+            name: string;
+        }[];
+        const hasBlockIndices = ["start_block_index", "end_block_index"].every((name) =>
+            compartmentColumns.some((column) => column.name === name),
+        );
+        const blockProjection = hasBlockIndices
+            ? "start_block_index, end_block_index"
+            : "NULL AS start_block_index, NULL AS end_block_index";
         const sourceCompartments = db
             .prepare(
                 `SELECT sequence, start_message, end_message, start_message_id, end_message_id,
                         title, content, p1, p2, p3, p4, importance, episode_type, legacy,
-                        created_at, harness
+                        created_at, harness, ${blockProjection}
                    FROM compartments WHERE session_id = ? ORDER BY sequence ASC`,
             )
             .all(sourceSessionId) as RawCompartmentRow[];
@@ -378,8 +389,8 @@ export function copySessionStateForClone(
             `INSERT INTO compartments
                 (session_id, sequence, start_message, end_message, start_message_id,
                  end_message_id, title, content, p1, p2, p3, p4, importance,
-                 episode_type, legacy, created_at, harness)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 episode_type, legacy, created_at, harness${hasBlockIndices ? ", start_block_index, end_block_index" : ""})
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${hasBlockIndices ? ", ?, ?" : ""})`,
         );
         const copiedCompartments: CloneCompartmentRow[] = [];
         for (const row of sourceCompartments) {
@@ -404,6 +415,7 @@ export function copySessionStateForClone(
                 row.legacy,
                 row.created_at,
                 row.harness,
+                ...(hasBlockIndices ? [row.start_block_index, row.end_block_index] : []),
             );
             copiedCompartments.push({
                 sequence: row.sequence,

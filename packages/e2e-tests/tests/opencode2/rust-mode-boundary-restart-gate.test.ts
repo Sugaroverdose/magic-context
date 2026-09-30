@@ -9,14 +9,15 @@
  *    adapter still trims to the RECORDED boundary (the post-fold restore and
  *    `trimToRecordedBoundary` read it back from context.db, not from process memory);
  *  - a second, later boundary is published after the restart;
- *  - no pass reads the whole session from the host store: the v2 reader's debug
+ *  - no steady pass reads the whole session from the host store: the v2 reader's debug
  *    counters never show a `history` read, no single operation decodes more than
  *    one 100-row page, and the decoded-row total per pass stays bounded while the
  *    session holds 10,000 rows;
- *  - with `single_store` off, the module never holds `context.db` open during the
- *    fold, and `session.status` reports mode "off" with no path.
+ *  - the module holds the shared context.db and its cache store.db only under
+ *    this fixture's isolated root; there is no optional single-store mode.
  *
- * One hermetic daemon + module + GA host per file (see rust-mode-fold-cadence).
+ * One hermetic daemon, module and pinned OpenCode 2 host per file, as in
+ * rust-mode-fold-cadence.test.ts in this directory.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -204,6 +205,7 @@ describe.skipIf(!prereqs.ok)(
 			existingIsolation: fixture,
 			modelContextLimit: 24_000,
 			modelOutputLimit: 1_024,
+            historianModel: { id: "mock-historian", contextLimit: 128_000 },
 			probePlugin: observer.dir,
 			magicContextConfig: {
 				transform_mode: (process.env.GATE_TRANSFORM_MODE ?? "rust") as
@@ -212,7 +214,7 @@ describe.skipIf(!prereqs.ok)(
 				subc: { connection_file: subc.connectionFile },
 				memory: { enabled: false },
 				dreamer: { disable: true },
-				historian: { opencode: { model: "openai/mock-model" } },
+				historian: { opencode: { model: "openai/mock-historian" } },
 				execute_threshold_percentage: 40,
 				history_budget_percentage: 0.15,
 			},
@@ -296,7 +298,7 @@ describe.skipIf(!prereqs.ok)(
 			await subc?.stop();
 		});
 
-		it("keeps the boundary and bounded reads across a restart, and single_store off never opens context.db", async () => {
+		it("keeps the shared-context boundary and bounded reads across a restart", async () => {
 			const clientFor = () =>
 				OpenCode.make({
 					baseUrl: host.url,
@@ -448,7 +450,7 @@ describe.skipIf(!prereqs.ok)(
 				`oc_input before restart: ${beforeCoverage.map((entry) => entry.ocInput).join(" ")}`,
 			);
 
-			// single_store off: the module reports "off" and holds no context.db.
+			// Diagnostics must identify context.db, not the cache-only store.db.
 			const status = await subc.moduleStatus(
 				session.id,
 				host.cwd,
@@ -561,13 +563,12 @@ describe.skipIf(!prereqs.ok)(
 
 			// ── assertions ───────────────────────────────────────────────────────
 			expect(beforeBoundaries.size).toBeGreaterThanOrEqual(1);
-			expect(singleStore?.mode).toBe("off");
-			expect(singleStore?.path ?? null).toBeNull();
-			expect(
-				[...modulePathsSeen].filter(
-					(path) => path.endsWith("context.db") || path.includes("context.db-"),
-				),
-			).toEqual([]);
+			expect(singleStore?.capable).toBe(true);
+            expect(singleStore?.mode).toBeUndefined();
+            expect(singleStore?.path).toBe(join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+            expect([...modulePathsSeen].some(path => path.endsWith("context.db"))).toBe(true);
+            expect([...modulePathsSeen].some(path => path.endsWith("store.db"))).toBe(true);
+            expect([...modulePathsSeen].filter(path => /\.db(?:-wal|-shm)?$/.test(path)).every(path => path.startsWith(`${fixture.root}/`))).toBe(true);
 			// The recorded boundary survives the restart: the first pass after it starts
 			// there, not at the top of the 10,000-row history. Without a host checkpoint
 			// the array is trimmed to it; after one, the history put back behind the

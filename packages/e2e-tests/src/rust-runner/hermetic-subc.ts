@@ -47,6 +47,8 @@ import {
     type RouteTarget,
 } from "@cortexkit/subc-client";
 
+import { prepareContextDatabase } from "../prepare-context-db";
+
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 const MODULE_ID = "magic-context";
 const RUST_E2E_PID_FILE = "rust-e2e-pids.json";
@@ -486,6 +488,9 @@ export class HermeticSubcStack {
     }
 
     static async start(opts: HermeticSubcOptions): Promise<HermeticSubcStack> {
+        // The module reads domain rows from context.db at startup; the host must
+        // not race its schema initialization against the module's first open.
+        prepareContextDatabase(opts.dataDir);
         reapRecordedRustProcesses();
         const stack = new HermeticSubcStack({
             dataDir: opts.dataDir,

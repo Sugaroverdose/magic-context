@@ -18,6 +18,10 @@ import {
     type HiddenRunHandle,
 } from "../../../hooks/magic-context/compartment-runner-types";
 import type { RawMessageProvider } from "../../../hooks/magic-context/read-session-chunk";
+import {
+    projectNeedsSingleStoreMigration,
+    renderSingleStoreMigrationRequiredRefusal,
+} from "../../../hooks/magic-context/single-store-refusal";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
@@ -36,7 +40,6 @@ import {
 import type { Database } from "../../../shared/sqlite";
 import { dreamFailureCode, userFacingFailureCode } from "../../../shared/user-facing-codes";
 import { getCompartmentEvents } from "../compartment-events";
-import { getAuthorityManagedMarker } from "../context-authority";
 import {
     getMemoriesByProject,
     getMemoryCountsByStatus,
@@ -76,7 +79,6 @@ import { mapMemories } from "./map-memories";
 import {
     DreamerModuleFailureError,
     type DreamerModuleRoute,
-    logDreamerNotOwnerOnce,
     resolveDreamerModuleRoute,
 } from "./module-apply";
 import { promotePrimers } from "./promote-primers";
@@ -469,6 +471,9 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             const processed = processedDreamTaskItems(backlogAtStart.pending, remaining);
             return `${config.task} incomplete: ${remaining} remain (was ${backlogAtStart.pending} at run start; processed ${processed} this run)`;
         };
+        if (projectNeedsSingleStoreMigration(db, projectIdentity)) {
+            return { status: "completed", detail: renderSingleStoreMigrationRequiredRefusal() };
+        }
         let moduleRoute: Awaited<ReturnType<typeof resolveDreamerModuleRoute>>;
         if (
             config.task === "curate" ||
@@ -489,26 +494,8 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                     commandId: `${startedAt}:${holderId}:${config.task}`,
                 });
             } catch (error) {
-                throw new DreamerModuleFailureError("authority.status", error);
+                throw new DreamerModuleFailureError("store admission", error);
             }
-        }
-        if (
-            !moduleRoute &&
-            getAuthorityManagedMarker(db, projectIdentity) &&
-            (
-                [
-                    "curate",
-                    "map-memories",
-                    "compress-cues",
-                    "classify-memories",
-                    "verify",
-                    "verify-broad",
-                    "retrospective",
-                ] as DreamTaskName[]
-            ).includes(config.task)
-        ) {
-            logDreamerNotOwnerOnce(projectIdentity);
-            return { status: "completed", detail: "skipped: module-managed memory; not owner" };
         }
         const parent = await resolveParentSessionId();
         if (!leaseOwnershipMatches(db, holderId, leaseAcquisition.generation, leaseKey)) {
@@ -871,8 +858,6 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                           | "moduleClient"
                           | "moduleSessionId"
                           | "moduleProjectRoot"
-                          | "moduleContextStoreUuid"
-                          | "moduleAuthorityGeneration"
                           | "moduleCommandId"
                       >
                     | undefined;
@@ -881,8 +866,6 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                         moduleClient: moduleRoute.moduleClient,
                         moduleSessionId: moduleRoute.moduleSessionId,
                         moduleProjectRoot: moduleRoute.moduleProjectRoot,
-                        moduleContextStoreUuid: moduleRoute.moduleContextStoreUuid,
-                        moduleAuthorityGeneration: moduleRoute.moduleAuthorityGeneration,
                         moduleCommandId: moduleRoute.moduleCommandId,
                     };
                 }

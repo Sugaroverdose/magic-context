@@ -142,6 +142,7 @@ function tagRepository() {
         execFileSync("git", ["-C", dir, ...args], {
             encoding: "utf8",
             stdio: ["ignore", "pipe", "pipe"],
+            windowsHide: true,
         }).trim();
     git("init", "-b", "master");
     git("config", "user.name", "Fixture");

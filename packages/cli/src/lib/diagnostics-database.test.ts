@@ -192,10 +192,10 @@ describe("doctor database collectors", () => {
                 "--outfile",
                 bundle,
             ],
-            { encoding: "utf8" },
+            { encoding: "utf8", windowsHide: true },
         );
         expect(build.status, build.stderr).toBe(0);
-        const run = spawnSync("node", [bundle], { encoding: "utf8" });
+        const run = spawnSync("node", [bundle], { encoding: "utf8", windowsHide: true });
         expect(run.status, run.stderr).toBe(0);
         assertStoreResults(JSON.parse(run.stdout));
         expect(existsSync(join(root, "missing", "context.db"))).toBe(false);

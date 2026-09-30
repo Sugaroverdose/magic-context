@@ -161,7 +161,168 @@ describe("createV2RustCompactionMarkerStrategy", () => {
     });
 });
 
+describe("createV2RustCompactionMarkerStrategy with a partial published end", () => {
+    it("records the boundary before the partial message and the trim keeps that message", () => {
+        const db = useTempDataHome();
+        getOrCreateSessionMeta(db, "ses-partial-end");
+        // The fold ends partway through a2 (ordinal 4): block 0 is summarized, the
+        // file block after it is not.
+        db.prepare(
+            "INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, end_block_index, title, content, created_at) VALUES ('ses-partial-end', 0, 1, 4, 'u1', 'a2', 0, 'partial', 'covered', 1)",
+        ).run();
+        const strategy = createV2RustCompactionMarkerStrategy((_sessionId, endMessageId) =>
+            resolveBoundaryUserMessage(history, endMessageId),
+        );
+        const outcome = strategy.applyDeferred(db, "ses-partial-end", {
+            ordinal: 4,
+            endMessageId: "a2",
+            publishedAt: Date.now(),
+        });
+        expect(outcome).toEqual({ kind: "applied", markerOrdinal: 4 });
+        const state = getPersistedCompactionMarkerState(db, "ses-partial-end");
+        // u2 is the nearest user turn before the partial a2: everything before it is
+        // whole and covered, and a2 stays after the cut.
+        expect(state?.boundaryMessageId).toBe("u2");
+        expect(state?.boundaryOrdinal).toBe(4);
+
+        const messages = [
+            { id: "u1", parts: [{ type: "text", text: "u1" }] },
+            { id: "a1", parts: [{ type: "text", text: "a1" }] },
+            { id: "u2", parts: [{ type: "text", text: "u2" }] },
+            {
+                id: "a2",
+                parts: [
+                    { type: "text", text: "covered" },
+                    { type: "file", url: "UNCOVERED_FILE" },
+                ],
+            },
+            { id: "a3", parts: [{ type: "text", text: "a3" }] },
+        ];
+        expect(trimToRecordedBoundary(db, "ses-partial-end", messages)).toBe(2);
+        expect(messages.map((message) => message.id)).toEqual(["u2", "a2", "a3"]);
+        expect(JSON.stringify(messages)).toContain("UNCOVERED_FILE");
+    });
+});
+
+describe("trimToRecordedBoundary with indexed ends and their successors", () => {
+    type Row = [
+        sequence: number,
+        startMessage: number,
+        endMessage: number,
+        startId: string,
+        endId: string,
+        startBlock: number | null,
+        endBlock: number | null,
+    ];
+
+    /** Seed compartments, record the boundary for a fold through a4, and trim. */
+    function trimWith(rows: Row[]): { dropped: number; ids: string[]; text: string } {
+        const db = useTempDataHome();
+        const sessionId = "ses-coverage";
+        getOrCreateSessionMeta(db, sessionId);
+        const insert = db.prepare(
+            "INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, start_block_index, end_block_index, title, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 't', 'c', 1)",
+        );
+        for (const row of rows) insert.run(sessionId, ...row);
+        createV2RustCompactionMarkerStrategy((_sessionId, endMessageId) =>
+            resolveBoundaryUserMessage(history, endMessageId),
+        ).applyDeferred(db, sessionId, { ordinal: 7, endMessageId: "a4", publishedAt: 1 });
+        const messages = history.map((message) => ({
+            id: message.id,
+            parts:
+                message.id === "a2"
+                    ? [
+                          { type: "text", text: "covered" },
+                          { type: "file", url: "UNCOVERED_FILE" },
+                      ]
+                    : [{ type: "text", text: message.id }],
+        }));
+        const dropped = trimToRecordedBoundary(db, sessionId, messages);
+        return {
+            dropped,
+            ids: messages.map((message) => message.id),
+            text: JSON.stringify(messages),
+        };
+    }
+
+    it("trims past an indexed end whose successor continues on the same message", () => {
+        const result = trimWith([
+            [0, 1, 4, "u1", "a2", 0, 0],
+            [1, 4, 7, "a2", "a4", 1, 0],
+        ]);
+        // The boundary for a fold through a4 is u3; a2's remainder is in the next row.
+        expect(result.dropped).toBe(5);
+        expect(result.ids).toEqual(["u3", "a4"]);
+    });
+
+    it("trims past a last-block end whose successor starts on the next message", () => {
+        const result = trimWith([
+            [0, 1, 4, "u1", "a2", 0, 1],
+            [1, 5, 7, "a3", "a4", 0, 0],
+        ]);
+        expect(result.dropped).toBe(5);
+        expect(result.ids).toEqual(["u3", "a4"]);
+    });
+
+    it("keeps an indexed end whose successor skips a message, with its uncovered blocks", () => {
+        const result = trimWith([
+            [0, 1, 4, "u1", "a2", 0, 0],
+            [1, 6, 7, "u3", "a4", 0, 0],
+        ]);
+        // a3 (ordinal 5) is in neither row, so a2's remainder may be uncovered: the
+        // cut stops at a2 instead of the recorded u3.
+        expect(result.dropped).toBe(3);
+        expect(result.ids).toEqual(["a2", "a3", "u3", "a4"]);
+        expect(result.text).toContain("UNCOVERED_FILE");
+    });
+});
+
 describe("trimToRecordedBoundary", () => {
+    it("a V2 recorded boundary after an indexed end retains its uncovered blocks", () => {
+        const db = useTempDataHome();
+        getOrCreateSessionMeta(db, "ses-indexed-v2");
+        db.prepare(
+            "INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, end_block_index, title, content, created_at) VALUES ('ses-indexed-v2', 0, 1, 4, 'u1', 'a2', 0, 'partial', 'covered', 1)",
+        ).run();
+        const strategy = createV2RustCompactionMarkerStrategy((_sessionId, endMessageId) =>
+            resolveBoundaryUserMessage(history, endMessageId),
+        );
+        strategy.applyDeferred(db, "ses-indexed-v2", {
+            ordinal: 7,
+            endMessageId: "a4",
+            publishedAt: Date.now(),
+        });
+        const messages = [
+            { id: "u1", parts: [{ type: "text", text: "before" }] },
+            {
+                id: "a2",
+                parts: [
+                    { type: "text", text: "covered" },
+                    { type: "file", url: "UNCOVERED_FILE" },
+                ],
+            },
+            { id: "a3", parts: [{ type: "text", text: "after" }] },
+            { id: "u3", parts: [{ type: "text", text: "tail" }] },
+        ];
+        trimToRecordedBoundary(db, "ses-indexed-v2", messages);
+        expect(JSON.stringify(messages)).toContain("UNCOVERED_FILE");
+        const prefix = JSON.stringify(messages);
+        const defer = [
+            { id: "u1", parts: [{ type: "text", text: "before" }] },
+            {
+                id: "a2",
+                parts: [
+                    { type: "text", text: "covered" },
+                    { type: "file", url: "UNCOVERED_FILE" },
+                ],
+            },
+            { id: "a3", parts: [{ type: "text", text: "after" }] },
+            { id: "u3", parts: [{ type: "text", text: "tail" }] },
+            { id: "a4", parts: [{ type: "text", text: "append" }] },
+        ];
+        trimToRecordedBoundary(db, "ses-indexed-v2", defer);
+        expect(JSON.stringify(defer.slice(0, messages.length))).toBe(prefix);
+    });
     const strategy = createV2RustCompactionMarkerStrategy((_sessionId, endMessageId) =>
         resolveBoundaryUserMessage(history, endMessageId),
     );

@@ -36,7 +36,7 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { shouldEnforcePrivateStoragePermissions } from "../../shared/storage-permissions";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 
-import { ensureContextStoreUuid } from "./context-authority";
+import { ensureContextStoreUuid } from "./context-store-uuid";
 import {
     attachFailClosedBlockingProcessEvidence,
     type FailClosedBlockingProcess,
@@ -131,7 +131,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 91;
+export const LATEST_SUPPORTED_VERSION = 92;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1068,6 +1068,8 @@ export function initializeDatabase(
       end_message INTEGER NOT NULL,
       start_message_id TEXT DEFAULT '',
       end_message_id TEXT DEFAULT '',
+      start_block_index INTEGER,
+      end_block_index INTEGER,
       title TEXT NOT NULL,
       content TEXT NOT NULL,
       p1 TEXT,
@@ -1576,6 +1578,16 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       (id, cursor_session_id, cursor_ordinal, completed, updated_at)
     VALUES (1, '', 0, 0, 0);
 
+    CREATE TABLE IF NOT EXISTS single_store_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      state TEXT NOT NULL CHECK (state IN ('required', 'migrated')),
+      migrated_at INTEGER,
+      migrated_by TEXT,
+      backup_dir TEXT,
+      report_json TEXT
+    );
+    INSERT OR IGNORE INTO single_store_state(id, state) VALUES (1, 'required');
+
     -- Highest memory id another writer (the Rust module in single-store mode) put
     -- into memories for a project, and how far this host has embedded. Migration v91.
     CREATE TABLE IF NOT EXISTS memory_embedding_watermarks (
@@ -1880,6 +1892,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       end_message INTEGER NOT NULL,
       start_message_id TEXT DEFAULT '',
       end_message_id TEXT DEFAULT '',
+      start_block_index INTEGER,
+      end_block_index INTEGER,
       title TEXT NOT NULL,
       content TEXT NOT NULL,
       p1 TEXT,

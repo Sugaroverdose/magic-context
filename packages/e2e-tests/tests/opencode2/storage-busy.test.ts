@@ -73,9 +73,14 @@ for (const seconds of [7, 60]) {
             await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(80000) });
             const requests = () => host.mock.requests().filter(request => request.body.model === "mock-model" && JSON.stringify(request).includes(text));
             if (seconds === 7) {
+                // session.wait can observe an idle state before the resumed hook has
+                // delivered its request. Wait for the actual provider capture instead.
+                const deadline = started + 80_000;
+                while (requests().length === 0 && Date.now() < deadline) await Bun.sleep(50);
                 const elapsed = Date.now() - started;
                 console.info(`storage-busy 7s elapsed=${elapsed}ms requests=${requests().length}`);
                 expect(requests().length).toBeGreaterThan(0);
+                expect(JSON.stringify(requests())).toContain("<session-history>");
                 expect(elapsed).toBeGreaterThan(5000);
             } else {
                 expect(requests()).toHaveLength(0);

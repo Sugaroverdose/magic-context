@@ -26,6 +26,7 @@
  */
 
 import { MEMORY_MURAL_BLOCK } from "@magic-context/core/agents/magic-context-prompt";
+import { isPartialCompartmentEnd } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	getMaxMemoryIdForProjects,
 	getMemoriesByProject,
@@ -170,8 +171,12 @@ function trimPiMessagesToBoundary(
 	cutoffMessageId: string,
 	trimMutableEntryIds = false,
 	sessionId?: string,
+	preserveBoundary = false,
 ): number {
-	if (cutoffMessageId.length === 0) return 0;
+	// Pi tool calls and results occupy separate entries. If only part of the
+	// boundary message was summarized, keep the prefix: removing an earlier call
+	// could make orphan cleanup also delete its still-needed result.
+	if (cutoffMessageId.length === 0 || preserveBoundary) return 0;
 	// Resolve a synthetic-user (folded toolResult) cutoff to the real entry id
 	// of the underlying toolResult, which is what the live message carries.
 	const effectiveCutoffId = cutoffMessageId.startsWith(SYNTH_USER_ID_PREFIX)
@@ -844,7 +849,16 @@ export function trimPiMessagesToCachedBoundary(
 		(compartment) => compartment.endMessageId === boundary,
 	);
 	if (!boundaryIsLive) return 0;
-	return trimPiMessagesToBoundary(piMessages, entryIds, boundary, true);
+	return trimPiMessagesToBoundary(
+		piMessages,
+		entryIds,
+		boundary,
+		true,
+		sessionId,
+		compartments.some(
+			(c) => c.endMessageId === boundary && c.endBlockIndex != null,
+		),
+	);
 }
 
 function setCachedBoundary(
@@ -2523,6 +2537,8 @@ function resolveRenderedCompartmentBoundary(
 	const boundary = compartments.find(
 		(compartment) => compartment.endMessageId === boundaryId,
 	);
+	if (boundary?.endBlockIndex != null)
+		return { endMessageId: null, ordinal: null };
 	return {
 		endMessageId: boundaryId,
 		ordinal:
@@ -2598,6 +2614,9 @@ function replayCompletePiPrefix(
 				trimBoundaryId,
 				false,
 				state.sessionId,
+				compartments.some(
+					(c) => c.endMessageId === trimBoundaryId && c.endBlockIndex != null,
+				),
 			)
 		: 0;
 	const head: PiAgentMessage[] = [];
@@ -2663,6 +2682,7 @@ export function injectM0M1Pi(
 					prepared.trimBoundaryId,
 					false,
 					state.sessionId,
+					isPartialCompartmentEnd(db, state.sessionId, prepared.trimBoundaryId),
 				)
 			: 0;
 		const head = structuredClone(prepared.messages);
@@ -2953,7 +2973,8 @@ export function injectM0M1Pi(
 		if (
 			latestM1Compartment &&
 			latestM1Compartment.sequence > markers.maxCompartmentSeq &&
-			latestM1Compartment.endMessageId.length > 0
+			latestM1Compartment.endMessageId.length > 0 &&
+			latestM1Compartment.endBlockIndex == null
 		) {
 			m1RenderedCoverage = {
 				endMessageId: latestM1Compartment.endMessageId,
@@ -2971,6 +2992,7 @@ export function injectM0M1Pi(
 				trimBoundaryId,
 				false,
 				state.sessionId,
+				isPartialCompartmentEnd(db, state.sessionId, trimBoundaryId),
 			)
 		: 0;
 	const muralWire = m0.includes("<memory-mural>")

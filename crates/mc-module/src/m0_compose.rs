@@ -11,7 +11,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use mc_store::{McStore, McStoreError, MemoryRevision};
+use mc_store::{McStore, McStoreError, MemoryRevision, StoredCompartment};
 use sha2::{Digest, Sha256};
 
 use crate::compartment_coverage::{resolve_coverage, CoverageGap};
@@ -123,8 +123,6 @@ pub struct M0ComposeInputs<'a> {
     pub covered_system_messages: &'a [String],
     /// Disabled memory removes both project memories and the user-profile memory block.
     pub memory_enabled: bool,
-    /// Host-backed profiles expose context.db ids; Claude Code remains module-native.
-    pub host_backed_memory_ids: bool,
     /// Maximum token estimate for the grouped project-memory block.
     pub memory_budget_tokens: f64,
     /// Maximum token estimate for the user-profile block.
@@ -424,10 +422,53 @@ fn render_m0_retry(
     m0_bytes
 }
 
+/// The four domain reads m0 is composed from.
+///
+/// The module reads them through its store. The single-store migration engine implements
+/// them twice more, over the old `store.db` tables and over `context.db`, so its render
+/// check composes both sides with this same composer.
+pub trait M0Source {
+    fn load_compartments(&self, session_id: &str) -> Result<Vec<StoredCompartment>, McStoreError>;
+    fn resolve_workspace_membership(
+        &self,
+        project_path: &str,
+    ) -> Result<Option<mc_store::WorkspaceMembership>, McStoreError>;
+    fn load_memory_render_snapshot(
+        &self,
+        project_path: &str,
+        membership: Option<&mc_store::WorkspaceMembership>,
+        now_ms: i64,
+    ) -> Result<mc_store::MemoryRenderSnapshot, McStoreError>;
+    fn load_active_user_memories(&self) -> Result<Vec<String>, McStoreError>;
+}
+
+impl M0Source for McStore {
+    fn load_compartments(&self, session_id: &str) -> Result<Vec<StoredCompartment>, McStoreError> {
+        McStore::load_compartments(self, session_id)
+    }
+    fn resolve_workspace_membership(
+        &self,
+        project_path: &str,
+    ) -> Result<Option<mc_store::WorkspaceMembership>, McStoreError> {
+        McStore::resolve_workspace_membership(self, project_path)
+    }
+    fn load_memory_render_snapshot(
+        &self,
+        project_path: &str,
+        membership: Option<&mc_store::WorkspaceMembership>,
+        now_ms: i64,
+    ) -> Result<mc_store::MemoryRenderSnapshot, McStoreError> {
+        McStore::load_memory_render_snapshot(self, project_path, membership, now_ms)
+    }
+    fn load_active_user_memories(&self) -> Result<Vec<String>, McStoreError> {
+        McStore::load_active_user_memories(self)
+    }
+}
+
 /// Read the store and compose the HARD m0 bytes + watermarks. `estimate_tokens` is the
 /// token estimator used for every injection budget and the history fit.
-pub fn compose_m0_from_store(
-    store: &McStore,
+pub fn compose_m0_from_store<S: M0Source + ?Sized>(
+    store: &S,
     inputs: &M0ComposeInputs<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> Result<M0Composition, M0ComposeError> {
@@ -440,8 +481,8 @@ pub fn compose_m0_from_store(
     )
 }
 
-pub(crate) fn compose_m0_from_store_timed(
-    store: &McStore,
+pub(crate) fn compose_m0_from_store_timed<S: M0Source + ?Sized>(
+    store: &S,
     inputs: &M0ComposeInputs<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     incremental: bool,
@@ -492,12 +533,7 @@ pub(crate) fn compose_m0_from_store_timed(
         inputs.memory_budget_tokens,
         estimate_tokens,
     );
-    let mut rendered_memories = selected_memories.clone();
-    if inputs.host_backed_memory_ids {
-        for memory in &mut rendered_memories {
-            memory.id = memory.host_row_id.unwrap_or(0);
-        }
-    }
+    let rendered_memories = selected_memories.clone();
     let source_name_by_id = membership
         .as_ref()
         .map(|value| workspace_source_names(&rendered_memories, value))
@@ -594,8 +630,10 @@ mod tests {
     }
 
     fn seed_user_profile(store: &McStore, profile: &[String]) {
+        store.seed_user_profile_for_test(profile, 1).unwrap();
         store
             .apply_authority_state_sync(ModuleStateSyncRequest {
+                resolved_compartment_boundaries: &[],
                 session_id: "ses",
                 project_path: "git:proj",
                 shadow_generation: 0,
@@ -617,16 +655,7 @@ mod tests {
                 strip_seeds: &[],
                 strip_seed_skipped: 0,
                 reasoning_cleared_through_tag: None,
-                compartments: &[],
-                memories: &[],
-                memory_mutations: &[],
-                user_profile: profile,
-                user_profile_present: true,
-                workspace: None,
-                workspace_present: false,
                 last_todo_state: None,
-                project_memory_epoch: None,
-                user_profile_version: Some(1),
                 acked_watermarks: serde_json::json!({}),
             })
             .unwrap();
@@ -749,7 +778,6 @@ mod tests {
             history_budget_tokens: 60_000.0,
             covered_system_messages: &[],
             memory_enabled: true,
-            host_backed_memory_ids: false,
             memory_budget_tokens: 15_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: false,
@@ -806,7 +834,6 @@ mod tests {
             history_budget_tokens: 60_000.0,
             covered_system_messages: &[],
             memory_enabled: true,
-            host_backed_memory_ids: false,
             memory_budget_tokens: 8_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: true,
@@ -840,7 +867,6 @@ mod tests {
             history_budget_tokens: 60_000.0,
             covered_system_messages: &[],
             memory_enabled: true,
-            host_backed_memory_ids: false,
             memory_budget_tokens: 8_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: false,
@@ -869,7 +895,6 @@ mod tests {
             history_budget_tokens: 60_000.0,
             covered_system_messages: &[],
             memory_enabled: true,
-            host_backed_memory_ids: false,
             memory_budget_tokens: 8_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: true,
@@ -919,7 +944,6 @@ mod tests {
             history_budget_tokens: 60_000.0,
             covered_system_messages: &[],
             memory_enabled: false,
-            host_backed_memory_ids: false,
             memory_budget_tokens: 8_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: true,
@@ -985,7 +1009,6 @@ mod tests {
             history_budget_tokens: 60_000.0,
             covered_system_messages: &[],
             memory_enabled: true,
-            host_backed_memory_ids: false,
             memory_budget_tokens: 8_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: true,
@@ -1038,7 +1061,6 @@ mod tests {
             history_budget_tokens: 300.0,
             covered_system_messages: &[],
             memory_enabled: false,
-            host_backed_memory_ids: false,
             memory_budget_tokens: 0.0,
             user_profile_budget_tokens: 0.0,
             inject_docs: false,
@@ -1285,136 +1307,6 @@ mod tests {
     }
 
     #[test]
-    fn host_backed_m0_uses_acknowledged_host_ids_and_hides_unacknowledged_module_ids() {
-        let fixture = FixtureBuilder::store();
-        let store = &fixture.store;
-        store
-            .seed_memory(1, "git:proj", "CONSTRAINTS", "stable", 50)
-            .unwrap();
-        let project_directory = fixture.dir.path().to_str().unwrap();
-        let module = compose_m0_from_store(
-            store,
-            &M0ComposeInputs {
-                session_id: "ses",
-                project_path: "git:proj",
-                project_directory,
-                now_ms: 0,
-                history_budget_tokens: 60_000.0,
-                covered_system_messages: &[],
-                memory_enabled: true,
-                host_backed_memory_ids: false,
-                memory_budget_tokens: 8_000.0,
-                user_profile_budget_tokens: 4_000.0,
-                inject_docs: false,
-                temporal_awareness: true,
-                mural: None,
-            },
-            no_estimate,
-        )
-        .unwrap();
-        let pending = compose_m0_from_store(
-            store,
-            &M0ComposeInputs {
-                session_id: "ses",
-                project_path: "git:proj",
-                project_directory,
-                now_ms: 0,
-                history_budget_tokens: 60_000.0,
-                covered_system_messages: &[],
-                memory_enabled: true,
-                host_backed_memory_ids: true,
-                memory_budget_tokens: 8_000.0,
-                user_profile_budget_tokens: 4_000.0,
-                inject_docs: false,
-                temporal_awareness: true,
-                mural: None,
-            },
-            no_estimate,
-        )
-        .unwrap();
-        assert!(!pending.m0_bytes.contains("#1:"));
-        assert!(pending.m0_bytes.contains("waiting for the host mirror"));
-        assert!(pending.rendered_memory_ids.is_empty());
-
-        let feed_head_before_ack = store.changefeed_head("memories").unwrap();
-        store
-            .acknowledge_host_memory_ids(
-                "git:proj",
-                &[mc_store::HostMemoryIdentityAck {
-                    module_row_id: 1,
-                    host_row_id: 101,
-                }],
-            )
-            .unwrap();
-        assert_eq!(
-            store.changefeed_head("memories").unwrap(),
-            feed_head_before_ack,
-            "host identity acknowledgements must not create mirror feedback rows"
-        );
-        let host = compose_m0_from_store(
-            store,
-            &M0ComposeInputs {
-                session_id: "ses",
-                project_path: "git:proj",
-                project_directory,
-                now_ms: 0,
-                history_budget_tokens: 60_000.0,
-                covered_system_messages: &[],
-                memory_enabled: true,
-                host_backed_memory_ids: true,
-                memory_budget_tokens: 8_000.0,
-                user_profile_budget_tokens: 4_000.0,
-                inject_docs: false,
-                temporal_awareness: true,
-                mural: None,
-            },
-            no_estimate,
-        )
-        .unwrap();
-        assert_eq!(host.m0_bytes, module.m0_bytes.replace("#1:", "#101:"));
-        assert_eq!(host.rendered_memory_ids, vec![101]);
-    }
-
-    #[test]
-    fn review_claude_code_m0_identity_pin() {
-        let fixture = FixtureBuilder::store();
-        fixture
-            .store
-            .seed_memory(1, "git:proj", "CONSTRAINTS", "stable", 50)
-            .unwrap();
-        let inputs = M0ComposeInputs {
-            session_id: "ses",
-            project_path: "git:proj",
-            project_directory: fixture.dir.path().to_str().unwrap(),
-            now_ms: 0,
-            history_budget_tokens: 60_000.0,
-            covered_system_messages: &[],
-            memory_enabled: true,
-            host_backed_memory_ids: false,
-            memory_budget_tokens: 8_000.0,
-            user_profile_budget_tokens: 4_000.0,
-            inject_docs: false,
-            temporal_awareness: true,
-            mural: None,
-        };
-        let before = compose_m0_from_store(&fixture.store, &inputs, no_estimate).unwrap();
-        assert!(before.m0_bytes.contains("#1:"));
-        fixture
-            .store
-            .acknowledge_host_memory_ids(
-                "git:proj",
-                &[mc_store::HostMemoryIdentityAck {
-                    module_row_id: 1,
-                    host_row_id: 901,
-                }],
-            )
-            .unwrap();
-        let after = compose_m0_from_store(&fixture.store, &inputs, no_estimate).unwrap();
-        assert_eq!(before.m0_bytes, after.m0_bytes);
-        assert_eq!(after.rendered_memory_ids, vec![1]);
-    }
-
-    #[test]
     fn determinism_same_inputs_same_bytes() {
         let fixture = FixtureBuilder::store();
         let dir = &fixture.dir;
@@ -1433,7 +1325,6 @@ mod tests {
             history_budget_tokens: 60_000.0,
             covered_system_messages: &[],
             memory_enabled: true,
-            host_backed_memory_ids: false,
             memory_budget_tokens: 8_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: true,

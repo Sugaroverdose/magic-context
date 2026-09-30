@@ -287,14 +287,6 @@ function memoryIdContaining(body: Record<string, unknown>, content: string): num
     return Number(match[1]);
 }
 
-function thrownMessage(fn: () => unknown): string {
-    try {
-        fn();
-        return "";
-    } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-    }
-}
 
 async function waitForRustCompartment(sessionId: string): Promise<void> {
     if (!(h instanceof TestHarness)) {
@@ -619,18 +611,21 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                         "B10 Rust writer: save the release rule.",
                     );
 
-                    // PARITY.md assigns memory rows to module authority. Observe the
-                    // committed write through a fresh session's provider wire; a direct
-                    // TypeScript context.db insert is rejected instead of mutating m[1].
+                    // Both runtimes write the same context rows. Verify each committed
+                    // write in the context sent with a fresh Rust session's provider request.
                     const readerSessionId = await h.createSession();
                     h.mock.reset();
                     setDefer("B10 Rust reader");
                     await h.sendPrompt(readerSessionId, "B10 Rust reader: load project memory.");
                     const readerM0 = extractM0(mainAgentRequests(h.mock.requests()).at(-1)!.body)!;
                     expect(readerM0).toContain(freshRule);
-                    expect(thrownMessage(() => seedMemory("B10 forbidden TS-side write"))).toContain(
-                        "managed by the Rust module",
-                    );
+                    const sharedRule = "B10 shared TS-side write";
+                    seedMemory(sharedRule);
+                    const sharedReader = await h.createSession();
+                    h.mock.reset();
+                    setDefer("B10 shared-store reader");
+                    await h.sendPrompt(sharedReader, "Read the TypeScript writer's memory.");
+                    expect(extractM0(mainAgentRequests(h.mock.requests()).at(-1)!.body)).toContain(sharedRule);
                     return;
                 }
                 seedMemory("B10 baseline rule: prefer the project's own tools over shell fallbacks.");
@@ -725,9 +720,15 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                     const revisedM0 = extractM0(mainAgentRequests(h.mock.requests()).at(-1)!.body)!;
                     expect(revisedM0).toContain(revised);
                     expect(revisedM0).not.toContain(original);
-                    expect(
-                        thrownMessage(() => queueMemoryUpdate(rustMemoryId, "forbidden TS update")),
-                    ).toContain("managed by the Rust module");
+                    const sharedUpdate = "B11 shared TS update";
+                    queueMemoryUpdate(rustMemoryId, sharedUpdate);
+                    const sharedReader = await h.createSession();
+                    h.mock.reset();
+                    setDefer("B11 shared-store reader");
+                    await h.sendPrompt(sharedReader, "Read the TypeScript writer's update.");
+                    const sharedM0 = extractM0(mainAgentRequests(h.mock.requests()).at(-1)!.body)!;
+                    expect(sharedM0).toContain(sharedUpdate);
+                    expect(sharedM0).not.toContain(revised);
                     return;
                 }
                 const memId = seedMemory(

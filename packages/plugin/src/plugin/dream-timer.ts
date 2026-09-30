@@ -1,7 +1,6 @@
 import { statSync } from "node:fs";
 
 import type { DreamerConfig } from "../config/schema/magic-context";
-import { getAuthorityManagedMarker } from "../features/magic-context/context-authority";
 import type { ClassifyModuleClient } from "../features/magic-context/dreamer/classify";
 import { acquireLease, releaseLease } from "../features/magic-context/dreamer/lease";
 import { logDreamerNotOwnerOnce } from "../features/magic-context/dreamer/module-apply";
@@ -63,6 +62,7 @@ import {
 } from "../features/magic-context/storage";
 import { pruneStaleLkgSlots } from "../hooks/magic-context/lkg-persist";
 import type { RawMessageProvider } from "../hooks/magic-context/read-session-chunk";
+import { projectNeedsSingleStoreMigration } from "../hooks/magic-context/single-store-refusal";
 import { getErrorMessage } from "../shared/error-message";
 import { log } from "../shared/logger";
 import type { ModelHarness } from "../shared/model-resolution";
@@ -707,7 +707,7 @@ export function _resetDreamTimerForTests(): void {
 }
 
 async function runCompiledSmartNoteSweep(reg: ProjectRegistration, db: Database): Promise<void> {
-    if (getAuthorityManagedMarker(db, reg.projectIdentity)) {
+    if (projectNeedsSingleStoreMigration(db, reg.projectIdentity)) {
         logDreamerNotOwnerOnce(reg.projectIdentity);
         return;
     }

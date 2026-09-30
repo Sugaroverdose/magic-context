@@ -49,10 +49,10 @@ export async function assertHiddenChildStoresClosed(
         [path, `${path}-wal`, `${path}-shm`].filter(existsSync).map((file) => realpathSync(file)),
     );
     const result = spawnSync("lsof", ["-Fn", "--", ...paths], {
+        windowsHide: true,
         encoding: "utf8",
         timeout: 30_000,
         maxBuffer: 32 * 1024 * 1024,
-        windowsHide: true,
     });
     if (
         result.error ||

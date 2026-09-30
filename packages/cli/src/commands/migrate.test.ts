@@ -506,6 +506,36 @@ describe("migrateOpenCodeSessionToPi", () => {
         expect(readJournalRows(cortexkitDb)).toEqual([]);
     });
 
+    it("refuses partial-message compartment conversion before staging or claiming a journal", () => {
+        const db = makeDb();
+        const { sessionId } = insertSyntheticSession(db);
+        const cortexkitDb = makeCortexkitDb();
+        cortexkitDb.exec("ALTER TABLE compartments ADD COLUMN end_block_index INTEGER");
+        cortexkitDb
+            .prepare(
+                "INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, end_block_index, title, content, created_at, harness) VALUES (?, 0, 1, 2, 'm1', 'm2', 0, 'partial', 'body', 1, 'opencode')",
+            )
+            .run(sessionId);
+        const writes: string[] = [];
+        expect(() =>
+            migrateOpenCodeSessionToPi({
+                db,
+                cortexkitDb,
+                sessionId,
+                piSessionsRoot: tempDir(),
+                fs: {
+                    writeFileAtomic: (path) => writes.push(path),
+                    unlinkSync: () => {},
+                    existsSync: (path) => existsSync(path),
+                    renameSync: (from, to) => renameSync(from, to),
+                    mkdirSync: (path, options) => mkdirSync(path, options),
+                },
+            }),
+        ).toThrow("partial_message_compartments_require_recompaction");
+        expect(writes).toEqual([]);
+        expect(readJournalRows(cortexkitDb)).toEqual([]);
+    });
+
     it("refuses module-managed source sessions before staging output", () => {
         const db = makeDb();
         const { sessionId, cwd } = insertSyntheticSession(db);
@@ -536,9 +566,7 @@ describe("migrateOpenCodeSessionToPi", () => {
                     mkdirSync: (path, options) => mkdirSync(path, options),
                 },
             }),
-        ).toThrow(
-            `context.db may contain only host mirrors, not the Rust engine truth. Drain authority to TypeScript with \`magic-context doctor drain-authority ${cwd}\``,
-        );
+        ).toThrow("(MC-C14)");
         expect(writes).toEqual([]);
         expect(readJournalRows(cortexkitDb)).toEqual([]);
     });

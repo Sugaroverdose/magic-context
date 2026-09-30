@@ -294,20 +294,6 @@
             ]
         },
         {
-            "path": "tests/dreamer-authority-preflight.test.ts",
-            "tier": "ts-only",
-            "invocation": { "ts": true, "rust": false },
-            "rationale": "OpenCode 1.18.30 TypeScript host skips module-managed classification without prompting",
-            "contract_refs": ["TS-HARNESS"],
-            "hosts": ["opencode"],
-            "behavior": true,
-            "divergences": [
-                { "host": "opencode2", "reason": "OpenCode 2 uses a separate completion carrier", "contract_ref": "TS-HARNESS" },
-                { "host": "pi", "reason": "Pi uses a separate JSONL host and has no module client", "contract_ref": "PI-HARNESS" },
-                { "host": "omp", "reason": "OMP uses a separate Pi-compatible host", "contract_ref": "PI-HARNESS" }
-            ]
-        },
-        {
             "path": "tests/dreamer-pi-model-chain.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
@@ -1890,21 +1876,6 @@
             ]
         },
         {
-            "path": "tests/rust-memory-mirror-resume.test.ts",
-            "tier": "rust-only",
-            "invocation": {
-                "ts": false,
-                "rust": true
-            },
-            "rationale": "real-module memory-mirror resume: interrupted initial drain resumes from the module feed head, stable passes issue no pull, ctx_memory reads/writes succeed after the wedge (issue 444)",
-            "contract_refs": [
-                "RUST-E2E"
-            ],
-            "hosts": [
-                "opencode"
-            ]
-        },
-        {
             "path": "tests/rust-memory-off-parity.test.ts",
             "tier": "rust-only",
             "invocation": {
@@ -2446,21 +2417,6 @@
                 "rust": false
             },
             "rationale": "the dreamer token budget on a real OpenCode 1.18.30 host: aborting at the soft limit keeps the tools array byte-identical, the finalize turn banks its manifest, a later tool call is refused, and the hard stop records token_budget (MC-D11); opt-in with MC_E2E_OC1_BUDGET_PROBE=1, so it runs by hand outside the mode lanes",
-            "contract_refs": [
-                "DREAMER-TIMEOUTS"
-            ],
-            "hosts": [
-                "opencode"
-            ]
-        },
-        {
-            "path": "tests/dreamer-verify-slice-authority.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "a verify batch longer than Bun's 300-360 s fetch timer on a real OpenCode 1 host ends on its own slice, records the model on the failed row, aborts the child and waits for the next scheduled run; takes about eight minutes of wall clock, so it runs by hand outside the mode lanes",
             "contract_refs": [
                 "DREAMER-TIMEOUTS"
             ],

@@ -161,7 +161,7 @@ fn run(payload: usize) -> PassAllocations {
             .unwrap();
         }
     }
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
     let dir_text = dir.path().to_str().unwrap().to_string();
     let ctx = context(&dir_text);
     let live = request(&session, LIVE_MESSAGES);

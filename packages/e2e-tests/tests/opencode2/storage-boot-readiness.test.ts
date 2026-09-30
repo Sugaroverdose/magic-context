@@ -13,6 +13,7 @@ import { join, resolve } from "node:path";
 import { OpenCode } from "@opencode/client";
 import {
 	closeDatabase,
+    LATEST_SUPPORTED_VERSION,
 	openDatabase,
 } from "../../../plugin/src/features/magic-context/storage-db";
 import {
@@ -43,7 +44,7 @@ async function checkStorageBoot(blocked: boolean) {
 		throw new Error("could not seed isolated storage");
 	closeDatabase();
 	const db = new Database(dbPath);
-	db.exec("DELETE FROM schema_migrations WHERE version = 91");
+	db.prepare("DELETE FROM schema_migrations WHERE version = ?").run(LATEST_SUPPORTED_VERSION);
 	if (blocked) db.exec("BEGIN IMMEDIATE");
 	const blockerPid = process.pid;
 	if (blocked)
@@ -255,7 +256,7 @@ export default { id: "opencode-magic-context", async setup(context) { mark("setu
 			checked
 				.query("SELECT MAX(version) AS version FROM schema_migrations")
 				.get(),
-		).toEqual({ version: blocked ? 90 : 91 });
+		).toEqual({ version: blocked ? LATEST_SUPPORTED_VERSION - 1 : LATEST_SUPPORTED_VERSION });
 		checked.close();
 		if (!blocked) {
 			expect(

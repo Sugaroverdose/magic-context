@@ -243,6 +243,8 @@ export interface CandidateCompartment {
     endMessage: number;
     startMessageId: string;
     endMessageId: string;
+    startBlockIndex?: number | null;
+    endBlockIndex?: number | null;
     title: string;
     /** v2: P1 tier text (mirror). v1/compressor: flat content. */
     content: string;

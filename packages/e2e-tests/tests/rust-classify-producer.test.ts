@@ -58,8 +58,6 @@ describe.skipIf(!rustPrereqs.ok)("rust classify producer", () => {
     let h: RustTestHarness;
     let sessionId: string;
     let projectIdentity: string;
-    let contextStoreUuid: string;
-    let authorityGeneration: number;
     let items: PoolItem[];
 
     beforeEach(async () => {
@@ -142,46 +140,19 @@ describe.skipIf(!rustPrereqs.ok)("rust classify producer", () => {
                     );
                 }
             }).immediate();
-            const uuidRow = seedDb
-                .prepare("SELECT value FROM context_store_meta WHERE key = 'store_uuid'")
-                .get() as { value?: string } | undefined;
-            contextStoreUuid = uuidRow?.value ?? "";
-            expect(contextStoreUuid).toBeTruthy();
         } finally {
             seedDb.close();
         }
 
-        // Rust mode mirrors the corpus into the module store and flips memories authority.
+        // Rust reads the same committed context rows and uses the same memory IDs.
         await h.restart({ rust: true });
-        await h.sendPrompt(sessionId, "activate Rust authority for the classify lane corpus");
+        await h.sendPrompt(sessionId, "activate Rust mode for the shared classify corpus");
         await h.waitForRustPasses(1);
 
-        const status = await h.subc.moduleRequest(sessionId, h.env.workdir, {
-            method: "authority.status",
-            context_store_uuid: contextStoreUuid,
-            project: projectIdentity,
-            domain: "memories",
-        });
-        const authority = (status as { authority?: { state?: string; generation?: number } })
-            .authority;
-        expect(authority?.state).toBe("MODULE");
-        authorityGeneration = authority?.generation ?? -1;
-
-        const moduleDb = new Database(
-            join(h.env.dataDir, "cortexkit", "magic-context", "store.db"),
-            { readonly: true },
-        );
-        try {
-            items = (
-                moduleDb
-                    .prepare(
-                        "SELECT id, normalized_hash FROM mc_memories WHERE project_path = ? AND status = 'active' ORDER BY id",
-                    )
-                    .all(projectIdentity) as Array<{ id: number; normalized_hash: string }>
-            ).map((row) => ({ memory_id: row.id, content_hash: row.normalized_hash }));
-        } finally {
-            moduleDb.close();
-        }
+        items = (h.contextDb().prepare(
+            "SELECT id, normalized_hash FROM memories WHERE project_path = ? AND status = 'active' ORDER BY id",
+        ).all(projectIdentity) as Array<{ id: number; normalized_hash: string }>)
+            .map(row => ({ memory_id: row.id, content_hash: row.normalized_hash }));
         expect(items.length).toBeGreaterThan(1);
     });
 
@@ -194,7 +165,6 @@ describe.skipIf(!rustPrereqs.ok)("rust classify producer", () => {
             method: "dreamer.run_task",
             task: "classify",
             command_id: `classify:lane:${park ? "park" : "clean"}:${Date.now()}`,
-            authority_generation: authorityGeneration,
             model_chain: modelChain,
             payload: {
                 prompt_body: classifyPrompt(projectIdentity, items, park),

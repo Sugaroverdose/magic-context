@@ -410,12 +410,13 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
             modelContextLimit: 100_000,
             magicContextConfig: {
                 execute_threshold_percentage: 20,
+                embedding: { provider: "off" },
                 protected_tags: 1,
                 memory: {
                     enabled: true,
                     auto_promote: false,
                     injection_budget_tokens: 500,
-                    auto_search: { enabled: true, score_threshold: 0.1, min_prompt_chars: 12 },
+                    auto_search: { enabled: true, score_threshold: 0.3, min_prompt_chars: 12 },
                     git_commit_indexing: { enabled: false },
                 },
                 dreamer: { disable: true },
@@ -715,6 +716,12 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
                 .contextDb()
                 .prepare("SELECT COUNT(*) AS n FROM memories WHERE content = ?")
                 .get(autoSearchMemory) as { n: number } | null;
+            if ((mirroredMemory?.n ?? 0) !== 1) {
+                const body = h.mock.requests().at(-1)?.body;
+                console.error("memory write tool result", JSON.stringify(Array.isArray(body?.messages) ? body.messages.slice(-2) : body).slice(-3000));
+                const diagnostic = await Bun.file(join(h.dataDir, "cortexkit", "magic-context-e2e.log")).text();
+                console.error(diagnostic.split("\n").filter(line => /config|embedding|observation|disabled|registered project/.test(line)).join("\n"));
+            }
             expect(mirroredMemory?.n ?? 0).toBe(1);
         } else {
             seedMemory(autoSearchMemory);

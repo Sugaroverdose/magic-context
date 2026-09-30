@@ -61,15 +61,15 @@ function thrownBy(run: () => unknown): unknown {
 }
 
 describe("createV2StorageGate", () => {
-    it("restores the native write busy window after a non-blocking boot open", async () => {
-        const dataHome = mkdtempSync(join(tmpdir(), "v2-storage-busy-window-"));
+    it("restores the steady-state busy timeout after the nonblocking default open", async () => {
+        const dataHome = mkdtempSync(join(tmpdir(), "v2-storage-gate-timeout-"));
         tempDirs.push(dataHome);
         process.env.XDG_DATA_HOME = dataHome;
         process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
-        const gate = createV2StorageGate();
-        const db = await gate.probe();
-        expect(db).toBeDefined();
-        expect(db!.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 5000 });
+        __setRpcIdentityTestHooks({ processListExecFileSync: (() => "") as typeof execFileSync });
+        const database = await createV2StorageGate().probe();
+        expect(database).toBeDefined();
+        expect(database!.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 5000 });
     });
 
     it("re-attempts a failed open at most once per interval and names the failure", async () => {
@@ -161,6 +161,7 @@ describe("createV2StorageGate against a migration blocked by another live host",
         seeded
             .prepare("DELETE FROM schema_migrations WHERE version = ?")
             .run(LATEST_SUPPORTED_VERSION);
+        seeded.exec("DROP TABLE single_store_state");
         closeQuietly(seeded);
         const dir = join(dirname(dbPath), "rpc", "older-host");
         mkdirSync(dir, { recursive: true });

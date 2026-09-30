@@ -1,9 +1,8 @@
 //! Single-store writer: the module writing the host's `context.db` domain tables.
 //!
-//! Today the module owns `store.db` and a changefeed mirror copies domain rows into
-//! `context.db`, which every interactive seat reads. This module is the first half of
-//! removing that seam: it writes the domain tables directly, under the same discipline
-//! the TypeScript host writes them under.
+//! `context.db` is the only copy of the module's memories, notes and session history. The
+//! module writes those tables directly, under the same discipline the TypeScript host
+//! writes them under; `store.db` keeps only the module's cache.
 //!
 //! Three rules shape everything here.
 //!
@@ -33,14 +32,13 @@
 //!    the compartments, their facts, their events — all land in the final chunk. A reader
 //!    between chunks sees the session exactly as it was before the fold started.
 //!
-//! In this slice the writers are shadow/verify only. `single_store: "on"` is refused by
-//! name; `"shadow"` writes to a scratch copy of the file and reports how the rows it
-//! produced differ from the rows already in `context.db`.
+//! Everyday writes go through [`HostStore::with_domain_transaction`], one transaction per
+//! write; the chunked [`HostStore::publish_fold`] writer is kept for bulk publishes.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -50,12 +48,8 @@ use sha2::{Digest, Sha256};
 /// Whether this binary can serve a store whose project rows live in the host's own
 /// database ("single-store mode"), as `session.status` reports it.
 ///
-/// This is the store's own constant, not a second copy: `mc_store` is what refuses to
-/// open a store carrying the single-store marker, so the status surface has to report
-/// the same answer that refusal acts on. The writers in this file run only against a
-/// scratch copy (`shadow`) and `on` is refused, so this build cannot serve a moved
-/// store yet and reports `false`; the slice that adds the readers flips the store's
-/// constant and this follows.
+/// This is the store's own constant, not a second copy, so the status surface reports the
+/// same answer the store acts on.
 pub const SINGLE_STORE_CAPABLE: bool = mc_store::SINGLE_STORE_CAPABLE;
 
 /// The `context.db` upstream migration lane this binary was built against.
@@ -64,7 +58,7 @@ pub const SINGLE_STORE_CAPABLE: bool = mc_store::SINGLE_STORE_CAPABLE;
 /// this binary was built; whether that migration changed anything these writers depend
 /// on is answered per table by the fingerprints, so a migration that touched only tables
 /// the module never writes does not stop the module writing.
-pub const BUILT_CONTEXT_FENCE_VERSION: i64 = 91;
+pub const BUILT_CONTEXT_FENCE_VERSION: i64 = 92;
 
 /// Versions at or above this number belong to downstream forks and are excluded when
 /// reading the persisted lane, matching the host's own fence arithmetic.
@@ -144,60 +138,6 @@ pub const PUBLISH_CHUNK_BUDGET_US: i64 = 250_000;
 /// A historian fold is a handful of compartments, far below this ceiling.
 pub const MAX_VISIBILITY_CHUNK_ROWS: usize = 256;
 
-// ── Mode ────────────────────────────────────────────────────────────────────
-
-/// Module config `single_store`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SingleStoreMode {
-    /// The module does not open `context.db` at all. The mirror remains the only path.
-    #[default]
-    Off,
-    /// The module runs its writers against a scratch copy and reports how the rows it
-    /// produced differ from the rows already in `context.db`. Nothing is written to the
-    /// real file.
-    Shadow,
-    /// The module writes `context.db` for real. Refused in this slice.
-    On,
-}
-
-impl SingleStoreMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SingleStoreMode::Off => "off",
-            SingleStoreMode::Shadow => "shadow",
-            SingleStoreMode::On => "on",
-        }
-    }
-
-    /// Parse a config value. An unrecognized value is not silently treated as `off`:
-    /// the caller is told, so a typo in a config file surfaces as a warning rather than
-    /// as a feature that quietly never runs.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "off" => Some(SingleStoreMode::Off),
-            "shadow" => Some(SingleStoreMode::Shadow),
-            "on" => Some(SingleStoreMode::On),
-            _ => None,
-        }
-    }
-
-    fn code(self) -> u8 {
-        match self {
-            SingleStoreMode::Off => 0,
-            SingleStoreMode::Shadow => 1,
-            SingleStoreMode::On => 2,
-        }
-    }
-
-    fn from_code(code: u8) -> Self {
-        match code {
-            1 => SingleStoreMode::Shadow,
-            2 => SingleStoreMode::On,
-            _ => SingleStoreMode::Off,
-        }
-    }
-}
-
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 /// Why the module will not write `context.db`.
@@ -229,11 +169,6 @@ pub enum HostStoreError {
         expected: String,
         found: String,
     },
-    /// `single_store: "on"` was requested. The writers exist but are shadow/verify only
-    /// in this slice.
-    ModeRefused {
-        mode: &'static str,
-    },
     /// The privilege row could not be flipped, or did not read back as flipped inside
     /// the transaction. Writing on regardless would hit the authority guards mid-publish
     /// and leave a partially applied chunk.
@@ -264,7 +199,6 @@ impl HostStoreError {
             HostStoreError::FenceMissing { .. } => "single_store_fence_missing",
             HostStoreError::TableMissing { .. } => "single_store_table_missing",
             HostStoreError::FingerprintMismatch { .. } => "single_store_fingerprint_mismatch",
-            HostStoreError::ModeRefused { .. } => "single_store_mode_refused",
             HostStoreError::PrivilegeFlipFailed { .. } => "single_store_privilege_flip_failed",
             HostStoreError::ChunkBudgetExceeded { .. } => "single_store_chunk_budget_exceeded",
             HostStoreError::Busy { .. } => "single_store_busy",
@@ -305,10 +239,6 @@ impl fmt::Display for HostStoreError {
             } => write!(
                 formatter,
                 "context.db table {table} has schema fingerprint {found}, not the {expected} this module was built against; domain writes to {table} are refused"
-            ),
-            HostStoreError::ModeRefused { mode } => write!(
-                formatter,
-                "single_store mode {mode} is not available in this build: the context.db writers are shadow/verify only"
             ),
             HostStoreError::PrivilegeFlipFailed { reason } => write!(
                 formatter,
@@ -363,7 +293,8 @@ fn counted<T>(result: Result<T, HostStoreError>) -> Result<T, HostStoreError> {
 
 // ── Schema fingerprints ─────────────────────────────────────────────────────
 
-/// The `sqlite_master` fingerprint each domain table, and [`BRACKET_TABLE`], must carry.
+/// The expected schema fingerprint of each domain table and of [`BRACKET_TABLE`], as
+/// computed by [`read_table_fingerprint`].
 ///
 /// Regenerate together with any migration that touches a domain table:
 /// `bun scripts/dump-context-db-schema.ts > crates/mc-module/tests/fixtures/context-db-schema.sql`
@@ -372,59 +303,130 @@ fn counted<T>(result: Result<T, HostStoreError>) -> Result<T, HostStoreError> {
 pub const DOMAIN_TABLE_FINGERPRINTS: &[(&str, &str)] = &[
     (
         "compartment_events",
-        "c25a1a9fbae82a47e449aa1de08a0f9741a9665ada17d83e52e584225087e843",
+        "79cb5301803217125d3831923e70a5d913754d6d733a96727f8cb86f2f5e138d",
     ),
     (
         "compartments",
-        "3ea325c5d2d51df824126f3abcdd9f01707a4b254762b5c613323ad18a4591c3",
+        "0b8353ff0e21178c2577a28825eea941b515e3c539092f2d5c799eb7c83688a4",
     ),
     (
         "context_privilege_state",
-        "5fe555e971ccd6cb5c7a25aa523d527950bf3f4fd5e38bbd79cbcda9fd2f095b",
+        "ffe1e5a4d218c3a16cacc0a4c716eb227fa1bba59f203f035226d73ee0f88751",
     ),
     (
         "memories",
-        "614cc40bba9242ecd79577df693df5f90b98b5f6cd436f978b1293eda1372a12",
+        "a5b13611e93768e4f53e78e4831a58d74d6c79e078a1a85c5cfbf269a0eb417c",
     ),
     (
         "memory_embedding_watermarks",
-        "35ee22cf02938870a25f214d3b0002fb434a7f005b086fd4642e96e816bf15ad",
+        "b3012ecd26bbc261bbd51ce0e7cdfaa9068864b0d32701c23d7b4704cf9560cc",
     ),
     (
         "notes",
-        "efe8efd4759a9a9cc768808b3c94c55bc2af93ecd66778f64853c2f13c585ad7",
+        "31bf819717d1a09f3762fb1f56848fc19612f110fae8cc894bad5dc00f4ae2db",
     ),
     (
         "primer_candidates",
-        "ddeae5e61b4b3df6025141621a080574f196e3d782a209c79b3a2b21be201141",
+        "9992d881ec72626d4656a7c73c8779e33f1762cf106ea9ffff72e3b08dd3ec27",
     ),
     (
         "session_facts",
-        "1e619e665f653afa4ab62a45f37e0dedee798085f4081ece02f40f278a834f64",
+        "4a51eda591fa24f51a6b500a0773a9a648f1e53a1ada9352b195039230e11ec5",
     ),
     (
         "user_memories",
-        "d1b14d392fe181fb9563068356ebec6519ff956f3fc27ffc7cdc4438a3cbcd98",
+        "db3e60857602228326096491485382054f65432421e673b669b5a91f7dc8c865",
     ),
     (
         "user_memory_candidates",
-        "8129e1b067e2f1f69d2ea36d44c42df0757bc0d86f7c32eab57fb11a5847305a",
+        "95439b71b9b3bf11af21a75f092c8978d732e00be1a833b61214e81852dd83cc",
     ),
 ];
 
-fn expected_fingerprint(table: &str) -> Option<&'static str> {
+pub(crate) fn expected_fingerprint(table: &str) -> Option<&'static str> {
     DOMAIN_TABLE_FINGERPRINTS
         .iter()
         .find(|(name, _)| *name == table)
         .map(|(_, fingerprint)| *fingerprint)
 }
 
-/// Collapse the whitespace SQLite preserves verbatim in `sqlite_master.sql`.
+/// Normalise schema SQL so that spelling alone never reads as a schema change.
 ///
-/// Reformatting a CREATE statement without changing what it declares must not read as a
-/// schema change; changing a column, a constraint, an index or a trigger body must.
+/// Whitespace runs collapse to one space. Spaces next to parentheses and commas go, and
+/// so do identifier quotes (`"`, `` ` ``, `[`, `]`); string literals are left as written.
+/// Changing a column, a constraint, an index or a trigger body still changes the result.
 fn normalize_schema_sql(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut out = String::with_capacity(sql.len());
+    let mut in_string = false;
+    let mut pending_space = false;
+    for ch in sql.chars() {
+        if in_string {
+            out.push(ch);
+            if ch == '\'' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '\'' => {
+                if pending_space && !out.is_empty() && !out.ends_with(['(', ',']) {
+                    out.push(' ');
+                }
+                pending_space = false;
+                in_string = true;
+                out.push(ch);
+            }
+            '"' | '`' | '[' | ']' => {}
+            c if c.is_whitespace() => pending_space = true,
+            '(' | ')' | ',' => {
+                pending_space = false;
+                out.push(ch);
+            }
+            _ => {
+                if pending_space && !out.is_empty() && !out.ends_with(['(', ',']) {
+                    out.push(' ');
+                }
+                pending_space = false;
+                out.push(ch);
+            }
+        }
+    }
+    out
+}
+
+/// The CHECK constraints a CREATE TABLE statement declares, normalised and sorted, so
+/// their place in the statement (inline, or appended by `ALTER TABLE ADD COLUMN`) does
+/// not matter.
+fn check_constraints(create_sql: &str) -> Vec<String> {
+    let normalized = normalize_schema_sql(create_sql);
+    let upper = normalized.to_ascii_uppercase();
+    let bytes = normalized.as_bytes();
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = upper[from..].find("CHECK(") {
+        let start = from + offset;
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut end = normalized.len();
+        for (index, byte) in bytes.iter().enumerate().skip(start + "CHECK".len()) {
+            match byte {
+                b'\'' => in_string = !in_string,
+                b'(' if !in_string => depth += 1,
+                b')' if !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = index + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        found.push(normalized[start..end].to_string());
+        from = end;
+    }
+    found.sort();
+    found
 }
 
 /// Hash one table's full `sqlite_master` surface.
@@ -433,42 +435,133 @@ fn normalize_schema_sql(sql: &str) -> String {
 /// which is the surface a migration can change under the module: a trigger-only migration
 /// on a domain table is the demonstrated shape, and a columns-only fingerprint would miss
 /// it entirely.
-fn read_table_fingerprint(
+pub(crate) fn read_table_fingerprint(
     conn: &Connection,
     table: &str,
 ) -> Result<Option<String>, rusqlite::Error> {
-    let mut statement = conn.prepare(
-        "SELECT type, name, sql FROM sqlite_master
-          WHERE tbl_name = ?1 AND sql IS NOT NULL
-          ORDER BY type ASC, name ASC",
-    )?;
-    let rows = statement
+    Ok(table_schema_description(conn, table)?.map(|description| {
+        let mut hasher = Sha256::new();
+        hasher.update(description.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }))
+}
+
+/// The text [`read_table_fingerprint`] hashes: what the table declares, independent of
+/// how its CREATE statement happens to be spelled.
+///
+/// A file that gained columns through `ALTER TABLE ADD COLUMN` over many releases stores a
+/// different CREATE text from a file created at the latest lane in one go, with the same
+/// columns in another order. Hashing the text would read that as a schema change, and
+/// on a long-lived host file every write would be refused. So the description is built
+/// from what SQLite reports instead:
+/// - every column's name, declared type, NOT NULL flag, default and primary-key position,
+///   sorted by name;
+/// - the table's CHECK constraints, normalised and sorted;
+/// - every index (including the ones UNIQUE and PRIMARY KEY constraints create), with its
+///   uniqueness, origin, partial flag and key columns, plus the normalised SQL of an
+///   explicitly created one;
+/// - every trigger by name with its normalised SQL.
+///
+/// Returns `None` when the table does not exist.
+pub(crate) fn table_schema_description(
+    conn: &Connection,
+    table: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    let create_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(create_sql) = create_sql else {
+        return Ok(None);
+    };
+    let mut lines = Vec::new();
+
+    let mut columns = conn
+        .prepare("SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info(?1)")?
         .query_map(params![table], |row| {
-            Ok((
+            Ok(format!(
+                "column\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
                 row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
+                normalize_schema_sql(&row.get::<_, String>(1)?).to_ascii_uppercase(),
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?
+                    .map(|value| normalize_schema_sql(&value))
+                    .unwrap_or_else(|| "NULL".to_string()),
+                row.get::<_, i64>(4)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
+    columns.sort();
+    lines.extend(columns);
 
-    if !rows
-        .iter()
-        .any(|(kind, name, _)| kind == "table" && name == table)
-    {
-        return Ok(None);
-    }
+    lines.extend(
+        check_constraints(&create_sql)
+            .into_iter()
+            .map(|check| format!("check\u{1f}{check}")),
+    );
 
-    let mut hasher = Sha256::new();
-    for (kind, name, sql) in &rows {
-        hasher.update(kind.as_bytes());
-        hasher.update([0x1f]);
-        hasher.update(name.as_bytes());
-        hasher.update([0x1f]);
-        hasher.update(normalize_schema_sql(sql).as_bytes());
-        hasher.update([0x1e]);
+    let index_list = conn
+        .prepare("SELECT name, \"unique\", origin, partial FROM pragma_index_list(?1)")?
+        .query_map(params![table], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut indexes = Vec::new();
+    for (name, unique, origin, partial) in index_list {
+        let key_columns = conn
+            .prepare("SELECT COALESCE(name, '<expr>') FROM pragma_index_info(?1) ORDER BY seqno")?
+            .query_map(params![name], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+            .join(",");
+        let sql: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        // An index SQLite made for a UNIQUE or PRIMARY KEY constraint is named by its
+        // position in the CREATE statement, which differs between an evolved file and a
+        // fresh one, so it is identified by what it covers instead.
+        let identity = if origin == "c" {
+            name.clone()
+        } else {
+            format!("{origin}:{key_columns}")
+        };
+        indexes.push(format!(
+            "index\u{1f}{identity}\u{1f}{unique}\u{1f}{origin}\u{1f}{partial}\u{1f}{key_columns}\u{1f}{}",
+            sql.map(|sql| normalize_schema_sql(&sql)).unwrap_or_default()
+        ));
     }
-    Ok(Some(format!("{:x}", hasher.finalize())))
+    indexes.sort();
+    lines.extend(indexes);
+
+    let mut triggers = conn
+        .prepare(
+            "SELECT name, sql FROM sqlite_master
+              WHERE type = 'trigger' AND tbl_name = ?1 AND sql IS NOT NULL",
+        )?
+        .query_map(params![table], |row| {
+            Ok(format!(
+                "trigger\u{1f}{}\u{1f}{}",
+                row.get::<_, String>(0)?,
+                normalize_schema_sql(&row.get::<_, String>(1)?)
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    triggers.sort();
+    lines.extend(triggers);
+
+    Ok(Some(lines.join("\u{1e}")))
 }
 
 /// Read the persisted upstream migration lane, ignoring downstream fork numbers.
@@ -501,7 +594,11 @@ pub struct FenceState {
 }
 
 impl FenceState {
-    fn read(conn: &Connection, path: &Path, built_version: i64) -> Result<Self, HostStoreError> {
+    pub(crate) fn read(
+        conn: &Connection,
+        path: &Path,
+        built_version: i64,
+    ) -> Result<Self, HostStoreError> {
         let persisted_version =
             read_persisted_fence(conn)?.ok_or_else(|| HostStoreError::FenceMissing {
                 path: path.display().to_string(),
@@ -534,7 +631,7 @@ impl FenceState {
 
     /// The fence for one table. A table whose surface still hashes to the value this
     /// binary was built against is the table these writers know, at any migration lane.
-    fn check_table(&self, table: &str) -> Result<(), HostStoreError> {
+    pub(crate) fn check_table(&self, table: &str) -> Result<(), HostStoreError> {
         let Some(found) = self.fingerprints.get(table) else {
             return Err(HostStoreError::TableMissing {
                 table: table.to_string(),
@@ -823,8 +920,29 @@ impl HostStore {
             .collect()
     }
 
+    /// Run `writes` in one `BEGIN IMMEDIATE` transaction under the privileged-writer bracket,
+    /// after re-checking the schema of the fingerprinted tables among `tables`. A table the
+    /// module writes but does not fingerprint (the mutation logs, `memory_verifications`)
+    /// is not a fence input and is skipped here.
+    pub fn with_domain_transaction(
+        &mut self,
+        tables: &[&str],
+        writes: &mut dyn FnMut(&Transaction<'_>) -> rusqlite::Result<()>,
+    ) -> Result<(), HostStoreError> {
+        let fenced: Vec<&str> = tables
+            .iter()
+            .copied()
+            .filter(|table| DOMAIN_TABLES.contains(table))
+            .collect();
+        let fence = self.fence.clone();
+        with_privileged_transaction(&mut self.conn, &fence, &fenced, |tx| {
+            writes(tx).map_err(HostStoreError::from)
+        })
+        .map(|_| ())
+    }
+
     /// The health block the status surface reports.
-    pub fn health_value(&self, mode: SingleStoreMode) -> Value {
+    pub fn health_value(&self) -> Value {
         let mut tables = serde_json::Map::new();
         for table in DOMAIN_TABLES.iter().chain(std::iter::once(&BRACKET_TABLE)) {
             let state = match self.fence.check_write(table) {
@@ -839,7 +957,6 @@ impl HostStore {
         }
         json!({
             "capable": SINGLE_STORE_CAPABLE,
-            "mode": mode.as_str(),
             "path": self.path.display().to_string(),
             "fence": {
                 "persisted_version": self.fence.persisted_version,
@@ -847,22 +964,6 @@ impl HostStore {
                 "lane_ahead": self.fence.lane_ahead(),
             },
             "tables": Value::Object(tables),
-        })
-    }
-
-    /// Health for a module that could not open the file, or was never asked to.
-    pub fn unavailable_health_value(
-        mode: SingleStoreMode,
-        error: Option<&HostStoreError>,
-    ) -> Value {
-        json!({
-            "capable": SINGLE_STORE_CAPABLE,
-            "mode": mode.as_str(),
-            "path": Value::Null,
-            "fence": Value::Null,
-            "tables": Value::Null,
-            "error_code": error.map(HostStoreError::code),
-            "detail": error.map(ToString::to_string),
         })
     }
 }
@@ -1000,17 +1101,21 @@ fn insert_compartments(
     let mut statement = tx.prepare(
         "INSERT INTO compartments
            (session_id, sequence, start_message, end_message, start_message_id, end_message_id,
-            title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness, start_block_index, end_block_index)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
     )?;
     for compartment in &publish.compartments {
+        let (start_id, start_block) =
+            mc_store::context_boundaries::canonical_boundary_parts(&compartment.start_message_id)?;
+        let (end_id, end_block) =
+            mc_store::context_boundaries::canonical_boundary_parts(&compartment.end_message_id)?;
         statement.execute(params![
             publish.session_id,
             compartment.sequence,
             compartment.start_message,
             compartment.end_message,
-            compartment.start_message_id,
-            compartment.end_message_id,
+            start_id,
+            end_id,
             compartment.title,
             compartment.content,
             compartment.p1,
@@ -1022,6 +1127,8 @@ fn insert_compartments(
             compartment.legacy_flag(),
             compartment.created_at,
             publish.harness,
+            start_block,
+            end_block,
         ])?;
         ids.push(tx.last_insert_rowid());
     }
@@ -1411,8 +1518,8 @@ fn insert_user_memories(tx: &Transaction<'_>, publish: &FoldPublish) -> Result<(
 /// mark is what asks: the host's backfill drains every memory above `embedded_memory_id`
 /// up to `written_memory_id`. A per-project mark rather than a per-row column keeps the
 /// memories table byte-identical between the two writers.
-fn raise_embedding_watermark(
-    tx: &Transaction<'_>,
+pub(crate) fn raise_embedding_watermark(
+    tx: &Connection,
     project_path: &str,
     memory_id: i64,
     now_ms: i64,
@@ -1745,385 +1852,6 @@ fn apply_chunk(
     Ok(result)
 }
 
-// ── Shadow verification ─────────────────────────────────────────────────────
-
-/// One column that differs between the rows the module produced and the rows already in
-/// `context.db` for the same publish.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShadowDivergence {
-    pub table: String,
-    /// The natural key of the row, so a report names which row diverged.
-    pub key: String,
-    pub column: String,
-    /// What `context.db` holds. `None` means the mirror has no such row at all.
-    pub mirror: Option<String>,
-    /// What the module's writer produced.
-    pub module: Option<String>,
-}
-
-/// The outcome of one shadow publish.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ShadowReport {
-    pub scratch_path: String,
-    pub divergences: Vec<ShadowDivergence>,
-    pub chunk_rows: Vec<usize>,
-    pub chunk_durations_us: Vec<i64>,
-}
-
-impl ShadowReport {
-    /// A one-line summary for the log, naming the tables and columns that diverged rather
-    /// than only counting them.
-    pub fn summary(&self) -> String {
-        if self.divergences.is_empty() {
-            return format!(
-                "single_store shadow: {} chunks, no divergence",
-                self.chunk_rows.len()
-            );
-        }
-        let mut by_table: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for divergence in &self.divergences {
-            by_table
-                .entry(divergence.table.as_str())
-                .or_default()
-                .push(divergence.column.as_str());
-        }
-        let detail = by_table
-            .into_iter()
-            .map(|(table, mut columns)| {
-                columns.sort_unstable();
-                columns.dedup();
-                format!("{table}({})", columns.join(","))
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!(
-            "single_store shadow: {} chunks, {} diverging column(s): {detail}",
-            self.chunk_rows.len(),
-            self.divergences.len()
-        )
-    }
-}
-
-/// Columns compared per table. Autoincrement ids are excluded: two writers appending to
-/// the same table pick different ids by construction, and comparing them would report a
-/// divergence on every row while hiding the content ones.
-fn shadow_compare_columns(table: &str) -> &'static [&'static str] {
-    match table {
-        "compartments" => &[
-            "sequence",
-            "start_message",
-            "end_message",
-            "start_message_id",
-            "end_message_id",
-            "title",
-            "content",
-            "p1",
-            "p2",
-            "p3",
-            "p4",
-            "importance",
-            "episode_type",
-            "legacy",
-            "created_at",
-            "harness",
-        ],
-        "session_facts" => &["category", "content", "created_at", "updated_at", "harness"],
-        "compartment_events" => &["kind", "at_compartment", "fields_json", "harness"],
-        "memories" => &[
-            "project_path",
-            "category",
-            "content",
-            "normalized_hash",
-            "importance",
-            "scope",
-            "shareable",
-            "source_session_id",
-            "source_type",
-            "seen_count",
-            "retrieval_count",
-            "status",
-            "expires_at",
-            "verification_status",
-            "metadata_json",
-        ],
-        "primer_candidates" => &[
-            "project_path",
-            "harness",
-            "session_id",
-            "question",
-            "normalized_question",
-            "source_compartment_start",
-            "source_compartment_end",
-            "source_start_message_id",
-            "source_end_message_id",
-            "source_message_time",
-        ],
-        "user_memory_candidates" => &[
-            "content",
-            "session_id",
-            "source_compartment_start",
-            "source_compartment_end",
-        ],
-        "user_memories" => &["content", "status", "source_candidate_ids"],
-        "notes" => &["type", "status", "content", "session_id", "harness"],
-        _ => &[],
-    }
-}
-
-/// The natural key a row is matched on across the two databases.
-fn shadow_key_columns(table: &str) -> &'static [&'static str] {
-    match table {
-        "compartments" => &["session_id", "sequence"],
-        "session_facts" => &["session_id", "category", "content"],
-        "compartment_events" => &["session_id", "kind", "at_compartment"],
-        "memories" => &["project_path", "category", "content"],
-        "primer_candidates" => &["project_path", "session_id", "source_start_message_id"],
-        "user_memory_candidates" => &["session_id", "content"],
-        "user_memories" => &["content"],
-        "notes" => &["session_id", "content"],
-        _ => &[],
-    }
-}
-
-fn read_rows(
-    conn: &Connection,
-    table: &str,
-    scope_column: &str,
-    scope_value: &str,
-) -> Result<BTreeMap<String, BTreeMap<String, Option<String>>>, HostStoreError> {
-    let keys = shadow_key_columns(table);
-    let columns = shadow_compare_columns(table);
-    if keys.is_empty() || columns.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let mut selected: Vec<&str> = keys.to_vec();
-    for column in columns {
-        if !selected.contains(column) {
-            selected.push(column);
-        }
-    }
-    let sql = format!(
-        "SELECT {} FROM {table} WHERE {scope_column} = ?1",
-        selected.join(", ")
-    );
-    let mut statement = conn.prepare(&sql)?;
-    let mut rows = statement.query(params![scope_value])?;
-    let mut out = BTreeMap::new();
-    while let Some(row) = rows.next()? {
-        let mut values = BTreeMap::new();
-        for (index, column) in selected.iter().enumerate() {
-            let value: Option<String> = row.get::<_, Option<String>>(index).or_else(|_| {
-                row.get::<_, Option<i64>>(index)
-                    .map(|value| value.map(|value| value.to_string()))
-            })?;
-            values.insert((*column).to_string(), value);
-        }
-        let key = keys
-            .iter()
-            .map(|column| {
-                values
-                    .get(*column)
-                    .cloned()
-                    .flatten()
-                    .unwrap_or_else(|| "\u{0}".to_string())
-            })
-            .collect::<Vec<_>>()
-            .join("\u{1f}");
-        out.insert(key, values);
-    }
-    Ok(out)
-}
-
-/// The table's scope column and the publish value that scopes it.
-fn shadow_scope<'a>(table: &str, publish: &'a FoldPublish) -> (&'static str, &'a str) {
-    match table {
-        "memories" | "primer_candidates" => ("project_path", publish.project_path.as_str()),
-        "user_memories" => ("status", "active"),
-        _ => ("session_id", publish.session_id.as_str()),
-    }
-}
-
-impl HostStore {
-    /// Remove the rows this publish would produce, so the writers run against the state
-    /// that existed before the fold.
-    ///
-    /// Only ever called on a scratch copy. The point of shadow verification is to compare
-    /// the module's rows against the mirror's rows for the same publish, and that needs
-    /// both writers to start from the same place: without this, a fold the mirror had
-    /// already drained would meet its own rows on the way in. The deletes are keyed the
-    /// same way the comparison is, which is deliberately blunt — a scratch file is thrown
-    /// away, so over-deleting there costs nothing and under-deleting would silently
-    /// weaken the comparison.
-    fn rewind_publish_scope(&mut self, publish: &FoldPublish) -> Result<(), HostStoreError> {
-        let fence = self.fence.clone();
-        let tables: Vec<&str> = DOMAIN_TABLES.to_vec();
-        let (_, _) = with_privileged_transaction(&mut self.conn, &fence, &tables, |tx| {
-            tx.execute(
-                "DELETE FROM compartment_events WHERE session_id = ?1",
-                params![publish.session_id],
-            )?;
-            tx.execute(
-                "DELETE FROM session_facts WHERE session_id = ?1",
-                params![publish.session_id],
-            )?;
-            for compartment in &publish.compartments {
-                tx.execute(
-                    "DELETE FROM compartments WHERE session_id = ?1 AND sequence = ?2",
-                    params![publish.session_id, compartment.sequence],
-                )?;
-            }
-            for memory in &publish.memories {
-                tx.execute(
-                    "DELETE FROM memories WHERE project_path = ?1 AND content = ?2",
-                    params![publish.project_path, memory.content],
-                )?;
-            }
-            for note in &publish.notes {
-                tx.execute(
-                    "DELETE FROM notes WHERE session_id = ?1 AND content = ?2",
-                    params![publish.session_id, note.content],
-                )?;
-            }
-            for candidate in &publish.primer_candidates {
-                tx.execute(
-                    "DELETE FROM primer_candidates
-                      WHERE project_path = ?1 AND harness = ?2 AND session_id = ?3
-                        AND source_start_message_id = ?4 AND source_end_message_id = ?5",
-                    params![
-                        publish.project_path,
-                        publish.harness,
-                        publish.session_id,
-                        candidate.source_start_message_id,
-                        candidate.source_end_message_id,
-                    ],
-                )?;
-            }
-            for observation in &publish.user_observations {
-                tx.execute(
-                    "DELETE FROM user_memory_candidates WHERE session_id = ?1 AND content = ?2",
-                    params![publish.session_id, observation.content.trim()],
-                )?;
-            }
-            for memory in &publish.user_memories {
-                tx.execute(
-                    "DELETE FROM user_memories WHERE content = ?1",
-                    params![memory.content],
-                )?;
-            }
-            Ok(())
-        })?;
-        Ok(())
-    }
-
-    /// Run the writers against a scratch copy of `context.db` and report how the rows
-    /// they produce differ from the rows already there.
-    ///
-    /// `VACUUM INTO` rather than a file copy: it takes a consistent snapshot of a live
-    /// WAL database from inside SQLite, so a seat writing concurrently cannot leave the
-    /// scratch copy torn.
-    pub fn shadow_publish(
-        &mut self,
-        publish: &FoldPublish,
-        scratch_dir: &Path,
-    ) -> Result<ShadowReport, HostStoreError> {
-        counted(self.shadow_publish_inner(publish, scratch_dir))
-    }
-
-    fn shadow_publish_inner(
-        &mut self,
-        publish: &FoldPublish,
-        scratch_dir: &Path,
-    ) -> Result<ShadowReport, HostStoreError> {
-        std::fs::create_dir_all(scratch_dir).map_err(|error| HostStoreError::OpenFailed {
-            path: scratch_dir.display().to_string(),
-            reason: error.to_string(),
-        })?;
-        let scratch_path = scratch_dir.join(format!(
-            "single-store-shadow-{}.db",
-            publish
-                .session_id
-                .replace(|c: char| !c.is_alphanumeric(), "_")
-        ));
-        // VACUUM INTO refuses to overwrite, so a previous run's file is removed first.
-        let _ = std::fs::remove_file(&scratch_path);
-        let _ = std::fs::remove_file(scratch_path.with_extension("db-wal"));
-        let _ = std::fs::remove_file(scratch_path.with_extension("db-shm"));
-        self.conn
-            .execute("VACUUM INTO ?1", params![scratch_path.to_string_lossy()])?;
-
-        let mut scratch = HostStore::open_with_fence(&scratch_path, self.fence.built_version)?;
-        scratch.set_chunk_budget(self.chunk_budget);
-        scratch.set_visibility_budget(self.visibility_budget);
-        scratch.rewind_publish_scope(publish)?;
-        let outcome = scratch.publish_fold(publish)?;
-
-        let mut divergences = Vec::new();
-        for table in DOMAIN_TABLES {
-            if shadow_key_columns(table).is_empty() {
-                continue;
-            }
-            let (scope_column, scope_value) = shadow_scope(table, publish);
-            let mirror = read_rows(&self.conn, table, scope_column, scope_value)?;
-            let module = read_rows(&scratch.conn, table, scope_column, scope_value)?;
-            for (key, module_row) in &module {
-                let mirror_row = mirror.get(key);
-                for column in shadow_compare_columns(table) {
-                    let module_value = module_row.get(*column).cloned().flatten();
-                    let mirror_value = mirror_row
-                        .and_then(|row| row.get(*column).cloned())
-                        .flatten();
-                    let missing_row = mirror_row.is_none();
-                    if missing_row || module_value != mirror_value {
-                        divergences.push(ShadowDivergence {
-                            table: (*table).to_string(),
-                            key: key.clone(),
-                            column: (*column).to_string(),
-                            mirror: mirror_value,
-                            module: module_value,
-                        });
-                    }
-                }
-            }
-        }
-
-        Ok(ShadowReport {
-            scratch_path: scratch_path.display().to_string(),
-            divergences,
-            chunk_rows: outcome.chunk_rows,
-            chunk_durations_us: outcome.chunk_durations_us,
-        })
-    }
-}
-
-// ── Mode gate ───────────────────────────────────────────────────────────────
-
-/// The process-wide single-store mode.
-///
-/// A publish consults this on a path that runs for every fold, so the common answer —
-/// `Off`, meaning "do nothing, the mirror still owns this" — has to cost one relaxed
-/// atomic load and no allocation.
-static SINGLE_STORE_MODE: AtomicU8 = AtomicU8::new(0);
-
-/// Set the process-wide mode from resolved config.
-pub fn set_mode(mode: SingleStoreMode) {
-    SINGLE_STORE_MODE.store(mode.code(), Ordering::Relaxed);
-}
-
-pub fn mode() -> SingleStoreMode {
-    SingleStoreMode::from_code(SINGLE_STORE_MODE.load(Ordering::Relaxed))
-}
-
-/// Check a requested mode before anything opens the file.
-///
-/// `on` is refused by name rather than silently downgraded to `shadow`: a project that
-/// asked for real writes and got verification instead would look like it was working.
-pub fn admit_mode(mode: SingleStoreMode) -> Result<SingleStoreMode, HostStoreError> {
-    match mode {
-        SingleStoreMode::On => Err(HostStoreError::ModeRefused { mode: "on" }),
-        other => Ok(other),
-    }
-}
-
 // ── Locating context.db ─────────────────────────────────────────────────
 
 /// Where the host keeps `context.db`.
@@ -2168,203 +1896,6 @@ pub fn resolve_context_db_path() -> PathBuf {
             .join("magic-context")
     };
     storage_dir.join("context.db")
-}
-
-/// Where a shadow run puts its scratch copy: a temp directory, never beside the real
-/// database, so a scratch file can never be mistaken for the host's own.
-pub fn shadow_scratch_dir() -> PathBuf {
-    std::env::temp_dir()
-        .join("magic-context")
-        .join("single-store-shadow")
-}
-
-// ── The shadow verification hook ───────────────────────────────────────
-
-/// The last shadow outcome, for the status surface.
-static LAST_SHADOW: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
-    std::sync::OnceLock::new();
-
-fn last_shadow_slot() -> &'static std::sync::Mutex<Option<String>> {
-    LAST_SHADOW.get_or_init(|| std::sync::Mutex::new(None))
-}
-
-fn record_shadow_outcome(summary: String) {
-    *last_shadow_slot()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(summary);
-}
-
-/// What the last shadow publish reported, if one has run in this process.
-pub fn last_shadow_summary() -> Option<String> {
-    last_shadow_slot()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-}
-
-/// The refusal that made the resolved mode fall back to `off`, if any.
-static MODE_REFUSAL: std::sync::OnceLock<std::sync::Mutex<Option<(String, &'static str)>>> =
-    std::sync::OnceLock::new();
-
-fn mode_refusal_slot() -> &'static std::sync::Mutex<Option<(String, &'static str)>> {
-    MODE_REFUSAL.get_or_init(|| std::sync::Mutex::new(None))
-}
-
-/// Remember that a configured mode was refused, so the status surface can say why the
-/// module is doing nothing instead of leaving the operator to guess.
-pub fn record_mode_refusal(error: &HostStoreError) {
-    *mode_refusal_slot()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((error.to_string(), error.code()));
-}
-
-pub fn mode_refusal() -> Option<(String, &'static str)> {
-    mode_refusal_slot()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-}
-
-/// The single-store block for `session.status`.
-///
-/// Reports capability, the resolved mode, and — when the mode asks the module to touch
-/// `context.db` — what the fence and the per-table fingerprints found. In the default
-/// `off` mode this opens nothing: the answer is that the module is not touching the file,
-/// and opening it to say so would contradict the answer.
-pub fn status_value() -> Value {
-    let mode = mode();
-    let refusal = mode_refusal();
-    let mut block = match mode {
-        SingleStoreMode::Off => json!({
-            "capable": SINGLE_STORE_CAPABLE,
-            "mode": mode.as_str(),
-            "path": Value::Null,
-            "fence": Value::Null,
-            "tables": Value::Null,
-        }),
-        SingleStoreMode::Shadow | SingleStoreMode::On => {
-            let path = resolve_context_db_path();
-            match HostStore::open(&path) {
-                Ok(store) => store.health_value(mode),
-                Err(error) => HostStore::unavailable_health_value(mode, Some(&error)),
-            }
-        }
-    };
-    if let Some(object) = block.as_object_mut() {
-        object.insert(
-            "built_fence_version".to_string(),
-            json!(BUILT_CONTEXT_FENCE_VERSION),
-        );
-        object.insert(
-            "chunk_budget_rows".to_string(),
-            json!(DEFAULT_PUBLISH_CHUNK_ROWS),
-        );
-        object.insert(
-            "visibility_budget_rows".to_string(),
-            json!(MAX_VISIBILITY_CHUNK_ROWS),
-        );
-        object.insert("busy_refusals".to_string(), json!(busy_refusal_count()));
-        object.insert(
-            "last_shadow".to_string(),
-            match last_shadow_summary() {
-                Some(summary) => json!(summary),
-                None => Value::Null,
-            },
-        );
-        if let Some((detail, code)) = refusal {
-            object.insert("refused_mode_detail".to_string(), json!(detail));
-            object.insert("refused_mode_code".to_string(), json!(code));
-        }
-    }
-    block
-}
-
-/// What [`apply_publish_for_mode`] did with one fold publish.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModePublish {
-    /// `shadow`: the writers ran against a scratch copy; `context.db` was not written.
-    Shadow(ShadowReport),
-    /// `on`: the publish was written to `context.db`, including its embedding watermark.
-    Written(PublishOutcome),
-}
-
-/// Hand one fold publish to whatever the resolved mode asks for.
-///
-/// `off` returns `None` after one relaxed atomic load and opens nothing. `shadow` runs
-/// [`verify_publish_in_shadow`], which writes only a scratch copy. `on` writes the real
-/// `context.db`, so the rows and the embedding watermark that asks the host to embed them
-/// land where the host's drain reads them. `on` is still refused by [`admit_mode`], so in
-/// this build that arm is reached only by a caller that sets the mode directly.
-///
-/// A failure is recorded for the status surface and swallowed: the fold has already
-/// committed to the module's own store, and nothing here may fail it retroactively.
-pub fn apply_publish_for_mode(publish: &FoldPublish) -> Option<ModePublish> {
-    match mode() {
-        SingleStoreMode::Off => None,
-        SingleStoreMode::Shadow => verify_publish_in_shadow(publish).map(ModePublish::Shadow),
-        SingleStoreMode::On => {
-            let path = resolve_context_db_path();
-            if !path.exists() {
-                record_shadow_outcome(format!(
-                    "single_store on: no context.db at {}",
-                    path.display()
-                ));
-                return None;
-            }
-            match HostStore::open(&path).and_then(|mut store| store.publish_fold(publish)) {
-                Ok(outcome) => {
-                    record_shadow_outcome(format!(
-                        "single_store on: {} chunks, {} rows written",
-                        outcome.chunk_rows.len(),
-                        outcome.total_rows()
-                    ));
-                    Some(ModePublish::Written(outcome))
-                }
-                Err(error) => {
-                    record_shadow_outcome(format!(
-                        "single_store on refused ({}): {error}",
-                        error.code()
-                    ));
-                    None
-                }
-            }
-        }
-    }
-}
-
-/// Verify one fold publish against `context.db`, if the mode asks for it.
-///
-/// Returns `None` when single-store is off, which is the default and the only state this
-/// slice ships enabled: the cost on that path is one relaxed atomic load. A failure here
-/// is recorded and swallowed, never propagated — verification must not be able to fail a
-/// publish that already succeeded in the module's own store.
-pub fn verify_publish_in_shadow(publish: &FoldPublish) -> Option<ShadowReport> {
-    if mode() != SingleStoreMode::Shadow {
-        return None;
-    }
-    let path = resolve_context_db_path();
-    if !path.exists() {
-        record_shadow_outcome(format!(
-            "single_store shadow: no context.db at {}",
-            path.display()
-        ));
-        return None;
-    }
-    let report = HostStore::open(&path)
-        .and_then(|mut store| store.shadow_publish(publish, &shadow_scratch_dir()));
-    match report {
-        Ok(report) => {
-            record_shadow_outcome(report.summary());
-            Some(report)
-        }
-        Err(error) => {
-            record_shadow_outcome(format!(
-                "single_store shadow refused ({}): {error}",
-                error.code()
-            ));
-            None
-        }
-    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -2545,10 +2076,7 @@ mod tests {
 
         assert!(store.fence().lane_ahead());
         assert_eq!(store.writable_tables(), DOMAIN_TABLES.to_vec());
-        assert_eq!(
-            store.health_value(SingleStoreMode::Shadow)["fence"]["lane_ahead"],
-            json!(true)
-        );
+        assert_eq!(store.health_value()["fence"]["lane_ahead"], json!(true));
         store.publish_fold(&sample_publish()).unwrap();
     }
 
@@ -3308,116 +2836,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mode_on_is_refused_by_name() {
-        let error = admit_mode(SingleStoreMode::On).unwrap_err();
-        assert_eq!(error.code(), "single_store_mode_refused");
-        assert!(error.to_string().contains("shadow/verify only"));
-        assert_eq!(
-            admit_mode(SingleStoreMode::Off).unwrap(),
-            SingleStoreMode::Off
-        );
-        assert_eq!(
-            admit_mode(SingleStoreMode::Shadow).unwrap(),
-            SingleStoreMode::Shadow
-        );
-    }
-
-    #[test]
-    fn mode_parses_the_three_documented_values_and_nothing_else() {
-        assert_eq!(SingleStoreMode::parse("off"), Some(SingleStoreMode::Off));
-        assert_eq!(
-            SingleStoreMode::parse(" Shadow "),
-            Some(SingleStoreMode::Shadow)
-        );
-        assert_eq!(SingleStoreMode::parse("ON"), Some(SingleStoreMode::On));
-        assert_eq!(SingleStoreMode::parse("enabled"), None);
-        assert_eq!(SingleStoreMode::default(), SingleStoreMode::Off);
-    }
-
-    // ── Shadow verification ─────────────────────────────────────────────────
-
-    #[test]
-    fn shadow_mode_writes_nothing_to_the_real_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = fixture_db(dir.path(), "context.db");
-        mark_managed(&path, "git:fixture");
-        let mut store = HostStore::open(&path).unwrap();
-        let report = store
-            .shadow_publish(&sample_publish(), &dir.path().join("scratch"))
-            .unwrap();
-
-        let conn = Connection::open(&path).unwrap();
-        for table in ["compartments", "memories", "session_facts"] {
-            let count: i64 = conn
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
-                .unwrap();
-            assert_eq!(count, 0, "shadow mode wrote to {table} in the real file");
-        }
-        assert!(
-            !report.divergences.is_empty(),
-            "every row is new here, so every compared column must be reported"
-        );
-        assert!(report.summary().contains("diverging column"));
-    }
-
-    #[test]
-    fn shadow_mode_reports_the_columns_that_differ_from_the_mirrors_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = fixture_db(dir.path(), "context.db");
-        mark_managed(&path, "git:fixture");
-
-        // Stand in for the mirror: the same publish, already landed, except that one
-        // column carries a different value.
-        {
-            let mut seeded = HostStore::open(&path).unwrap();
-            let mut mirrored = sample_publish();
-            mirrored.compartments[0].title = "a different title".to_string();
-            seeded.publish_fold(&mirrored).unwrap();
-        }
-
-        let mut store = HostStore::open(&path).unwrap();
-        let report = store
-            .shadow_publish(&sample_publish(), &dir.path().join("scratch"))
-            .unwrap();
-
-        let compartment_titles: Vec<&ShadowDivergence> = report
-            .divergences
-            .iter()
-            .filter(|divergence| divergence.table == "compartments" && divergence.column == "title")
-            .collect();
-        assert_eq!(compartment_titles.len(), 1, "{:?}", report.divergences);
-        assert_eq!(
-            compartment_titles[0].mirror.as_deref(),
-            Some("a different title")
-        );
-        assert_eq!(compartment_titles[0].module.as_deref(), Some("first"));
-        assert!(report.summary().contains("compartments(title)"));
-    }
-
-    #[test]
-    fn shadow_mode_reports_no_divergence_when_the_rows_already_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = fixture_db(dir.path(), "context.db");
-        mark_managed(&path, "git:fixture");
-        {
-            let mut seeded = HostStore::open(&path).unwrap();
-            seeded.publish_fold(&sample_publish()).unwrap();
-        }
-        let mut store = HostStore::open(&path).unwrap();
-        let report = store
-            .shadow_publish(&sample_publish(), &dir.path().join("scratch"))
-            .unwrap();
-        assert!(
-            report.divergences.is_empty(),
-            "identical rows must not be reported as divergence: {:?}",
-            report.divergences
-        );
-        assert!(report.summary().contains("no divergence"));
-    }
-
     // ── Health surface ──────────────────────────────────────────────────────
 
     #[test]
@@ -3430,10 +2848,8 @@ mod tests {
                 .unwrap();
         }
         let store = HostStore::open(&path).unwrap();
-        let health = store.health_value(SingleStoreMode::Shadow);
-        // Reports the store's answer: this build cannot serve a moved store.
-        assert_eq!(health["capable"], json!(false));
-        assert_eq!(health["mode"], json!("shadow"));
+        let health = store.health_value();
+        assert_eq!(health["capable"], json!(true));
         assert_eq!(
             health["fence"]["persisted_version"],
             json!(BUILT_CONTEXT_FENCE_VERSION)
@@ -3448,43 +2864,6 @@ mod tests {
     }
 
     #[test]
-    fn the_status_block_in_off_mode_opens_nothing() {
-        set_mode(SingleStoreMode::Off);
-        let block = status_value();
-        // Reports the store's answer: this build cannot serve a moved store.
-        assert_eq!(block["capable"], json!(false));
-        assert_eq!(block["mode"], json!("off"));
-        assert!(
-            block["path"].is_null(),
-            "off mode must not name a file it did not open"
-        );
-        assert!(block["fence"].is_null());
-        assert_eq!(
-            block["built_fence_version"],
-            json!(BUILT_CONTEXT_FENCE_VERSION)
-        );
-        assert_eq!(
-            block["chunk_budget_rows"],
-            json!(DEFAULT_PUBLISH_CHUNK_ROWS)
-        );
-    }
-
-    #[test]
-    fn a_refused_mode_is_named_in_the_status_block() {
-        record_mode_refusal(&HostStoreError::ModeRefused { mode: "on" });
-        set_mode(SingleStoreMode::Off);
-        let block = status_value();
-        assert_eq!(
-            block["refused_mode_code"],
-            json!("single_store_mode_refused")
-        );
-        assert!(block["refused_mode_detail"]
-            .as_str()
-            .unwrap()
-            .contains("shadow/verify only"));
-    }
-
-    #[test]
     fn the_context_db_path_follows_the_hosts_own_resolution_order() {
         // Resolution is read from the process environment, which several tests share, so
         // this asserts the shape of the answer rather than mutating that environment.
@@ -3496,25 +2875,6 @@ mod tests {
             "resolved {}",
             resolved.display()
         );
-    }
-
-    #[test]
-    fn shadow_verification_is_inert_while_the_mode_is_off() {
-        set_mode(SingleStoreMode::Off);
-        assert!(verify_publish_in_shadow(&sample_publish()).is_none());
-    }
-
-    #[test]
-    fn unavailable_health_carries_the_error_code() {
-        let error = HostStoreError::FenceMissing {
-            path: "/tmp/example/context.db".to_string(),
-        };
-        let health = HostStore::unavailable_health_value(SingleStoreMode::Shadow, Some(&error));
-        assert_eq!(health["error_code"], json!("single_store_fence_missing"));
-        assert!(health["detail"]
-            .as_str()
-            .unwrap()
-            .contains("/tmp/example/context.db"));
     }
 
     // ── Chunk budget measurement ────────────────────────────────────────────
