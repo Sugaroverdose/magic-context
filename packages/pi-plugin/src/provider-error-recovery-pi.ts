@@ -194,7 +194,6 @@ export function applyPiThinkingBindingRecovery(args: {
 	 */
 	endOfPassOrder?: boolean;
 }): PiThinkingBindingApplication | null {
-	if (args.provider?.toLowerCase() !== "anthropic") return null;
 	const frozenEntryIds = frozenBindingEntryIds(args.db, args.sessionId);
 
 	const flagTarget = isPrefixBoundThinkingModel(args.provider, args.model)
@@ -244,7 +243,7 @@ export interface PiProactiveThinkingStrip {
 
 /**
  * Remove every thinking block still on the wire on a busting pass of a
- * prefix-bound model (Fable 5.1, Opus 5.5).
+ * prefix-bound model (Fable 5.1, Opus 5.5, Sonnet 5.5).
  *
  * On those models a thinking block is valid only while every byte before it is
  * unchanged, and a busting pass is the pass that changes those bytes: older

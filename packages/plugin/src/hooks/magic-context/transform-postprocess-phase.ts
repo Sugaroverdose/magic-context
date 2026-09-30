@@ -422,7 +422,7 @@ export async function applyTodoSynthesis(args: {
 export interface ThinkingBindingRecoveryApplication {
     /** The flag value read, so the caller clears only that value. */
     flagTarget: string;
-    /** Every assistant whose reasoning this pass sends as an empty sentinel. */
+    /** Every assistant whose reasoning this pass removes from the provider wire. */
     messageIds: string[];
 }
 
@@ -470,7 +470,7 @@ function freezeAllReasoningForBindingRecovery(args: {
     return { flagTarget: args.flagTarget, messageIds };
 }
 
-/** Thinking a busting pass removed on a prefix-bound model (Fable 5.1, Opus 5.5). */
+/** Thinking a busting pass removed on a prefix-bound model (Fable 5.1, Opus 5.5, Sonnet 5.5). */
 export interface ProactiveThinkingStrip {
     /** Assistants whose reasoning this pass froze into the binding-mismatch strip set. */
     messageIds: string[];
@@ -478,7 +478,7 @@ export interface ProactiveThinkingStrip {
 
 /**
  * Freeze the reasoning of every assistant still sending it, on a busting pass
- * of a prefix-bound model (Fable 5.1, Opus 5.5).
+ * of a prefix-bound model (Fable 5.1, Opus 5.5, Sonnet 5.5).
  *
  * On those models a signed thinking block is valid only while every byte
  * before it is unchanged, and a busting pass is the pass that changes those
@@ -650,7 +650,6 @@ export function replayRustModeBindingMismatchStrips(args: {
     messages: MessageLike[];
     resolvedProviderID?: string;
 }): void {
-    if (!modelAcceptsEmptyContent(args.resolvedProviderID)) return;
     const recoveryMessageIds = new Set<string>();
     for (const id of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
         if (!id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) continue;
@@ -1020,7 +1019,7 @@ export function runRustModePostprocess(args: {
     const recoveryMessageIds = new Set<string>();
     let thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null = null;
     let proactiveThinkingStrip: ProactiveThinkingStrip | null = null;
-    if (modelAcceptsEmptyContent(args.resolvedProviderID)) {
+    {
         try {
             for (const id of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
                 if (!id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) continue;
@@ -3086,7 +3085,7 @@ export async function runPostTransformPhase(
     const mergedReasoningStrippedIds = new Set(replaySnapshot?.mergedReasoningStrippedIds ?? []);
     const thinkingBindingRecoveryMessageIds = new Set<string>();
     let thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null = null;
-    if (canUseEmptySentinels && !compactionOff) {
+    if (!compactionOff) {
         try {
             for (const id of mergedReasoningStrippedIds) {
                 if (id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) {
@@ -3120,7 +3119,7 @@ export async function runPostTransformPhase(
                 }
             }
 
-            if (isCacheBustingPass) {
+            if (canUseEmptySentinels && isCacheBustingPass) {
                 const candidates = findMergedReasoningStripDecisions(
                     args.messages,
                     args.resolvedProviderID,
@@ -3296,7 +3295,6 @@ export async function runPostTransformPhase(
     // run for them.
     let proactiveThinkingStrip: ProactiveThinkingStrip | null = null;
     if (
-        canUseEmptySentinels &&
         !compactionOff &&
         args.fullFeatureMode &&
         args.thinkingBindingRecoveryEnabledForModel === true &&

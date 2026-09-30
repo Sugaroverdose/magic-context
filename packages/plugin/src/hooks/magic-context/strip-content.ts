@@ -3,7 +3,12 @@ import {
     readFrozenMergedReasoningParts,
 } from "../../features/magic-context/merged-reasoning-decisions";
 import { isRecord } from "../../shared/record-type-guard";
-import { isSentinel, makeSentinel, makeWholeMessageSentinel } from "./sentinel";
+import {
+    isSentinel,
+    makeSentinel,
+    makeWholeMessageSentinel,
+    modelAcceptsEmptyContent,
+} from "./sentinel";
 import { stripWellFormedLeadingTagPrefix } from "./tag-content-primitives";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
@@ -847,7 +852,8 @@ export function stripReasoningFromAssistantIds(
     providerID: string | undefined,
     messageIds: ReadonlySet<string>,
 ): number {
-    if (providerID !== "anthropic" || messageIds.size === 0) return 0;
+    if (messageIds.size === 0) return 0;
+    const emptySentinels = modelAcceptsEmptyContent(providerID);
     let stripped = 0;
     for (const message of messages) {
         const id = message.info.id;
@@ -855,9 +861,16 @@ export function stripReasoningFromAssistantIds(
         for (let index = 0; index < message.parts.length; index += 1) {
             const part = message.parts[index];
             if (!isRecord(part) || !REASONING_PART_TYPES.has(String(part.type))) continue;
-            message.parts[index] = makeSentinel(part);
+            if (emptySentinels) {
+                message.parts[index] = makeSentinel(part);
+            } else {
+                // Cloud and custom adapters may forward empty blocks instead of filtering them.
+                message.parts.splice(index, 1);
+                index -= 1;
+            }
             stripped += 1;
         }
+        if (message.parts.length === 0) message.parts.push(makeWholeMessageSentinel(providerID));
     }
     return stripped;
 }
