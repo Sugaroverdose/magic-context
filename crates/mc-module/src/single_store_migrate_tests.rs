@@ -1049,3 +1049,317 @@ fn migration_splits_module_boundaries_and_normalizes_existing_context_rows() {
     let mutations: i64 = context.query_row("SELECT COUNT(*) FROM m0_mutation_log WHERE session_id='context-only-flat' AND mutation_type='compartment_upgrade'", [], |row| row.get(0)).unwrap();
     assert_eq!(mutations, 1);
 }
+
+// ── Which copy of a session's history is kept ──────────────────────────────
+
+/// One compartment as a test writes it: sequence, first and last message ordinal, title,
+/// and creation time. The content is derived from the title.
+type Hist = (i64, i64, i64, &'static str, i64);
+
+const HISTORY_SESSION: &str = "ses_history";
+
+/// Give `HISTORY_SESSION` (attributed to `project`) the given compartments in each file,
+/// plus one store event and one context event on sequence 0.
+fn seed_history(fixture: &Fixture, project: &str, store_rows: &[Hist], context_rows: &[Hist]) {
+    let store = fixture.store();
+    let context = fixture.context();
+    context
+        .execute(
+            "INSERT INTO session_projects(session_id, harness, project_path, updated_at)
+             VALUES (?1, 'opencode', ?2, 1)",
+            params![HISTORY_SESSION, project],
+        )
+        .unwrap();
+    for (sequence, start, end, title, created) in store_rows {
+        store
+            .execute(
+                "INSERT INTO mc_compartments(session_id, sequence, start_message, end_message,
+                     start_message_id, end_message_id, title, content, p1, importance, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 50, ?9)",
+                params![
+                    HISTORY_SESSION,
+                    sequence,
+                    start,
+                    end,
+                    format!("m{start}"),
+                    format!("m{end}"),
+                    title,
+                    format!("{title} body"),
+                    created
+                ],
+            )
+            .unwrap();
+    }
+    for (sequence, start, end, title, created) in context_rows {
+        context
+            .execute(
+                "INSERT INTO compartments(id, session_id, sequence, start_message, end_message,
+                     start_message_id, end_message_id, title, content, p1, importance, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, 50, ?10)",
+                params![
+                    500 + sequence,
+                    HISTORY_SESSION,
+                    sequence,
+                    start,
+                    end,
+                    format!("m{start}"),
+                    format!("m{end}"),
+                    title,
+                    format!("{title} body"),
+                    created
+                ],
+            )
+            .unwrap();
+    }
+    store
+        .execute(
+            "INSERT INTO mc_compartment_events(session_id, compartment_id, kind, fields_json, created_at)
+             VALUES (?1, 0, 'store-event', '{}', 1)",
+            params![HISTORY_SESSION],
+        )
+        .unwrap();
+    context
+        .execute(
+            "INSERT INTO compartment_events(session_id, compartment_id, kind, fields_json, created_at)
+             VALUES (?1, 500, 'context-event', '{}', 1)",
+            params![HISTORY_SESSION],
+        )
+        .unwrap();
+}
+
+/// `(id, sequence, last message ordinal, title)` of every `HISTORY_SESSION` compartment.
+fn history_rows(fixture: &Fixture) -> Vec<(i64, i64, i64, String)> {
+    fixture
+        .context()
+        .prepare(
+            "SELECT id, sequence, end_message, title FROM compartments
+              WHERE session_id = ?1 ORDER BY sequence",
+        )
+        .unwrap()
+        .query_map(params![HISTORY_SESSION], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn history_decision(report: &Report) -> Option<&HistoryDecision> {
+    report
+        .history
+        .iter()
+        .find(|decision| decision.session == HISTORY_SESSION)
+}
+
+fn event_kinds(fixture: &Fixture) -> Vec<String> {
+    fixture
+        .context()
+        .prepare("SELECT kind FROM compartment_events WHERE session_id = ?1 ORDER BY kind")
+        .unwrap()
+        .query_map(params![HISTORY_SESSION], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// The shape that lost history in production: a project went back to TypeScript after
+/// running in Rust mode. `store.db` stopped at sequence 2; TypeScript then rewrote
+/// sequence 2 and kept summarising, so `context.db` is ahead in both content and reach.
+#[test]
+fn a_typescript_session_that_rewrote_and_extended_history_keeps_its_context_copy() {
+    let fixture = Fixture::new(Extras::default());
+    seed_history(
+        &fixture,
+        CONTEXT_PROJECT,
+        &[
+            (0, 1, 10, "zero", 100),
+            (1, 11, 20, "one", 100),
+            (2, 21, 22, "two as the module wrote it", 100),
+        ],
+        &[
+            (0, 1, 10, "zero", 100),
+            (1, 11, 20, "one", 100),
+            (2, 21, 40, "two as typescript rewrote it", 200),
+            (3, 41, 60, "three", 300),
+            (4, 61, 80, "four", 400),
+        ],
+    );
+    let report = fixture.migrate();
+    assert_eq!(
+        history_rows(&fixture),
+        vec![
+            (500, 0, 10, "zero".to_string()),
+            (501, 1, 20, "one".to_string()),
+            (502, 2, 40, "two as typescript rewrote it".to_string()),
+            (503, 3, 60, "three".to_string()),
+            (504, 4, 80, "four".to_string()),
+        ],
+        "every context compartment stays, unchanged and with its id"
+    );
+    let decision = history_decision(&report).expect("a decision is reported");
+    assert_eq!(decision.kept, Winner::Context);
+    assert_eq!(decision.reason, HistoryReason::WroteLast);
+    assert_eq!(
+        event_kinds(&fixture),
+        vec!["context-event", "store-event"],
+        "the store event on an unchanged compartment is added beside the context's"
+    );
+    let project = report
+        .projects
+        .iter()
+        .find(|entry| entry.project == CONTEXT_PROJECT)
+        .unwrap();
+    assert_eq!(project.tables["compartments"].superseded, 1);
+    assert_eq!(project.tables["compartments"].deleted, 0);
+}
+
+/// A `context.db` copy holding every store compartment and more is kept even when the
+/// project is module-owned: nothing the store has is lost by keeping it.
+#[test]
+fn a_session_whose_context_copy_is_a_superset_keeps_it_whatever_the_owner() {
+    let fixture = Fixture::new(Extras::default());
+    seed_history(
+        &fixture,
+        STORE_PROJECT,
+        &[(0, 1, 10, "zero", 100)],
+        &[(0, 1, 10, "zero", 100), (1, 11, 20, "one", 200)],
+    );
+    let report = fixture.migrate();
+    assert_eq!(history_rows(&fixture).len(), 2);
+    let decision = history_decision(&report).unwrap();
+    assert_eq!(
+        (decision.kept, decision.reason),
+        (Winner::Context, HistoryReason::Superset)
+    );
+}
+
+/// A stalled mirror: the module kept writing `store.db` and `context.db` fell behind. The
+/// store's copy is taken and the missing compartments arrive in `context.db`.
+#[test]
+fn a_session_whose_store_copy_is_ahead_takes_it() {
+    let fixture = Fixture::new(Extras::default());
+    seed_history(
+        &fixture,
+        STORE_PROJECT,
+        &[
+            (0, 1, 10, "zero", 100),
+            (1, 11, 20, "one", 200),
+            (2, 21, 30, "two", 300),
+        ],
+        &[(0, 1, 10, "zero", 100)],
+    );
+    let report = fixture.migrate();
+    let rows = history_rows(&fixture);
+    assert_eq!(
+        rows.iter()
+            .map(|(_, sequence, end, _)| (*sequence, *end))
+            .collect::<Vec<_>>(),
+        vec![(0, 10), (1, 20), (2, 30)]
+    );
+    assert_eq!(
+        rows[0].0, 500,
+        "the shared compartment keeps its context id"
+    );
+    let decision = history_decision(&report).unwrap();
+    assert_eq!(
+        (decision.kept, decision.reason),
+        (Winner::Store, HistoryReason::Superset)
+    );
+}
+
+#[test]
+fn identical_history_is_left_as_it_is_and_not_reported() {
+    let fixture = Fixture::new(Extras::default());
+    let rows = [(0, 1, 10, "zero", 100), (1, 11, 20, "one", 200)];
+    seed_history(&fixture, CONTEXT_PROJECT, &rows, &rows);
+    let report = fixture.migrate();
+    assert_eq!(
+        history_rows(&fixture),
+        vec![
+            (500, 0, 10, "zero".to_string()),
+            (501, 1, 20, "one".to_string())
+        ]
+    );
+    assert!(history_decision(&report).is_none());
+}
+
+/// Both copies changed compartments the other lacks, and the evidence disagrees: the
+/// project is TypeScript-owned but the store's changes are the newer ones. The run is
+/// refused rather than dropping either copy, and the operator's choice then moves it.
+#[test]
+fn diverged_history_refuses_until_a_copy_is_preferred() {
+    let fixture = Fixture::new(Extras::default());
+    seed_history(
+        &fixture,
+        CONTEXT_PROJECT,
+        &[
+            (0, 1, 10, "zero", 100),
+            (1, 11, 30, "one by the module", 300),
+        ],
+        &[
+            (0, 1, 10, "zero", 100),
+            (1, 11, 20, "one by typescript", 200),
+            (2, 21, 25, "two by typescript", 200),
+        ],
+    );
+    let refusal = assert_refused_unchanged(
+        &fixture,
+        fixture.options("b"),
+        &mut NoHooks,
+        HISTORY_DIVERGED,
+    );
+    let detail = refusal.to_value().to_string();
+    assert!(
+        detail.contains(&format!("--prefer-history {HISTORY_SESSION}=context")),
+        "{detail}"
+    );
+    let mut options = fixture.options("b2");
+    options
+        .prefer_history
+        .insert(HISTORY_SESSION.into(), Winner::Context);
+    let report = run(&options, &mut NoHooks).unwrap();
+    assert_eq!(history_rows(&fixture).len(), 3);
+    assert_eq!(
+        history_decision(&report).unwrap().reason,
+        HistoryReason::Preferred
+    );
+}
+
+/// The shared fixture's session is module-owned and both copies carry the same
+/// timestamps (the mirror copied them), so the owner decides and the store's rewrite wins.
+#[test]
+fn equal_timestamps_fall_back_to_the_project_owner() {
+    let fixture = Fixture::new(Extras::default());
+    let report = fixture.migrate();
+    let decision = report
+        .history
+        .iter()
+        .find(|decision| decision.session == SESSION)
+        .unwrap();
+    assert_eq!(
+        (decision.kept, decision.reason),
+        (Winner::Store, HistoryReason::ProjectOwner)
+    );
+}
+
+#[test]
+fn the_command_line_takes_prefer_history() {
+    let args: Vec<String> = [
+        "--context-db",
+        "c",
+        "--store-db",
+        "s",
+        "--backup-dir",
+        "b",
+        "--prefer-history",
+        "ses_a=context",
+    ]
+    .iter()
+    .map(|arg| arg.to_string())
+    .collect();
+    let options = parse_args(&args).unwrap();
+    assert_eq!(options.prefer_history.get("ses_a"), Some(&Winner::Context));
+    let mut bad = args.clone();
+    bad[7] = "ses_a=both".into();
+    assert!(parse_args(&bad).is_err());
+}

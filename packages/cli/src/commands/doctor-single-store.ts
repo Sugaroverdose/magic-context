@@ -11,6 +11,7 @@ import {
 import { Database } from "@magic-context/core/shared/sqlite";
 import { probeHostProcessesUsing } from "./doctor-opencode2-cache";
 import { defaultInspectHolders } from "./doctor-repair-db";
+import { parseRepairHistoryArgs, runDoctorSingleStoreRepair } from "./doctor-single-store-repair";
 
 const STOP = "quit OpenCode, Pi and ck-mc (`ck stop magic-context`) and run again";
 const SUFFIXES = ["", "-wal", "-shm"];
@@ -21,6 +22,11 @@ export interface SingleStoreOptions {
     dryRun?: boolean;
     skipForeign?: boolean;
     prefer?: string[];
+    /**
+     * `<session>=store|context`: which file's compartments to keep for a session whose
+     * history in store.db and context.db diverged and the migration would not choose.
+     */
+    preferHistory?: string[];
     acceptIdChange?: boolean;
 }
 
@@ -80,6 +86,7 @@ type Counts = {
     kept: number;
     deleted: number;
     orphans_kept: number;
+    superseded?: number;
 };
 interface Report {
     status: "migrated" | "already_migrated" | "dry_run" | "refused";
@@ -91,6 +98,14 @@ interface Report {
         tables: Record<string, Counts>;
     }[];
     render_check: { sampled: number; passed: boolean | number; seed: number | string };
+    history?: {
+        session: string;
+        project: string;
+        kept: string;
+        reason: string;
+        store_compartments: number;
+        context_compartments: number;
+    }[];
     sessions_reset: number;
     normalized_context_compartments?: number;
     transaction_ms?: number | null;
@@ -261,6 +276,8 @@ export function runDoctorSingleStore(
         if (options.dryRun) args.push("--dry-run");
         if (options.skipForeign) args.push("--skip-foreign");
         for (const preference of options.prefer ?? []) args.push("--prefer", preference);
+        for (const preference of options.preferHistory ?? [])
+            args.push("--prefer-history", preference);
         if (options.acceptIdChange) args.push("--accept-id-change");
         const result = spawnSync(binary, args, {
             windowsHide: true,
@@ -303,9 +320,13 @@ export function runDoctorSingleStore(
             );
             for (const [table, counts] of Object.entries(project.tables))
                 deps.print(
-                    `  ${table}: source ${counts.source} / copied ${counts.copied} / updated ${counts.updated} / kept ${counts.kept} / deleted ${counts.deleted} / orphans_kept ${counts.orphans_kept}`,
+                    `  ${table}: source ${counts.source} / copied ${counts.copied} / updated ${counts.updated} / kept ${counts.kept} / deleted ${counts.deleted} / orphans_kept ${counts.orphans_kept} / superseded ${counts.superseded ?? 0}`,
                 );
         }
+        for (const decision of report.history ?? [])
+            deps.print(
+                `history ${decision.session}: kept the ${decision.kept} copy (${decision.reason}; store ${decision.store_compartments} / context ${decision.context_compartments} compartments)`,
+            );
         deps.print(
             `Render check: sampled ${report.render_check.sampled}, passed ${report.render_check.passed}, seed ${report.render_check.seed}`,
         );
@@ -322,9 +343,25 @@ export function runDoctorSingleStore(
 }
 
 export function runDoctorSingleStoreCli(args: string[]): number {
-    const options: SingleStoreOptions = { prefer: [] };
-    if (args.shift() !== "migrate") {
-        console.error("Usage: magic-context doctor single-store migrate [options]");
+    const prefer: string[] = [];
+    const preferHistory: string[] = [];
+    const options: SingleStoreOptions = { prefer, preferHistory };
+    const command = args.shift();
+    if (command === "repair-history") {
+        const parsed = parseRepairHistoryArgs(args);
+        if (typeof parsed === "string") {
+            console.error(parsed);
+            console.error(
+                "Usage: magic-context doctor single-store repair-history --from-backup <dir> [--session <id>]... [--apply [--live]]",
+            );
+            return 1;
+        }
+        return runDoctorSingleStoreRepair(parsed);
+    }
+    if (command !== "migrate") {
+        console.error(
+            "Usage: magic-context doctor single-store migrate [options] | repair-history --from-backup <dir> [options]",
+        );
         return 1;
     }
     for (let i = 0; i < args.length; i++) {
@@ -332,7 +369,12 @@ export function runDoctorSingleStoreCli(args: string[]): number {
         if (arg === "--dry-run") options.dryRun = true;
         else if (arg === "--skip-foreign") options.skipForeign = true;
         else if (arg === "--accept-id-change") options.acceptIdChange = true;
-        else if (arg === "--ck-mc" || arg === "--backup-root" || arg === "--prefer") {
+        else if (
+            arg === "--ck-mc" ||
+            arg === "--backup-root" ||
+            arg === "--prefer" ||
+            arg === "--prefer-history"
+        ) {
             const value = args[++i];
             if (!value || value.startsWith("--")) {
                 console.error(`Missing value for ${arg}`);
@@ -340,11 +382,15 @@ export function runDoctorSingleStoreCli(args: string[]): number {
             }
             if (arg === "--ck-mc") options.ckMc = value;
             else if (arg === "--backup-root") options.backupRoot = value;
-            else if (/^.+=(store|context)$/.test(value)) options.prefer!.push(value);
-            else {
-                console.error("--prefer requires <project>=store|context");
+            else if (!/^.+=(store|context)$/.test(value)) {
+                console.error(
+                    arg === "--prefer"
+                        ? "--prefer requires <project>=store|context"
+                        : "--prefer-history requires <session>=store|context",
+                );
                 return 1;
-            }
+            } else if (arg === "--prefer") prefer.push(value);
+            else preferHistory.push(value);
         } else {
             console.error(`Unknown option: ${arg}`);
             return 1;

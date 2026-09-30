@@ -54,6 +54,7 @@ pub mod selection;
 pub mod session_resolver;
 pub mod single_store_migrate;
 pub mod single_store_reads;
+pub mod single_store_repair;
 mod state_sync_timing;
 mod tail_hygiene;
 pub mod transform;
