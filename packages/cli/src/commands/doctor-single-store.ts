@@ -340,7 +340,9 @@ export function runDoctorSingleStore(
 }
 
 export function runDoctorSingleStoreCli(args: string[]): number {
-    const options: SingleStoreOptions = { prefer: [], preferHistory: [] };
+    const prefer: string[] = [];
+    const preferHistory: string[] = [];
+    const options: SingleStoreOptions = { prefer, preferHistory };
     const command = args.shift();
     if (command === "repair-history") {
         const parsed = parseRepairHistoryArgs(args);
@@ -384,8 +386,8 @@ export function runDoctorSingleStoreCli(args: string[]): number {
                         : "--prefer-history requires <session>=store|context",
                 );
                 return 1;
-            } else if (arg === "--prefer") options.prefer!.push(value);
-            else options.preferHistory!.push(value);
+            } else if (arg === "--prefer") prefer.push(value);
+            else preferHistory.push(value);
         } else {
             console.error(`Unknown option: ${arg}`);
             return 1;

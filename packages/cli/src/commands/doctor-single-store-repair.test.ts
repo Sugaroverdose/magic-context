@@ -54,13 +54,22 @@ beforeEach(() => {
     backup = join(dir, "migration-backup");
     mkdirSync(data, { recursive: true });
     mkdirSync(backup, { recursive: true });
-    for (const path of [join(data, "context.db"), join(data, "store.db"), join(backup, "context.db"), join(backup, "store.db")])
+    for (const path of [
+        join(data, "context.db"),
+        join(data, "store.db"),
+        join(backup, "context.db"),
+        join(backup, "store.db"),
+    ])
         writeFileSync(path, "");
     process.env.XDG_DATA_HOME = dir;
     process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
     process.env.MAGIC_CONTEXT_STORAGE_DIR = data;
     process.env.FAKE_CALLS = join(dir, "calls");
-    process.env.FAKE_REPORT = JSON.stringify({ status: "preview", sessions: [plan], not_needed: [] });
+    process.env.FAKE_REPORT = JSON.stringify({
+        status: "preview",
+        sessions: [plan],
+        not_needed: [],
+    });
     process.env.FAKE_EXIT = "0";
     process.env.FAKE_LSOF_EXIT = "1";
     process.env.FAKE_LSOF_PID = "";
@@ -89,7 +98,9 @@ function run(options: Parameters<typeof runDoctorSingleStoreRepair>[0]) {
     );
 }
 const engineArgs = () =>
-    existsSync(join(dir, "calls")) ? readFileSync(join(dir, "calls"), "utf8").trim().split("\n") : null;
+    existsSync(join(dir, "calls"))
+        ? readFileSync(join(dir, "calls"), "utf8").trim().split("\n")
+        : null;
 
 test("a preview calls the engine without --apply and without probing holders", () => {
     expect(run({ sessions: ["ses_lost"] })).toBe(0);
@@ -158,7 +169,15 @@ test("the repair-history arguments are parsed", () => {
         "--live only applies with --apply",
     );
     expect(
-        parseRepairHistoryArgs(["--from-backup", "b", "--session", "a", "--session", "c", "--apply"]),
+        parseRepairHistoryArgs([
+            "--from-backup",
+            "b",
+            "--session",
+            "a",
+            "--session",
+            "c",
+            "--apply",
+        ]),
     ).toEqual({ fromBackup: "b", sessions: ["a", "c"], apply: true });
 });
 

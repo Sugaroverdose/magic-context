@@ -116,7 +116,10 @@ export function runDoctorSingleStoreRepair(
                 return refuse("repair_backup_missing", `${join(fromBackup, name)} does not exist`);
         const sessions = options.sessions ?? [];
         if (options.live && sessions.length === 0)
-            return refuse("repair_usage", "--live repairs named sessions only; pass --session <id>");
+            return refuse(
+                "repair_usage",
+                "--live repairs named sessions only; pass --session <id>",
+            );
 
         let backupDir: string | undefined;
         if (options.apply) {
@@ -198,8 +201,7 @@ export function runDoctorSingleStoreRepair(
                 : `Repaired ${plans.length} session(s); backup of the live stores: ${report.backup_dir}`,
         );
         for (const plan of plans) describe(plan, deps.print);
-        for (const session of report.not_needed ?? [])
-            deps.print(`${session}: nothing to restore`);
+        for (const session of report.not_needed ?? []) deps.print(`${session}: nothing to restore`);
         if (report.status === "repaired" && plans.length > 0)
             deps.print(
                 "Each repaired session rebuilds m[0] once on its next pass (one prompt-cache write). A running host needs no restart.",
@@ -214,7 +216,8 @@ export function runDoctorSingleStoreRepair(
 }
 
 export function parseRepairHistoryArgs(args: string[]): RepairHistoryOptions | string {
-    const options: RepairHistoryOptions = { sessions: [] };
+    const sessions: string[] = [];
+    const options: RepairHistoryOptions = { sessions };
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
         if (arg === "--apply") options.apply = true;
@@ -223,7 +226,7 @@ export function parseRepairHistoryArgs(args: string[]): RepairHistoryOptions | s
             const value = args[++i];
             if (!value || value.startsWith("--")) return `Missing value for ${arg}`;
             if (arg === "--from-backup") options.fromBackup = value;
-            else if (arg === "--session") options.sessions!.push(value);
+            else if (arg === "--session") sessions.push(value);
             else if (arg === "--ck-mc") options.ckMc = value;
             else options.backupRoot = value;
         } else return `Unknown option: ${arg}`;
