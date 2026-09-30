@@ -148,6 +148,45 @@ describe("OpenCode model catalog parsing", () => {
             "historian model missing/model names provider 'missing', which this OpenCode host does not have. The historian cannot run on it; configure that provider in OpenCode or choose a model listed by opencode models --verbose.",
         ]);
     });
+    it("flags the unsupported DeepSeek dreamer name when absent from the host catalog", () => {
+        const config = {
+            historian: { opencode: { model: "deepseek/deepseek-flash" } },
+            dreamer: { opencode: { model: "deepseek/deepseek-v4-flash" } },
+        };
+        const catalog = (ids: string[]) =>
+            ids
+                .map(
+                    (id) =>
+                        `deepseek/${id}\n${JSON.stringify({ id, providerID: "deepseek", variants: {} }, null, 2)}`,
+                )
+                .join("\n");
+        const warnings: string[] = [];
+        checkConfiguredVariantCatalog(
+            config,
+            "v1",
+            (message) => warnings.push(message),
+            () => ({
+                stdout: catalog(["deepseek-flash", "deepseek-v4-pro"]),
+                status: 0,
+            }),
+        );
+        expect(warnings).toEqual([
+            "dreamer model deepseek/deepseek-v4-flash is not offered by provider 'deepseek' on this OpenCode host. The dreamer cannot run on it; choose a model listed by opencode models --verbose.",
+        ]);
+        warnings.length = 0;
+        checkConfiguredVariantCatalog(
+            config,
+            "v1",
+            (message) => warnings.push(message),
+            () => ({
+                stdout: catalog(["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash"]),
+                status: 0,
+            }),
+        );
+        // Catalog validation cannot detect a provider rejection of an advertised ID.
+        expect(warnings).toEqual([]);
+    });
+
     it("retains the v1 verbose catalog check", () => {
         const args: string[][] = [];
         checkConfiguredVariantCatalog(

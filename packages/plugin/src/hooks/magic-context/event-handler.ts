@@ -50,6 +50,7 @@ import {
     refreshModelLimitsAfterAuthOnce,
     refreshModelLimitsFromApi,
 } from "../../shared/models-dev-cache";
+import { recordPromptSessionError } from "../../shared/prompt-async-transport";
 import { hasTrustedAbsoluteWall } from "../../shared/window-geometry";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
@@ -342,6 +343,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             if (!errInfo) {
                 return;
             }
+            recordPromptSessionError(errInfo.sessionID, errInfo.error);
             try {
                 const bindingMismatch = detectThinkingBindingMismatch(errInfo.error);
                 if (bindingMismatch.isBindingMismatch) {

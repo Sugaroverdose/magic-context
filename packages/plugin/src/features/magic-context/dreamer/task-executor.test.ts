@@ -144,7 +144,13 @@ describe("createDreamTaskExecutor — curate", () => {
         let children = 0;
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [
+                        { id: "old-dream", title: "magic-context-dream-map-memories" },
+                        { id: "other-child", title: "subagent", parentID: "ses-parent" },
+                        { id: "ses-parent", title: "ordinary session" },
+                    ],
+                })),
                 create: mock(async () => ({ data: { id: `child-${++children}` } })),
                 prompt: mock(async (args: { body: { parts: Array<{ text: string }> } }) => {
                     prompts.push(args.body.parts[0].text);
@@ -173,6 +179,11 @@ describe("createDreamTaskExecutor — curate", () => {
         );
         expect(result.status).toBe("completed");
         expect(children).toBe(3);
+        expect(client.session.create).toHaveBeenCalledWith(
+            expect.objectContaining({
+                body: expect.objectContaining({ parentID: "ses-parent" }),
+            }),
+        );
         expect(prompts).toHaveLength(3);
         expect(prompts.every((prompt) => (prompt.match(/Content: Rule/g) ?? []).length === 1)).toBe(
             true,
@@ -211,7 +222,9 @@ describe("createDreamTaskExecutor — curate", () => {
         const logSpy = spyOn(logger, "log").mockImplementation(() => {});
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => {
                     opencodeDb
                         .prepare(
@@ -319,7 +332,9 @@ describe("createDreamTaskExecutor — curate", () => {
         let capturedPrompt = "";
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "dream-child" } })),
                 prompt: mock(async (args: { body?: { parts?: Array<{ text?: string }> } }) => {
                     capturedPrompt = args.body?.parts?.[0]?.text ?? "";
@@ -391,7 +406,9 @@ describe("createDreamTaskExecutor — curate", () => {
         const prompts: string[] = [];
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: `rotation-${prompts.length}` } })),
                 prompt: mock(async (args: { body?: { parts?: Array<{ text?: string }> } }) => {
                     prompts.push(args.body?.parts?.[0]?.text ?? "");
@@ -443,7 +460,9 @@ describe("createDreamTaskExecutor — curate", () => {
         let attempts = 0;
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: `retry-${attempts}` } })),
                 prompt: mock(async (args: { body?: { parts?: Array<{ text?: string }> } }) => {
                     prompts.push(args.body?.parts?.[0]?.text ?? "");
@@ -512,7 +531,9 @@ describe("createDreamTaskExecutor — curate", () => {
         const create = mock(async () => ({ data: { id: "must-not-create" } }));
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create,
             },
         };
@@ -571,7 +592,9 @@ describe("createDreamTaskExecutor — curate", () => {
         });
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "dream-child-tool-only" } })),
                 prompt: mock(async () => ({})),
                 messages: mock(async () => ({
@@ -624,7 +647,9 @@ describe("createDreamTaskExecutor — curate", () => {
         });
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "dream-child-pending-tool" } })),
                 prompt: mock(async () => ({})),
                 messages: mock(async () => ({
@@ -672,7 +697,9 @@ describe("createDreamTaskExecutor — curate", () => {
         const progress: DreamTaskProgress[] = [];
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "dream-child-refusal" } })),
                 prompt: mock(async () => {
                     recordCurateSafetyRefusal("dream-child-refusal", {
@@ -739,7 +766,9 @@ describe("createDreamTaskExecutor — curate", () => {
         let promptCalls = 0;
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "dream-child" } })),
                 prompt: mock(async () => {
                     promptCalls += 1;
@@ -795,7 +824,9 @@ describe("createDreamTaskExecutor — curate", () => {
         let capturedSystem = "";
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "dream-child" } })),
                 prompt: mock(async (args: { body?: { system?: string } }) => {
                     capturedSystem = args.body?.system ?? "";
@@ -846,7 +877,9 @@ describe("createDreamTaskExecutor — structured failure telemetry", () => {
             const childId = `failure-child-${suffix}`;
             const client = {
                 session: {
-                    list: mock(async () => ({ data: [] })),
+                    list: mock(async () => ({
+                        data: [{ id: "ses-parent", title: "ordinary session" }],
+                    })),
                     create: mock(async () => ({ data: { id: childId } })),
                     prompt: mock(async (args: { signal?: AbortSignal }) => {
                         if (mode === "provider_error") {
@@ -956,7 +989,9 @@ describe("createDreamTaskExecutor — verify-broad disposition", () => {
         recordMemoryVerifications(db, memory.id, ["src/fact.ts"], 1_000);
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "verify-plain-empty" } })),
                 prompt: mock(async () => ({})),
                 messages: mock(async () => ({
@@ -1027,7 +1062,9 @@ describe("createDreamTaskExecutor — verify-broad disposition", () => {
         ];
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "verify-host-refusal" } })),
                 prompt: mock(async () => ({})),
                 messages: mock(async () => ({ data: messages })),
@@ -1088,7 +1125,9 @@ describe("createDreamTaskExecutor — verify-broad disposition", () => {
         recordMemoryVerifications(db, memory.id, ["src/fact.ts"], 1_000);
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "verify-batch-timeout" } })),
                 // Bun's fetch rejects this way when the host client's request timer fires.
                 prompt: mock(async () => {
@@ -1158,7 +1197,9 @@ describe("createDreamTaskExecutor — verify-broad disposition", () => {
         const manifests = new Map<string, string>();
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: `verify-child-${++childCount}` } })),
                 prompt: mock(
                     async (args: {
@@ -1234,7 +1275,9 @@ describe("createDreamTaskExecutor — verify-broad disposition", () => {
         recordMemoryVerifications(db, memory.id, ["src/fact.ts"], 1_000);
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "verify-provider-outage" } })),
                 prompt: mock(async () => ({})),
                 messages: mock(async () => ({
@@ -1286,7 +1329,9 @@ describe("createDreamTaskExecutor — verify-broad disposition", () => {
         recordMemoryVerifications(db, memory.id, ["src/fact.ts"], 1_000);
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => {
                     throw new Error("provider unavailable");
                 }),
@@ -1453,7 +1498,9 @@ describe("createDreamTaskExecutor — map-memories disposition", () => {
             let manifest = "";
             const client = {
                 session: {
-                    list: mock(async () => ({ data: [] })),
+                    list: mock(async () => ({
+                        data: [{ id: "ses-parent", title: "ordinary session" }],
+                    })),
                     create: mock(async () => ({ data: { id: "map-child" } })),
                     prompt: mock(async (args: { body?: { parts?: Array<{ text?: string }> } }) => {
                         promptCalls += 1;
@@ -1550,7 +1597,9 @@ describe("createDreamTaskExecutor — map-memories disposition", () => {
         let promptCalls = 0;
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "map-timeout-child" } })),
                 prompt: mock(async () => {
                     promptCalls += 1;
@@ -1595,7 +1644,9 @@ describe("createDreamTaskExecutor — classify-memories", () => {
         installAuthorityManagedMarker(db, project);
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => {
                     throw new Error("must not prompt");
                 }),
@@ -1644,7 +1695,9 @@ describe("createDreamTaskExecutor — classify-memories", () => {
             .join("\n")}\n</classify>`;
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "dream-child" } })),
                 prompt: mock(
                     async (args: {
@@ -1709,7 +1762,9 @@ describe("createDreamTaskExecutor — classify-memories", () => {
         let promptCalls = 0;
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "classify-provider-outage" } })),
                 prompt: mock(async () => {
                     promptCalls += 1;
@@ -1878,7 +1933,9 @@ describe("createDreamTaskExecutor — classify-memories", () => {
 
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "must-not-create" } })),
                 delete: mock(async () => ({})),
             },
@@ -1949,7 +2006,9 @@ describe("createDreamTaskExecutor — compress-cues", () => {
         ).run(project, memory.category, "module-hash");
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "cue-child" } })),
                 prompt: mock(async () => ({})),
                 messages: mock(async () => ({
@@ -2048,7 +2107,9 @@ describe("createDreamTaskExecutor — compress-cues", () => {
         const create = mock(async () => ({ data: { id: "must-not-create" } }));
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create,
             },
         };
@@ -2094,7 +2155,9 @@ describe("createDreamTaskExecutor — compress-cues", () => {
         });
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "cue-child" } })),
                 prompt: mock(async () => ({})),
                 messages: mock(async () => ({ data: assistantMessages("<cues></cues>") })),
@@ -2131,7 +2194,9 @@ describe("createDreamTaskExecutor — compress-cues", () => {
         });
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "cue-child" } })),
                 prompt: mock(async () => ({})),
                 messages: mock(async () => ({
@@ -2191,7 +2256,9 @@ describe("createDreamTaskExecutor — retrospective", () => {
         let promptAttempts = 0;
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: `retro-overflow-${promptAttempts}` } })),
                 prompt: mock(async (args: { body?: { parts?: Array<{ text?: string }> } }) => {
                     promptedWindows.push(args.body?.parts?.[0]?.text?.match(/line-\d+/g) ?? []);
@@ -2315,7 +2382,9 @@ describe("createDreamTaskExecutor — retrospective", () => {
         let prompts = 0;
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "retro-child" } })),
                 prompt: mock(async () => {
                     prompts += 1;
@@ -2404,7 +2473,9 @@ describe("createDreamTaskExecutor — retrospective", () => {
         let lastSystem = "";
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "retro-child" } })),
                 prompt: mock(
                     async (args: {
@@ -2513,7 +2584,9 @@ describe("createDreamTaskExecutor — retrospective", () => {
         let lastSystem = "";
         const client = {
             session: {
-                list: mock(async () => ({ data: [] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "retro-child" } })),
                 prompt: mock(async (args: { body?: { system?: string } }) => {
                     lastSystem = args.body?.system ?? "";
@@ -2570,7 +2643,7 @@ test("createDreamTaskExecutor surfaces host-refused verify counts", async () => 
     recordMemoryVerifications(db, memory.id, ["src/fact.ts"], 1_000);
     const client = {
         session: {
-            list: mock(async () => ({ data: [] })),
+            list: mock(async () => ({ data: [{ id: "ses-parent", title: "ordinary session" }] })),
             create: mock(async () => ({ data: { id: "verify-refusal-child" } })),
             prompt: mock(async () => ({})),
             messages: mock(async () => ({

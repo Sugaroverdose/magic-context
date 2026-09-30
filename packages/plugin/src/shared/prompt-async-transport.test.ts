@@ -5,6 +5,7 @@ import { promptSyncWithValidatedOutputRetry } from "./model-suggestion-retry";
 import {
     createPromptAsyncTransport,
     promptAsyncAndWaitForIdle,
+    recordPromptSessionError,
     supportsPromptAsync,
 } from "./prompt-async-transport";
 
@@ -467,4 +468,49 @@ describe("prompt_async transport under the retry chain", () => {
         expect(host.prompt).not.toHaveBeenCalled();
         expect(host.abort).toHaveBeenCalledWith({ path: { id: "ses-child" } });
     });
+});
+
+test("an idle accepted user row is not a no-output completion after 30 seconds", async () => {
+    const host = asyncHost({ plan: ["idle-pending"] });
+    await expect(
+        promptAsyncAndWaitForIdle(host.client, request(), {
+            pollIntervalMs: 1,
+            startGraceMs: 20,
+        }),
+    ).rejects.toThrow("settled assistant");
+});
+
+test("an early child session error preserves DeepSeek's unsupported-model 400 without waiting for an assistant", async () => {
+    const host = asyncHost({ plan: ["idle-pending"] });
+    const message =
+        "The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed deepseek-v4-flash";
+    host.promptAsync.mockImplementation(async () => {
+        recordPromptSessionError("ses-child", {
+            name: "APIError",
+            data: { statusCode: 400, message },
+        });
+        recordPromptSessionError("ses-child", {
+            name: "UnknownError",
+            data: { message: "duplicate stack" },
+        });
+        return { data: undefined };
+    });
+    await expect(
+        promptAsyncAndWaitForIdle(host.client, request(), {
+            pollIntervalMs: 1,
+            startGraceMs: 60000,
+        }),
+    ).rejects.toThrow(`${message} (status=400)`);
+    expect(host.polls()).toBe(0);
+});
+
+test("session errors belonging to another child do not fail the run", async () => {
+    const host = asyncHost({ plan: ["settle"] });
+    const send = host.promptAsync.getMockImplementation()!;
+    host.promptAsync.mockImplementation(async (req) => {
+        recordPromptSessionError("other-child", "unrelated");
+        return send(req);
+    });
+    await promptAsyncAndWaitForIdle(host.client, request(), { pollIntervalMs: 1 });
+    expect(host.polls()).toBe(1);
 });

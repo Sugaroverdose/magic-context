@@ -7,9 +7,18 @@ import {
     TOKEN_BUDGET_FINALIZE_MESSAGE,
 } from "../features/magic-context/dreamer/token-budget";
 import { sumTokensFromChildMessages } from "../features/magic-context/subagent-token-capture";
+import { describeAssistantError } from "./assistant-message-extractor";
 import type { PromptArgs, PromptTransport } from "./model-suggestion-retry";
 
 type Client = ReturnType<typeof createOpencodeClient> | undefined;
+
+const activeSessionErrors = new Map<string, unknown>();
+
+/** Feed host errors only to active background waits, not ordinary user sessions. */
+export function recordPromptSessionError(sessionId: string, error: unknown): void {
+    if (activeSessionErrors.has(sessionId) && activeSessionErrors.get(sessionId) === undefined)
+        activeSessionErrors.set(sessionId, error);
+}
 
 /**
  * Why this exists: a synchronous `session.prompt` keeps one HTTP request open
@@ -234,18 +243,33 @@ export async function promptAsyncAndWaitForIdle(
             .filter((id): id is string => id !== null),
     );
     const initialBaseline = new Set(completionBaseline);
-    const sent = await session.promptAsync?.(request);
-    if (sent && typeof sent === "object" && "error" in sent) {
-        const rejection = (sent as { error?: unknown }).error;
-        if (rejection)
-            throw new Error(`prompt_async was rejected: ${describeRejection(rejection)}`);
-    }
-    let sentAt = Date.now();
-    let sawBusy = false;
-
+    // Dispatch can fail before an assistant row exists. The plugin event hook
+    // retains that provider/model error while this child is actively awaited.
+    activeSessionErrors.set(sessionId, undefined);
     try {
+        const sent = await session.promptAsync?.(request);
+        if (sent && typeof sent === "object" && "error" in sent) {
+            const rejection = (sent as { error?: unknown }).error;
+            if (rejection) {
+                throw new Error(`prompt_async was rejected: ${describeRejection(rejection)}`);
+            }
+        }
+        let sentAt = Date.now();
+        let sawBusy = false;
+
         for (;;) {
             await sleep(pollIntervalMs, signal);
+            const hostError = activeSessionErrors.get(sessionId);
+            if (hostError !== undefined) {
+                const error = new Error(
+                    `Host recorded session error: ${describeAssistantError(hostError)}`,
+                );
+                Object.assign(error, {
+                    name: "DreamerProviderOutputFailureError",
+                    transient: true,
+                });
+                throw error;
+            }
             const status = await readStatus(session, sessionId, dir, signal);
             const messages = await readMessages(session, sessionId, dir, signal);
             if (budget) {
@@ -333,19 +357,16 @@ export async function promptAsyncAndWaitForIdle(
                 isSettledAssistant(last)
             )
                 return;
-            const fresh = current.some((message) => {
-                const id = messageId(message);
-                return id !== null && !completionBaseline.has(id);
-            });
-            if (sawBusy && fresh) return;
+            // An accepted user message is not a completion. A host-side rejection
+            // can leave only that row behind while the session remains idle.
             if (Date.now() - sentAt >= startGraceMs) {
-                if (fresh) return;
                 throw new Error(
-                    `prompt_async did not start a run in child session ${sessionId} within ${startGraceMs}ms`,
+                    `prompt_async did not start a run with a settled assistant in child session ${sessionId} within ${startGraceMs}ms (observed_busy=${sawBusy})`,
                 );
             }
         }
     } finally {
+        activeSessionErrors.delete(sessionId);
         if (budget) releaseBudgetFinalizeChild(sessionId);
     }
 }

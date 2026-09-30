@@ -3,6 +3,8 @@ import { DreamTokenBudgetExceeded } from "../features/magic-context/dreamer/toke
 import { detectOverflow } from "../features/magic-context/overflow-detection";
 import { HiddenAgentStepLimit } from "../v2/hooks/hidden-child";
 import {
+    describeAssistantError,
+    describeAssistantSettlement,
     extractLatestAssistantFailure,
     extractLatestAssistantText,
 } from "./assistant-message-extractor";
@@ -659,7 +661,7 @@ async function attemptAndValidate<TOutput, TValidated>(
             const assistantFailure = extractLatestAssistantFailure(output);
             if (assistantFailure) {
                 const error = new Error(
-                    `Host recorded assistant error: ${String(assistantFailure.error)}`,
+                    `Host recorded assistant error: ${describeAssistantError(assistantFailure.error)}`,
                 );
                 Object.assign(error, {
                     name: "DreamerProviderOutputFailureError",
@@ -671,6 +673,9 @@ async function attemptAndValidate<TOutput, TValidated>(
         const validated = await options.validateOutput(output, attempt);
         return { output, validated, attempt };
     } catch (error) {
+        if (error instanceof Error && /no (?:assistant )?output/i.test(error.message)) {
+            error.message += ` (${describeAssistantSettlement(output)})`;
+        }
         throw {
             error,
             failureClass: classifyPromptFailure(error, "validation", signal),

@@ -650,3 +650,49 @@ describe("host fetch TimeoutError is a timeout", () => {
         expect(abort).not.toHaveBeenCalled();
     });
 });
+
+test("empty v1 and v2 replies report the provider finish reason", async () => {
+    for (const output of [
+        [{ info: { role: "assistant", finish: "stop" }, parts: [] }],
+        { text: null, tokenLog: { finish_reason: "stop" } },
+    ]) {
+        const client = createClient(mock(async () => ({})));
+        await expect(
+            promptSyncWithValidatedOutputRetry(client, createArgs(), {
+                fetchOutput: async () => output,
+                validateOutput: () => {
+                    throw new Error("map-memories returned no output");
+                },
+            }),
+        ).rejects.toThrow("no output (finish=stop");
+    }
+});
+
+test("DeepSeek unsupported-model 400 preserves provider status and message rather than no output", async () => {
+    const message =
+        "The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed deepseek-v4-flash";
+    const client = createClient(mock(async () => ({})));
+    let caught: unknown;
+    try {
+        await promptSyncWithValidatedOutputRetry(client, createArgs(), {
+            fetchOutput: async () => [
+                {
+                    info: {
+                        role: "assistant",
+                        error: { name: "APIError", data: { statusCode: 400, message } },
+                    },
+                    parts: [],
+                },
+            ],
+            validateOutput: () => {
+                throw new Error("map-memories returned no output");
+            },
+        });
+    } catch (error) {
+        caught = error;
+    }
+    expect((caught as Error).message).toContain(message);
+    expect((caught as Error).message).toContain("status=400");
+    expect((caught as Error).message).not.toContain("no output");
+    expect(getPromptFailureDetail(caught)).toMatchObject({ failureClass: "provider_error" });
+});

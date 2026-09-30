@@ -408,7 +408,8 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
     let parentSessionIdPromise: Promise<string | undefined> | undefined;
 
     const resolveParentSessionId = (): Promise<string | undefined> => {
-        if (deps.hiddenCompletionExecutor) return Promise.resolve(deps.parentSessionId);
+        if (deps.hiddenCompletionExecutor || deps.parentSessionId)
+            return Promise.resolve(deps.parentSessionId);
         if (!parentSessionIdPromise) {
             parentSessionIdPromise = (async () => {
                 try {
@@ -417,14 +418,23 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                     });
                     const sessions = shared.normalizeSDKResponse(
                         listResponse,
-                        [] as { id?: string }[],
+                        [] as { id?: string; title?: string; parentID?: string }[],
                         { preferResponseOnMissingData: true },
                     );
-                    return sessions?.find((s) => typeof s?.id === "string")?.id;
+                    return sessions?.find(
+                        (s) =>
+                            typeof s?.id === "string" &&
+                            !s.parentID &&
+                            !s.title?.startsWith("magic-context-"),
+                    )?.id;
                 } catch {
                     return undefined;
                 }
-            })();
+            })().then((parent) => {
+                // A project can acquire its first ordinary session after boot.
+                if (!parent) parentSessionIdPromise = undefined;
+                return parent;
+            });
         }
         return parentSessionIdPromise;
     };
