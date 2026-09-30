@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { log } from "./logger";
 import { PI_IMAGE_NAMES, piHarnessKindFromExecutable } from "./pi-executable";
+import { canonicalProjectDirectory } from "./project-directory-key";
 
 export type ProcessKind = "OpenCode server" | "OpenCode instance (TUI/CLI)" | "Pi" | "process";
 
@@ -68,8 +69,27 @@ export function isOwnRpcServerRecord(
 /**
  * Stable hash for a project directory — scopes RPC port files per-project
  * so multiple OpenCode instances don't collide.
+ *
+ * The server that writes a discovery file and the TUI that looks it up often
+ * receive the same directory spelled differently (macOS `/var` vs
+ * `/private/var`; on Windows drive-letter case, separators, a trailing
+ * separator, `\\?\` prefixes, 8.3 short names). Both hash the one canonical
+ * spelling from `canonicalProjectDirectory`, so any of those spellings finds the
+ * same file.
  */
 export function projectHash(directory: string): string {
+    return createHash("sha256")
+        .update(canonicalProjectDirectory(directory))
+        .digest("hex")
+        .slice(0, 16);
+}
+
+/**
+ * The hash builds up to 0.44.4 used: the spelling as given, minus trailing
+ * slashes. Lookups also read that directory so a TUI can still find an older
+ * server (and tell the user it is older).
+ */
+export function legacyProjectHash(directory: string): string {
     const normalized = directory.replace(/\/+$/, "");
     return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
@@ -77,6 +97,16 @@ export function projectHash(directory: string): string {
 /** Directory containing per-process RPC discovery files for a project. */
 export function rpcPortDir(storageDir: string, directory: string): string {
     return join(storageDir, "rpc", projectHash(directory));
+}
+
+/**
+ * Every directory a lookup reads for this project: the canonical one servers
+ * write now, and the pre-canonical one older servers wrote.
+ */
+export function rpcPortDirsForLookup(storageDir: string, directory: string): string[] {
+    const canonical = rpcPortDir(storageDir, directory);
+    const legacy = join(storageDir, "rpc", legacyProjectHash(directory));
+    return legacy === canonical ? [canonical] : [canonical, legacy];
 }
 
 /** Per-process RPC port file path. */
@@ -92,7 +122,7 @@ export function rpcPortFilePath(
 
 /** Legacy single-port file used by v0.18.0 and earlier. */
 export function legacyRpcPortFilePath(storageDir: string, directory: string): string {
-    return join(rpcPortDir(storageDir, directory), "port");
+    return join(storageDir, "rpc", legacyProjectHash(directory), "port");
 }
 
 export type PidLiveness = "alive" | "dead" | "inconclusive";

@@ -106,6 +106,49 @@ describe("home project sidebar", () => {
     });
 });
 
+describe("session-owner", () => {
+    function ownerHandler(directory: string, sessionDirectories: Record<string, string>) {
+        const handlers = new Map<string, TestRpcHandler>();
+        const rpcServer = {
+            handle(method: string, handler: TestRpcHandler) {
+                handlers.set(method, handler);
+            },
+        } as unknown as MagicContextRpcServer;
+        registerRpcHandlers(rpcServer, {
+            directory,
+            config: MagicContextConfigSchema.parse({}),
+            client: {
+                session: {
+                    get: async ({ path }: { path: { id: string } }) => ({
+                        data: sessionDirectories[path.id]
+                            ? { directory: sessionDirectories[path.id] }
+                            : undefined,
+                    }),
+                },
+            },
+            liveSessionState: createLiveSessionState(),
+        });
+        const handler = handlers.get("session-owner");
+        if (!handler) throw new Error("session-owner is not registered");
+        return handler;
+    }
+
+    test("claims a session whose host directory is this server's directory in another spelling", async () => {
+        const root = mkdtempSync(join(tmpdir(), "session-owner-"));
+        try {
+            const handler = ownerHandler(root, {
+                ses_mine: `${root}/`,
+                ses_other: join(root, "elsewhere"),
+            });
+            expect(await handler({ sessionId: "ses_mine" })).toEqual({ owner: true });
+            expect(await handler({ sessionId: "ses_other" })).toEqual({ owner: false });
+            expect(await handler({ sessionId: "ses_unknown" })).toEqual({ owner: false });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+});
+
 describe("status-detail replies the /ctx-status dialog can draw", () => {
     test("a session with no stored state yet passes the dialog's check and names the server version", async () => {
         const db = createTestDb();

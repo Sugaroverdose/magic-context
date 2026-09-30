@@ -113,6 +113,7 @@ import { listHiddenVariantWarnings } from "../shared/hidden-variant-warnings";
 import { activeHostLimitations } from "../shared/host-limitations";
 import { getLoggerDiagnostics, log } from "../shared/logger";
 import { pluginPackageVersion } from "../shared/plugin-package-version";
+import { canonicalProjectDirectory } from "../shared/project-directory-key";
 import { pushNotification } from "../shared/rpc-notifications";
 import type { MagicContextRpcServer } from "../shared/rpc-server";
 import type {
@@ -1419,6 +1420,37 @@ async function generateDebugHeapSnapshot(
 }
 
 /**
+ * The session's directory from the host's own session record, or null when the
+ * host client has no session API or the lookup fails.
+ */
+async function readHostSessionDirectory(
+    client: unknown,
+    sessionId: string,
+): Promise<string | null> {
+    if (typeof client !== "object" || client === null || !("session" in client)) return null;
+    const session = client.session;
+    if (typeof session !== "object" || session === null || !("get" in session)) return null;
+    const get = session.get;
+    if (typeof get !== "function") return null;
+    try {
+        const response: unknown = await get.call(session, { path: { id: sessionId } });
+        const data =
+            typeof response === "object" && response !== null && "data" in response
+                ? response.data
+                : null;
+        const sessionDirectory =
+            typeof data === "object" && data !== null && "directory" in data
+                ? data.directory
+                : null;
+        return typeof sessionDirectory === "string" && sessionDirectory.length > 0
+            ? sessionDirectory
+            : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Register all RPC handlers on the server.
  */
 export function registerRpcHandlers(
@@ -1490,6 +1522,24 @@ export function registerRpcHandlers(
             moduleStatus,
             compactionEnabled,
         );
+    });
+
+    // A TUI whose session directory matched no discovery directory asks every
+    // local server whether it owns the session. The host's own session record
+    // decides, compared in the canonical spelling this server's discovery file
+    // is filed under.
+    rpcServer.handle("session-owner", async (params) => {
+        const sessionId = String(params.sessionId ?? "");
+        if (!sessionId) return { owner: false };
+        const sessionDirectory =
+            liveSessionState.sessionDirectoryBySession.get(sessionId) ??
+            (await readHostSessionDirectory(args.client, sessionId));
+        if (!sessionDirectory) return { owner: false };
+        return {
+            owner:
+                canonicalProjectDirectory(sessionDirectory) ===
+                canonicalProjectDirectory(directory),
+        };
     });
 
     rpcServer.handle("status-detail", async (params) => {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
@@ -168,6 +168,49 @@ describe("TUI context RPC data", () => {
             kind: "not_tracked",
             cause: "home_directory",
         });
+    });
+
+    test("finds the session's server when the host spells its directory differently", async () => {
+        // The server files its discovery record under the directory it was
+        // started with (here through a symlink, as macOS /var is to
+        // /private/var); the TUI asks with the resolved spelling.
+        const dataHome = makeDataHome();
+        const root = realpathSync(mkdtempSync(join(tmpdir(), "mc-spelling-")));
+        tempDirs.push(root);
+        const real = join(root, "Pictures", "project");
+        mkdirSync(real, { recursive: true });
+        const link = join(root, "project-link");
+        symlinkSync(real, link);
+        await startServer(
+            dataHome,
+            `${link}/`,
+            () => snapshot("ses_spelled", 300) as unknown as Record<string, unknown>,
+        );
+        initRpcClient("/home-startup");
+        expect((await loadSidebarSnapshot("ses_spelled", real)).inputTokens).toBe(300);
+    });
+
+    test("asks every local server for the session's owner when no directory matches", async () => {
+        const dataHome = makeDataHome();
+        const home = await startServer(dataHome, "/home-startup", () => ({
+            sessionId: "ses_owned",
+            disabled: true,
+        }));
+        home.handle("session-owner", async () => ({ owner: false }));
+        const project = await startServer(
+            dataHome,
+            "/filed/under/this/spelling",
+            () => snapshot("ses_owned", 500) as unknown as Record<string, unknown>,
+        );
+        project.handle("session-owner", async (params) => ({
+            owner: params.sessionId === "ses_owned",
+        }));
+        initRpcClient("/home-startup");
+
+        // A spelling no canonical form maps to the filed one.
+        const snapshotSeen = await loadSidebarSnapshot("ses_owned", "/asked/with/another/spelling");
+        expect(snapshotSeen.inputTokens).toBe(500);
+        expect(snapshotSeen.compartmentCount).toBe(2);
     });
 
     test("distinguishes a real zero compartment count from an RPC failure", async () => {

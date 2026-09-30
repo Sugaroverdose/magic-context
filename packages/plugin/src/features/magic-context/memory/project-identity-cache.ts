@@ -2,18 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getMagicContextStorageDir } from "../../../shared/data-path";
+import { projectDirectoryKey } from "../../../shared/project-directory-key";
 
-/** Normalize Windows-formatted directory paths consistently, even on a non-Windows OS. */
-export function projectDirectoryKey(directory: string): string {
-    const slashed = directory
-        .replaceAll("\\", "/")
-        .replace(/^\/\/\?\/UNC\//i, "//")
-        .replace(/^\/\/\?\//, "");
-    if (/^[a-z]:\//i.test(slashed) || slashed.startsWith("//")) {
-        return path.win32.normalize(slashed).replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
-    }
-    return path.resolve(directory);
-}
+// Lives in shared/ so the TUI (which ships without features/) can use the same
+// normalization; re-exported here for the existing importers.
+export { projectDirectoryKey };
 
 function cachePath(directory: string): string {
     const hash = createHash("sha256").update(projectDirectoryKey(directory)).digest("hex");

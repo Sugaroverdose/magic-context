@@ -4,7 +4,7 @@
  */
 import { getMagicContextStorageDir } from "../../shared/data-path";
 import { pluginPackageVersion } from "../../shared/plugin-package-version";
-import { MagicContextRpcClient } from "../../shared/rpc-client";
+import { MagicContextRpcClient, RpcServerNotFoundError } from "../../shared/rpc-client";
 import type { EmbedDetail, SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
 import {
     checkStatusDetailPayload,
@@ -69,9 +69,46 @@ function clientForDirectory(directory: string): MagicContextRpcClient | null {
             sessionDirectoryClients.delete(oldest);
         }
     }
-    const client = new MagicContextRpcClient(getMagicContextStorageDir(), directory);
+    // Short resolution: when this directory has no discovery file the caller
+    // falls back to asking every local server (see `callSessionRpc`) instead of
+    // retrying the miss for fifteen seconds.
+    const client = new MagicContextRpcClient(getMagicContextStorageDir(), directory, {
+        resolveAttempts: 2,
+        reresolveAttempts: 1,
+    });
     sessionDirectoryClients.set(directory, client);
     return client;
+}
+
+/**
+ * Call a session-scoped RPC on the server that owns the session's directory.
+ * When no server is filed under that directory (the host spelled it in a way
+ * the canonical form still does not match), every live local server is asked
+ * whether it owns the session, and the owner, if any, answers this call and
+ * later ones for the directory. Only when no server claims the session does
+ * the call fail as before.
+ */
+async function callSessionRpc<T>(
+    directory: string,
+    sessionId: string,
+    method: string,
+    params: Record<string, unknown>,
+): Promise<T> {
+    const client = clientForDirectory(directory);
+    if (!client) throw new Error("RPC client is not initialized");
+    try {
+        return await client.call<T>(method, params);
+    } catch (error) {
+        if (!(error instanceof RpcServerNotFoundError) || client === rpcClient) throw error;
+        const owner = await MagicContextRpcClient.findSessionOwner(
+            getMagicContextStorageDir(),
+            sessionId,
+        );
+        if (!owner) throw error;
+        sessionDirectoryClients.get(directory)?.reset();
+        sessionDirectoryClients.set(directory, owner);
+        return owner.call<T>(method, params);
+    }
 }
 
 export function getRpcGeneration(): number {
@@ -187,13 +224,17 @@ export async function loadSidebarSnapshot(
     directory: string,
 ): Promise<SidebarSnapshot> {
     const empty: SidebarSnapshot = { ...EMPTY_SNAPSHOT, sessionId };
-    const client = clientForDirectory(directory);
-    if (!client) return recallSidebarSnapshot(sessionId, empty);
+    if (!rpcClient) return recallSidebarSnapshot(sessionId, empty);
     try {
-        const result = await client.call<SidebarSnapshot>("sidebar-snapshot", {
-            sessionId,
+        const result = await callSessionRpc<SidebarSnapshot>(
             directory,
-        });
+            sessionId,
+            "sidebar-snapshot",
+            {
+                sessionId,
+                directory,
+            },
+        );
         if ((result as unknown as Record<string, unknown>).error) {
             // Snapshot-build errors are explicit failure envelopes, equivalent to
             // a transport failure: retain the last known-good client snapshot.
@@ -231,10 +272,9 @@ export async function loadStatusDetail(
     directory: string,
     modelKey?: string,
 ): Promise<StatusDetailResult> {
-    const client = clientForDirectory(directory);
-    if (!client) return statusRpcFailure("RPC client is not initialized");
+    if (!rpcClient) return statusRpcFailure("RPC client is not initialized");
     try {
-        const reply = await client.call<unknown>("status-detail", {
+        const reply = await callSessionRpc<unknown>(directory, sessionId, "status-detail", {
             sessionId,
             directory,
             modelKey,
@@ -257,10 +297,9 @@ const EMPTY_EMBED_DETAIL: EmbedDetail = {
 
 /** Fetch embedding coverage status for `/ctx-embed` via RPC. */
 export async function loadEmbedDetail(sessionId: string, directory: string): Promise<EmbedDetail> {
-    const client = clientForDirectory(directory);
-    if (!client) return EMPTY_EMBED_DETAIL;
+    if (!rpcClient) return EMPTY_EMBED_DETAIL;
     try {
-        const result = await client.call<EmbedDetail>("embed-detail", {
+        const result = await callSessionRpc<EmbedDetail>(directory, sessionId, "embed-detail", {
             sessionId,
             directory,
         });
@@ -280,13 +319,17 @@ export async function getCompartmentCount(
     sessionId: string,
     directory?: string,
 ): Promise<CompartmentCountResult> {
-    const client = clientForDirectory(directory ?? "");
-    if (!client) return { ok: false, error: "RPC client is not initialized" };
+    if (!rpcClient) return { ok: false, error: "RPC client is not initialized" };
     try {
-        const result = await client.call<{ count?: number; error?: string }>("compartment-count", {
+        const result = await callSessionRpc<{ count?: number; error?: string }>(
+            directory ?? "",
             sessionId,
-            directory,
-        });
+            "compartment-count",
+            {
+                sessionId,
+                directory,
+            },
+        );
         if (typeof result.error === "string") return { ok: false, error: result.error };
         if (typeof result.count !== "number" || !Number.isFinite(result.count)) {
             return { ok: false, error: "Invalid compartment count response" };
@@ -303,10 +346,11 @@ export async function getCompartmentCount(
  * (the same one the recomp dialog read its compartment count from).
  */
 export async function requestRecomp(sessionId: string, directory?: string): Promise<boolean> {
-    const client = clientForDirectory(directory ?? "");
-    if (!client) return false;
+    if (!rpcClient) return false;
     try {
-        const result = await client.call<{ ok: boolean }>("recomp", { sessionId });
+        const result = await callSessionRpc<{ ok: boolean }>(directory ?? "", sessionId, "recomp", {
+            sessionId,
+        });
         return result.ok ?? false;
     } catch {
         return false;
