@@ -2484,6 +2484,21 @@
             ]
         },
         {
+            "path": "tests/issue-586-pi-responses-orphans.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "a real Pi host (0.99.x) on a mock openai-responses relay and openai-completions gateway checks that no request carries a tool result without its call across drop, busting and defer passes, a model round trip and unreadable removal markers; it needs an installed Pi and a throwaway TMPDIR, so it runs by hand outside the mode lanes",
+            "contract_refs": [
+                "ISSUE-586-PAIRED-STRIP"
+            ],
+            "hosts": [
+                "pi"
+            ]
+        },
+        {
             "path": "tests/historian-no-tools.test.ts",
             "tier": "excluded",
             "invocation": {
