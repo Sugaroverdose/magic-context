@@ -139,9 +139,7 @@ describe("v2 context hook never registers a persistent tool transform", () => {
         const hookStart = source.indexOf('context.session.hook("context"');
         expect(bodyStart).toBeGreaterThan(0);
         expect(hookStart).toBeGreaterThan(bodyStart);
-        expect(source.slice(hookStart)).toContain(
-            "withSqliteTransformPass(() => runManagedContext(draft))",
-        );
+        expect(source.slice(hookStart)).toContain("await runManagedContext(draft)");
         const hookBody = source.slice(bodyStart);
         expect(hookBody).not.toContain("context.tool.transform(");
         expect(hookBody).toContain("applyV2PromptSurfaceTools(draft");
