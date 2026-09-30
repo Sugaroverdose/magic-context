@@ -254,7 +254,10 @@ import {
 	prepareCachedM0M1PiReplay,
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
-import { canClearNativeReasoning } from "./native-replay-pi";
+import {
+	canClearNativeReasoning,
+	NATIVE_TOOL_REMOVAL_MARKER,
+} from "./native-replay-pi";
 import {
 	applyNativeReasoningReplayPi,
 	applyNativeToolInputReplayPi,
@@ -5658,6 +5661,18 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						args.db,
 						args.sessionId,
 						targets,
+						{
+							// A full drop whose arc removal is recorded was removed, not
+							// served as a marker. Keep it full even when this pass's model
+							// must keep tool pairs, so passes that can remove it still do
+							// and the placeholder strip never sees its call come back.
+							// Unreadable removal records keep every full drop as it is.
+							keepFullDrop: (callId) =>
+								nativeRemovalInputs === undefined ||
+								(callId !== null &&
+									nativeRemovalInputs.get(callId) ===
+										NATIVE_TOOL_REMOVAL_MARKER),
+						},
 					).size;
 				})
 				.immediate();
@@ -6720,6 +6735,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		// previously-stripped placeholders get re-keyed under the new scheme this
 		// pass (discovery is otherwise gated on isCacheBusting = history-refresh).
 		forceDiscovery: args.stableIdSchemeCutover === true,
+		// Frozen ids whose message owns a tool call are forgotten only on a pass
+		// that already changes the served prefix, so the stored set never changes
+		// on a pass meant to replay the previous bytes.
+		canFirstApply: isCacheBustingPass,
 	});
 	logTransformTiming(
 		args.sessionId,

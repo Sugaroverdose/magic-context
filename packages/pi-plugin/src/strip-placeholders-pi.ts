@@ -13,6 +13,11 @@
  * Discovery of new placeholder-only ids happens only on cache-busting
  * passes, matching OpenCode's "discover on execute, replay everywhere"
  * contract.
+ *
+ * A frozen id never removes a message that owns a tool call. Pi sends every
+ * `toolResult` whether or not its call is still in the array, so removing the
+ * call's owner strands the result, which Responses and Chat Completions
+ * endpoints reject. See `ownsToolCall`.
  */
 
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
@@ -62,6 +67,24 @@ function messageIsPlaceholderOnly(message: unknown): boolean {
 	return sawVisibleContent;
 }
 
+/**
+ * A frozen id records that its message had nothing left to send when it was
+ * discovered. That stops holding when the message carries a tool call on this
+ * pass: the tool-drop replay keeps some dropped calls on purpose (a
+ * real-argument skeleton, a result that ends the request, a model that needs
+ * tool pairs beside its reasoning), and a stored drop mode can change after
+ * the id was frozen (a HARD fold converting it to a real-argument skeleton).
+ */
+function ownsToolCall(message: unknown): boolean {
+	const content = (message as { content?: unknown } | undefined)?.content;
+	return (
+		Array.isArray(content) &&
+		content.some(
+			(part) => (part as { type?: unknown } | undefined)?.type === "toolCall",
+		)
+	);
+}
+
 export interface StripPiDroppedPlaceholderResult {
 	removed: number;
 	discovered: number;
@@ -86,6 +109,14 @@ export function stripPiDroppedPlaceholderMessages(args: {
 	 * re-keyed under the new scheme (discovery is otherwise history-refresh-gated).
 	 */
 	forceDiscovery?: boolean;
+	/**
+	 * True when this pass already changes the served prefix (a HARD fold, first
+	 * render, explicit flush, published history or forced materialization).
+	 * Frozen ids whose message owns a tool call are dropped from the persisted
+	 * set only on such a pass, so the stored set changes only when the request
+	 * bytes are changing anyway.
+	 */
+	canFirstApply?: boolean;
 	/** Test seam for exhausting the durable CAS write. */
 	applyDelta?: typeof applyStrippedPlaceholderDelta;
 }): StripPiDroppedPlaceholderResult {
@@ -123,6 +154,25 @@ export function stripPiDroppedPlaceholderMessages(args: {
 		}
 	}
 
+	// Frozen ids whose message owns a tool call on this pass. Replay keeps those
+	// messages on every pass. A pass that already busts also removes the ids from
+	// the persisted set, so a session holding such ids (stored while the call was
+	// absent, before its drop mode changed) stops carrying them.
+	const toolOwnerIds = new Set<string>();
+	for (let i = 0; i < messages.length; i++) {
+		const id = idOf(messages[i], i);
+		if (id && persistedIds.has(id) && ownsToolCall(messages[i]))
+			toolOwnerIds.add(id);
+	}
+	const mayForgetOwners =
+		isCacheBusting ||
+		args.forceDiscovery === true ||
+		args.canFirstApply === true;
+	if (mayForgetOwners) {
+		for (const id of toolOwnerIds)
+			if (!removedIds.includes(id)) removedIds.push(id);
+	}
+
 	let discovered = 0;
 	let pruned = 0;
 	if (discoveredIds.length > 0 || removedIds.length > 0) {
@@ -153,6 +203,7 @@ export function stripPiDroppedPlaceholderMessages(args: {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const id = idOf(messages[i], i);
 		if (!id || !idsToStrip.has(id)) continue;
+		if (toolOwnerIds.has(id)) continue;
 		messages.splice(i, 1);
 		removed++;
 	}
@@ -160,7 +211,7 @@ export function stripPiDroppedPlaceholderMessages(args: {
 	if (removed > 0 || discovered > 0 || pruned > 0) {
 		sessionLog(
 			sessionId,
-			`placeholder strip: removed=${removed} discovered=${discovered} pruned=${pruned}`,
+			`placeholder strip: removed=${removed} discovered=${discovered} pruned=${pruned} keptToolOwners=${toolOwnerIds.size}`,
 		);
 	}
 	return { removed, discovered };

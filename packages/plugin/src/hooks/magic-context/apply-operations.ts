@@ -201,21 +201,28 @@ export function foldBustsServedPrefix(
  * The legacy marker was only ever written inside the newest-call window or for
  * a call that could not be removed, so every legacy tag is re-decided as an
  * in-window drop. Tags not on this pass's wire stay as they are.
+ *
+ * `keepFullDrop` lets a host exempt `full` tags whose removal it has already
+ * recorded. Pi records the first structural removal of each arc; such a call
+ * was removed, not served as a marker, and it may only look unremovable on this
+ * pass (a model that needs tool pairs beside its reasoning). Converting it
+ * would keep the call on every later pass, including ones that can remove it.
  */
 export function convertLegacyToolSkeletons(
     db: ContextDatabase,
     sessionId: string,
     targets: ReadonlyMap<number, TagTarget>,
+    options: { keepFullDrop?: (callId: string | null) => boolean } = {},
 ): Map<number, ConvertedToolDropMode> {
     const rows = db
         .prepare(
-            `SELECT tag_number AS tagNumber, drop_mode AS dropMode
+            `SELECT tag_number AS tagNumber, drop_mode AS dropMode, message_id AS callId
                FROM tags
               WHERE session_id = ? AND type = 'tool' AND status = 'dropped'
                 AND drop_mode IN ('truncated', 'full')
               ORDER BY tag_number`,
         )
-        .all(sessionId) as Array<{ tagNumber: number; dropMode: string }>;
+        .all(sessionId) as Array<{ tagNumber: number; dropMode: string; callId: string | null }>;
     const converted = new Map<number, ConvertedToolDropMode>();
     for (const row of rows) {
         const target = targets.get(row.tagNumber);
@@ -226,6 +233,7 @@ export function convertLegacyToolSkeletons(
             target.wouldStrandConversationEnd?.() === true;
         let mode: ConvertedToolDropMode;
         if (row.dropMode === "full") {
+            if (options.keepFullDrop?.(row.callId) === true) continue;
             // Removable full drops already serve real-or-absent bytes.
             if (target.cannotRemove?.() !== true) continue;
             mode = "skeleton_real";

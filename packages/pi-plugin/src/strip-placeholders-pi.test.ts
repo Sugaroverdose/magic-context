@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { getStrippedPlaceholderIds } from "@magic-context/core/features/magic-context/storage";
+import {
+	getStrippedPlaceholderIds,
+	setStrippedPlaceholderIds,
+} from "@magic-context/core/features/magic-context/storage";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import markerParity from "../../../testdata/marker-only-parity.json";
 import {
@@ -376,6 +379,112 @@ describe("stripPiDroppedPlaceholderMessages", () => {
 			expect(r2.removed).toBe(1); // only the placeholder
 			expect(pass2).not.toContain(placeholder);
 			expect(pass2).toContain(syntheticPrepend); // unmapped → never stripped
+		} finally {
+			closeQuietly(db);
+		}
+	});
+});
+
+describe("stripPiDroppedPlaceholderMessages never removes a tool call owner", () => {
+	const owner = (id: string, t: number) =>
+		assistantMessage("", t, {
+			content: [
+				{ type: "thinking", thinking: "" },
+				{ type: "toolCall", id, name: "read", arguments: {} },
+			],
+		});
+	const result = (id: string, t: number) =>
+		({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "read",
+			content: [{ type: "text", text: `[dropped §${t}§]` }],
+			isError: false,
+			timestamp: t,
+		}) as never;
+	const build = () => {
+		const messages = [
+			userMessage("go", 1),
+			owner("call-a", 2),
+			result("call-a", 3),
+			assistantMessage("", 4, {
+				content: [{ type: "thinking", thinking: "" }],
+			}),
+			userMessage("next", 5),
+		] as object[];
+		const ids = new Map(messages.map((m, i) => [m, `entry-${i}`] as const));
+		return { messages: messages as unknown[], ids };
+	};
+	const idsOf = (built: ReturnType<typeof build>) =>
+		built.messages.map((m) => built.ids.get(m as object));
+
+	it("keeps a frozen message that owns a live tool call on a defer pass and keeps its id", () => {
+		const db = createTestDb();
+		try {
+			// entry-1 was frozen while its call was absent; entry-3 is a real placeholder.
+			setStrippedPlaceholderIds(
+				db,
+				"ses-owner",
+				new Set(["entry-1", "entry-3"]),
+			);
+			const built = build();
+			stripPiDroppedPlaceholderMessages({
+				db,
+				sessionId: "ses-owner",
+				messages: built.messages,
+				isCacheBusting: false,
+				canFirstApply: false,
+				stableIdByRef: built.ids,
+			});
+			expect(idsOf(built)).toEqual([
+				"entry-0",
+				"entry-1",
+				"entry-2",
+				"entry-4",
+			]);
+			expect(getStrippedPlaceholderIds(db, "ses-owner")).toEqual(
+				new Set(["entry-1", "entry-3"]),
+			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("forgets a poisoned id on a busting pass and keeps replaying the genuine one", () => {
+		const db = createTestDb();
+		try {
+			setStrippedPlaceholderIds(
+				db,
+				"ses-heal",
+				new Set(["entry-1", "entry-3"]),
+			);
+			const busting = build();
+			stripPiDroppedPlaceholderMessages({
+				db,
+				sessionId: "ses-heal",
+				messages: busting.messages,
+				isCacheBusting: false,
+				canFirstApply: true,
+				stableIdByRef: busting.ids,
+			});
+			expect(idsOf(busting)).toEqual([
+				"entry-0",
+				"entry-1",
+				"entry-2",
+				"entry-4",
+			]);
+			expect(getStrippedPlaceholderIds(db, "ses-heal")).toEqual(
+				new Set(["entry-3"]),
+			);
+			const defer = build();
+			stripPiDroppedPlaceholderMessages({
+				db,
+				sessionId: "ses-heal",
+				messages: defer.messages,
+				isCacheBusting: false,
+				stableIdByRef: defer.ids,
+			});
+			expect(idsOf(defer)).toEqual(idsOf(busting));
 		} finally {
 			closeQuietly(db);
 		}
