@@ -18,6 +18,7 @@ import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallbac
 import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-refusal";
 import type { MessageLike } from "../hooks/magic-context/transform-operations";
 import { replayRustModeBindingMismatchStrips } from "../hooks/magic-context/transform-postprocess-phase";
+import { UnresolvedHistoryBoundaryError } from "../hooks/magic-context/unresolved-history-boundary";
 import { log, sessionLog } from "../shared/logger";
 import {
     isTransientSqliteError,
@@ -413,6 +414,14 @@ export function createMessagesTransformHandler(args: {
                 }
             } else if (sessionId) {
                 sessionLog(sessionId, "lkg_miss");
+            }
+            // The LKG replay above (the last request this session served
+            // successfully) could not stand in, and the untrimmed request does
+            // not fit the window: refuse the turn rather than hand the provider a
+            // request it will reject (or, on OpenCode 1, the raw input messages,
+            // which are just as large).
+            if (!args.compactionOff && error instanceof UnresolvedHistoryBoundaryError) {
+                throw error;
             }
             const code = (error as { code?: string } | null)?.code;
             const name = (error as { name?: string } | null)?.name;

@@ -587,7 +587,9 @@ export function prepareCompartmentInjection(
 
     const lastCompartment = compartments[compartments.length - 1];
     const lastEnd = lastCompartment.endMessage;
-    const lastEndMessageId = lastCompartment.endMessageId;
+    // A newest compartment without an end id cannot be placed; trim at the
+    // newest one that can (see lastCompartmentBoundaryId).
+    const lastEndMessageId = newestCompartmentEndId(compartments) ?? "";
 
     // Modern m0/m1 preparation keeps the persisted baseline boundary. Only final
     // delivery may advance it after prefix preflight, so contention cannot remove
@@ -1089,13 +1091,22 @@ type M0Compartment = Compartment & {
 
 /**
  * The boundary (OpenCode message id) covered by a compartment set rendered into
- * m[0]+m[1] — the highest-sequence compartment's end message id, or null when
- * there are none / the latest has no stored boundary (legacy rows). The input
- * is ordered `sequence ASC`, so the last element is the latest compartment.
+ * m[0]+m[1] — the end message id of the newest compartment that has one, or
+ * null when none does. Newer compartments without an end id (legacy rows, or
+ * rows carried into a forked session) cannot be placed, so the rows after the
+ * boundary stay raw rather than the whole window. The input is ordered
+ * `sequence ASC`.
  */
 function lastCompartmentBoundaryId(compartments: readonly M0Compartment[]): string | null {
-    const last = compartments.at(-1);
-    return last?.endMessageId && last.endMessageId.length > 0 ? last.endMessageId : null;
+    return newestCompartmentEndId(compartments);
+}
+
+function newestCompartmentEndId(compartments: readonly Compartment[]): string | null {
+    for (let index = compartments.length - 1; index >= 0; index -= 1) {
+        const id = compartments[index]?.endMessageId;
+        if (typeof id === "string" && id.length > 0) return id;
+    }
+    return null;
 }
 
 const DEFAULT_HISTORY_BUDGET_TOKENS = 60_000;

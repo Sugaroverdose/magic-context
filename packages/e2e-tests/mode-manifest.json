@@ -678,6 +678,36 @@
             ]
         },
         {
+            "path": "tests/opencode2/recomp-hidden-executor.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane (issue 591): /ctx-recomp over the GA command API rebuilds compartments through the v2 hidden-completion executor instead of failing with MC-R01 on the missing OpenCode 1 client, and the next turn renders the rebuilt history; the v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/missing-history-boundary.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane (issue 590): compartments and a host compaction, then the newest compartment's end row deleted from the throwaway store (or its end id cleared, or every end deleted); the next turn must re-anchor on one rebuild pass and fit the mock provider's enforced window, or be refused, never sent uncut; the v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/compartment-boundary-host-row.test.ts",
             "tier": "excluded",
             "invocation": {

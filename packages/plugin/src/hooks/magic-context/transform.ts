@@ -163,6 +163,7 @@ import {
     runPostTransformPhase,
 } from "./transform-postprocess-phase";
 import { logTransformTiming } from "./transform-stage-logger";
+import { UnresolvedHistoryBoundaryError } from "./unresolved-history-boundary";
 
 export { EmergencyFailClosedError } from "./emergency-fail-closed";
 
@@ -2578,6 +2579,31 @@ export function createTransform(deps: TransformDeps) {
                     sessionId,
                     `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} conversation=${finalWireEstimate.messageTokens.conversation} tools=${finalWireEstimate.messageTokens.toolCall} system=${finalWireEstimate.systemTokens} toolDefinitions=${finalWireEstimate.toolDefinitionTokens ?? "unknown"} tail=${finalWireTail}`,
                 );
+            }
+            // The prefix trim could not find the history boundary, so the whole
+            // window is about to go out uncut. That is harmless while it fits and
+            // a guaranteed provider rejection when it does not; in the second case
+            // stop, so the wrapper replays the last good request or refuses.
+            if (postTransformResult.prefixTrimStatus === "refused") {
+                const untrimmed =
+                    finalWireEstimate ??
+                    estimateFinalWireInputTokens({
+                        messages,
+                        systemPromptTokens: sessionMeta.systemPromptTokens,
+                        providerID: modelForBudget?.providerID,
+                        modelID: modelForBudget?.modelID,
+                        agentName: notificationParams.agent,
+                    });
+                if (untrimmed.tokens > boundaryContextLimit) {
+                    sessionLog(
+                        sessionId,
+                        `history boundary unresolved: prefix trim refused and the untrimmed request estimate ${untrimmed.tokens} (trusted=${untrimmed.trusted}) exceeds the context limit ${boundaryContextLimit}; not sending it`,
+                    );
+                    throw new UnresolvedHistoryBoundaryError(
+                        untrimmed.tokens,
+                        boundaryContextLimit,
+                    );
+                }
             }
             const timedOutHistorianFailure = compartmentPhase.historianJoinTimedOut
                 ? historianJoinFailClosedMessage({
