@@ -2128,18 +2128,24 @@ export function getDroppedTagsBySession(
     sessionId: string,
     scope?: { ownerIds: readonly string[]; messageAddresses: readonly string[] },
 ): TagEntry[] {
-    // Filter before hydrating tag rows: a long folded history can dwarf the servable tail.
+    // Query owner and message addresses separately so their indexes bound both
+    // scans to the visible tail. Unary + keeps the status filter but prevents
+    // choosing the session-wide dropped-tag index for these scoped lookups.
     const rows = (
         scope
             ? db
-                  .prepare(`SELECT ${TAG_SELECT_COLUMNS} FROM tags
-        WHERE session_id = ? AND status = 'dropped'
-          AND ((type = 'tool' AND tool_owner_message_id IN (SELECT value FROM json_each(?)))
-            OR (type != 'tool' AND message_id IN (SELECT value FROM json_each(?))))
+                  .prepare(`SELECT ${TAG_SELECT_COLUMNS} FROM tags INDEXED BY idx_tags_pi_fallback_tool_owner
+        WHERE session_id = ? AND type = 'tool' AND +status = 'dropped'
+          AND tool_owner_message_id IN (SELECT value FROM json_each(?))
+        UNION ALL
+        SELECT ${TAG_SELECT_COLUMNS} FROM tags INDEXED BY idx_tags_session_message_id
+        WHERE session_id = ? AND type != 'tool' AND +status = 'dropped'
+          AND message_id IN (SELECT value FROM json_each(?))
         ORDER BY tag_number ASC, id ASC`)
                   .all(
                       sessionId,
                       JSON.stringify(scope.ownerIds),
+                      sessionId,
                       JSON.stringify(scope.messageAddresses),
                   )
             : getDroppedTagsBySessionStatement(db).all(sessionId)

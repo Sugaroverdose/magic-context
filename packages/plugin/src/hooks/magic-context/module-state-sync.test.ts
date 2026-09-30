@@ -20,6 +20,7 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import { setProjectState } from "../../features/magic-context/storage-project-state";
 import {
+    getDroppedTagsBySession,
     insertTag,
     updateTagDropMode,
     updateTagStatus,
@@ -1293,4 +1294,47 @@ it("forced seed timing is logged when boundary assembly fails", async () => {
         }),
     ).rejects.toThrow("context_compartment_boundary_unresolved");
     expect(logged).toEqual([{ sessionId: "missing-session", phase: "seed" }]);
+});
+
+it("scoped drop seeds use address indexes instead of scanning dropped history", () => {
+    const db = createContextDb();
+    db.prepare(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000)
+        INSERT INTO tags(session_id, tag_number, message_id, type, status, byte_size)
+        SELECT 'indexed-seed', i, 'old'||i||':p0', 'message', 'dropped', 100 FROM n`).run();
+    const scope = { ownerIds: ["tail"], messageAddresses: ["tail:p0"] };
+    const plans: string[] = [];
+    const traced = new Proxy(db, {
+        get(target, key) {
+            if (key === "prepare")
+                return (sql: string) => {
+                    if (sql.includes("json_each")) {
+                        const query = target.prepare(`EXPLAIN QUERY PLAN ${sql}`);
+                        const args = sql.includes("UNION ALL")
+                            ? [
+                                  "indexed-seed",
+                                  JSON.stringify(scope.ownerIds),
+                                  "indexed-seed",
+                                  JSON.stringify(scope.messageAddresses),
+                              ]
+                            : [
+                                  "indexed-seed",
+                                  JSON.stringify(scope.ownerIds),
+                                  JSON.stringify(scope.messageAddresses),
+                              ];
+                        plans.push(
+                            ...(query.all(...args) as Array<{ detail: string }>).map(
+                                (row) => row.detail,
+                            ),
+                        );
+                    }
+                    return target.prepare(sql);
+                };
+            const value = Reflect.get(target, key);
+            return typeof value === "function" ? value.bind(target) : value;
+        },
+    });
+    expect(getDroppedTagsBySession(traced, "indexed-seed", scope)).toEqual([]);
+    expect(plans.join("\n")).toContain("idx_tags_pi_fallback_tool_owner");
+    expect(plans.join("\n")).toContain("idx_tags_session_message_id");
+    expect(plans.join("\n")).not.toContain("idx_tags_dropped_session_tag_number");
 });
