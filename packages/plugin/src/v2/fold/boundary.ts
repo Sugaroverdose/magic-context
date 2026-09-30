@@ -1,4 +1,3 @@
-import { hasPartialCompartmentEndThrough } from "../../features/magic-context/compartment-storage";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import {
     getPersistedCompactionMarkerState,
@@ -59,9 +58,14 @@ export function createV2RustCompactionMarkerStrategy(
     return {
         ...v2CompactionMarkerStrategy,
         applyDeferred: (db, sessionId, pending): MarkerUpdateOutcome => {
-            if (hasPartialCompartmentEndThrough(db, sessionId, pending.ordinal)) {
-                return { kind: "stale-skip", reason: "partial-message-boundary" };
-            }
+            // A published end can stop partway through a message (an indexed end), leaving
+            // that message's later blocks unsummarized. That is not a reason to skip the
+            // boundary: it is resolved from that partial message itself, as the nearest
+            // user turn at or before it, and `trimToRecordedBoundary` keeps the boundary
+            // message and everything after it. So the cut lands after the last whole
+            // turn, the partial message stays in the array raw (as TS mode leaves it),
+            // and no tool call is separated from its result. An older indexed end
+            // before the boundary is still protected by the trim's own partial guard.
             const existing = getPersistedCompactionMarkerState(db as ContextDatabase, sessionId);
             if (existing && existing.boundaryOrdinal >= pending.ordinal) {
                 return { kind: "already-current" };
@@ -148,9 +152,25 @@ export function trimToRecordedBoundary(
     if (!boundaryId) return 0;
     const start = messages.findIndex((message) => message.id === boundaryId);
     if (start <= 0) return 0;
+    // An indexed end (end_block_index set) may leave later blocks of that message
+    // unsummarized, so the trim must never cut past such a message while its
+    // remainder is uncovered. The remainder counts as covered once the next
+    // compartment continues exactly where this one stopped: on the same message at
+    // a later block, or on the next message ordinal. Both indices the historian
+    // publishes are last-block anchors (every chunk line covers a whole host
+    // message and is anchored at its last block), so a successor's start index
+    // cannot be required to equal end+1 or 0; the ordinal continuation is what
+    // proves nothing was skipped. The latest compartment has no successor, so its
+    // indexed end always stays protected, and so does any end followed by a gap.
     const partial = db
         .prepare(
-            "SELECT end_message_id FROM compartments WHERE session_id=? AND end_block_index IS NOT NULL ORDER BY sequence LIMIT 1",
+            `SELECT k.end_message_id FROM compartments k
+             LEFT JOIN compartments n ON n.session_id = k.session_id AND n.sequence = k.sequence + 1
+             WHERE k.session_id = ?1 AND k.end_block_index IS NOT NULL
+               AND NOT (n.sequence IS NOT NULL AND (
+                   (n.start_message_id = k.end_message_id AND n.start_block_index > k.end_block_index)
+                   OR n.start_message = k.end_message + 1))
+             ORDER BY k.sequence LIMIT 1`,
         )
         .get(sessionId) as { end_message_id: string } | undefined;
     const partialIndex = partial
