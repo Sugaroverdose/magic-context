@@ -306,6 +306,84 @@ Still on the startup client: `/ctx-dream`, `/ctx-flush` and `/ctx-wrapup`
 send only a session ID, and on both hosts they reach the startup directory's
 server.
 
+### Directory spelling and the session-owner fallback
+
+A per-session client only helps if it finds the session's discovery file.
+The server filed its record under a hash of the directory as its host spelled
+it, and the TUI looked it up with its own spelling. During the real-TUI proof
+above, the seeding script and the server disagreed on `/var` versus
+`/private/var`, which is the same class of miss. On Windows the spellings vary
+further: drive-letter case, separators, a trailing separator, `\\?\`
+prefixes, and 8.3 short names (the reporter's log has `AMMINI~1`).
+
+Fix:
+
+- `projectHash` (`shared/rpc-utils.ts`), used by the server's port-file write
+  and the TUI's lookup alike, now hashes `canonicalProjectDirectory`
+  (`shared/project-directory-key.ts`). That is `realpathSync.native` where the
+  directory exists (it resolves symlinks, `/var` → `/private/var`, junctions,
+  and 8.3 short names on Windows), followed by the Windows-aware
+  `projectDirectoryKey` that project identity already uses. That function
+  moved to `shared/` because the TUI ships without `features/`, and
+  `project-identity-cache.ts` re-exports it.
+- Lookups also read the pre-canonical hash directory, so a TUI still finds a
+  server older than this change, and the dialog can say that server is older.
+- If a session's directory still matches no discovery directory, the TUI asks
+  every local server through a new `session-owner` RPC. Each server decides
+  from the host's own session record (`client.session.get`, or its cached
+  session directory). The TUI then uses the server that claims the session,
+  instead of showing an empty sidebar. Session clients give up on their own
+  directory after about 0.5 s, so this fallback does not wait out the 15 s
+  default retry.
+
+Tests. `shared/project-directory-key.test.ts` has one test per spelling pair:
+drive-letter case, separators, trailing separator, `\\?\`, name case,
+`\\?\UNC\`, 8.3 short name, macOS `/var` versus `/private/var`, a symlink
+and its target, and a POSIX trailing slash. The 8.3 case replaces realpath
+with a stand-in, because this host cannot create short names; expanding them
+relies on `realpathSync.native` on Windows. `tui/data/context-db.test.ts`
+starts a real server filed under a symlink spelling and looks it up with the
+resolved spelling. It also covers the owner fallback: a server filed under a
+spelling that nothing canonicalizes to is still found through `session-owner`.
+`rpc-handlers.test.ts` covers the server side of `session-owner`. Hashing the
+raw spelling again turns 11 tests red. Removing the fallback turns the owner
+test red.
+
+### OpenCode 2 (2.0.20)
+
+Run on `@opencode/cli@2.0.20`, installed into
+`$TMPDIR/magic-context/issue-584/oc2020`. The throwaway root was
+`$TMPDIR/magic-context/issue-584/oc2`, with `XDG_*`, `HOME`, `OPENCODE_DB`
+and `MAGIC_CONTEXT_STORAGE_DIR` under it and
+`OPENCODE_DISABLE_DEFAULT_PLUGINS=true`. The plugin was built from this
+branch, with the mock OpenAI-compatible provider. `lsof` showed the TUI
+process with no database open and the background `serve --service` process
+holding only the root's `opencode2.db` and `context.db`.
+
+A session was created in `HOME/Pictures/project`, 2 compartments and 3
+memories were seeded for its identity (`dir:49a8c5731f96`), and the TUI was
+started in `HOME`. OpenCode 2 lists another directory's sessions only after
+`ctrl+a` ("all projects") in `/sessions`. The service then ran one Magic
+Context server for `HOME` and one for the project, each with its own discovery
+directory.
+
+- Sidebar: Compartments 2, Memories 3.
+- `Magic Context: Status` from the command palette: the full project status,
+  "Compartments (2)" and Memory Active 3.
+- Queried directly, the `HOME` instance (the directory the TUI's setup bound
+  to) answers `{ disabled: true }` for this session, and the project instance
+  answers 2 / 3. The TUI showed the project instance's numbers.
+
+Not verified on OpenCode 2:
+
+- A v0.44.4 "before" run on OpenCode 2. Its `dist/` was not built.
+- The typed `/ctx-status` slash command. It opened no dialog in this run, and
+  neither log recorded the command. The palette entry calls the same TUI
+  function, so the likely gap is between the host's server-side command and
+  the TUI's notification socket. That socket still connects to the startup
+  directory's server, while the command runs in the project's instance. This
+  is not confirmed.
+
 ## Side findings (not changed)
 
 - With no identity at boot (home directory, paused identity), the server hook
