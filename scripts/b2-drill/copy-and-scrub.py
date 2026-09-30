@@ -54,9 +54,10 @@ def copy_read_only(source, destination):
         src.execute("PRAGMA query_only=ON")
         dst = sqlite3.connect(destination)
         try:
-            # Large pages per step keep the copy fast; the backup restarts itself if a
-            # live writer changes pages it already copied, so the result stays consistent.
-            src.backup(dst, pages=65536)
+            # One step copies the whole file inside a single read transaction. A stepped
+            # backup restarts from scratch whenever a live writer commits between steps,
+            # and on a busy store it never finishes. A WAL reader does not block writers.
+            src.backup(dst, pages=-1)
         finally:
             dst.close()
     finally:
