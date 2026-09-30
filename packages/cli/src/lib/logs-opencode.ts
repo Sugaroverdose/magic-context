@@ -152,7 +152,9 @@ export async function bundleIssueReport(
     const sanitizedTitle = sanitizeDiagnosticText(title).trim();
 
     const selectedSession = sessionFilter
-        ? report.recentSessions.find((session) => session.sessionId === sessionFilter)
+        ? (report.recentSessions.available ? report.recentSessions.rows : []).find(
+              (session) => session.sessionId === sessionFilter,
+          )
         : undefined;
     const sessionContext = selectedSession
         ? [

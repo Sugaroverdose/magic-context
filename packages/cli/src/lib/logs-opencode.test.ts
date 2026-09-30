@@ -397,20 +397,23 @@ describe("bundleIssueReport secret redaction", () => {
                     nativeCompaction: { auto: false, prune: false },
                 },
                 logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
-                recentSessions: [],
+                recentSessions: { available: true, rows: [] },
                 historianDumps: {
                     byProject: [],
                     legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
                 },
-                historianFailures: [
-                    {
-                        sessionId: "ses_1",
-                        failureCount: 1,
-                        lastError: "Authorization: Bearer historian-last-error-secret",
-                        lastFailureAt: "2026-05-11T12:00:00.000Z",
-                    },
-                ],
-                historianRuns: [],
+                historianFailures: {
+                    available: true,
+                    rows: [
+                        {
+                            sessionId: "ses_1",
+                            failureCount: 1,
+                            lastError: "Authorization: Bearer historian-last-error-secret",
+                            lastFailureAt: "2026-05-11T12:00:00.000Z",
+                        },
+                    ],
+                },
+                historianRuns: { available: true, rows: [] },
             };
 
             const bundled = await bundleIssueReport(report, "description", "title");
@@ -427,6 +430,17 @@ describe("bundleIssueReport secret redaction", () => {
             expect(body).not.toContain("historian-last-error-secret");
             expect(body).not.toContain("### OpenCode installations");
             expect(body).toContain("- OpenCode installed: true [cli] (1.0.0)");
+            expect(body).toContain("No historian runs recorded.");
+
+            report.historianRuns = { available: false, reason: "schema too old" };
+            report.historianFailures = { available: false, reason: "query error" };
+            report.recentSessions = { available: false, reason: "path missing" };
+            const unavailable = await bundleIssueReport(report, "description", "unavailable");
+            const unavailableBody = readFileSync(unavailable.path, "utf-8");
+            expect(unavailableBody).toContain("Historian runs: unavailable (schema too old)");
+            expect(unavailableBody).toContain("Historian failures: unavailable (query error)");
+            expect(unavailableBody).toContain("Recent sessions: unavailable (path missing)");
+            expect(unavailableBody).not.toContain("No historian runs recorded");
         } finally {
             process.chdir(originalCwd);
         }
@@ -487,20 +501,23 @@ describe("bundleIssueReport secret redaction", () => {
                     nativeCompaction: { auto: false, prune: false },
                 },
                 logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
-                recentSessions: [
-                    {
-                        sessionId: "ses_1",
-                        title: "Problem at /Users/alice/private token=abc123",
-                        directory: "/Users/alice/project",
-                        lastActiveAt: "2026-05-11T12:00:00.000Z",
-                    },
-                ],
+                recentSessions: {
+                    available: true,
+                    rows: [
+                        {
+                            sessionId: "ses_1",
+                            title: "Problem at /Users/alice/private token=abc123",
+                            directory: "/Users/alice/project",
+                            lastActiveAt: "2026-05-11T12:00:00.000Z",
+                        },
+                    ],
+                },
                 historianDumps: {
                     byProject: [],
                     legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
                 },
-                historianFailures: [],
-                historianRuns: [],
+                historianFailures: { available: true, rows: [] },
+                historianRuns: { available: true, rows: [] },
             };
 
             const bundled = await bundleIssueReport(
@@ -578,25 +595,28 @@ describe("bundleIssueReport size and session fallbacks", () => {
                 nativeCompaction: { auto: false, prune: false },
             },
             logFile: { path: logPath, exists: true, sizeKb: 200 },
-            recentSessions: [
-                {
-                    sessionId: "ses_parent001",
-                    title: "Parent session",
-                    directory: root,
-                    lastActiveAt: "2026-05-11T12:00:00.000Z",
-                    parentSessionId: null,
-                },
-                {
-                    sessionId: "ses_child001",
-                    title: "Child session",
-                    directory: root,
-                    lastActiveAt: "2026-05-11T12:01:00.000Z",
-                    parentSessionId: "ses_parent001",
-                },
-            ],
+            recentSessions: {
+                available: true,
+                rows: [
+                    {
+                        sessionId: "ses_parent001",
+                        title: "Parent session",
+                        directory: root,
+                        lastActiveAt: "2026-05-11T12:00:00.000Z",
+                        parentSessionId: null,
+                    },
+                    {
+                        sessionId: "ses_child001",
+                        title: "Child session",
+                        directory: root,
+                        lastActiveAt: "2026-05-11T12:01:00.000Z",
+                        parentSessionId: "ses_parent001",
+                    },
+                ],
+            },
             historianDumps: { byProject: [], legacyDumps: { dir: root, count: 0, recent: [] } },
-            historianFailures: [],
-            historianRuns: [],
+            historianFailures: { available: true, rows: [] },
+            historianRuns: { available: true, rows: [] },
         };
         const originalCwd = process.cwd();
         process.chdir(root);
