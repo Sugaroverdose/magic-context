@@ -13,9 +13,10 @@ their Magic Context data was gone.
 - **Defect 1: the migration guard failed open on Windows.** A 0.44.4 process
   migrated the shared store from v85 to v91 while a 0.42.6 OpenCode server
   (PID 10376) was still running. The guard saw the live PID, could not check
-  its identity, and continued. This is fixed for the tasklist-only case.
-  Separately, what the guard should do when liveness truly cannot be
-  determined is a policy decision; it is proposed below, not changed.
+  its identity, and continued. This branch makes Windows start times
+  available (the likely root cause). What the guard does when a start time is
+  still unavailable (a health probe or a name check) is pending the operator,
+  and the guard's behavior is unchanged.
 - **Defect 2: the status dialog crashed on any reply without a usable
   snapshot.** The reply most likely came from the 0.44.4 server's own
   home-directory instance, not from the stale 0.42.6 server (see "Where the
@@ -99,14 +100,9 @@ CIM row whose `CreationDate` does not parse:
 
 ### Fix (in this change)
 
-- `isPidIdentityPlausible`: when a record has `started_at` but the process
-  start time cannot be read, it now falls through to the command-name/image
-  check that legacy records without a start time already use (`opencode`,
-  `node`, `bun`, `electron`). On Windows with tasklist-only evidence, a live
-  `opencode.exe` is `plausible`, so the guard refuses with
-  `storage fatal: refusing to migrate … while confirmed OpenCode server PID …`.
-  A reused PID now owned by an unrelated image (for example `chrome.exe`) is
-  `implausible`.
+These changes make process start times available on Windows, which removes
+the root cause on the reporter's machine:
+
 - The CIM query formats `CreationDate` itself
   (`$_.CreationDate.ToUniversalTime().ToString('o')`), so the output no longer
   depends on the PowerShell edition. The parser also accepts the 5.1 wrapped
@@ -114,28 +110,24 @@ CIM row whose `CreationDate` does not parse:
 - Synchronous process-list commands get an 8 MiB output limit, matching the
   asynchronous path.
 
+Pending the operator's decision: what the guard does when a record has a
+start time but the process start still cannot be read (tasklist-only
+evidence, or a denied probe). It currently returns "inconclusive" and
+continues, as before. The options are the RPC `/health` probe or a
+command-name check. A name-check fallthrough was drafted and has been removed
+from this branch until that decision is made.
+
 Tests. These are unit tests against the Windows code paths (`platform:
 "win32"`, faked `powershell`/`tasklist` output). They are not a real Windows
 host.
 
-- `rpc-async-probes.test.ts` › `Windows boot refuses to migrate under a live
-  server that only tasklist can see`: a v85 store, a 0.42.6-style record with
-  `started_at`, CIM failing, and tasklist listing `opencode.exe`.
-  `openDatabaseAsync` returns null, the refusal names PID 10376, and the store
-  stays at v85.
 - `rpc-async-probes.test.ts` › `Windows PowerShell 5.1 wrapped creation dates
   still prove a holder's identity`.
-- `rpc-utils.test.ts` › `uses tasklist for the Windows command check when no
-  start time is available` (the rewritten contract), `a reused Windows PID
-  with an unrelated image is implausible without a start time`, and `the
-  synchronous Windows process list allows more output than the 1 MiB
-  default`.
-
-Remaining false-refusal risk: a stale record whose PID Windows has reused for
-another `node.exe`/`bun.exe`/`opencode.exe` process now blocks the migration
-until that process exits or the record is deleted. The refusal message names
-the PID. The old behavior had the opposite failure, a silent migration under a
-live older server.
+- `rpc-utils.test.ts` › `the synchronous Windows process list allows more
+  output than the 1 MiB default`. `uses tasklist for the Windows command
+  fallback and skips unavailable start time` keeps master's expectation
+  ("inconclusive" without a start time) and now also checks the ISO
+  `CreationDate` query.
 
 ### Proposal (not implemented): when liveness truly cannot be determined
 

@@ -483,16 +483,10 @@ export function isPidIdentityPlausible(
 
     if (Number.isFinite(record.started_at) && record.started_at > 0) {
         const processStartTime = evidence ? evidence.startTime : readProcessStartTime(record.pid);
-        if (processStartTime !== null) {
-            return processStartTime <= record.started_at + RPC_IDENTITY_SKEW_TOLERANCE_MS
-                ? "plausible"
-                : "implausible";
-        }
-        // No start time to compare (Windows tasklist reports none, and a
-        // sandbox can deny the probe). Returning "inconclusive" here let the
-        // migration guard treat a PID the process list had just confirmed alive
-        // as unconfirmed and migrate underneath it. Fall through to the same
-        // command-name check legacy records without a start time get.
+        if (processStartTime === null) return "inconclusive";
+        return processStartTime <= record.started_at + RPC_IDENTITY_SKEW_TOLERANCE_MS
+            ? "plausible"
+            : "implausible";
     }
 
     const command = evidence
