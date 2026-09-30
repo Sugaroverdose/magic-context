@@ -16,9 +16,11 @@ import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
     appendNoteNudgeAnchor,
     setChannel2NudgeState,
+    setPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
 import { setProjectState } from "../../features/magic-context/storage-project-state";
 import {
+    getDroppedTagsBySession,
     insertTag,
     updateTagDropMode,
     updateTagStatus,
@@ -1202,4 +1204,137 @@ it("a batched seed read refuses ordinal drift instead of overwriting the wire me
         }),
     ).resolves.toBe("mismatch");
     expect(state.idOrdinalMemo.get("m1")).toBe(99);
+});
+
+it("cold inventory bounds 100K-message seeds at the published host marker", async () => {
+    useTempDataHome("cold-large-seed-");
+    const sessionId = "ses-cold-large";
+    createOpenCodeDb(sessionId, [{ id: "tail", role: "user" }]);
+    const rawDb = new Database(join(process.env.XDG_DATA_HOME ?? "", "opencode", "opencode.db"));
+    rawDb.exec(`UPDATE message SET time_created=100001;
+        CREATE INDEX parts_by_message ON part(message_id);
+        CREATE INDEX messages_by_session ON message(session_id, time_created, id);`);
+    rawDb
+        .prepare(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000)
+        INSERT INTO message SELECT 'old'||i, ?, i, i, json_object('id','old'||i,'role','user') FROM n`)
+        .run(sessionId);
+    rawDb
+        .prepare(`INSERT INTO part(message_id, session_id, time_created, time_updated, data)
+        SELECT id, session_id, time_created, time_updated, '{"type":"text","text":"old"}' FROM message WHERE id LIKE 'old%'`)
+        .run();
+    closeQuietly(rawDb);
+    const db = createContextDb();
+    db.prepare(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000)
+        INSERT INTO tags(session_id, tag_number, message_id, type, status, byte_size)
+        SELECT ?, i, 'old'||i||':p0', 'message', 'dropped', 100 FROM n`).run(sessionId);
+    insertTag(db, sessionId, "tail:p0", "message", 100, 100001);
+    updateTagStatus(db, sessionId, 100001, "dropped");
+    setPersistedCompactionMarkerState(db, sessionId, {
+        boundaryMessageId: "old100000",
+        summaryMessageId: "summary",
+        compactionPartId: "marker",
+        summaryPartId: "summary-part",
+        boundaryOrdinal: 100000,
+        targetEndMessageId: "tail",
+    });
+    appendNoteNudgeAnchor(db, sessionId, "old1", "hidden");
+    appendNoteNudgeAnchor(db, sessionId, "tail", "visible");
+    addStaleReduceStrippedIds(db, sessionId, ["old1", "tail"]);
+    const timing = new StateSyncTiming();
+    const started = performance.now();
+    const payload = await buildModuleStateSyncPayload({
+        state: syncState(),
+        pass: { db, sessionId },
+        force: true,
+        options: { timing, seedInventory: { boundaryId: null, contextBoundariesResolved: true } },
+    });
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(payload && typeof payload === "object").toBe(true);
+    if (!payload || typeof payload !== "object") throw new Error("missing seed payload");
+    expect(payload.params.drop_seeds?.map((seed) => seed.block_id)).toEqual([
+        "old100000#0",
+        "tail#0",
+    ]);
+    expect(payload.params.note_nudge_anchors).toEqual([{ message_id: "tail", text: "visible" }]);
+    expect(payload.params.strip_seeds).toEqual([
+        { message_id: "tail", strip_kind: "stale_reduce" },
+    ]);
+    expect(timing.rawMessages).toBe(2);
+    expect(timing.rawReads).toBe(1);
+    // Omitting seeds for hidden host messages must not also tell the module to
+    // discard its cached prefix: that requires a separately resolved boundary.
+    expect(payload.params.seed_boundary_id).toBeNull();
+});
+
+it("forced seed timing is logged when boundary assembly fails", async () => {
+    useTempDataHome("failed-seed-timing-");
+    const db = createContextDb();
+    appendCompartments(db, "missing-session", [
+        {
+            sequence: 0,
+            startMessage: 1,
+            endMessage: 2,
+            startMessageId: "missing",
+            endMessageId: "missing",
+            title: "missing",
+            content: "x",
+        },
+    ]);
+    const timing = new StateSyncTiming();
+    const logged: Array<{ sessionId: string; phase: string | undefined }> = [];
+    timing.log = (sessionId, phase) => {
+        logged.push({ sessionId, phase });
+    };
+    await expect(
+        buildModuleStateSyncPayload({
+            state: syncState(),
+            pass: { db, sessionId: "missing-session" },
+            force: true,
+            options: { timing },
+        }),
+    ).rejects.toThrow("context_compartment_boundary_unresolved");
+    expect(logged).toEqual([{ sessionId: "missing-session", phase: "seed" }]);
+});
+
+it("scoped drop seeds use address indexes instead of scanning dropped history", () => {
+    const db = createContextDb();
+    db.prepare(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000)
+        INSERT INTO tags(session_id, tag_number, message_id, type, status, byte_size)
+        SELECT 'indexed-seed', i, 'old'||i||':p0', 'message', 'dropped', 100 FROM n`).run();
+    const scope = { ownerIds: ["tail"], messageAddresses: ["tail:p0"] };
+    const plans: string[] = [];
+    const traced = new Proxy(db, {
+        get(target, key) {
+            if (key === "prepare")
+                return (sql: string) => {
+                    if (sql.includes("json_each")) {
+                        const query = target.prepare(`EXPLAIN QUERY PLAN ${sql}`);
+                        const args = sql.includes("UNION ALL")
+                            ? [
+                                  "indexed-seed",
+                                  JSON.stringify(scope.ownerIds),
+                                  "indexed-seed",
+                                  JSON.stringify(scope.messageAddresses),
+                              ]
+                            : [
+                                  "indexed-seed",
+                                  JSON.stringify(scope.ownerIds),
+                                  JSON.stringify(scope.messageAddresses),
+                              ];
+                        plans.push(
+                            ...(query.all(...args) as Array<{ detail: string }>).map(
+                                (row) => row.detail,
+                            ),
+                        );
+                    }
+                    return target.prepare(sql);
+                };
+            const value = Reflect.get(target, key);
+            return typeof value === "function" ? value.bind(target) : value;
+        },
+    });
+    expect(getDroppedTagsBySession(traced, "indexed-seed", scope)).toEqual([]);
+    expect(plans.join("\n")).toContain("idx_tags_pi_fallback_tool_owner");
+    expect(plans.join("\n")).toContain("idx_tags_session_message_id");
+    expect(plans.join("\n")).not.toContain("idx_tags_dropped_session_tag_number");
 });

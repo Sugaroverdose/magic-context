@@ -2,7 +2,6 @@ import type { ContextDatabase } from "../../features/magic-context/storage";
 import { moduleRawBlockMappings } from "./module-wire";
 import {
     readRawSessionMessageIdOrdinalsForRange,
-    readRawSessionMessageOrdinalById,
     readRawSessionMessagePartsById,
 } from "./read-session-chunk";
 import { formatDate } from "./temporal-awareness";
@@ -52,10 +51,15 @@ export function resolveSharedCompartmentBoundaries(
     // in the module's existing date cache, so they need no host-history lookup.
     if (rows.every((row) => row.start_block_index !== null && row.end_block_index !== null))
         return [];
+    // Read message-ID ordinals once and reuse them for every compartment endpoint,
+    // avoiding a separate scan of session history for each start and end.
+    const ordinals = readRawSessionMessageIdOrdinalsForRange(sessionId, 1, Number.MAX_SAFE_INTEGER);
+    const rawById = new Map<string, ReturnType<typeof readRawSessionMessagePartsById>>();
     const endpoint = (rawId: string, blockIndex: number | null, edge: "start" | "end") => {
-        const raw = readRawSessionMessagePartsById(sessionId, rawId);
-        const ordinal =
-            raw?.id === rawId ? readRawSessionMessageOrdinalById(sessionId, rawId) : null;
+        if (!rawById.has(rawId))
+            rawById.set(rawId, readRawSessionMessagePartsById(sessionId, rawId));
+        const raw = rawById.get(rawId) ?? null;
+        const ordinal = raw?.id === rawId ? (ordinals.get(rawId) ?? null) : null;
         const block =
             blockIndex !== null
                 ? blockIndex
@@ -64,12 +68,15 @@ export function resolveSharedCompartmentBoundaries(
                   : (moduleRawBlockMappings(raw).at(-1)?.blockIndex ?? 0);
         return { ordinal, id: `${rawId}#${block}`, raw };
     };
+    const idsByOrdinal = rows.some((row) => !row.start_message_id || !row.end_message_id)
+        ? new Map([...ordinals].map(([id, ordinal]) => [ordinal, id]))
+        : null;
     const endpoints = rows.map((row) => ({
         start: endpoint(row.start_message_id, row.start_block_index, "start"),
         end: endpoint(row.end_message_id, row.end_block_index, "end"),
     }));
     return rows.map((row, index) => {
-        const { start, end } = endpoints[index];
+        let { start, end } = endpoints[index];
         let startOrdinal = start.ordinal;
         let endOrdinal = end.ordinal;
         if (startOrdinal !== null || endOrdinal !== null) {
@@ -97,6 +104,29 @@ export function resolveSharedCompartmentBoundaries(
         ) {
             throw new SharedCompartmentBoundaryError(sessionId, row.sequence);
         }
+        // Legacy summaries can lack an endpoint ID. Once neighboring endpoints
+        // prove its ordinal, resolve the actual host message there; an empty ID
+        // cannot be serialized as a valid module block address.
+        const resolveMissingId = (
+            sourceId: string,
+            blockIndex: number | null,
+            ordinal: number,
+            edge: "start" | "end",
+        ) => {
+            const id = idsByOrdinal?.get(ordinal);
+            if (sourceId || blockIndex !== null || !id)
+                throw new SharedCompartmentBoundaryError(sessionId, row.sequence);
+            return endpoint(id, null, edge);
+        };
+        if (!row.start_message_id)
+            start = resolveMissingId(
+                row.start_message_id,
+                row.start_block_index,
+                startOrdinal,
+                "start",
+            );
+        if (!row.end_message_id)
+            end = resolveMissingId(row.end_message_id, row.end_block_index, endOrdinal, "end");
         const dates =
             typeof start.raw?.createdAt === "number" && typeof end.raw?.createdAt === "number"
                 ? {

@@ -15,6 +15,7 @@ import {
     getEmergencyInputSample,
     getNoteNudgeAnchors,
     getPendingCompactionMarkerState,
+    getPersistedCompactionMarkerState,
     getPersistedTodoSyntheticAnchor,
 } from "../../features/magic-context/storage-meta-persisted";
 import { getPendingOps } from "../../features/magic-context/storage-ops";
@@ -428,12 +429,19 @@ function dropSeedAddress(tag: TagEntry): { messageId: string; partIndex: number 
 function dropSeedForTag(args: {
     tag: TagEntry;
     readRawById: (messageId: string) => RawMessageParts | null;
+    mappingsById?: Map<string, ReturnType<typeof moduleRawBlockMappings>>;
 }): { seed: ModuleDropSeed } | { reason: string } {
     const tag = args.tag;
+    const mappingsFor = (messageId: string) => {
+        const cached = args.mappingsById?.get(messageId);
+        if (cached) return cached;
+        const mappings = moduleRawBlockMappings(args.readRawById(messageId));
+        args.mappingsById?.set(messageId, mappings);
+        return mappings;
+    };
     if (tag.type === "tool") {
         if (!tag.toolOwnerMessageId) return { reason: "tool owner message is missing" };
-        const raw = args.readRawById(tag.toolOwnerMessageId);
-        const mappings = moduleRawBlockMappings(raw);
+        const mappings = mappingsFor(tag.toolOwnerMessageId);
         const call = mappings.find(
             (mapping) => mapping.kind === "tool_call" && mapping.callId === tag.messageId,
         );
@@ -456,7 +464,7 @@ function dropSeedForTag(args: {
     if (tag.messageId.length === 0) return { reason: "message tag identity is empty" };
     const address = dropSeedAddress(tag);
     if (!address) return { reason: "message tag identity is empty" };
-    const mappings = moduleRawBlockMappings(args.readRawById(address.messageId));
+    const mappings = mappingsFor(address.messageId);
     const mapping = mappings.find(
         (candidate) =>
             (address.partIndex === null || candidate.partIndex === address.partIndex) &&
@@ -478,7 +486,8 @@ function buildDropSeeds(args: {
     sessionId: string;
     readRawById: (messageId: string) => RawMessageParts | null;
 }): { seeds: ModuleDropSeed[]; skipped: number } {
-    const byBlock = new Map<string, ModuleDropSeed>();
+    const byBlock = new Map<string, { seed: ModuleDropSeed; canonical: string }>();
+    const mappingsById = new Map<string, ReturnType<typeof moduleRawBlockMappings>>();
     let skipped = 0;
     for (const tag of getDroppedTagsBySession(
         args.db,
@@ -495,7 +504,7 @@ function buildDropSeeds(args: {
             tag.type === "tool" ? tag.toolOwnerMessageId : dropSeedAddress(tag)?.messageId;
         if (args.eligibleMessageIds && (!ownerId || !args.eligibleMessageIds.has(ownerId)))
             continue;
-        const result = dropSeedForTag({ tag, readRawById: args.readRawById });
+        const result = dropSeedForTag({ tag, readRawById: args.readRawById, mappingsById });
         if (!("seed" in result)) {
             skipped += 1;
             sessionLog(
@@ -504,15 +513,16 @@ function buildDropSeeds(args: {
             );
             continue;
         }
+        const canonical = canonicalSeedJson(result.seed);
         const existing = byBlock.get(result.seed.block_id);
-        if (!existing || canonicalSeedJson(result.seed) < canonicalSeedJson(existing)) {
-            byBlock.set(result.seed.block_id, result.seed);
+        if (!existing || canonical < existing.canonical) {
+            byBlock.set(result.seed.block_id, { seed: result.seed, canonical });
         }
     }
     return {
-        seeds: [...byBlock.values()].sort((left, right) =>
-            canonicalSeedJson(left).localeCompare(canonicalSeedJson(right)),
-        ),
+        seeds: [...byBlock.values()]
+            .sort((left, right) => left.canonical.localeCompare(right.canonical))
+            .map(({ seed }) => seed),
         skipped,
     };
 }
@@ -863,7 +873,22 @@ export function buildPagedModuleStateSyncPayloads(
     return batches;
 }
 
-export async function buildModuleStateSyncPayload(args: {
+export async function buildModuleStateSyncPayload(
+    args: Parameters<typeof collectModuleStateSyncPayload>[0],
+): ReturnType<typeof collectModuleStateSyncPayload> {
+    const timing = args.options?.timing ?? (args.force ? new StateSyncTiming() : undefined);
+    try {
+        return await collectModuleStateSyncPayload({
+            ...args,
+            options: { ...args.options, timing },
+        });
+    } finally {
+        // Log seed cost before transport, including assembly failures.
+        if (args.force) timing?.log(args.pass.sessionId, "seed");
+    }
+}
+
+async function collectModuleStateSyncPayload(args: {
     state: ModuleStateSyncState;
     pass: ModuleStateSyncPass;
     force: boolean;
@@ -915,12 +940,36 @@ export async function buildModuleStateSyncPayload(args: {
           });
     const timing = args.options?.timing;
     const inventory = args.options?.seedInventory;
+    const resolvedBoundaries =
+        inventory?.contextBoundariesResolved === true
+            ? []
+            : resolveSharedCompartmentBoundaries(args.pass.db, args.pass.sessionId);
+    const tailBoundary = resolvedBoundaries.at(-1);
+    // A summary covering whole messages establishes a safe host-message trim
+    // boundary. Summaries covering individual blocks may still need the module
+    // to rebuild its cached prefix before older host messages can be removed.
+    const hostBoundary =
+        tailBoundary && tailBoundary.source_end_block_index === null
+            ? tailBoundary.end_message_id
+            : null;
+    const seedBoundaryId = hostBoundary ?? inventory?.boundaryId ?? null;
+    // After a module reset its inventory can lack a boundary. OpenCode's
+    // persisted compaction marker still hides messages before the marker row
+    // from the model. Seed only that visible tail, including the marker row;
+    // the summary's target can be later and must not exclude visible messages.
+    const rawSeedBoundaryId =
+        seedBoundaryId ??
+        (args.force
+            ? getPersistedCompactionMarkerState(args.pass.db, args.pass.sessionId)
+                  ?.boundaryMessageId
+            : null) ??
+        null;
     const rawStart = performance.now();
     const tail =
-        args.force && inventory
+        args.force && (inventory || rawSeedBoundaryId)
             ? readRawSessionSeedTail(
                   args.pass.sessionId,
-                  inventory.boundaryId?.replace(/#\d+$/, "") ?? null,
+                  rawSeedBoundaryId?.replace(/#\d+$/, "") ?? null,
                   () => {
                       if (timing) timing.rawReads += 1;
                   },
@@ -1048,24 +1097,12 @@ export async function buildModuleStateSyncPayload(args: {
     const channel2NudgeState = args.force
         ? getChannel2NudgeState(args.pass.db, args.pass.sessionId)
         : undefined;
-    const resolvedBoundaries =
-        inventory?.contextBoundariesResolved === true
-            ? []
-            : resolveSharedCompartmentBoundaries(args.pass.db, args.pass.sessionId);
-    const tailBoundary = resolvedBoundaries.at(-1);
-    // A whole-message tail records what TypeScript has already summarized.
-    // Indexed module publications can still be waiting for permission to rebuild
-    // the cached prefix; reconnecting must not advance their trim boundary early.
-    const hostBoundary =
-        tailBoundary && tailBoundary.source_end_block_index === null
-            ? tailBoundary.end_message_id
-            : null;
     const payloadArgs = {
         resolvedBoundaries,
         moduleGeneration: args.state.moduleGeneration,
         expectedShadowSeq: args.state.lastAckedSeq,
         seedId: args.seedId ?? randomUUID(),
-        seedBoundaryId: hostBoundary ?? inventory?.boundaryId ?? null,
+        seedBoundaryId,
         dropSeeds:
             dropSeedState && dropSeedState.seeds.length > 0 ? dropSeedState.seeds : undefined,
         dropSeedSkipped:
