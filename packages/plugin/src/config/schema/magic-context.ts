@@ -490,7 +490,7 @@ const DreamTaskBaseConfigSchema = z
             .positive()
             .optional()
             .describe(
-                "Maximum cumulative prompt tokens (input + cache read + cache write) for one tool-loop child. Defaults vary by task.",
+                "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
             ),
     })
     .strict();

@@ -30,12 +30,14 @@ export const CANONICAL_DREAM_TASKS = [
 export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
 
 /** Prompt-token ceilings informed by docs/reports/dreamer-token-usage.md.
- * Multi-memory batches need more room than a single primer investigation;
- * curate's 150-step tool loop warrants a larger allowance too. */
+ * Completed Gemini run usage predicts 20-memory mapping/verification batches
+ * at about 70% of their allowance
+ * (docs/reports/verify-token-budget-2026-09-30.md); curate and other tasks retain
+ * their separate allowances. */
 export const DREAM_TOOL_LOOP_TOKEN_BUDGETS = {
-    "map-memories": 1_500_000,
-    verify: 1_700_000,
-    "verify-broad": 1_700_000,
+    "map-memories": 2_500_000,
+    verify: 2_500_000,
+    "verify-broad": 3_000_000,
     curate: 1_500_000,
     retrospective: 300_000,
     "maintain-docs": 1_600_000,

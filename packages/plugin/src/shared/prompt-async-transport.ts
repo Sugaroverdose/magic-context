@@ -8,14 +8,23 @@ import {
 } from "../features/magic-context/dreamer/token-budget";
 import { sumTokensFromChildMessages } from "../features/magic-context/subagent-token-capture";
 import { describeAssistantError } from "./assistant-message-extractor";
+import { sessionLog } from "./logger";
 import type { PromptArgs, PromptTransport } from "./model-suggestion-retry";
 
 type Client = ReturnType<typeof createOpencodeClient> | undefined;
 
 const activeSessionErrors = new Map<string, unknown>();
+const budgetAbortedSessions = new Set<string>();
 
 /** Feed host errors only to active background waits, not ordinary user sessions. */
 export function recordPromptSessionError(sessionId: string, error: unknown): void {
+    // The finalize nudge intentionally aborts the previous generation. Its late
+    // event must not poison the replacement turn; other provider errors still count.
+    if (
+        budgetAbortedSessions.has(sessionId) &&
+        describeAssistantError(error).startsWith("MessageAbortedError")
+    )
+        return;
     if (activeSessionErrors.has(sessionId) && activeSessionErrors.get(sessionId) === undefined)
         activeSessionErrors.set(sessionId, error);
 }
@@ -233,7 +242,7 @@ export async function promptAsyncAndWaitForIdle(
     const budget =
         options.budgetGuard ??
         (options.tokenBudget ? createDreamTokenBudget(options.tokenBudget) : undefined);
-    if (budget?.snapshot().finalizeFired)
+    if (budget && (budget.snapshot().finalizeFired || budget.snapshot().hardStopped))
         throw new DreamTokenBudgetExceeded(sessionId, budget.snapshot().spent);
     const seenUsage = new Set<string>();
     let finalizing = false;
@@ -273,6 +282,13 @@ export async function promptAsyncAndWaitForIdle(
             const status = await readStatus(session, sessionId, dir, signal);
             const messages = await readMessages(session, sessionId, dir, signal);
             if (budget) {
+                const latest = messages.at(-1);
+                const latestId = messageId(latest);
+                const completedAnswer =
+                    latestId !== null &&
+                    !completionBaseline.has(latestId) &&
+                    isTerminalAssistant(latest) &&
+                    infoOf(latest).error == null;
                 for (const message of messages) {
                     const id = messageId(message);
                     if (!id || seenUsage.has(id) || infoOf(message).role !== "assistant") continue;
@@ -285,7 +301,10 @@ export async function promptAsyncAndWaitForIdle(
                         tokens.input,
                         tokens.cacheRead,
                         tokens.cacheWrite,
-                        isTerminalAssistant(message),
+                        // A poll can receive several usage rows together. Charge
+                        // all of them, but never abort an answer already completed.
+                        completedAnswer ||
+                            (isTerminalAssistant(message) && infoOf(message).error == null),
                     );
                     options.onBudgetUpdate?.({ ...budget.snapshot(), sessionId });
                     if (decision === "stop") {
@@ -294,6 +313,12 @@ export async function promptAsyncAndWaitForIdle(
                     }
                     if (decision === "finalize") {
                         finalizing = true;
+                        sessionLog(
+                            sessionId,
+                            "dreamer token budget: finalize fired",
+                            budget.snapshot(),
+                        );
+                        budgetAbortedSessions.add(sessionId);
                         registerBudgetFinalizeChild(sessionId, budget);
                         if (!session.abort)
                             throw new DreamTokenBudgetExceeded(sessionId, budget.snapshot().spent);
@@ -335,7 +360,7 @@ export async function promptAsyncAndWaitForIdle(
                         break;
                     }
                 }
-                if (budget.snapshot().hardStopped) {
+                if (budget.snapshot().hardStopped && !completedAnswer) {
                     await session.abort?.({ path: { id: sessionId } });
                     throw new DreamTokenBudgetExceeded(sessionId, budget.snapshot().spent);
                 }
@@ -367,6 +392,7 @@ export async function promptAsyncAndWaitForIdle(
         }
     } finally {
         activeSessionErrors.delete(sessionId);
+        budgetAbortedSessions.delete(sessionId);
         if (budget) releaseBudgetFinalizeChild(sessionId);
     }
 }

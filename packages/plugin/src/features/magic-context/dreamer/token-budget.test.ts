@@ -21,6 +21,19 @@ describe("dreamer prompt-token budget", () => {
             MagicContextConfigSchema.parse({ dreamer: { tasks: { verify: { token_budget: 0 } } } }),
         ).toThrow();
     });
+    test("sizes memory tool-loop defaults for twenty-memory batches without changing other budgets", () => {
+        const tasks = buildDreamTaskRuntimeConfigs(
+            MagicContextConfigSchema.parse({}).dreamer,
+            "opencode",
+        );
+        expect(tasks.find((task) => task.task === "verify")?.tokenBudget).toBe(2_500_000);
+        expect(tasks.find((task) => task.task === "verify-broad")?.tokenBudget).toBe(3_000_000);
+        expect(tasks.find((task) => task.task === "map-memories")?.tokenBudget).toBe(2_500_000);
+        expect(tasks.find((task) => task.task === "curate")?.tokenBudget).toBe(1_500_000);
+        expect(tasks.find((task) => task.task === "retrospective")?.tokenBudget).toBe(300_000);
+        expect(tasks.find((task) => task.task === "maintain-docs")?.tokenBudget).toBe(1_600_000);
+        expect(tasks.find((task) => task.task === "refresh-primers")?.tokenBudget).toBe(350_000);
+    });
     test("does not finalize work under the soft limit", () => {
         const guard = createDreamTokenBudget(100);
         expect(guard.charge(30, 40, 9)).toBe("continue");
@@ -51,6 +64,23 @@ describe("dreamer prompt-token budget", () => {
             finalizeFired: false,
             hardStopped: true,
         });
+    });
+
+    test("keeps a completed finalize answer even when its usage exceeds the budget", () => {
+        const guard = createDreamTokenBudget(1_400_000);
+        for (let step = 0; step < 9; step++)
+            expect(guard.charge(20_000, 100_000, 0)).toBe("continue");
+        expect(guard.charge(20_000, 100_000, 0)).toBe("finalize");
+        expect(guard.charge(120_000, 120_000, 0, true)).toBe("continue");
+        expect(guard.snapshot()).toMatchObject({ spent: 1_440_000, hardStopped: true });
+        expect(guard.refuseTool()).toMatchObject({ hardStopped: true });
+    });
+
+    test("keeps an already completed answer when coarse usage skips the soft limit", () => {
+        const guard = createDreamTokenBudget(100);
+        expect(guard.charge(110, 0, 0, true)).toBe("continue");
+        expect(guard.snapshot()).toMatchObject({ hardStopped: true, finalizeFired: false });
+        expect(guard.refuseTool()).toMatchObject({ hardStopped: true });
     });
 
     test("stops at 100 percent even without two refusals", () => {
