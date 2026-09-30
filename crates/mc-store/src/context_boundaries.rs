@@ -302,6 +302,55 @@ mod tests {
         store.with_context_conn_for_test(|conn| conn.execute_batch("INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at) VALUES ('raw', 0, 2, 5, 'm1', 'm4', 'summary', 'body', 1)")).unwrap();
     }
     #[test]
+    fn echoed_materialized_boundary_is_retained_when_a_newer_compartment_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        let first = [boundary()];
+        store
+            .apply_authority_state_sync(request(&first, 0))
+            .unwrap();
+        let (meta, materialized, _) = store.load_state_sync_inventory("raw", true).unwrap();
+        assert!(meta.initialized);
+        assert_eq!(materialized, "m4#0");
+
+        // A newer compartment is published but not folded yet; the host echoes the
+        // module's own boundary, which now lags the newest compartment.
+        store
+            .with_context_conn_for_test(|conn| conn.execute_batch(
+                "INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at) VALUES ('raw', 1, 6, 9, 'm5', 'm8', 'later', 'body', 2)",
+            ))
+            .unwrap();
+        let mut newer = boundary();
+        newer.sequence = 1;
+        newer.source_start_message = 6;
+        newer.source_end_message = 9;
+        newer.source_start_message_id = "m5".into();
+        newer.source_end_message_id = "m8".into();
+        newer.start_message = 5;
+        newer.end_message = 8;
+        newer.start_message_id = "m5#0".into();
+        newer.end_message_id = "m8#0".into();
+        let rows = [boundary(), newer];
+        let (meta, _, _) = store.load_state_sync_inventory("raw", true).unwrap();
+        store
+            .apply_authority_state_sync(request(&rows, meta.shadow_seq))
+            .unwrap();
+        let (_, retained, _) = store.load_state_sync_inventory("raw", true).unwrap();
+        assert_eq!(retained, "m4#0");
+
+        // A declared boundary that is neither the materialized one nor the newest
+        // compartment is still refused.
+        let (meta, _, _) = store.load_state_sync_inventory("raw", true).unwrap();
+        let mut stale = request(&rows, meta.shadow_seq);
+        stale.seed_boundary_id = Some("m1#0");
+        assert!(matches!(
+            store.apply_authority_state_sync(stale),
+            Err(crate::ModuleStateSyncError::InvalidSeedBoundary { .. })
+        ));
+    }
+
+    #[test]
     fn empty_legacy_source_id_accepts_host_resolution_without_rewriting_shared_row() {
         let dir = tempfile::tempdir().unwrap();
         let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();

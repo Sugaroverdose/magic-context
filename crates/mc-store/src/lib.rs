@@ -10854,7 +10854,30 @@ impl McStore {
             if !request.resolved_compartment_boundaries.is_empty() {
                 meta.resolved_compartment_boundaries = resolved_boundaries.clone();
             }
-            if let Some(declared) = request.seed_boundary_id {
+            // A reconnecting host without a whole-message boundary of its own echoes the
+            // boundary this module reported in its inventory. Compartments published after
+            // that fold can already be in context.db, so the echo may lag the newest
+            // compartment; it asks for no change, so the materialized boundary is kept
+            // rather than validated against the newest compartment and refused. It must
+            // still be a real compartment end: if the host rewrote that compartment, the
+            // echo falls through to validation and is refused.
+            let echoes_materialized_boundary = meta.initialized
+                && request.seed_boundary_id.is_some_and(|declared| {
+                    declared == core.boundary_id
+                        && seed_compartments
+                            .iter()
+                            .any(|compartment| compartment.end_message_id == declared)
+                });
+            if echoes_materialized_boundary {
+                tracing::info!(
+                    "mc-store: state-sync seed echoed materialized boundary {:?}; retained for session {}",
+                    core.boundary_id, request.session_id
+                );
+            }
+            if let Some(declared) = request
+                .seed_boundary_id
+                .filter(|_| !echoes_materialized_boundary)
+            {
                 let adoption = match validated_seed_boundary(declared, &seed_compartments) {
                     Ok(adoption) => adoption,
                     Err(detail) => {
