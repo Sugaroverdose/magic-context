@@ -166,3 +166,18 @@ it("creates dreamer sessions with the ordinary parent relationship", async () =>
         query: { directory: "/project" },
     });
 });
+
+it("creates parentless process-local dreamer sessions without exposing a host root", async () => {
+    const create = mock(async () => ({ id: "hidden-child" }));
+    const result = await createChildSessionWithFence({
+        client: { backgroundSessionsAreHidden: true, session: { create } },
+        db: null,
+        title: "magic-context-dream-curate",
+        directory: "/project",
+    });
+    expect(result).toEqual({ id: "hidden-child" });
+    expect(create).toHaveBeenCalledWith({
+        body: { title: "magic-context-dream-curate" },
+        query: { directory: "/project" },
+    });
+});

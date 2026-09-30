@@ -93,6 +93,7 @@ async function setupCli(dryRun: boolean): Promise<number> {
             ...(dryRun ? ["--dry-run"] : []),
         ],
         {
+            windowsHide: true,
             env: { ...process.env, PATH: root },
             cwd: root,
             stdout: "ignore",

@@ -54,7 +54,7 @@ describe("reviewUserMemories", () => {
             reviewUserMemories({
                 db,
                 client,
-                parentSessionId: undefined,
+                parentSessionId: "ses-parent",
                 sessionDirectory: "/repo/project",
                 holderId: "holder",
                 leaseKey: "review-user-memories",
@@ -122,7 +122,7 @@ describe("reviewUserMemories", () => {
         await reviewUserMemories({
             db,
             client: client as never,
-            parentSessionId: undefined,
+            parentSessionId: "ses-parent",
             sessionDirectory: "/repo/project",
             holderId: "holder",
             leaseKey: "review-user-memories-settled",

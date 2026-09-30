@@ -690,6 +690,9 @@ function createPiDreamerClient(
 	};
 
 	return {
+		// Pi runs background tasks in --no-session subprocesses, so they never
+		// appear in the user's session list and need no parent to hide them.
+		backgroundSessionsAreHidden: true,
 		session,
 		readTokenBudget: (task: string) => budgetStates.get(task),
 		resetDreamTokenBudget: (task: string) => budgetStates.delete(task),

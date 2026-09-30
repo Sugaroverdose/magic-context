@@ -154,6 +154,9 @@ function createMockDeps(promptMocks: PromptMocks = createPromptMocks()): MagicCo
     return {
         client: {
             session: {
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: promptMocks.createSession,
                 ...(promptMocks.prompt ? { prompt: promptMocks.prompt } : {}),
                 promptAsync: promptMocks.promptAsync,

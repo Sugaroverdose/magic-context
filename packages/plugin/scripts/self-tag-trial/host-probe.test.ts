@@ -4,7 +4,17 @@ import { mkdtempSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-test("C and D guidance reaches the pinned host and is absent for A", () => {
+let pinnedHostAvailable = false;
+try {
+    pinnedHostAvailable = execFileSync("opencode", ["--version"], { encoding: "utf8" }).trim() === "1.18.30";
+} catch {
+    // The research probe requires an installed OpenCode host, not just Bun.
+}
+if (!pinnedHostAvailable) {
+    console.warn("Skipping self-tag host probe: pinned OpenCode 1.18.30 is not available on PATH.");
+}
+
+test.skipIf(!pinnedHostAvailable)("C and D guidance reaches the pinned host and is absent for A", () => {
     const base = join(tmpdir(), "magic-context", "self-tag-trial");
     mkdirSync(base, { recursive: true });
     const output = join(mkdtempSync(join(base, "proof-")), "proof.json");

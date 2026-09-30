@@ -2425,6 +2425,17 @@
             ]
         },
         {
+            "path": "tests/dreamer-verify-token-budget-oc1.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Opt-in real OpenCode 1.18.30 budget probes (MC_E2E_OC1_BUDGET_PROBE=1): completed manifests, refusal limits, coarse usage and normal verify/map batches; run on demand outside the mode lanes, like dreamer-token-budget-oc1.",
+            "contract_refs": ["DREAMER-TIMEOUTS"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/dreamer-host-timeout.test.ts",
             "tier": "excluded",
             "invocation": {
