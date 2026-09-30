@@ -18,6 +18,22 @@
             ]
         },
         {
+            "path": "tests/issue-574-unborn-project.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "manual regression probe on OpenCode 1.18.30: a git repo with no commits keeps its dir: identity and existing memories, and sidebar refreshes log no identity errors; throwaway root with host PID lsof containment",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode"]
+        },
+        {
+            "path": "tests/issue-570-home-project.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "manual regression probe on OpenCode 1.18.30 with throwaway HOME and host PID lsof containment",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/issue-538-engine-wall.test.ts",
             "tier": "excluded",
             "invocation": {
@@ -997,6 +1013,14 @@
             "hosts": [
                 "opencode2"
             ]
+        },
+        {
+            "path": "tests/opencode2/hidden-child-two-directories.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Real OpenCode 2 host dispatches hidden runs from two git worktrees with shared project identity to their respective directory hooks; dedicated v2 lane",
+            "contract_refs": ["R44"],
+            "hosts": ["opencode2"]
         },
         {
             "path": "tests/opencode2/hidden-child-unbound.test.ts",
@@ -2386,6 +2410,21 @@
             ]
         },
         {
+            "path": "tests/dreamer-token-budget-oc1.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "the dreamer token budget on a real OpenCode 1.18.30 host: aborting at the soft limit keeps the tools array byte-identical, the finalize turn banks its manifest, a later tool call is refused, and the hard stop records token_budget (MC-D11); opt-in with MC_E2E_OC1_BUDGET_PROBE=1, so it runs by hand outside the mode lanes",
+            "contract_refs": [
+                "DREAMER-TIMEOUTS"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/dreamer-host-timeout.test.ts",
             "tier": "excluded",
             "invocation": {
@@ -2417,12 +2456,12 @@
         },
         {
             "path": "tests/opencode2/storage-busy.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode 2 under a real context.db write lock: a short lock retries, a long one refuses visibly without a raw provider request, busy LKG replays prefix and system together, background contention releases the server. Held out of CI until the 7-second case passes on the pinned 2.0.15 host; run by hand",
+            "rationale": "OpenCode 2 under a real context.db write lock: a short lock retries, a long one refuses visibly without a raw provider request, busy LKG replays prefix and system together, background contention releases the server on the pinned 2.0.15 host",
             "contract_refs": [
                 "OC2-S1"
             ],

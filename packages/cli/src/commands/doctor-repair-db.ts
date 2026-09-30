@@ -20,7 +20,10 @@ import {
     inspectRpcServerDiscovery,
 } from "@magic-context/core/features/magic-context/storage-db";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
-import { inspectLivePiProcesses } from "@magic-context/core/shared/rpc-utils";
+import {
+    inspectLivePiProcesses,
+    inspectWindowsProcessesSync,
+} from "@magic-context/core/shared/rpc-utils";
 import { Database, type Database as DatabaseType } from "@magic-context/core/shared/sqlite";
 
 import { type PromptIO, promptIO } from "../lib/prompts";
@@ -93,7 +96,14 @@ export function defaultInspectHolders(
         processReferences: processReferencesStorage,
         ...overrides,
     };
-    const rpc = deps.inspectRpc(storageDir);
+    // On Windows one process snapshot serves both the RPC and the Pi checks, so
+    // the slow process listing runs once per doctor call.
+    const processes = process.platform === "win32" ? inspectWindowsProcessesSync() : undefined;
+    const rpc = deps.inspectRpc(storageDir, processes, {
+        deadlineMs: 15_000,
+        onProgress: (checked, total) =>
+            console.error(`Inspecting RPC database holders: ${checked}/${total} records checked`),
+    });
     if (rpc.state === "unreadable") {
         const arm = rpc.unreadableArm === "parse" ? "could not be parsed" : "could not be read";
         return {
@@ -105,7 +115,13 @@ export function defaultInspectHolders(
 
     const blockers =
         rpc.state === "live" ? rpc.serverPids.map((pid) => `OpenCode server (PID ${pid})`) : [];
-    const pi = deps.inspectPi();
+    if (rpc.state === "inconclusive")
+        return {
+            safe: false,
+            blockers: [],
+            uncertainty: `RPC process liveness could not be determined (PID ${(rpc.inconclusivePids ?? []).join(", ")})`,
+        };
+    const pi = overrides.inspectPi ? deps.inspectPi() : (processes?.pi ?? deps.inspectPi());
     if (canonicalStoragePath(storageDir) !== canonicalStoragePath(deps.defaultStorageDir)) {
         // Non-default stores require an explicit host path. A process named Pi
         // is not enough: open target files or a configured storage path identify holders.

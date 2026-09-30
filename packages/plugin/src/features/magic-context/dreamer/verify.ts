@@ -25,6 +25,7 @@ import {
     invalidateMemory,
     type Memory,
     normalizeVerificationFiles,
+    readGitHead,
     recordMemoryVerifications,
 } from "../memory";
 import { computeNormalizedHash } from "../memory/normalize-hash";
@@ -46,6 +47,8 @@ import {
     providerOutputFailureFromInvalidManifest,
 } from "./provider-output-failure";
 import { getTaskScheduleState, writeTaskScheduleState } from "./storage-task-schedule";
+import { DreamTokenBudgetExceeded } from "./token-budget";
+import { buildVerifyDiffEvidence } from "./verify-diff";
 import { partitionVerifyScope } from "./verify-gate";
 import {
     buildVerifyPrompt,
@@ -126,6 +129,8 @@ export interface VerifyArgs {
     forceBroad?: boolean;
     model?: ModelInput;
     fallbackModels?: readonly ModelInput[];
+    tokenBudget?: number;
+    onBudgetUpdate?: (state: { spent: number; finalizeFired: boolean }) => void;
     language?: string;
     moduleRoute?: DreamerModuleRoute;
     onProgress?: (processed: number, refused: number) => void;
@@ -205,8 +210,14 @@ export async function runVerify(args: VerifyArgs): Promise<VerifyResult> {
     }
 
     const batches: VerifyPromptMemory[][] = [];
-    for (let i = 0; i < gate.inScope.length; i += VERIFY_BATCH_SIZE) {
-        batches.push(gate.inScope.slice(i, i + VERIFY_BATCH_SIZE));
+    const groups =
+        !args.forceBroad && gate.mode === "incremental"
+            ? [gate.inScope.filter((m) => m.verifiedAt), gate.inScope.filter((m) => !m.verifiedAt)]
+            : [gate.inScope];
+    for (const group of groups) {
+        for (let i = 0; i < group.length; i += VERIFY_BATCH_SIZE) {
+            batches.push(group.slice(i, i + VERIFY_BATCH_SIZE));
+        }
     }
 
     const abortController = new AbortController();
@@ -311,8 +322,18 @@ async function verifyOneBatch(
     let agentSessionId: string | null = null;
     let promptSettled = false;
     const startedAt = Date.now();
+    let budgetFinalized = false;
+    const onBudgetUpdate: NonNullable<VerifyArgs["onBudgetUpdate"]> = (state) => {
+        budgetFinalized ||= state.finalizeFired;
+        args.onBudgetUpdate?.(state);
+    };
     try {
-        const prompt = buildVerifyPrompt(args.projectIdentity, batch);
+        const headAtPrompt = await readGitHead(args.sessionDirectory);
+        const evidence =
+            !args.forceBroad && batch.every((m) => m.verifiedAt)
+                ? await buildVerifyDiffEvidence(args.sessionDirectory, batch)
+                : null;
+        const prompt = buildVerifyPrompt(args.projectIdentity, batch, evidence);
         if (args.hiddenCompletionExecutor) {
             const run = await runHiddenSingleShotPrompt({
                 executor: args.hiddenCompletionExecutor,
@@ -323,6 +344,7 @@ async function verifyOneBatch(
                 prompt,
                 title: "magic-context-dream-verify",
                 callContext: "dreamer:verify",
+                metadata: { tokenBudget: args.tokenBudget, onBudgetUpdate },
                 model: args.model,
                 fallbackModels: args.fallbackModels,
                 language: args.language,
@@ -338,7 +360,13 @@ async function verifyOneBatch(
                 status: "completed",
                 messages: run.completion.messages ?? [],
             });
-            return applyParsedVerifyManifest(args, batch, run.validated);
+            return applyParsedVerifyManifest(
+                args,
+                batch,
+                run.validated,
+                evidence?.head ?? headAtPrompt,
+                budgetFinalized,
+            );
         }
         const client = args.client;
         if (!client) throw new Error("verify requires a client or hidden completion executor");
@@ -374,7 +402,10 @@ async function verifyOneBatch(
             {
                 // Send without holding a request open for the whole batch, so the
                 // slice below is the only timer (see prompt-async-transport.ts).
-                transport: shared.createPromptAsyncTransport(client, agentSessionId),
+                transport: shared.createPromptAsyncTransport(client, agentSessionId, {
+                    tokenBudget: args.tokenBudget,
+                    onBudgetUpdate,
+                }),
                 timeoutMs: sliceMs,
                 signal,
                 fallbackModels: args.fallbackModels,
@@ -409,7 +440,13 @@ async function verifyOneBatch(
         promptSettled = true;
 
         recordInvocation(args, startedAt, { status: "completed", messages: run.output });
-        return await applyParsedVerifyManifest(args, batch, run.validated);
+        return await applyParsedVerifyManifest(
+            args,
+            batch,
+            run.validated,
+            evidence?.head ?? headAtPrompt,
+            budgetFinalized,
+        );
     } catch (error) {
         const desc = describeError(error);
         const providerFailure =
@@ -428,7 +465,12 @@ async function verifyOneBatch(
                 args.sessionDirectory,
             ),
         });
-        if (error instanceof DreamerModuleFailureError || signal.aborted) throw error;
+        if (
+            error instanceof DreamerModuleFailureError ||
+            error instanceof DreamTokenBudgetExceeded ||
+            signal.aborted
+        )
+            throw error;
         // A timeout is a budget verdict, not a failure of this run: report it so the
         // run can stop cleanly with its earlier batches banked.
         if (
@@ -501,6 +543,8 @@ async function applyParsedVerifyManifest(
     args: VerifyArgs,
     batch: VerifyPromptMemory[],
     parsed: ParsedVerifyManifest,
+    headAtPrompt?: string | null,
+    budgetFinalized = false,
 ): Promise<VerifyVerdictCounts> {
     const batchIds = new Set(batch.map((m) => m.id));
     const batchById = new Map(batch.map((memory) => [memory.id, memory]));
@@ -526,18 +570,25 @@ async function applyParsedVerifyManifest(
     );
     assertNoDuplicateManifestIds(validIds, "verify");
 
-    // A closed root rules out truncation, but fewer than half of the requested ids
-    // is more likely a confused response to another request than an ordinary tail
-    // omission. Reject before any writes so an unrelated minority cannot be banked.
-    if (validIds.length * 2 < batch.length) {
+    // The token guard asks the child to stop investigating and return only ids it
+    // checked, so low coverage is expected then. Without that stop request, reject
+    // low coverage before writes: the child may have answered a different batch.
+    if (!budgetFinalized && validIds.length * 2 < batch.length) {
         throw new Error(
             `verify manifest covers ${validIds.length}/${batch.length} batch ids after filtering unknown entries; rejecting mostly-wrong manifest`,
+        );
+    }
+    if (budgetFinalized && validIds.length < batch.length) {
+        log(
+            `[dreamer] verify: accepted partial manifest after token budget: ${validIds.length}/${batch.length}`,
         );
     }
     if (validIds.length === 0) {
         return { verified: 0, updated: 0, archived: 0, skipped: 0, refused: 0 };
     }
     const now = Date.now();
+    const verifiedHead =
+        headAtPrompt === undefined ? await readGitHead(args.sessionDirectory) : headAtPrompt;
 
     // Pre-normalize files OUTSIDE the transaction (git/realpath I/O). For each
     // affected id, the COMPLETE backing set the agent reports.
@@ -675,6 +726,7 @@ async function applyParsedVerifyManifest(
             if (!isPrimaryMutable(memory)) continue;
             if (w.kind === "verify") {
                 recordMemoryVerifications(args.db, w.id, w.files, now);
+                if (verifiedHead) recordVerifiedCommit(args.db, memory, now, verifiedHead);
                 verified += 1;
             } else if (w.kind === "update") {
                 rewriteMemoryContent(args.db, memory, w.content, w.hash);
@@ -698,6 +750,21 @@ async function applyParsedVerifyManifest(
         }
     });
     return { verified, updated, archived, skipped, refused };
+}
+
+function recordVerifiedCommit(db: Database, memory: Memory, at: number, head: string): void {
+    let metadata: Record<string, unknown> = {};
+    try {
+        const parsed: unknown = JSON.parse(memory.metadataJson ?? "{}");
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+            metadata = parsed as Record<string, unknown>;
+    } catch {
+        /* Preserve verification even when old metadata is malformed. */
+    }
+    db.prepare("UPDATE memories SET metadata_json = ? WHERE id = ?").run(
+        JSON.stringify({ ...metadata, dreamerVerifiedAt: at, dreamerVerifiedCommit: head }),
+        memory.id,
+    );
 }
 
 async function normalizeFiles(args: VerifyArgs, rawFiles: readonly string[]): Promise<string[]> {

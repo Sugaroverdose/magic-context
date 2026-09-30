@@ -49,7 +49,9 @@ import { promptSurfaceConfigIdentity, resolvePromptSurface } from "../../shared/
 import { createPromptSurfaceGuidanceEpochCache } from "../../shared/prompt-surface-runtime";
 import {
     isTransientSqliteError,
+    withAsyncPrivilegedWriter,
     withoutSqliteTransformPass,
+    withSqliteBackgroundWriter,
     withSqliteTransformPass,
 } from "../../shared/sqlite";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
@@ -62,8 +64,12 @@ import {
     type ToolAvailabilityVerdict,
     todowritePermissionDenied,
 } from "./ctx-reduce-availability";
-import { resolveKnownHistorianContextLimit } from "./derive-budgets";
+import {
+    resolveHistorianProducerLimits,
+    resolveKnownHistorianContextLimit,
+} from "./derive-budgets";
 import { isEditTool } from "./edit-marker";
+import { invalidateAutoEmbedSession } from "./embed-session-state";
 import {
     EmergencyFailClosedError,
     ENGINE_RECONNECTING_USER_MESSAGE,
@@ -341,6 +347,8 @@ interface RustSessionState extends ModuleStateSyncState {
     baselineSystemHashOmitted: boolean;
     todoProbeIdentity?: string;
     todoProbeNextPass?: boolean;
+    /** Last seen compartment `max_sequence:count` for this session; a change re-arms auto-embed. */
+    autoEmbedCompartmentMark?: string;
     lastAppliedAtMs?: number;
     consecutiveFailures: number;
     passCount: number;
@@ -1278,27 +1286,33 @@ function resolvedHistorianModelChain(
 
 function resolvedHistorianModelLimits(
     chain: readonly string[],
-): Record<string, { context?: number; output?: number }> {
+): Record<string, { context?: number; input?: number; output?: number }> {
     return Object.fromEntries(
         chain.map((key) => {
             const [provider, ...parts] = key.split("/");
             const output =
                 provider && parts.length ? getSdkOutputLimit(provider, parts.join("/")) : undefined;
-            const known = resolveKnownHistorianContextLimit(key);
+            const producerLimits = resolveHistorianProducerLimits(key);
+            const known =
+                producerLimits.input === undefined
+                    ? resolveKnownHistorianContextLimit(key)
+                    : undefined;
             const learned =
                 provider && parts.length
                     ? getSdkWindowGeometry(provider, parts.join("/"))?.derivation.window
                     : undefined;
             const context =
-                known === undefined
+                producerLimits.context ??
+                (known === undefined
                     ? learned
                     : learned === undefined
                       ? known
-                      : Math.min(known, learned);
+                      : Math.min(known, learned));
             return [
                 key,
                 {
                     ...(context !== undefined ? { context } : {}),
+                    ...(producerLimits.input !== undefined ? { input: producerLimits.input } : {}),
                     ...(output !== undefined ? { output } : {}),
                 },
             ];
@@ -3543,6 +3557,15 @@ export function createRustModeTransform(
                 // LKG captures postprocessed output, so running postprocess again would stop the
                 // fallback artifact from being an exact replay.
                 if (!replayedFrozenRepresentation) {
+                    if (materializedBoundary && !deps.compactionOff) {
+                        try {
+                            await withAsyncPrivilegedWriter(deps.db, () => undefined);
+                        } catch (error) {
+                            // Postprocess can still serve a safe SOFT replay when its
+                            // optional host-store marker cannot acquire the writer.
+                            if (!isTransientSqliteError(error)) throw error;
+                        }
+                    }
                     const postprocess = runRustModePostprocess({
                         db: deps.db,
                         sessionId,
@@ -3832,9 +3855,28 @@ export function createRustModeTransform(
             timings.bookkeeping += performance.now() - bookkeepingStartedAt - timings.delivery;
             appliedAt = performance.now();
             // Embedding work is background maintenance, not a foreground transform writer.
-            void withoutSqliteTransformPass(() =>
-                drainSingleStoreEmbeddingWatermarks(deps.db),
-            ).catch((error) => {
+            void withoutSqliteTransformPass(async () => {
+                // The module writes compartments straight into context.db, so the TS
+                // compartment writers that re-arm the once-per-session auto-embed latch
+                // never run for them. Re-arm it here when the session's compartment
+                // high-water mark moves, so new module compartments get embedded too.
+                const compartmentRow = deps.db
+                    .prepare(
+                        "SELECT COALESCE(MAX(sequence), -1) AS max_sequence, COUNT(*) AS count FROM compartments WHERE session_id = ?",
+                    )
+                    .get(sessionId) as { max_sequence?: number; count?: number } | undefined;
+                const compartmentMark = `${compartmentRow?.max_sequence ?? -1}:${compartmentRow?.count ?? 0}`;
+                if (
+                    state.autoEmbedCompartmentMark !== undefined &&
+                    state.autoEmbedCompartmentMark !== compartmentMark
+                ) {
+                    invalidateAutoEmbedSession(sessionId);
+                }
+                state.autoEmbedCompartmentMark = compartmentMark;
+                await withSqliteBackgroundWriter(() =>
+                    drainSingleStoreEmbeddingWatermarks(deps.db),
+                );
+            }).catch((error) => {
                 sessionLog(sessionId, "single-store embedding drain failed (ignored):", error);
             });
             finishPass(true);

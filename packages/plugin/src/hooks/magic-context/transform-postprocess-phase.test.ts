@@ -581,6 +581,58 @@ function serializeAnthropicVisibleRoleGroups(messages: MessageLike[]): string {
 }
 
 describe("stripped placeholder replay across temporary marker windows", () => {
+    for (const providerID of ["anthropic", "openai-compatible"]) {
+        it(`freezes a marker-only final assistant across a priced pass and appended defer (${providerID})`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `ses-marker-only-${providerID}`;
+            const makePrefix = (): MessageLike[] =>
+                [
+                    {
+                        info: { id: "user", role: "user", sessionID: sessionId },
+                        parts: [{ type: "text", text: "continue" }],
+                    },
+                    {
+                        info: { id: "last", role: "assistant", sessionID: sessionId },
+                        parts: [
+                            { type: "text", text: "§672§ [dropped §672§]" },
+                            { type: "reasoning", text: "[cleared]" },
+                        ],
+                    },
+                ] as unknown as MessageLike[];
+            const first = makePrefix();
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, first, {
+                    schedulerDecision: "execute",
+                    pendingMaterializationSessions: new Set([sessionId]),
+                    schedulerDeferReason: null,
+                    resolvedProviderID: providerID,
+                }),
+            );
+            expect(getStrippedPlaceholderIds(db, sessionId).has("last")).toBe(true);
+            const prefix = JSON.stringify(first);
+            expect(first[1]?.parts).toEqual([
+                { type: "text", text: providerID === "anthropic" ? "" : "[dropped]" },
+            ]);
+            const second = [
+                ...makePrefix(),
+                {
+                    info: { id: "new", role: "assistant", sessionID: sessionId },
+                    parts: [{ type: "text", text: "§655§ [cleared]" }],
+                },
+            ] as MessageLike[];
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, second, {
+                    schedulerDecision: "defer",
+                    resolvedProviderID: providerID,
+                }),
+            );
+            expect(JSON.stringify(second.slice(0, first.length))).toBe(prefix);
+            expect(second[2]?.parts).toEqual([{ type: "text", text: "§655§ [cleared]" }]);
+            expect(getStrippedPlaceholderIds(db, sessionId).has("new")).toBe(false);
+        });
+    }
+
     for (const [missingPassDecision, replayPassDecision] of [
         ["execute", "defer"],
         ["defer", "execute"],
@@ -3187,7 +3239,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         );
     });
 
-    it("preserves a pre-deploy whitespace prefix through a HARD fold and rebuilt defer tail", async () => {
+    it("neutralizes a tag-only assistant on the HARD fold and replays its sentinel on defer", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-hardfold-inert-whitespace";
@@ -3228,7 +3280,6 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         });
         insertTag(db, sessionId, "assistant-framing:p0", "message", 1, 1);
         markWhitespaceAssistantTagInert(db, sessionId, 1, "assistant-framing:p0");
-        const previousServe = "§1§  ";
         const makeTail = () =>
             [
                 {
@@ -3289,7 +3340,8 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         );
         expect(hardResult.materialized).toBe(true);
         expect(marker?.boundaryOrdinal).toBe(10);
-        expect(hardWhitespace?.parts).toEqual([{ type: "text", text: previousServe }]);
+        // A bare tag is a complete marker; its replacement text is replayed on later passes.
+        expect(hardWhitespace?.parts).toEqual([{ type: "text", text: "[dropped]" }]);
         const hardWire = JSON.stringify(hardMessages);
 
         const deferMessages = [
@@ -3327,7 +3379,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         const deferWhitespace = deferMessages.find(
             (message) => message.info.id === "assistant-framing",
         );
-        expect(deferWhitespace?.parts).toEqual([{ type: "text", text: previousServe }]);
+        expect(deferWhitespace?.parts).toEqual([{ type: "text", text: "[dropped]" }]);
         expect(JSON.stringify(deferMessages)).toBe(hardWire);
     });
 
@@ -9070,6 +9122,54 @@ describe("proactive strip of thinking on busting passes", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
     };
+
+    it("a budget-shrink HARD strips thinking on the resizing pass and not the next replay", async () => {
+        openDb();
+        const sessionId = "ses-proactive-budget-shrink";
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 1,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: "user-prefix",
+                endMessageId: "user-prefix",
+                title: "large history",
+                content: "",
+                p1: "history bytes ".repeat(500),
+                p2: "dense",
+                p3: "brief",
+                p4: "anchor",
+                importance: 100,
+            },
+        ]);
+        const pass = (messages: MessageLike[], historyBudgetTokens: number) =>
+            runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    resolvedProviderID: "anthropic",
+                    thinkingBindingRecoveryEnabledForModel: true,
+                    fullFeatureMode: true,
+                    schedulerDecision: "defer",
+                    m0M1: {
+                        projectPath: "git:budget-shrink",
+                        projectDirectory: "/nonexistent",
+                        historyBudgetTokens,
+                        historyBudgetPolicyIdentity: "p0.15:percentage:40",
+                    },
+                }),
+            );
+        await pass(buildSession(sessionId), 12000);
+        const shrinking = appendTurn(buildSession(sessionId), sessionId, "shrink");
+        const result = await pass(shrinking, 1);
+        expect(result.materializeReason).toContain("render_config:budget_shrink(");
+        expect(result.bustedThisPass).toBe(true);
+        expect(result.proactiveThinkingStrip?.messageIds).toContain("assistant-shrink");
+        expect(reasoningCount(findMessage(shrinking, "assistant-shrink"))).toBe(0);
+        const replay = appendTurn(shrinking, sessionId, "after-shrink");
+        const next = await pass(replay, 1);
+        expect(next.materialized).toBe(false);
+        expect(next.proactiveThinkingStrip).toBeNull();
+        expect(reasoningCount(findMessage(replay, "assistant-after-shrink"))).toBe(1);
+    });
 
     it("strips every thinking block on a busting pass; the next defer pass keeps the shared prefix hash", async () => {
         openDb();

@@ -11865,6 +11865,19 @@ impl McHandler {
             };
         }
         let (model, result, child_session) = output.expect("classifier output set");
+        let tokens = historian_producer::producer_token_log(
+            result.usage,
+            Some(CLASSIFY_MAX_OUTPUT_TOKENS),
+            result.length_capped,
+        );
+        tracing::info!(
+            response_chars = result.text.chars().count(),
+            tokens = %tokens,
+            "dreamer classify response received"
+        );
+        if result.length_capped {
+            tracing::warn!(tokens = %tokens, "dreamer classify output hit the length cap");
+        }
         let mut response = json!({
             "ok": true,
             "manifest_text": result.text,
@@ -18239,7 +18252,7 @@ pub fn manifest_with_route_targets(
     // the marker and fails loudly on absence, which is the correct failure
     // surface for a malformed stamp.
     .provenance(match build_provenance(option_env!("MC_BUILD_SHA"), None, None) {
-        Ok(provenance) => Some(provenance),
+        Ok(provenance) => Some(provenance.with_launch_nonce_source(subc_client_rs::launch_nonce_source())),
         Err(err) => {
             tracing::warn!("mc-module: MC_BUILD_SHA rejected by provenance form check, omitting deploy marker: {err}");
             None
@@ -39119,3 +39132,5 @@ mod todo_verdict_probe_tests {
         assert!(!unprobed_todo_bust(Some(false), "DEFER"));
     }
 }
+
+mod user_answer;

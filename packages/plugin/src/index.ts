@@ -22,7 +22,11 @@ import {
     createFailClosedController,
     getLastHookInitFailure,
 } from "./features/magic-context/fail-closed-block";
-import { resolveProjectIdentityForSession } from "./features/magic-context/memory/project-identity";
+import {
+    resolveProjectIdentityForSession,
+    setHomeProjectPermission,
+} from "./features/magic-context/memory/project-identity";
+import { backfillSessionActivity } from "./features/magic-context/session-activity";
 import { runSessionProjectBackfill } from "./features/magic-context/session-project-backfill";
 import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "./features/magic-context/smart-notes/compiler-prompt";
 import {
@@ -135,6 +139,7 @@ const server: Plugin = async (ctx) => {
     });
     const loadedPluginConfig = loadPluginConfigDetailed(ctx.directory);
     const pluginConfig = loadedPluginConfig.config;
+    setHomeProjectPermission(pluginConfig.allow_home_project);
     const liveConfigReader = pluginConfigReader(ctx.directory, pluginConfig);
     const dreamerCap = createDreamerOutputCapSampler(
         pluginConfig,
@@ -451,34 +456,49 @@ const server: Plugin = async (ctx) => {
                 const ocDb = openOpenCodeDb();
                 if (!ocDb) return;
                 try {
-                    await runSessionProjectBackfill(db, (afterSessionId, limit) => {
-                        const rows = (
-                            afterSessionId === null
-                                ? ocDb
-                                      .prepare(
-                                          `SELECT id, COALESCE(directory, '') AS directory
+                    await runSessionProjectBackfill(
+                        db,
+                        (afterSessionId, limit) => {
+                            const rows = (
+                                afterSessionId === null
+                                    ? ocDb
+                                          .prepare(
+                                              `SELECT id, COALESCE(directory, '') AS directory
                                        FROM session
                                        ORDER BY id ASC
                                        LIMIT ?`,
-                                      )
-                                      .all(limit)
-                                : ocDb
-                                      .prepare(
-                                          `SELECT id, COALESCE(directory, '') AS directory
+                                          )
+                                          .all(limit)
+                                    : ocDb
+                                          .prepare(
+                                              `SELECT id, COALESCE(directory, '') AS directory
                                        FROM session
                                        WHERE id > ?
                                        ORDER BY id ASC
                                        LIMIT ?`,
-                                      )
-                                      .all(afterSessionId, limit)
-                        ) as Array<{
-                            id: string;
-                            directory: string;
-                        }>;
-                        return rows.map((session) => ({
-                            sessionId: session.id,
-                            directory: session.directory,
-                        }));
+                                          )
+                                          .all(afterSessionId, limit)
+                            ) as Array<{
+                                id: string;
+                                directory: string;
+                            }>;
+                            return rows.map((session) => ({
+                                sessionId: session.id,
+                                directory: session.directory,
+                            }));
+                        },
+                        {
+                            leaseKey: "opencode:session-projects-creation-v2",
+                            allowHomeProject: pluginConfig.allow_home_project,
+                        },
+                    );
+                    await backfillSessionActivity(db, "opencode", (sessionId) => {
+                        const row = ocDb
+                            .prepare(
+                                "SELECT MAX(time_created) AS time FROM message WHERE session_id = ?",
+                            )
+                            .get(sessionId) as { time: number | null } | undefined;
+                        return row?.time ?? undefined;
                     });
                 } finally {
                     closeQuietly(ocDb);

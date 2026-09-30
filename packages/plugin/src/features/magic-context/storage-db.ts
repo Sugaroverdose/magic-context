@@ -24,6 +24,7 @@ import {
     classifyProcessKind,
     inspectLivePiProcesses,
     inspectProcessesAsync,
+    inspectWindowsProcessesSync,
     isOwnRpcServerRecord,
     isPidAlive,
     isPidIdentityPlausible,
@@ -529,7 +530,18 @@ function classifyJunkDiscovery(
 export function inspectRpcServerDiscovery(
     storageDir: string,
     processes?: AsyncProcessInspection,
+    options?: {
+        /** Give up after this many milliseconds. Only interactive CLI callers set it. */
+        deadlineMs?: number;
+        /** Report progress on long scans. Plugin hosts pass nothing, so nothing reaches their stderr. */
+        onProgress?: (checked: number, total: number) => void;
+    },
 ): RpcServerDiscovery {
+    const deadline =
+        options?.deadlineMs === undefined
+            ? Number.POSITIVE_INFINITY
+            : Date.now() + options.deadlineMs;
+    let progressAt = Date.now() + 3_000;
     const rpcRoot = join(storageDir, "rpc");
     let projectEntries: Dirent[];
     try {
@@ -562,11 +574,20 @@ export function inspectRpcServerDiscovery(
         return { state: "absent", serverPids: [], staleFiles: [] };
     }
 
+    if (!processes && process.platform === "win32") processes = inspectWindowsProcessesSync();
     const pids = new Set<number>();
     const processByPid = new Map<number, FailClosedBlockingProcess>();
     const staleFiles: string[] = [];
     const inconclusivePids = new Set<number>();
-    for (const portFile of portFiles) {
+    for (const [index, portFile] of portFiles.entries()) {
+        if (Date.now() >= deadline)
+            throw new Error(
+                `RPC holder inspection timed out after ${Math.round((options?.deadlineMs ?? 0) / 1000)} seconds (${index}/${portFiles.length} records checked). Close OpenCode and Pi, then retry.`,
+            );
+        if (options?.onProgress && Date.now() >= progressAt) {
+            options.onProgress(index, portFiles.length);
+            progressAt = Date.now() + 3_000;
+        }
         let raw: string;
         try {
             raw = rpcDiscoveryFs.readFileSync(portFile, "utf8");
@@ -609,7 +630,14 @@ export function inspectRpcServerDiscovery(
             if (!previous || (previous.kind === "process" && detected.kind !== "process")) {
                 processByPid.set(record.pid, detected);
             }
-        } else if (identity === "implausible") {
+        } else if (
+            identity === "implausible" &&
+            !(
+                (processes?.processSnapshot?.source === "cim" ||
+                    processes?.processSnapshot?.source === "tasklist") &&
+                liveness === "alive"
+            )
+        ) {
             staleFiles.push(portFile);
         } else {
             inconclusivePids.add(record.pid);

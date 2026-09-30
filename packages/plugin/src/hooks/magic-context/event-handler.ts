@@ -1,11 +1,14 @@
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
+import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import { scheduleClearAndReindex } from "../../features/magic-context/message-index-async";
 import {
     detectOverflow,
     detectThinkingBindingMismatch,
     isPrefixBoundThinkingModel,
 } from "../../features/magic-context/overflow-detection";
+import { observeSessionActivity } from "../../features/magic-context/session-activity";
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
+import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     armThinkingBindingRecovery,
     clearDetectedContextLimit,
@@ -111,6 +114,7 @@ export interface EventHandlerDeps {
     onRustWireInvalidated?: (sessionId: string) => void;
     onSessionDeleted?: (sessionId: string) => Promise<void> | void;
     rustSessionCleanup?: boolean;
+    allowHomeProject?: boolean;
     config: {
         clear_reasoning_age?: number;
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
@@ -309,6 +313,14 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             try {
+                // The host's creation directory also covers children that never run a transform.
+                if (info.directory) {
+                    recordSessionProjectIdentity(
+                        deps.db,
+                        info.id,
+                        resolveProjectIdentityForSession(info.directory, deps.allowHomeProject),
+                    );
+                }
                 const modelKey = resolveModelKey(info.providerID, info.modelID);
                 updateSessionMeta(deps.db, info.id, {
                     isSubagent: info.parentID.length > 0,
@@ -449,6 +461,27 @@ export function createEventHandler(deps: EventHandlerDeps) {
         }
 
         if (input.event.type === "message.updated") {
+            const message = getMessageUpdatedInfo(input.event.properties);
+            if (message?.sessionID) {
+                try {
+                    const rawInfo = properties?.info;
+                    const time =
+                        rawInfo && typeof rawInfo === "object" && "time" in rawInfo
+                            ? (rawInfo.time as { created?: unknown } | undefined)?.created
+                            : undefined;
+                    observeSessionActivity(
+                        deps.db,
+                        message.sessionID,
+                        typeof time === "number" ? time : Date.now(),
+                    );
+                } catch (error) {
+                    sessionLog(
+                        message.sessionID,
+                        "event message.updated activity persistence failed:",
+                        error,
+                    );
+                }
+            }
             const info = getMessageUpdatedAssistantInfo(input.event.properties);
             if (!info) {
                 const genericInfo = getMessageUpdatedInfo(input.event.properties);

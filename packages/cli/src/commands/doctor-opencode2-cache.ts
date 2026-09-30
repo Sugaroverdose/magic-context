@@ -32,12 +32,14 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { compareSemverCore } from "@magic-context/core/hooks/auto-update-checker/semver";
+import { inspectWindowsProcessesSync } from "@magic-context/core/shared/rpc-utils";
 import {
     getOpenCodeV2PluginCacheSlot,
     isOpenCodePluginDistTag,
     readConfiguredOpenCodePluginSpec,
     readOpenCodeV2CachedPluginVersion,
 } from "../lib/opencode-plugin-cache";
+import { assertWindowsStoresClosed } from "./doctor-windows-holders";
 
 export type HostUseProbe =
     | { status: "free" }
@@ -72,11 +74,30 @@ function runLsof(args: string[], spawn: SpawnLike): { pids: number[] } | { error
     return { pids };
 }
 
-/** Ask `lsof` which processes (other than this one) hold any of the targets open. */
+/** Check whether processes use the target files or directories before changing them. */
 export function probeHostProcessesUsing(
     targets: HostUseProbeTargets,
     spawn: SpawnLike = spawnSync as unknown as SpawnLike,
 ): HostUseProbe {
+    if (process.platform === "win32") {
+        try {
+            assertWindowsStoresClosed(
+                targets.files.filter((path) => !/-(?:wal|shm)$/.test(path)),
+                inspectWindowsProcessesSync(),
+            );
+            if (targets.directories.some(existsSync))
+                return {
+                    status: "unknown",
+                    reason: "Windows cannot rule out open files in plugin cache directories",
+                };
+            return { status: "free" };
+        } catch (error) {
+            return {
+                status: "unknown",
+                reason: error instanceof Error ? error.message : String(error),
+            };
+        }
+    }
     const files = targets.files.filter((file) => existsSync(file));
     const directories = targets.directories.filter((directory) => existsSync(directory));
     const queries: string[][] = [];

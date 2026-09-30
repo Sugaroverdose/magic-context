@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import type { execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
+import { readRememberedGitIdentity } from "./memory/project-identity-cache";
 import {
     __clearProjectIdentityResolutionCacheForTests,
     __clearProjectIdentityTransientCooldownForTests,
@@ -16,6 +17,8 @@ import {
     resolveProjectIdentityForSession,
     resolveProjectIdentityOrFallback,
     resolveProjectIdentityStrict,
+    setHomeProjectPermission,
+    shouldSkipHomeProjectMemory,
     storedPathBelongsToIdentity,
     takeDubiousOwnershipProjectIdentityWarning,
 } from "./project-identity";
@@ -98,6 +101,93 @@ function makeGitFailure(fields: {
 }
 
 describe("project identity", () => {
+    it("unborn repo resolves to its existing dir identity and switches at the first commit", () => {
+        const directory = makeTempDir("identity-unborn-");
+        execFileSync("git", ["init", "-q", directory], { windowsHide: true });
+        expect(
+            expectProjectIdentityError(() => resolveProjectIdentityStrict(directory)).errorClass,
+        ).toBe("no_commits");
+        expect(resolveProjectIdentity(directory)).toBe(expectedDirIdentity(directory));
+        expect(resolveProjectIdentityOrFallback(directory)).toBe(expectedDirIdentity(directory));
+        expect(resolveProjectIdentityForSession(directory)).toBe(expectedDirIdentity(directory));
+        expect(readRememberedGitIdentity(directory)).toBeUndefined();
+        execFileSync(
+            "git",
+            [
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "first",
+            ],
+            { cwd: directory, windowsHide: true },
+        );
+        const root = execFileSync("git", ["rev-parse", "HEAD"], {
+            cwd: directory,
+            encoding: "utf8",
+            windowsHide: true,
+        }).trim();
+        expect(resolveProjectIdentityForSession(directory)).toBe(`git:${root}`);
+    });
+
+    it("transient failure with commits and no recorded identity still pauses", () => {
+        const directory = makeTempDir("identity-committed-cold-");
+        execFileSync("git", ["init", "-q", directory], { windowsHide: true });
+        execFileSync(
+            "git",
+            [
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "first",
+            ],
+            { cwd: directory, windowsHide: true },
+        );
+        __setProjectIdentityTestHooks({
+            execFileSync: (() => {
+                throw makeGitFailure({ code: "ETIMEDOUT" });
+            }) as typeof execFileSync,
+        });
+        expect(resolveProjectIdentityForSession(directory)).toBeUndefined();
+        expect(() => resolveProjectIdentity(directory)).toThrow(ProjectIdentityError);
+        expect(readRememberedGitIdentity(directory)).toBeUndefined();
+    });
+    it("applies the boot home permission to strict, fallback, and stored identities", () => {
+        const home = makeTempDir("identity-home-policy-");
+        __setProjectIdentityTestHooks({ homeDirectory: () => home });
+        expect(shouldSkipHomeProjectMemory(home)).toBe(true);
+        expect(resolveProjectIdentityForSession(home)).toBeUndefined();
+        expect(expectProjectIdentityError(() => resolveProjectIdentity(home)).errorClass).toBe(
+            "home_project_disabled",
+        );
+        expect(
+            expectProjectIdentityError(() => resolveProjectIdentityStrict(home)).errorClass,
+        ).toBe("home_project_disabled");
+        expect(
+            expectProjectIdentityError(() => resolveProjectIdentityOrFallback(home)).errorClass,
+        ).toBe("home_project_disabled");
+        expect(normalizeStoredProjectPath(home)).toBe(home);
+
+        setHomeProjectPermission(true);
+        expect(shouldSkipHomeProjectMemory(home)).toBe(false);
+        const identity = resolveProjectIdentity(home);
+        expect(identity).toBe(expectedDirIdentity(home));
+        expect(resolveProjectIdentityOrFallback(home)).toBe(identity);
+        expect(normalizeStoredProjectPath(home)).toBe(identity);
+        expect(storedPathBelongsToIdentity(home, identity)).toBe(true);
+        expectProjectIdentityError(() => resolveProjectIdentity(home, false));
+        expectProjectIdentityError(() => resolveProjectIdentityStrict(home, false));
+        setHomeProjectPermission(false);
+        expect(shouldSkipHomeProjectMemory(home)).toBe(true);
+        expectProjectIdentityError(() => resolveProjectIdentity(home));
+    });
     it("resolveProjectIdentityStrict returns the git root commit identity", () => {
         const repo = makeRepoWithGitMetadata("project-identity-git-");
         __setProjectIdentityTestHooks({ execFileSync: returningRootCommit(FIRST_ROOT_COMMIT) });

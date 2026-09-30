@@ -1,6 +1,8 @@
+import { invalidateAutoEmbedSession } from "../../hooks/magic-context/embed-session-state";
 import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
+import { deleteChunkEmbedBackoffForSession } from "./compartment-chunk-embedding";
 import { isCompartmentLeaseHeld } from "./compartment-lease";
 import { getIncrementDepthStatement } from "./compression-depth-storage";
 import { isNoContentCompartment } from "./no-content-compartment";
@@ -214,6 +216,7 @@ function insertCompartmentRows(
             compartment.endBlockIndex ?? null,
         );
     }
+    if (compartments.length > 0) invalidateAutoEmbedSession(sessionId);
 }
 
 function insertFactRows(
@@ -343,6 +346,7 @@ export function replaceAllCompartments(
 ): void {
     const now = Date.now();
     db.transaction(() => {
+        deleteChunkEmbedBackoffForSession(db, sessionId);
         const deleted = db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
         if (deleted.changes > 0) {
             queueM0Mutation(db, {
@@ -351,6 +355,7 @@ export function replaceAllCompartments(
                 queuedAt: now,
             });
         }
+        invalidateAutoEmbedSession(sessionId);
         insertCompartmentRows(db, sessionId, compartments, now);
     }).immediate();
 }
@@ -406,6 +411,7 @@ export function replaceAllCompartmentState(
 ): void {
     const now = Date.now();
     db.transaction(() => {
+        deleteChunkEmbedBackoffForSession(db, sessionId);
         const deleted = db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
         if (deleted.changes > 0) {
             queueM0Mutation(db, {
@@ -414,6 +420,7 @@ export function replaceAllCompartmentState(
                 queuedAt: now,
             });
         }
+        invalidateAutoEmbedSession(sessionId);
         db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
 
         insertCompartmentRows(db, sessionId, compartments, now);
@@ -443,6 +450,7 @@ export function replaceAllCompartmentStateAndBumpDepth(
             return false;
         }
 
+        deleteChunkEmbedBackoffForSession(db, sessionId);
         const deleted = db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
         if (deleted.changes > 0) {
             queueM0Mutation(db, {
@@ -451,6 +459,7 @@ export function replaceAllCompartmentStateAndBumpDepth(
                 queuedAt: now,
             });
         }
+        invalidateAutoEmbedSession(sessionId);
         db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
 
         insertCompartmentRows(db, sessionId, compartments, now);
@@ -645,6 +654,7 @@ export function promoteRecompStaging(
                 const staging = getRecompStaging(db, sessionId);
                 if (!staging || staging.compartments.length === 0) return null;
 
+                deleteChunkEmbedBackoffForSession(db, sessionId);
                 const deleted = db
                     .prepare("DELETE FROM compartments WHERE session_id = ?")
                     .run(sessionId);
@@ -655,6 +665,7 @@ export function promoteRecompStaging(
                         queuedAt: now,
                     });
                 }
+                invalidateAutoEmbedSession(sessionId);
                 db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
                 insertCompartmentRows(db, sessionId, staging.compartments, now);
                 insertFactRows(db, sessionId, staging.facts, now);
@@ -683,6 +694,7 @@ export function promoteRecompStaging(
             return null;
         }
         // Replace real tables
+        deleteChunkEmbedBackoffForSession(db, sessionId);
         const deleted = db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
         if (deleted.changes > 0) {
             queueM0Mutation(db, {
@@ -691,6 +703,7 @@ export function promoteRecompStaging(
                 queuedAt: now,
             });
         }
+        invalidateAutoEmbedSession(sessionId);
         db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
 
         insertCompartmentRows(db, sessionId, staging.compartments, now);

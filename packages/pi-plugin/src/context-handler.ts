@@ -163,6 +163,7 @@ import {
 import { EmergencyFailClosedError } from "@magic-context/core/hooks/magic-context/emergency-fail-closed";
 import {
 	DEFAULT_CONTEXT_LIMIT,
+	historyBudgetPolicyIdentity,
 	resolveExecuteThreshold,
 } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { foldExecutesThisPass } from "@magic-context/core/hooks/magic-context/fold-execution-gate";
@@ -386,6 +387,7 @@ function logPiLkgRecovery(sessionId: string, message: string): void {
 }
 
 export const __test = {
+	updateSessionProjectTracking,
 	isPiHardCacheExpired,
 	adoptPiFallbackTags,
 	buildEntryFingerprintMap,
@@ -556,6 +558,7 @@ const deferredHistoryRefreshSessions = new Set<string>();
 const deferredMaterializationSessions = new Set<string>();
 const sessionsByProject = new Map<string, Set<string>>();
 const lastSeenProjectIdentityBySession = new Map<string, string>();
+const persistedProjectIdentityBySession = new Map<string, string>();
 const rawMessageProviderUnregistersBySession = new Map<string, () => void>();
 const activeContextHandlerSessions = new Set<string>();
 const lastHeuristicsTurnIdBySession = new Map<string, string>();
@@ -932,19 +935,18 @@ function updateSessionProjectTracking(
 		if (prevSessions?.size === 0) sessionsByProject.delete(prev);
 		clearPiSystemPromptSession(sessionId);
 	}
-	// Persist the session→project ownership binding so the project-scoped
-
-	// session's compartments to the right project. ctx.cwd is the authoritative
-	// session directory in Pi (no SDK/launch-dir ambiguity), so every observation
-	// is host-safe. Guarded to the once-per-(session,identity) transition — only
-	// on first sight or an actual identity change — so steady-state passes carry
-	// no per-pass DB write. embedSessionCompartmentChunks also self-records, so
-	// this only widens coverage to passively-published sessions.
-	if (db && prev !== projectIdentity) {
+	// Pi's session cwd is host-owned, so persist its project binding even for
+	// sessions that never embed chunks. Retry failed writes on later observations;
+	// successful bindings do not write on steady-state passes.
+	if (
+		db &&
+		persistedProjectIdentityBySession.get(sessionId) !== projectIdentity
+	) {
 		try {
 			recordSessionProjectIdentity(db, sessionId, projectIdentity);
+			persistedProjectIdentityBySession.set(sessionId, projectIdentity);
 		} catch {
-			// best-effort; backfill re-records on demand from the session command
+			// Retry on the next observation; tracking a session is not proof of persistence.
 		}
 	}
 	trackSessionForProject(projectIdentity, sessionId);
@@ -3302,6 +3304,12 @@ export function registerPiContextHandler(
 							// v2 decay rendering needs the HISTORY budget (~60K), not the
 							// memory injection budget (~4K). Compute it from live usage +
 							// historian config, mirroring OpenCode's decayPressure budget.
+							historyBudgetPolicyIdentity: historyBudgetPolicyIdentity(
+								options.historian?.historyBudgetPercentage,
+								options.historian?.executeThresholdPercentage,
+								liveModelBySession.get(sessionId),
+								options.historian?.executeThresholdTokens,
+							),
 							historyBudgetTokens: resolveHistoryBudgetTokensForPi({
 								historyBudgetPercentage:
 									options.historian?.historyBudgetPercentage,
@@ -4001,12 +4009,15 @@ export function registerPiContextHandler(
  * fast-path so we don't hit the DB just to dedupe per turn.
  *
  * We store the actual Promise (not just the session id) so the
- * `session_shutdown` handler can `await` outstanding runs before Pi
- * exits — critical for `pi --print` mode where the parent process
- * exits as soon as `agent_end` fires, otherwise killing the historian
- * subprocess mid-run.
+ * `session_shutdown` handler can cancel and await outstanding runs.
+ * Headless sessions do not launch background historians.
  */
 const inFlightHistorian = new Map<string, Promise<unknown>>();
+const historianAbortControllers = new Map<string, AbortController>();
+
+export function abortInFlightHistorians(sessionId: string): void {
+	historianAbortControllers.get(sessionId)?.abort();
+}
 
 /**
  * Wait for one session's in-flight historian run to complete. Called from the
@@ -4262,7 +4273,10 @@ function spawnPiHistorianRun(args: {
 		fallbackModelId,
 	} = args;
 	const holderId = crypto.randomUUID();
+	const controller = new AbortController();
+	historianAbortControllers.set(sessionId, controller);
 	const runPromise = (async () => {
+		if (controller.signal.aborted) return;
 		const lease = acquireCompartmentLease(db, sessionId, holderId);
 		if (!lease) {
 			sessionLog(
@@ -4288,6 +4302,7 @@ function spawnPiHistorianRun(args: {
 				appendCompaction: resolvePiAppendCompaction(ctx),
 				readBranchEntries: resolvePiReadBranchEntries(ctx),
 				runner: historian.runner,
+				signal: controller.signal,
 				historianModel: historian.model,
 				fallbackModels: historian.fallbackModels,
 				fallbackModelId,
@@ -4391,6 +4406,8 @@ function spawnPiHistorianRun(args: {
 		.finally(() => {
 			try {
 				inFlightHistorian.delete(sessionId);
+				if (historianAbortControllers.get(sessionId) === controller)
+					historianAbortControllers.delete(sessionId);
 				unregister();
 				if (isContextHandlerSessionActive(sessionId)) {
 					historian.onStatusChange?.(ctx, sessionId);
@@ -4805,6 +4822,9 @@ function maybeFireHistorian(args: {
 			return;
 		}
 
+		// Headless Pi exits after agent_end without dispatching session_shutdown.
+		// Leave the eligible history in the store for the next interactive pass.
+		if (!ctx.hasUI) return;
 		triggered = true;
 		sessionLog(
 			sessionId,
@@ -4813,9 +4833,8 @@ function maybeFireHistorian(args: {
 
 		// Fire-and-forget for the user's LLM call: the parent agent
 		// turn never awaits this. But we DO track the Promise in
-		// inFlightHistorian so `awaitInFlightHistorians()` can wait
-		// at session_shutdown — without that, `pi --print` mode would
-		// kill the historian subprocess mid-run when the parent exits.
+		// inFlightHistorian so shutdown can cancel the child and wait for
+		// the run's finally block to release its compartment-state lease.
 		spawnPiHistorianRun({
 			pi: args.pi,
 			ctx,
@@ -4879,6 +4898,7 @@ interface RunPipelineArgs {
 		/** v2 decay-render history budget (~60K), distinct from the memory
 		 *  injection budget. Drives compartment tier demotion in renderM0Pi. */
 		historyBudgetTokens?: number;
+		historyBudgetPolicyIdentity?: string;
 		temporalAwareness?: boolean;
 		/** mural.enabled — when enabled, generate a deterministic image of memories that did not fit the context budget whenever the system performs a full (HARD) context fold. */
 		muralEnabled?: boolean;
@@ -5110,6 +5130,7 @@ async function runCompactionOffPipeline(
 				injectDocs: args.injection.injectDocs,
 				injectionBudgetTokens: args.injection.injectionBudgetTokens,
 				historyBudgetTokens: args.injection.historyBudgetTokens,
+				historyBudgetPolicyIdentity: args.injection.historyBudgetPolicyIdentity,
 				muralEnabled: args.injection.muralEnabled === true,
 				compactionOff: true,
 			},
@@ -5337,6 +5358,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					injectDocs: args.injection.injectDocs,
 					injectionBudgetTokens: args.injection.injectionBudgetTokens,
 					historyBudgetTokens: args.injection.historyBudgetTokens,
+					historyBudgetPolicyIdentity:
+						args.injection.historyBudgetPolicyIdentity,
 					hardSignals: piHardSignals,
 					muralEnabled: args.injection.muralEnabled === true,
 					freezePrefixForPass: true,
@@ -7543,6 +7566,7 @@ export function clearContextHandlerSession(sessionId: string): void {
 	lastHeuristicsTurnIdBySession.delete(sessionId);
 	routinePressureAppliedBySession.delete(sessionId);
 	lastSeenProjectIdentityBySession.delete(sessionId);
+	persistedProjectIdentityBySession.delete(sessionId);
 	for (const [projectIdentity, sessions] of sessionsByProject) {
 		sessions.delete(sessionId);
 		if (sessions.size === 0) sessionsByProject.delete(projectIdentity);

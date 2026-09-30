@@ -71,6 +71,7 @@ describe("createV2StorageGate", () => {
         expect(database).toBeDefined();
         expect(database!.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 5000 });
     });
+
     it("re-attempts a failed open at most once per interval and names the failure", async () => {
         const clock = manualClock();
         let opens = 0;

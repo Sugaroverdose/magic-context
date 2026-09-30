@@ -9,6 +9,7 @@ import {
 } from "../../../plugin/src/v2/hooks/hidden-child";
 import { type HostServiceOwner, removeHostSession } from "../../../plugin/src/v2/host-service";
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";
+import { hiddenTerminalError } from "../../../plugin/src/v2/hooks/hidden-terminal-error";
 
 interface Command {
     seq: number;
@@ -49,14 +50,40 @@ export default {
                 appendFileSync(callsPath, `${JSON.stringify(record)}\n`);
             }
         });
+        const terminalErrors = new Map<string, unknown>();
+        void (async () => {
+            for await (const value of context.event.subscribe()) {
+                const event = value as { type?: string; data?: { sessionID?: string; error?: unknown } };
+                if (!event.data?.sessionID) continue;
+                const error = hiddenTerminalError(event);
+                if (error !== undefined) terminalErrors.set(event.data.sessionID, error);
+            }
+        })();
         let agentsReady: Promise<void> | undefined;
         const remove = (input: { sessionID: string; owner?: HostServiceOwner }) =>
             removeHostSession(input.sessionID, input.owner);
         const executor = await createV2HiddenCompletionExecutor(
-            { ...context.session, remove },
+            {
+                ...context.session,
+                remove,
+                terminalError: async ({ sessionID }: { sessionID: string }) => {
+                    const until = Date.now() + 50;
+                    do {
+                        const error = terminalErrors.get(sessionID);
+                        if (error !== undefined) return error;
+                        await Bun.sleep(5);
+                    } while (Date.now() < until);
+                    return undefined;
+                },
+                prompt: async (input: { sessionID: string; text: string }) => {
+                    terminalErrors.delete(input.sessionID);
+                    return context.session.prompt(input);
+                },
+            },
             {
                 db,
                 projectIdentity: dir,
+                directory: dir,
                 hook,
                 ensureAgent: () => (agentsReady ??= context.agent.reload()),
                 openReader: () =>

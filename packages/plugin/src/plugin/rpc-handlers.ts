@@ -31,7 +31,12 @@ import {
     emptyMemoryImportanceHistogram,
     getActiveMemoryImportanceHistogram,
 } from "../features/magic-context/memory/memory-diagnostics";
-import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
+import {
+    ProjectIdentityError,
+    resolveProjectIdentity,
+    resolveProjectIdentityForSession,
+    shouldSkipHomeProjectMemory,
+} from "../features/magic-context/memory/project-identity";
 import { getMessageIndexQueueHeapStats } from "../features/magic-context/message-index-async";
 import { getMural } from "../features/magic-context/mural/storage-mural";
 import { getEmbeddingCoverageStatus } from "../features/magic-context/project-embedding-registry";
@@ -344,7 +349,13 @@ export function buildSidebarSnapshot(
     compactionEnabled = true,
 ): SidebarSnapshot {
     try {
-        const projectIdentity = resolveProjectIdentity(directory);
+        const projectIdentity = resolveProjectIdentityForSession(directory);
+        if (projectIdentity === undefined)
+            throw new ProjectIdentityError(
+                "git_identity_unavailable",
+                directory,
+                "Memory features paused while project identity is unavailable",
+            );
 
         const meta = db
             .prepare<[string], Record<string, unknown>>(
@@ -704,7 +715,7 @@ export function buildSidebarSnapshot(
         // last good breakdown instead of letting the bar flicker.
         return applyStickySnapshotCache(sessionId, fresh);
     } catch (err) {
-        log("[rpc] sidebar-snapshot error:", err);
+        if (!(err instanceof ProjectIdentityError)) log("[rpc] sidebar-snapshot error:", err);
         throw err;
     }
 }
@@ -721,6 +732,9 @@ export function buildSidebarSnapshotRpcResponse(
     moduleStatus?: RustSessionStatus,
     compactionEnabled = true,
 ): Record<string, unknown> {
+    if (shouldSkipHomeProjectMemory(directory)) return { sessionId, disabled: true };
+    if (resolveProjectIdentityForSession(directory) === undefined)
+        return { sessionId, disabled: true, paused: true };
     try {
         return buildSidebarSnapshot(
             db,
@@ -768,7 +782,6 @@ export function buildStatusDetail(
         compactionEnabled,
     );
     const rustMode = config?.transform_mode === "rust";
-    const _projectIdentity = rustMode ? resolveProjectIdentity(directory) : null;
     const moduleMemoryAuthority = moduleStatus?.authority?.memories;
     const _moduleMemoryState = moduleMemoryAuthority?.state;
     const _moduleFeedHead = moduleStatus?.memory_mirror?.feed_head;
@@ -1466,6 +1479,9 @@ export function registerRpcHandlers(
     rpcServer.handle("status-detail", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         const dir = String(params.directory ?? directory);
+        if (shouldSkipHomeProjectMemory(dir)) return { sessionId, disabled: true };
+        if (resolveProjectIdentityForSession(dir) === undefined)
+            return { sessionId, disabled: true, paused: true };
         const modelKey = params.modelKey ? String(params.modelKey) : undefined;
         const db = readDatabase();
         if (!db || !sessionId) return { error: "unavailable" };
@@ -1502,6 +1518,9 @@ export function registerRpcHandlers(
     rpcServer.handle("embed-detail", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         const dir = String(params.directory ?? directory);
+        if (shouldSkipHomeProjectMemory(dir)) return { sessionId, disabled: true };
+        if (resolveProjectIdentityForSession(dir) === undefined)
+            return { sessionId, disabled: true, paused: true };
         const db = readDatabase();
         if (!db || !sessionId) return { error: "unavailable" };
         try {

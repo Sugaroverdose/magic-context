@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { EmbeddingConfig } from "../../../config/schema/magic-context";
+import { estimateTokens } from "../../../hooks/magic-context/read-session-formatting";
+import { CHUNK_WINDOW_SAFETY_RATIO } from "../compartment-chunk-embedding";
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import { QWEN3_QUERY_INSTRUCTION, resolveEmbeddingTextPrefixes } from "./embedding-model-match";
 import { embeddingModelsMatch, OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
@@ -207,6 +209,75 @@ describe("OpenAICompatibleEmbeddingProvider request body (NVIDIA NIM fields, iss
         const body = JSON.parse(init.body as string) as { input: string[] };
         // Empty / whitespace inputs become a single space; real text is untouched.
         expect(body.input).toEqual([" ", " ", "real text", " "]);
+    });
+
+    test("caps long query inputs including the instruction prefix", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "test-model",
+            queryInstruction: "Q: ",
+            maxInputTokens: 8,
+        });
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embed("a".repeat(200), undefined, "query");
+        const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+        const body = JSON.parse(init.body as string) as { input: string[] };
+        expect(body.input[0]?.startsWith("Q: ")).toBe(true);
+        expect(body.input[0]?.length).toBeLessThan(203);
+    });
+
+    test("keeps inputs under the cap byte for byte", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "test-model",
+            maxInputTokens: 20,
+        });
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embedBatch(["short text"]);
+        const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+        const body = JSON.parse(init.body as string) as { input: string[] };
+        expect(body.input[0]).toBe("short text");
+    });
+
+    test("sends a full-size chunk whole but caps the same text as a query", async () => {
+        // A chunk sized to the chunker's margin, plus a document prefix, sits between
+        // that margin and the full limit: documents must go out whole, queries capped.
+        const maxInputTokens = 100;
+        let text = "";
+        while (estimateTokens(`D: ${text}w `) <= maxInputTokens) text += "w ";
+        expect(estimateTokens(`D: ${text}`)).toBeGreaterThan(
+            Math.floor(maxInputTokens * CHUNK_WINDOW_SAFETY_RATIO),
+        );
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "test-model",
+            documentPrefix: "D: ",
+            queryInstruction: "D: ",
+            maxInputTokens,
+        });
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embedBatch([text], undefined, "passage");
+        await provider.embed(text, undefined, "query");
+        const sent = fetchSpy.mock.calls.map(
+            (call) =>
+                (JSON.parse((call[1] as RequestInit).body as string) as { input: string[] })
+                    .input[0],
+        );
+        expect(sent[0]).toBe(`D: ${text}`);
+        expect(sent[1]?.length).toBeLessThan(`D: ${text}`.length);
+    });
+
+    test("does not split a surrogate pair at the cap boundary", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "test-model",
+            maxInputTokens: 2,
+        });
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embedBatch(["ab😀z"]);
+        const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+        const body = JSON.parse(init.body as string) as { input: string[] };
+        expect(body.input[0]).toBe("ab");
     });
 
     test("purpose query sends queryInputType when configured (#155)", async () => {

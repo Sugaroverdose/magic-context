@@ -1,6 +1,5 @@
 import { homedir } from "node:os";
 import { parse, resolve } from "node:path";
-
 import type {
 	DreamerConfig,
 	EmbeddingConfig,
@@ -17,6 +16,7 @@ import {
 	type ManualRunResult,
 	runManualDream,
 } from "@magic-context/core/features/magic-context/dreamer/task-scheduler";
+import { DreamTokenBudgetExceeded } from "@magic-context/core/features/magic-context/dreamer/token-budget";
 import { isUsableProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { startDreamScheduleTimer as defaultStartDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
@@ -212,6 +212,14 @@ const inFlightDreams = (() => {
 	globals[PI_DREAMER_IN_FLIGHT] = dreams;
 	return dreams;
 })();
+const dreamAbortControllers = new Map<object, Set<AbortController>>();
+
+export function abortInFlightDreamers(registrationOwner: object): void {
+	for (const controller of dreamAbortControllers.get(registrationOwner) ?? []) {
+		controller.abort();
+	}
+}
+
 let sessionCounter = 0;
 let piSubagentRunnerFactory: PiSubagentRunnerFactory = () =>
 	new PiSubagentRunner();
@@ -281,6 +289,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 			opts.sampleDreamRun
 				? opts.sampleDreamRun().dreamerConfig?.maxTokens
 				: opts.config.maxTokens,
+		() => opts.sampleDreamRun?.().dreamerConfig ?? opts.config,
 	);
 
 	let cleanup: (() => void) | undefined;
@@ -303,12 +312,13 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		retinaHandoff: opts.retinaHandoff,
 		mural: opts.mural,
 		ensureRegistered: ensureProjectRegisteredFromPiDirectory,
-		// SCHEDULED Pi retrospective must read Pi JSONL sessions, not opencode.db.
-		// Supply the Pi provider factory (db arg ignored — Pi reads JSONL by cwd),
-		// converging the scheduled path onto the same provider the manual
-		// /ctx-dream path already uses.
+		// Pi retrospectives read JSONL messages and context.db activity, not
+		// OpenCode's message store. Scheduled and manual runs use this provider.
 		retrospectiveRawProvider: () =>
-			new PiRetrospectiveRawProvider({ projectCwd: opts.projectDir }),
+			new PiRetrospectiveRawProvider({
+				projectCwd: opts.projectDir,
+				contextDb: opts.db,
+			}),
 		// SCHEDULED refresh-primers likewise needs the Pi JSONL factory so its
 		// open-book seed renders raw U:/TC: lines; without it the scheduled task
 		// silently ran closed-book (the manual /ctx-dream path already wires this).
@@ -355,6 +365,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 				owners.get(manualOpts.registrationOwner)?.projectDir ===
 				manualOpts.projectDir,
 			() => dreamerConfig.maxTokens,
+			() => dreamerConfig,
 		);
 		const manualRun = runManualDream({
 			db: manualOpts.db,
@@ -382,6 +393,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 				openOpenCodeDb,
 				retrospectiveRawProvider: new PiRetrospectiveRawProvider({
 					projectCwd: manualOpts.projectDir,
+					contextDb: manualOpts.db,
 				}),
 				primerRawProviderFactory: createPiPrimerRawProviderFactory(),
 				userMemoryCollectionEnabled: userMemoryCollectionEnabled(dreamerConfig),
@@ -504,8 +516,17 @@ function createPiDreamerClient(
 	onAdjunctsRefreshNeeded = opts.onAdjunctsRefreshNeeded,
 	isRegistrationOwnerActive: () => boolean = () => true,
 	getMaxOutputTokens: () => number | undefined = () => opts.config.maxTokens,
-): DreamTimerClient {
+	getDreamerConfig: () => PiDreamerOptions["config"] = () => opts.config,
+): DreamTimerClient & {
+	readTokenBudget: (
+		task: string,
+	) => { spent: number; finalizeFired: boolean } | undefined;
+} {
 	const runner = piSubagentRunnerFactory();
+	const budgetStates = new Map<
+		string,
+		{ spent: number; finalizeFired: boolean }
+	>();
 	const assertRegistrationOwnerActive = (): void => {
 		if (!isRegistrationOwnerActive()) {
 			throw new Error(
@@ -550,6 +571,13 @@ function createPiDreamerClient(
 			// double-iterate and override a task's own (possibly empty) chain.
 			const perTaskModel = extractBodyModel(args);
 			const requestedAgent = extractBodyAgent(args) ?? "magic-context-dreamer";
+			const controller = new AbortController();
+			let controllers = dreamAbortControllers.get(opts.registrationOwner);
+			if (!controllers) {
+				controllers = new Set();
+				dreamAbortControllers.set(opts.registrationOwner, controllers);
+			}
+			controllers.add(controller);
 			const runPromise = runner.run({
 				agent: requestedAgent,
 				systemPrompt,
@@ -561,7 +589,9 @@ function createPiDreamerClient(
 				// authority (not a second, conflicting wall-clock here).
 				timeoutMs: 30 * 60 * 1000,
 				cwd: dreamSession.directory,
-				signal: args.signal ?? undefined,
+				signal: args.signal
+					? AbortSignal.any([args.signal, controller.signal])
+					: controller.signal,
 				// modelBodyField writes the active entry qualifier as OpenCode's
 				// `variant`; the Pi facade translates that same wire field into
 				// `--thinking` without letting a primary level leak to fallbacks.
@@ -570,12 +600,41 @@ function createPiDreamerClient(
 				accountingSessionId: opts.projectIdentity,
 				accountingSubagent: "dreamer",
 				accountingTask: accountingTaskFromTitle(dreamSession.title),
+				tokenBudget: (() => {
+					const task = accountingTaskFromTitle(dreamSession.title);
+					if (!task) return undefined;
+					return buildDreamTaskRuntimeConfigs(
+						getDreamerConfig(),
+						opts.harness,
+					).find((entry) => entry.task === task)?.tokenBudget;
+				})(),
 			});
 			inFlightDreams.set(runPromise, opts.registrationOwner);
 			try {
 				const result = await runPromise;
+				const budget = result.meta?.tokenBudget as
+					| { spent?: number; finalizeFired?: boolean }
+					| undefined;
+				const budgetTask = accountingTaskFromTitle(dreamSession.title);
+				if (budgetTask && budget && typeof budget.spent === "number") {
+					const prior = budgetStates.get(budgetTask);
+					budgetStates.set(budgetTask, {
+						spent: (prior?.spent ?? 0) + budget.spent,
+						finalizeFired:
+							(prior?.finalizeFired ?? false) || budget.finalizeFired === true,
+					});
+				}
 				assertRegistrationOwnerActive();
 				if (!result.ok) {
+					if (result.reason === "token_budget") {
+						throw new DreamTokenBudgetExceeded(
+							dreamSession.id,
+							Number(
+								(result.meta?.tokenBudget as { spent?: number } | undefined)
+									?.spent ?? 0,
+							),
+						);
+					}
 					if (result.reason === "step_limit") {
 						throw new HiddenAgentStepLimit(
 							"pi-dreamer",
@@ -614,6 +673,9 @@ function createPiDreamerClient(
 				onAdjunctsRefreshNeeded?.(opts.projectIdentity);
 			} finally {
 				inFlightDreams.delete(runPromise);
+				controllers.delete(controller);
+				if (controllers.size === 0)
+					dreamAbortControllers.delete(opts.registrationOwner);
 			}
 		},
 		messages: async (args: SessionMessagesArgs) => {
@@ -627,7 +689,16 @@ function createPiDreamerClient(
 		},
 	};
 
-	return { session } as unknown as DreamTimerClient;
+	return {
+		session,
+		readTokenBudget: (task: string) => budgetStates.get(task),
+		resetDreamTokenBudget: (task: string) => budgetStates.delete(task),
+	} as unknown as DreamTimerClient & {
+		readTokenBudget: (
+			task: string,
+		) => { spent: number; finalizeFired: boolean } | undefined;
+		resetDreamTokenBudget: (task: string) => void;
+	};
 }
 
 function readDirectory(args: { query?: unknown }): string | undefined {
@@ -802,6 +873,7 @@ export const __test = {
 		registeredProjects.clear();
 		sessionsById.clear();
 		inFlightDreams.clear();
+		dreamAbortControllers.clear();
 		sessionCounter = 0;
 		piSubagentRunnerFactory = () => new PiSubagentRunner();
 		startDreamScheduleTimerFn = defaultStartDreamScheduleTimer;

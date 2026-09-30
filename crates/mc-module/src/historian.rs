@@ -1330,6 +1330,8 @@ pub struct HistorianModelLimits {
     #[serde(default)]
     pub context: Option<usize>,
     #[serde(default)]
+    pub input: Option<usize>,
+    #[serde(default)]
     pub output: Option<u32>,
 }
 
@@ -1881,41 +1883,48 @@ fn producer_output_reserve(window: usize, max_output_tokens: u32) -> usize {
     (max_output_tokens as usize).min(window / 4)
 }
 
-pub(crate) fn producer_input_token_limit(
+pub(crate) fn producer_input_token_limit_with_input(
     context_limit_tokens: Option<usize>,
+    input_limit_tokens: Option<usize>,
     max_output_tokens: u32,
 ) -> Option<usize> {
-    let window = context_limit_tokens?;
-    // The runner clamps the generous output request to the model's allowed output.
-    // A catalog ceiling cannot reserve more than a quarter of the input window.
-    let reserve = producer_output_reserve(window, max_output_tokens);
-    let limit = window
-        .saturating_sub(reserve)
-        .saturating_mul(100 - PRODUCER_WINDOW_ESTIMATOR_MARGIN_PERCENT)
-        / 100;
+    let shared = context_limit_tokens
+        .map(|window| window.saturating_sub(producer_output_reserve(window, max_output_tokens)));
+    let usable = match (shared, input_limit_tokens) {
+        (Some(shared), Some(input)) => shared.min(input),
+        (Some(shared), None) => shared,
+        (None, Some(input)) => input,
+        (None, None) => return None,
+    };
+    let limit = usable.saturating_mul(100 - PRODUCER_WINDOW_ESTIMATOR_MARGIN_PERCENT) / 100;
     (limit > 0).then_some(limit)
 }
 
-pub(crate) fn producer_window_failure_reason(
+pub(crate) fn producer_window_failure_reason_with_input(
     producer_source_tokens: usize,
     context_limit_tokens: Option<usize>,
+    input_limit_tokens: Option<usize>,
     max_output_tokens: u32,
 ) -> Option<String> {
-    let context_limit_tokens = context_limit_tokens?;
     if producer_source_tokens == 0 {
         return None;
     }
-    let usable_input_tokens = context_limit_tokens.saturating_sub(producer_output_reserve(
+    let shared = context_limit_tokens
+        .map(|window| window.saturating_sub(producer_output_reserve(window, max_output_tokens)));
+    let usable_input_tokens = shared
+        .unwrap_or(usize::MAX)
+        .min(input_limit_tokens.unwrap_or(usize::MAX));
+    let producer_input_limit_tokens = producer_input_token_limit_with_input(
         context_limit_tokens,
+        input_limit_tokens,
         max_output_tokens,
-    ));
-    let producer_input_limit_tokens =
-        producer_input_token_limit(Some(context_limit_tokens), max_output_tokens)?;
+    )?;
     if producer_source_tokens <= producer_input_limit_tokens {
         return None;
     }
     Some(format!(
-        "producer_source_exceeds_window producer_source_tokens={producer_source_tokens} usable_input_tokens={usable_input_tokens} producer_input_limit_tokens={producer_input_limit_tokens} context_limit_tokens={context_limit_tokens} max_output_tokens={max_output_tokens} estimator_margin=0.03"
+        "producer_source_exceeds_window producer_source_tokens={producer_source_tokens} usable_input_tokens={usable_input_tokens} producer_input_limit_tokens={producer_input_limit_tokens} context_limit_tokens={} max_output_tokens={max_output_tokens} estimator_margin=0.03",
+        context_limit_tokens.map_or("unknown".to_string(), |value| value.to_string())
     ))
 }
 
@@ -1941,9 +1950,20 @@ where
     if request.model_chain.is_empty() {
         return Err(HistorianDriveError::NoModels);
     }
-    if let Some(reason) = producer_window_failure_reason(
+    let primary_limits = request
+        .model_chain
+        .first()
+        .and_then(|model| request.model_limits.get(model));
+    let primary_input = primary_limits.and_then(|limits| limits.input);
+    let primary_context = if primary_input.is_some() {
+        primary_limits.and_then(|limits| limits.context)
+    } else {
+        request.historian_context_limit_tokens
+    };
+    if let Some(reason) = producer_window_failure_reason_with_input(
         request.producer_source_tokens,
-        request.historian_context_limit_tokens,
+        primary_context,
+        primary_input,
         request.max_output_tokens,
     ) {
         tracing::warn!(
@@ -2000,14 +2020,22 @@ where
             .or(legacy_window)
             .or(request.historian_context_limit_tokens)
             .map(|window| {
-                request
-                    .historian_context_limit_tokens
-                    .map_or(window, |cap| window.min(cap))
+                if resolved.and_then(|limit| limit.input).is_some() {
+                    window
+                } else {
+                    request
+                        .historian_context_limit_tokens
+                        .map_or(window, |cap| window.min(cap))
+                }
             });
         let output = resolved
             .and_then(|limit| limit.output)
             .unwrap_or(request.max_output_tokens);
-        let fit_limit = producer_input_token_limit(current_window, output);
+        let fit_limit = producer_input_token_limit_with_input(
+            current_window,
+            resolved.and_then(|limit| limit.input),
+            output,
+        );
         if fit_limit.is_none() {
             static UNKNOWN_WINDOWS: std::sync::OnceLock<
                 std::sync::Mutex<std::collections::HashSet<String>>,
@@ -2337,6 +2365,7 @@ where
             harness: request.harness,
             awaiting,
             output: output.clone(),
+            max_output_tokens: Some(crate::historian_producer::HISTORIAN_MAX_OUTPUT_TOKENS),
             observed_chunk_fingerprint: request.observed_chunk_fingerprint,
             validation_chunk: request.validation_chunk,
             chunk_transcript: request.chunk_transcript,
@@ -2439,9 +2468,20 @@ pub async fn run_historian_firing_on_host(
     if request.model_chain.is_empty() {
         return Err(HistorianDriveError::NoModels);
     }
-    if let Some(reason) = producer_window_failure_reason(
+    let primary_limits = request
+        .model_chain
+        .first()
+        .and_then(|model| request.model_limits.get(model));
+    let primary_input = primary_limits.and_then(|limits| limits.input);
+    let primary_context = if primary_input.is_some() {
+        primary_limits.and_then(|limits| limits.context)
+    } else {
+        request.historian_context_limit_tokens
+    };
+    if let Some(reason) = producer_window_failure_reason_with_input(
         request.producer_source_tokens,
-        request.historian_context_limit_tokens,
+        primary_context,
+        primary_input,
         request.max_output_tokens,
     ) {
         let loaded = request.store.load(request.session_id)?;
@@ -2583,6 +2623,7 @@ pub async fn run_historian_firing_on_host(
         harness: request.harness,
         awaiting: claimed.clone(),
         output,
+        max_output_tokens: None,
         observed_chunk_fingerprint: request.observed_chunk_fingerprint,
         validation_chunk: request.validation_chunk,
         chunk_transcript: request.chunk_transcript,
@@ -2727,6 +2768,7 @@ pub fn adopt_historian_run_on_host(
         harness: request.harness,
         awaiting,
         output,
+        max_output_tokens: None,
         observed_chunk_fingerprint: request.observed_chunk_fingerprint,
         validation_chunk: request.validation_chunk,
         chunk_transcript: request.chunk_transcript,
@@ -2908,6 +2950,7 @@ where
         harness: request.harness,
         awaiting,
         output,
+        max_output_tokens: None,
         observed_chunk_fingerprint: request.observed_chunk_fingerprint,
         validation_chunk: request.validation_chunk,
         chunk_transcript: request.chunk_transcript,
@@ -2938,6 +2981,7 @@ struct PublishOutputRequest<'a> {
     harness: &'a str,
     awaiting: HistorianDurableState,
     output: ProducerOutput,
+    max_output_tokens: Option<u32>,
     observed_chunk_fingerprint: &'a str,
     validation_chunk: &'a HistorianChunk,
     chunk_transcript: &'a str,
@@ -2962,6 +3006,7 @@ fn publish_output_from_awaiting(
         harness,
         awaiting,
         output,
+        max_output_tokens,
         observed_chunk_fingerprint,
         validation_chunk,
         chunk_transcript,
@@ -2975,14 +3020,25 @@ fn publish_output_from_awaiting(
         completion_now_ms,
         publication_fence,
     } = request;
+    // The host report does not carry usage; omitted values must not look like zero spend.
+    let tokens = crate::historian_producer::producer_token_log(
+        output.usage,
+        max_output_tokens,
+        output.length_capped,
+    );
+    tracing::info!(
+        session_id,
+        response_chars = output.text.chars().count(),
+        tokens = %tokens,
+        "historian response received"
+    );
     let validating = output_received(&awaiting, &output.text)?;
     persist_historian_state(store, session_id, validating.clone())?;
 
     let validation_result = if output.length_capped {
         Err(HistorianValidationError {
             message:
-                "Historian output hit the length cap; refusing a potentially partial document."
-                    .to_string(),
+                format!("Historian output hit the length cap; refusing a potentially partial document. tokens={tokens}"),
         })
     } else {
         validate_historian_output(
@@ -3811,22 +3867,76 @@ mod tests {
         assert_eq!(admitted_producer.observed_starts.len(), 1);
 
         assert_eq!(
-            producer_window_failure_reason(10_000, Some(11_000), 1_000).as_deref(),
+            producer_window_failure_reason_with_input(10_000, Some(11_000), None, 1_000).as_deref(),
             Some("producer_source_exceeds_window producer_source_tokens=10000 usable_input_tokens=10000 producer_input_limit_tokens=9700 context_limit_tokens=11000 max_output_tokens=1000 estimator_margin=0.03")
         );
     }
 
     #[test]
+    fn historian_input_cap_and_context_reserve_match_typescript_admission() {
+        let limits: HistorianModelLimits =
+            serde_json::from_str(r#"{"context":400000,"input":272000,"output":128000}"#).unwrap();
+        assert_eq!(limits.input, Some(272_000));
+        // Unconfigured output reserves at most a quarter of the shared window.
+        assert_eq!(
+            producer_input_token_limit_with_input(limits.context, limits.input, 128_000),
+            Some(263_840)
+        );
+        assert_eq!(
+            producer_input_token_limit_with_input(Some(400_000), None, 128_000),
+            Some(291_000)
+        );
+        assert_eq!(
+            producer_input_token_limit_with_input(Some(300_000), limits.input, 128_000),
+            Some(218_250)
+        );
+        assert_eq!(
+            producer_input_token_limit_with_input(None, limits.input, 128_000),
+            Some(263_840)
+        );
+    }
+
+    #[test]
+    fn historian_model_limits_wire_accepts_missing_input_and_ignores_extra_input_on_old_module() {
+        let old_plugin_limits: HistorianModelLimits =
+            serde_json::from_str(r#"{"context":400000,"output":128000}"#).unwrap();
+        assert_eq!(old_plugin_limits.input, None);
+        assert_eq!(
+            producer_input_token_limit_with_input(
+                old_plugin_limits.context,
+                old_plugin_limits.input,
+                128_000,
+            ),
+            Some(291_000)
+        );
+        #[derive(serde::Deserialize)]
+        struct OldModuleLimits {
+            context: usize,
+            output: u32,
+        }
+        let old_module: OldModuleLimits =
+            serde_json::from_str(r#"{"context":400000,"input":272000,"output":128000}"#).unwrap();
+        assert_eq!((old_module.context, old_module.output), (400_000, 128_000));
+    }
+
+    #[test]
     fn small_producer_window_reserves_only_allowed_output_and_still_refuses_oversize() {
         assert_eq!(
-            producer_input_token_limit(Some(32_000), 32_000),
+            producer_input_token_limit_with_input(Some(32_000), None, 32_000),
             Some(23_280)
         );
-        assert!(producer_window_failure_reason(1_000, Some(32_000), 32_000).is_none());
-        assert!(producer_window_failure_reason(25_000, Some(32_000), 32_000)
-            .unwrap()
-            .contains("producer_input_limit_tokens=23280"));
-        assert_eq!(producer_input_token_limit(Some(0), 32_000), None);
+        assert!(
+            producer_window_failure_reason_with_input(1_000, Some(32_000), None, 32_000).is_none()
+        );
+        assert!(
+            producer_window_failure_reason_with_input(25_000, Some(32_000), None, 32_000)
+                .unwrap()
+                .contains("producer_input_limit_tokens=23280")
+        );
+        assert_eq!(
+            producer_input_token_limit_with_input(Some(0), None, 32_000),
+            None
+        );
     }
 
     #[tokio::test]
@@ -4004,6 +4114,7 @@ mod tests {
             models[1].clone(),
             HistorianModelLimits {
                 context: Some(4),
+                input: None,
                 output: Some(4),
             },
         );

@@ -69,6 +69,9 @@ import {
 	decodeCachedM0UpgradeIdentity,
 	encodeCachedM0UpgradeIdentity,
 	MEMORY_RENDER_FORMAT_EPOCH,
+	renderBudgetIdentityChanged,
+	renderedBudgetShrinkReason,
+	renderedBudgetSnapshot,
 } from "@magic-context/core/hooks/magic-context/compartment-render-epoch";
 import {
 	DEFAULT_HISTORY_BUDGET_TOKENS,
@@ -414,6 +417,7 @@ export interface PiM0M1State {
 	 *  Distinct from injectionBudgetTokens — using the memory budget here would
 	 *  over-demote every compartment. */
 	historyBudgetTokens?: number;
+	historyBudgetPolicyIdentity?: string;
 	/** User-profile block budget (~4K). The m[1] new-user-profile delta is
 	 *  trimmed to 25% of this (matches OpenCode renderM1). Defaults when unset. */
 	userProfileBudgetTokens?: number;
@@ -561,6 +565,8 @@ export interface PiM0SnapshotMarkers {
 	projectIdentity: string | null;
 	muralEnabled: boolean;
 	renderBudgetIdentity: string;
+	/** Numeric allowances used by the cached render; absent on older baselines. */
+	renderedBudgets?: string | null;
 }
 
 /**
@@ -584,7 +590,7 @@ const EMPTY_PI_HARD_SIGNALS: PiM0HardSignals = {
 };
 
 function renderBudgetIdentityPi(state: PiM0M1State): string {
-	return `m${state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS}-h${state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS}`;
+	return `m${state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS}-h${state.historyBudgetPolicyIdentity ?? state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS}`;
 }
 
 export interface PiMaterializeMismatch {
@@ -944,6 +950,7 @@ function getCachedMarkers(
 		projectIdentity: meta.cachedM0ProjectIdentity ?? null,
 		muralEnabled: cachedUpgradeIdentity.muralEnabled ?? false,
 		renderBudgetIdentity: cachedUpgradeIdentity.renderBudgetIdentity ?? "",
+		renderedBudgets: cachedUpgradeIdentity.renderedBudgets,
 	};
 }
 
@@ -1039,6 +1046,10 @@ function readCurrentMarkersFromCompartments(
 		projectIdentity: state.projectIdentity,
 		muralEnabled: state.muralEnabled === true,
 		renderBudgetIdentity: renderBudgetIdentityPi(state),
+		renderedBudgets: renderedBudgetSnapshot(
+			state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS,
+			state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS,
+		),
 	};
 }
 
@@ -1098,18 +1109,35 @@ export function mustMaterializePi(
 	}
 	if (cached.muralEnabled !== current.muralEnabled) {
 		return piMaterializeMismatch(
-			"render_config",
+			`render_config:mural(${cached.muralEnabled}→${current.muralEnabled})`,
 			"muralEnabled",
 			cached.muralEnabled,
 			current.muralEnabled,
 		);
 	}
-	if (cached.renderBudgetIdentity !== current.renderBudgetIdentity) {
+	if (
+		renderBudgetIdentityChanged(
+			cached.renderBudgetIdentity,
+			current.renderBudgetIdentity,
+		)
+	) {
 		return piMaterializeMismatch(
-			"render_config",
+			`render_config:budget(${cached.renderBudgetIdentity}→${current.renderBudgetIdentity})`,
 			"renderBudgetIdentity",
 			cached.renderBudgetIdentity,
 			current.renderBudgetIdentity,
+		);
+	}
+	const budgetShrinkReason = renderedBudgetShrinkReason(
+		cached.renderedBudgets,
+		current.renderedBudgets,
+	);
+	if (budgetShrinkReason) {
+		return piMaterializeMismatch(
+			budgetShrinkReason,
+			"renderedBudgets",
+			cached.renderedBudgets ?? null,
+			current.renderedBudgets ?? null,
 		);
 	}
 	// ── HARD: provider-side cache eviction (the cache was already dead) ──
@@ -1529,6 +1557,10 @@ function readFrozenM0InputsPi(
 			muralEnabled:
 				state.memoryEnabled !== false && state.muralEnabled === true,
 			renderBudgetIdentity: renderBudgetIdentityPi(state),
+			renderedBudgets: renderedBudgetSnapshot(
+				state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS,
+				state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS,
+			),
 		};
 		return { docs, markers, compartments, memories, userProfile, workspace };
 	});
@@ -1779,6 +1811,7 @@ export function materializeM0Pi(
 				snapshotMarkers.muralEnabled,
 				snapshotMarkers.renderBudgetIdentity,
 				snapshotMarkers.memoryRenderEpoch,
+				snapshotMarkers.renderedBudgets ?? null,
 			),
 			systemHash: snapshotMarkers.systemHash,
 			modelKey: snapshotMarkers.modelKey,
@@ -2268,6 +2301,7 @@ function markersFromCachedPiRow(
 		projectIdentity: row.cached_m0_project_identity ?? null,
 		muralEnabled: cachedUpgradeIdentity.muralEnabled ?? false,
 		renderBudgetIdentity: cachedUpgradeIdentity.renderBudgetIdentity ?? "",
+		renderedBudgets: cachedUpgradeIdentity.renderedBudgets,
 	};
 }
 

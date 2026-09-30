@@ -1,3 +1,11 @@
+import {
+    historianOrphanStaleMs,
+    retrospectiveOrphanStaleMs,
+} from "../features/magic-context/dreamer/retrospective-orphan-sweep";
+import {
+    createDreamTokenBudget,
+    DreamTokenBudgetExceeded,
+} from "../features/magic-context/dreamer/token-budget";
 import type {
     HiddenCompletion,
     HiddenCompletionExecutor,
@@ -11,6 +19,7 @@ import { declareHostLimitation } from "../shared/host-limitations";
 import { log } from "../shared/logger";
 import type { PromptArgs } from "../shared/model-suggestion-retry";
 import { parseProviderModel, toModelEntry } from "../shared/resolve-fallbacks";
+import { runTokenLog } from "../shared/run-token-log";
 import type { Database } from "../shared/sqlite";
 import {
     HIDDEN_CURATE_AGENT,
@@ -107,6 +116,7 @@ export interface HiddenChildHost {
      * because the host surface this adapter is handed does not always carry it; when it is missing,
      * a retired child keeps its entry in the retired list and the next boot sweep tries again.
      */
+    status?(input: { directory: string }): Promise<Record<string, { type: string }> | undefined>;
     remove?(input: {
         sessionID: string;
         owner?: HostServiceOwner;
@@ -117,12 +127,14 @@ export interface HiddenChildHost {
 export interface HiddenChildRows {
     latestSequence(sessionID: string): number;
     latestAssistant(sessionID: string): StoreRow<"assistant"> | undefined;
+    assistantSince?(sessionID: string, afterSeq: number): StoreRow<"assistant">[];
     latestIdle(sessionID: string): StoreRow<"idle"> | undefined;
 }
 
 export interface V2HiddenCompletionOptions {
     db: Database;
     projectIdentity: string;
+    directory: string;
     hook: HiddenChildHook;
     openReader: () => HiddenChildRows & { close?: () => void };
     ensureAgent?(): Promise<void>;
@@ -150,6 +162,7 @@ export interface V2HiddenCompletionOptions {
 
 interface RunState {
     identity: HiddenRunIdentity;
+    budget?: ReturnType<typeof createDreamTokenBudget>;
     role: HiddenChildRole;
     child: PersistedHiddenChild;
     releaseRole: () => void;
@@ -175,8 +188,10 @@ const REMOVAL_SPACING_MS = 250;
 const RETIRED_CHILDREN_LIMIT = 200;
 const LEGACY_CLEANUP_BOOT_LIMIT = 5;
 
-export function hiddenChildrenMetaKey(projectIdentity: string): string {
-    return `${META_PREFIX}${projectIdentity}`;
+export function hiddenChildrenMetaKey(projectIdentity: string, directory?: string): string {
+    return directory === undefined
+        ? `${META_PREFIX}${projectIdentity}`
+        : `${META_PREFIX}${JSON.stringify([projectIdentity, directory])}`;
 }
 
 function emptyMeta(): HiddenChildrenMeta {
@@ -269,8 +284,59 @@ class HiddenChildStateStore {
     constructor(
         private readonly db: Database,
         projectIdentity: string,
+        directory: string,
     ) {
-        this.key = hiddenChildrenMetaKey(projectIdentity);
+        this.key = hiddenChildrenMetaKey(projectIdentity, directory);
+        this.legacyKey = hiddenChildrenMetaKey(projectIdentity);
+    }
+
+    private readonly legacyKey: string;
+
+    migrateStale(isStale: (child: PersistedHiddenChild) => boolean): void {
+        this.db
+            .transaction(() => {
+                const legacyRow = this.db
+                    .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
+                    .get(this.legacyKey) as { value: string } | undefined;
+                if (!legacyRow) return;
+                const legacy = parseMeta(legacyRow.value);
+                const scoped = this.read();
+                for (const role of ["historian", "dreamer"] as const) {
+                    const child = legacy.active[role];
+                    if (!child || !isStale(child)) continue;
+                    scoped.retired_children.push({
+                        ...child,
+                        retired_at: Date.now(),
+                        reason: "legacy-directory-scope",
+                    });
+                    delete legacy.active[role];
+                }
+                const remaining: RetiredHiddenChild[] = [];
+                for (const child of legacy.retired_children) {
+                    if (isStale(child)) scoped.retired_children.push(child);
+                    else remaining.push(child);
+                }
+                legacy.retired_children = remaining;
+                const excess = scoped.retired_children.length - RETIRED_CHILDREN_LIMIT;
+                if (excess > 0) scoped.retired_children.splice(0, excess);
+                this.db
+                    .prepare(`INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+                    .run(this.key, JSON.stringify(scoped));
+                if (
+                    Object.keys(legacy.active).length === 0 &&
+                    legacy.retired_children.length === 0
+                ) {
+                    this.db
+                        .prepare("DELETE FROM schema_migrations_meta WHERE key = ?")
+                        .run(this.legacyKey);
+                } else {
+                    this.db
+                        .prepare("UPDATE schema_migrations_meta SET value = ? WHERE key = ?")
+                        .run(JSON.stringify(legacy), this.legacyKey);
+                }
+            })
+            .immediate();
     }
 
     read(): HiddenChildrenMeta {
@@ -558,6 +624,15 @@ async function sleepUntilPoll(signal: AbortSignal | undefined, deadline: number)
     });
 }
 
+function isProviderFailure(error: unknown): boolean {
+    if (!error || typeof error !== "object") return false;
+    const type = (error as { type?: unknown }).type;
+    return (
+        typeof type === "string" &&
+        (type.startsWith("provider.") || type.toLowerCase().includes("provider"))
+    );
+}
+
 async function awaitAssistantRow(
     openReader: () => HiddenChildRows & { close?: () => void },
     readSessionError: () => Promise<unknown>,
@@ -585,10 +660,8 @@ async function awaitAssistantRow(
                     `terminal_row=${errorText(newIdle)}`,
                     `session_error=${sessionError === undefined ? "unavailable" : errorText(sessionError)}`,
                 ];
-                throw sessionError === undefined
-                    ? new Error(
-                          `Hidden completion failed without a provider error: ${details.join("; ")}`,
-                      )
+                throw sessionError === undefined || !isProviderFailure(sessionError)
+                    ? new Error(`Hidden completion failed: ${details.join("; ")}`)
                     : new HiddenProviderError(details.join("; "));
             }
             if (outcome === "succeeded" && newAssistant) return newAssistant;
@@ -602,10 +675,8 @@ async function awaitAssistantRow(
                     `terminal_row=${errorText(newAssistant)}`,
                     `session_error=${sessionError === undefined ? "unavailable" : errorText(sessionError)}`,
                 ];
-                throw sessionError === undefined
-                    ? new Error(
-                          `Hidden completion failed without a provider error: ${details.join("; ")}`,
-                      )
+                throw sessionError === undefined || !isProviderFailure(sessionError)
+                    ? new Error(`Hidden completion failed: ${details.join("; ")}`)
                     : new HiddenProviderError(details.join("; "));
             }
             if (newAssistant.data.error !== undefined) {
@@ -662,10 +733,51 @@ export async function createV2HiddenCompletionExecutor(
     options: V2HiddenCompletionOptions,
 ): Promise<HiddenCompletionExecutor> {
     const runs = new WeakMap<HiddenRunHandle, RunState>();
-    const store = new HiddenChildStateStore(options.db, options.projectIdentity);
+    const store = new HiddenChildStateStore(options.db, options.projectIdentity, options.directory);
     const generation = options.generation ?? "opencode2";
     const roleTails = new Map<HiddenChildRole, Promise<void>>();
 
+    const legacy = options.db
+        .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
+        .get(hiddenChildrenMetaKey(options.projectIdentity)) as { value: string } | undefined;
+    if (legacy) {
+        const children = parseMeta(legacy.value);
+        const statuses = new Map<string, Record<string, { type: string }> | undefined>();
+        for (const child of [...Object.values(children.active), ...children.retired_children]) {
+            if (!child || !host.status) continue;
+            const directory = child.directory ?? options.directory;
+            if (!statuses.has(directory)) {
+                try {
+                    statuses.set(directory, await host.status({ directory }));
+                } catch {
+                    statuses.set(directory, undefined);
+                }
+            }
+        }
+        store.migrateStale((child) => {
+            const directory = child.directory ?? options.directory;
+            const state = statuses.get(directory);
+            if (
+                host.status &&
+                (!state || state[child.id]?.type === "busy" || state[child.id]?.type === "retry")
+            )
+                return false;
+            const last = Math.max(
+                child.created_at,
+                withReader(options.openReader, (reader) =>
+                    Math.max(
+                        reader.latestAssistant(child.id)?.data.time?.created ?? 0,
+                        reader.latestIdle(child.id)?.data.time?.created ?? 0,
+                    ),
+                ),
+            );
+            const staleMs =
+                child.role === "historian"
+                    ? historianOrphanStaleMs(20 * 60_000, 3)
+                    : retrospectiveOrphanStaleMs(undefined);
+            return Date.now() - last > staleMs;
+        });
+    }
     const persisted = store.read();
     for (const child of [...Object.values(persisted.active), ...persisted.retired_children]) {
         if (child) options.hook.registerChild(child.id);
@@ -970,8 +1082,12 @@ export async function createV2HiddenCompletionExecutor(
                 }
                 openedChild = active;
                 const handle = { id: active.id, childSessionId: active.id };
+                const tokenBudget = identity.metadata?.tokenBudget;
                 const run: RunState = {
                     identity,
+                    ...(hiddenToolLoop(identity) && typeof tokenBudget === "number"
+                        ? { budget: createDreamTokenBudget(tokenBudget) }
+                        : {}),
                     role,
                     child: active,
                     releaseRole,
@@ -1022,6 +1138,66 @@ export async function createV2HiddenCompletionExecutor(
             };
             options.hook.registerAttempt(marker, attempt);
             const deadline = Date.now() + run.identity.timeoutMs;
+            const budget = run.budget;
+            if (budget?.snapshot().finalizeFired) {
+                throw new DreamTokenBudgetExceeded(run.child.id, budget.snapshot().spent);
+            }
+            let usageSeq = baseline;
+            let budgetPoll: ReturnType<typeof setInterval> | undefined;
+            let budgetReject!: (error: Error) => void;
+            const budgetStopped = new Promise<never>((_resolve, reject) => {
+                budgetReject = reject;
+            });
+            if (budget) {
+                budgetPoll = setInterval(() => {
+                    try {
+                        const fresh = withReader(
+                            options.openReader,
+                            (reader) =>
+                                reader.assistantSince?.(run.child.id, usageSeq) ??
+                                (() => {
+                                    const latest = reader.latestAssistant(run.child.id);
+                                    return latest ? [latest] : [];
+                                })(),
+                        );
+                        for (const row of fresh) {
+                            if (row.seq <= usageSeq) continue;
+                            usageSeq = row.seq;
+                            const tokens = row.data.tokens;
+                            const decision = budget.charge(
+                                Math.max(0, tokens?.input ?? 0),
+                                Math.max(0, tokens?.cache?.read ?? 0),
+                                Math.max(0, tokens?.cache?.write ?? 0),
+                                row.data.finish === "stop" &&
+                                    !(row.data.content ?? []).some(
+                                        (part) => part.type === "tool-call",
+                                    ),
+                                false,
+                            );
+                            const onBudgetUpdate = run.identity.metadata?.onBudgetUpdate;
+                            if (typeof onBudgetUpdate === "function")
+                                onBudgetUpdate({ ...budget.snapshot(), sessionId: run.child.id });
+                            if (decision !== "continue") {
+                                if (budgetPoll) clearInterval(budgetPoll);
+                                // This host exposes context shaping but no pre-tool execution
+                                // hook for hidden children. Stop at the soft threshold instead
+                                // of allowing another investigation call to execute.
+                                attempt.budgetExceeded = new DreamTokenBudgetExceeded(
+                                    run.child.id,
+                                    budget.snapshot().spent,
+                                );
+                                void interruptAndRetire(run, "token-budget").finally(() =>
+                                    budgetReject(attempt.budgetExceeded as Error),
+                                );
+                                return;
+                            }
+                        }
+                    } catch (error) {
+                        if (budgetPoll) clearInterval(budgetPoll);
+                        budgetReject(error instanceof Error ? error : new Error(String(error)));
+                    }
+                }, POLL_INTERVAL_MS);
+            }
             let abortReject!: (error: Error) => void;
             const aborted = new Promise<never>((_resolve, reject) => {
                 abortReject = reject;
@@ -1044,8 +1220,13 @@ export async function createV2HiddenCompletionExecutor(
                 await Promise.race([
                     host.prompt({ sessionID: run.child.id, text: marker }),
                     aborted,
+                    ...(budget ? [budgetStopped] : []),
                 ]);
-                await Promise.race([host.wait({ sessionID: run.child.id }), aborted]);
+                await Promise.race([
+                    host.wait({ sessionID: run.child.id }),
+                    aborted,
+                    ...(budget ? [budgetStopped] : []),
+                ]);
                 const row = await Promise.race([
                     awaitAssistantRow(
                         options.openReader,
@@ -1067,6 +1248,7 @@ export async function createV2HiddenCompletionExecutor(
                         request.signal,
                     ),
                     aborted,
+                    ...(budget ? [budgetStopped] : []),
                 ]);
                 if (!attempt.shaped) {
                     throw new HiddenCompletionRefusal(
@@ -1101,6 +1283,7 @@ export async function createV2HiddenCompletionExecutor(
                 }
                 run.completion = {
                     text,
+                    tokenLog: runTokenLog(tokens, run.identity.maxOutputTokens, row.data.finish),
                     ...(hiddenToolLoop(run.identity)
                         ? { messages: toolLoopMessages(attempt) }
                         : {}),
@@ -1124,7 +1307,7 @@ export async function createV2HiddenCompletionExecutor(
                 // Recorded for `keep_subagents` retention: this child now holds a settled run.
                 if (!run.child.ever_settled) run.child = store.markEverSettled(run.child);
             } catch (caught) {
-                const error = attempt.stepLimit ?? caught;
+                const error = attempt.budgetExceeded ?? attempt.stepLimit ?? caught;
                 run.failed = true;
                 if (!(error instanceof HiddenProviderError)) {
                     run.unsettledFailure = true;
@@ -1156,6 +1339,7 @@ export async function createV2HiddenCompletionExecutor(
                 throw error;
             } finally {
                 clearTimeout(deadlineTimer);
+                if (budgetPoll) clearInterval(budgetPoll);
                 request.signal?.removeEventListener("abort", onAbort);
                 options.hook.releaseAttempt(marker);
             }

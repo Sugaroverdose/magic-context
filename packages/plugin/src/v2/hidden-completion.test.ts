@@ -71,6 +71,10 @@ class Rows {
         );
     }
 
+    assistantSince(sessionID: string, afterSeq: number): StoreRow<"assistant">[] {
+        return (this.rows.get(sessionID) ?? []).filter((row) => row.seq > afterSeq);
+    }
+
     latestAssistant(sessionID: string): StoreRow<"assistant"> | undefined {
         this.latestAssistantCalls += 1;
         return this.rows.get(sessionID)?.at(-1);
@@ -331,6 +335,7 @@ async function setup(
         createV2HiddenCompletionExecutor(host, {
             db,
             projectIdentity: "/project",
+            directory: "/project",
             hook,
             openReader: () => rows,
             generation: hostGeneration,
@@ -360,7 +365,7 @@ async function setup(
                 (
                     db
                         .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
-                        .get(hiddenChildrenMetaKey("/project")) as { value: string }
+                        .get(hiddenChildrenMetaKey("/project", "/project")) as { value: string }
                 ).value,
             ) as {
                 retired_children: Array<{
@@ -375,7 +380,7 @@ async function setup(
                 `INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
             ).run(
-                hiddenChildrenMetaKey("/project"),
+                hiddenChildrenMetaKey("/project", "/project"),
                 JSON.stringify({ version: 1, active: {}, retired_children: children }),
             );
         },
@@ -387,7 +392,7 @@ async function setup(
                 `INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
             ).run(
-                hiddenChildrenMetaKey("/project"),
+                hiddenChildrenMetaKey("/project", "/project"),
                 JSON.stringify({
                     version: 1,
                     active: { [child.role]: active },
@@ -475,6 +480,7 @@ describe("OpenCode 2 hidden child completion", () => {
                 text: null,
                 reasoning: "private reasoning",
                 lengthCapped: true,
+                tokenLog: { max_tokens: null, finish_reason: "length", reasoning: 3 },
             });
             await close(state.executor, handle, true);
         } finally {
@@ -510,6 +516,14 @@ describe("OpenCode 2 hidden child completion", () => {
             expect(completion).toMatchObject({
                 text: "editor completion",
                 usage: { input: 101, output: 11, cacheRead: 7, cacheWrite: 5 },
+                tokenLog: {
+                    input: 101,
+                    output: 11,
+                    reasoning: 3,
+                    cache_read: 7,
+                    cache_write: 5,
+                    max_tokens: null,
+                },
                 providerId: "mock",
                 modelId: "cheap",
             });
@@ -584,7 +598,7 @@ describe("OpenCode 2 hidden child completion", () => {
                 (
                     state.db
                         .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
-                        .get(hiddenChildrenMetaKey("/project")) as { value: string }
+                        .get(hiddenChildrenMetaKey("/project", "/project")) as { value: string }
                 ).value,
             );
             expect(meta.retired_children).toHaveLength(1);
@@ -1188,6 +1202,94 @@ describe("OpenCode 2 hidden child completion", () => {
         }
     });
 
+    test("legacy children migrate only after inactivity, then cleanup is idempotent", async () => {
+        const state = await setup("host-generation-1", { remove: true });
+        try {
+            const oldKey = hiddenChildrenMetaKey("/project");
+            expect(hiddenChildrenMetaKey("/project", "/project")).not.toBe(
+                hiddenChildrenMetaKey("/project", "/other"),
+            );
+            const stale = {
+                ...retiredChild("legacy-stale", Date.now() - 24 * 60 * 60_000),
+                directory: "/other",
+            };
+            const fresh = { ...retiredChild("legacy-fresh", Date.now()), directory: "/project" };
+            const active = (child: typeof stale) => {
+                const result = { ...child } as Record<string, unknown>;
+                delete result.retired_at;
+                delete result.reason;
+                return result;
+            };
+            state.db.prepare("INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)").run(
+                oldKey,
+                JSON.stringify({
+                    version: 1,
+                    active: { historian: active(fresh) },
+                    retired_children: [stale],
+                }),
+            );
+            await state.create();
+            await eventually(() => state.removed.includes("legacy-stale"));
+            expect(
+                state.removals.find((item) => item.sessionID === "legacy-stale")?.directory,
+            ).toBe("/other");
+            expect(state.removed).not.toContain("legacy-fresh");
+            expect(
+                state.db
+                    .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
+                    .get(oldKey),
+            ).toBeTruthy();
+            await state.create();
+            expect(state.removals.filter((item) => item.sessionID === "legacy-stale")).toHaveLength(
+                1,
+            );
+            state.db.prepare("UPDATE schema_migrations_meta SET value = ? WHERE key = ?").run(
+                JSON.stringify({
+                    version: 1,
+                    active: {
+                        historian: active({
+                            ...fresh,
+                            created_at: Date.now() - 24 * 60 * 60_000,
+                        }),
+                    },
+                    retired_children: [],
+                }),
+                oldKey,
+            );
+            await state.create();
+            await eventually(() => state.removed.includes("legacy-fresh"));
+            expect(
+                state.db
+                    .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
+                    .get(oldKey),
+            ).toBeNull();
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("an affirmatively busy legacy child is not deleted even when old", async () => {
+        const state = await setup("host-generation-1", { remove: true });
+        try {
+            const child = retiredChild("busy-legacy", Date.now() - 24 * 60 * 60_000);
+            const oldKey = hiddenChildrenMetaKey("/project");
+            state.db
+                .prepare("INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)")
+                .run(oldKey, JSON.stringify({ version: 1, active: {}, retired_children: [child] }));
+            state.host.status = async () => ({ "busy-legacy": { type: "busy" } });
+            await state.create();
+            await settleRemovals();
+            expect(state.removed).toEqual([]);
+            expect(
+                state.db
+                    .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
+                    .get(oldKey),
+            ).toBeTruthy();
+        } finally {
+            state.db.close();
+        }
+    });
+
     test("a restarted executor reuses the successful v2 child from persisted project meta", async () => {
         const state = await setup();
         try {
@@ -1198,6 +1300,7 @@ describe("OpenCode 2 hidden child completion", () => {
             const restarted = await createV2HiddenCompletionExecutor(state.host, {
                 db: state.db,
                 projectIdentity: "/project",
+                directory: "/project",
                 hook: state.hook,
                 openReader: () => state.rows,
                 generation: "host-generation-1",
@@ -1457,7 +1560,7 @@ describe("OpenCode 2 hidden child completion", () => {
         for (const [id, agent] of agents) {
             expect(agent.hidden).toBe(true);
             const tools: Record<string, string[]> = {
-                [HIDDEN_CURATE_AGENT]: ["ctx_memory", "ctx_memory_list"],
+                [HIDDEN_CURATE_AGENT]: ["ctx_memory"],
                 "dreamer-memory-mapper": ["read", "grep", "glob"],
                 "dreamer-primer-investigator": ["read", "grep", "glob", "ctx_search"],
                 "dreamer-retrospective": ["ctx_search"],
@@ -1536,5 +1639,37 @@ describe("OpenCode 2 hidden child completion", () => {
         } finally {
             state.db.close();
         }
+    });
+});
+
+test("hidden tool-loop hard-stops at soft prompt budget when the host has no pre-tool hook", async () => {
+    const fixture = await setup();
+    fixture.setDelayRow(1200);
+    const executor = fixture.executor;
+    let finalized: boolean | undefined;
+    const handle = await executor.open({
+        ...dreamerRun,
+        agent: HIDDEN_CURATE_AGENT,
+        timeoutMs: 3000,
+        metadata: {
+            tokenBudget: 130,
+            onBudgetUpdate: (state: { finalizeFired: boolean }) => {
+                finalized = state.finalizeFired;
+            },
+        },
+    });
+    const attempt = executor.attempt(handle, request());
+    await eventually(() => fixture.requests.length > 0);
+    // The fixture's assistant reports 101 input, 7 cache read and 5 cache write tokens.
+    fixture.rows.append(handle.id, "", { finish: "tool-calls" });
+    await expect(attempt).rejects.toMatchObject({ name: "DreamTokenBudgetExceeded" });
+    expect(fixture.interrupts).toContain(handle.id);
+    expect(fixture.requests).toHaveLength(1);
+    expect(finalized).toBe(false);
+    await executor.close(handle, {
+        promptSettled: false,
+        privacySensitive: true,
+        context: "test",
+        log: () => {},
     });
 });

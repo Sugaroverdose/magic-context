@@ -19,11 +19,9 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
         // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
-        // removed. Adding an excluded OpenCode 2 file moves this number and the excluded
-        // list below and nothing else, because tier "excluded" never enters a TS or
-        // Rust invocation list. A ts-only OpenCode 2 file also moves the TS and
-        // opencode2 counts in the next test.
-        expect(validation.files.length).toBe(137);
+        // removed. Moving a file between excluded and ts-only changes the invocation
+        // counts and excluded list below, but not the total number of files.
+        expect(validation.files.length).toBe(141);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -34,20 +32,21 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(45);
+        expect(ts).toHaveLength(46);
         expect(rust).toHaveLength(54);
         expect(rust).toContain("tests/subagent-behavior.test.ts");
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(3);
         expect(filesForMode(validation, "ts", "opencode")).toHaveLength(35);
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(26);
-        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(26);
-        // These four OpenCode 2 files are ts-only with hosts ["opencode2"], so only the
+        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(27);
+        // These five OpenCode 2 files are ts-only with hosts ["opencode2"], so only the
         // OpenCode 2 host lane runs them; the other host lanes never select them.
         for (const path of [
             "tests/opencode2/adapters-s2-contracts.test.ts",
             "tests/opencode2/adapters-s3-marker-policy.test.ts",
             "tests/opencode2/pins.test.ts",
             "tests/opencode2/reporter-emergency-drop.test.ts",
+            "tests/opencode2/storage-busy.test.ts",
         ]) {
             expect(filesForMode(validation, "ts", "opencode2")).toContain(path);
             expect(filesForMode(validation, "ts", "opencode")).not.toContain(path);
@@ -61,8 +60,11 @@ describe("mode manifest validator", () => {
         expect([...excluded].sort()).toEqual([
             "tests/adv-identical-bytes-hard.test.ts",
             "tests/dreamer-host-timeout.test.ts",
+            "tests/dreamer-token-budget-oc1.test.ts",
             "tests/dreamer-verify-budget.test.ts",
             "tests/issue-538-engine-wall.test.ts",
+            "tests/issue-570-home-project.test.ts",
+            "tests/issue-574-unborn-project.test.ts",
             "tests/opencode2/automatic-s3-paths.test.ts",
             "tests/opencode2/bounded-raw-reads.test.ts",
             "tests/opencode2/commands-s2-flush.test.ts",
@@ -82,6 +84,7 @@ describe("mode manifest validator", () => {
             "tests/opencode2/harness-s3-identity.test.ts",
             "tests/opencode2/hidden-child-ga.test.ts",
             "tests/opencode2/hidden-child-terminal-failure.test.ts",
+            "tests/opencode2/hidden-child-two-directories.test.ts",
             "tests/opencode2/hidden-child-unbound.test.ts",
             "tests/opencode2/hidden-step-limit.test.ts",
             "tests/opencode2/image-attachment.test.ts",
@@ -99,7 +102,6 @@ describe("mode manifest validator", () => {
             "tests/opencode2/session-project-binding.test.ts",
             "tests/opencode2/sidebar-component.test.ts",
             "tests/opencode2/status-dialog.test.ts",
-            "tests/opencode2/storage-busy.test.ts",
             "tests/opencode2/storage-refusal-reason.test.ts",
             "tests/opencode2/store-directories.test.ts",
             "tests/opencode2/store-generation-conversion.test.ts",

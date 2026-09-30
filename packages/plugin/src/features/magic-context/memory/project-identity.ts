@@ -3,8 +3,9 @@
  *
  * Strategy:
  *   1. Git repo with commits → root commit hash (same across worktrees, clones, forks)
- *   2. Git repo without a readable commit → reuse durable identity or defer
- *   3. No git repo → fallback to directory hash via resolveProjectIdentity()
+ *   2. Git repo with an unborn HEAD → directory hash until the first commit
+ *   3. Transient git failure → reuse durable identity or defer
+ *   4. No git repo → fallback to directory hash via resolveProjectIdentity()
  *
  * The root commit hash is immutable and survives remote renames, host
  * migrations, and SSH/HTTPS URL changes. It is the same across all
@@ -55,16 +56,45 @@ interface SessionIdentityCacheEntry {
     revalidateAt: number | null;
 }
 const sessionIdentityCache = new Map<string, SessionIdentityCacheEntry>();
+// Boot policy applies to identity lookups made outside the session path (historian, RPC, tools).
+let homeProjectPermission = false;
+let homeProjectSkipLogged = false;
+const pausedIdentityReasons = new Map<string, string>();
+const pausedIdentityLogged = new Set<string>();
+
+export function setHomeProjectPermission(allowed: boolean): void {
+    homeProjectPermission = allowed;
+}
+
+/** Skip memory work on a disallowed home project without generating repeated failures. */
+export function shouldSkipHomeProjectMemory(directory: string): boolean {
+    try {
+        assertProjectAllowed(directory, homeProjectPermission);
+        return false;
+    } catch (error) {
+        if (
+            !(error instanceof ProjectIdentityError) ||
+            error.errorClass !== "home_project_disabled"
+        )
+            throw error;
+        if (!homeProjectSkipLogged) {
+            homeProjectSkipLogged = true;
+            log("[magic-context] home project memory disabled; skipping memory features");
+        }
+        return true;
+    }
+}
 let execFileSyncForIdentity: typeof execFileSync = execFileSync;
 let userHomeDirectoryForIdentity = (): string => homedir();
 let nowMs = (): number => Date.now();
 let filesystemProbeObserverForTests: (() => void) | undefined;
 
-/** Git failures retain their classification; only genuine non-repositories may use dir: keys. */
+/** Git failures retain their classification; confirmed unborn repositories may use directory-based identity keys. */
 export type ProjectIdentityErrorClass =
     | "home_project_disabled"
     | "git_identity_unavailable"
     | "not_git_repo"
+    | "no_commits"
     | "git_missing"
     | "git_timeout"
     | "dubious_ownership"
@@ -193,6 +223,36 @@ function isGitTimeoutError(error: unknown): boolean {
     );
 }
 
+function hasUnbornHead(directory: string): boolean {
+    const options = {
+        cwd: directory,
+        encoding: "utf8" as const,
+        env: { ...process.env, LC_ALL: "C", LANG: "C" },
+        stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
+        timeout: GIT_TIMEOUT_MS,
+        windowsHide: true,
+    };
+    try {
+        execFileSyncForIdentity("git", ["rev-parse", "--git-dir"], options);
+        // --quiet distinguishes a missing HEAD (exit 1, no stderr) from access/runtime failures.
+        try {
+            execFileSyncForIdentity("git", ["rev-parse", "--verify", "--quiet", "HEAD"], options);
+            return false;
+        } catch (error) {
+            return (
+                !isGitTimeoutError(error) &&
+                typeof error === "object" &&
+                error !== null &&
+                "status" in error &&
+                error.status === 1 &&
+                getErrorStderr(error) === ""
+            );
+        }
+    } catch {
+        return false;
+    }
+}
+
 function classifyGitError(error: unknown, rawDirectory: string): ProjectIdentityError {
     if (isGitTimeoutError(error)) {
         return new ProjectIdentityError(
@@ -262,7 +322,10 @@ function classifyGitError(error: unknown, rawDirectory: string): ProjectIdentity
  * The cache is process-local, keyed by `path.resolve(directory)`, and stores only successful git
  * identities. Transient failures are never cached.
  */
-export function resolveProjectIdentityStrict(directory: string, allowHomeProject = false): string {
+export function resolveProjectIdentityStrict(
+    directory: string,
+    allowHomeProject = homeProjectPermission,
+): string {
     assertProjectAllowed(directory, allowHomeProject);
     const canonical = path.resolve(directory);
     const cached = identityCache.get(canonical);
@@ -291,7 +354,15 @@ export function resolveProjectIdentityStrict(directory: string, allowHomeProject
             windowsHide: true,
         }) as string;
     } catch (error) {
-        throw classifyGitError(error, directory);
+        const classified = classifyGitError(error, directory);
+        if (classified.errorClass === "not_git_repo" && hasUnbornHead(canonical)) {
+            throw new ProjectIdentityError(
+                "no_commits",
+                directory,
+                "Git repository has no commits yet",
+            );
+        }
+        throw classified;
     }
 
     // Repos with grafted histories (merged with --allow-unrelated-histories) have
@@ -324,7 +395,7 @@ export function resolveProjectIdentityStrict(directory: string, allowHomeProject
     return identity;
 }
 
-/** Directory fallback is reserved for paths without git metadata. */
+/** Directory fallback is allowed for non-repositories and confirmed unborn repositories. */
 function shouldUseDirectoryFallback(error: ProjectIdentityError): boolean {
     return error.errorClass !== "home_project_disabled";
 }
@@ -453,7 +524,10 @@ function assertProjectAllowed(directory: string, allowHomeProject: boolean): voi
     }
 }
 
-export function resolveProjectIdentity(directory: string, allowHomeProject = false): string {
+export function resolveProjectIdentity(
+    directory: string,
+    allowHomeProject = homeProjectPermission,
+): string {
     assertProjectAllowed(directory, allowHomeProject);
     const canonical = path.resolve(directory);
     const cachedFallback = directoryFallbackCache.get(canonical);
@@ -488,6 +562,8 @@ export function resolveProjectIdentity(directory: string, allowHomeProject = fal
     } catch (error) {
         if (error instanceof ProjectIdentityError && shouldUseDirectoryFallback(error)) {
             const fallback = directoryFallback(canonical);
+            // Do not cache unborn fallbacks: the first commit must switch the identity to git:.
+            if (error.errorClass === "no_commits") return fallback;
             const hasGitMetadata = hasGitDir(canonical);
             if (!hasGitMetadata) {
                 if (error.errorClass === "permission_denied") throw error;
@@ -511,7 +587,7 @@ export function resolveProjectIdentity(directory: string, allowHomeProject = fal
 
 export function resolveProjectIdentityOrFallback(
     directory: string,
-    allowHomeProject = false,
+    allowHomeProject = homeProjectPermission,
 ): string {
     try {
         return resolveProjectIdentity(directory, allowHomeProject);
@@ -629,7 +705,7 @@ export function isUsableProjectIdentity(identity: string | null | undefined): id
 
 export function resolveProjectIdentityForSession(
     directory: string,
-    allowHomeProject = false,
+    allowHomeProject = homeProjectPermission,
 ): string | undefined {
     const resolvedDirectory = path.resolve(directory);
     const cacheKey = `${allowHomeProject ? "1" : "0"}\0${resolvedDirectory}`;
@@ -666,9 +742,20 @@ export function resolveProjectIdentityForSession(
             );
         } catch (error) {
             if (!(error instanceof ProjectIdentityError)) throw error;
+            const reason =
+                error.errorClass === "git_identity_unavailable"
+                    ? (pausedIdentityReasons.get(resolvedDirectory) ?? error.errorClass)
+                    : error.errorClass;
+            pausedIdentityReasons.set(resolvedDirectory, reason);
+            const logKey = `${resolvedDirectory}\0${reason}`;
+            if (!pausedIdentityLogged.has(logKey)) {
+                pausedIdentityLogged.add(logKey);
+                log(`[magic-context] memory features paused for ${resolvedDirectory}: ${reason}`);
+            }
             identity = undefined;
         }
     }
+    if (identity !== undefined) pausedIdentityReasons.delete(resolvedDirectory);
 
     // Successful git identities are immutable. Directory/home fallbacks are
     // revalidated after the same cooldown used for recoverable git failures so a
@@ -796,6 +883,10 @@ export function __clearProjectIdentityResolutionCacheForTests(directory?: string
 }
 
 export function __resetProjectIdentityForTests(): void {
+    homeProjectPermission = false;
+    homeProjectSkipLogged = false;
+    pausedIdentityReasons.clear();
+    pausedIdentityLogged.clear();
     identityCache.clear();
     linkedGitWorktreeCache.clear();
     lastKnownGitIdentityCache.clear();

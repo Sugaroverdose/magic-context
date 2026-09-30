@@ -16,9 +16,13 @@ import {
     formatFailClosedBlockingSummary,
     isFailClosedBlockingError,
 } from "../../features/magic-context/fail-closed-block";
-import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
+import {
+    resolveProjectIdentityForSession,
+    setHomeProjectPermission,
+} from "../../features/magic-context/memory/project-identity";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
 import { createScheduler } from "../../features/magic-context/scheduler";
+import { backfillSessionActivity } from "../../features/magic-context/session-activity";
 import {
     clearSession,
     getOrCreateSessionMeta,
@@ -49,7 +53,6 @@ import {
     recordToolParameters,
 } from "../../hooks/magic-context/dropped-input-guard";
 import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
-import { getSessionErrorInfo } from "../../hooks/magic-context/event-payloads";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import {
     createChatMessageHook,
@@ -92,8 +95,8 @@ import { pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import {
     isTransientSqliteError,
+    withAsyncPrivilegedWriter,
     withoutSqliteTransformPass,
-    withPrivilegedWriter,
     withSqliteTransformPass,
 } from "../../shared/sqlite";
 import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
@@ -112,6 +115,7 @@ import { DeletedSessionTombstones } from "./deleted-session-tombstones";
 import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { startDreamTrigger } from "./dream-trigger";
 import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
+import { hiddenTerminalError } from "./hidden-terminal-error";
 import { V2LkgSystemReplay } from "./lkg-system";
 import { modelLimitCacheWarm, warmModelLimitCacheFromCatalog } from "./model-limit-cache";
 import { adaptPayload, HEAD_IDS } from "./payload";
@@ -465,6 +469,7 @@ export async function applyV2SystemPrompt(
 export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
     const config = loadPluginConfigDetailed(directory).config;
+    setHomeProjectPermission(config.allow_home_project);
     if (!config.enabled) return;
     const liveConfigReader = pluginConfigReader(directory, config);
     const compactionOff = !isCompactionEnabled(config);
@@ -656,6 +661,7 @@ export async function registerContext(context: V2Context) {
                 db: database,
                 projectIdentity:
                     resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
+                directory,
                 hook: hiddenChildHook,
                 keepSubagents: config.keep_subagents === true,
                 ensureAgent: () => (hiddenAgentsReady ??= context.agent.reload()),
@@ -788,9 +794,20 @@ export async function registerContext(context: V2Context) {
     if (db && isDatabasePersisted(db)) {
         const backfillDb = db;
         scheduleAfterBootQuiet(() => {
-            runV2SessionProjectBackfill(backfillDb, openStoreReader).catch((error: unknown) =>
-                log("[session-project-backfill] OpenCode 2 backfill failed:", error),
-            );
+            runV2SessionProjectBackfill(backfillDb, openStoreReader, config.allow_home_project)
+                .then(() =>
+                    backfillSessionActivity(backfillDb, "opencode", (sessionId) => {
+                        const reader = openStoreReader();
+                        try {
+                            return reader.latestMessageTime(sessionId);
+                        } finally {
+                            reader.close();
+                        }
+                    }),
+                )
+                .catch((error: unknown) =>
+                    log("[session-project-backfill] OpenCode 2 backfill failed:", error),
+                );
         });
     }
     const readAllForConversion = (sessionID: string) =>
@@ -916,11 +933,14 @@ export async function registerContext(context: V2Context) {
         try {
             for await (const value of context.event.subscribe({ signal: usageController.signal })) {
                 if (usageController.signal.aborted) break;
-                const event = value as { type?: string; data?: { sessionID?: string } };
+                const event = value as {
+                    type?: string;
+                    data?: { sessionID?: string; error?: unknown };
+                };
                 if (!event.data?.sessionID) continue;
                 const sessionID = event.data.sessionID;
-                if (event.type === "session.error") {
-                    const error = getSessionErrorInfo(event.data)?.error;
+                if (event.type === "session.error" || event.type === "session.execution.failed") {
+                    const error = hiddenTerminalError(event);
                     if (error !== undefined) hiddenSessionErrors.set(sessionID, error);
                     continue;
                 }
@@ -1119,7 +1139,8 @@ export async function registerContext(context: V2Context) {
             // Check writer admission before best-effort setup writers can each spend
             // their own busy timeout. No transform callback runs in this transaction.
             const admissionDb = db ?? storage.current();
-            if (!compactionOff && admissionDb) withPrivilegedWriter(admissionDb, () => undefined);
+            if (!compactionOff && admissionDb)
+                await withAsyncPrivilegedWriter(admissionDb, () => undefined);
             // Measure only after admission and after per-model descriptions are final.
             recordV2ToolDefinitions(draft);
             // Only a failure to read or record usage refuses here. A high reading is

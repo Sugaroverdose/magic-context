@@ -69,6 +69,21 @@ test("complete producer prompt uses producer calibration and refuses previously 
     expect(producerPromptFailureReason({ ...input, contextLimitTokens: undefined })).toBeNull();
 });
 
+test("separate input cap and shared context constraints use the tighter allowance", () => {
+    expect(producerInputTokenLimit(400_000, 100_000, 272_000)).toBe(263_840);
+    expect(producerInputTokenLimit(400_000, 100_000)).toBe(291_000);
+    expect(producerInputTokenLimit(undefined, 100_000, 272_000)).toBe(263_840);
+    expect(producerInputTokenLimit(300_000, 100_000, 272_000)).toBe(194_000);
+    expect(
+        producerWindowFailureReason({
+            producerSourceTokens: 264_000,
+            contextLimitTokens: 400_000,
+            inputLimitTokens: 272_000,
+            maxOutputTokens: 100_000,
+        }),
+    ).toContain("producer_input_limit_tokens=263840");
+});
+
 test("32k historian with unconfigured output admits a real prompt and refuses an oversized one", () => {
     const reserve = historianProducerReserve(32_000, undefined, 32_000);
     expect(reserve).toBe(8_000);
@@ -100,4 +115,20 @@ test("inconsistent configured output cannot turn every producer prompt into a re
             maxOutputTokens: reserve,
         }),
     ).toBeNull();
+});
+
+test("Sol producer prompts use seeded fit while an unmeasured variant stays fail closed", () => {
+    const prompt = {
+        sourceLocal: 192000,
+        systemLocal: 8000,
+        toolsLocal: 0,
+        contextLimitTokens: 400000,
+        inputLimitTokens: 272000,
+        maxOutputTokens: 128000,
+    };
+    for (const modelKey of ["openai/gpt-6-sol", "openai/gpt-6.1-sol", "openai/gpt-5.6-terra"])
+        expect(producerPromptFailureReason({ ...prompt, modelKey })).toBeNull();
+    expect(producerPromptFailureReason({ ...prompt, modelKey: "openai/gpt-6-madeup" })).toContain(
+        "producer_prompt_exceeds_window",
+    );
 });

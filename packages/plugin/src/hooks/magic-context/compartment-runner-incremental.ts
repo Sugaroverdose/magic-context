@@ -12,7 +12,8 @@ import {
 // (compartment-runner-recomp.ts, compartment-runner.ts, tests) keep working
 // unchanged. The implementation moved to ./historian-state-file.ts so Pi
 // can import it without pulling in the full incremental runner.
-import { producerSourceLocalBudget } from "./derive-budgets";
+import { beginSqliteWriterAsync } from "../../shared/sqlite";
+import { producerSourceLocalBudget, resolveHistorianProducerLimits } from "./derive-budgets";
 import {
     finishHistorianPublishStage,
     startHistorianPublishStage,
@@ -30,7 +31,10 @@ import {
     embedPromotedFacts,
     promoteSessionFactsDurable,
 } from "../../features/magic-context/memory";
-import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import {
+    resolveProjectIdentity,
+    shouldSkipHomeProjectMemory,
+} from "../../features/magic-context/memory/project-identity";
 import {
     getMemoriesByProject,
     ModuleMemoryAuthorityError,
@@ -233,6 +237,7 @@ export function clearHistorianAlertState(sessionId: string): void {
 }
 
 export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Promise<void> {
+    if (shouldSkipHomeProjectMemory(deps.directory ?? process.cwd())) return;
     const {
         client,
         db,
@@ -586,8 +591,12 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         }
         const producerModel = toModelEntry(deps.model)?.model ?? deps.fallbackModelId;
         const modelParts = producerModel?.split("/");
+        const producerLimits = resolveHistorianProducerLimits(producerModel);
+        const producerContext =
+            producerLimits.context ??
+            (producerLimits.input === undefined ? deps.historianContextLimit : undefined);
         const producerReserve = historianProducerReserve(
-            deps.historianContextLimit,
+            producerContext,
             deps.historianMaxOutputTokens,
             modelParts && modelParts.length > 1
                 ? getSdkOutputLimit(modelParts[0], modelParts.slice(1).join("/"))
@@ -597,7 +606,8 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             ? fitAtomicHistorianSourceToProducerWindow({
                   text: chunk.text,
                   resultBoundaries: chunk.toolResultBoundaries,
-                  contextLimitTokens: deps.historianContextLimit,
+                  contextLimitTokens: producerContext,
+                  inputLimitTokens: producerLimits.input,
                   maxOutputTokens: producerReserve,
               })
             : null;
@@ -619,12 +629,14 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         }
         const producerWindowFailure = producerWindowFailureReason({
             producerSourceTokens,
-            contextLimitTokens: deps.historianContextLimit,
+            contextLimitTokens: producerContext,
+            inputLimitTokens: producerLimits.input,
             maxOutputTokens: producerReserve,
         });
         if (
             deps.historianContextLimit !== undefined &&
-            producerInputTokenLimit(deps.historianContextLimit, producerReserve) === undefined
+            producerInputTokenLimit(producerContext, producerReserve, producerLimits.input) ===
+                undefined
         ) {
             logInconsistentProducerWindowOnce(
                 sessionId,
@@ -993,7 +1005,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         );
         let published = false;
         const transactionStartedAt = startHistorianPublishStage(sessionId, "publish-txn");
-        db.exec("BEGIN IMMEDIATE");
+        await beginSqliteWriterAsync(db, "historian-publish");
         try {
             if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
                 db.exec("ROLLBACK");
