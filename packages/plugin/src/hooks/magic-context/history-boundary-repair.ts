@@ -4,7 +4,10 @@ import {
     isCompartmentLeaseHeld,
     releaseCompartmentLeaseBestEffort,
 } from "../../features/magic-context/compartment-lease";
-import { type Compartment, getCompartments } from "../../features/magic-context/compartment-storage";
+import {
+    type Compartment,
+    getCompartments,
+} from "../../features/magic-context/compartment-storage";
 import { queueM0Mutation } from "../../features/magic-context/storage-m0-mutation-log";
 import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
 import { sessionLog } from "../../shared/logger";
@@ -135,10 +138,9 @@ function dropCompartmentsAfter(
         );
         // Depth counters past the anchor belonged to the removed compartments;
         // the rebuilt ones start fresh, as a partial recomp's do.
-        db.prepare("DELETE FROM compression_depth WHERE session_id = ? AND message_ordinal > ?").run(
-            sessionId,
-            anchor.endMessage,
-        );
+        db.prepare(
+            "DELETE FROM compression_depth WHERE session_id = ? AND message_ordinal > ?",
+        ).run(sessionId, anchor.endMessage);
         deleteChunkEmbedBackoffForSession(db, sessionId);
         queueM0Mutation(db, { sessionId, mutationType: "recomp_boundary_change" });
         clearCachedM0M1(db, sessionId);
@@ -159,20 +161,11 @@ function dropCompartmentsAfter(
 /**
  * Re-anchor the history boundary when the host store proves its message is
  * gone. See the section comment above for the rules.
- *
- * `hostCompacted` says the host has cut history out of its own window. It
- * matters for one more shape: a cached pair recorded before any compartment
- * existed (its boundary is empty) while compartments exist now. Replay covers
- * nothing of the compartments then, so every row the host cut would come back
- * raw; the pair is cleared so this pass folds the compartments in instead.
- * Without a host cut the same shape is the ordinary state between a first
- * publication and the next priced pass, and is left alone.
  */
 export function repairMissingHistoryBoundary(args: {
     db: Database;
     sessionId: string;
     isInHostStore: HostMessagePresence;
-    hostCompacted: boolean;
 }): HistoryBoundaryRepair {
     const { db, sessionId, isInHostStore } = args;
     const compartments = getCompartments(db, sessionId);
@@ -235,21 +228,23 @@ export function repairMissingHistoryBoundary(args: {
         };
     }
 
+    // An empty cached boundary is left alone: it means the pair was recorded
+    // before the first compartment, so replay covers none of them and their raw
+    // rows are meant to be served until the next priced pass folds them in.
     const baseline = readBaseline(db, sessionId);
-    if (!baseline.hasCachedM0 || baseline.boundary === latestEnd) return { kind: "intact" };
-    if (baseline.boundary !== null) {
-        const baselinePresent = isInHostStore(baseline.boundary);
-        if (baselinePresent !== false) return { kind: "intact" };
-    } else if (!args.hostCompacted) {
+    if (!baseline.hasCachedM0 || baseline.boundary === null || baseline.boundary === latestEnd) {
         return { kind: "intact" };
     }
+    if (isInHostStore(baseline.boundary) !== false) return { kind: "intact" };
     clearCachedM0M1(db, sessionId);
     forgetCachedPrefix(sessionId);
     sessionLog(
         sessionId,
-        baseline.boundary === null
-            ? `history boundary repair: the cached prefix covers no compartment while the host has compacted its history; rebuilding it on this pass against compartment end ${latestEnd}`
-            : `history boundary repair: the cached prefix boundary ${baseline.boundary} is not in the host store; rebuilding it on this pass against compartment end ${latestEnd}`,
+        `history boundary repair: the cached prefix boundary ${baseline.boundary} is not in the host store; rebuilding it on this pass against compartment end ${latestEnd}`,
     );
-    return { kind: "baseline-reset", anchorEndMessageId: latestEnd, staleBaselineId: baseline.boundary };
+    return {
+        kind: "baseline-reset",
+        anchorEndMessageId: latestEnd,
+        staleBaselineId: baseline.boundary,
+    };
 }

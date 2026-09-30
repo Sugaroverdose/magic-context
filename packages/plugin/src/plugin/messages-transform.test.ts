@@ -14,6 +14,7 @@ import {
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
 import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-refusal";
 import { finalizeMessageRepresentation } from "../hooks/magic-context/transform-postprocess-phase";
+import { UnresolvedHistoryBoundaryError } from "../hooks/magic-context/unresolved-history-boundary";
 import { Database } from "../shared/sqlite";
 import { createMessagesTransformHandler } from "./messages-transform";
 
@@ -108,6 +109,22 @@ describe("createMessagesTransformHandler — error boundary (issue #23)", () => 
         await expect(handler({}, makeOutput())).rejects.toBeInstanceOf(
             RawFallbackContextLimitError,
         );
+    });
+
+    it("refuses an uncut over-window request when no last good request can stand in", async () => {
+        // Unlike an ordinary transform error, this one must not fall through to
+        // the input messages: they are the same whole window the guard stopped.
+        const handler = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async () => {
+                    throw new UnresolvedHistoryBoundaryError(6_200_000, 500_000);
+                },
+            },
+        });
+
+        const refusal = handler({}, makeOutput());
+        await expect(refusal).rejects.toBeInstanceOf(UnresolvedHistoryBoundaryError);
+        await expect(refusal).rejects.toThrow("(MC-H04)");
     });
 
     it("passes through non-error transforms normally", async () => {

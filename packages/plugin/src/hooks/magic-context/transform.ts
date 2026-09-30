@@ -2599,7 +2599,10 @@ export function createTransform(deps: TransformDeps) {
                         sessionId,
                         `history boundary unresolved: prefix trim refused and the untrimmed request estimate ${untrimmed.tokens} (trusted=${untrimmed.trusted}) exceeds the context limit ${boundaryContextLimit}; not sending it`,
                     );
-                    throw new UnresolvedHistoryBoundaryError(untrimmed.tokens, boundaryContextLimit);
+                    throw new UnresolvedHistoryBoundaryError(
+                        untrimmed.tokens,
+                        boundaryContextLimit,
+                    );
                 }
             }
             const timedOutHistorianFailure = compartmentPhase.historianJoinTimedOut

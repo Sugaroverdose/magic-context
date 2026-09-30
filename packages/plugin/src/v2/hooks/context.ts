@@ -74,8 +74,8 @@ import {
     StorageBusyRefusalError,
 } from "../../hooks/magic-context/storage-busy-refusal";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
-import { UnresolvedHistoryBoundaryError } from "../../hooks/magic-context/unresolved-history-boundary";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
+import { UnresolvedHistoryBoundaryError } from "../../hooks/magic-context/unresolved-history-boundary";
 import { scheduleAfterBootQuiet } from "../../plugin/boot-quiet";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
@@ -174,14 +174,12 @@ export function checkHistoryBoundary(
     db: Database,
     reader: Pick<V2StoreReader, "earliestSequence" | "sequenceForId">,
     sessionID: string,
-    hostCompacted: boolean,
 ): HistoryBoundaryRepair | undefined {
     try {
         const storeHasSession = reader.earliestSequence(sessionID) !== undefined;
         return repairMissingHistoryBoundary({
             db,
             sessionId: sessionID,
-            hostCompacted,
             isInHostStore: (messageId) =>
                 storeHasSession ? reader.sequenceForId(sessionID, messageId) !== undefined : null,
         });
@@ -1401,7 +1399,7 @@ export async function registerContext(context: V2Context) {
                 // owns its own.
                 const boundaryRepair =
                     !rustModeModuleClient && db && !compactionOff
-                        ? checkHistoryBoundary(db, reader, draft.sessionID, cut !== undefined)
+                        ? checkHistoryBoundary(db, reader, draft.sessionID)
                         : undefined;
                 if (
                     boundaryRepair?.kind === "repaired" ||

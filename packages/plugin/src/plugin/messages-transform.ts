@@ -16,9 +16,9 @@ import { replayLkg, resolveLkgModelKeys } from "../hooks/magic-context/lkg-repla
 import { dropSlot, getSlot, noteEntry } from "../hooks/magic-context/lkg-slot";
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
 import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-refusal";
-import { UnresolvedHistoryBoundaryError } from "../hooks/magic-context/unresolved-history-boundary";
 import type { MessageLike } from "../hooks/magic-context/transform-operations";
 import { replayRustModeBindingMismatchStrips } from "../hooks/magic-context/transform-postprocess-phase";
+import { UnresolvedHistoryBoundaryError } from "../hooks/magic-context/unresolved-history-boundary";
 import { log, sessionLog } from "../shared/logger";
 import {
     isTransientSqliteError,
