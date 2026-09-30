@@ -5,6 +5,7 @@ import {
     detectThinkingBindingMismatch,
     extractErrorMessage,
     isPrefixBoundThinkingModel,
+    parseReportedInputTokens,
     parseReportedLimit,
 } from "./overflow-detection";
 
@@ -53,6 +54,12 @@ describe("overflow-detection / detectOverflow", () => {
             "Input token count 1234567 exceeds the maximum number of tokens allowed",
             undefined,
             undefined,
+        ],
+        [
+            "gemini-parenthesized",
+            "The input token count (123456) exceeds the maximum number of tokens allowed (100000).",
+            100000,
+            "prompt_only",
         ],
         [
             "xai",
@@ -245,6 +252,19 @@ describe("overflow-detection / isPrefixBoundThinkingModel", () => {
 
 describe("overflow-detection / parseReportedLimit", () => {
     test("extracts from 'maximum prompt length' (xAI)", () => {
+        expect(
+            parseReportedLimit(
+                "The input token count (123456) exceeds the maximum number of tokens allowed (100000).",
+            ),
+        ).toEqual({ value: 100000, provenance: "prompt_only" });
+        expect(
+            parseReportedInputTokens(
+                "The input token count (123456) exceeds the maximum number of tokens allowed (100000).",
+            ),
+        ).toBe(123456);
+        expect(parseReportedInputTokens("Input token count 1234567 exceeds the maximum")).toBe(
+            1234567,
+        );
         expect(parseReportedLimit("the maximum prompt length is 256000 tokens")).toEqual({
             value: 256000,
             provenance: "prompt_only",

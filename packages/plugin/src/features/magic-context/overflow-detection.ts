@@ -90,6 +90,12 @@ const LIMIT_EXTRACTION_PATTERNS: ReadonlyArray<LimitExtractionPattern> = [
         pattern: />\s*(\d+)\s*(?:tokens?\s*)?(?:maximum|max|limit)\b/i,
         provenance: "prompt_only",
     }, // Anthropic reports the accepted input ceiling, not input plus output.
+    // Gemini puts both numbers in parentheses: "input token count (N) exceeds the
+    // maximum number of tokens allowed (M)". M is the input ceiling.
+    {
+        pattern: /maximum number of tokens allowed\s*\(?\s*(\d+)/i,
+        provenance: "prompt_only",
+    }, // Google Gemini
     { pattern: /prepared prompt exceeds engine max_context\s+(\d+)/i, provenance: "unknown" }, // This format reports the engine's max_context limit after the message.
     { pattern: /prompt exceeds (?:the )?.{0,32}\bmax_context\s+(\d+)/i, provenance: "unknown" }, // Other local engines
     { pattern: /max(?:imum)?.*context.*?(\d+)/i, provenance: "unknown" }, // generic fallback
@@ -302,7 +308,7 @@ export function parseReportedInputTokens(message: string): number | undefined {
     if (!message) return undefined;
     const patterns = [
         /prompt is too long:\s*(\d+)/i,
-        /input token count\s*(\d+)/i,
+        /input token count\s*\(?\s*(\d+)/i,
         /input length\s*(\d+)/i,
         /prompt was\s*(\d+)/i,
         /messages resulted in\s*(\d+)\s*tokens?/i,

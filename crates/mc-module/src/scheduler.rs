@@ -97,6 +97,11 @@ const LIMIT_EXTRACTION_PATTERN_SOURCES: &[(&str, ContextLimitProvenance)] = &[
         r">\s*(\d+)\s*(?:tokens?\s*)?(?:maximum|max|limit)\b",
         ContextLimitProvenance::PromptOnly,
     ),
+    // Gemini: "input token count (N) exceeds the maximum number of tokens allowed (M)".
+    (
+        r"maximum number of tokens allowed\s*\(?\s*(\d+)",
+        ContextLimitProvenance::PromptOnly,
+    ),
     (
         r"prepared prompt exceeds engine max_context\s+(\d+)",
         ContextLimitProvenance::Unknown,

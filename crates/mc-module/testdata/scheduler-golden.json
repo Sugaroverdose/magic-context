@@ -478,6 +478,17 @@
       }
     },
     {
+      "label": "gemini-parenthesized",
+      "input": "The input token count (123456) exceeds the maximum number of tokens allowed (100000).",
+      "expected_message": "The input token count (123456) exceeds the maximum number of tokens allowed (100000).",
+      "expected": {
+        "is_overflow": true,
+        "reported_limit": 100000,
+        "reported_limit_provenance": "prompt_only",
+        "matched_pattern": "input token count.*exceeds the maximum"
+      }
+    },
+    {
       "label": "xai",
       "input": "the maximum prompt length is 256000 tokens but the prompt was 300000",
       "expected_message": "the maximum prompt length is 256000 tokens but the prompt was 300000",

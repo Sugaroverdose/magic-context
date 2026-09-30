@@ -295,6 +295,10 @@ const overflowInputs: Array<[string, unknown]> = [
     ["bedrock", "Input is too long for requested model."],
     ["openai", "This model's maximum context length is 128000 tokens"],
     ["gemini", "Input token count 1234567 exceeds the maximum number of tokens allowed"],
+    [
+        "gemini-parenthesized",
+        "The input token count (123456) exceeds the maximum number of tokens allowed (100000).",
+    ],
     ["xai", "the maximum prompt length is 256000 tokens but the prompt was 300000"],
     ["groq", "Please reduce the length of the messages or completion"],
     ["openrouter", "the maximum context length is 32768 tokens"],
