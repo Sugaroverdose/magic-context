@@ -22,7 +22,7 @@ const aggregate = (data: any[]) => ({ rows: data.length, wellFormed: data.filter
     misplaced: data.filter(r => r.misplaced).length, byteIdentity: data.filter(r => r.byteIdentity === true).length });
 const result: any = { responseModels: [...new Set(rows.map(r => r.responseModel))], variants: {}, sessions: [], buckets: [], errors: summary.calls.filter((c: any) => c.status !== undefined && c.status !== 200),
     credentials: { copiedDeleted: summary.copiedCredentialDeleted, stagedDeleted: summary.stagedCredentialDeleted } };
-for (const variant of ["A", "B"]) {
+for (const variant of [...new Set(rows.map(r => r.variant))]) {
     const data = rows.filter(r => r.variant === variant);
     const calls = summary.sessions.filter((s: any) => s.variant === variant).flatMap((s: any) => summary.calls.slice(s.providerCallStart, s.providerCallEnd));
     const usage = calls.reduce((total: any, c: any) => {
@@ -39,7 +39,7 @@ for (const variant of ["A", "B"]) {
 }
 for (const session of summary.sessions) result.sessions.push({ ...Object.fromEntries(["session", "variant", "scenario", "replicate", "completed", "lastCompletedTurn", "replies", "parallelSeen", "placeholderSeen", "providerHookTextEqual", "reductionTarget", "providerSawReductionTarget", "reductionStatus"].map(key => [key, session[key]])),
     ...aggregate(rows.filter(r => r.session === session.session && !r.toolOnly)) });
-const columns = ["model", "requestedModel", "responseModel", "variant", "scenario", "session", "position", "userTurn", "providerCallIndex", "rawFirst60", "assignedTag", "wellFormed", "canonicalPrefix", "correct", "delta", "malformed", "misplaced", "byteIdentity", "toolOnly", "tagOnlyText"];
+const columns = ["model", "requestedModel", "responseModel", "variant", "scenario", "session", "position", "userTurn", "providerCallIndex", "rawFirst60", "assignedTag", "wellFormed", "canonicalPrefix", "correct", "delta", "malformed", "misplaced", "byteIdentity", "toolOnly", "tagOnlyText", "reasoningTokens", "finish"];
 const csv = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
 writeFileSync(`${prefix}.csv`, columns.join(",") + "\n" + rows.map(row => columns.map(key => csv(row[key])).join(",")).join("\n") + "\n");
 writeFileSync(`${prefix}-analysis.json`, JSON.stringify(result, null, 2));

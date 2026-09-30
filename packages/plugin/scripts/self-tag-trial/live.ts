@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { isolate } from "./bootstrap";
 import { measure, type Event } from "./measure";
+import type { Variant } from "./engine";
 import { prompts, scenarios } from "./scenarios";
 
 const stagedAuth = join(tmpdir(), "magic-context", "self-tag-trial", "creds", "auth.json");
@@ -13,7 +14,9 @@ const liveHome = homedir();
 if (!existsSync(stagedAuth) || (statSync(stagedAuth).mode & 0o777) !== 0o600) throw new Error("Staged credential absent or not mode 600");
 const out = resolve(process.argv[2] ?? "docs/reports/issue-582-self-tag-live");
 const resumeVariant = process.argv[4]?.startsWith("resume-") ? process.argv[4].slice(7) : null;
-const resume = resumeVariant === "A" || resumeVariant === "B";
+const resume = ["A", "B", "C", "D"].includes(resumeVariant ?? "");
+const selected = process.env.SELF_TAG_VARIANTS?.split(",") as Variant[] | undefined;
+if (selected?.some(v => !["A", "B", "C", "D"].includes(v))) throw new Error("Unknown variant");
 const previous = resume ? JSON.parse(readFileSync(`${out}-summary.json`, "utf8")) : null;
 const priorEvents: Event[] = resume ? readFileSync(join(previous.root, "capture.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
 let priorTurn = 0;
@@ -28,8 +31,9 @@ const root = previous?.root ?? isolate();
 if (previous && !root.startsWith(join(tmpdir(), "magic-context", "self-tag-trial") + "/")) throw new Error("Resume root escaped trial directory");
 const { DeepSeekCaller } = await import("./live-adapter");
 const supplement = process.argv[3] === "reduction-supplement";
-const trialScenarios = supplement ? ["reduced"] as const : scenarios;
-const summary: any = previous ?? { root, cohort: supplement ? "reduction-supplement" : "primary", model: "deepseek-flash", operatorModelLabel: "deepseek-v4.1-flash", rejectedSetupRequests: 2, version: "1.18.30", sessions: [], copiedCredentialDeleted: false, stagedCredentialDeleted: false };
+const control = process.env.SELF_TAG_FRESH_CONTROL === "1";
+const trialScenarios = supplement ? ["reduced"] as const : control ? ["fresh"] as const : scenarios;
+const summary: any = previous ?? { root, cohort: supplement ? "reduction-supplement" : "primary", model: "deepseek-flash", operatorModelLabel: "deepseek-v4.1-flash", rejectedSetupRequests: 0, version: "1.18.30", sessions: [], copiedCredentialDeleted: false, stagedCredentialDeleted: false };
 const rows: unknown[] = resume ? readFileSync(`${out}.jsonl`, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)).filter(row => row.variant !== resumeVariant) : [];
 let caller: Awaited<ReturnType<typeof DeepSeekCaller.create>> | undefined;
 let completed = false;
@@ -46,9 +50,9 @@ try {
         summary.resumedForPendingFlush = true;
     }
     summary.isolationBefore = caller.isolation();
-    for (let replicate = 0; replicate < (supplement ? 1 : 2); replicate++) for (let s = 0; s < trialScenarios.length; s++) {
+    for (let replicate = 0; replicate < (supplement || control ? 1 : 2); replicate++) for (let s = 0; s < trialScenarios.length; s++) {
         const scenario = trialScenarios[s];
-        const order = (replicate + s) % 2 ? ["B", "A"] as const : ["A", "B"] as const;
+        const order = selected ?? ((replicate + s) % 2 ? ["B", "A"] as const : ["A", "B"] as const);
         for (const variant of order) {
             if (previous && variant !== resumeVariant) continue;
             const resumed = previous && variant === resumeVariant;
@@ -63,7 +67,22 @@ try {
             if (!resumed) summary.sessions.push(record);
             const events: Event[] = resumed ? priorEvents.filter(event => event.kind !== "flush" && (event.input?.sessionID === session || event.messages?.some((message: any) => message.info.sessionID === session) || event.kind === "system" && event.capturedSession === session)) : [];
             const turnPrompts = resumed ? [...record.prompts, "Flush the pending fixture reduction.", "What is 3 plus 4? Explain in one sentence."] : prompts(scenario);
+            if (supplement && !resumed) turnPrompts.push("Flush the pending fixture reduction.", "What is 3 plus 4? Explain in one sentence.");
             for (let turn = resumed ? record.prompts.length : 0; turn < turnPrompts.length; turn++) {
+                if (supplement && !resumed && turn === 16) {
+                    const calls = [...caller.calls];
+                    await caller.close();
+                    // Reducing history changes the cached provider prompt prefix. Wait out its five-minute
+                    // reuse window so the scheduler can reclaim history without sacrificing that cache.
+                    record.cacheExpiryWaitMs = 301000;
+                    await Bun.sleep(record.cacheExpiryWaitMs);
+                    caller = await DeepSeekCaller.create(root, liveHome, stagedAuth, hostBinary);
+                    caller.calls.push(...calls);
+                    caller.session = session;
+                    caller.requireDroppedTag = record.reductionTarget;
+                    writeFileSync(join(root, "control.json"), JSON.stringify({ variant, head: false }));
+                    record.restartedBeforeTurn = 17;
+                }
                 let prompt = turnPrompts[turn];
                 if (scenario === "reduced" && turn === 9) {
                     const db = new Database(join(root, "data", "cortexkit", "magic-context", "context.db"), { readonly: true });
@@ -78,7 +97,7 @@ try {
                     if (supplement) prompt = "Call trial_read with padding=true to load the large deterministic reference fixture. Ignore its reference appendix when answering. After the tool returns, summarize apples=3, pears=4, total=7 in one sentence.";
                     else prompt += "\nReference scratch pad, not part of the fruit counts; ignore it when answering:\n<fixture-padding>\n" + "reference line: alpha beta gamma delta epsilon zeta eta theta iota kappa\n".repeat(500) + "</fixture-padding>";
                 }
-                if (supplement && (turn === 11 && !resumed || turn === 16 && resumed)) {
+                if (supplement && (turn === 11 && !resumed || turn === 16)) {
                     const db = new Database(join(root, "data", "cortexkit", "magic-context", "context.db"), { readonly: true });
                     try {
                         const fresh = db.query("SELECT tag_number FROM tags t WHERE session_id = ? AND type = 'tool' AND status = 'active' AND tag_number < ? AND NOT EXISTS (SELECT 1 FROM pending_ops p WHERE p.session_id = t.session_id AND p.tag_id = t.tag_number) ORDER BY tag_number LIMIT 1").get(session, record.reductionTarget) as { tag_number: number } | null;
@@ -121,6 +140,9 @@ try {
                     if (!provider.responseModel) throw new Error("Provider response omitted model identity");
                     Object.assign(row, { model: provider.responseModel, requestedModel: provider.model,
                         providerCallIndex: provider.index, responseModel: provider.responseModel, usage: provider.usage,
+                        reasoning: provider.reasoning, reasoningTokens: provider.reasoningTokens, finish: provider.finish,
+                        providerToolCalls: provider.calls,
+                        reasoningReplays: events.filter(e => e.kind === "wire").flatMap(e => e.messages).filter((m: any) => m.info.id === row.messageID).map((m: any) => m.parts.filter((p: any) => p.type === "reasoning").map((p: any) => p.text)),
                         providerArgumentTags: provider.calls.some(call => /§/.test(String(call.arguments ?? ""))) });
                     row.misplaced ||= provider.calls.some(call => /§/.test(String(call.arguments ?? "")));
                 }
@@ -145,9 +167,9 @@ try {
 } finally {
     await caller?.close();
     summary.copiedCredentialDeleted = !existsSync(join(root, "data", "opencode", "auth.json"));
-    if (completed) rmSync(stagedAuth, { force: true });
+    if (completed && process.env.SELF_TAG_KEEP_STAGED !== "1") rmSync(stagedAuth, { force: true });
     summary.stagedCredentialDeleted = !existsSync(stagedAuth);
     summary.completed = completed;
     save();
 }
-console.log(`Completed live DeepSeek trial; ${rows.length} rows; staged and copied credentials deleted.`);
+console.log(`Completed live DeepSeek trial; ${rows.length} rows; copied credential deleted; staged retention recorded in summary.`);

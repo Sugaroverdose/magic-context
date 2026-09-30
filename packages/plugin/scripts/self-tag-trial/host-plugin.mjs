@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { tool } from "@opencode-ai/plugin";
 
 const instruction = "Start the text of each reply with exactly §N§ followed by one space, where N is one more than the highest tag number in the conversation. Never write tags anywhere else: not mid-text, not in tool arguments, and not on tool-call-only replies.";
+const instructionC = 'Every user message, every text you write and every tool result in this conversation carries a tag such as §12§, numbered in the order they arrive. Start the text of each reply with exactly §N§ and one space, where N is one more than the highest tag number you can see, tool results included. That applies to every reply that has text, including a short sentence written alongside tool calls, for example `§12§ Reading both files in parallel.` followed by the calls. A reply that is only tool calls gets no tag. IMPORTANT: NEVER write tag notation anywhere else: not mid-text and not in tool arguments. To refer to an item in your prose, write "tag 12".';
 const record = (event) => appendFileSync(process.env.SELF_TAG_CAPTURE, JSON.stringify(event) + "\n");
 const control = () => process.env.SELF_TAG_CONTROL
     ? JSON.parse(readFileSync(process.env.SELF_TAG_CONTROL, "utf8"))
@@ -33,6 +34,7 @@ export default {
             "experimental.chat.system.transform": async (input, output) => {
                 await system?.(input, output);
                 if (control().variant === "B") output.system.push(instruction);
+                if (["C", "D"].includes(control().variant)) output.system.push(instructionC);
                 record({ kind: "system", system: output.system });
             },
             "experimental.chat.messages.transform": async (input, output) => {

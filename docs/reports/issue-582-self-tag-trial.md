@@ -197,3 +197,158 @@ The current factory fixes the invalid configuration used in the recorded primary
 Verification commands: plugin package typecheck; focused engine/measurement tests; pinned mock host probe; live per-session provider/hook equality, actual DB number readback and last-reply flush guards; independent outgoing placeholder checks; sampled lsof fence; explicit credential deletion checks; and git whitespace checks. No new dependency or lockfile change was required for this follow-up. The earlier standard plugin build supplies unchanged product dist. The repository formatter still rejects its existing `rules.preset` configuration; no unrelated formatter cleanup is included.
 
 **Decision supported by this trial:** explicit self-tagging helps this Flash model, especially on the first reply, but the tested B wording does not meet the required every-reply/cache-byte contract. Fixing the first mixed-tool preamble and preventing inline/tag-only output would require a further experiment or a different mechanism; this report does not assume either fix works.
+
+## Follow-up: variants C and D (2026-09-30)
+
+The A/B observations and conclusions above are retained as the original trial record. This follow-up adds C, and D (C's wording with thinking enabled); it does not retroactively change the A/B data or guidance.
+
+### Exact instruction and corrected conditions
+
+C appends the following **separate system entry after the unchanged full product guidance**, exactly where B appends its own line. D uses the same bytes as C:
+
+> Every user message, every text you write and every tool result in this conversation carries a tag such as §12§, numbered in the order they arrive. Start the text of each reply with exactly §N§ and one space, where N is one more than the highest tag number you can see, tool results included. That applies to every reply that has text, including a short sentence written alongside tool calls, for example `§12§ Reading both files in parallel.` followed by the calls. A reply that is only tool calls gets no tag. IMPORTANT: NEVER write tag notation anywhere else: not mid-text and not in tool arguments. To refer to an item in your prose, write "tag 12".
+
+The exact line quoted above was compared byte-for-byte with the operator's `.cortexkit/alfonso/plans/issue-582-variant-c.md`, section “Variant C system line”, to verify that no punctuation or spacing changed. The pinned-host mock probe checks the actual system hook: C's line is present for C and D, absent for A and B; B's original line remains present only for B. No A/B instruction or product guidance was replaced.
+
+**C's and D's primary sessions ran with corrected, production-schema-validated config; the original A/B primary sessions ran on defaults after their invalid config fell back.** These are not perfectly matched historical cohorts. The earlier A/B successful supplements already used validated config. The follow-up explicitly uses `transform_mode: "ts"`, `protected_tokens: 4000`, full guidance, disabled historian/dreamer/compressor, and disabled automatic memory search/promotion. No product code changed. Two new fresh-session controls (one A, one B) use this corrected config, reported separately rather than pooled into the original A/B rates.
+
+All calls still request and return `deepseek-flash` through the same relay and use OpenCode 1.18.30 with the built product dist. C and the A/B controls use `thinking.type=disabled` and `max_tokens=512`; **D alone uses `thinking.type=enabled` and `max_tokens=4096`**. Host model output-limit metadata is 4096 in the follow-up, while the relay enforces those per-variant generation caps. No seed or temperature is added. Raw reasoning and provider-reported reasoning-token counts are retained per call and in D's rows/trajectories; only reply text is scored.
+
+Each C/D benchmark contains two fresh, two reduced and two literal-head 16-turn sessions plus one 18-turn reduced supplement. Prompts, deterministic tools, requested 3–6-step loops and parallel-call requests are unchanged. Every completed session actually made parallel calls. Supplemental turns 17–18 continue the original 16-turn scenario with the same reduction-flush and arithmetic prompts used for the A/B continuations.
+
+The scheduler defers history reductions while the provider can reuse a cached prompt prefix: dropping old content would invalidate that prefix. A same-root restart alone did not expire this five-minute reuse window: the first C supplemental attempt stopped after 16 paid turns when the relay refused to forward a request without the required placeholder. Its 25 paid calls and provider-only recovered rows are retained as excluded data. The first capture file was overwritten on restart in that attempt; the harness now preserves capture history across restarts. The successful C and D supplements wait 301 seconds after turn 16, then restart the isolated host, allowing the five-minute cache TTL to expire before the guarded turn 17. This makes the implicit pause in the historical manual continuations explicit, without changing product scheduling or writing to its DB. A combined C/D runner also rejected a D startup locally because C's guard leaked across sessions; no upstream call was made. The guard now resets at session start; D's standalone supplement is the counted D session. Neither rejected request is counted as a model reply.
+
+### Pooled results next to the original A/B
+
+**C achieved 155/155 byte-identical text parts in this sample (100%). D achieved 169/171 (98.8%).** This is evidence for C's wording in these fixtures, not proof of an every-reply invariant. Thinking did not improve this sample: D had one wrong prefix and one unprefixed closing acknowledgment. Both C and D fixed the first mixed text-and-tools reply in all seven sessions, unlike historical B's 0/7.
+
+| Variant | Replies | Text parts | Closed tag | Canonical prefix | Correct number | Wrong number | Malformed | Misplaced | Byte-identical |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A, historical | 167 | 153 | 117 | 116 | 116 | 0 | 6 | 6 | 114 (74.5%) |
+| B, historical | 158 | 153 | 146 | 145 | 145 | 0 | 3 | 4 | 142 (92.8%) |
+| C, corrected config | 160 | 155 | 155 | 155 | 155 | 0 | 0 | 0 | 155 (100%) |
+| D, corrected config + thinking | 176 | 171 | 170 | 170 | 169 | 1 | 0 | 0 | 169 (98.8%) |
+
+C and D each had five text-free tool-only replies, with no argument tags. Neither had a tag-only text frame accompanying tools. Denominators still count raw text parts; reasoning is never included in these scores.
+
+| Variant | Reply position | Text parts | Closed tag | Correct | Wrong | Malformed | Misplaced | Byte-identical |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| A, historical | 1 | 7 | 0 | 0 | 0 | 0 | 0 | 0 |
+| A, historical | 2–5 | 24 | 12 | 11 | 0 | 0 | 1 | 11 |
+| A, historical | 6–20 | 96 | 79 | 79 | 0 | 6 | 5 | 77 |
+| A, historical | >20 | 26 | 26 | 26 | 0 | 0 | 0 | 26 |
+| B, historical | 1 | 7 | 7 | 7 | 0 | 0 | 0 | 7 |
+| B, historical | 2–5 | 28 | 21 | 21 | 0 | 0 | 0 | 21 |
+| B, historical | 6–20 | 101 | 101 | 100 | 0 | 3 | 4 | 97 |
+| B, historical | >20 | 17 | 17 | 17 | 0 | 0 | 0 | 17 |
+| C | 1 | 7 | 7 | 7 | 0 | 0 | 0 | 7 |
+| C | 2–5 | 28 | 28 | 28 | 0 | 0 | 0 | 28 |
+| C | 6–20 | 101 | 101 | 101 | 0 | 0 | 0 | 101 |
+| C | >20 | 19 | 19 | 19 | 0 | 0 | 0 | 19 |
+| D | 1 | 7 | 7 | 7 | 0 | 0 | 0 | 7 |
+| D | 2–5 | 28 | 28 | 28 | 0 | 0 | 0 | 28 |
+| D | 6–20 | 101 | 100 | 99 | 1 | 0 | 0 | 99 |
+| D | >20 | 35 | 35 | 35 | 0 | 0 | 0 | 35 |
+
+### First mixed text-and-tools reply, one row per session
+
+Every row below is reply position **3**, assigned **tag 6**, has real parallel tool calls and is byte-identical. Raw text is quoted without normalization. The session ID disambiguates the supplemental reduced session from primary replicate 1.
+
+| Variant / scenario / replicate | Session | Raw first mixed reply | Byte identity |
+|---|---|---|---|
+| C / fresh / 1 | `ses_f0c697af9ffesBxM5SUS7mUfRN` | `§6§ Reading the fixture and listing the directory in parallel first.` | yes |
+| C / reduced / 1 | `ses_f0c691d65ffe1tpRRbiiruHgIb` | `§6§ Reading the fixture and listing the directory in parallel first.` | yes |
+| C / literal-head / 1 | `ses_f0c68bf26ffe49CmalvP6tLOxd` | `§6§ Starting with a parallel read and list, per your request.` | yes |
+| C / fresh / 2 | `ses_f0c68653fffewLiYUKv8MscCZ0` | `§6§ Starting with a parallel read and list.` | yes |
+| C / reduced / 2 | `ses_f0c67f555ffeLQeksL8sEkEaJV` | `§6§ Reading the fixture and listing the directory in parallel to start.` | yes |
+| C / literal-head / 2 | `ses_f0c6796d2ffeWYgcM2p0GTBa5P` | `§6§ Reading fixture.txt while listing the fixture directory in parallel first.` | yes |
+| C / reduced supplement / 1 | `ses_f0c60a4d0ffe5JyxT1v7RJJwpO` | `§6§ Reading the fixture and listing the directory in parallel first.` | yes |
+| D / fresh / 1 | `ses_f0c64207bffe7FzR46wH4qZuT4` | `§6§ Starting by reading the fixture and listing the directory in parallel.` | yes |
+| D / reduced / 1 | `ses_f0c63a8e8ffesNGQCzGHjel9SL` | `§6§ Reading fixture.txt and listing the directory in parallel first.` | yes |
+| D / literal-head / 1 | `ses_f0c631727ffe1w1CoA48W7GY4b` | `§6§ Starting with a parallel read of fixture.txt and listing of the directory.` | yes |
+| D / fresh / 2 | `ses_f0c62a17dffeGn1HPv6fTjM8gk` | `§6§ Starting by reading the fixture and listing the directory in parallel.` | yes |
+| D / reduced / 2 | `ses_f0c620c12ffe6Mr5VXOVIY2zeE` | `§6§ Reading fixture.txt and listing the fixture directory in parallel to start.` | yes |
+| D / literal-head / 2 | `ses_f0c61900effep2ssFBn9q5ALR2` | `§6§ Starting with a parallel read of the fixture and a listing of the fixture directory.` | yes |
+| D / reduced supplement / 1 | `ses_f0c5f3009ffe6D6Z3pD9EnlJoG` | `§6§ Starting with a parallel read of the fixture and a listing of the directory.` | yes |
+
+### Controls and actual reduction evidence
+
+| Corrected fresh control (not pooled above) | Calls / text parts | Correct / byte-identical | Wrong / malformed / misplaced | First mixed reply |
+|---|---:|---:|---|---|
+| A, `ses_f0c607977ffethfiBIjp63uzOE` | 22 / 22 | 18 / 18 (81.8%) | 0 / 0 / 0 | position 3, no prefix, mismatch |
+| B, `ses_f0c601507ffeycvRH3VDfpDoWi` | 20 / 20 | 19 / 19 (95%) | 0 / 0 / 0 | position 3, no prefix, mismatch |
+
+Both controls wrote `I'll start by reading the fixture and listing the directory in parallel.` Their first mixed reply should have carried tag 6. The same B defect survives the config correction in this one-session control, supporting the interpretation that C's explicit mixed-reply example helps. One control per variant cannot isolate all config or sampling effects, so the historical A/B-versus-C rate difference should not be attributed entirely to wording.
+
+| Supplement | Target | Durable status | Actual outgoing provider calls serving target |
+|---|---:|---|---|
+| C, `ses_f0c60a4d0ffe5JyxT1v7RJJwpO` | 25 | dropped | 26–28 |
+| D, `ses_f0c5f3009ffe6D6Z3pD9EnlJoG` | 28 | dropped | 29–31 |
+
+Each counted supplement has 18 user turns, transformed-wire placeholder evidence, durable DB readback, and independent outgoing **tool-message** placeholder evidence. Primary C/D reduced sessions, like the old primary cohorts, queued reductions but did not serve a dropped placeholder. Corrected-config primary C was 131/131 byte-identical text parts; its supplement was 24/24. Primary D was 141/143; its supplement was 28/28.
+
+### Prose references, reasoning and the two D failures
+
+C used the requested plain-prose `tag N` reference form in **9 text parts**; D did so in **3**. There was **no mid-text section-mark notation** in either variant's reply text and no section marks in tool arguments. These are counts of text parts containing a reference, not counts of individual references. The literal-head fixture never caused a `§9002§` prefix (one greater than its quoted, non-live `§9001§` handle).
+
+D did write tag notation inside its reasoning: **164/176 calls** contained a section mark in reasoning, including statements identifying tool tags and planning the next prefix. There were 169 calls with nonempty reasoning; all 169 have an exact reasoning-part replay in the captured transformed history. No empty or cleared reasoning replay was observed in these short sessions. The raw reasoning strings, per-call `reasoningTokens`, finish reasons and observed reasoning replays are in JSONL/summary files; trajectories include reasoning separately, unscored. All 176 D calls reported reasoning-token usage, including zero counts. Their total is **9,188 reasoning tokens**, already included in the 15,554 completion-token total, not an extra billable total. C/controls did not report a reasoning-token breakdown and produced no reasoning text; their rows retain `null` rather than inventing a reported zero.
+
+Magic Context removes section-mark tag notation from assistant text before storing it, through `experimental.text.complete`; typed reasoning is a separate part, not a leading-tagged text part. The TS cleanup/replay path targets reasoning `text`/`thinking` fields, and records a separate clear watermark (`strip-content.ts:245–388`, `transform-postprocess-phase.ts:2204–2255`, `storage-meta-persisted.ts:1012–1038`, under `packages/plugin/src/hooks/magic-context/` except the storage file under `features/magic-context/`). Thus observed reasoning notation was not stripped as reply text. No reasoning cleanup was observed here, and these runs do not prove what a longer cleared-reasoning session would do. Exact provider-text/pre-strip-hook equality held in every counted session; reasoning handling caused **no observed change to reply-text byte identity**.
+
+D's two mismatches are ordinary reply-text failures, not a reasoning-stripping artifact:
+
+- Fresh replicate 1, position 7: raw `§13§ is the complete answer; the stamping was merely deferred, so no further action is needed.` Actual assignment was 15 (delta **−2**), and replay began `§15§`. The reasoning itself recognized that a new text reply would need tag 15, yet the text reused 13.
+- Fresh replicate 2, position 10: raw `Done.` Actual assignment was 21; replay was `§21§ Done.` The reasoning debated ending without more text and knew that another reply required tag 21, but the acknowledgment omitted it.
+
+**No counted C or D reply finished with `finish_reason=length`**, including D's tool-only replies. There was no captured stream error or failed provider response in the counted cohorts.
+
+### Follow-up calls, tokens and cost
+
+| Phase | Paid model calls | Input tokens | Completion tokens | Reasoning tokens (subset) | Benchmark? |
+|---|---:|---:|---:|---:|---|
+| C primary | 132 | 778,124 | 4,389 | not reported; no reasoning text | yes |
+| C supplement | 28 | 201,567 | 1,067 | not reported; no reasoning text | yes |
+| D primary | 145 | 801,492 | 13,146 | 7,816 | yes |
+| D supplement | 31 | 250,478 | 2,408 | 1,372 | yes |
+| Corrected A/B fresh controls | 42 | 157,464 | 1,422 | not reported; no reasoning text | separately |
+| Excluded first C supplement | 25 | 159,673 | 937 | not reported; no reasoning text | no |
+| Relay guard rejections | 0 (2 local requests) | 0 | 0 | 0 | no |
+
+Follow-up total, including excluded work: **403 paid model calls, 2 locally rejected requests, 2,348,798 input tokens and 23,369 completion tokens**. Input comprises 2,163,584 cache-hit and 185,214 cache-miss tokens. At the same cited Flash rates, estimated incremental spend is **$0.0483 off-peak to $0.0966 peak** (about 5–10 cents). C's counted sessions cost $0.0181–$0.0362, D's $0.0238–$0.0476, controls $0.0030–$0.0060; the remainder is excluded C debugging. Adding the historical estimate gives roughly $0.0952–$0.1904 across both trials. These remain estimates, not invoice reads; reasoning tokens are not double-counted.
+
+### Follow-up isolation, cleanup and reproducibility
+
+All hosts used throwaway roots only. The summaries retain `lsof -Fn -p <pid>` before and after completed sessions, with empty forbidden-live-path lists. No live auth/config/database/store was opened by the harness, and no live credential source was discovered. Checks are sampled host-PID evidence, not exhaustive descendant tracing. The relay records no headers and sanitizes provider-error credential values. A direct artifact scan for the exact operator-staged DeepSeek API key found zero occurrences in the 47 then-generated files; all later artifacts derive only from those sanitized captures.
+
+**The staged credential was retained until D's supplemental run finished, then deleted. All six throwaway auth-copy paths, including the failed C root, were checked absent.** `issue-582-self-tag-cleanup-c.json` records the deletion checks. Per-run summaries correctly show that staging was retained at their own completion; the cleanup artifact is the final state. No key or Authorization header is committed.
+
+New artifacts, next to the old A/B files:
+
+- `issue-582-self-tag-live-c.*`, `issue-582-self-tag-supplement-c.*`: C raw rows/CSV, summaries and analyses.
+- Corresponding `-live-d.*`, `-supplement-d.*`: D data, including full raw reasoning and reasoning tokens per call.
+- `issue-582-self-tag-all-c.jsonl`, `-aggregate-c.json` and corresponding `-d` files: seven-session pooled and per-position results, first-mixed rows, usage and cost.
+- `issue-582-self-tag-controls-c.*`, `-all-controls-c.jsonl`, `-aggregate-controls-c.json`: corrected A/B controls kept separate.
+- `issue-582-self-tag-supplement-failed-c.jsonl` and `-supplement-failed-c-summary.json`: excluded provider-only recovered rows, not guessed byte-identity scores. `-relay-rejected-c-summary.json` preserves the second local rejection. `-spend-c.json` includes both rejections and all paid work.
+- `issue-582-self-tag-host-proof-c.json` and `-rows.jsonl`: zero-paid-call actual-host A/B/C/D system and storage/replay proof.
+- `issue-582-self-tag-trajectories-c/` and `-trajectories-d/`: one file per session, showing every prompt, raw reply text, native provider tool calls, assignment and text-part verdict; D reasoning is shown separately. A control trajectory folder is also included. The earlier `issue-582-self-tag-trajectories/` folder was not present in this checkout; the committed `followup-report.ts` renders prompts, raw text, calls, assignments and verdicts directly rather than relying on an unavailable renderer.
+
+Run from the repository root after install/build and after the operator stages the DeepSeek-only `auth.json` at `$TMPDIR/magic-context/self-tag-trial/creds/auth.json`, with mode 600 (read/write for its owner only):
+
+```sh
+SELF_TAG_VARIANTS=C SELF_TAG_KEEP_STAGED=1 bun packages/plugin/scripts/self-tag-trial/live.ts docs/reports/issue-582-self-tag-live-c
+SELF_TAG_VARIANTS=D SELF_TAG_KEEP_STAGED=1 bun packages/plugin/scripts/self-tag-trial/live.ts docs/reports/issue-582-self-tag-live-d
+SELF_TAG_VARIANTS=C SELF_TAG_KEEP_STAGED=1 bun packages/plugin/scripts/self-tag-trial/live.ts docs/reports/issue-582-self-tag-supplement-c reduction-supplement
+SELF_TAG_VARIANTS=D SELF_TAG_KEEP_STAGED=1 bun packages/plugin/scripts/self-tag-trial/live.ts docs/reports/issue-582-self-tag-supplement-d reduction-supplement
+SELF_TAG_VARIANTS=A,B SELF_TAG_FRESH_CONTROL=1 SELF_TAG_KEEP_STAGED=1 bun packages/plugin/scripts/self-tag-trial/live.ts docs/reports/issue-582-self-tag-controls-c
+# Delete staging after all runs; each host close deletes its isolated copy.
+# Analyze each of the five prefixes with analyze.ts, then:
+bun packages/plugin/scripts/self-tag-trial/followup-report.ts docs/reports/issue-582-self-tag c live-c supplement-c
+bun packages/plugin/scripts/self-tag-trial/followup-report.ts docs/reports/issue-582-self-tag d live-d supplement-d
+bun packages/plugin/scripts/self-tag-trial/verify-followup.ts
+bun test packages/plugin/scripts/self-tag-trial/engine.test.ts packages/plugin/scripts/self-tag-trial/measure.test.ts packages/plugin/scripts/self-tag-trial/host-probe.test.ts
+bun run --cwd packages/plugin typecheck
+```
+
+The live C/D sessions passed independent DB assignments, provider/pre-strip equality, next-transform replay, final no-provider flush and sampled isolation checks. The final artifact verifier checks session/scenario balance, every call's model/thinking/cap, actual system entries, D reasoning usage, supplement wire/DB/provider evidence and raw-versus-replayed identity. Removing C/D's appended system entry made exactly `C and D guidance reaches the pinned host and is absent for A` fail with `C guidance variant not applied`; all seven measurement tests still passed. Staged source was restored, its working diff returned to empty, and all eight tests passed again. `issue-582-self-tag-mutation-c.json` records the named red/green control and diff evidence. No mutated harness was used for any live request.
+
+**Interpretation:** C eliminates the observed B mixed-reply and inline-reference defects in this bounded sample. Its 100% sample rate is not a universal byte-identity guarantee. D demonstrates that enabling thinking does not enforce the contract: the reasoning may correctly plan a tag while the emitted reply omits or misnumbers it. The corrected controls support, but do not fully isolate, a wording effect relative to historical B.

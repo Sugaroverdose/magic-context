@@ -8,7 +8,7 @@ import { tagMessages } from "../../src/hooks/magic-context/tag-messages";
 import { createTransform } from "../../src/hooks/magic-context/transform";
 import { applyPendingOperations } from "../../src/hooks/magic-context/apply-operations";
 import { stripPersistedAssistantText } from "../../src/hooks/magic-context/tag-content-primitives";
-import { instructionB } from "./bootstrap";
+import { instructionB, instructionC } from "./bootstrap";
 
 function requiredDatabase() {
     const db = openDatabase();
@@ -16,7 +16,7 @@ function requiredDatabase() {
     return db;
 }
 
-export type Variant = "A" | "B";
+export type Variant = "A" | "B" | "C" | "D";
 export type Call = { id: string; name: string; input: Record<string, unknown> };
 export type Reply = { texts: string[]; calls: Call[]; reasoning?: string; usage?: Record<string, number> };
 export type Row = {
@@ -27,7 +27,7 @@ export type Row = {
 };
 export const tools = ["read", "echo", "list", "ctx_reduce"];
 export function guidance(variant: Variant): string {
-    return buildMagicContextSection(null, 0, true) + (variant === "B" ? `\n\n${instructionB}` : "");
+    return buildMagicContextSection(null, 0, true) + (variant === "B" ? `\n\n${instructionB}` : variant === "C" || variant === "D" ? `\n\n${instructionC}` : "");
 }
 export function fakeTool(call: Call): string {
     switch (call.name) {

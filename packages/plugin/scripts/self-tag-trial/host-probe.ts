@@ -1,12 +1,12 @@
 import { homedir } from "node:os";
 import { writeFileSync } from "node:fs";
-import { isolate, instructionB } from "./bootstrap";
+import { isolate, instructionB, instructionC } from "./bootstrap";
 const liveHome = homedir();
 const root = isolate();
 process.env.TMPDIR = root;
 const { OpenCodeCaller } = await import("./host-adapter");
 const records: unknown[] = [];
-for (const variant of ["A", "B"] as const) {
+for (const variant of ["A", "B", "C", "D"] as const) {
     process.env.SELF_TAG_HEAD_FIXTURE = "1";
     const caller = await OpenCodeCaller.mock(root, variant, liveHome);
     try {
@@ -21,6 +21,7 @@ for (const variant of ["A", "B"] as const) {
         if (raw !== "§2§ RAW_SENTINEL" || stripped !== "RAW_SENTINEL" || replay !== raw) throw new Error(`Persistence/retag mismatch: ${JSON.stringify({ raw, stripped, replay })}`);
         const systems = first.filter(e => e.kind === "system").flatMap(e => e.system).join("\n");
         if (systems.includes(instructionB) !== (variant === "B")) throw new Error("Guidance variant not applied");
+        if (systems.includes(instructionC) !== (variant === "C" || variant === "D")) throw new Error("C guidance variant not applied");
         caller.script([
             { content: [{ type: "text", text: "§6§ Inspecting fixtures." },
                 { type: "tool_use", id: "read-1", name: "trial_read", input: {} },
@@ -49,4 +50,4 @@ const rows = (records as any[]).flatMap(record => record.events.filter((e: any) 
         byteIdentity: part ? part.text === raw.text : null, outcome: part ? "next-pass-observed" : "pending-next-pass" };
 }));
 writeFileSync(out.replace(/\.json$/, "-rows.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
-console.log(`Host mock proof passed for A and B; root=${root}; real model calls=0`);
+console.log(`Host mock proof passed for A, B, C and D; root=${root}; real model calls=0`);
