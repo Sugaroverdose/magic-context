@@ -141,11 +141,6 @@ const ParamsShape = {
 				"Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
 		}),
 	),
-	limit: Type.Optional(
-		Type.Number({
-			description: "Max results for list (default 10).",
-		}),
-	),
 	reason: Type.Optional(
 		Type.String({
 			description: "Why it is being archived (optional).",
@@ -174,9 +169,17 @@ type CtxMemoryListParams = Static<typeof ListParamsSchema>;
 const PrimaryParamsSchema = Type.Object(ParamsShape, {
 	additionalProperties: true,
 });
+// The primary schema omits `limit`: it only sizes the list action, which primary
+// agents cannot run (ctx_memory_list advertises it). `additionalProperties: true`
+// keeps older calls that still carry `limit` valid. The dreamer schema keeps it.
 const DreamerParamsSchema = Type.Object(
 	{
 		...ParamsShape,
+		limit: Type.Optional(
+			Type.Number({
+				description: "Max results for list (default 10).",
+			}),
+		),
 		superseded_by: Type.Optional(
 			Type.Number({
 				description:

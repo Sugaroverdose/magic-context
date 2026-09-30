@@ -130,7 +130,9 @@ describe("registerMagicContextTools", () => {
 
 			const expectedFields: Record<string, string[]> = {
 				ctx_search: ["query", "limit", "from", "to", "sources"],
-				ctx_memory: ["action", "content", "category", "ids", "limit", "reason"],
+				// No `limit`: it only sized the dreamer-only list action, which now
+				// lives on ctx_memory_list (issue 575).
+				ctx_memory: ["action", "content", "category", "ids", "reason"],
 				ctx_note: [
 					"action",
 					"content",

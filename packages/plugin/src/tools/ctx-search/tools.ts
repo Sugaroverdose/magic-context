@@ -79,7 +79,7 @@ const ctxSearchArgsShape = {
     sources: tool.schema
         .array(tool.schema.enum(["memory", "message", "git_commit", "primer", "note"]))
         .optional()
-        .describe("Restrict to these sources; omit for all. [] searches none."),
+        .describe("Restrict to these sources; omitting it or passing [] searches every source."),
 };
 // The tool definition exposes only the documented argument shape to the model
 // provider, but older callers may still send extra arguments. Parse with

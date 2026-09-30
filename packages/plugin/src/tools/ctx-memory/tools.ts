@@ -415,7 +415,6 @@ const ctxMemoryArgsShape = {
         .describe(
             "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
         ),
-    limit: tool.schema.number().optional().describe("Max results for list (default 10)."),
     reason: tool.schema.string().optional().describe("Why it is being archived (optional)."),
 };
 const ctxMemoryListArgsShape = {
@@ -435,6 +434,10 @@ const ctxMemoryArgsSchema = tool.schema
         // field. Exclude it from the standard provider schema, but validate its
         // type when Curate sends it.
         superseded_by: tool.schema.number().optional(),
+        // `limit` only sizes the internal list action, which primary agents cannot
+        // run; ctx_memory_list advertises it. It stays validated here so the list
+        // tool's forwarded value and older calls that still carry it keep parsing.
+        limit: tool.schema.number().optional(),
     })
     .passthrough();
 

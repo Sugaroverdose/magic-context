@@ -167,7 +167,7 @@ const ctxNoteArgsShape = {
         .enum(["all", "active", "pending", "ready", "dismissed"])
         .optional()
         .describe(
-            "Read filter: active (default: active + ready), all, pending (unsurfaced smart notes), ready, dismissed.",
+            "Read filter: all, active, pending (unsurfaced smart notes), ready, dismissed. Omitted, it shows active session notes plus every current smart note (pending included); active shows only notes whose stored status is active.",
         ),
     limit: tool.schema.number().optional().describe("Rows per read (default 25)."),
     offset: tool.schema.number().optional().describe("Skip this many newest rows (default 0)."),
@@ -177,7 +177,7 @@ const ctxNoteArgsShape = {
         .max(50)
         .optional()
         .describe(
-            "Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write.",
+            "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.",
         ),
 };
 // The tool definition exposes only the documented argument shape to the model

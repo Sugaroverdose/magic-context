@@ -101,7 +101,7 @@ const ParamsSchema = Type.Object(
 					minItems: 1,
 					maxItems: 50,
 					description:
-						"Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write.",
+						"Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.",
 				},
 			),
 		),
@@ -110,7 +110,7 @@ const ParamsSchema = Type.Object(
 				FILTER_VALUES.map((value) => Type.Literal(value)),
 				{
 					description:
-						"Read filter: active (default: active + ready), all, pending (unsurfaced smart notes), ready, dismissed.",
+						"Read filter: all, active, pending (unsurfaced smart notes), ready, dismissed. Omitted, it shows active session notes plus every current smart note (pending included); active shows only notes whose stored status is active.",
 				},
 			),
 		),
