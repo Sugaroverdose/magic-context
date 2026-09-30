@@ -1,32 +1,10 @@
 import { embedAndStoreCompartmentChunks } from "../../features/magic-context/compartment-embedding";
 import { insertCompartmentEvents } from "../../features/magic-context/compartment-events";
+import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
 import {
     appendCompartments,
     getCompartments,
 } from "../../features/magic-context/compartment-storage";
-import {
-    readCoordinateRebaseNotice,
-    recoverUnresolvedCompartments,
-} from "../../features/magic-context/store-generation-rebase";
-// Re-export the historian-state-file helpers so existing callers
-// (compartment-runner-recomp.ts, compartment-runner.ts, tests) keep working
-// unchanged. The implementation moved to ./historian-state-file.ts so Pi
-// can import it without pulling in the full incremental runner.
-import { beginSqliteWriterAsync } from "../../shared/sqlite";
-import { producerSourceLocalBudget, resolveHistorianProducerLimits } from "./derive-budgets";
-import {
-    finishHistorianPublishStage,
-    startHistorianPublishStage,
-} from "./historian-publish-stage-logger";
-import { cleanupHistorianStateFile } from "./historian-state-file";
-
-export {
-    cleanupHistorianStateFile,
-    HISTORIAN_STATE_INLINE_THRESHOLD,
-    maybeWriteHistorianStateFile,
-} from "./historian-state-file";
-
-import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
 import {
     embedPromotedFacts,
     promoteSessionFactsDurable,
@@ -65,6 +43,10 @@ import {
 import { updateSessionMeta } from "../../features/magic-context/storage-meta";
 import { insertPrimerCandidates } from "../../features/magic-context/storage-primers";
 import { getLatestHistorianInvocationId } from "../../features/magic-context/storage-subagent-invocations";
+import {
+    readCoordinateRebaseNotice,
+    recoverUnresolvedCompartments,
+} from "../../features/magic-context/store-generation-rebase";
 import { insertUserMemoryCandidates } from "../../features/magic-context/user-memory/storage-user-memory";
 import { normalizeSDKResponse } from "../../shared";
 import { describeError } from "../../shared/error-message";
@@ -76,6 +58,7 @@ import {
     resolveOpenCodeDbPath,
 } from "../../shared/opencode-db-path";
 import { toModelEntry } from "../../shared/resolve-fallbacks";
+import { beginSqliteWriterAsync } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
@@ -90,6 +73,11 @@ import {
     validateChunkCoverage,
     validateStoredCompartments,
 } from "./compartment-runner-validation";
+import { producerSourceLocalBudget, resolveHistorianProducerLimits } from "./derive-budgets";
+import {
+    finishHistorianPublishStage,
+    startHistorianPublishStage,
+} from "./historian-publish-stage-logger";
 import { snapTerminalCompartmentToServedRow } from "./host-served-rows";
 import { clearInjectionCache, renderHistorianMemoryBlock } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
@@ -256,7 +244,6 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
     let completedSuccessfully = false;
     let retainDrainReservationForRetryThrottle = false;
     let issueNotified = false;
-    let stateFilePath: string | undefined;
     let drainReservation: ReturnType<typeof reserveProtectedTailDrainTokens>["reservation"] = null;
 
     // historian_runs telemetry (migration v24). Captured across the run and
@@ -1386,6 +1373,5 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         }
         // Record one historian_runs row for this attempt (every exit path).
         recordTelemetry();
-        cleanupHistorianStateFile(stateFilePath);
     }
 }

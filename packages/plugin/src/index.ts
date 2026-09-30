@@ -1021,7 +1021,7 @@ const server: Plugin = async (ctx) => {
                     : undefined;
                 // Strip two_pass + disallowed_tools + thinking_level from historian
                 // overrides — two_pass is consumed by the runner, disallowed_tools is
-                // consumed below to build the permission map, thinking_level is Pi-only
+                // a legacy no-op now that historians have no tools, thinking_level is Pi-only
                 // (passed as --thinking to the Pi subprocess). None is a valid OpenCode
                 // agent config field, so leaking them in would put unknown keys on the
                 // OpenCode agent config. Both historian and historian-editor agents use
