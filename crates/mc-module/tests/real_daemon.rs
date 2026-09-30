@@ -584,6 +584,10 @@ fn spawn_daemon(
         // real `~/.local/share/cortexkit/run/logs/subc.log` and interleaves test boots
         // with production ones. Sharing the module's data home mirrors production layout.
         .env("XDG_DATA_HOME", data_home)
+        .env("HOME", config_dir)
+        .env_remove(subc_protocol::SUBC_MODULE_ID_ENV)
+        .env_remove(subc_protocol::SUBC_LAUNCH_NONCE_ENV)
+        .env_remove(subc_os::LAUNCH_NONCE_FD_ENV)
         .env("SUBC_PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -613,6 +617,11 @@ fn spawn_module_with_differential(
         .arg(connection_file)
         .env(subc_protocol::SUBC_MODULE_ID_ENV, MODULE_ID)
         .env("XDG_DATA_HOME", data_home)
+        .env(
+            "XDG_CONFIG_HOME",
+            data_home.parent().unwrap().join("config"),
+        )
+        .env("HOME", data_home.parent().unwrap().join("config"))
         .env(
             "MC_NATIVE_ATTACHMENT_DIFFERENTIAL",
             if differential { "1" } else { "0" },
@@ -791,10 +800,287 @@ fn workspace_root() -> PathBuf {
 }
 
 fn subconscious_root(workspace: &Path) -> PathBuf {
-    workspace.parent().unwrap().join("subconscious")
+    fs::canonicalize(workspace.parent().unwrap().join("subconscious")).unwrap()
 }
 
 fn unique_temp_dir(name: &str) -> PathBuf {
     let nonce = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("{name}-{}-{nonce}", std::process::id()))
+}
+
+/// Run with `cargo test --locked -p mc-module --test real_daemon mc_pipe_only_supervision_through_real_daemon -- --exact --nocapture`.
+/// Uses a supervised production binary and a test-owned runner in temporary directories.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mc_pipe_only_supervision_through_real_daemon() {
+    use std::os::unix::fs::PermissionsExt;
+    use subc_protocol::manifest::{
+        Concurrency, ManagementOperation, ManagementOperationKind, ModuleManifest, ProviderRole,
+    };
+
+    let workspace = workspace_root();
+    let subconscious = subconscious_root(&workspace);
+    let revision = Command::new("git")
+        .current_dir(&subconscious)
+        .args(["merge-base", "--is-ancestor", "2b0914f0", "HEAD"])
+        .status()
+        .unwrap();
+    assert!(revision.success(), "local subconscious must include 2b0914f0 (per-module launch_nonce_env); refusing to pull or modify it");
+    // Build artifacts stay under this worktree, even for the subconscious source.
+    let target = workspace.join("target/pipe-only-subc");
+    let daemon_bin = ensure_binary(
+        &subconscious,
+        target.join("debug/ck-subc"),
+        &[
+            "build",
+            "--locked",
+            "-p",
+            "subc-core",
+            "--bins",
+            "--target-dir",
+            target.to_str().unwrap(),
+        ],
+    );
+    let module_bin = ensure_binary(
+        &workspace,
+        workspace.join("target/debug/ck-mc"),
+        &["build", "--locked", "-p", "mc-module"],
+    );
+    let temp = TempRoot(unique_temp_dir("mc-pipe-only-daemon"));
+    let runtime = temp.0.join("runtime");
+    let config = temp.0.join("config");
+    let data = temp.0.join("data");
+    let project = temp.0.join("project");
+    for dir in [&runtime, &data, &project] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    write_empty_config(&config);
+    let environment = temp.0.join("child-environment.txt");
+    let launcher = temp.0.join("launch-mc.sh");
+    // Record presence, not the secret. exec preserves the actual inherited pipe
+    // and makes the observed environment the environment of ck-mc itself.
+    fs::write(&launcher, format!("#!/bin/sh\nif [ -z \"${{SUBC_LAUNCH_NONCE+x}}\" ]; then echo env_absent; else echo env_present; fi > '{}'\nif [ -n \"${{SUBC_LAUNCH_NONCE_FD+x}}\" ]; then echo fd_present; else echo fd_absent; fi >> '{}'\nexec '{}' \"$@\"\n", environment.display(), environment.display(), module_bin.display())).unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        config.join("cortexkit/subc.jsonc"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "modules": { MODULE_ID: {
+                "program": launcher, "args": [], "enabled": true, "reserved": true,
+                "launch_nonce_env": false,
+                "env": { "XDG_DATA_HOME": data, "XDG_CONFIG_HOME": config, "HOME": config }
+            }}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let daemon = spawn_daemon(&daemon_bin, &runtime, &config, &data);
+    wait_for_connection_file(&daemon.connection_file, START_TIMEOUT).await;
+    let stop_module = StopSupervisedModule {
+        ck_bin: target.join("debug/ck"),
+        daemon: &daemon,
+        data_home: data.clone(),
+    };
+    let consumer = SubcConsumer::connect(&daemon.connection_file, fast_consumer_options())
+        .await
+        .unwrap();
+    let identity = BindIdentity::new(
+        fs::canonicalize(&project).unwrap(),
+        "claude-code",
+        "pipe-only",
+    );
+    let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+    loop {
+        let probe = consumer
+            .call(
+                RouteTarget::ToolProvider {
+                    module_id: MODULE_ID.into(),
+                },
+                identity.clone(),
+                br#"{"kind":"status","v":1}"#.to_vec(),
+                fast_call_options(),
+            )
+            .await;
+        if let Ok(bytes) = probe {
+            let status: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status["ok"], true, "{status}");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "supervised HELLO did not register"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        fs::read_to_string(&environment).unwrap(),
+        "env_absent\nfd_present\n"
+    );
+    let ck_bin = target.join("debug/ck");
+    let provenance = Command::new(&ck_bin)
+        .args([
+            "--subc",
+            daemon.connection_file.to_str().unwrap(),
+            "--json",
+            "provenance",
+            MODULE_ID,
+        ])
+        .env("HOME", &config)
+        .env("XDG_CONFIG_HOME", &config)
+        .env("XDG_DATA_HOME", &data)
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .output()
+        .unwrap();
+    assert!(
+        provenance.status.success(),
+        "{}",
+        String::from_utf8_lossy(&provenance.stderr)
+    );
+    let provenance: Value = serde_json::from_slice(&provenance.stdout).unwrap();
+    assert_eq!(
+        provenance["modules"][0]["module_declared"]["build"]["launch_nonce_source"], "fd",
+        "{provenance}"
+    );
+
+    // Broca is a management-surface provider. Record the principal the daemon
+    // supplies in route.bind, then require a historian request on that route:
+    // observing a bind proposal alone would not prove the open was accepted.
+    let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let manifest = ModuleManifest::builder("broca", "0.0.0")
+        .provides(vec![ProviderRole::ManagementSurface {
+            operations: vec![ManagementOperation {
+                name: "session.send".into(),
+                kind: ManagementOperationKind::Query,
+                description: None,
+            }],
+            config_schema: json!({}),
+            observability: vec![],
+            identity_scope: vec![],
+            concurrency: Concurrency::ModuleManaged,
+        }])
+        .build();
+    let (runner, serving) = subc_client_rs::serve_with_handle(
+        &daemon.connection_file,
+        manifest,
+        CensusRunner {
+            observed: observed_tx,
+            principals: Mutex::new(std::collections::HashMap::new()),
+        },
+    )
+    .await
+    .unwrap();
+    let serving = tokio::spawn(serving);
+    let messages: Vec<_> = (1..=80)
+        .map(|n| {
+            ck(
+                &format!("m{n}"),
+                n,
+                &format!("message {n} {}", "word ".repeat(800)),
+            )
+        })
+        .collect();
+    let bytes = consumer.call(RouteTarget::ToolProvider { module_id: MODULE_ID.into() }, identity,
+        serde_json::to_vec(&json!({ "kind": "transform", "v": 2, "session_id": "pipe-only", "render_config": "cfg0", "serializer_profile": "owned-llmrunner", "historian_model_chain": ["anthropic/claude-sonnet-4"], "messages": messages })).unwrap(), fast_call_options()).await.unwrap();
+    let response: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(response["status"], "ok", "{response}");
+    assert_eq!(response["served_from"], "transform", "{response}");
+    assert_eq!(
+        response["historian"]["fired"], true,
+        "{}",
+        response["historian"]
+    );
+    let (principal, request) = tokio::time::timeout(START_TIMEOUT, observed_rx.recv())
+        .await
+        .expect("historian route never carried traffic")
+        .unwrap();
+    assert_eq!(
+        principal,
+        Some(subc_protocol::Principal::Reserved {
+            module_id: MODULE_ID.into()
+        })
+    );
+    assert_eq!(request["method"], "session.send");
+    drop(runner);
+    serving.abort();
+    let _ = serving.await;
+    drop(consumer);
+    drop(stop_module);
+    drop(daemon);
+}
+
+#[cfg(unix)]
+struct CensusRunner {
+    observed: tokio::sync::mpsc::UnboundedSender<(Option<subc_protocol::Principal>, Value)>,
+    principals: Mutex<std::collections::HashMap<u16, Option<subc_protocol::Principal>>>,
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl subc_client_rs::ModuleHandler for CensusRunner {
+    async fn on_bind(
+        &self,
+        req: &subc_client_rs::RouteBindRequest,
+    ) -> subc_client_rs::BindDecision {
+        self.principals
+            .lock()
+            .unwrap()
+            .insert(req.handle.channel, req.principal.clone());
+        subc_client_rs::BindDecision::accept()
+    }
+
+    async fn handle(
+        &self,
+        ctx: subc_client_rs::RequestCtx,
+        body: Vec<u8>,
+    ) -> subc_client_rs::HandlerOutcome {
+        let principal = self
+            .principals
+            .lock()
+            .unwrap()
+            .get(&ctx.route_handle().channel)
+            .cloned()
+            .unwrap();
+        self.observed
+            .send((principal, serde_json::from_slice(&body).unwrap()))
+            .unwrap();
+        // The received request and its daemon-supplied principal prove the
+        // route was accepted; no completion or external provider is needed.
+        subc_client_rs::HandlerOutcome::Response(
+            serde_json::to_vec(
+                &json!({ "error": "hermetic census runner does not execute completions" }),
+            )
+            .unwrap(),
+        )
+    }
+}
+
+// Disable the supervised child before the daemon is killed, including on panic.
+// Otherwise daemon teardown could leave a restarted child behind the test.
+#[cfg(unix)]
+struct StopSupervisedModule<'a> {
+    ck_bin: PathBuf,
+    daemon: &'a LiveDaemon,
+    data_home: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for StopSupervisedModule<'_> {
+    fn drop(&mut self) {
+        let _ = Command::new(&self.ck_bin)
+            .args([
+                "--subc",
+                self.daemon.connection_file.to_str().unwrap(),
+                "module",
+                "stop",
+                MODULE_ID,
+            ])
+            .env("HOME", &self.daemon.config_dir)
+            .env("XDG_CONFIG_HOME", &self.daemon.config_dir)
+            .env("XDG_RUNTIME_DIR", &self.daemon.runtime_dir)
+            .env("XDG_DATA_HOME", &self.data_home)
+            .env_remove(subc_protocol::SUBC_MODULE_ID_ENV)
+            .env_remove(subc_protocol::SUBC_LAUNCH_NONCE_ENV)
+            .env_remove(subc_os::LAUNCH_NONCE_FD_ENV)
+            .output();
+    }
 }
