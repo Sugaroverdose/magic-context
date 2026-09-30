@@ -86,7 +86,35 @@ describe("checkLocalEmbeddingRuntimeAt", () => {
                 expect(formatLocalEmbeddingRuntimeWasmSelected(status)).toContain(
                     "native addon was not probed or loaded",
                 );
+                const warning = formatLocalEmbeddingRuntimeWasmSelected(status);
+                expect(warning).toContain("Doctor process Bun");
+                expect(warning).toContain("dedicated embedding worker");
+                expect(warning).toContain("Bun >=1.4.0");
+                expect(warning).toContain("openai-compatible");
             }
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("old Bun explicit native preference uses the safe worker WASM lane", () => {
+        const root = makeRoot();
+        try {
+            installWasmPackage(root);
+            __setEmbeddingRuntimeTestHooks({
+                runOnnxRuntimeNodeLoadProbeChild: () => ({
+                    stdout: JSON.stringify({ ok: true }),
+                    status: 0,
+                    signal: null,
+                }),
+            });
+            expect(
+                checkLocalEmbeddingRuntimeAt(root, "win32", "x64", "native", {
+                    isBun: true,
+                    isElectron: false,
+                    bunVersion: "1.3.14",
+                }).state,
+            ).toBe("wasm-selected");
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

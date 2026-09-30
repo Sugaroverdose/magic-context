@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import type { EmbeddingConfig } from "../../config/schema/magic-context";
 import { formatEmbedStatusText } from "../../hooks/magic-context/format-embed-status";
+import { setEmbeddingSessionBusy } from "../../shared/embedding-activity";
 import {
     chunkCanonicalText,
     loadCompartmentChunkEmbeddingsForSearch,
@@ -840,6 +841,63 @@ describe("project embedding registry", () => {
         release?.();
 
         expect(await inFlight).toBeNull();
+    });
+
+    it("defers proactive memory and history backfill during a stream but keeps query embedding available", async () => {
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        const projectIdentity = "git:streaming-embedding-gate";
+        insertMemory(db, {
+            projectPath: projectIdentity,
+            category: "CONSTRAINTS",
+            content: "Embed after the stream.",
+        });
+        seedCompartmentWithFts(db, "ses-streaming-embedding-gate");
+        registerProjectEmbedding(
+            db,
+            projectIdentity,
+            localConfig("model-a"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/streaming-embedding-gate",
+        );
+        recordSessionProjectIdentity(db, "ses-streaming-embedding-gate", projectIdentity);
+        setEmbeddingSessionBusy("ses-streaming-embedding-gate", true);
+        try {
+            expect(await embedUnembeddedMemoriesForProject(db, projectIdentity)).toBe(0);
+            expect((await sweepAllRegisteredProjects(db)).chunksEmbedded).toBe(0);
+            expect(
+                (
+                    await embedSessionCompartmentChunks(
+                        db,
+                        projectIdentity,
+                        "ses-streaming-embedding-gate",
+                    )
+                ).status,
+            ).toBe("aborted");
+            expect(
+                await embedTextForProject(
+                    projectIdentity,
+                    "search while streaming",
+                    undefined,
+                    "query",
+                ),
+            ).not.toBeNull();
+        } finally {
+            setEmbeddingSessionBusy("ses-streaming-embedding-gate", false);
+        }
+        expect(await embedUnembeddedMemoriesForProject(db, projectIdentity)).toBe(1);
+        expect(
+            (
+                await embedSessionCompartmentChunks(
+                    db,
+                    projectIdentity,
+                    "ses-streaming-embedding-gate",
+                )
+            ).embedded,
+        ).toBe(1);
     });
 
     it("stores unembedded memory vectors when the memory content stays unchanged", async () => {

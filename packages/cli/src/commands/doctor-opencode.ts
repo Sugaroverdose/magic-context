@@ -731,7 +731,7 @@ function checkLocalEmbeddingRuntimeForDoctor(runtimePreference: LocalEmbeddingRu
         runtimePreference,
     );
     if (runtime.state === "wasm-selected") {
-        log.info(formatLocalEmbeddingRuntimeWasmSelected(runtime));
+        log.warn(formatLocalEmbeddingRuntimeWasmSelected(runtime));
         return { issues: 0 };
     }
     if (runtime.state === "wasm-fallback") {

@@ -5,7 +5,7 @@ import { dirname, join, sep } from "node:path";
 import {
     type LocalEmbeddingHost,
     type LocalEmbeddingRuntime,
-    resolveLocalEmbeddingRuntime,
+    resolveLocalEmbeddingWorkerRuntime,
 } from "@magic-context/core/features/magic-context/memory/embedding-local";
 
 /**
@@ -310,13 +310,15 @@ export function formatLocalEmbeddingRuntimeWasmFallback(
             "Embedding provider: local — " +
             `onnxruntime-node ${knownUnavailable.packageVersion} has no native binding for darwin/x64; ` +
             `WASM fallback active at ${status.wasmPath}. Reinstalling the same package (including doctor --force) ` +
-            "cannot restore native inference. WASM is slower; for optional native speed, manually pin onnxruntime-node@1.23.0."
+            "cannot restore native inference. WASM is slower; for optional native speed, manually pin onnxruntime-node@1.23.0. " +
+            `Doctor process Bun ${process.versions.bun ?? "not detected"}; the host's embedded Bun may differ. Inference runs in a dedicated worker.`
         );
     }
     return (
         "Embedding provider: local — onnxruntime-node native binding failed " +
         `(${describeNativeFailure(status.nativeFailure)}); WASM fallback active at ${status.wasmPath}. ` +
-        "WASM inference is slower than native; a remote `openai-compatible` provider may be faster."
+        "WASM inference is slower than native; a remote `openai-compatible` provider may be faster. " +
+        `Doctor process Bun ${process.versions.bun ?? "not detected"}; the host's embedded Bun may differ. Inference runs in a dedicated worker.`
     );
 }
 
@@ -396,7 +398,9 @@ export function formatLocalEmbeddingRuntimeWasmSelected(
 ): string {
     return (
         "Embedding provider: local — onnxruntime-web (WASM) selected by embedding.local_runtime/host at " +
-        `${status.wasmPath}. The native addon was not probed or loaded. WASM inference is slower than native.`
+        `${status.wasmPath}. Doctor process Bun ${process.versions.bun ?? "not detected"} (the host's embedded Bun may differ). ` +
+        "The native addon was not probed or loaded. WASM inference runs in a dedicated embedding worker but is slower than native. " +
+        "Upgrade the host to Bun >=1.4.0 or configure a remote openai-compatible embedding provider."
     );
 }
 
@@ -456,7 +460,7 @@ export function checkLocalEmbeddingRuntimeAt(
     runtimePreference: LocalEmbeddingRuntime = "auto",
     host?: LocalEmbeddingHost,
 ): LocalEmbeddingRuntimeStatus {
-    const selectedRuntime = resolveLocalEmbeddingRuntime(runtimePreference, host);
+    const selectedRuntime = resolveLocalEmbeddingWorkerRuntime(runtimePreference, host);
     if (selectedRuntime !== "native") {
         const wasm = probeWasmRuntimeAt(installRoot);
         return wasm.state === "ok"
@@ -590,7 +594,7 @@ export function checkLocalEmbeddingRuntimeByResolution(
         return { state: "unknown", reason: "plugin package dir not found" };
     }
 
-    const selectedRuntime = resolveLocalEmbeddingRuntime(runtimePreference, host);
+    const selectedRuntime = resolveLocalEmbeddingWorkerRuntime(runtimePreference, host);
     if (selectedRuntime !== "native") {
         const wasm = probeWasmRuntimeByResolution(pluginDir);
         return wasm.state === "ok"

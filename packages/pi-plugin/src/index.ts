@@ -107,6 +107,7 @@ import {
 	formatConfigParseNotice,
 } from "@magic-context/core/shared/config-diagnostics";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
+import { setEmbeddingSessionBusy } from "@magic-context/core/shared/embedding-activity";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { setKeepSubagents } from "@magic-context/core/shared/keep-subagents";
@@ -1721,6 +1722,9 @@ async function startPiMagicContextRuntime(
 		});
 	});
 
+	pi.on("agent_start", (_event, ctx) => {
+		setEmbeddingSessionBusy(ctx.sessionManager.getSessionId(), true);
+	});
 	const readLastTodoState = (sessionId: string) =>
 		getOrCreateSessionMeta(db, sessionId).lastTodoState;
 	const todoOverlay = registerConfiguredTodoLifecycle(pi, {
@@ -2338,6 +2342,7 @@ async function startPiMagicContextRuntime(
 	// Headless Pi exits after agent_end. The context handler leaves eligible
 	// history queued rather than launching a child that would outlive Pi.
 	pi.on("agent_end", (event, ctx) => {
+		setEmbeddingSessionBusy(ctx.sessionManager.getSessionId(), false);
 		// Synchronous return — DO NOT await background work here.
 		// awaitInFlightHistorians()/awaitInFlightDreamers() are still
 		// invoked at session_shutdown where they belong (and where pi
@@ -2715,6 +2720,7 @@ async function startPiMagicContextRuntime(
 	// Other sessions and /reload share the SQLite handle. The process exit
 	// hook closes it after every extension has finished shutdown.
 	pi.on("session_shutdown", async (_event, ctx) => {
+		setEmbeddingSessionBusy(ctx.sessionManager.getSessionId(), false);
 		sessionShuttingDown = true;
 		commandLifecycleController.abort();
 		stopStatusDialogRefresh();

@@ -885,7 +885,7 @@ async function runHealthChecks(options: {
                 { isBun: false, isElectron: false },
             );
             if (runtime.state === "wasm-selected") {
-                add(results, "info", formatLocalEmbeddingRuntimeWasmSelected(runtime));
+                add(results, "warn", formatLocalEmbeddingRuntimeWasmSelected(runtime));
                 runtimeReported = true;
                 break;
             }
