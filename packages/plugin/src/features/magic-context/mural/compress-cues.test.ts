@@ -150,7 +150,7 @@ function cueArgs(db: Database, projectIdentity: string): CompressCuesArgs {
         db,
         client: {} as never,
         projectIdentity,
-        parentSessionId: undefined,
+        parentSessionId: "ses-parent",
         sessionDirectory: process.cwd(),
         holderId,
         leaseKey,

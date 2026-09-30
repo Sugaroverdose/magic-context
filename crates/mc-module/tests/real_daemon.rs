@@ -874,6 +874,7 @@ async fn mc_pipe_only_supervision_through_real_daemon() {
         fs::create_dir_all(dir).unwrap();
     }
     write_empty_config(&config);
+    provision_context_store(&workspace, &config, &data);
     let environment = temp.0.join("child-environment.txt");
     let launcher = temp.0.join("launch-mc.sh");
     // Record presence, not the secret. exec preserves the actual inherited pipe
@@ -1145,28 +1146,7 @@ async fn hostless_store_init_first_transform_through_real_daemon() {
     write_empty_config(&config);
     let context_path = data.join("cortexkit/magic-context/context.db");
     assert!(!context_path.exists());
-    let output = Command::new("bun")
-        .args([
-            "run",
-            "packages/cli/src/index.ts",
-            "doctor",
-            "store",
-            "init",
-        ])
-        .current_dir(&workspace)
-        .env("HOME", &config)
-        .env("XDG_CONFIG_HOME", &config)
-        .env("XDG_DATA_HOME", &data)
-        .env_remove("MAGIC_CONTEXT_TEST_DATA_DIR")
-        .env_remove("MAGIC_CONTEXT_STORAGE_DIR")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "store init failed: {} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    provision_context_store(&workspace, &config, &data);
     assert!(
         context_path.exists(),
         "doctor store init must create context.db"
@@ -1249,4 +1229,31 @@ async fn hostless_store_init_first_transform_through_real_daemon() {
         .unwrap();
     assert_eq!(state, "migrated");
     assert_eq!(by, stamp);
+}
+
+// Production modules require an existing host-schema store before opening storage.
+// Provision it through the CLI in the test's isolated roots, just as setup does.
+fn provision_context_store(workspace: &Path, config: &Path, data: &Path) {
+    let output = Command::new("bun")
+        .args([
+            "run",
+            "packages/cli/src/index.ts",
+            "doctor",
+            "store",
+            "init",
+        ])
+        .current_dir(workspace)
+        .env("HOME", config)
+        .env("XDG_CONFIG_HOME", config)
+        .env("XDG_DATA_HOME", data)
+        .env_remove("MAGIC_CONTEXT_TEST_DATA_DIR")
+        .env_remove("MAGIC_CONTEXT_STORAGE_DIR")
+        .output()
+        .expect("bun must be installed to provision the host-schema store");
+    assert!(
+        output.status.success(),
+        "store init failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

@@ -547,6 +547,14 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # The hostless-store integration test provisions context.db through the CLI.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install CLI dependencies
+        run: bun install --frozen-lockfile
+
       - name: Check out commons
         uses: actions/checkout@v5
         with:
@@ -558,6 +566,8 @@ jobs:
         with:
           repository: cortexkit/subconscious
           path: .siblings/subconscious
+          # real_daemon checks that the launch-nonce prerequisite is in history.
+          fetch-depth: 0
 
       # actions/checkout refuses a path outside $GITHUB_WORKSPACE, so the siblings
       # land inside the workspace and are linked to the ../ paths the Rust workspace
