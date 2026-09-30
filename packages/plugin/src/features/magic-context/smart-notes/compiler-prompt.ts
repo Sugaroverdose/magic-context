@@ -21,8 +21,9 @@ Authoring constraints:
 - Manifest must declare every capability, host, URL, and file path used by the code.
 - HTTP bodies are capped at 64 KiB. For GitHub release-version checks prefer /repos/OWNER/REPO/releases/latest; never fetch an unbounded /releases list. If a list is necessary, specify a small per_page and explicit page bounds. Tags use /tags?per_page=100 with pagination; an incomplete list cannot prove absence.
 - Compare version components numerically, not lexicographically. Parse GitHub tag arrays by each object's name; never compare the response body or the tag object to a name.
-- A tag other than A/B means name !== A AND name !== B, not OR. Preserve each clause of an OR condition independently.
-- For GitHub ancestry use /compare/BASE...TAG?per_page=1: behind or identical means TAG is an ancestor of BASE; ahead or diverged means it is not. Unknown status, non-200 responses, invalid JSON and incomplete pagination are errors, never evidence that a condition is met.
+- Set exclusion: use allowed.indexOf(name) === -1. Example: allowed = ["v0.1.0", "v0.1.1"]; neither allowed name satisfies "a tag other than these exists". Never use name !== A || name !== B: that is always true when A and B differ. Preserve genuine OR clauses independently.
+- "X is an ancestor of BASE": GET /compare/X...BASE?per_page=1. Status ahead means BASE descends from X; identical also satisfies ancestry. Behind means X descends from BASE, and diverged means neither is ancestral. With the reverse /compare/BASE...X?per_page=1, behind or identical proves X is ancestral; ahead or diverged means it is not. Example: X=v0.1.0, BASE=master, /compare/v0.1.0...master returning ahead means the tag IS an ancestor of master.
+- Enumerate every tag using bounded pagination: /tags?per_page=100&page=1, then page=2, etc. Stop only on a short page. Set an explicit maximum page count; if its final page is full, throw an error instead of returning met=false or met=true from incomplete enumeration. Example: a ten-page bound with 100 tags on page=10 is incomplete, not evidence of absence. Unknown comparison status, non-200 responses, invalid JSON and incomplete pagination are errors, never evidence that a condition is met.
 
 Output schema:
 {

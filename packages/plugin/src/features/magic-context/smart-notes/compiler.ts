@@ -17,7 +17,6 @@ import { recordChildInvocation } from "../subagent-token-capture";
 import type { SmartNoteCapabilityFactory } from "./capabilities";
 import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "./compiler-prompt";
 import { type RunCompiledSmartNoteCheckResult, runCompiledSmartNoteCheck } from "./sandbox-runner";
-import { compileTagSetCondition } from "./tag-condition";
 import {
     SMART_NOTE_CHECK_CEILING_MS,
     type SmartNoteCapabilityName,
@@ -125,10 +124,7 @@ Remember: output only the JSON object described by the system prompt.`;
         const remainingMs = Math.max(1_000, args.deadline - Date.now());
         let response: CompilerResponse;
         let outputMessages: unknown[] | undefined;
-        const tagCondition = compileTagSetCondition(args.note.surfaceCondition);
-        if (tagCondition) {
-            response = tagCondition;
-        } else if (args.hiddenCompletionExecutor) {
+        if (args.hiddenCompletionExecutor) {
             // The compiler is a no-tool prompt that answers with one JSON object,
             // so a completion carrier delivers it without a child-session tool loop.
             const carried = await runHiddenSingleShotPrompt({

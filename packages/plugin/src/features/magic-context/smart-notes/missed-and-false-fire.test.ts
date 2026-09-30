@@ -162,23 +162,33 @@ function tagRepository() {
                 return { status: 200, body: JSON.stringify(names.map((name) => ({ name }))) };
             }
             expect(parsed.searchParams.get("per_page")).toBe("1");
-            const tag = decodeURIComponent(parsed.pathname.split("...")[1]);
-            let ancestor = true;
-            try {
-                git("merge-base", "--is-ancestor", `${tag}^{commit}`, "master");
-            } catch {
-                ancestor = false;
+            const [base, head] = parsed.pathname
+                .split("/compare/")[1]
+                .split("...")
+                .map(decodeURIComponent);
+            const baseSha = git("rev-parse", `${base}^{commit}`);
+            const headSha = git("rev-parse", `${head}^{commit}`);
+            let status = "identical";
+            if (baseSha !== headSha) {
+                try {
+                    git("merge-base", "--is-ancestor", baseSha, headSha);
+                    status = "ahead";
+                } catch {
+                    try {
+                        git("merge-base", "--is-ancestor", headSha, baseSha);
+                        status = "behind";
+                    } catch {
+                        status = "diverged";
+                    }
+                }
             }
-            return {
-                status: 200,
-                body: JSON.stringify({ status: ancestor ? "behind" : "diverged" }),
-            };
+            return { status: 200, body: JSON.stringify({ status }) };
         },
     };
     return { git, capabilities };
 }
 
-test("original tag condition stays unmet with exactly two ancestor tags through the real compiler path", async () => {
+test("exclusion OR falsely fires on allowed ancestor tags despite a successful compiler dry run", async () => {
     const { git, capabilities } = tagRepository();
     expect(git("tag", "--list").split("\n")).toEqual(["v0.1.0", "v0.1.1"]);
     // A plausible lost-check failure: either allowed name satisfies this OR.
@@ -189,56 +199,77 @@ test("original tag condition stays unmet with exactly two ancestor tags through 
         compiledCheck: `function check(cap) { var tags = JSON.parse(cap.httpGet("https://api.github.com/repos/cortexkit/insula/tags?per_page=100").body); return { met: tags.some(function(t) { return t.name !== "v0.1.0" || t.name !== "v0.1.1"; }) }; }`,
     });
     expect(unsafe).toEqual({ ok: true, result: { met: true } });
-    const result = await compile(original, capabilities);
-    expect(result).toMatchObject({ ok: true, dryRun: { met: false } });
-});
-
-test("original tag condition fires when an allowed tag diverges from master", async () => {
-    const { git, capabilities } = tagRepository();
-    git("checkout", "-b", "side", "v0.1.0");
-    git("commit", "--allow-empty", "-m", "side tip");
-    git("tag", "-f", "v0.1.1");
-    git("checkout", "master");
-    expect(await compile(original, capabilities)).toMatchObject({
-        ok: true,
-        dryRun: { met: true },
-    });
-});
-
-test("original tag condition fires when an additional ancestor tag exists", async () => {
-    const { git, capabilities } = tagRepository();
-    git("tag", "v0.1.2");
-    expect(await compile(original, capabilities)).toMatchObject({
-        ok: true,
-        dryRun: { met: true },
-    });
-});
-
-test("tag source failures are not evidence of a met condition", async () => {
-    expect(
-        await compile(original, {
-            ...emptyCapabilities,
-            httpGet: async () => ({ status: 403, body: "{}" }),
+    for (const tag of ["v0.1.0", "v0.1.1"]) {
+        expect(git("merge-base", "--is-ancestor", `${tag}^{commit}`, "master")).toBe("");
+    }
+    const transport = carrier([
+        JSON.stringify({
+            compiled_check: `function check(cap) { var tags = JSON.parse(cap.httpGet("https://api.github.com/repos/cortexkit/insula/tags?per_page=100&page=1").body); return { met: tags.some(function(t) { return t.name !== "v0.1.0" || t.name !== "v0.1.1"; }) }; }`,
+            manifest: { capabilities: ["httpGet"], hosts: ["api.github.com"] },
+            check_cron: "0 * * * *",
         }),
-    ).toMatchObject({ ok: false });
+    ]);
+    // The sandbox validates execution and result shape, not the meaning of the
+    // condition. This fixture demonstrates why a passing dry run is insufficient.
+    expect(await compile(original, capabilities, transport.executor)).toMatchObject({
+        ok: true,
+        dryRun: { met: true },
+    });
 });
 
-test("tag pagination cannot silently treat a full final page as complete", async () => {
-    const urls: string[] = [];
-    const result = await compile(original, {
-        ...emptyCapabilities,
-        httpGet: async (url) => {
-            urls.push(url);
-            if (url.includes("/compare/")) return { status: 200, body: '{"status":"identical"}' };
-            return {
-                status: 200,
-                body: JSON.stringify(Array.from({ length: 100 }, () => ({ name: "v0.1.0" }))),
-            };
-        },
-    });
-    expect(result).toMatchObject({ ok: false });
-    if (!result.ok) expect(result.error).toContain("Tag pagination exceeded 1000 tags");
-    expect(urls.filter((url) => url.includes("/tags?"))).toHaveLength(10);
+test("tag guidance reaches the compiler transport for original and reworded conditions", async () => {
+    const { capabilities } = tagRepository();
+    const compiledCheck = `function check(cap) {
+        var allowed = ["v0.1.0", "v0.1.1"];
+        var urls = ["https://api.github.com/repos/cortexkit/insula/compare/v0.1.0...master?per_page=1", "https://api.github.com/repos/cortexkit/insula/compare/v0.1.1...master?per_page=1"];
+        var response = cap.httpGet("https://api.github.com/repos/cortexkit/insula/tags?per_page=100&page=1");
+        if (response.status !== 200) throw new Error("Tag source unavailable");
+        var tags = JSON.parse(response.body);
+        if (!Array.isArray(tags) || tags.length >= 100) throw new Error("Incomplete tag fixture");
+        for (var i = 0; i < tags.length; i++) {
+            var name = tags[i].name;
+            if (allowed.indexOf(name) === -1) return { met: true };
+            var comparison = cap.httpGet(urls[allowed.indexOf(name)]);
+            if (comparison.status !== 200) throw new Error("Comparison unavailable");
+            var status = JSON.parse(comparison.body).status;
+            if (status === "behind" || status === "diverged") return { met: true };
+            if (status !== "ahead" && status !== "identical") throw new Error("Unknown comparison status");
+        }
+        return { met: false };
+    }`;
+    for (const condition of [
+        original,
+        "Notify me if master does not descend from any tag, or a tag outside the v0.1.0 and v0.1.1 set appears on cortexkit/insula.",
+    ]) {
+        const transport = carrier([
+            JSON.stringify({
+                compiled_check: compiledCheck,
+                manifest: { capabilities: ["httpGet"], hosts: ["api.github.com"] },
+                check_cron: "0 * * * *",
+            }),
+        ]);
+        expect(await compile(condition, capabilities, transport.executor)).toMatchObject({
+            ok: true,
+            dryRun: { met: false },
+        });
+        expect(transport.requests).toHaveLength(1);
+        const request = JSON.parse(transport.requests[0]);
+        expect(request.body.parts[0].text).toContain(condition);
+        const system = request.body.system;
+        expect(system).toContain("allowed.indexOf(name) === -1");
+        expect(system).toContain("Never use name !== A || name !== B");
+        expect(system).toContain("GET /compare/X...BASE?per_page=1");
+        expect(system).toContain(
+            "Status ahead means BASE descends from X; identical also satisfies ancestry",
+        );
+        expect(system).toContain("Behind means X descends from BASE");
+        expect(system).toContain(
+            "reverse /compare/BASE...X?per_page=1, behind or identical proves X is ancestral",
+        );
+        expect(system).toContain("Enumerate every tag using bounded pagination");
+        expect(system).toContain("Stop only on a short page");
+        expect(system).toContain("if its final page is full, throw an error");
+    }
 });
 
 test("persistent compilation failure nudges its owner once with the reason, not a met verdict", () => {
