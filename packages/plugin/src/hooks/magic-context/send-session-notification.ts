@@ -1,3 +1,4 @@
+import { observeEmbeddingActivity } from "../../shared/embedding-activity";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { isDefaultSessionTitle } from "../../shared/safe-notification-target";
@@ -564,6 +565,7 @@ export function observeIgnoredNotificationEvent(event: {
     type: string;
     properties?: unknown;
 }): void {
+    observeEmbeddingActivity(event);
     const record = (value: unknown): Record<string, unknown> | undefined =>
         value !== null && typeof value === "object"
             ? (value as Record<string, unknown>)

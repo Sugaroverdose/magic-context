@@ -58,6 +58,7 @@ import { buildStatusDetail } from "../../plugin/rpc-handlers";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../plugin/types";
 import type { ConfigParseFailure } from "../../shared/config-diagnostics";
+import { isEmbeddingHostBusy } from "../../shared/embedding-activity";
 import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
 import { resolveHistorianModel } from "../../shared/model-resolution";
@@ -575,6 +576,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     };
 
     const maybeAutoEmbedSession = (sessionId: string): void => {
+        if (isEmbeddingHostBusy()) return;
         const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
         const identity = resolveProjectIdentityForSession(
             directory,
@@ -609,6 +611,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 // on the transform's return path. A macrotask yield lets the
                 // transform return first, keeping the hot path clean.
                 await new Promise((resolve) => setTimeout(resolve, 0));
+                if (isEmbeddingHostBusy()) {
+                    invalidateAutoEmbedSession(sessionId);
+                    return;
+                }
                 await ensureProjectRegisteredFromOpenCodeDirectory(directory, db);
                 const sessionProjectIdentity = resolveProjectIdentityForSession(
                     directory,

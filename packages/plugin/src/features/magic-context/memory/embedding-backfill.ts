@@ -1,3 +1,4 @@
+import { isEmbeddingHostBusy } from "../../../shared/embedding-activity";
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { embedBatchForProject, getProjectEmbeddingSnapshot } from "./embedding";
@@ -13,6 +14,7 @@ export async function ensureMemoryEmbeddings(args: {
     memories: Memory[];
     existingEmbeddings: Map<number, StoredMemoryEmbedding>;
 }): Promise<Map<number, StoredMemoryEmbedding>> {
+    if (isEmbeddingHostBusy()) return args.existingEmbeddings;
     const snapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
     if (!snapshot?.enabled) {
         return args.existingEmbeddings;

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { EmbeddingConfig } from "../../config/schema/magic-context";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../config/schema/magic-context";
 import { setBootQuietPeriodForTests } from "../../plugin/boot-quiet";
+import { isEmbeddingHostBusy } from "../../shared/embedding-activity";
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
@@ -2623,6 +2624,7 @@ export async function embedUnembeddedMemoriesForProjectOutcome(
     projectIdentity: string,
     batchSize = 10,
 ): Promise<EmbedMemoriesOutcome> {
+    if (isEmbeddingHostBusy()) return { kind: "unavailable" };
     const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
     if (!snapshot?.enabled) return { kind: "disabled" };
 
@@ -2766,7 +2768,12 @@ export async function drainCommitBacklogForProject(
     }, SESSION_EMBED_LEASE_RENEWAL_MS);
     (renewal as { unref?: () => void }).unref?.();
     try {
-        while (!leaseLost && Date.now() < deadline && total < COMMIT_DRAIN_MAX_PER_SWEEP) {
+        while (
+            !leaseLost &&
+            !isEmbeddingHostBusy() &&
+            Date.now() < deadline &&
+            total < COMMIT_DRAIN_MAX_PER_SWEEP
+        ) {
             const embedded = await embedCommitBatch(db, projectIdentity, COMMIT_DRAIN_BATCH_SIZE);
             if (!renewGitSweepLease(db, projectIdentity, holderId)) leaseLost = true;
             if (leaseLost || embedded === 0) break;
@@ -3048,7 +3055,12 @@ async function drainCompartmentChunkBacklogForProject(
     }, SESSION_EMBED_LEASE_RENEWAL_MS);
     (renewal as { unref?: () => void }).unref?.();
     try {
-        while (!leaseLost && Date.now() < deadline && total < CHUNK_DRAIN_MAX_PER_SWEEP) {
+        while (
+            !leaseLost &&
+            !isEmbeddingHostBusy() &&
+            Date.now() < deadline &&
+            total < CHUNK_DRAIN_MAX_PER_SWEEP
+        ) {
             const embedded = await embedCompartmentChunkBatch(
                 db,
                 projectIdentity,
@@ -3187,7 +3199,7 @@ export async function embedSessionCompartmentChunks(
         // denominator; `embedded` is clamped to it in the callback in case the
         // historian published mid-run.
         for (;;) {
-            if (leaseLost || drainAbort.signal.aborted) {
+            if (leaseLost || drainAbort.signal.aborted || isEmbeddingHostBusy()) {
                 aborted = true;
                 break;
             }
@@ -3400,7 +3412,7 @@ export async function sweepAllRegisteredProjects(
     chunksEmbedded: number;
     perProject: Map<string, { memories: number; commits: number; chunks: number }>;
 }> {
-    if (projectSweepInProgress) {
+    if (projectSweepInProgress || isEmbeddingHostBusy()) {
         log("[magic-context] project embedding sweep already in progress, skipping this tick");
         return {
             memoriesEmbedded: 0,
@@ -3425,7 +3437,7 @@ export async function sweepAllRegisteredProjects(
             let chunks = 0;
             let consecutiveEmpty = 0;
 
-            while (Date.now() < deadline) {
+            while (Date.now() < deadline && !isEmbeddingHostBusy()) {
                 const count = await embedUnembeddedMemoriesForProject(
                     db,
                     projectIdentity,
