@@ -628,13 +628,13 @@ async function runIssueFlow(): Promise<number> {
         // Ask the user which session this issue relates to. Only show the
         // picker when there's more than one recent session — otherwise the
         // single-session case is unambiguous, and the no-session case
-        // (Node-only run without bun:sqlite) skips filtering entirely.
+        // or unavailable-store case skips filtering entirely.
         let sessionFilter: string | null = null;
-        if (report.recentSessions.length > 1) {
+        if (report.recentSessions.available && report.recentSessions.rows.length > 1) {
             const choice = await selectOne(
                 "Which session is this issue about? (filters log lines from other sessions)",
                 [
-                    ...report.recentSessions.map((session, index) => {
+                    ...report.recentSessions.rows.map((session, index) => {
                         const displayTitle = session.title.trim() || "(no title)";
                         const truncatedTitle =
                             displayTitle.length > 50

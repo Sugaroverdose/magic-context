@@ -1,12 +1,3 @@
-// NOTE: bun:sqlite is loaded lazily inside collectHistorianFailures() via a
-// runtime-gated dynamic import. The CLI runs under Node (npx invocation), so
-// `bun:sqlite` is normally unavailable; we only attempt the import when running
-// under Bun (e.g. someone runs `bun x @cortexkit/magic-context doctor`). A
-// static `import { Database } from "bun:sqlite"` would crash the CLI under
-// Node before any try/catch could intervene because Node's ESM loader rejects
-// `bun:` specifiers during resolution. Historian-failure diagnostics are
-// best-effort: if the DB can't be read, the report still produces all other
-// information.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -103,11 +94,9 @@ export interface DiagnosticReport {
      * real project directories and to power the session picker in the `--issue`
      * flow.
      *
-     * Populated only when bun:sqlite is available (under Bun) and the resolved
-     * OpenCode session DB exists. Empty array on Node-only runs (and the
-     * diagnostics report falls back to the legacy tmp-dir historian listing).
+     * Availability is reported separately so unreadable stores never look empty.
      */
-    recentSessions: RecentSessionSummary[];
+    recentSessions: DiagnosticRows<RecentSessionSummary>;
     /**
      * Historian dumps grouped by project directory. Older dumps under the
      * legacy harness-scoped tmp dir are surfaced separately as `legacyDumps`
@@ -115,12 +104,12 @@ export interface DiagnosticReport {
      */
     historianDumps: HistorianDumpsReport;
     /** Most recent historian-failure rows from session_meta across all sessions. */
-    historianFailures: HistorianFailureSummary[];
+    historianFailures: DiagnosticRows<HistorianFailureSummary>;
     /**
      * Per-session rollup of the durable `historian_runs` telemetry. Surfaces the
      * fail/success/noop history that the self-clearing session_meta counter hides.
      */
-    historianRuns: HistorianRunSummary[];
+    historianRuns: DiagnosticRows<HistorianRunSummary>;
 }
 
 export interface PluginCacheInstall {
@@ -166,6 +155,10 @@ export interface HistorianDumpsReport {
         recent: HistorianDumpSummary[];
     };
 }
+
+export type DiagnosticRows<T> =
+    | { available: true; rows: T[] }
+    | { available: false; reason: string };
 
 export interface RecentSessionSummary {
     sessionId: string;
@@ -585,116 +578,55 @@ export function collectRecentSessionsFromDatabase(
     });
 }
 
-/**
- * Read recent active OpenCode sessions from OpenCode's own SQLite DB.
- *
- * OpenCode's database is only available in the Bun runtime used by OpenCode
- * itself. The published CLI normally runs under Node, so it returns [] there
- * and the rest of doctor continues with its other diagnostics.
- */
-async function collectRecentSessions(
-    resolution: OpenCodeDbPathResolution,
-    hostGeneration: OpenCodeHostGeneration,
-): Promise<RecentSessionSummary[]> {
-    const opencodeDbPath = resolution.path;
-    if (!openCodeDbPathExists(resolution)) return [];
-
-    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
-        return [];
-    }
-
-    type DatabaseCtor = new (
-        path: string,
-        opts?: { readonly?: boolean },
-    ) => {
-        prepare: (sql: string) => { all: () => unknown[] };
-        close: () => void;
-    };
-
-    let DatabaseClass: DatabaseCtor;
+/** Read a diagnostic store without creating it or upgrading its schema. */
+async function collectDatabaseRows<T>(
+    path: string,
+    read: (db: InstanceType<typeof import("@magic-context/core/shared/sqlite").Database>) => T[],
+): Promise<DiagnosticRows<T>> {
+    if (!existsSync(path)) return { available: false, reason: "path missing" };
+    let backend: typeof import("@magic-context/core/shared/sqlite");
     try {
-        const mod = (await new Function("p", "return import(p)")("bun:sqlite")) as {
-            Database: DatabaseCtor;
-        };
-        DatabaseClass = mod.Database;
-    } catch {
-        return [];
+        backend = await import("@magic-context/core/shared/sqlite");
+    } catch (error) {
+        return { available: false, reason: `runtime unavailable: ${diagnosticError(error)}` };
     }
-
-    let db: (RecentSessionDatabase & { close: () => void }) | null = null;
+    let db: InstanceType<typeof backend.Database> | undefined;
     try {
-        db = new DatabaseClass(opencodeDbPath, { readonly: true });
-        assertOpenCodeStoreGeneration(db, hostGeneration, opencodeDbPath);
-        return collectRecentSessionsFromDatabase(db);
-    } catch {
-        return [];
+        db = new backend.Database(path, { readonly: true });
+        return { available: true, rows: read(db) };
+    } catch (error) {
+        const message = diagnosticError(error);
+        const category = /no such (table|column)/i.test(message) ? "schema too old" : "query error";
+        return { available: false, reason: `${category}: ${message}` };
     } finally {
         try {
             db?.close();
         } catch {
-            // ignore close errors
+            // A close failure must not hide the diagnostic query result.
         }
     }
 }
 
-/**
- * Read the most recent historian-failure rows from session_meta.
- *
- * `bun:sqlite` is loaded lazily via a runtime-gated dynamic import so the
- * CLI works under both Bun and Node:
- *
- *   - Under Bun (typeof Bun !== "undefined"): import("bun:sqlite") succeeds
- *     and we read the failures.
- *   - Under Node (the default for `npx @cortexkit/magic-context doctor`):
- *     we never attempt the import, so Node's ESM loader doesn't see a `bun:`
- *     specifier. The function returns `[]` and the rest of the diagnostics
- *     report builds normally.
- *
- * A static `import { Database } from "bun:sqlite"` at module top would crash
- * the CLI before any try/catch could catch it: Node throws
- * `ERR_UNSUPPORTED_ESM_URL_SCHEME` on `bun:` specifiers during module
- * resolution, which happens before user code runs. The dynamic-import-with-
- * function-string trick (`new Function(...)`) defeats Bun's static analysis
- * so the bundler doesn't try to resolve `bun:sqlite` at build time either.
- */
-async function collectHistorianFailures(
+function diagnosticError(error: unknown): string {
+    return sanitizeDiagnosticText(error instanceof Error ? error.message : String(error));
+}
+
+/** Read recent active sessions from the resolved OpenCode store on Bun or Node. */
+export async function collectRecentSessions(
+    resolution: OpenCodeDbPathResolution,
+    hostGeneration: OpenCodeHostGeneration,
+): Promise<DiagnosticRows<RecentSessionSummary>> {
+    return collectDatabaseRows(resolution.path, (db) => {
+        assertOpenCodeStoreGeneration(db, hostGeneration, resolution.path);
+        return collectRecentSessionsFromDatabase(db);
+    });
+}
+
+/** Read historian failure counters, which reset to zero after a successful run. */
+export async function collectHistorianFailures(
     storageDirPath: string,
-): Promise<HistorianFailureSummary[]> {
-    const contextDbPath = join(storageDirPath, "context.db");
-    if (!existsSync(contextDbPath)) return [];
-
-    // Runtime gate: only attempt the import under Bun. The historian-failure
-    // section is best-effort diagnostics — losing it under Node is acceptable
-    // because the rest of the report (config, conflicts, log tail, dumps)
-    // already gives users and us enough to triage most issues.
-    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
-        return [];
-    }
-
-    type DatabaseCtor = new (
-        path: string,
-        opts?: { readonly?: boolean },
-    ) => {
-        prepare: (sql: string) => { all: () => unknown[] };
-        close: () => void;
-    };
-
-    let DatabaseClass: DatabaseCtor;
-    try {
-        // `new Function(...)` defeats the bundler's static-analysis pass so
-        // no resolver tries to load `bun:sqlite` at build time. At runtime
-        // under Bun this resolves to the built-in `bun:sqlite` module.
-        const mod = (await new Function("p", "return import(p)")("bun:sqlite")) as {
-            Database: DatabaseCtor;
-        };
-        DatabaseClass = mod.Database;
-    } catch {
-        return [];
-    }
-
-    let db: { prepare: (sql: string) => { all: () => unknown[] }; close: () => void } | null = null;
-    try {
-        db = new DatabaseClass(contextDbPath, { readonly: true });
+): Promise<DiagnosticRows<HistorianFailureSummary>> {
+    return collectDatabaseRows(join(storageDirPath, "context.db"), (db) => {
         const rows = db
             .prepare(
                 "SELECT session_id, historian_failure_count, historian_last_error, historian_last_failure_at FROM session_meta WHERE historian_failure_count > 0 ORDER BY historian_last_failure_at DESC LIMIT 10",
@@ -720,55 +652,14 @@ async function collectHistorianFailures(
             );
             return { sessionId, failureCount, lastError, lastFailureAt: lastAt };
         });
-    } catch {
-        return [];
-    } finally {
-        try {
-            db?.close();
-        } catch {
-            // ignore close errors
-        }
-    }
+    });
 }
 
-/**
- * Per-session rollup of the durable `historian_runs` telemetry (migration v24).
- * Unlike `collectHistorianFailures` (which reads the self-clearing session_meta
- * counter), these rows persist across successes — so a flaky historian that
- * fails repeatedly then occasionally succeeds is still visible here. Best-effort
- * + Bun-gated, mirroring `collectHistorianFailures`.
- */
-async function collectHistorianRuns(storageDirPath: string): Promise<HistorianRunSummary[]> {
-    const contextDbPath = join(storageDirPath, "context.db");
-    if (!existsSync(contextDbPath)) return [];
-    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") return [];
-
-    type DatabaseCtor = new (
-        path: string,
-        opts?: { readonly?: boolean },
-    ) => {
-        prepare: (sql: string) => { all: (...params: unknown[]) => unknown[] };
-        close: () => void;
-    };
-
-    let DatabaseClass: DatabaseCtor;
-    try {
-        const mod = (await new Function("p", "return import(p)")("bun:sqlite")) as {
-            Database: DatabaseCtor;
-        };
-        DatabaseClass = mod.Database;
-    } catch {
-        return [];
-    }
-
-    let db: {
-        prepare: (sql: string) => { all: (...p: unknown[]) => unknown[] };
-        close: () => void;
-    } | null = null;
-    try {
-        db = new DatabaseClass(contextDbPath, { readonly: true });
-        // Defensive: the table only exists at schema v24+. A pre-v24 DB throws
-        // "no such table" → caught below → empty section (best-effort).
+/** Read durable historian telemetry, which persists across successful runs. */
+export async function collectHistorianRuns(
+    storageDirPath: string,
+): Promise<DiagnosticRows<HistorianRunSummary>> {
+    return collectDatabaseRows(join(storageDirPath, "context.db"), (db) => {
         const aggRows = db
             .prepare(
                 `SELECT session_id,
@@ -830,15 +721,7 @@ async function collectHistorianRuns(storageDirPath: string): Promise<HistorianRu
                         : "",
             };
         });
-    } catch {
-        return [];
-    } finally {
-        try {
-            db?.close();
-        } catch {
-            // ignore close errors
-        }
-    }
+    });
 }
 
 /**
@@ -937,7 +820,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
         },
         logFiles,
         recentSessions,
-        historianDumps: collectHistorianDumps(recentSessions),
+        historianDumps: collectHistorianDumps(recentSessions.available ? recentSessions.rows : []),
         historianFailures: await collectHistorianFailures(storageDirPath),
         historianRuns: await collectHistorianRuns(storageDirPath),
     };
@@ -1011,13 +894,15 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         },
     };
 
-    const recentSessions = report.recentSessions.map((session) => ({
-        sessionId: session.sessionId,
-        title: sanitizeDiagnosticText(session.title),
-        directory: sanitizeString(session.directory),
-        lastActiveAt: session.lastActiveAt,
-        parentSessionId: session.parentSessionId ?? null,
-    }));
+    const recentSessions = (report.recentSessions.available ? report.recentSessions.rows : []).map(
+        (session) => ({
+            sessionId: session.sessionId,
+            title: sanitizeDiagnosticText(session.title),
+            directory: sanitizeString(session.directory),
+            lastActiveAt: session.lastActiveAt,
+            parentSessionId: session.parentSessionId ?? null,
+        }),
+    );
 
     return [
         `- Timestamp: ${report.timestamp}`,
@@ -1061,9 +946,11 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         "```",
         "",
         "### Recent sessions",
-        recentSessions.length === 0
-            ? "_No recent OpenCode sessions found (or OpenCode DB unavailable on this runtime)._"
-            : ["```json", JSON.stringify(recentSessions, null, 2), "```"].join("\n"),
+        !report.recentSessions.available
+            ? `Recent sessions: unavailable (${sanitizeDiagnosticText(report.recentSessions.reason)})`
+            : recentSessions.length === 0
+              ? "_No recent OpenCode sessions found._"
+              : ["```json", JSON.stringify(recentSessions, null, 2), "```"].join("\n"),
         "",
         "### Historian dumps",
         "(Metadata only — XML content is not included in this report.)",
@@ -1074,23 +961,27 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         "",
         "### Historian failures (session_meta)",
         "_Note: this counter RESETS to 0 on every successful run — see 'Historian runs' below for the durable history._",
-        report.historianFailures.length === 0
-            ? "_No sessions with historian failures._"
-            : [
-                  "```json",
-                  JSON.stringify(sanitizeConfigValue(report.historianFailures), null, 2),
-                  "```",
-              ].join("\n"),
+        !report.historianFailures.available
+            ? `Historian failures: unavailable (${sanitizeDiagnosticText(report.historianFailures.reason)})`
+            : report.historianFailures.rows.length === 0
+              ? "_No sessions with historian failures._"
+              : [
+                    "```json",
+                    JSON.stringify(sanitizeConfigValue(report.historianFailures.rows), null, 2),
+                    "```",
+                ].join("\n"),
         "",
         "### Historian runs (durable telemetry)",
         "Per-session success/failure/no-op counts from `historian_runs` (never reset).",
-        report.historianRuns.length === 0
-            ? "_No historian runs recorded (or schema predates v24)._"
-            : [
-                  "```json",
-                  JSON.stringify(sanitizeConfigValue(report.historianRuns), null, 2),
-                  "```",
-              ].join("\n"),
+        !report.historianRuns.available
+            ? `Historian runs: unavailable (${sanitizeDiagnosticText(report.historianRuns.reason)})`
+            : report.historianRuns.rows.length === 0
+              ? "_No historian runs recorded._"
+              : [
+                    "```json",
+                    JSON.stringify(sanitizeConfigValue(report.historianRuns.rows), null, 2),
+                    "```",
+                ].join("\n"),
         "",
         "### Log files",
         ...(report.logFiles ?? [report.logFile]).map(
