@@ -9,6 +9,7 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
@@ -501,7 +502,7 @@ if (singleRef) {
 	// single path; macOS watch exclusions are fixed paths, not globs.
 	const scratchParent = process.env.MC_REPLAY_SCRATCH_ROOT ?? join(REPO_ROOT, ".pure-replay-differential");
 	mkdirSync(scratchParent, { recursive: true });
-	const sharedRoot = mkdtempSync(join(scratchParent, "run-"));
+	const sharedRoot = mkdtempSync(join(realpathSync(scratchParent), "run-"));
 	try {
 		const left = captureRef(refs[0], "left", sharedRoot);
 		const right = captureRef(refs[1], "right", sharedRoot);
