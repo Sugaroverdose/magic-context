@@ -54,6 +54,7 @@ import {
 } from "../features/magic-context/storage";
 import {
     getPersistedSchemaVersion,
+    getUnconfirmedMigrationHolders,
     LATEST_SUPPORTED_VERSION,
 } from "../features/magic-context/storage-db";
 import {
@@ -111,6 +112,7 @@ import { getMagicContextStorageDir } from "../shared/data-path";
 import { listHiddenVariantWarnings } from "../shared/hidden-variant-warnings";
 import { activeHostLimitations } from "../shared/host-limitations";
 import { getLoggerDiagnostics, log } from "../shared/logger";
+import { pluginPackageVersion } from "../shared/plugin-package-version";
 import { pushNotification } from "../shared/rpc-notifications";
 import type { MagicContextRpcServer } from "../shared/rpc-server";
 import type {
@@ -1493,12 +1495,15 @@ export function registerRpcHandlers(
     rpcServer.handle("status-detail", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         const dir = String(params.directory ?? directory);
-        if (shouldSkipHomeProjectMemory(dir)) return { sessionId, disabled: true };
+        // Every reply names this server's version so the TUI can tell the user
+        // when it is talking to a server from a different release.
+        const pluginVersion = pluginPackageVersion() ?? undefined;
+        if (shouldSkipHomeProjectMemory(dir)) return { sessionId, disabled: true, pluginVersion };
         if (resolveProjectIdentityForSession(dir) === undefined)
-            return { sessionId, disabled: true, paused: true };
+            return { sessionId, disabled: true, paused: true, pluginVersion };
         const modelKey = params.modelKey ? String(params.modelKey) : undefined;
         const db = readDatabase();
-        if (!db || !sessionId) return { error: "unavailable" };
+        if (!db || !sessionId) return { error: "unavailable", pluginVersion };
         const rustMode = config.transform_mode === "rust";
         const moduleStatus = rustMode
             ? await loadRustSessionStatus(rustModeModuleClient, sessionId, dir)
@@ -1506,6 +1511,7 @@ export function registerRpcHandlers(
         if (rustMode && !moduleStatus) {
             return {
                 error: "Rust module status unavailable; canonical session state was not read",
+                pluginVersion,
             };
         }
         const detail = buildStatusDetail(
@@ -1526,6 +1532,9 @@ export function registerRpcHandlers(
         if (args.hiddenCompletionExecutor?.capabilities.tools === false) {
             detail.dreamerUnsupportedTasks = toolLoopDreamTasks();
         }
+        detail.pluginVersion = pluginVersion;
+        const unconfirmedHolders = getUnconfirmedMigrationHolders();
+        if (unconfirmedHolders) detail.unconfirmedMigrationHolders = unconfirmedHolders;
         return detail as unknown as Record<string, unknown>;
     });
 

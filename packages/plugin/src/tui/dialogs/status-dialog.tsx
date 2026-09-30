@@ -12,18 +12,16 @@
 import { createMemo, createSignal, onCleanup } from "solid-js"
 import type { TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import packageJson from "../../../package.json"
-import { statusSummaryFromDetail } from "../../shared/status-summary"
 import {
-    buildStatusView,
+    buildStatusViewFor,
     distributeBarWidths,
     statusColumnsFor,
     type StatusRow,
     type StatusSection,
     type StatusTone,
-    type StatusViewSource,
 } from "../../shared/status-view"
 import { RUST_MODE_HOST_PATHS_LINE } from "../../shared/rust-mode-status"
-import type { StatusDetail } from "../data/context-db"
+import type { StatusDetailResult } from "../data/context-db"
 
 const R = (props: { t: TuiThemeCurrent; l: string; v: string; fg?: string }) => (
     <box width="100%" flexDirection="row" justifyContent="space-between">
@@ -83,35 +81,27 @@ const StatusSectionView = (props: { t: TuiThemeCurrent; section: StatusSection }
     </box>
 )
 
-export const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
+/**
+ * `status` is the checked result of the status RPC (`loadStatusDetail`), never
+ * the raw reply: a reply the view cannot draw arrives as the reason it cannot,
+ * and the shared model turns that into a "status unavailable" view. An
+ * unchecked reply used to reach the view model directly, where a missing field
+ * threw inside this component's first render and crashed the whole TUI.
+ */
+export const StatusDialog = (props: { api: TuiPluginApi; status: StatusDetailResult }) => {
     const theme = createMemo(() => (props.api as any).theme.current)
     const t = () => theme()
-    const s = () => props.s
-    const compactionOff = () => s().compaction_enabled === false
-
-    // Prefer the RPC-provided model context limit (what the sidebar shows) so the
-    // two surfaces never disagree. Fall back to deriving from usage% only when the
-    // RPC limit is absent (0) — and that derivation is itself undefined at 0%, so
-    // it stays "?" rather than showing a number inconsistent with the sidebar.
-    const contextLimit = () =>
-        s().contextLimit > 0
-            ? s().contextLimit
-            : s().usagePercentage > 0
-              ? Math.round(s().inputTokens / (s().usagePercentage / 100))
-              : 0
+    const ready = () => (props.status.state === "ready" ? props.status : null)
+    const compactionOff = () => ready()?.source.compaction_enabled === false
+    const recompProgress = () => ready()?.extras.recompProgress ?? null
+    const hostBackendsModuleSide = () => ready()?.extras.hostBackendsModuleSide === true
 
     // Which rows exist, what they are called and which colour they carry is
     // decided by the shared model, so this dialog and Pi's overlay cannot drift
-    // apart. This component only draws what the model returns.
+    // apart. This component only draws what the model returns, and the model
+    // never throws: a result it cannot draw becomes the unavailable view.
     const view = createMemo(() =>
-        buildStatusView(
-            {
-                ...(s() as unknown as StatusViewSource),
-                contextLimit: contextLimit(),
-                warnings: statusSummaryFromDetail(s()).warnings,
-            },
-            { version: packageJson.version },
-        ),
+        buildStatusViewFor(props.status, { version: packageJson.version }),
     )
     // The dialog's own laid-out width, which is what the sections have to fit
     // into; the terminal width is only the pre-layout fallback.
@@ -206,8 +196,8 @@ export const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 running or just finished — dogfood 2026-05-30). This is live run
                 state rather than status content, so it stays out of the shared
                 section model. */}
-            {!compactionOff() && s().recompProgress && (() => {
-                const p = s().recompProgress!
+            {!compactionOff() && recompProgress() && (() => {
+                const p = recompProgress()!
                 // Label follows the flow that started the run, so a plain
                 // /ctx-recomp never reads as an "Upgrade" (dogfood 2026-06-04).
                 const verb = p.kind === "upgrade" ? "Upgrade" : p.kind === "embed" ? "Embed" : "Recomp"
@@ -242,7 +232,7 @@ export const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 )
             })()}
 
-            {s().hostBackendsModuleSide && (
+            {hostBackendsModuleSide() && (
                 <box marginTop={1} width="100%" flexDirection="column">
                     <text fg={t().text}><b>Rust Mode</b></text>
                     <text fg={t().textMuted}>{RUST_MODE_HOST_PATHS_LINE}</text>

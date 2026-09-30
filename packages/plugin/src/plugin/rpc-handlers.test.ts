@@ -32,9 +32,12 @@ import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import type { RustModeModuleClient } from "../hooks/magic-context/rust-mode-transform";
 import * as logger from "../shared/logger";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../shared/models-dev-cache";
+import { pluginPackageVersion } from "../shared/plugin-package-version";
 import type { MagicContextRpcServer } from "../shared/rpc-server";
 import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
+import { buildStatusViewFor } from "../shared/status-view";
+import { checkStatusDetailPayload } from "../shared/status-view-check";
 import {
     buildCompartmentCount,
     buildDebugMemoryUsage,
@@ -97,6 +100,50 @@ describe("home project sidebar", () => {
             const snapshot = buildSidebarSnapshotRpcResponse(db, "ses_home", directory);
             expect(snapshot.error).toBeUndefined();
             expect(snapshot).toHaveProperty("sessionId", "ses_home");
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
+describe("status-detail replies the /ctx-status dialog can draw", () => {
+    test("a session with no stored state yet passes the dialog's check and names the server version", async () => {
+        const db = createTestDb();
+        try {
+            const handler = registeredRpcMethods(false, () => db).get("status-detail");
+            if (!handler) throw new Error("status-detail is not registered");
+            const reply = await handler({ sessionId: "ses-never-seen", directory: process.cwd() });
+            const version = pluginPackageVersion();
+            expect(version).toMatch(/^\d+\.\d+\.\d+/);
+            expect(reply.pluginVersion).toBe(version);
+            const check = checkStatusDetailPayload(reply, version ?? "");
+            expect(check.state).toBe("ready");
+            const view = buildStatusViewFor(check, { version: version ?? "" });
+            expect(view.headline.left.text).toBe("0.0% / 65%");
+            expect(view.warnings).toEqual([]);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("the home-directory reply carries the server version and draws as unavailable", async () => {
+        const directory = process.cwd();
+        __setProjectIdentityTestHooks({ homeDirectory: () => directory });
+        const db = createTestDb();
+        try {
+            const handler = registeredRpcMethods(false, () => db).get("status-detail");
+            if (!handler) throw new Error("status-detail is not registered");
+            const reply = await handler({ sessionId: "ses_home", directory });
+            expect(reply).toEqual({
+                sessionId: "ses_home",
+                disabled: true,
+                pluginVersion: pluginPackageVersion() ?? undefined,
+            });
+            const check = checkStatusDetailPayload(reply, pluginPackageVersion() ?? "");
+            expect(check.state === "unavailable" && check.reason).toEqual({
+                kind: "not_tracked",
+                cause: "home_directory",
+            });
         } finally {
             closeQuietly(db);
         }

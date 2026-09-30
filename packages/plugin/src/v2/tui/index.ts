@@ -1,7 +1,10 @@
 import { jsx } from "@opentui/solid/jsx-runtime";
 import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
 import { flushLogger, log } from "../../shared/logger";
+import { pluginPackageVersion } from "../../shared/plugin-package-version";
 import type { SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
+import { buildUnavailableStatusView } from "../../shared/status-view";
+import { statusVersionNotice } from "../../shared/status-view-check";
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../../tui/compaction-off";
 import {
     type CommandRpcResult,
@@ -15,6 +18,7 @@ import {
     requestFlush,
     requestRecomp,
     requestWrapup,
+    type StatusDetailResult,
 } from "../../tui/data/context-db";
 import {
     type SocketNotification,
@@ -83,7 +87,24 @@ export function sidebarText(snapshot: SidebarSnapshot | undefined): string {
  *
  * Exported for test access.
  */
-export function statusText(detail: StatusDetail): string {
+export function statusText(
+    detail: Pick<
+        StatusDetail,
+        | "contextLimit"
+        | "usagePercentage"
+        | "inputTokens"
+        | "compaction_enabled"
+        | "historianRunning"
+        | "compartmentCount"
+        | "memoryBlockCount"
+        | "memoryCount"
+        | "pendingOpsCount"
+        | "configGeneration"
+        | "configAdoptedAt"
+        | "configReloadFailure"
+        | "lastTransformError"
+    >,
+): string {
     const context =
         detail.contextLimit > 0
             ? `${detail.usagePercentage.toFixed(1)}% (${compactTokens(detail.inputTokens)}/${compactTokens(detail.contextLimit)} tokens)`
@@ -112,6 +133,35 @@ export function statusText(detail: StatusDetail): string {
             : []),
         ...(detail.lastTransformError ? [`Warning: ${detail.lastTransformError}`] : []),
     ].join("\n");
+}
+
+/**
+ * Plain-text status for one checked result: the status lines above, or the
+ * "status unavailable" view as text when there is no usable snapshot. A
+ * server/UI version difference is named first in both cases.
+ *
+ * Exported for test access.
+ */
+export function statusTextFor(status: StatusDetailResult): string {
+    if (status.state === "unavailable") {
+        const view = buildUnavailableStatusView(status.reason, status.versions, {
+            version: pluginPackageVersion() ?? "unknown",
+        });
+        return [
+            `${view.headline.left.text}: ${view.headline.right.text}`,
+            ...view.sections.flatMap((section) =>
+                section.rows.map((row) => `${row.label}: ${row.value}`),
+            ),
+            ...view.warnings.map((warning) => warning.text),
+        ].join("\n");
+    }
+    const notice = statusVersionNotice(status.versions);
+    const text = statusText({
+        ...status.source,
+        historianRunning: status.extras.historianRunning,
+        lastTransformError: status.extras.lastTransformError,
+    });
+    return notice ? `${notice}\n${text}` : text;
 }
 
 function currentSessionID(context: V2TuiContext): string | null {
@@ -153,17 +203,12 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         }
         const result = await loadStatusDetail(target, directory);
         if (currentSessionID(context) !== target) return false;
-        if (!result.ok) {
-            context.ui.toast.show({
-                message: "Magic Context status is unavailable",
-                variant: "warning",
-            });
-            return false;
-        }
+        // A result without a usable snapshot still opens the dialog, which then
+        // names why the status is unavailable.
         const mounted = statusDialog;
         if (mounted) {
             try {
-                mounted.show(result.detail);
+                mounted.show(result);
                 return true;
             } catch (error) {
                 // A component that throws while opening would leave the host
@@ -175,7 +220,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         }
         await context.ui.dialog.alert({
             title: "Magic Context status",
-            message: statusText(result.detail),
+            message: statusTextFor(result),
         });
         return true;
     };

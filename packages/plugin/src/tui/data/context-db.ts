@@ -3,8 +3,15 @@
  * All data is fetched from the server plugin via HTTP RPC.
  */
 import { getMagicContextStorageDir } from "../../shared/data-path";
+import { pluginPackageVersion } from "../../shared/plugin-package-version";
 import { MagicContextRpcClient } from "../../shared/rpc-client";
 import type { EmbedDetail, SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
+import {
+    checkStatusDetailPayload,
+    type OpenCodeStatusExtras,
+    type StatusCheck,
+    statusRpcFailure,
+} from "../../shared/status-view-check";
 
 export type { EmbedDetail, SidebarSnapshot, StatusDetail };
 
@@ -162,26 +169,29 @@ export async function loadSidebarSnapshot(
     }
 }
 
-export type StatusDetailResult = { ok: true; detail: StatusDetail } | { ok: false; error: string };
+export type StatusDetailResult = StatusCheck<OpenCodeStatusExtras>;
 
-/** Fetch full status detail without presenting transport failure as an empty session. */
+/**
+ * Fetch the status for the `/ctx-status` dialog. Every reply, including a
+ * transport failure, comes back as a checked result: either a snapshot the
+ * view model can draw, or the reason there is none. The dialog never receives
+ * an unchecked payload.
+ */
 export async function loadStatusDetail(
     sessionId: string,
     directory: string,
     modelKey?: string,
 ): Promise<StatusDetailResult> {
-    if (!rpcClient) return { ok: false, error: "RPC client is not initialized" };
+    if (!rpcClient) return statusRpcFailure("RPC client is not initialized");
     try {
-        const result = await rpcClient.call<StatusDetail>("status-detail", {
+        const reply = await rpcClient.call<unknown>("status-detail", {
             sessionId,
             directory,
             modelKey,
         });
-        const error = (result as unknown as Record<string, unknown>).error;
-        if (typeof error === "string") return { ok: false, error };
-        return { ok: true, detail: result };
+        return checkStatusDetailPayload(reply, pluginPackageVersion() ?? "unknown");
     } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        return statusRpcFailure(error instanceof Error ? error.message : String(error));
     }
 }
 

@@ -10,6 +10,7 @@ import {
     classifyProcessKind,
     discoverLivePiProcessIds,
     inspectLivePiProcesses,
+    inspectWindowsProcessesSync,
     isPidAlive,
     isPidIdentityPlausible,
     parseTasklistOutput,
@@ -612,7 +613,7 @@ describe("isPidIdentityPlausible", () => {
         expect(isPidIdentityPlausible(record(0))).toBe("inconclusive");
     });
 
-    test("uses tasklist for the Windows command fallback and skips unavailable start time", () => {
+    test("uses tasklist for the Windows command check when no start time is available", () => {
         const calls: Array<{ file: string; args: readonly string[] }> = [];
         __setRpcIdentityTestHooks({
             platform: "win32",
@@ -628,19 +629,57 @@ describe("isPidIdentityPlausible", () => {
             { file: "tasklist", args: ["/FO", "CSV", "/NH", "/FI", `PID eq ${PID}`] },
         ]);
 
+        // A record with a start time whose process start cannot be read (the
+        // CIM query failed here, so tasklist is all there is) is judged by the
+        // image name instead. It used to come back "inconclusive", which let the
+        // migration guard migrate under a live OpenCode server on Windows.
         calls.length = 0;
-        expect(isPidIdentityPlausible(record(NOW_MS))).toBe("inconclusive");
-        expect(calls).toEqual([
-            {
-                file: "powershell",
-                args: [
-                    "-NoProfile",
-                    "-Command",
-                    "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,CreationDate | ConvertTo-Json -Compress",
-                ],
-            },
-        ]);
+        expect(isPidIdentityPlausible(record(NOW_MS))).toBe("plausible");
+        expect(calls.map((call) => call.file)).toEqual(["powershell", "tasklist"]);
+        expect(calls[0]?.args.slice(0, 2)).toEqual(["-NoProfile", "-Command"]);
+        expect(String(calls[0]?.args[2])).toContain("Get-CimInstance Win32_Process");
+        expect(String(calls[0]?.args[2])).toContain("ToString('o')");
     });
+
+    test("a reused Windows PID with an unrelated image is implausible without a start time", () => {
+        __setRpcIdentityTestHooks({
+            platform: "win32",
+            execFileSync: ((file: string | URL) => {
+                if (String(file) === "powershell") throw new Error("CIM unavailable");
+                return tasklistOutput([[PID, "chrome.exe"]]);
+            }) as typeof execFileSync,
+        });
+        expect(isPidIdentityPlausible(record(NOW_MS))).toBe("implausible");
+    });
+});
+
+test("the synchronous Windows process list allows more output than the 1 MiB default", () => {
+    // Bun's execFileSync throws ENOBUFS past 1 MiB, and a Win32_Process listing
+    // with command lines passes that on a busy desktop; the snapshot then falls
+    // back to tasklist, which has no start times.
+    const limits: unknown[] = [];
+    __setRpcIdentityTestHooks({
+        platform: "win32",
+        processListExecFileSync: ((
+            _file: string,
+            _args: readonly string[],
+            options?: { maxBuffer?: number },
+        ) => {
+            limits.push(options?.maxBuffer);
+            return JSON.stringify([
+                {
+                    ProcessId: 7,
+                    ParentProcessId: 1,
+                    Name: "opencode.exe",
+                    CommandLine: "opencode",
+                    CreationDate: "2026-09-30T10:15:00Z",
+                },
+            ]);
+        }) as unknown as typeof execFileSync,
+    });
+    const inspection = inspectWindowsProcessesSync();
+    expect(inspection.processSnapshot?.source).toBe("cim");
+    expect(limits).toEqual([8 * 1024 * 1024]);
 });
 
 test("Spanish tasklist no-match is not running", () => {

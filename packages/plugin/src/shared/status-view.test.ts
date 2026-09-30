@@ -8,6 +8,7 @@ import {
     statusColumnsFor,
     statusSectionWidth,
 } from "./status-view";
+import { checkStatusViewSource } from "./status-view-check";
 
 const NOW = 1_730_000_000_000;
 
@@ -78,7 +79,11 @@ const SOURCE: StatusViewSource = {
 };
 
 function view(overrides: Partial<StatusViewSource> = {}) {
-    return buildStatusView({ ...SOURCE, ...overrides }, { version: "1.2.3", now: NOW });
+    // buildStatusView only accepts a checked snapshot; a fixture the check
+    // rejects is a broken fixture, so say which fields rather than draw nothing.
+    const checked = checkStatusViewSource({ ...SOURCE, ...overrides });
+    if (!checked.ok) throw new Error(`fixture rejected: ${checked.fields.join(", ")}`);
+    return buildStatusView(checked.source, { version: "1.2.3", now: NOW });
 }
 
 function rowLabels(sectionTitle: string, overrides: Partial<StatusViewSource> = {}): string[] {

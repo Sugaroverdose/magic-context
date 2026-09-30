@@ -120,9 +120,14 @@ describe("TUI context RPC data", () => {
         }));
         initRpcClient(directory);
 
+        // The error reaches the dialog as a named reason, never as a snapshot.
         expect(await loadStatusDetail("ses_rust", directory)).toEqual({
-            ok: false,
-            error: "Rust module status unavailable; canonical session state was not read",
+            state: "unavailable",
+            reason: {
+                kind: "rpc_error",
+                message: "Rust module status unavailable; canonical session state was not read",
+            },
+            versions: null,
         });
     });
 

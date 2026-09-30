@@ -3,13 +3,12 @@
 import { createMemo } from "solid-js"
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { StatusDialog } from "./dialogs/status-dialog"
-import { renderUserFacingFailure, userFacingFailureCode } from '../shared/user-facing-codes';
 import {
     createSidebarContentSlot,
     kickRecompProgressRefresh,
     refreshSidebarSnapshot,
 } from "./slots/sidebar-content"
-import { closeRpc, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp, type EmbedDetail, type StatusDetail } from "./data/context-db"
+import { closeRpc, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp, type EmbedDetail } from "./data/context-db"
 import { startNotificationSocket, stopNotificationSocket, type SocketNotification } from "./data/notification-socket"
 import { isCompactionEnabled } from "../config/agent-disable"
 import { loadPluginConfig } from "../config"
@@ -210,18 +209,11 @@ async function showStatusDialog(
     const modelKey = getModelKeyFromMessages(api, sessionId)
     const result = await loadStatusDetail(sessionId, directory, modelKey)
     if (getSessionId(api) !== sessionId) return false
-    if (!result.ok) {
-        console.error(
-            `[magic-context] status unavailable code=${userFacingFailureCode("status_unavailable")}: ${result.error}`,
-        )
-        showToast(api, {
-            message: renderUserFacingFailure("status_unavailable"),
-            variant: "warning",
-        })
-        return false
-    }
-
-    api.ui.dialog.replace(() => <StatusDialog api={api} s={result.detail} />)
+    // A result without a usable snapshot still opens the dialog: it shows the
+    // "status unavailable" view naming the reason (RPC error, a directory the
+    // server keeps no state for, missing fields, a server/UI version
+    // difference) instead of a toast that disappears.
+    api.ui.dialog.replace(() => <StatusDialog api={api} status={result} />)
     return true
 }
 

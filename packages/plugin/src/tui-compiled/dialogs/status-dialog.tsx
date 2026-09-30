@@ -22,8 +22,7 @@ import { createElement as _$createElement } from "opentui:runtime-module:%40open
  */
 import { createMemo, createSignal, onCleanup } from "opentui:runtime-module:solid-js";
 import packageJson from "../../../package.json";
-import { statusSummaryFromDetail } from "../../shared/status-summary";
-import { buildStatusView, distributeBarWidths, statusColumnsFor } from "../../shared/status-view";
+import { buildStatusViewFor, distributeBarWidths, statusColumnsFor } from "../../shared/status-view";
 import { RUST_MODE_HOST_PATHS_LINE } from "../../shared/rust-mode-status";
 const R = props => (() => {
   var _el$ = _$createElement("box"),
@@ -132,26 +131,27 @@ const StatusSectionView = props => (() => {
   _$effect(_$p => _$setProp(_el$9, "fg", props.t.text, _$p));
   return _el$8;
 })();
+
+/**
+ * `status` is the checked result of the status RPC (`loadStatusDetail`), never
+ * the raw reply: a reply the view cannot draw arrives as the reason it cannot,
+ * and the shared model turns that into a "status unavailable" view. An
+ * unchecked reply used to reach the view model directly, where a missing field
+ * threw inside this component's first render and crashed the whole TUI.
+ */
 export const StatusDialog = props => {
   const theme = createMemo(() => props.api.theme.current);
   const t = () => theme();
-  const s = () => props.s;
-  const compactionOff = () => s().compaction_enabled === false;
-
-  // Prefer the RPC-provided model context limit (what the sidebar shows) so the
-  // two surfaces never disagree. Fall back to deriving from usage% only when the
-  // RPC limit is absent (0) — and that derivation is itself undefined at 0%, so
-  // it stays "?" rather than showing a number inconsistent with the sidebar.
-  const contextLimit = () => s().contextLimit > 0 ? s().contextLimit : s().usagePercentage > 0 ? Math.round(s().inputTokens / (s().usagePercentage / 100)) : 0;
+  const ready = () => props.status.state === "ready" ? props.status : null;
+  const compactionOff = () => ready()?.source.compaction_enabled === false;
+  const recompProgress = () => ready()?.extras.recompProgress ?? null;
+  const hostBackendsModuleSide = () => ready()?.extras.hostBackendsModuleSide === true;
 
   // Which rows exist, what they are called and which colour they carry is
   // decided by the shared model, so this dialog and Pi's overlay cannot drift
-  // apart. This component only draws what the model returns.
-  const view = createMemo(() => buildStatusView({
-    ...s(),
-    contextLimit: contextLimit(),
-    warnings: statusSummaryFromDetail(s()).warnings
-  }, {
+  // apart. This component only draws what the model returns, and the model
+  // never throws: a result it cannot draw becomes the unavailable view.
+  const view = createMemo(() => buildStatusViewFor(props.status, {
     version: packageJson.version
   }));
   // The dialog's own laid-out width, which is what the sections have to fit
@@ -307,9 +307,9 @@ export const StatusDialog = props => {
       });
     })(), null);
     _$insert(_el$1, (() => {
-      var _c$3 = _$memo(() => !!(!compactionOff() && s().recompProgress));
+      var _c$3 = _$memo(() => !!(!compactionOff() && recompProgress()));
       return () => _c$3() && (() => {
-        const p = s().recompProgress;
+        const p = recompProgress();
         // Label follows the flow that started the run, so a plain
         // /ctx-recomp never reads as an "Upgrade" (dogfood 2026-06-04).
         const verb = p.kind === "upgrade" ? "Upgrade" : p.kind === "embed" ? "Embed" : "Recomp";
@@ -429,7 +429,7 @@ export const StatusDialog = props => {
       })();
     })(), _el$20);
     _$insert(_el$1, (() => {
-      var _c$4 = _$memo(() => !!s().hostBackendsModuleSide);
+      var _c$4 = _$memo(() => !!hostBackendsModuleSide());
       return () => _c$4() && (() => {
         var _el$30 = _$createElement("box"),
           _el$31 = _$createElement("text"),

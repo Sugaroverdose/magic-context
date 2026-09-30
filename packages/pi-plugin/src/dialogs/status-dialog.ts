@@ -63,7 +63,7 @@ import type {
 } from "@magic-context/core/shared/rpc-types";
 import { renderUserStatusSummary } from "@magic-context/core/shared/status-summary";
 import {
-	buildStatusView,
+	buildStatusViewFor,
 	distributeBarWidths,
 	STATUS_COLUMN_GAP,
 	type StatusBarSegment,
@@ -74,6 +74,7 @@ import {
 	type StatusViewSource,
 	statusColumnsFor,
 } from "@magic-context/core/shared/status-view";
+import { checkLocalStatusSource } from "@magic-context/core/shared/status-view-check";
 import { resolveTailHygieneStatus } from "@magic-context/core/shared/tail-hygiene-status";
 import type { UserFacingFailureKey } from "@magic-context/core/shared/user-facing-codes";
 import type { WindowGeometryResult } from "@magic-context/core/shared/window-geometry";
@@ -499,8 +500,12 @@ export function renderPiStatusOverlay(
 ): string[] {
 	// Which rows exist, their labels, order and colours come from the shared
 	// model, so this overlay and the OpenCode dialog cannot drift apart. Only
-	// the drawing is Pi's own.
-	const view = buildStatusView(statusViewSourceFromPiDetail(s), {
+	// the drawing is Pi's own. The snapshot passes the same check the OpenCode
+	// dialog applies to its RPC reply; one the model cannot draw becomes the
+	// "status unavailable" view naming the missing fields instead of an
+	// exception thrown out of Pi's render loop.
+	const status = checkLocalStatusSource(statusViewSourceFromPiDetail(s));
+	const view = buildStatusViewFor(status, {
 		version: packageJson.version,
 	});
 	const lines: string[] = [];
@@ -547,17 +552,20 @@ export function renderPiStatusOverlay(
 	// pre-v2 layout have nowhere else to surface. This is live run state
 	// rather than status content, which is why it is not one of the shared
 	// sections.
-	const upgrade: StatusRow | null = s.recompInFlight
-		? { label: "Recomp", value: "running…", tone: "warning" }
-		: s.upgradeNeededCount > 0
-			? {
-					label: "Recomp",
-					value: `${s.upgradeNeededCount} compartment${
-						s.upgradeNeededCount === 1 ? "" : "s"
-					} in the old layout · run /ctx-recomp`,
-					tone: "warning",
-				}
-			: null;
+	const upgrade: StatusRow | null =
+		status.state !== "ready"
+			? null
+			: s.recompInFlight
+				? { label: "Recomp", value: "running…", tone: "warning" }
+				: s.upgradeNeededCount > 0
+					? {
+							label: "Recomp",
+							value: `${s.upgradeNeededCount} compartment${
+								s.upgradeNeededCount === 1 ? "" : "s"
+							} in the old layout · run /ctx-recomp`,
+							tone: "warning",
+						}
+					: null;
 	if (upgrade) lines.push(renderStatusRow(upgrade, 9, innerWidth, theme));
 
 	// The shared model decides whether the sections fit in two columns at this

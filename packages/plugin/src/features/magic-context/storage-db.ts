@@ -92,6 +92,25 @@ export interface MigrationOnOpenRefusal {
 
 let lastMigrationOnOpenRefusal: MigrationOnOpenRefusal | null = null;
 
+/**
+ * An on-open migration this process ran although another OpenCode server's RPC
+ * record named a PID whose liveness or identity could not be checked. The
+ * guard continues in that case (see `enforceMigrationOnOpenGuard`), so the
+ * status dialog reports it: if that PID was a live older build, it is now
+ * running against a store newer than its fence.
+ */
+export interface UnconfirmedMigrationHolders {
+    pids: number[];
+    fromVersion: number;
+    toVersion: number;
+}
+
+let lastUnconfirmedMigrationHolders: UnconfirmedMigrationHolders | null = null;
+
+export function getUnconfirmedMigrationHolders(): UnconfirmedMigrationHolders | null {
+    return lastUnconfirmedMigrationHolders;
+}
+
 export function getSchemaFenceRejection(): {
     persistedVersion: number;
     supportedVersion: number;
@@ -107,6 +126,7 @@ export function getMigrationOnOpenRefusal(): MigrationOnOpenRefusal | null {
 export function __resetSchemaFenceStateForTests(): void {
     lastSchemaFenceRejection = null;
     lastMigrationOnOpenRefusal = null;
+    lastUnconfirmedMigrationHolders = null;
 }
 
 export const LATEST_SUPPORTED_VERSION = 91;
@@ -813,6 +833,14 @@ function enforceMigrationOnOpenGuard(
     ) {
         lastMigrationOnOpenRefusal = null;
         logInconclusiveMigrationProbes(dbPath, discovery, piDiscovery);
+        const uncertainPids = discovery.inconclusivePids ?? [];
+        if (uncertainPids.length > 0) {
+            lastUnconfirmedMigrationHolders = {
+                pids: [...uncertainPids],
+                fromVersion: persistedVersion,
+                toVersion: latestSupportedVersion,
+            };
+        }
         return true;
     }
     const blockingPids = [...new Set([...discovery.serverPids, ...piPids])].sort(

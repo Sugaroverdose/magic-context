@@ -10,10 +10,10 @@
  * of this package.
  *
  * Unlike the sidebar, this component fetches nothing: the caller passes the
- * status snapshot it already loaded over RPC, so no second data layer is
+ * checked status result it already loaded over RPC, so no second data layer is
  * initialised here.
  */
-import type { StatusDetail } from "../../shared/rpc-types";
+import type { StatusDetailResult } from "../../tui/data/context-db";
 import {
     type CompiledStatusDialog,
     loadCompiledStatusDialog,
@@ -22,8 +22,11 @@ import { flattenTheme, isMissingOpenTuiRuntime } from "./sidebar-mount";
 import type { V2TuiContext } from "./types";
 
 export interface V1StatusDialogMount {
-    /** Replaces the host's dialog surface with the status view for one snapshot. */
-    show(detail: StatusDetail): void;
+    /**
+     * Replaces the host's dialog surface with the status view for one checked
+     * result: the status itself, or the view naming why it is unavailable.
+     */
+    show(status: StatusDetailResult): void;
 }
 
 /**
@@ -44,7 +47,7 @@ export async function mountV1StatusDialog(
         return null;
     }
     return {
-        show: (detail) => {
+        show: (status) => {
             context.ui.dialog.show?.(() =>
                 compiled.StatusDialog({
                     // Read through getters so a theme change repaints: the
@@ -61,8 +64,8 @@ export async function mountV1StatusDialog(
                             },
                         };
                     },
-                    get s() {
-                        return detail;
+                    get status() {
+                        return status;
                     },
                 }),
             );

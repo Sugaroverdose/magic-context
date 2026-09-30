@@ -121,8 +121,21 @@ const WINDOWS_CIM_PROBE_TIMEOUT_MS = 5_000;
 const WINDOWS_PROCESS_SNAPSHOT_TTL_MS = 2_000;
 const MAX_ANCESTOR_WALK_DEPTH = 16;
 const OPEN_CODE_COMMAND_MARKERS = ["opencode", "node", "bun", "electron"];
+// CreationDate is formatted in the query as an ISO-8601 UTC string. Left as a
+// DateTime, ConvertTo-Json's output depends on the PowerShell edition (Windows
+// PowerShell 5.1 can emit `\/Date(ms)\/` or an object wrapping it; PowerShell 7
+// emits a local-offset string), and a start time the parser cannot read turns
+// every live RPC holder's identity check inconclusive.
 const WINDOWS_CIM_COMMAND =
-    "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,CreationDate | ConvertTo-Json -Compress";
+    "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,@{Name='CreationDate';Expression={if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null }}} | ConvertTo-Json -Compress";
+/**
+ * Output limit for process-list commands. A full Win32_Process listing with
+ * command lines routinely exceeds the 1 MiB `execFileSync` default (browser and
+ * editor processes carry very long command lines); past the limit the call
+ * throws ENOBUFS and the probe falls back to tasklist, which reports no start
+ * times.
+ */
+const PROCESS_LIST_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const PI_HARNESS_ARC_MARKERS = [
     "pi-coding-agent",
     "oh-my-pi",
@@ -440,10 +453,16 @@ export function isPidIdentityPlausible(
 
     if (Number.isFinite(record.started_at) && record.started_at > 0) {
         const processStartTime = evidence ? evidence.startTime : readProcessStartTime(record.pid);
-        if (processStartTime === null) return "inconclusive";
-        return processStartTime <= record.started_at + RPC_IDENTITY_SKEW_TOLERANCE_MS
-            ? "plausible"
-            : "implausible";
+        if (processStartTime !== null) {
+            return processStartTime <= record.started_at + RPC_IDENTITY_SKEW_TOLERANCE_MS
+                ? "plausible"
+                : "implausible";
+        }
+        // No start time to compare (Windows tasklist reports none, and a
+        // sandbox can deny the probe). Returning "inconclusive" here let the
+        // migration guard treat a PID the process list had just confirmed alive
+        // as unconfirmed and migrate underneath it. Fall through to the same
+        // command-name check legacy records without a start time get.
     }
 
     const command = evidence
@@ -529,6 +548,7 @@ function execProcessList(
         exec(file, [...args], {
             encoding: "utf8",
             timeout,
+            maxBuffer: PROCESS_LIST_MAX_BUFFER_BYTES,
             stdio: ["ignore", "pipe", "pipe"],
             windowsHide: true,
         }),
@@ -536,6 +556,11 @@ function execProcessList(
 }
 
 function parseWindowsCreationDate(value: unknown): number | null {
+    // Windows PowerShell 5.1 can serialize a DateTime carrying extended
+    // properties as { value: "\/Date(ms)\/", DisplayHint, DateTime }.
+    if (value !== null && typeof value === "object" && "value" in value) {
+        return parseWindowsCreationDate((value as { value: unknown }).value);
+    }
     if (typeof value === "number" && Number.isFinite(value)) {
         return value > 1e12 ? value : value * 1_000;
     }

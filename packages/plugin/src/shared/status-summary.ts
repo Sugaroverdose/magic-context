@@ -38,18 +38,27 @@ export interface UserStatusSummary {
     hiddenVariantWarnings?: string[];
 }
 
-export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary {
-    const compressionState: StatusCompressionState =
-        detail.compaction_enabled === false
-            ? "off"
-            : detail.historianRunning ||
-                detail.compartmentInProgress ||
-                (detail.recompProgress?.phase === "recomp" &&
-                    detail.recompProgress.kind !== "embed")
-              ? "compressing"
-              : detail.compartmentCount > 0
-                ? "ready"
-                : "waiting";
+/**
+ * The status fields the warning list is derived from. A full `StatusDetail`
+ * satisfies it; the status payload check builds one from an unchecked RPC reply
+ * so both paths derive the same warnings.
+ */
+export interface StatusWarningInput {
+    readonly lastTransformError?: string | null;
+    readonly historianFailureCount?: number;
+    readonly configParseFailures?: readonly unknown[];
+    readonly embedding?: { readonly state: string };
+    readonly loggerDiagnostics?: { readonly swallowedWriteCount?: number };
+    readonly memoryMirror?: { readonly stalled?: boolean };
+    readonly compactionMarker?: { readonly code: string | null };
+    readonly memoryAuthorityMismatch?: boolean;
+    readonly dreamerFailures?: readonly unknown[];
+    readonly dreamerTickFailure?: unknown;
+    readonly hostLimitations?: readonly UserFacingFailureKey[];
+}
+
+/** Failure codes the status surfaces print as warnings, deduplicated, in display order. */
+export function statusWarningsFromDetail(detail: StatusWarningInput): UserFacingFailureKey[] {
     const warnings: UserFacingFailureKey[] = [];
     if (detail.lastTransformError) warnings.push("transform_update_failed");
     if ((detail.historianFailureCount ?? 0) > 0) warnings.push("historian_unavailable");
@@ -70,6 +79,21 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
     // same list: the user needs to see that something they configured or asked
     // for is not running here.
     warnings.push(...(detail.hostLimitations ?? []));
+    return [...new Set(warnings)];
+}
+
+export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary {
+    const compressionState: StatusCompressionState =
+        detail.compaction_enabled === false
+            ? "off"
+            : detail.historianRunning ||
+                detail.compartmentInProgress ||
+                (detail.recompProgress?.phase === "recomp" &&
+                    detail.recompProgress.kind !== "embed")
+              ? "compressing"
+              : detail.compartmentCount > 0
+                ? "ready"
+                : "waiting";
 
     return {
         inputTokens: detail.inputTokens,
@@ -101,7 +125,7 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
         historianRunner: detail.historianRunner,
         dreamerRunner: detail.dreamerRunner,
         compactionMarker: detail.compactionMarker,
-        warnings: [...new Set(warnings)],
+        warnings: statusWarningsFromDetail(detail),
         hiddenVariantWarnings: detail.hiddenVariantWarnings ?? [],
     };
 }

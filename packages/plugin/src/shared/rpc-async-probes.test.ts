@@ -192,6 +192,86 @@ test("boot storage wait stays responsive with a locked v90 store and slow Window
     }
 });
 
+/**
+ * The shape of the Windows 11 report behind issue 584: an older OpenCode server
+ * was live, the process list came from tasklist (image names, no start times),
+ * and the boot guard logged the live PID as "not confirmed" and migrated the
+ * shared store from v85 to v91 underneath it.
+ */
+function seedOlderStoreWithLiveServer(pid: number): { root: string; dbPath: string } {
+    const root = mkdtempSync(join(tmpdir(), "async-storage-tasklist-"));
+    const dbPath = join(root, "context.db");
+    const seeded = new Database(dbPath);
+    seeded.exec(
+        "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES(85)",
+    );
+    seeded.close();
+    mkdirSync(join(root, "rpc", "project"), { recursive: true });
+    writeFileSync(
+        join(root, "rpc", "project", `port-${pid}-older.json`),
+        JSON.stringify({
+            pid,
+            port: 52206,
+            started_at: Date.now() - 60_000,
+            kind: "OpenCode server",
+        }),
+    );
+    return { root, dbPath };
+}
+
+test("Windows boot refuses to migrate under a live server that only tasklist can see", async () => {
+    const pid = 10376;
+    const { root, dbPath } = seedOlderStoreWithLiveServer(pid);
+    __setRpcIdentityTestHooks({ platform: "win32" });
+    const probes: string[] = [];
+    __setAsyncProcessProbeForTests(async (file) => {
+        probes.push(file);
+        if (file === "powershell") throw new Error("powershell unavailable");
+        return `"opencode.exe","${pid}","Console","1","412,000 K"\r\n"explorer.exe","4242","Console","1","90,000 K"\r\n`;
+    });
+    try {
+        expect(await openDatabaseAsync({ dbPath, busyTimeoutMs: 0 })).toBeNull();
+        expect(probes).toEqual(["powershell", "tasklist"]);
+        expect(getMigrationOnOpenRefusal()?.serverPids).toEqual([pid]);
+        const checked = new Database(dbPath);
+        expect(
+            checked.prepare("SELECT MAX(version) AS version FROM schema_migrations").get(),
+        ).toEqual({ version: 85 });
+        checked.close();
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("Windows PowerShell 5.1 wrapped creation dates still prove a holder's identity", async () => {
+    __setRpcIdentityTestHooks({ platform: "win32" });
+    __setAsyncProcessProbeForTests(async () =>
+        JSON.stringify([
+            {
+                ProcessId: 10376,
+                ParentProcessId: 1,
+                Name: "opencode.exe",
+                CommandLine: "opencode.exe",
+                CreationDate: {
+                    value: "/Date(1790763300123)/",
+                    DisplayHint: 2,
+                    DateTime: "Wednesday, September 30, 2026 12:15:00 PM",
+                },
+            },
+            {
+                ProcessId: 10377,
+                ParentProcessId: 1,
+                Name: "opencode.exe",
+                CommandLine: "opencode.exe",
+                CreationDate: "2026-09-30T10:15:00.1234567Z",
+            },
+        ]),
+    );
+    const result = await inspectProcessesAsync();
+    expect(result.evidence(10376).startTime).toBe(1790763300123);
+    expect(result.evidence(10377).startTime).toBe(1790763300123);
+});
+
 test("a timed-out refresh retains confirmed blockers until a successful process scan", async () => {
     let now = 1000;
     __setRpcIdentityTestHooks({ platform: "win32", nowMs: () => now });

@@ -9,7 +9,6 @@ import { createComponent as _$createComponent } from "opentui:runtime-module:%40
 // @ts-nocheck
 import { createMemo } from "opentui:runtime-module:solid-js";
 import { StatusDialog } from "./dialogs/status-dialog";
-import { renderUserFacingFailure, userFacingFailureCode } from "../shared/user-facing-codes";
 import { createSidebarContentSlot, kickRecompProgressRefresh, refreshSidebarSnapshot } from "./slots/sidebar-content";
 import { closeRpc, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp } from "./data/context-db";
 import { startNotificationSocket, stopNotificationSocket } from "./data/notification-socket";
@@ -193,19 +192,13 @@ async function showStatusDialog(api, targetSessionId = getSessionId(api)) {
   const modelKey = getModelKeyFromMessages(api, sessionId);
   const result = await loadStatusDetail(sessionId, directory, modelKey);
   if (getSessionId(api) !== sessionId) return false;
-  if (!result.ok) {
-    console.error(`[magic-context] status unavailable code=${userFacingFailureCode("status_unavailable")}: ${result.error}`);
-    showToast(api, {
-      message: renderUserFacingFailure("status_unavailable"),
-      variant: "warning"
-    });
-    return false;
-  }
+  // A result without a usable snapshot still opens the dialog: it shows the
+  // "status unavailable" view naming the reason (RPC error, a directory the
+  // server keeps no state for, missing fields, a server/UI version
+  // difference) instead of a toast that disappears.
   api.ui.dialog.replace(() => _$createComponent(StatusDialog, {
     api: api,
-    get s() {
-      return result.detail;
-    }
+    status: result
   }));
   return true;
 }
