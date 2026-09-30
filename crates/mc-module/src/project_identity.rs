@@ -335,6 +335,9 @@ mod tests {
             .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00Z")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            // Config injected through the environment (a shell or agent tool setting
+            // core.hooksPath this way) would otherwise change the golden commit.
+            .env("GIT_CONFIG_COUNT", "0")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
