@@ -13028,7 +13028,7 @@ impl McHandler {
     }
 
     async fn handle_ctx_expand_facade(&self, channel: u16, request: &Value) -> HandlerOutcome {
-        let Some(args) = facade_arguments(request, &["message", "start"]) else {
+        let Some(args) = facade_arguments(request, &["tag", "message", "start"]) else {
             return invalid_params_error("ctx_expand arguments must be an object");
         };
         let args = &args;
@@ -13048,6 +13048,23 @@ impl McHandler {
             Ok(mode) => mode,
             Err(error) => return tool_error_result(error),
         };
+        if let CtxExpandMode::Tag(number) = expand_mode {
+            let tags = match store.load_tags_for_session(session_id) {
+                Ok(tags) => tags,
+                Err(error) => return tool_error_result(format!("Error: {error}")),
+            };
+            let Some(tag) = tags.iter().find(|tag| tag.tag_number == number) else {
+                return mcp_text_result(format!("no tag {number} in this session; if {number} came from a <session-history> heading or a ctx_search hit, it is an ordinal: use message={number}"), false);
+            };
+            let mut messages = self.cached_expand_messages(session_id).unwrap_or_default();
+            let transcripts = match store.load_chunk_transcripts_for_range(session_id, 0, i64::MAX)
+            {
+                Ok(rows) => rows,
+                Err(error) => return tool_error_result(format!("Error: {error}")),
+            };
+            messages.extend(durable_expand_messages(&transcripts));
+            return mcp_text_result(render_tag_expand(tag, &messages), false);
+        }
         if let CtxExpandMode::Message(message) = expand_mode {
             if let Some(raw_message) =
                 self.cached_expand_messages(session_id)
@@ -15936,11 +15953,26 @@ fn parse_search_date_bound(
 
 #[derive(Debug, Clone, Copy)]
 enum CtxExpandMode {
+    Tag(i64),
     Message(i64),
     Range { start: i64, end: i64, verbose: bool },
 }
 
 fn resolve_ctx_expand_mode(args: &Map<String, Value>) -> Result<CtxExpandMode, String> {
+    if let Some(value) = args.get("tag").filter(|value| !value.is_null()) {
+        let filler = (value == &json!(0) || value == &json!(""))
+            && (args.contains_key("message") || args.contains_key("start"));
+        if !filler {
+            let tag = normalize_tag_input(value)?;
+            if ["message", "start", "end"].iter().any(|key| {
+                args.get(*key)
+                    .is_some_and(|value| !value.is_null() && value != &json!(0))
+            }) {
+                return Err("Error: use tag alone, without message or start/end.".to_string());
+            }
+            return Ok(CtxExpandMode::Tag(tag));
+        }
+    }
     let message = i64_arg(args, "message");
     let start = i64_arg(args, "start");
     let end = i64_arg(args, "end");
@@ -17272,7 +17304,7 @@ fn refuse_retired_memory_id_lane(args: &Map<String, Value>) -> Result<(), String
 
 fn parse_tag_range_string(input: &str) -> Result<Vec<u64>, String> {
     const MAX_RANGE_ELEMENTS: u64 = 1000;
-    let trimmed = input.replace('§', "").trim().to_string();
+    let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("Range string must not be empty".to_string());
     }
@@ -17318,6 +17350,7 @@ fn parse_tag_range_string(input: &str) -> Result<Vec<u64>, String> {
 }
 
 fn parse_tag_integer(raw: &str) -> Result<u64, String> {
+    let raw = normalize_tag_text(raw);
     if raw.is_empty() || !raw.chars().all(|ch| ch.is_ascii_digit()) {
         return Err(format!("Invalid integer: \"{raw}\""));
     }
@@ -18039,7 +18072,9 @@ Use from/to to restrict every source to an inclusive UTC date range."#.to_string
 }
 
 fn ctx_expand_description() -> String {
-    r#"Recover the original conversation behind your compacted history.
+    r#"Recover original content that is no longer on your desk. It takes two kinds of number, and they are never interchangeable:
+- `tag=N`: the number from a §N§ tag or a `[dropped §N§]` placeholder. Returns that one item whole: a text, or a tool call with its full input and output.
+- `message=N`, `start`/`end`: message ordinals, the positions shown in `<session-history>` headings (`## start-end`) and in `ctx_search` hits. An ordinal counts whole messages; a tag counts each text and tool result separately, so the same number points at different things.
 
 Earlier turns are summarized in <session-history> under `## start-end · date · title` headings; each heading stands for the raw messages in that ordinal range. When the summary isn't enough — exact wording, a value, an error message, the reasoning behind a decision — expand the range: ctx_expand(start=120, end=245). Also works around a ctx_search message hit: start=N-10, end=N+5. Ranges after the last compartment are your live tail — already visible, not expandable.
 
@@ -18157,10 +18192,11 @@ fn ctx_expand_schema() -> Value {
         "type": "object",
         "additionalProperties": true,
         "properties": {
-            "start": { "type": "integer", "minimum": 0, "description": "First ordinal of the range — a compartment's start, or an ordinal from a ctx_search hit." },
-            "end": { "type": "integer", "minimum": 0, "description": "Last ordinal of the range, inclusive — a compartment's end." },
+            "tag": { "anyOf": [{ "type": "number" }, { "type": "string" }], "description": "Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone." },
+            "start": { "type": "integer", "minimum": 0, "description": "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number." },
+            "end": { "type": "integer", "minimum": 0, "description": "Last message ordinal of the range, inclusive, not a tag number." },
             "verbose": { "type": "boolean", "description": "With start/end: one entry per message with ordinal and per-part preview instead of the transcript." },
-            "message": { "type": "integer", "minimum": 0, "description": "Recover ONE message in full by ordinal (all text, all tool inputs and outputs). Use alone, without start/end." },
+            "message": { "type": "integer", "minimum": 0, "description": "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone." },
         }
     })
 }
@@ -18172,10 +18208,10 @@ fn ctx_note_schema() -> Value {
         "properties": {
             "action": { "type": "string", "enum": ["write", "read", "update", "dismiss"], "description": "write | read | update | dismiss. Defaults to write when content is given, else read." },
             "content": { "type": "string", "maxLength": 65536, "description": "Note text for write/update: first line is the title (under 80 chars), then the detail." },
-            "note_ids": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 }, "description": "Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write." },
+            "note_ids": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 }, "description": "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write." },
             "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25, "description": "Rows per read (default 25)." },
             "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest rows (default 0)." },
-            "filter": { "type": "string", "enum": ["all", "active", "pending", "ready", "dismissed"], "description": "Read filter: active (default: active + ready), all, pending (unsurfaced smart notes), ready, dismissed." },
+            "filter": { "type": "string", "enum": ["all", "active", "pending", "ready", "dismissed"], "description": "Read filter: all, active, pending (unsurfaced smart notes), ready, dismissed. Omitted, it shows active session notes plus every current smart note (pending included); active shows only notes whose stored status is active." },
             "surface_condition": { "type": "string", "maxLength": 4096, "description": "Makes this a smart note: a condition an outside checker can verify on its own, periodically — repository state, releases, web pages, anything it can look up — never something only this conversation knows. The note is parked until the condition holds." },
             "memory_project": { "type": "string", "description": "Resolved MC project identity supplied by the host transport." },
         }
@@ -27365,7 +27401,7 @@ mod tests {
                 "minItems": 1,
                 "maxItems": 50,
                 "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 },
-                "description": "Note ids: one for update, 1–50 for dismiss, any number for read (returns full bodies). Ignored by write."
+                "description": "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write."
             })
         );
     }
@@ -29245,7 +29281,10 @@ mod tests {
                 ],
             ),
             ("ctx_search", vec!["query", "limit", "from", "to"]),
-            ("ctx_expand", vec!["start", "end", "verbose", "message"]),
+            (
+                "ctx_expand",
+                vec!["start", "end", "verbose", "message", "tag"],
+            ),
             (
                 "ctx_note",
                 vec![
@@ -37984,6 +38023,96 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn ctx_expand_normalizes_copied_tag_forms_and_reduce_ranges() {
+        for value in [
+            json!(12),
+            json!("12"),
+            json!("§12§"),
+            json!("§12"),
+            json!("tag 12"),
+            json!("[dropped §12§]"),
+            json!("  §12§  "),
+        ] {
+            assert_eq!(normalize_tag_input(&value).unwrap(), 12);
+            assert!(matches!(
+                resolve_ctx_expand_mode(json!({"tag": value}).as_object().unwrap()).unwrap(),
+                CtxExpandMode::Tag(12)
+            ));
+        }
+        for value in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!(""),
+            json!("12 13"),
+            json!("§§12§"),
+            json!("tag 12 extra"),
+        ] {
+            assert!(normalize_tag_input(&value)
+                .unwrap_err()
+                .contains("[dropped §12§]"));
+        }
+        assert_eq!(parse_tag_range_string("§3§-§5§").unwrap(), vec![3, 4, 5]);
+        assert_eq!(parse_tag_range_string("§1§,§9§").unwrap(), vec![1, 9]);
+        assert_eq!(
+            parse_tag_range_string("tag 1,[dropped §9§],§12").unwrap(),
+            vec![1, 9, 12]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ctx_expand_tag_recovers_durable_text_and_tool_sibling_not_the_colliding_ordinal() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+        let mut fixture = json!([
+            {"mid":"one", "ordinal":1, "ck":{"role":"user", "content":[{"type":"text", "text":"original text"}]}},
+            {"mid":"two", "ordinal":2, "ck":{"role":"assistant", "content":[{"type":"tool_call", "id":"single", "name":"read", "input":{"path":"single.txt"}}, {"type":"tool_result", "id":"single", "tool_name":"read", "output":{"kind":"text", "text":"single output"}}]}},
+            {"mid":"three", "ordinal":3, "ck":{"role":"assistant", "content":[{"type":"tool_call", "id":"left", "name":"read", "input":{"path":"left.txt"}}, {"type":"tool_result", "id":"left", "tool_name":"read", "output":{"kind":"text", "text":"left output"}}, {"type":"tool_call", "id":"right", "name":"read", "input":{"path":"right.txt"}}, {"type":"tool_result", "id":"right", "tool_name":"read", "output":{"kind":"text", "text":"right output"}}]}},
+            {"mid":"four", "ordinal":4, "ck":{"role":"user", "content":[{"type":"text", "text":"ordinal four, not tag four"}]}}
+        ]);
+        for message in fixture.as_array_mut().unwrap() {
+            for part in message["ck"]["content"].as_array_mut().unwrap() {
+                if part["type"] == "tool_result" {
+                    let text = part["output"]["text"].clone();
+                    part["output"] = json!({"kind":{"type":"text", "text":text}});
+                }
+                *part = json!({"kind":part.clone()});
+            }
+        }
+        let messages: Vec<ck_wire::CkIngressMessage> = serde_json::from_value(fixture).unwrap();
+        publish_ctx_expand_fixture(&store, "ses", project.to_str().unwrap(), &messages);
+        let inputs = ["one#0", "two#1", "three#1", "three#3"].map(|id| mc_store::TagMintInput {
+            block_id: id.to_string(),
+            kind: "message".to_string(),
+            token_count: 10,
+            source_bytes: b"original".to_vec(),
+        });
+        store.seed_tags_for_test("ses", &inputs, 1).unwrap();
+        let text = tool_text(call_facade(&handler, "ctx_expand", json!({"tag":1})).await);
+        assert!(text.contains("original text"), "{text}");
+        let single = tool_text(call_facade(&handler, "ctx_expand", json!({"tag":2})).await);
+        assert!(
+            single.contains("single.txt") && single.contains("single output"),
+            "{single}"
+        );
+        let right =
+            tool_text(call_facade(&handler, "ctx_expand", json!({"tag":"[dropped §4§]"})).await);
+        assert!(
+            right.contains("right.txt") && right.contains("right output"),
+            "{right}"
+        );
+        assert!(!right.contains("left output") && !right.contains("ordinal four"));
+        let ordinal = tool_text(call_facade(&handler, "ctx_expand", json!({"message":4})).await);
+        assert!(ordinal.contains("ordinal four, not tag four"), "{ordinal}");
+        let unknown = tool_text(call_facade(&handler, "ctx_expand", json!({"tag":99})).await);
+        assert_eq!(unknown, "no tag 99 in this session; if 99 came from a <session-history> heading or a ctx_search hit, it is an ordinal: use message=99");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn ctx_expand_uses_durable_raw_messages_for_exact_ranges_and_snapshot_loss() {
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
@@ -39161,3 +39290,107 @@ mod todo_verdict_probe_tests {
 }
 
 mod user_answer;
+
+fn normalize_tag_text(raw: &str) -> &str {
+    let raw = raw.trim();
+    if let Some(inner) = raw
+        .strip_prefix("[dropped §")
+        .and_then(|s| s.strip_suffix("§]"))
+    {
+        return inner;
+    }
+    if let Some(inner) = raw.strip_prefix("tag ") {
+        return inner.trim_start();
+    }
+    if let Some(inner) = raw.strip_prefix('§') {
+        return inner.strip_suffix('§').unwrap_or(inner);
+    }
+    raw
+}
+
+fn normalize_tag_input(value: &Value) -> Result<i64, String> {
+    const ERROR: &str = "Error: tag must be one positive integer: 12, \"12\", \"§12§\", \"§12\", \"tag 12\", or \"[dropped §12§]\" (surrounding whitespace is allowed).";
+    let number = if let Some(raw) = value.as_str() {
+        parse_tag_integer(raw)
+            .ok()
+            .and_then(|n| i64::try_from(n).ok())
+    } else {
+        value.as_i64().or_else(|| {
+            value
+                .as_f64()
+                .filter(|n| n.is_finite() && n.fract() == 0.0 && *n <= 9007199254740991.0)
+                .map(|n| n as i64)
+        })
+    };
+    number
+        .filter(|n| *n > 0 && *n <= 9007199254740991)
+        .ok_or_else(|| ERROR.to_string())
+}
+
+fn render_tag_expand(tag: &mc_store::McTagRow, messages: &[ck_wire::CkIngressMessage]) -> String {
+    let Some((mid, index)) = ck_wire::split_block_id(&tag.block_id) else {
+        return format!(
+            "Tag {}'s original block is no longer in stored history.",
+            tag.tag_number
+        );
+    };
+    let mut ordered = messages.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|message| message.ordinal);
+    ordered.dedup_by(|left, right| left.mid == right.mid);
+    let parts = ordered
+        .iter()
+        .flat_map(|message| {
+            message
+                .ck
+                .content
+                .iter()
+                .enumerate()
+                .map(move |(index, block)| (message.mid.as_str(), index, block))
+        })
+        .collect::<Vec<_>>();
+    let Some(position) = parts
+        .iter()
+        .position(|(owner, part, _)| *owner == mid && *part == index)
+    else {
+        return format!(
+            "Tag {}'s original block is no longer in stored history.",
+            tag.tag_number
+        );
+    };
+    let block = parts[position].2;
+    let (call, result) = match &block.kind {
+        ck_wire::CkKind::ToolCall { id, .. } => {
+            let result = parts
+                .iter()
+                .skip(position + 1)
+                .find_map(|(_, _, part)| match &part.kind {
+                    ck_wire::CkKind::ToolResult { id: other, .. } if other == id => {
+                        Some(Some(*part))
+                    }
+                    ck_wire::CkKind::ToolCall { id: other, .. } if other == id => Some(None),
+                    _ => None,
+                })
+                .flatten();
+            (Some(block), result)
+        }
+        ck_wire::CkKind::ToolResult { id, .. } => {
+            let call = parts[..position]
+                .iter()
+                .rev()
+                .find_map(|(_, _, part)| match &part.kind {
+                    ck_wire::CkKind::ToolCall { id: other, .. } if other == id => Some(Some(*part)),
+                    ck_wire::CkKind::ToolResult { id: other, .. } if other == id => Some(None),
+                    _ => None,
+                })
+                .flatten();
+            (call, Some(block))
+        }
+        _ => return render_cached_expand_part(block).unwrap_or_default(),
+    };
+    [call, result]
+        .into_iter()
+        .flatten()
+        .filter_map(render_cached_expand_part)
+        .collect::<Vec<_>>()
+        .join("\n")
+}

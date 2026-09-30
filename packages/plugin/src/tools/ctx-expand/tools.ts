@@ -5,7 +5,7 @@ import { readSessionChunk } from "../../hooks/magic-context/read-session-chunk";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_EXPAND_DESCRIPTION, CTX_EXPAND_TOKEN_BUDGET } from "./constants";
 import { resolveCtxExpandMode } from "./mode";
-import { renderMessageByOrdinal, renderVerboseRange } from "./render";
+import { renderItemByTag, renderMessageByOrdinal, renderVerboseRange } from "./render";
 import type { CtxExpandArgs } from "./types";
 
 export { CTX_EXPAND_LIGHT_DESCRIPTION } from "../light-descriptions";
@@ -15,16 +15,22 @@ export interface CtxExpandToolDeps {
 }
 
 const ctxExpandArgsShape = {
+    tag: tool.schema
+        .union([tool.schema.number(), tool.schema.string()])
+        .optional()
+        .describe(
+            "Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone.",
+        ),
     start: tool.schema
         .number()
         .optional()
         .describe(
-            "First ordinal of the range — a compartment's start, or an ordinal from a ctx_search hit.",
+            "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
         ),
     end: tool.schema
         .number()
         .optional()
-        .describe("Last ordinal of the range, inclusive — a compartment's end."),
+        .describe("Last message ordinal of the range, inclusive, not a tag number."),
     verbose: tool.schema
         .boolean()
         .optional()
@@ -35,7 +41,7 @@ const ctxExpandArgsShape = {
         .number()
         .optional()
         .describe(
-            "Recover ONE message in full by ordinal (all text, all tool inputs and outputs). Use alone, without start/end.",
+            "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
         ),
 };
 // The tool definition exposes only the documented argument shape to the model
@@ -50,7 +56,7 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
         async execute(rawArgs: CtxExpandArgs, toolContext) {
             const parsedArgs = ctxExpandArgsSchema.safeParse(rawArgs);
             let args = (parsedArgs.success ? parsedArgs.data : rawArgs) as CtxExpandArgs;
-            args = unwrapImitatedReducedArgs(args, ["message", "start"], {
+            args = unwrapImitatedReducedArgs(args, ["tag", "message", "start"], {
                 start: "number",
                 end: "number",
                 verbose: "boolean",
@@ -60,6 +66,9 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
             const mode = resolveCtxExpandMode(args, "positive");
             if (mode.kind === "error") {
                 return mode.message;
+            }
+            if (mode.kind === "tag") {
+                return renderItemByTag(deps.db, sessionId, mode.tag);
             }
             if (mode.kind === "message") {
                 return renderMessageByOrdinal(sessionId, mode.message);
