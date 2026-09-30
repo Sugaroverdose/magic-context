@@ -65,7 +65,13 @@ impl ResolvedContextBoundary {
         .into_iter()
         .all(|(source, source_index, resolved)| {
             crate::split_flat_block_id(resolved).is_some_and(|(mid, block)| {
-                mid == source && source_index.is_none_or(|index| i64::try_from(block) == Ok(index))
+                // Older shared rows can omit an endpoint ID entirely. The host
+                // then resolves a real message from its proven ordinal range;
+                // there is no source ID to preserve, but an explicit block index
+                // still forbids substitution. Row matching retains the empty
+                // source identity so cache reuse cannot mask a later repair.
+                (mid == source || (source.is_empty() && source_index.is_none()))
+                    && source_index.is_none_or(|index| i64::try_from(block) == Ok(index))
             })
         })
     }
@@ -295,6 +301,62 @@ mod tests {
     fn seed(store: &McStore) {
         store.with_context_conn_for_test(|conn| conn.execute_batch("INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at) VALUES ('raw', 0, 2, 5, 'm1', 'm4', 'summary', 'body', 1)")).unwrap();
     }
+    #[test]
+    fn empty_legacy_source_id_accepts_host_resolution_without_rewriting_shared_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .with_context_conn_for_test(|conn| {
+                conn.execute_batch(
+            "UPDATE compartments SET start_message_id='', end_block_index=3 WHERE session_id='raw'"
+        )
+            })
+            .unwrap();
+        let mut resolved = boundary();
+        resolved.source_start_message_id.clear();
+        resolved.source_end_block_index = Some(3);
+        resolved.end_message_id = "m4#3".into();
+        let rows = [resolved];
+        let mut sync = request(&rows, 0);
+        sync.seed_boundary_id = None;
+        store.apply_authority_state_sync(sync).unwrap();
+        let raw = store.load_raw_context_compartments("raw").unwrap();
+        assert_eq!(raw[0].start_message_id, "");
+        assert_eq!(raw[0].end_message_id, "m4#3");
+        let rendered = store.load_compartments("raw").unwrap();
+        assert_eq!(rendered[0].start_message_id, "m1#0");
+        assert_eq!(rendered[0].end_message_id, "m4#3");
+        assert!(store
+            .context_boundaries_resolved("raw", &store.cached_context_boundaries("raw").unwrap())
+            .unwrap());
+        store
+            .with_context_conn_for_test(|conn| {
+                conn.execute_batch(
+                    "UPDATE compartments SET start_message_id='repaired' WHERE session_id='raw'",
+                )
+            })
+            .unwrap();
+        assert!(!store
+            .context_boundaries_resolved("raw", &store.cached_context_boundaries("raw").unwrap())
+            .unwrap());
+    }
+
+    #[test]
+    fn empty_source_resolution_requires_unindexed_source_and_valid_flat_id() {
+        let mut resolved = boundary();
+        resolved.source_start_message_id.clear();
+        assert!(resolved.preserves_source_ids());
+        resolved.source_start_block_index = Some(0);
+        assert!(!resolved.preserves_source_ids());
+        resolved.source_start_block_index = None;
+        resolved.start_message_id = "#0".into();
+        assert!(!resolved.preserves_source_ids());
+        resolved.start_message_id = "m1#0".into();
+        resolved.source_start_message_id = "known".into();
+        assert!(!resolved.preserves_source_ids());
+    }
+
     #[test]
     fn cache_coordinates_survive_restart_without_rewriting_shared_rows() {
         let dir = tempfile::tempdir().unwrap();
