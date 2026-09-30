@@ -36,7 +36,6 @@ import {
 import { sessionLog } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
 import { resolveTodowriteAvailability } from "./ctx-reduce-availability";
-import { invalidateAutoEmbedSession } from "./embed-session-state";
 import { StateSyncTiming, timedStateSyncDatabase } from "./module-state-sync-timing";
 import { isModuleTransportGenerationChangedResult } from "./module-transport";
 import { MODULE_PAGE_MAX_BYTES, moduleRawBlockMappings, moduleWireBodyBytes } from "./module-wire";

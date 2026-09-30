@@ -64,6 +64,7 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { deriveWindowGeometry } from "../../shared/window-geometry";
 import { createCtxSearchTools } from "../../tools/ctx-search/tools";
 import { primeCtxReduceSpawnPermission } from "./ctx-reduce-availability";
+import { autoEmbedAttemptedBySession } from "./embed-session-state";
 import {
     EmergencyFailClosedError,
     ENGINE_RECONNECTING_USER_MESSAGE,
@@ -2123,6 +2124,53 @@ describe("Rust mode authority adapter", () => {
         memorySyncRequestedSessions.add(sessionId);
         expect(await run()).toBe(firstSha);
         expect(watermarkReads).toBeGreaterThan(readsAfterMeta);
+    });
+
+    it("re-arms auto-embed when the module publishes compartments into context.db", async () => {
+        const sessionId = `rust-auto-embed-rearm-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let rowVersion = 1;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform"
+                    ? {
+                          decision: "SOFT+",
+                          row_version: rowVersion,
+                          native_messages: makeMessages(sessionId),
+                      }
+                    : { ok: true },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const run = async () => {
+            const messages = makeMessages(sessionId);
+            await transform.run(
+                sessionId,
+                messages,
+                { messages: [...messages] as unknown[] },
+                makeMeta(db, sessionId),
+            );
+            // The compartment check runs in a background task; let it settle.
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        };
+
+        await run();
+        autoEmbedAttemptedBySession.add(sessionId);
+        await run();
+        expect(autoEmbedAttemptedBySession.has(sessionId)).toBe(true);
+
+        // What the module does on a historian publish: a new shared row plus a new
+        // row_version on the next transform response.
+        db.prepare(
+            `INSERT INTO compartments (session_id, sequence, start_message, end_message,
+                start_message_id, end_message_id, title, content, created_at)
+             VALUES (?, 0, 1, 2, 'm1', 'm2', 'published', 'published by the module', ?)`,
+        ).run(sessionId, Date.now());
+        rowVersion = 2;
+        await run();
+        expect(autoEmbedAttemptedBySession.has(sessionId)).toBe(false);
+        autoEmbedAttemptedBySession.delete(sessionId);
     });
 
     it("forwards the model-routed prompt preset and description overrides", async () => {

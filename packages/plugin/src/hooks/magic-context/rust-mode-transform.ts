@@ -349,6 +349,8 @@ interface RustSessionState extends ModuleStateSyncState {
     todoProbeNextPass?: boolean;
     /** Last seen compartment `max_sequence:count` for this session; a change re-arms auto-embed. */
     autoEmbedCompartmentMark?: string;
+    /** Last transform-response compartment key; the compartment query runs only when it moves. */
+    autoEmbedCompartmentKey?: string;
     lastAppliedAtMs?: number;
     consecutiveFailures: number;
     passCount: number;
@@ -899,6 +901,23 @@ function responseValue(response: unknown): Record<string, unknown> {
     if (isRecord(response) && isRecord(response.result)) return response.result;
     if (isRecord(response)) return response;
     throw new Error("module transform returned a non-object response");
+}
+
+/**
+ * Identity of the module's published compartment state as reported on a transform
+ * response. Returns null for a response without a usable row_version (older modules),
+ * which makes the caller check context.db on every pass instead of never.
+ */
+function moduleCompartmentProjectionKey(response: Record<string, unknown>): string | null {
+    const rowVersion = response.row_version;
+    if (typeof rowVersion !== "number" || !Number.isSafeInteger(rowVersion) || rowVersion < 0) {
+        return null;
+    }
+    return JSON.stringify([
+        rowVersion,
+        response.boundary_id ?? null,
+        response.coverage_ordinal ?? null,
+    ]);
 }
 
 function stateSyncInputSignature(args: {
@@ -3854,25 +3873,32 @@ export function createRustModeTransform(
             heapHolder.wireCaches.set(sessionId, pendingWireCache);
             timings.bookkeeping += performance.now() - bookkeepingStartedAt - timings.delivery;
             appliedAt = performance.now();
+            // The module writes compartments straight into context.db, so the TS
+            // compartment writers that re-arm the once-per-session auto-embed latch
+            // never run for them. A module publish moves row_version, the boundary or
+            // the coverage ordinal, so only a changed key pays for the compartment
+            // query that decides whether to re-arm; stable passes read nothing.
+            const compartmentKey = moduleCompartmentProjectionKey(response);
+            const compartmentCheckDue =
+                compartmentKey === null || state.autoEmbedCompartmentKey !== compartmentKey;
+            state.autoEmbedCompartmentKey = compartmentKey ?? undefined;
             // Embedding work is background maintenance, not a foreground transform writer.
             void withoutSqliteTransformPass(async () => {
-                // The module writes compartments straight into context.db, so the TS
-                // compartment writers that re-arm the once-per-session auto-embed latch
-                // never run for them. Re-arm it here when the session's compartment
-                // high-water mark moves, so new module compartments get embedded too.
-                const compartmentRow = deps.db
-                    .prepare(
-                        "SELECT COALESCE(MAX(sequence), -1) AS max_sequence, COUNT(*) AS count FROM compartments WHERE session_id = ?",
-                    )
-                    .get(sessionId) as { max_sequence?: number; count?: number } | undefined;
-                const compartmentMark = `${compartmentRow?.max_sequence ?? -1}:${compartmentRow?.count ?? 0}`;
-                if (
-                    state.autoEmbedCompartmentMark !== undefined &&
-                    state.autoEmbedCompartmentMark !== compartmentMark
-                ) {
-                    invalidateAutoEmbedSession(sessionId);
+                if (compartmentCheckDue) {
+                    const compartmentRow = deps.db
+                        .prepare(
+                            "SELECT COALESCE(MAX(sequence), -1) AS max_sequence, COUNT(*) AS count FROM compartments WHERE session_id = ?",
+                        )
+                        .get(sessionId) as { max_sequence?: number; count?: number } | undefined;
+                    const compartmentMark = `${compartmentRow?.max_sequence ?? -1}:${compartmentRow?.count ?? 0}`;
+                    if (
+                        state.autoEmbedCompartmentMark !== undefined &&
+                        state.autoEmbedCompartmentMark !== compartmentMark
+                    ) {
+                        invalidateAutoEmbedSession(sessionId);
+                    }
+                    state.autoEmbedCompartmentMark = compartmentMark;
                 }
-                state.autoEmbedCompartmentMark = compartmentMark;
                 await withSqliteBackgroundWriter(() =>
                     drainSingleStoreEmbeddingWatermarks(deps.db),
                 );
