@@ -131,6 +131,45 @@ describe("TUI context RPC data", () => {
         });
     });
 
+    test("session calls go to the server of the session's directory, not the startup one", async () => {
+        // The TUI started in the home directory; the session it shows belongs
+        // to a project directory with its own Magic Context server instance.
+        const dataHome = makeDataHome();
+        const home = "/home-startup";
+        const project = "/home-startup/Pictures/project";
+        const homeServer = await startServer(dataHome, home, () => ({
+            sessionId: "ses_project",
+            disabled: true,
+        }));
+        homeServer.handle("status-detail", async () => ({
+            sessionId: "ses_project",
+            disabled: true,
+        }));
+        homeServer.handle("compartment-count", async () => ({ count: 0 }));
+        const projectServer = await startServer(
+            dataHome,
+            project,
+            () => snapshot("ses_project", 400) as unknown as Record<string, unknown>,
+        );
+        projectServer.handle("status-detail", async () => ({ error: "from the project server" }));
+        projectServer.handle("compartment-count", async () => ({ count: 72 }));
+        initRpcClient(home);
+
+        expect((await loadSidebarSnapshot("ses_project", project)).compartmentCount).toBe(2);
+        const status = await loadStatusDetail("ses_project", project);
+        expect(status.state === "unavailable" && status.reason).toEqual({
+            kind: "rpc_error",
+            message: "from the project server",
+        });
+        expect(await getCompartmentCount("ses_project", project)).toEqual({ ok: true, count: 72 });
+        // The startup directory still reaches the startup server.
+        const homeStatus = await loadStatusDetail("ses_project", home);
+        expect(homeStatus.state === "unavailable" && homeStatus.reason).toEqual({
+            kind: "not_tracked",
+            cause: "home_directory",
+        });
+    });
+
     test("distinguishes a real zero compartment count from an RPC failure", async () => {
         const dataHome = makeDataHome();
         const directory = "/repo-count";

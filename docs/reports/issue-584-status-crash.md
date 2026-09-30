@@ -259,6 +259,53 @@ handler (`rpc-handlers.test.ts`) and a malformed Pi snapshot
 check and the `disabled` branch makes 8 of them fail, including the three
 compiled-dialog render cases for home, paused and empty.
 
+## Defect 3: the TUI asked the startup directory's server about every session
+
+The reporter restarted with every `opencode.exe` killed, and the sidebar still
+showed 0 compartments and 0 memories. The cause: the TUI calls
+`initRpcClient(api.state.path.directory)` once at plugin start, and every
+session-scoped RPC (sidebar snapshot, status detail, embed detail, compartment
+count, recomp) went through that one client. OpenCode starts one Magic Context
+server instance per directory. Non-git directories share OpenCode's global
+project, so a TUI started in `~` lists sessions from, for example,
+`~\Pictures\Camera Roll\VikStudio\TGroup` and opens them. The server for
+that session boots for its own directory (log line 122), but the TUI kept
+asking the home instance. That instance keeps no project state: the sidebar
+read 0/0, and `/ctx-status` got the `{ disabled: true }` home reply.
+
+Fix: the TUI data layer (`tui/data/context-db.ts`) keeps the startup client
+for the notification socket and the process-wide calls. Session-scoped calls
+go to a client for the session's own directory. `tui/data/session-directory.ts`
+picks that directory: `api.state.session.get(id).directory` on OpenCode 1,
+`context.data.session.get(id).location.directory` on OpenCode 2. It falls back
+to the startup directory while the host has not loaded the session. The
+sidebar (both hosts, including the compiled sidebar OpenCode 2 mounts),
+`/ctx-status`, `/ctx-embed` and the recomp dialog use it, and they resolve it
+again on each refresh or command, so a session switch follows along.
+
+Proof on a real OpenCode 1.18.30 TUI. The throwaway root was
+`$TMPDIR/magic-context/issue-584/bind`, with `HOME` pointed into it, the mock
+provider, and `lsof` showing every open `.db` under the root. A session was
+created in the non-git project `HOME/Pictures/project`, then 2 compartments and
+3 memories were seeded for it. The TUI was then started in `HOME` and opened
+that session from `/sessions`. The server booted for `HOME`, then for the
+project, in the same PID, which matches the reporter's log.
+
+| Build | Sidebar | `/ctx-status` |
+| --- | --- | --- |
+| v0.44.4 (same store, same session) | Compartments 0, Memories 0 | crash `view().headline` |
+| this branch | Compartments 2, Memories 3 | full status for the project, "Compartments (2)" (palette and slash command) |
+
+Tests: `tui/data/context-db.test.ts` › `session calls go to the server of the
+session's directory, not the startup one` runs two real RPC servers (home and
+project). It goes red when session calls are forced back onto the startup
+client. `v2/tui/session-directory.test.ts` covers OpenCode 2's session
+directory lookup and its fallbacks.
+
+Still on the startup client: `/ctx-dream`, `/ctx-flush` and `/ctx-wrapup`
+send only a session ID, and on both hosts they reach the startup directory's
+server.
+
 ## Side findings (not changed)
 
 - With no identity at boot (home directory, paused identity), the server hook

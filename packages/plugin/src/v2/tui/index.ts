@@ -25,8 +25,9 @@ import {
     startNotificationSocket,
     stopNotificationSocket,
 } from "../../tui/data/notification-socket";
+import { directoryForSession } from "../../tui/data/session-directory";
 import { eventSessionID } from "./events";
-import { mountV1Sidebar, type V1SidebarMount } from "./sidebar-mount";
+import { mountV1Sidebar, sessionDirectory, type V1SidebarMount } from "./sidebar-mount";
 import { mountV1StatusDialog, type V1StatusDialogMount } from "./status-dialog-mount";
 import type { V2KeymapLayer, V2SidebarState, V2TuiContext } from "./types";
 
@@ -179,6 +180,11 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         { initial: { snapshots: {} } },
     );
 
+    // The TUI can show a session from another directory than the one it
+    // started in; session-scoped calls go to that session's own server.
+    const directoryOf = (sessionID: string): string =>
+        directoryForSession(sessionDirectory(context, sessionID), directory);
+
     const refresh = async (sessionID: string, force = false): Promise<void> => {
         if (!sessionID || inflight.has(sessionID)) return;
         const now = Date.now();
@@ -186,7 +192,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         refreshedAt.set(sessionID, now);
         inflight.add(sessionID);
         try {
-            const snapshot = await loadSidebarSnapshot(sessionID, directory);
+            const snapshot = await loadSidebarSnapshot(sessionID, directoryOf(sessionID));
             updateSidebar((draft) => {
                 draft.snapshots[sessionID] = snapshot;
             });
@@ -201,7 +207,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
             context.ui.toast.show({ message: "No active session", variant: "warning" });
             return false;
         }
-        const result = await loadStatusDetail(target, directory);
+        const result = await loadStatusDetail(target, directoryOf(target));
         if (currentSessionID(context) !== target) return false;
         // A result without a usable snapshot still opens the dialog, which then
         // names why the status is unavailable.
@@ -230,7 +236,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
             context.ui.toast.show({ message: "No active session", variant: "warning" });
             return false;
         }
-        const count = await getCompartmentCount(target, directory);
+        const count = await getCompartmentCount(target, directoryOf(target));
         if (currentSessionID(context) !== target) return false;
         if (!count.ok) {
             context.ui.toast.show({ message: "Unable to load recomp details", variant: "error" });
@@ -247,7 +253,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
             label: { confirm: "Run recomp", cancel: "Cancel" },
         });
         if (!confirmed) return true;
-        const requested = await requestRecomp(target);
+        const requested = await requestRecomp(target, directoryOf(target));
         context.ui.toast.show({
             message: requested
                 ? "Recomp requested; historian will start shortly"

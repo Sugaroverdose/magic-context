@@ -16,7 +16,24 @@ import {
 export type { EmbedDetail, SidebarSnapshot, StatusDetail };
 
 let rpcClient: MagicContextRpcClient | null = null;
+let rpcClientDirectory: string | null = null;
 let rpcGeneration = 0;
+
+/**
+ * Clients for session directories other than the one the TUI started in.
+ *
+ * OpenCode runs one Magic Context server instance per directory, and each one
+ * writes its RPC discovery file under that directory's hash. A TUI started in
+ * one directory (commonly the home directory) can show a session whose
+ * directory is another project; asking the startup directory's server about
+ * that session returns the startup directory's answer (for the home directory:
+ * no project state at all), so the sidebar and `/ctx-status` showed nothing.
+ * Session-scoped calls therefore go to the client for the session's own
+ * directory. The startup client stays as it is for the notification socket and
+ * the process-wide calls.
+ */
+const sessionDirectoryClients = new Map<string, MagicContextRpcClient>();
+const MAX_SESSION_DIRECTORY_CLIENTS = 16;
 
 /** Initialize the RPC client. Call once on TUI startup. */
 export function initRpcClient(directory: string): void {
@@ -26,6 +43,35 @@ export function initRpcClient(directory: string): void {
     // new generation and abandons its in-flight connect).
     rpcGeneration += 1;
     rpcClient = new MagicContextRpcClient(storageDir, directory);
+    rpcClientDirectory = directory;
+    resetSessionDirectoryClients();
+}
+
+function resetSessionDirectoryClients(): void {
+    for (const client of sessionDirectoryClients.values()) client.reset();
+    sessionDirectoryClients.clear();
+}
+
+/**
+ * The client for the server instance that owns `directory`: the startup client
+ * when the directory is the one the TUI started in (or unknown), otherwise a
+ * client discovering that directory's own server. Null before init.
+ */
+function clientForDirectory(directory: string): MagicContextRpcClient | null {
+    if (!rpcClient) return null;
+    if (!directory || directory === rpcClientDirectory) return rpcClient;
+    const existing = sessionDirectoryClients.get(directory);
+    if (existing) return existing;
+    if (sessionDirectoryClients.size >= MAX_SESSION_DIRECTORY_CLIENTS) {
+        const oldest = sessionDirectoryClients.keys().next().value;
+        if (oldest !== undefined) {
+            sessionDirectoryClients.get(oldest)?.reset();
+            sessionDirectoryClients.delete(oldest);
+        }
+    }
+    const client = new MagicContextRpcClient(getMagicContextStorageDir(), directory);
+    sessionDirectoryClients.set(directory, client);
+    return client;
 }
 
 export function getRpcGeneration(): number {
@@ -45,6 +91,8 @@ export function closeRpc(): void {
     rpcGeneration += 1;
     rpcClient?.reset();
     rpcClient = null;
+    rpcClientDirectory = null;
+    resetSessionDirectoryClients();
 }
 
 const EMPTY_SNAPSHOT: SidebarSnapshot = {
@@ -139,9 +187,10 @@ export async function loadSidebarSnapshot(
     directory: string,
 ): Promise<SidebarSnapshot> {
     const empty: SidebarSnapshot = { ...EMPTY_SNAPSHOT, sessionId };
-    if (!rpcClient) return recallSidebarSnapshot(sessionId, empty);
+    const client = clientForDirectory(directory);
+    if (!client) return recallSidebarSnapshot(sessionId, empty);
     try {
-        const result = await rpcClient.call<SidebarSnapshot>("sidebar-snapshot", {
+        const result = await client.call<SidebarSnapshot>("sidebar-snapshot", {
             sessionId,
             directory,
         });
@@ -182,9 +231,10 @@ export async function loadStatusDetail(
     directory: string,
     modelKey?: string,
 ): Promise<StatusDetailResult> {
-    if (!rpcClient) return statusRpcFailure("RPC client is not initialized");
+    const client = clientForDirectory(directory);
+    if (!client) return statusRpcFailure("RPC client is not initialized");
     try {
-        const reply = await rpcClient.call<unknown>("status-detail", {
+        const reply = await client.call<unknown>("status-detail", {
             sessionId,
             directory,
             modelKey,
@@ -207,9 +257,10 @@ const EMPTY_EMBED_DETAIL: EmbedDetail = {
 
 /** Fetch embedding coverage status for `/ctx-embed` via RPC. */
 export async function loadEmbedDetail(sessionId: string, directory: string): Promise<EmbedDetail> {
-    if (!rpcClient) return EMPTY_EMBED_DETAIL;
+    const client = clientForDirectory(directory);
+    if (!client) return EMPTY_EMBED_DETAIL;
     try {
-        const result = await rpcClient.call<EmbedDetail>("embed-detail", {
+        const result = await client.call<EmbedDetail>("embed-detail", {
             sessionId,
             directory,
         });
@@ -229,12 +280,13 @@ export async function getCompartmentCount(
     sessionId: string,
     directory?: string,
 ): Promise<CompartmentCountResult> {
-    if (!rpcClient) return { ok: false, error: "RPC client is not initialized" };
+    const client = clientForDirectory(directory ?? "");
+    if (!client) return { ok: false, error: "RPC client is not initialized" };
     try {
-        const result = await rpcClient.call<{ count?: number; error?: string }>(
-            "compartment-count",
-            { sessionId, directory },
-        );
+        const result = await client.call<{ count?: number; error?: string }>("compartment-count", {
+            sessionId,
+            directory,
+        });
         if (typeof result.error === "string") return { ok: false, error: result.error };
         if (typeof result.count !== "number" || !Number.isFinite(result.count)) {
             return { ok: false, error: "Invalid compartment count response" };
@@ -245,11 +297,16 @@ export async function getCompartmentCount(
     }
 }
 
-/** Send recomp request to server via RPC. */
-export async function requestRecomp(sessionId: string): Promise<boolean> {
-    if (!rpcClient) return false;
+/**
+ * Send recomp request to server via RPC. `directory` is the session's
+ * directory, so the request reaches the server instance that owns the session
+ * (the same one the recomp dialog read its compartment count from).
+ */
+export async function requestRecomp(sessionId: string, directory?: string): Promise<boolean> {
+    const client = clientForDirectory(directory ?? "");
+    if (!client) return false;
     try {
-        const result = await rpcClient.call<{ ok: boolean }>("recomp", { sessionId });
+        const result = await client.call<{ ok: boolean }>("recomp", { sessionId });
         return result.ok ?? false;
     } catch {
         return false;

@@ -57,6 +57,16 @@ export interface V2TuiContext {
     readonly data: {
         readonly listen: (handler: (event: { details: unknown }) => void) => () => void;
         readonly location: { default(): V2TuiLocation };
+        /**
+         * `Context.data.session` on GA 2.0.x. `location.directory` is the
+         * directory whose Magic Context server owns the session. Optional so a
+         * host without it falls back to the startup directory.
+         */
+        readonly session?: {
+            get(
+                sessionID: string,
+            ): { readonly location?: { readonly directory?: string } } | undefined;
+        };
     };
     readonly keymap: {
         readonly layer: (

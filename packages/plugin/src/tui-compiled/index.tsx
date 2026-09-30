@@ -11,6 +11,7 @@ import { createMemo } from "opentui:runtime-module:solid-js";
 import { StatusDialog } from "./dialogs/status-dialog";
 import { createSidebarContentSlot, kickRecompProgressRefresh, refreshSidebarSnapshot } from "./slots/sidebar-content";
 import { closeRpc, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp } from "./data/context-db";
+import { directoryForSession } from "./data/session-directory";
 import { startNotificationSocket, stopNotificationSocket } from "./data/notification-socket";
 import { isCompactionEnabled } from "../config/agent-disable";
 import { loadPluginConfig } from "../config";
@@ -105,6 +106,20 @@ function getSessionId(api) {
   }
   return null;
 }
+
+/**
+ * The directory whose Magic Context server owns this session, which is not
+ * necessarily the directory the TUI started in (see `directoryForSession`).
+ */
+function sessionDirectory(api, sessionId) {
+  let reported;
+  try {
+    reported = api.state.session.get(sessionId)?.directory;
+  } catch {
+    // Session state not available yet: fall back to the startup directory.
+  }
+  return directoryForSession(reported, api.state.path.directory ?? "");
+}
 function getModelKeyFromMessages(api, sessionId) {
   try {
     const msgs = api.state.session.messages(sessionId);
@@ -137,7 +152,7 @@ async function showRecompDialog(api, targetSessionId = getSessionId(api)) {
     });
     return false;
   }
-  const countResult = await getCompartmentCount(sessionId, api.state.path.directory ?? "");
+  const countResult = await getCompartmentCount(sessionId, sessionDirectory(api, sessionId));
   // Ack only after the dialog is actually shown for the same active session;
   // route switches while the RPC detail load is in flight must leave it pending.
   if (getSessionId(api) !== sessionId) return false;
@@ -155,7 +170,7 @@ async function showRecompDialog(api, targetSessionId = getSessionId(api)) {
       return [count === 0 ? "This session has no compartments yet — recomp will build them from raw history." : `You have ${count} compartments.`, "", "Recomp will rebuild the compressed history from raw history. Saved memories are not changed.", "This may take a long time and consume significant tokens.", "", "Proceed?"].join("\n");
     },
     onConfirm: async () => {
-      const requested = await requestRecomp(sessionId);
+      const requested = await requestRecomp(sessionId, sessionDirectory(api, sessionId));
       if (!requested) {
         showToast(api, {
           message: "Recomp request failed",
@@ -188,7 +203,7 @@ async function showStatusDialog(api, targetSessionId = getSessionId(api)) {
     });
     return false;
   }
-  const directory = api.state.path.directory ?? "";
+  const directory = sessionDirectory(api, sessionId);
   const modelKey = getModelKeyFromMessages(api, sessionId);
   const result = await loadStatusDetail(sessionId, directory, modelKey);
   if (getSessionId(api) !== sessionId) return false;
@@ -243,7 +258,7 @@ async function showEmbedDialog(api, targetSessionId = getSessionId(api)) {
     });
     return false;
   }
-  const directory = api.state.path.directory ?? "";
+  const directory = sessionDirectory(api, sessionId);
   const detail = await loadEmbedDetail(sessionId, directory);
   if (getSessionId(api) !== sessionId) return false;
   api.ui.dialog.replace(() => _$createComponent(EmbedDialog, {

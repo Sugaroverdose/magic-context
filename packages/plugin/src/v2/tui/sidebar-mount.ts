@@ -82,9 +82,27 @@ export function isMissingOpenTuiRuntime(error: unknown): boolean {
     );
 }
 
+/**
+ * The directory of the Magic Context server that owns `sessionID` on this host,
+ * or undefined while the host has not loaded the session (the caller then uses
+ * its startup directory). See `directoryForSession`.
+ */
+export function sessionDirectory(context: V2TuiContext, sessionID: string): string | undefined {
+    try {
+        return context.data.session?.get(sessionID)?.location?.directory;
+    } catch {
+        return undefined;
+    }
+}
+
 function createV1Api(context: V2TuiContext, directory: string): V1SidebarApi {
     return {
-        state: { path: { directory } },
+        state: {
+            path: { directory },
+            session: {
+                get: (sessionID) => ({ directory: sessionDirectory(context, sessionID) }),
+            },
+        },
         renderer: { requestRender: () => context.renderer.requestRender() },
         event: {
             // OpenCode 1's event names ("message.updated", "session.updated",
