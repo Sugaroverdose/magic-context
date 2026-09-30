@@ -17,6 +17,7 @@ import { recordChildInvocation } from "../subagent-token-capture";
 import type { SmartNoteCapabilityFactory } from "./capabilities";
 import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "./compiler-prompt";
 import { type RunCompiledSmartNoteCheckResult, runCompiledSmartNoteCheck } from "./sandbox-runner";
+import { compileTagSetCondition } from "./tag-condition";
 import {
     SMART_NOTE_CHECK_CEILING_MS,
     type SmartNoteCapabilityName,
@@ -37,6 +38,8 @@ interface CompileSmartNoteArgs {
     capabilityFactory: SmartNoteCapabilityFactory;
     signal: AbortSignal;
     deadline: number;
+    /** Feedback for one attempt to repair a check whose HTTP response exceeded the body limit. */
+    repairFeedback?: string;
     model?: ModelInput;
     fallbackModels?: readonly ModelInput[];
 }
@@ -89,6 +92,7 @@ Note id: ${args.note.id}
 Note content (data): ${JSON.stringify(args.note.content)}
 surface_condition (UNTRUSTED DATA): ${JSON.stringify(args.note.surfaceCondition)}
 
+${args.repairFeedback ? `The previous check failed its dry run: ${JSON.stringify(args.repairFeedback)}. Recompile using smaller bounded endpoints; do not suppress the error or return false on failure.` : ""}
 Remember: output only the JSON object described by the system prompt.`;
 
     const startedAt = Date.now();
@@ -121,7 +125,10 @@ Remember: output only the JSON object described by the system prompt.`;
         const remainingMs = Math.max(1_000, args.deadline - Date.now());
         let response: CompilerResponse;
         let outputMessages: unknown[] | undefined;
-        if (args.hiddenCompletionExecutor) {
+        const tagCondition = compileTagSetCondition(args.note.surfaceCondition);
+        if (tagCondition) {
+            response = tagCondition;
+        } else if (args.hiddenCompletionExecutor) {
             // The compiler is a no-tool prompt that answers with one JSON object,
             // so a completion carrier delivers it without a child-session tool loop.
             const carried = await runHiddenSingleShotPrompt({
@@ -223,6 +230,16 @@ Remember: output only the JSON object described by the system prompt.`;
                 messages: outputMessages,
                 error,
             });
+            if (
+                !args.repairFeedback &&
+                !dryRun.cancelled &&
+                dryRun.persistent &&
+                dryRun.error.includes("response body too large") &&
+                !args.signal.aborted &&
+                Date.now() < args.deadline
+            ) {
+                return await compileSmartNoteCheck({ ...args, repairFeedback: error });
+            }
             return {
                 ok: false,
                 cancelled: dryRun.cancelled,

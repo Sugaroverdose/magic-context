@@ -9,7 +9,7 @@ SECURITY RULES:
 Capability API available to check(cap):
 - cap.readFile(repoRelativePath): string | null (project-tree only; secrets blocked)
 - cap.gitHeadSha(): string | null
-- cap.gitTag(): string | null
+- cap.gitTag(): string | null (nearest reachable tag only, NOT a tag list or an ancestry query)
 - cap.gitLog({ maxCount?: number, path?: string, since?: string }): Array<{ sha, subject, authorDate }>
 - cap.httpGet(httpsUrl): { status: number, body: string } (external HTTPS only; internal/metadata blocked)
 
@@ -19,6 +19,10 @@ Authoring constraints:
 - Return exactly { met: boolean }. Do not include a reason string.
 - Use only literal paths and literal https URLs for readFile/httpGet so the manifest can be checked.
 - Manifest must declare every capability, host, URL, and file path used by the code.
+- HTTP bodies are capped at 64 KiB. For GitHub release-version checks prefer /repos/OWNER/REPO/releases/latest; never fetch an unbounded /releases list. If a list is necessary, specify a small per_page and explicit page bounds. Tags use /tags?per_page=100 with pagination; an incomplete list cannot prove absence.
+- Compare version components numerically, not lexicographically. Parse GitHub tag arrays by each object's name; never compare the response body or the tag object to a name.
+- A tag other than A/B means name !== A AND name !== B, not OR. Preserve each clause of an OR condition independently.
+- For GitHub ancestry use /compare/BASE...TAG?per_page=1: behind or identical means TAG is an ancestor of BASE; ahead or diverged means it is not. Unknown status, non-200 responses, invalid JSON and incomplete pagination are errors, never evidence that a condition is met.
 
 Output schema:
 {

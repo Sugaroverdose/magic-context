@@ -175,6 +175,15 @@ export function peekNoteNudgeText(
         }
     }
 
+    const failureNotice = notes.find((note) =>
+        /^Smart note #\d+ cannot be checked\.\nCondition: /.test(note.content),
+    );
+    if (failureNotice) {
+        const reason =
+            failureNotice.content.split("\nReason: ")[1]?.split("\n")[0] ?? "check unavailable";
+        return `Smart note check unavailable: ${reason}. Read ctx_note #${failureNotice.id} for the condition and repair instructions; this is NOT evidence that the condition is met.`;
+    }
+
     const parts: string[] = [];
     if (notes.length > 0) {
         parts.push(`${notes.length} deferred note${notes.length === 1 ? "" : "s"}`);
@@ -265,7 +274,26 @@ export function markNoteNudgeDelivered(
         return { ok: true, kind: "already-present" };
     }
 
-    const outcome = deliverNoteNudgeAtomic(db, sessionId, messageId, text);
+    const outcome = db
+        .transaction(() => {
+            const delivered = deliverNoteNudgeAtomic(db, sessionId, messageId, text);
+            const noticeId = text?.match(
+                /^Smart note check unavailable: [\s\S]*Read ctx_note #(\d+) for the condition/,
+            );
+            if (delivered.ok && noticeId) {
+                // A persisted anchor is the receipt. Acknowledge the separate failure
+                // notice, never the pending smart note whose condition is still unmet.
+                db.prepare(`UPDATE notes SET status = 'dismissed', updated_at = ?
+                WHERE id = ? AND type = 'session' AND session_id = ?
+                  AND content LIKE 'Smart note #% cannot be checked.%'`).run(
+                    Date.now(),
+                    Number(noticeId[1]),
+                    sessionId,
+                );
+            }
+            return delivered;
+        })
+        .immediate();
     if (outcome.ok) {
         recordNoteNudgeDeliveryTime(sessionId);
     }

@@ -1,7 +1,8 @@
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../../shared/write-transaction-timing";
-import { getPendingSmartNotes, type Note, type NoteCheckStatus } from "../storage-notes";
+import { setPersistedNoteNudgeTrigger } from "../storage-meta-persisted";
+import { addNote, getPendingSmartNotes, type Note, type NoteCheckStatus } from "../storage-notes";
 import {
     SMART_NOTE_CHECK_LIVENESS_RECHECK_MS,
     SMART_NOTE_CHECK_MAX_STALENESS_MS,
@@ -318,32 +319,62 @@ export function markSmartNoteCompilationFailure(
     maxFailures: number,
     error: string,
     persistent: boolean,
+    fallbackSessionId?: string,
 ): void {
-    const failureCount = readFailureCount(db, noteId, "check_failure_count") + 1;
-    const status: NoteCheckStatus = persistent
-        ? "uncompiled"
-        : failureCount >= maxFailures
-          ? "fallback"
-          : "uncompiled";
-    const nextDueAt = now + (persistent ? 7 * 24 * 60 * 60 * 1_000 : backoffMs(failureCount));
-    db.prepare(
-        `UPDATE notes
+    db.transaction(() => {
+        const failureCount = readFailureCount(db, noteId, "check_failure_count") + 1;
+        const status: NoteCheckStatus = persistent
+            ? "uncompiled"
+            : failureCount >= maxFailures
+              ? "fallback"
+              : "uncompiled";
+        const nextDueAt = now + (persistent ? 7 * 24 * 60 * 60 * 1_000 : backoffMs(failureCount));
+        db.prepare(
+            `UPDATE notes
          SET check_failure_count = ?,
              check_status = ?,
              check_next_due_at = ?,
              ready_reason = ?,
              updated_at = ?
          WHERE id = ? AND type = 'smart'`,
-    ).run(
-        failureCount,
-        status,
-        nextDueAt,
-        // Only a failure that will repeat regardless of the watched event asks the
-        // owner to rewrite the condition; a transient failure just retries.
-        persistent ? `Condition can't be checked: ${error}; rewrite it` : null,
-        now,
-        noteId,
-    );
+        ).run(
+            failureCount,
+            status,
+            nextDueAt,
+            // Only a failure that will repeat regardless of the watched event asks the
+            // owner to rewrite the condition; a transient failure just retries.
+            persistent ? `Condition can't be checked: ${error}; rewrite it` : null,
+            now,
+            noteId,
+        );
+        if (persistent || failureCount >= maxFailures) {
+            const source = db
+                .prepare(
+                    "SELECT session_id, surface_condition FROM notes WHERE id = ? AND type = 'smart'",
+                )
+                .get(noteId) as
+                | { session_id: string | null; surface_condition: string | null }
+                | undefined;
+            const ownerSessionId = source?.session_id ?? fallbackSessionId;
+            if (source && ownerSessionId) {
+                const prefix = `Smart note #${noteId} cannot be checked.\nCondition: ${source.surface_condition}\nReason: `;
+                // Keep the notice even after dismissal so retries of the same condition
+                // cannot create another owner alert. The source note remains pending.
+                const alreadyNotified = db
+                    .prepare(`SELECT 1 FROM notes
+                    WHERE type = 'session' AND session_id = ?
+                      AND substr(content, 1, length(?)) = ? LIMIT 1`)
+                    .get(ownerSessionId, prefix, prefix);
+                if (!alreadyNotified) {
+                    addNote(db, "session", {
+                        sessionId: ownerSessionId,
+                        content: `${prefix}${error.slice(0, 2048)}\nRewrite the condition or repair its data source; this is not evidence that it is met.`,
+                    });
+                    setPersistedNoteNudgeTrigger(db, ownerSessionId);
+                }
+            }
+        }
+    }).immediate();
 }
 
 function readFailureCount(db: Database, noteId: number, column: string): number {
