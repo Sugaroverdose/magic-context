@@ -11,7 +11,7 @@ Date: 2026-10-01. Plugin under test: commit `7e61ac82fd`, the tip of the reasoni
 | OpenAI Responses, API key, `store:false` + `include:["reasoning.encrypted_content"]`, `gpt-5-nano` | 2 of 2 old reasoning items removed; all 12 `function_call` items kept | **yes**, 6 of 6 calls | 13,141 (13,056) → **9,903** (9,344); the next call 9,939 (9,856) |
 | DeepSeek, `deepseek-flash`, thinking on, age lane | 5 oldest `reasoning_content` values sent as `""` | **yes**, 6 of 6 | 12,025 (11,776) → 12,016 (11,136); the next call 12,278 (12,032) |
 | DeepSeek, drop lane (oldest tool pair dropped, then `/ctx-flush`) | tool call and its result fully removed (12 → 11 of each) | **yes**, 6 of 6 | 11,998 (11,776) → 11,979 (11,136); the next call 12,041 (11,904) |
-| OpenRouter, `anthropic/claude-haiku-4.5` | **ineffective**: the plugin selected 1 assistant message for reasoning removal, but only the plain `reasoning` text left the wire; the signed `reasoning_details` block stayed | yes, 19 of 19 (nothing signed was removed) | 13,381 (13,280) → 13,400 (11,664) |
+| OpenRouter, `anthropic/claude-haiku-4.5` | **ineffective at `7e61ac82fd`**: the plugin selected 1 assistant message for reasoning removal, but only the plain `reasoning` text left the wire; the signed `reasoning_details` block stayed. **Fixed; see the rerun below** | yes, 19 of 19 (nothing signed was removed) | 13,381 (13,280) → 13,400 (11,664); after the fix 13,530 (13,425) → **13,374** (11,664) |
 | OpenRouter, `google/gemini-3-flash-preview` | **not exercised**: the host stored no reasoning parts to remove | yes, 19 of 19 (no removal) | n/a |
 | Bedrock, `us.anthropic.claude-haiku-4-5-20251001-v1:0` | **not run** | n/a | n/a |
 | Kimi For Coding, `kimi-for-coding` | **not run** | n/a | n/a |
@@ -43,6 +43,20 @@ On the providers where removal happened, input is the provider's own field: Open
    The cause is the adapter. `@openrouter/ai-sdk-provider` builds `reasoning_details` from the message-level provider options first, then from the provider options of a `tool-call` part, and only last from the `reasoning` part (`findFirstReasoningDetails`, `dist/index.js` in 3.1.0). OpenRouter streams `reasoning_details` onto the tool call as well. Removing the `reasoning` part therefore leaves the signed block in place.
 
    Whether a real removal would be accepted on this route is still untested. It would need `reasoning_details` stripped from the other parts of the same message.
+
+## OpenRouter rerun after the fix
+
+Plugin: the reasoning-removal branch after the review fixes. For a selected assistant on OpenRouter, removal now also strips the `openrouter.reasoning_details` copies from the message's tool-call parts, which `findFirstReasoningDetails` reads before the reasoning part. A message whose copies are Gemini thought signatures (`format: google-gemini-*`) is never selected, so those bytes never change. Run: `--providers openrouter`, same `mc-e2e` enrollment, same scenarios (12-step loop, `clear_reasoning_age: 10`, `/ctx-flush`, three more turns), 38 billed calls. Every call was accepted, and `lsof` listed only the root's `live.db` and `context.db` files.
+
+| Route, model | Call | Request bytes | Reasoning on the wire | Input (cached / cache write) |
+|---|---|---:|---|---|
+| OpenRouter, `anthropic/claude-haiku-4.5` | 13, last before removal | 52,828 | 1 signed `reasoning_details` block | 13,530 (13,425 / 99) |
+| | **14, removal pass** (plugin log: `froze 1 assistant(s)`) | **50,207** | **0**: the signed block left the wire with the reasoning part | **13,374** (11,664 / 1,700), although a new user turn was added |
+| | 15, next call | 51,650 | only the new turn's block | 13,517 (13,364 / 147) |
+| | 16–19 | 51,834 → 54,510 | new turns' blocks only | 13,495 → 13,717, cached 13,364 → 13,598 |
+| OpenRouter, `google/gemini-3-flash-preview` | 1–19 | 53,146 → 61,200 | every step's tool-call signatures kept (12 → 15 blocks) | 11,462 → 12,030, cached ≈ 11.2K throughout; no selection, no byte change from the lane |
+
+**Result.** On OpenRouter Claude the lane is now effective. The removal pass shrank the request by 2,621 bytes and billed 156 fewer input tokens than the call before it, despite the added turn; the earlier run grew by 19. The cache read dropped on the removal pass only (13,425 → 11,664, the expected cost of a real edit at the first assistant message) and was back at 13,364 on the next call. Gemini's signatures were untouched and every call was accepted.
 
 ## Per provider
 

@@ -292,6 +292,8 @@ async function runScenario(name: "age" | "drop" | "worker" | "worker-control", r
         await prompt("pass-2");
         if (name === "drop") {
             const db = new Database(contextDb);
+            // The host may still hold a write lock from the previous pass.
+            db.exec("PRAGMA busy_timeout = 15000");
             const tag = db
                 .query("SELECT tag_number AS n FROM tags WHERE session_id = ? AND type = 'tool' AND message_id = ?")
                 .get(session.id, "call_fx_5") as { n: number } | null;

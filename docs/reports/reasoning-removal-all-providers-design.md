@@ -31,24 +31,29 @@ A message is never selected when it is one of these:
 - the newest assistant message;
 - the newest assistant that still carries replayable content (`findLatestAssistantReasoningMutationExemptMessage`, which skips OpenCode's metadata-only request shell);
 - untagged (tag 0);
-- a message whose removal would leave no wire content. Wire content means a non-empty text part, a tool part or a file part. This keeps an assistant from becoming an empty message on adapters that do not drop empty messages.
+- a message whose removal would leave no wire content. Wire content means a non-empty text part, a tool part or a file part. This keeps an assistant from becoming an empty message on adapters that do not drop empty messages;
+- a message whose reasoning payload would stay on the wire through another part. On OpenRouter, `@openrouter/ai-sdk-provider` sends `reasoning_details` taken from the message's tool-call provider options before the reasoning part (`findFirstReasoningDetails`). Removal there also strips those copies from the message's tool parts. When the copies are Gemini thought signatures (`format: google-gemini-*`), which Gemini needs back for every function call of the current turn, the message is never selected and nothing changes. The lane never changes bytes without taking reasoning off the wire; a per-route test pins this.
 
-**Prefix-bound models** (Fable 5.1, Opus 5.5 and Sonnet 5.5 via `isPrefixBoundThinkingModel`, on any route): selection walks reasoning-bearing assistants oldest-first. It stops at the first one that is neither already removed nor eligible now, so the removed set is always a contiguous oldest prefix. The set only grows, so a removed block is never restored. On OpenCode primary sessions the existing proactive thinking strip already removes all reasoning on these models on every busting pass. The new lane matters for subagents, which that strip skips. The worker in the evidence was a subagent.
+An ineligible message is skipped; it does not stop the walk.
+
+**Prefix-bound models** (Fable 5.1, Opus 5.5 and Sonnet 5.5 via `isPrefixBoundThinkingModel`, on any route): the age lane selects nothing, on every host and for canonical Anthropic too. The binding rule (`anthropic-thinking-binding.md`) is that a signed block stays valid only while everything sent before it is unchanged. Removing an older block therefore invalidates every newer one, and an "oldest prefix" removal protects nothing. On these models the proactive thinking strip removes every signed block on a busting pass, the pass whose edits invalidate them anyway. That strip now also runs for subagents, in OpenCode and in Pi; the worker in the evidence was a subagent. In Rust mode, host postprocess does not run for subagents, so a bound-model subagent there gets no reasoning reclaim (no new invalidation either).
 
 ### OpenCode (packages/plugin)
 
 - **Canonical `anthropic`:** unchanged. The existing `clearOldReasoning` → `[cleared]` → empty-sentinel lane and its watermark replay stay exactly as they are, so canonical Anthropic output is byte-identical to today. The new lane does not run there.
 - **Every other provider:** a new frozen id set holds the ids of assistant messages whose reasoning was removed.
   - **Storage:** a new `reasoningRemoval` namespace in the existing per-session replay document (`session_meta.trailing_blank_decisions`, v2 envelope, the same document `piNative` lives in). No schema change and no migration.
-  - **Selection** runs only where `clearOldReasoning` runs today: inside the heuristics block, when `routineCleanupApplied` is true. That is the same cache-rebuilding permission every other mutation lane uses (ARCHITECTURE.md protected section, invariant 4). New ids are persisted, as a union, before any byte changes. If the write fails, nothing new is applied on that pass and the old set is replayed.
-  - **Application** happens on every pass, defer passes included, inside `finalizeMessageRepresentation`. That is the last writer before the tail-hygiene baseline. It splices the reasoning parts out of every message whose id is in the persisted set. The newest assistant is skipped defensively there as well.
+  - **Selection** runs only where `clearOldReasoning` runs today: inside the heuristics block, when `routineCleanupApplied` is true. That is the same cache-rebuilding permission every other mutation lane uses (ARCHITECTURE.md protected section, invariant 4). New ids are persisted, as a union, before any byte changes. If the write fails, nothing new is applied on that pass and the old set is replayed. After a successful write the committed set is re-read, so ids another process committed meanwhile are served on this pass, not first on a later defer pass.
+  - **Unresolved provider:** no selection. The session may be canonical Anthropic, whose later passes would not replay the ids. Ids frozen by an earlier, resolved pass are still replayed.
+  - **Unreadable state:** the pass replays this process's last good copy and selects nothing new. After a restart with a corrupted document there is no copy, and the pass serves no removals (logged as `reasoning-removal-read-failure`).
+  - **Application** happens on every pass, defer passes included, right after `finalizeMessageRepresentation`. It splices the reasoning parts out of every message whose id is in the persisted set, except the newest assistant with replayable content, which Rust also skips. A removed message can only become that message if newer history disappears (a revert), which already rewrites the cache.
 - **Why at finalize:** several lanes read or write `message.parts` by index during a pass:
   - text tag content ids are `<messageId>:p<index>`;
   - file-part tag targets write `messageParts[partIndex]` from a closure;
   - the stale-reduce strip records indices;
   - merged-reasoning replay keys frozen parts by index.
 
-  All of them run before finalize, on the unmodified array. OpenCode rebuilds the message array from its own database on every pass, so the next pass tags the original indices again. Removal therefore changes no index that any lane reads. `stripReasoningFromAssistantIds` already uses this splice-at-finalize pattern for binding recovery on non-Anthropic routes. `reasoningByMessage` holds part references, not indices, and is used only by the canonical Anthropic lane.
+  All of them run before the splice, on the unmodified array. OpenCode rebuilds the message array from its own database on every pass, so the next pass tags the original indices again. One lane does read positions after the splice: the tail-hygiene walk attributes text parts by `<messageId>:p<index>` on the spliced array, so in a reasoning-removed message its text can lose its tag attribution in the T/U accounting. That attribution is the same on every pass, so it never flips bytes or the baseline; it skews the nudge accounting only. `stripReasoningFromAssistantIds` already had the same effect on non-Anthropic routes. `reasoningByMessage` holds part references, not indices, and is used only by the canonical Anthropic lane.
 - **Accounting:** the pass counts removed parts as a mutation (`heuristicOrReasoningDidMutate`), so the usual bust bookkeeping sees it.
 
 ### Reasoning invalidated by tool and text drops (OpenCode)
@@ -58,28 +63,14 @@ The audit in `reclaim-lanes-provider-matrix.md` (rows 3 and 4) found a second, l
 - on Vertex, Bedrock and Copilot Claude, inside a signed block;
 - on OpenAI, as a summary beside the untouched `encrypted_content`. In tonight's dump, 516 of 609 items had this shape and still held 2.1 MB.
 
-**Change.** Both write sites now call `neutralizeDroppedReasoningPart`, and `[cleared]` is never written by a drop.
+**Change.** Both write sites now call `neutralizeDroppedReasoningPart`, and a drop never writes `[cleared]` into new bytes.
 
-- The part object is rewritten in place to exactly the shape `makeSentinel(part)` produced: `{type:"text",text:""}`, keeping any cache marker.
-- On canonical Anthropic that is the same output the old `[cleared]` → `stripClearedReasoning` conversion gave, so the bytes do not change. The one exception is `compactionOff`, where the old conversion was skipped and `[cleared]` reached the wire.
-- On every other route the part carries a hidden mark. `removeNeutralizedReasoningParts` splices it out at final representation, together with all of its provider metadata.
+- The part object is rewritten in place to exactly the shape `makeSentinel(part)` produced: `{type:"text",text:""}`, keeping any cache marker. Its original fields are kept aside.
+- **Canonical Anthropic:** the sentinel stays. That is the output the old `[cleared]` → `stripClearedReasoning` conversion gave, so the bytes do not change.
+- **Every other route:** a drop leaves reasoning to the age lane, as Pi and Rust do. Before finalize, the original part is put back in place, byte for byte. Removing it with the drop was tried and dropped after review: the tag lane links an OpenCode tool to the reasoning of the step *before* it, so the removal took an unrelated block off the wire, and on prefix-bound models any removal invalidates every newer signed block.
+- **First pass after upgrade:** until the session's first rebuilding pass, the part is put back with `[cleared]` in its `thinking`/`text`, exactly the bytes the drop served before. That rebuilding pass records `reasoningRemoval.dropLeavesReasoning` in the replay document and serves the restored parts; every later pass does the same. The change in what a drop does to reasoning therefore first lands on a pass that already rebuilds, never on a defer pass. An unresolved provider also gets the legacy bytes.
 - Redacted parts (no `thinking` or `text`) are left alone, as before.
-- `clearOldReasoning` and `replayClearedReasoning` skip parts that are already neutralized, so the age lane never writes `[cleared]` into them.
-
-**Same rules as the age lane.**
-
-| Rule | How the drop path meets it |
-|---|---|
-| Rebuild pass | A drop is first applied only on a rebuilding pass. |
-| Frozen replay | The drop is persisted (tag status and drop mode) and replayed on every pass, so the reasoning removal replays with it. No extra state is needed. |
-| Contiguous prefix on prefix-bound models | On non-Anthropic routes for these models, every reasoning part older than the newest message that lost reasoning to a drop is removed as well, so the survivors are a contiguous newest suffix. |
-
-**What this leaves as before.**
-
-- The newest assistant is not exempted on this path. The drop decides, as before, and the protected window keeps recent tags from being dropped.
-- Canonical Anthropic gets no new prefix closure, which keeps its bytes identical.
-
-**One-time change after upgrade.** On non-Anthropic routes, a session that already holds drops beside reasoning sees its `[cleared]` reasoning leave the wire on the first pass after the upgrade. That rewrites the cached prefix once. It cannot be deferred without writing `[cleared]` again.
+- `clearOldReasoning` and `replayClearedReasoning` skip parts that are already neutralized, so the age lane never writes `[cleared]` into them. The age-lane selection counts neutralized parts as reasoning, so a message whose reasoning a drop touched is still removed by age.
 
 ### Forced call skeleton beside reasoning (OpenCode)
 
@@ -88,9 +79,10 @@ The audit in `reclaim-lanes-provider-matrix.md` (rows 3 and 4) found a second, l
 It now applies only on Anthropic-family routes (`isAnthropicFamilyRoute`):
 
 - canonical `anthropic`;
-- any provider id containing `anthropic` (Vertex and custom ids);
-- Bedrock;
-- any Claude model behind another provider, such as Copilot or OpenRouter.
+- any provider id containing `anthropic` (Vertex and custom ids such as `vertex-eu-anthropic`);
+- any Claude model behind another provider: Bedrock Claude, Copilot, OpenRouter `anthropic/*`.
+
+Non-Claude Bedrock models (Nova, Llama, DeepSeek R1) are excluded: they produce no signed Anthropic thinking. A Claude model served through a gateway whose provider id and model alias name neither `anthropic` nor `claude` is a known false negative.
 
 On other routes the flag is cleared on the tag targets right after tagging, so emergency drops and the legacy conversion remove the pair fully. An unknown provider keeps the skeleton. Skeletons already persisted as `skeleton_real` keep replaying; only new decisions change.
 
@@ -99,13 +91,13 @@ On other routes the flag is cleared on the tag targets right after tagging, so e
 Pi is the parity reference. It already clears typed thinking on every provider. `clearOldReasoningPi` has no provider gate. It empties `thinking` and drops `thinkingSignature`, which carries the OpenAI reasoning item and its encrypted content. Every Pi serializer drops empty thinking, so the block already leaves the wire on every route. Two guards are missing, and this change adds them:
 
 - **Newest assistant:** never selected. The newest assistant has the highest tag, and replay covers only tags at or below the watermark, so a watermark below its tag cannot reach it on a later defer pass.
-- **Prefix-bound models:** the selection watermark is clamped to just below the first reasoning-bearing assistant that cannot be cleared (a redacted block, or an untagged message), so no gap opens.
+- **Prefix-bound models:** no new clearing (the cutoff is 0). The proactive thinking strip now also runs for subagents.
 
 The emptied shape stays as it is. Changing it to a splice would change Pi's working array for existing sessions without changing the wire. Native `providerPayload` reasoning (`canClearNativeReasoning`) keeps its existing gate. That gate concerns a different payload, Responses history captured by OMP, and is out of scope.
 
 ### Rust module (crates/mc-module)
 
-Rust already has a whole-block removal lane: the `reasoning_age` frozen strip unit, used by Claude Code and replayed by `remove_frozen_historical_reasoning`. For the OpenCode profile on a provider other than canonical `anthropic`, the reasoning cutoff is now captured on bust passes, and `reasoning_age` units are minted for eligible messages. The eligibility rules are the ones listed above. Canonical Anthropic keeps its `reasoning_clear` lane unchanged. Units are minted only when `is_bust_pass` holds, persisted with the other frozen units, and replayed unchanged on defers.
+Rust already has a whole-block removal lane: the `reasoning_age` frozen strip unit, used by Claude Code and replayed by `remove_frozen_historical_reasoning`. For the OpenCode profile on a provider other than canonical `anthropic`, `reasoning_age` units are minted on bust passes for eligible messages. The eligibility rules are the ones listed above. The lane selects nothing when the model is prefix-bound, when the provider is unresolved, or on OpenRouter: TS strips the tool-call `reasoning_details` copies there, and Rust does not, so it stays off rather than change bytes without shrinking the request. The reasoning cutoff for canonical Anthropic's `reasoning_clear` and Claude Code's `reasoning_age` is also not captured for prefix-bound models. Units are minted only when `is_bust_pass` holds, persisted with the other frozen units, and replayed unchanged on defers.
 
 ## 2. Emergency drop: a minimum reclaim per pass
 
@@ -121,7 +113,9 @@ minimum achievable reclaim = 2,000 tokens (EMERGENCY_MIN_ACHIEVABLE_RECLAIM_TOKE
 
 **Floor above ceiling:** when the estimated fixed floor alone exceeds the ceiling, the reason says so plainly, for example: `fixed floor ≈326000 already exceeds ceiling 251000: tool drops cannot reach the target`.
 
-Rust's `select_emergency` gets the same rule and constant. Instead of a reason string, its assessment records `floor_above_ceiling` and `skipped_below_minimum_reclaim`, and the module logs both through `tracing`. Another mutation that already prices the pass (TS `passAlreadyPriced`, Rust `pass_already_busting`) lifts the minimum, because riding an existing rewrite costs nothing extra.
+Rust's `select_emergency` gets the same rule and constant. Instead of a reason string, its assessment records `floor_above_ceiling` and `skipped_below_minimum_reclaim`, and the module logs both through `tracing`.
+
+**What waives the minimum.** Only a rewrite this pass already pays for, because riding it costs nothing extra. That is Pi's predicate: newly applied drops, a fold that busts the served prefix, or a rebuilt history injection. Replaying persisted drop statuses never counts: it restores bytes already served and is true on every pass that holds a drop, so the incident session (307 of 330 results dropped) would never have applied the minimum. In Rust, the force-band edge and the 95% backstop are permissions to rewrite, not paid rewrites, so they do not waive it either (`emergency_minimum_waived`, separate from `pass_already_busting`). Transform-level tests in TS and Rust drive a 100% pass with drops already persisted and show a sub-2,000-token selection skipped.
 
 ## Considered and dropped: exempting unseen tool results
 
@@ -131,8 +125,10 @@ A third guard was considered: never let an automatic lane drop a tool result bef
 
 | Technique | Pi (reference) | OpenCode TS | Rust (`opencode-aisdk`) |
 |---|---|---|---|
-| Age-based reasoning removal | All providers. Thinking is emptied and its signature dropped, and the serializer then drops the block. The watermark is now bounded below the newest assistant and is a contiguous prefix on bound models. | Canonical Anthropic: unchanged `[cleared]` → sentinel lane. Every other route: whole-part removal from a frozen id set. | Canonical Anthropic: unchanged `reasoning_clear` shells. Every other route: frozen `reasoning_age` whole-block removal. |
-| Reasoning side effect of a drop | None; reasoning is left to the age lane. | Removed with the drop (sentinel on Anthropic, splice elsewhere); never `[cleared]`. | None; reasoning is left to the age lane. The native encoder also drops historical reasoning from assistant messages whose parts changed. |
+| Age-based reasoning removal | All providers. Thinking is emptied and its signature dropped, and the serializer then drops the block. The watermark is bounded below the newest assistant. Off on prefix-bound models. | Canonical Anthropic: unchanged `[cleared]` → sentinel lane. Every other route: whole-part removal from a frozen id set (OpenRouter tool-call `reasoning_details` copies leave too; Gemini-signed messages are never selected). Off on prefix-bound models and for unresolved providers. | Canonical Anthropic: unchanged `reasoning_clear` shells. Every other route: frozen `reasoning_age` whole-block removal. Off on prefix-bound models, unresolved providers and OpenRouter. |
+| Proactive strip on prefix-bound models | Busting passes, subagents included. | Busting passes, subagents included. | Host postprocess, primaries only (subagents get none). |
+| Reasoning side effect of a drop | None; reasoning is left to the age lane. | Canonical Anthropic: empty sentinel (unchanged). Elsewhere: none, reasoning is left to the age lane (legacy `[cleared]` bytes replayed only until the first rebuilding pass after upgrade). | None; reasoning is left to the age lane. The native encoder also drops historical reasoning from assistant messages whose parts changed. |
+| Emergency minimum waived by | Applied drops or a busting fold. | Applied drops, a busting fold or a rebuilt history injection; never drop replay. | An independent rebuild only; never the force edge or the 95% backstop. |
 | Forced skeleton beside reasoning | Exempt only for `openai-responses` and `openai-codex-responses`. | Anthropic-family routes only. | No blanket rule; only a targeted separator safeguard. |
 | Native Responses reasoning items | Codex API with compat flags (`canClearNativeReasoning`), unchanged. | Covered by whole-part removal, because the encrypted payload lives on the part. | Covered by whole-block removal. |
 
@@ -141,10 +137,10 @@ A third guard was considered: never let an automatic lane drop a tool result bef
 | Lane | Selection | Persisted as | Defer pass |
 |---|---|---|---|
 | OpenCode non-Anthropic removal | rebuilding passes only | message id set in the replay document | splices the same ids at finalize |
-| OpenCode drop-path removal | the drop's own rebuilding pass | the persisted drop (tag status and mode) | drop replay neutralizes again; finalize splices (non-Anthropic) |
+| OpenCode drop path | the drop's own rebuilding pass | the persisted drop, plus `dropLeavesReasoning` for the upgrade switch | drop replay neutralizes again; non-Anthropic puts the part back (legacy `[cleared]` bytes until the first rebuilding pass after upgrade) |
 | Forced skeleton scope | new drops and new legacy conversions only | the persisted `drop_mode` | already persisted modes replay unchanged |
 | OpenCode canonical Anthropic | unchanged | unchanged watermark | unchanged |
-| Pi | rebuilding passes only | existing watermark, now clamped | existing replay |
+| Pi | rebuilding passes only (none on bound models) | existing watermark, now clamped | existing replay |
 | Rust | bust passes only | `reasoning_age` frozen units | existing unit replay |
 | Emergency minimum reclaim | only changes what a rebuilding pass selects | nothing new | drops already applied replay as before |
 
@@ -156,7 +152,7 @@ A third guard was considered: never let an automatic lane drop a tool result bef
 - **Host:** the installed OpenCode **1.18.30** (`opencode-stock-1.18.30`), running `serve` with the locally built plugin (`packages/plugin/dist`).
 - **Fixture:** a plugin listed before Magic Context. On every request it prepends the same single-turn tool loop: 40 assistant steps, each with `step-start`, a reasoning part carrying provider metadata, a completed `bash` call and `step-finish`.
 - **Endpoints:** every route is a loopback recorder that rejects the request after OpenCode has serialized it. The captures therefore prove the wire shape and its replay, not provider acceptance.
-- **Isolation:** one throwaway root per scenario under `$TMPDIR/magic-context/reasoning-removal/run3/`, holding HOME, all XDG roots, `OPENCODE_DB` and `MAGIC_CONTEXT_STORAGE_DIR`. After every scenario, `lsof -p <host pid>` listed only the `wire.db` and `context.db` files (plus their WAL and SHM files) inside that root.
+- **Isolation:** one throwaway root per scenario under `$TMPDIR/magic-context/reasoning-removal/run5/` (rerun after the review fixes), holding HOME, all XDG roots, `OPENCODE_DB` and `MAGIC_CONTEXT_STORAGE_DIR`. After every scenario, `lsof -p <host pid>` listed only the `wire.db` and `context.db` files (plus their WAL and SHM files) inside that root.
 
 **What each scenario does.**
 
@@ -169,17 +165,17 @@ A third guard was considered: never let an automatic lane drop a tool result bef
 | `anthropic` (`@ai-sdk/anthropic`, signed thinking) | age | 1 / 1 / 1 | 1 signature | 0 | identical on passes 1–3 |
 | `anthropic` | drop | 2 / 2 / 2 / 2 (tool calls 40 → 39) | 2 signatures | 0 | identical on 1–2; identical on 3–4 |
 | `vertex-eu-anthropic` (`@ai-sdk/google-vertex/anthropic`) | age | 9 / 9 / 9 | 9 signatures | 0 | identical on 1–3 |
-| `vertex-eu-anthropic` | drop | 40 / 40 / **38** / 38 (tools 40 → 39) | 40 → 38 signatures | 0 | identical on 1–2; identical on 3–4 |
+| `vertex-eu-anthropic` | drop | 40 / 40 / **39** / 39 (tools 40 → 39) | 40 → 39 signatures | 0 | identical on 1–2; identical on 3–4 |
 | `openai` (`@ai-sdk/openai` Responses, `store:false`) | age | 9 / 9 / 9 | 9 `encrypted_content` | 0 | identical on 1–3 |
-| `openai` | drop | 40 / 40 / **38** / 38 (tools 40 → 39) | 40 → 38 `encrypted_content` | 0 | identical on 1–2; identical on 3–4 |
+| `openai` | drop | 40 / 40 / **39** / 39 (tools 40 → 39) | 40 → 39 `encrypted_content` | 0 | identical on 1–2; identical on 3–4 |
 | `google` (`@ai-sdk/google`, Gemini 2.5 Pro) | age | 9 / 9 / 9 | 9 `thoughtSignature` | 0 | identical on 1–3 |
-| `google` | drop | 40 / 40 / **38** / 38 (tools 40 → 39) | 40 → 38 thought signatures | 0 | identical on 1–2; identical on 3–4 |
+| `google` | drop | 40 / 40 / **39** / 39 (tools 40 → 39) | 40 → 39 thought signatures | 0 | identical on 1–2; identical on 3–4 |
 
 **Reading the rows.**
 
 - The newest assistant's reasoning and the newest tool result were on the wire in every pass.
 - Canonical Anthropic keeps only one or two blocks because its existing merged-reasoning lane keeps at most one reasoning block per run of consecutive assistant messages. That lane is unchanged.
-- On the drop rows, the drop removed the tool call and its owner message. The reasoning the drop invalidated left the wire with no `[cleared]` text, on the rebuilding pass only.
+- On the drop rows, the drop removed the tool call and its owner message, together with that message's own reasoning (39 of 40 left). The reasoning of the step before it, which the tag lane links to the dropped call, stayed intact: drops leave reasoning to the age lane. No `[cleared]` text appeared, because each session's first pass is a rebuilding pass, which switches the drop mode.
 
 **Worker shape (OpenAI, 300 steps, about 3 KB `encrypted_content` each).**
 
