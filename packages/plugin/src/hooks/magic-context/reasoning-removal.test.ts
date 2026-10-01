@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
+import prefixBoundGolden from "../../../../../crates/mc-module/testdata/prefix-bound-reasoning-trim.json";
 import {
     getActiveTagsBySession,
     getOrCreateSessionMeta,
@@ -155,7 +156,9 @@ describe("selectReasoningRemovals", () => {
         expect(selected).toContain("assistant-3");
     });
 
-    it("selects nothing on prefix-bound models, where removing an older block invalidates every newer one", () => {
+    // Rows of Anthropic's "What counts as an edit" table
+    // (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
+    it('prefix-bound: "Remove `thinking` blocks from the start of the history" is valid, so the oldest aged prefix is selected', () => {
         const { messages, tags } = toolLoop(8);
         const selected = selectReasoningRemovals({
             messages,
@@ -164,7 +167,66 @@ describe("selectReasoningRemovals", () => {
             alreadyRemoved: new Set(),
             prefixBound: true,
         });
-        expect(selected).toEqual([]);
+        expect(selected).toEqual([
+            "assistant-0",
+            "assistant-1",
+            "assistant-2",
+            "assistant-3",
+            "assistant-4",
+        ]);
+    });
+
+    it('prefix-bound: "Remove a `thinking` block from the middle of the history and keep later ones" is invalid, so the walk stops at the first message it may not remove', () => {
+        const { messages, tags } = toolLoop(8, { reasoningOnlyStep: 2 });
+        tags.set(messages[3], 4);
+        const selected = selectReasoningRemovals({
+            messages,
+            messageTagNumbers: tags,
+            clearReasoningAge: 3,
+            alreadyRemoved: new Set(),
+            prefixBound: true,
+        });
+        // assistant-3 and assistant-4 are old enough, but removing them while
+        // assistant-2 keeps its block would be a removal from the middle.
+        expect(selected).toEqual(["assistant-0", "assistant-1"]);
+
+        // Messages whose reasoning is already gone are passed over, so the
+        // prefix continues behind them.
+        expect(
+            selectReasoningRemovals({
+                messages,
+                messageTagNumbers: tags,
+                clearReasoningAge: 3,
+                alreadyRemoved: new Set(["assistant-0"]),
+                prefixBound: true,
+                alsoGone: new Set(["assistant-1", "assistant-2"]),
+            }),
+        ).toEqual(["assistant-3", "assistant-4"]);
+    });
+
+    it("prefix-bound: matches the shared TypeScript, Pi and Rust golden", () => {
+        for (const scenario of prefixBoundGolden.cases) {
+            const { messages, tags } = toolLoop(scenario.steps);
+            for (const message of messages) {
+                const step = message.info.id?.replace("assistant-", "a");
+                if (step && scenario.untagged.includes(step)) tags.delete(message);
+            }
+            const removed = scenario.already_removed.map((step) => step.replace("a", "assistant-"));
+            const selected = selectReasoningRemovals({
+                messages,
+                messageTagNumbers: tags,
+                clearReasoningAge: scenario.clear_reasoning_age,
+                alreadyRemoved: new Set(removed),
+                prefixBound: true,
+            });
+            const after = [...removed, ...selected]
+                .map((id) => id.replace("assistant-", "a"))
+                .sort();
+            expect({ name: scenario.name, after }).toEqual({
+                name: scenario.name,
+                after: [...scenario.removed_after].sort(),
+            });
+        }
     });
 
     it("does not stop at an ineligible message and does not reselect removed ids", () => {

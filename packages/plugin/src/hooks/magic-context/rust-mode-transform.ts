@@ -3601,6 +3601,7 @@ export function createRustModeTransform(
                             model?.modelID,
                         ),
                         cacheBustingPass: moduleDecisionBusts,
+                        moduleReasoningTrimOnly: response.reasoning_trim_only === true,
                         ...(frozenReleaseReason ? { frozenReleaseLastServed } : {}),
                         trailingBlankSourceDecisions,
                         trailingBlankNewestAssistantId:

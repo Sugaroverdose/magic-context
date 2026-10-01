@@ -117,6 +117,7 @@ import {
 	getAutoSearchHintDecisions,
 	getEmergencyInputSample,
 	getNoteNudgeAnchors,
+	getPersistedTodoSyntheticAnchor,
 	isProviderOverflowFailClosedProven,
 	type NoteNudgeAnchor,
 	type PendingPiCompactionMarker,
@@ -290,6 +291,7 @@ import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
 import {
 	applyPiProactiveThinkingStrip,
 	applyPiThinkingBindingRecovery,
+	frozenBindingEntryIds,
 	resolvePiBindingStripOrder,
 	shouldRunPiProactiveThinkingStrip,
 } from "./provider-error-recovery-pi";
@@ -3470,6 +3472,15 @@ export function registerPiContextHandler(
 					return undefined;
 				}
 			})();
+			// Sticky reminders and the synthetic todo pair this pass adds or moves
+			// edit an earlier user or assistant message; the proactive thinking
+			// strip below needs to know.
+			const stickyBefore = postTransformSnapshot
+				? piStickyInjectionKeys(postTransformSnapshot)
+				: null;
+			const todoAnchorBefore = JSON.stringify(
+				getPersistedTodoSyntheticAnchor(options.db, sessionId),
+			);
 			const tNoteNudges = performance.now();
 			try {
 				if (!options.compactionOff) {
@@ -3594,6 +3605,23 @@ export function registerPiContextHandler(
 			// Sessions that still strip before the pipeline stages had their strips
 			// applied at the start of the pass and skip this step.
 			const tThinkingBinding = performance.now();
+			let hostEditBeforeNewestThinking = true;
+			try {
+				const stickyAfter = piStickyInjectionKeys(
+					loadPiPostTransformSnapshot(options.db, sessionId),
+				);
+				hostEditBeforeNewestThinking =
+					stickyBefore === null ||
+					[...stickyAfter].some((key) => !stickyBefore.has(key)) ||
+					JSON.stringify(
+						getPersistedTodoSyntheticAnchor(options.db, sessionId),
+					) !== todoAnchorBefore;
+			} catch {
+				// The reminder and todo state could not be read, so whether this
+				// pass edited an earlier message is unknown. Treat it as edited:
+				// stripping a still-valid block costs a cache rewrite, keeping an
+				// invalidated one costs a rejected request.
+			}
 			const outputEntryIds = resolvePiLkgOutputEntryIds(
 				outputMessages,
 				result.syntheticLeadingCount,
@@ -3634,7 +3662,17 @@ export function registerPiContextHandler(
 						// bust the cache (a HARD fold included). bustedThisPass is not
 						// used, because replaying saved drop statuses sets it even on
 						// a defer pass.
-						cacheBustingPass: isCacheBusting || result.executedWorkThisPass,
+						//
+						// A pass whose only edit is the oldest-prefix thinking clear
+						// keeps the newer blocks: Anthropic's "What counts as an edit"
+						// table lists "Remove `thinking` blocks from the start of the
+						// history" as valid. Any other edit, or one the pass cannot
+						// classify, still strips every block.
+						cacheBustingPass:
+							isCacheBusting ||
+							(result.executedWorkThisPass &&
+								(result.prefixEditBesidesReasoningTrim ||
+									hostEditBeforeNewestThinking)),
 						report: (line) => sessionLog(sessionId, line),
 					});
 				} catch (err) {
@@ -5038,6 +5076,13 @@ interface RunPipelineResult {
 	emergency: boolean;
 	bustedThisPass: boolean;
 	agentDropsAppliedThisPass: boolean;
+	/**
+	 * This pass edited bytes before newer thinking in some way other than the
+	 * oldest-prefix thinking clear of a prefix-bound model, or cannot say what
+	 * it changed (a first render, a requested materialization, published
+	 * history). The proactive thinking strip runs only when this is true.
+	 */
+	prefixEditBesidesReasoningTrim: boolean;
 	targetCount: number;
 	reasoningWatermark: number;
 	activeTags: ReturnType<typeof getTagsBySession>;
@@ -5171,6 +5216,9 @@ async function runCompactionOffPipeline(
 		emergency: false,
 		bustedThisPass: injectionResult?.m0Materialized === true,
 		agentDropsAppliedThisPass: false,
+		// Compaction-off passes never reach the proactive strip. True is the
+		// value that would strip if one ever did.
+		prefixEditBesidesReasoningTrim: true,
 		targetCount: 0,
 		reasoningWatermark: args.sessionMeta.clearedReasoningThroughTag ?? 0,
 		activeTags: [],
@@ -5207,6 +5255,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let pendingOpsAppliedThisPass = false;
 	let pendingOpsDidMutate = false;
 	let heuristicOrReasoningDidMutate = false;
+	// An edit this pass made before newer thinking other than the oldest-prefix
+	// thinking clear of a prefix-bound model; see RunPipelineResult.
+	let prefixEditBesidesReasoningTrim = false;
 	let didMutateFromFlushedStatuses = false;
 	let droppedCount = 0;
 	let droppedTokens = 0;
@@ -6183,7 +6234,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			if (heuristicsResult.droppedTokenReductions.length > 0) {
 				droppedTokenReductions.push(...heuristicsResult.droppedTokenReductions);
 			}
-			if (heuristicMutationCount > 0) heuristicOrReasoningDidMutate = true;
+			if (heuristicMutationCount > 0) {
+				heuristicOrReasoningDidMutate = true;
+				prefixEditBesidesReasoningTrim = true;
+			}
 			heuristicsExecuted = true;
 			executedWorkThisPass = true;
 			if (hasPendingMaterializeSignal) {
@@ -6250,14 +6304,19 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			const tClearReasoning = performance.now();
 			const prevWatermark = args.sessionMeta.clearedReasoningThroughTag ?? 0;
 			// Both lanes share one replayed watermark, so both use the same bound:
-			// below the newest assistant, and 0 (no new clearing) on prefix-bound
-			// models, where clearing an older block would invalidate every newer one.
+			// below the newest assistant, and on prefix-bound models below the
+			// first assistant that would leave a gap in the cleared prefix.
+			const prefixBound = args.reasoningClearing.prefixBound === true;
+			const bindingStripped = prefixBound
+				? frozenBindingEntryIds(args.db, args.sessionId)
+				: new Set<string>();
 			const maxCutoff = piReasoningClearCutoff({
 				messages: workingMessages,
 				messageIdToMaxTag,
 				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
 				piMessageStableId: stableIdResolver,
-				prefixBound: args.reasoningClearing.prefixBound === true,
+				prefixBound,
+				alreadyGone: (id) => bindingStripped.has(id),
 			});
 			const clearOutcome = clearOldReasoningPi({
 				messages: workingMessages,
@@ -6266,12 +6325,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				piMessageStableId: stableIdResolver,
 				maxCutoff,
 			});
+			// The inline strip rewrites assistant text, an edit of an earlier
+			// message, so it never starts on a prefix-bound model; the cutoff
+			// above already stops below any text it could reach on replay.
 			const stripOutcome = stripInlineThinkingPi({
 				messages: workingMessages,
 				messageIdToMaxTag,
 				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
 				piMessageStableId: stableIdResolver,
-				maxCutoff,
+				maxCutoff: prefixBound ? 0 : maxCutoff,
 			});
 			const combinedWatermark = Math.max(
 				clearOutcome.newWatermark,
@@ -6292,6 +6354,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			if (clearOutcome.cleared > 0 || stripOutcome.stripped > 0) {
 				heuristicOrReasoningDidMutate = true;
 				droppedCount += clearOutcome.cleared + stripOutcome.stripped;
+			}
+			// On a prefix-bound model, clearing typed thinking is the
+			// oldest-prefix removal; rewriting text never is.
+			if (stripOutcome.stripped > 0) prefixEditBesidesReasoningTrim = true;
+			if (clearOutcome.cleared > 0 && !prefixBound) {
+				prefixEditBesidesReasoningTrim = true;
 			}
 			if (
 				combinedWatermark > prevWatermark ||
@@ -6405,6 +6473,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			});
 			if (imageResult.newlyStrippedIds.length > 0) {
 				heuristicOrReasoningDidMutate = true;
+				prefixEditBesidesReasoningTrim = true;
 				executedWorkThisPass = true;
 				droppedCount += imageResult.stripped;
 			}
@@ -6536,6 +6605,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			: 0;
 		if (nativeInputsApplied > 0 || nativeReasoningApplied > 0) {
 			heuristicOrReasoningDidMutate = true;
+			prefixEditBesidesReasoningTrim = true;
 			executedWorkThisPass = true;
 		}
 	}
@@ -7053,6 +7123,19 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		emergency,
 		bustedThisPass,
 		agentDropsAppliedThisPass: pendingOpsDidMutate,
+		prefixEditBesidesReasoningTrim:
+			prefixEditBesidesReasoningTrim ||
+			firstRenderBust ||
+			args.isCacheBusting ||
+			hasPendingMaterializeSignal ||
+			deferredMaterializationConsumedThisPass ||
+			foldBustsServedPrefixThisPass ||
+			publishedM1RefreshedThisPass ||
+			materialized ||
+			historyWasConsumedThisPass ||
+			pendingOpsDidMutate ||
+			autoReclaimDidMutateThisPass ||
+			emergency,
 		targetCount: targets.size,
 		reasoningWatermark: args.sessionMeta.clearedReasoningThroughTag ?? 0,
 		activeTags,
@@ -7120,6 +7203,20 @@ function isAutoSearchHintDecision(
 		typeof row.reason === "string" &&
 		AUTO_SEARCH_NO_HINT_REASONS.has(row.reason as AutoSearchHintNoHintReason)
 	);
+}
+
+/** Keys of the sticky reminders a pass appends to user messages. */
+function piStickyInjectionKeys(snapshot: PiPostTransformSnapshot): Set<string> {
+	const keys = new Set<string>();
+	for (const anchor of snapshot.noteAnchors) {
+		keys.add(JSON.stringify(["note", anchor]));
+	}
+	for (const decision of snapshot.autoSearchDecisions) {
+		if (decision.decision === "hint") {
+			keys.add(JSON.stringify(["hint", decision]));
+		}
+	}
+	return keys;
 }
 
 function loadPiPostTransformSnapshot(

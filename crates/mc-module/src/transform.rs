@@ -1625,6 +1625,13 @@ pub struct TransformResponse {
     /// excluding blocks added only at the end.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub first_divergence: Option<FirstDivergence>,
+    /// True on a prefix-bound OpenCode bust (Fable 5.1, Opus 5.5, Sonnet 5.5) whose only
+    /// edit before newer signed thinking is removing reasoning from a contiguous oldest
+    /// prefix. Removing thinking from the start of the history leaves every later block
+    /// valid, so the host keeps the newer blocks instead of stripping all of them. Omitted
+    /// (false) on every other pass and by older modules, which keeps the strip.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reasoning_trim_only: bool,
     /// Optional diagnostic timings. Omitted only by compatibility constructors and on old
     /// responses; normal module transform passes include this object.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -1707,6 +1714,7 @@ impl TransformResponse {
             materialize_reason: None,
             identity_delta: Vec::new(),
             first_divergence: None,
+            reasoning_trim_only: false,
             timings: None,
             boundary_id: String::new(),
             reconcile_pending: false,
@@ -1746,6 +1754,7 @@ impl TransformResponse {
             materialize_reason: None,
             identity_delta: Vec::new(),
             first_divergence: None,
+            reasoning_trim_only: false,
             timings: None,
             boundary_id: String::new(),
             reconcile_pending: false,
@@ -3448,6 +3457,7 @@ fn apply_additive_only(
                 &meta.last_render_config,
             ),
             first_divergence: None,
+            reasoning_trim_only: false,
             timings: Some(timings),
             boundary_id: String::new(),
             reconcile_pending: false,
@@ -5132,6 +5142,63 @@ fn apply_once(
         Vec::new()
     };
     timings.caveman = elapsed_ms(caveman_started_at);
+    // A prefix-bound OpenCode bust whose only edit before newer signed thinking is the
+    // oldest-prefix `reasoning_age` removal ("Remove `thinking` blocks from the start of
+    // the history" is a valid change in Anthropic's preserved-thinking table). The host
+    // then keeps the newer blocks instead of stripping them all. Each condition rules out
+    // an edit this pass could otherwise make; a pass that fails any of them, or that this
+    // list does not describe, reports false, and the host strips, the safe direction.
+    let served_tag_overlay_this_pass = {
+        let mint_end = pending_overlays
+            .tag_mint_start
+            .saturating_add(pending_overlays.tag_mint_count)
+            .min(tag_rows.len());
+        tag_rows[pending_overlays.tag_mint_start.min(mint_end)..mint_end]
+            .iter()
+            .any(|row| {
+                overlay_target_was_served(&loaded.meta.served_output_fingerprint, &row.block_id)
+            })
+    };
+    let served_user_hint_this_pass = pending_overlays.user_hint.as_ref().is_some_and(|hint| {
+        !hint.hint_text.is_empty() && user_hint_target_was_served(&loaded.meta, &hint.block_id)
+    });
+    let current_exempt_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    // A bust releases the full native vector kept for an assistant that is no longer the
+    // newest, and the tag or hint overlays withheld from it then land on its text: an edit
+    // before newer thinking. Without active overlays its parts are unchanged.
+    let releases_native_reasoning_keep = (tagging_active || auto_search_active)
+        && loaded.core.frozen_units.iter().any(|unit| {
+            unit.key
+                .strip_prefix("strip:native_reasoning_keep:")
+                .is_some_and(|mid| Some(mid) != current_exempt_mid)
+        });
+    // A bust applies system-injection strips that earlier defers held back.
+    let applies_held_system_strip =
+        loaded.core.frozen_units.iter().any(|unit| {
+            unit.key.starts_with(SYSTEM_STRIP_BLOCK_PREFIX) && !unit.reset_rule.is_empty()
+        });
+    let reasoning_trim_only_candidate = is_bust_pass
+        && serializer_profile == Some(SerializerProfile::OpencodeAiSdk)
+        && is_prefix_bound_thinking_model(req.model_key.as_deref())
+        && matches!(plan, PassPlan::Soft)
+        && materialize_reason.as_deref() == Some("selection")
+        && !reductions_pending_now
+        && new_caveman_units.is_empty()
+        && new_strip_units
+            .iter()
+            .all(|unit| unit.key.starts_with("strip:reasoning_age:"))
+        && !todo_injection_pending
+        && !calibration_changed
+        && loaded.meta.pending_tag_block_ids.is_empty()
+        && loaded.meta.pending_user_hint_block_ids.is_empty()
+        && !served_tag_overlay_this_pass
+        && !served_user_hint_this_pass
+        && ctx
+            .guidance_date
+            .as_ref()
+            .is_none_or(|date| *date == loaded.meta.guidance_date)
+        && !releases_native_reasoning_keep
+        && !applies_held_system_strip;
     if loaded.meta.soft_refresh_pending && !prefix_replay_must_be_preserved {
         meta.soft_refresh_pending = false;
     }
@@ -6140,6 +6207,7 @@ fn apply_once(
         }
     }
     refresh_reasoning_clear_exemptions(&mut core, req, is_bust_pass, lineage_anchor_mid);
+    let frozen_units_before_reasoning_clear = core.frozen_units.len();
     core.frozen_units.extend(new_reasoning_clear_units(
         &core,
         &meta,
@@ -6153,6 +6221,8 @@ fn apply_once(
             projection: &projection,
         },
     ));
+    let minted_reasoning_clear_units =
+        core.frozen_units.len() != frozen_units_before_reasoning_clear;
     let legacy_adoption_complete =
         legacy_reasoning_adoption_complete(&loaded.meta, &core.frozen_units);
     if (is_bust_pass || legacy_adoption_complete)
@@ -6711,6 +6781,9 @@ fn apply_once(
                 &meta.last_render_config,
             ),
             first_divergence,
+            reasoning_trim_only: reasoning_trim_only_candidate
+                && !minted_reasoning_clear_units
+                && healed_trailing_blank_ids.is_empty(),
             timings: Some(timings),
             boundary_id: core.boundary_id.clone(),
             reconcile_pending: core.reconcile_pending,
@@ -12669,10 +12742,13 @@ fn new_frozen_strip_units(
     };
     // OpenCode on any provider other than canonical `anthropic` removes whole old reasoning
     // blocks through the same frozen `reasoning_age` unit. Canonical Anthropic keeps its
-    // `reasoning_clear` empty-shell lane, which its adapter filters before the wire.
+    // `reasoning_clear` empty-shell lane, which its adapter filters before the wire, except
+    // on prefix-bound models: that lane skips an ineligible message instead of stopping,
+    // so they use this lane's oldest-prefix walk on every route.
     let opencode_removal_mids = if profile == Some(SerializerProfile::OpencodeAiSdk)
         && req.serve_native
-        && !request_accepts_empty_content(req)
+        && (!request_accepts_empty_content(req)
+            || is_prefix_bound_thinking_model(req.model_key.as_deref()))
     {
         opencode_reasoning_removal_mids(req, tag_numbers, age_cutoff, &existing_keys)
     } else {
@@ -12824,10 +12900,15 @@ pub(crate) fn is_prefix_bound_thinking_model(model_key: Option<&str>) -> bool {
 /// block present, not the newest assistant (nor the newest with replayable content), and
 /// some non-reasoning content left after removal.
 ///
+/// On a prefix-bound model (Fable 5.1, Opus 5.5, Sonnet 5.5) only a contiguous oldest
+/// prefix is selected. Anthropic's preserved-thinking page ("What counts as an edit")
+/// lists "Remove `thinking` blocks from the start of the history, from the end, or all
+/// of them" as valid, and "Remove a `thinking` block from the middle of the history and
+/// keep later ones" as invalid for every later thinking block. The walk passes over
+/// messages already removed and stops at the first reasoning-bearing message it may not
+/// remove, so the removed set never has a gap.
+///
 /// Selects nothing when:
-/// - the model is prefix-bound (Fable 5.1, Opus 5.5, Sonnet 5.5): a signed block stays
-///   valid only while everything before it is unchanged, so removing an older block
-///   invalidates every newer one (docs/reports/anthropic-thinking-binding.md);
 /// - the provider is unresolved, since the session may be canonical Anthropic;
 /// - the route is OpenRouter, whose adapter also sends the reasoning as
 ///   `reasoning_details` copied onto the tool calls. TS strips those copies; this lane
@@ -12847,12 +12928,10 @@ fn opencode_reasoning_removal_mids<'a>(
         .as_deref()
         .unwrap_or("")
         .to_ascii_lowercase();
-    if provider.is_empty()
-        || provider.contains("openrouter")
-        || is_prefix_bound_thinking_model(req.model_key.as_deref())
-    {
+    if provider.is_empty() || provider.contains("openrouter") {
         return selected;
     }
+    let prefix_bound = is_prefix_bound_thinking_model(req.model_key.as_deref());
     let newest = latest_assistant_mid(&req.messages);
     let exempt = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
     // `@openrouter/ai-sdk-provider` keeps copies of the reasoning as
@@ -12883,13 +12962,12 @@ fn opencode_reasoning_removal_mids<'a>(
             continue;
         }
         let mid = message.mid.as_str();
-        if existing_keys.contains(format!("strip:reasoning_age:{mid}").as_str())
-            || openrouter_shaped.contains(mid)
-        {
+        if existing_keys.contains(format!("strip:reasoning_age:{mid}").as_str()) {
             continue;
         }
         let tag = message_tag_number(message, tag_numbers);
         let eligible = !mid.is_empty()
+            && !openrouter_shaped.contains(mid)
             && Some(mid) != newest
             && Some(mid) != exempt
             && tag > 0
@@ -12897,6 +12975,10 @@ fn opencode_reasoning_removal_mids<'a>(
             && message.ck.content.iter().any(has_meaningful_content);
         if eligible {
             selected.insert(mid);
+        } else if prefix_bound {
+            // A block left in place here would sit before every block removed after
+            // it: a removal from the middle.
+            break;
         }
     }
     selected
@@ -15309,8 +15391,9 @@ fn reasoning_clear_cutoff_with_tags(
     is_bust_pass: bool,
     tag_numbers: &BTreeMap<String, u64>,
 ) -> Option<u64> {
-    // Prefix-bound models never take the age lane: removing an older signed block
-    // invalidates every newer one.
+    // Prefix-bound models never take this watermark lane: it skips an ineligible message
+    // instead of stopping there, so it could remove a block from the middle and invalidate
+    // every newer one. OpenCode serves them through the `reasoning_age` oldest-prefix walk.
     if !is_bust_pass || is_prefix_bound_thinking_model(req.model_key.as_deref()) {
         return None;
     }

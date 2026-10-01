@@ -7278,4 +7278,111 @@ describe("Pi proactive strip of invalidated thinking", () => {
 			closeQuietly(db);
 		}
 	});
+
+	// Anthropic's "What counts as an edit" table
+	// (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking):
+	// "Remove `thinking` blocks from the start of the history" is valid.
+	it('"Remove `thinking` blocks from the start of the history" is valid, so a trim-only busting pass keeps every newer signed block and the defer pass replays it', async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-trim-only";
+		const fake = createFakePi();
+		try {
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				heuristics: { clearReasoningAge: 4 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: unknown[] } | undefined>;
+			// The age clear empties a block (every Pi serializer then drops it); a
+			// strip removes it. Either way it leaves no thinking text.
+			const liveThinking = (message: unknown): number => {
+				const content = (message as { content?: unknown }).content;
+				if (!Array.isArray(content)) return 0;
+				return (content as { type?: string; thinking?: string }[]).filter(
+					(part) => part.type === "thinking" && part.thinking !== "",
+				).length;
+			};
+			const build = (turns: number) => {
+				const messages: Record<string, unknown>[] = [];
+				const entryIds: string[] = [];
+				for (let turn = 0; turn < turns; turn++) {
+					messages.push(userMessage(`request ${turn}`, turn * 2 + 1));
+					entryIds.push(`entry-u${turn}`);
+					messages.push(
+						opusAssistant(`thought ${turn}`, `answer ${turn}`, turn * 2 + 2),
+					);
+					entryIds.push(`entry-a${turn}`);
+				}
+				return { messages, entryIds };
+			};
+			const pass = async (turns: number, percent: number) => {
+				const { messages, entryIds } = build(turns);
+				const result = await handler({ messages: messages as never[] }, {
+					...fakeContext(sessionId, process.cwd(), entryIds, messages as never),
+					model: { provider: "anthropic", id: "claude-opus-5-5" },
+					getContextUsage: () => ({
+						tokens: percent * 1000,
+						percent,
+						contextWindow: 100_000,
+					}),
+				} as never);
+				return (result?.messages ?? messages) as unknown[];
+			};
+
+			// The first render busts and strips the two turns it serves.
+			await pass(2, 10);
+			// Eight newer turns arrive on defer passes and keep their thinking.
+			const served = await pass(10, 10);
+			expect(served.slice(4).map(liveThinking)).toEqual(
+				Array.from({ length: 16 }, (_, i) => i % 2),
+			);
+			const strippedBefore = getMergedReasoningStrippedIds(db, sessionId);
+
+			// A force-band pass whose only edit is the oldest-prefix thinking clear.
+			const trim = await pass(10, 96);
+			const cleared = trim.filter(
+				(message, index) =>
+					index % 2 === 1 && index >= 4 && liveThinking(message) === 0,
+			);
+			expect(cleared.length).toBeGreaterThan(0);
+			// Cleared thinking is a contiguous oldest prefix of the kept turns...
+			const kept = trim
+				.map((message, index) => ({ index, thinking: liveThinking(message) }))
+				.filter(({ index }) => index % 2 === 1 && index >= 4)
+				.map(({ thinking }) => thinking);
+			expect(kept).toEqual([...kept].sort((a, b) => a - b));
+			expect(kept.at(-1)).toBe(1);
+			// ...and nothing newer was stripped: the newer turns are byte-identical.
+			expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(
+				strippedBefore,
+			);
+			const firstKept = trim.findIndex(
+				(message, index) =>
+					index >= 4 && index % 2 === 1 && liveThinking(message) === 1,
+			);
+			expect(sha256(trim.slice(firstKept))).toBe(
+				sha256(served.slice(firstKept)),
+			);
+
+			const defer = await pass(10, 10);
+			expect(sha256(defer)).toBe(sha256(trim));
+
+			// "Clear or shorten an earlier `tool_result`" (or any earlier content)
+			// invalidates every later block: a pass that trims and renders a drop
+			// strips them all.
+			const dropped = getTagsBySession(db, sessionId).find(
+				(tag) => tag.messageId === "entry-u3:p0",
+			);
+			if (!dropped) throw new Error("missing tag for an older user message");
+			updateTagStatus(db, sessionId, dropped.tagNumber, "dropped");
+			signalPiPendingMaterialization(sessionId);
+			const dropPass = await pass(10, 96);
+			expect(dropPass.map(liveThinking)).toEqual(Array(20).fill(0));
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
 });

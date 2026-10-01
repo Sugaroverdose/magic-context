@@ -316,7 +316,8 @@ export function applyPiProactiveThinkingStrip(args: {
 	return { entryIds };
 }
 
-function frozenBindingEntryIds(
+/** Branch entries whose thinking the binding-mismatch set removes on every pass. */
+export function frozenBindingEntryIds(
 	db: ContextDatabase,
 	sessionId: string,
 ): Set<string> {
@@ -386,9 +387,8 @@ export function resolvePiBindingStripOrder(args: {
 
 /**
  * Whether this pass may run the proactive thinking strip. Subagents are
- * included, as in OpenCode: on prefix-bound models the age lane no longer
- * clears thinking, so this strip is their only reasoning reclaim, and their
- * busting passes invalidate signed blocks exactly as a primary's do.
+ * included, as in OpenCode: their busting passes invalidate signed blocks
+ * exactly as a primary's do.
  */
 export function shouldRunPiProactiveThinkingStrip(args: {
 	compactionOff: boolean;

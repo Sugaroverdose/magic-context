@@ -116,10 +116,8 @@ export function buildMessageIdToMaxTag(
  * any later pass.
  *
  * Prefix-bound models (signed thinking bound to the request prefix: Fable 5.1,
- * Opus 5.5, Sonnet 5.5) get no new clearing at all. A block stays valid only
- * while everything before it is unchanged, so clearing an older block would
- * invalidate every newer one (docs/reports/anthropic-thinking-binding.md). The
- * proactive thinking strip removes every block on a busting pass instead.
+ * Opus 5.5, Sonnet 5.5) get a cutoff that clears only a contiguous oldest
+ * prefix; see `piPrefixBoundReasoningCutoff`.
  */
 export function piReasoningClearCutoff(args: {
 	messages: unknown[];
@@ -127,8 +125,10 @@ export function piReasoningClearCutoff(args: {
 	clearReasoningAge: number;
 	piMessageStableId: (msg: unknown, index: number) => string | undefined;
 	prefixBound: boolean;
+	/** Entries whose thinking another strip already removed for good. */
+	alreadyGone?: (id: string) => boolean;
 }): number {
-	if (args.prefixBound) return 0;
+	if (args.prefixBound) return piPrefixBoundReasoningCutoff(args);
 	let maxTag = 0;
 	for (const t of args.messageIdToMaxTag.values()) if (t > maxTag) maxTag = t;
 	let cutoff = maxTag - args.clearReasoningAge;
@@ -143,6 +143,134 @@ export function piReasoningClearCutoff(args: {
 		break;
 	}
 	return Math.max(0, cutoff);
+}
+
+function isAssistantWithContent(raw: unknown): raw is PiAssistantMessage {
+	return (
+		!!raw &&
+		typeof raw === "object" &&
+		(raw as { role?: unknown }).role === "assistant" &&
+		Array.isArray((raw as { content?: unknown }).content)
+	);
+}
+
+function thinkingParts(msg: PiAssistantMessage): PiThinkingContent[] {
+	return msg.content.filter(
+		(part): part is PiThinkingContent =>
+			!!part &&
+			typeof part === "object" &&
+			(part as { type?: unknown }).type === "thinking",
+	);
+}
+
+/** A thinking part the age clear has not emptied yet (it still reaches the wire). */
+function isLiveThinking(part: PiThinkingContent): boolean {
+	return (
+		part.redacted === true ||
+		part.thinking !== CLEARED ||
+		part.thinkingSignature !== undefined
+	);
+}
+
+function hasInlineThinkingMarkup(msg: PiAssistantMessage): boolean {
+	return msg.content.some(
+		(part) =>
+			!!part &&
+			typeof part === "object" &&
+			(part as { type?: unknown }).type === "text" &&
+			typeof (part as PiTextContent).text === "string" &&
+			stripInlineThinkingMarkup((part as PiTextContent).text) !==
+				(part as PiTextContent).text,
+	);
+}
+
+/**
+ * Age cutoff for a prefix-bound model, chosen so that the clear (and every
+ * later replay of its watermark) removes thinking from a contiguous oldest
+ * prefix of the assistants and from nothing after it.
+ *
+ * Anthropic's preserved-thinking page ("What counts as an edit") lists
+ * "Remove `thinking` blocks from the start of the history, from the end, or
+ * all of them" as valid, and "Remove a `thinking` block from the middle of the
+ * history and keep later ones" as invalid for every later thinking block.
+ *
+ * The walk goes oldest first. It passes over assistants whose thinking is
+ * already gone (emptied by an earlier clear, or in `alreadyGone`) and stops at
+ * the first assistant the clear may not fully handle: the newest assistant, an
+ * untagged or too-young one, one whose id cannot be resolved, one with a
+ * redacted block (the clear leaves those in place), or one whose text holds
+ * inline `<thinking>` markup (the shared watermark would make the inline strip
+ * rewrite that text, an edit of an earlier assistant message). The cutoff then
+ * sits below every tag at or after the stop, and the stop moves back until
+ * every assistant before it lies at or below the cutoff.
+ */
+export function piPrefixBoundReasoningCutoff(args: {
+	messages: unknown[];
+	messageIdToMaxTag: Map<string, number>;
+	clearReasoningAge: number;
+	piMessageStableId: (msg: unknown, index: number) => string | undefined;
+	alreadyGone?: (id: string) => boolean;
+}): number {
+	let maxTag = 0;
+	for (const t of args.messageIdToMaxTag.values()) if (t > maxTag) maxTag = t;
+	const ageCutoff = maxTag - args.clearReasoningAge;
+	if (maxTag === 0 || ageCutoff <= 0) return 0;
+
+	let newestIndex = -1;
+	for (let i = args.messages.length - 1; i >= 0; i--) {
+		if (isAssistantWithContent(args.messages[i])) {
+			newestIndex = i;
+			break;
+		}
+	}
+
+	// Assistants that still put thinking (or inline markup) on the wire, oldest
+	// first, with whether the clear may remove it.
+	const walk: { index: number; tag: number; removable: boolean }[] = [];
+	const tagAt = (i: number): number => {
+		const id = args.piMessageStableId(args.messages[i], i);
+		return id ? (args.messageIdToMaxTag.get(id) ?? 0) : 0;
+	};
+	for (let i = 0; i < args.messages.length; i++) {
+		const raw = args.messages[i];
+		if (!isAssistantWithContent(raw)) continue;
+		const inline = hasInlineThinkingMarkup(raw);
+		const live = thinkingParts(raw).filter(isLiveThinking);
+		if (live.length === 0 && !inline) continue;
+		const id = args.piMessageStableId(raw, i);
+		if (id && !inline && args.alreadyGone?.(id)) continue;
+		const tag = tagAt(i);
+		const removable =
+			i !== newestIndex &&
+			id !== undefined &&
+			tag > 0 &&
+			tag <= ageCutoff &&
+			!inline &&
+			!live.some((part) => part.redacted === true);
+		walk.push({ index: i, tag, removable });
+	}
+
+	let stop = walk.findIndex((entry) => !entry.removable);
+	if (stop < 0) stop = walk.length;
+	for (;;) {
+		// Nothing at or after the stop may fall under the cutoff, including
+		// assistants with no thinking: the watermark is replayed on every pass.
+		const firstKept =
+			stop < walk.length ? walk[stop].index : args.messages.length;
+		let cutoff = ageCutoff;
+		for (let i = firstKept; i < args.messages.length; i++) {
+			if (!isAssistantWithContent(args.messages[i])) continue;
+			const tag = tagAt(i);
+			if (tag > 0) cutoff = Math.min(cutoff, tag - 1);
+		}
+		if (newestIndex >= 0) {
+			const newestTag = tagAt(newestIndex);
+			if (newestTag > 0) cutoff = Math.min(cutoff, newestTag - 1);
+		}
+		const late = walk.slice(0, stop).findIndex((entry) => entry.tag > cutoff);
+		if (late < 0) return Math.max(0, cutoff);
+		stop = late;
+	}
 }
 
 /**
