@@ -17,6 +17,7 @@ import type {
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
+import { log } from "@magic-context/core/shared/logger";
 import type { PromptSurfaceConfig } from "@magic-context/core/shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "@magic-context/core/shared/prompt-surface-runtime";
 import { createPromptSurfaceRuntime } from "@magic-context/core/shared/prompt-surface-runtime";
@@ -106,8 +107,7 @@ export function registerMagicContextTools(
 		opts.promptSurfaceRuntime ??
 		createPromptSurfaceRuntime({
 			userConfigDirectory: process.cwd(),
-			warn: (message) =>
-				console.warn(`[magic-context][pi] config warning: ${message}`),
+			warn: (message) => log(`[magic-context][pi] config warning: ${message}`),
 		});
 	// Pi registers provider tools once when the extension loads. Resolve the
 	// registration default once here; project/model switches may reroute guidance

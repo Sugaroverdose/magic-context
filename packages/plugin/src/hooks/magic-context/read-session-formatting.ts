@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { COMMIT_VERB_PATTERN, createCommitHashExtractPattern } from "../../shared/commit-detection";
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
+import { log } from "../../shared/logger";
 import { isSystemDirective, removeSystemReminders } from "../../shared/system-directive";
 
 export interface SessionChunkLine {
@@ -309,7 +310,7 @@ function warnTokenizerFallback(error: unknown): void {
     if (tokenizerWarningSent) return;
     tokenizerWarningSent = true;
     const reason = error instanceof Error ? error.message : String(error);
-    console.warn(
+    log(
         "[magic-context] ai-tokenizer is unavailable; using approximate character-based token counts for this process. Token budgets, persisted per-message counts, and protected-tail/compartment boundaries may be less accurate until restart:",
         reason,
     );

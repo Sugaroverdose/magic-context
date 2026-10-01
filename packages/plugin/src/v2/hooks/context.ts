@@ -346,7 +346,6 @@ function toolResultText(result: { content?: unknown } | undefined): string {
  * was refused by the v2 store reader and every turn ended in silence).
  */
 export function reportPreProviderRefusal(sessionID: string, error: unknown): void {
-    console.warn("[magic-context] v2 refuseIfUnsafe", error);
     sessionLog(
         sessionID,
         `v2 refusing this turn before the model call: the context could not be read: ${getErrorMessage(error)}`,
@@ -532,7 +531,7 @@ export async function registerContext(context: V2Context) {
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
         harness: "opencode2",
         directory,
-        warn: (message) => console.warn(`[magic-context] config warning: ${message}`),
+        warn: (message) => log(`[magic-context] config warning: ${message}`),
     });
     // Tools are registered only when this first open succeeds: registering them
     // later would change the tool list mid-session, so they need a restart. A
@@ -829,7 +828,7 @@ export async function registerContext(context: V2Context) {
             const baseline = channel1.get(draft.sessionID);
             await deliverPendingChannel2(context, db, draft.sessionID, baseline);
         } catch (error) {
-            console.warn("[magic-context] v2 Channel 2 delivery deferred", error);
+            log("[magic-context] v2 Channel 2 delivery deferred", error);
         }
     });
     const openStoreReader = () =>
@@ -1023,7 +1022,7 @@ export async function registerContext(context: V2Context) {
             }
         } catch (error) {
             if (!usageController.signal.aborted)
-                console.warn("[magic-context] v2 usage subscription failed", error);
+                log("[magic-context] v2 usage subscription failed", error);
         }
     })();
     const materialize = (draft: SessionContext) => {
@@ -1212,7 +1211,6 @@ export async function registerContext(context: V2Context) {
                 storageRecoveryAnnounced = true;
                 const recovered = await recoverHiddenWork(db);
                 const message = formatStorageRecoveryNotice(recovered);
-                console.warn(`[magic-context] v2 storage recovered: ${message}`);
                 log(`[magic-context] v2 storage recovered: ${message}`);
                 pushNotification("toast", { message, variant: "info" }, draft.sessionID);
                 storeStorageNotice(draft.sessionID, message, "recovery");
@@ -1427,9 +1425,7 @@ export async function registerContext(context: V2Context) {
                         summary: cut.data.summary ?? "",
                         rendered: incoming,
                         onHard: (reason) => {
-                            console.warn(
-                                `[magic-context] HARD reason=${reason} session=${draft.sessionID}`,
-                            );
+                            sessionLog(draft.sessionID, `HARD reason=${reason}`);
                             materialize(draft);
                             pendingMaterializationSessions.add(draft.sessionID);
                         },
@@ -1657,10 +1653,7 @@ export async function registerContext(context: V2Context) {
                         cause: error,
                     });
                 }
-                console.warn(
-                    "[magic-context] compaction-off: fail-closed inert, passing through",
-                    error,
-                );
+                log("[magic-context] compaction-off: fail-closed inert, passing through", error);
             } else if (postFold) {
                 await refuseBeforeProvider(
                     context.session,
@@ -1674,7 +1667,7 @@ export async function registerContext(context: V2Context) {
                 );
             } else {
                 // Another plugin can poison the shared draft. Do not fail an otherwise viable turn.
-                console.warn("[magic-context] v2 context unavailable", error);
+                log("[magic-context] v2 context unavailable", error);
             }
         }
     };
@@ -1848,7 +1841,7 @@ export async function registerContext(context: V2Context) {
         if (rpcStopped) return;
         void rpcServer
             .start()
-            .catch((error) => console.warn("[magic-context] v2 RPC server failed to start", error));
+            .catch((error) => log("[magic-context] v2 RPC server failed to start", error));
     }, 0);
     return {
         async dispose() {

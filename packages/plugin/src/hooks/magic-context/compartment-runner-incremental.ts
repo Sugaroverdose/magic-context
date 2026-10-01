@@ -1024,7 +1024,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         );
         let published = false;
         const transactionStartedAt = startHistorianPublishStage(sessionId, "publish-txn");
-        await beginSqliteWriterAsync(db, "historian-publish");
+        const lockAcquiredAt = await beginSqliteWriterAsync(db, "historian-publish");
         try {
             if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
                 db.exec("ROLLBACK");
@@ -1150,7 +1150,9 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 "completed",
                 `compartments=${persistedCompartments.length}`,
             );
-            logSlowWriteTransaction("historian-publish", transactionStartedAt);
+            // Held time only: the publish stage above already includes the wait
+            // for the writer lock.
+            logSlowWriteTransaction("historian-publish", lockAcquiredAt);
         } catch (error) {
             finishHistorianPublishStage(sessionId, "publish-txn", transactionStartedAt, "failed");
             throw error;

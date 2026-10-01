@@ -321,6 +321,7 @@ try {
 		pid: host.pid,
 		stdout: host.stdout(),
 		stderr: host.stderr(),
+		pluginLog: host.pluginLog(),
 	}));
 	const sqliteWaits = existsSync(join(root, "sqlite-waits.log"))
 		? readFileSync(join(root, "sqlite-waits.log"), "utf8")
@@ -344,9 +345,10 @@ try {
 	migrationReader.close();
 	const lockedTurnOutcomes = hosts.map((_, index) => ({
 		index,
-		outcome: hostLogs[index].stderr.includes("lkg_replay_served")
+		// Both markers are Magic Context log lines, never host stderr.
+		outcome: hostLogs[index].pluginLog.includes("lkg_replay_served")
 			? "LKG"
-			: hostLogs[index].stderr.includes("refuseIfUnsafe")
+			: hostLogs[index].pluginLog.includes("refusing this turn before the model call")
 				? "refused"
 				: "normal",
 	}));

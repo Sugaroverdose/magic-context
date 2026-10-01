@@ -48,7 +48,7 @@ export async function registerV2Commands(args: {
             }
         });
     } catch (error) {
-        console.warn("[magic-context] v2 command registration failed", error);
+        log("[magic-context] v2 command registration failed", error);
         return false;
     }
     log(

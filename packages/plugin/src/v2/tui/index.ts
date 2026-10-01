@@ -221,7 +221,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
                 // with a dead dialog surface. Degrade to the text dialog for the
                 // rest of this TUI session and say so once.
                 statusDialog = null;
-                console.warn("[magic-context] v2 status dialog failed; using text", error);
+                log("[magic-context] v2 status dialog failed; using text", error);
             }
         }
         await context.ui.dialog.alert({
@@ -303,7 +303,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
                     // the rest of this TUI session and say so once.
                     mountedSidebar = null;
                     mounted.dispose();
-                    console.warn("[magic-context] v2 sidebar component failed; using text", error);
+                    log("[magic-context] v2 sidebar component failed; using text", error);
                 }
             }
             void refresh(input.sessionID);
@@ -462,8 +462,8 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
             // The accepted layer is the only place that knows which slash commands
             // this host actually got, so report them from it. Anything missing here
             // is missing from the host's command palette too. It goes to the
-            // diagnostic log as well as the console because a TUI host owns the
-            // screen and drops plugin console output.
+            // diagnostic log because a TUI host owns the screen and drops plugin
+            // console output.
             const registered = `registered slash commands: ${buildKeymapLayer()
                 .commands.map((command) => command.slash.name)
                 .join(" ")}`;
@@ -472,7 +472,6 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
             // killed before the next buffer flush would otherwise leave no record
             // of which commands this host received.
             flushLogger();
-            console.info(`[magic-context] ${registered}`);
             return true;
         } catch (error) {
             if (!(error instanceof Error) || error.message !== "Keymap.Provider is missing")
@@ -489,11 +488,11 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
                 try {
                     registered = registerKeymapLayer();
                 } catch (error) {
-                    console.warn("[magic-context] keymap.layer registration failed", error);
+                    log("[magic-context] keymap.layer registration failed", error);
                 }
                 if (!registered && !keymapGapLogged) {
                     keymapGapLogged = true;
-                    console.warn(
+                    log(
                         "[magic-context] OpenCode 2 keymap.layer is unavailable; /ctx-status, /ctx-recomp, /ctx-dream, /ctx-flush, /ctx-embed and /ctx-wrapup were not registered",
                     );
                 }
@@ -559,7 +558,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         },
         onNotification: handleNotification,
     });
-    console.info("[magic-context] @cortexkit/opencode-magic-context v2 TUI setup");
+    log("[magic-context] @cortexkit/opencode-magic-context v2 TUI setup");
 
     return () => {
         unregisterSlot();

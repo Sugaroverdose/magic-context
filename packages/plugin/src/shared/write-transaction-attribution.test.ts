@@ -50,7 +50,7 @@ const fencedSources: Array<{ path: string; sites: string[]; reporterCalls?: stri
         // directly), so it reports through the injected reporter instead.
         path: "packages/plugin/src/shared/sqlite.ts",
         sites: ["async_acquisition_dynamic_site", "privileged_writer"],
-        reporterCalls: ["console.warn(", "reportSlowPrivilegedWrite?.("],
+        reporterCalls: ["reportSqliteDiagnostic(", "reportSlowPrivilegedWrite?.("],
     },
     {
         path: "packages/plugin/src/features/magic-context/git-commits/sweep-coordinator.ts",

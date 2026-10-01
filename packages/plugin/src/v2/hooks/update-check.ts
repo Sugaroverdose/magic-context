@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLatestVersion } from "../../hooks/auto-update-checker/checker";
 import { compareSemverCore } from "../../hooks/auto-update-checker/semver";
+import { log } from "../../shared/logger";
 import { pushNotification } from "../../shared/rpc-notifications";
 import type { V2Context } from "./types";
 
@@ -73,7 +74,7 @@ export function startUpdateChecks(
             }
         } catch (error) {
             if (!controller.signal.aborted)
-                console.warn("[magic-context] v2 update check unavailable", error);
+                log("[magic-context] v2 update check unavailable", error);
         }
     })();
     return {

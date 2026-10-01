@@ -9,7 +9,7 @@ import {
 } from "../../../plugin/src/v2/store-reader";
 import { awaitPluginActivation } from "../../src/opencode2-runner/plugin-activation";
 import { assertWriteFenceUnchanged, snapshotWriteFence } from "../../src/opencode2-runner/write-fence";
-import { ROOT_KEYS, assertIsolation, assertLiveUnchanged, assertOpenPaths, handoff, isolation, snapshotLive, spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
+import { ROOT_KEYS, assertIsolation, assertLiveUnchanged, assertOpenPaths, handoff, isolation, snapshotLive, spawnOpencode2, waitForPluginActive, waitForPluginLog } from '../../src/opencode2-runner/spawn';
 
 test("hermetic_v2_runner environment refuses unsafe roots before boot", () => {
 	const fixture = isolation();
@@ -216,9 +216,10 @@ test("v2_loads_via_exports_map and session_message_reader real host writes", asy
 			plugins.data.find((plugin) => plugin.id === "opencode-magic-context")
 				?.state.status,
 		).toBe("active");
-		expect(host.stdout() + host.stderr()).toContain(
-			"@cortexkit/opencode-magic-context v2 setup",
-		);
+		expect(
+			await waitForPluginLog(host.env, "@cortexkit/opencode-magic-context v2 setup"),
+		).toContain("@cortexkit/opencode-magic-context v2 setup");
+		expect(host.stdout() + host.stderr()).not.toContain("[magic-context]");
 		host.mock.setDefault({
 			text: "fixture reply",
 			usage: { input_tokens: 100, output_tokens: 10 },
