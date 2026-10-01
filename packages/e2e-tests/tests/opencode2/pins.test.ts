@@ -39,6 +39,10 @@ test("v1_untouched and captured fixture bytes remain sha256 pinned", () => {
 			// `allow_home_project` setting at startup, so every project-identity caller
 			// honours it (86a598a3a5, "honor home project permission across identity
 			// callers"); also v1.
+			// It was re-minted again when the v1 entry's comment on the historian
+			// override fields began calling disallowed_tools a legacy no-op
+			// (878b65a3e3, "make historian agents tool-free across OpenCode and
+			// Pi"); a comment-only v1 change.
 			bytes = bytes
 				.replace('import { setup } from "./v2/server";\n', "")
 				.replace("PluginModule & { setup: typeof setup }", "PluginModule")

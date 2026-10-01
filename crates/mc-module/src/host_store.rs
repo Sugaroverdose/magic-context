@@ -2714,9 +2714,14 @@ mod tests {
     }
 
     fn read_session_history(path: &Path, session_id: &str) -> SessionHistory {
-        let conn = Connection::open(path).unwrap();
+        let mut conn = Connection::open(path).unwrap();
         conn.busy_timeout(std::time::Duration::from_millis(5_000))
             .unwrap();
+        // All four reads share one read transaction, so they see one snapshot of the
+        // file. Run as separate autocommit statements, each read would take its own
+        // snapshot, and a fold committing between two of them would be reported as a
+        // torn publish even though it landed in a single transaction.
+        let conn = conn.transaction().unwrap();
         let compartments = conn
             .prepare(
                 "SELECT sequence, title FROM compartments WHERE session_id = ?1 ORDER BY sequence",
