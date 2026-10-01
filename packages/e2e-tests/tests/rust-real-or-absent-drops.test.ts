@@ -30,9 +30,15 @@ import { RustTestHarness } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
 import { openTestDb } from "../src/test-db";
 
-const LOW = { input_tokens: 1_000, output_tokens: 10, cache_creation_input_tokens: 0 };
-// 97.5% of the 20k window: the next TS pass is a forced bust that drains queued drops.
-const HIGH = { input_tokens: 19_500, output_tokens: 10, cache_creation_input_tokens: 0 };
+// The window must hold OpenCode's own request: its system prompt and tool definitions
+// alone are about 40k tokens. A smaller window makes every request over the limit
+// before the conversation starts, and the TS transform refuses an over-limit pass
+// whenever it cannot vouch for it (its estimate is incomplete on a session's first
+// pass, or a stage such as auto-search timed out).
+const MODEL_CONTEXT_LIMIT = 200_000;
+const LOW = { input_tokens: 10_000, output_tokens: 10, cache_creation_input_tokens: 0 };
+// 97.5% of the window: the next TS pass is a forced bust that drains queued drops.
+const HIGH = { input_tokens: 195_000, output_tokens: 10, cache_creation_input_tokens: 0 };
 const CONFIG = {
     execute_threshold_percentage: 20,
     compressor: { enabled: false },
@@ -44,7 +50,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: real-or-absent dropped tool ca
 
     beforeAll(async () => {
         h = await RustTestHarness.create({
-            modelContextLimit: 20_000,
+            modelContextLimit: MODEL_CONTEXT_LIMIT,
             startInTsMode: true,
             startHistorianProducer: false,
             magicContextConfig: CONFIG,

@@ -43,15 +43,21 @@ function rawArrayBytes(h: RustTestHarness, sessionId: string): number {
     }
 }
 
+const MODEL_CONTEXT_LIMIT = 300_000;
+
 describe.skipIf(!rustPrereqs.ok)("rust invariant: cold-start drop seed", () => {
     let h: RustTestHarness;
 
     beforeAll(async () => {
-        // Small context limit + real content ballast so pressure genuinely
-        // crosses the execute threshold (the module measures true-raw content,
-        // not the mock's fabricated usage). Start in TS mode.
+        // Start in TS mode. The window must hold OpenCode's own request: its
+        // system prompt and tool definitions alone are about 40k tokens. A
+        // smaller window makes every request over the limit before the
+        // conversation starts, and the TS transform refuses an over-limit pass
+        // whenever it cannot vouch for it (its estimate is incomplete on a
+        // session's first pass, or a stage such as auto-search timed out). The
+        // scripted usage below is sized as a share of this window.
         h = await RustTestHarness.create({
-            modelContextLimit: 30_000,
+            modelContextLimit: MODEL_CONTEXT_LIMIT,
             startInTsMode: true,
             // This drill must reach the first Rust transform with only the TS
             // frozen reduction; a historian publication would legitimately replace
@@ -77,9 +83,9 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: cold-start drop seed", () => {
             h.mock.setDefault({
                 text: `assistant reply ${i}`,
                 usage: {
-                    input_tokens: 2_000 * i,
+                    input_tokens: 20_000 * i,
                     output_tokens: 20,
-                    cache_creation_input_tokens: 1_000,
+                    cache_creation_input_tokens: 10_000,
                 },
             });
             await h.sendPrompt(sessionId, `turn ${i}: ${h.ballast(1_500)}`);
@@ -113,7 +119,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: cold-start drop seed", () => {
                     { type: "tool_use", id: `toolu_reduce_${Date.now()}`, name, input: { drop: String(dropTag) } },
                 ],
                 stop_reason: "tool_use",
-                usage: { input_tokens: 8_000, output_tokens: 20, cache_creation_input_tokens: 1_000 },
+                usage: { input_tokens: 80_000, output_tokens: 20, cache_creation_input_tokens: 10_000 },
             };
         });
         await h.sendPrompt(sessionId, `turn 4: reduce tag ${dropTag}`);
@@ -122,7 +128,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: cold-start drop seed", () => {
         for (let i = 5; i <= 7; i += 1) {
             h.mock.setDefault({
                 text: `pressure ${i}`,
-                usage: { input_tokens: 27_000, output_tokens: 20, cache_creation_input_tokens: 2_000 },
+                usage: { input_tokens: 270_000, output_tokens: 20, cache_creation_input_tokens: 20_000 },
             });
             await h.sendPrompt(sessionId, `turn ${i}: ${h.ballast(1_500)}`);
         }
@@ -149,7 +155,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: cold-start drop seed", () => {
         // reduction so the drop is reproduced, not re-expanded.
         h.mock.setDefault({
             text: "after flip",
-            usage: { input_tokens: 20_000, output_tokens: 20, cache_creation_input_tokens: 2_000 },
+            usage: { input_tokens: 200_000, output_tokens: 20, cache_creation_input_tokens: 20_000 },
         });
         await h.sendPrompt(sessionId, `turn 8: after flip ${h.ballast(300)}`);
         await Bun.sleep(800);
