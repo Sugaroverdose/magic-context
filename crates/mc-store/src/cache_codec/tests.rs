@@ -494,6 +494,118 @@ fn digest_mismatch_survives_meta_only_writes() {
     );
 }
 
+/// A state sync carrying one valid and one invalid drop seed, and one valid and one invalid
+/// strip seed. Seeds are the host's drop and strip decisions, which the sync turns into
+/// frozen units; the invalid ones have no block index or an unknown strip kind.
+fn sync_with_seeds(store: &McStore, expected_shadow_seq: u64) -> crate::ModuleStateSyncResult {
+    let drop_seeds = [
+        crate::ModuleDropSeedRow {
+            block_id: "m7#0".into(),
+            drop_mode: "full".into(),
+            ..Default::default()
+        },
+        crate::ModuleDropSeedRow {
+            block_id: "no-block-index".into(),
+            drop_mode: "full".into(),
+            ..Default::default()
+        },
+    ];
+    let strip_seeds = [
+        crate::ModuleStripSeedRow {
+            message_id: "m8".into(),
+            strip_kind: "placeholder".into(),
+        },
+        crate::ModuleStripSeedRow {
+            message_id: "m9".into(),
+            strip_kind: "not-a-strip-kind".into(),
+        },
+    ];
+    store
+        .apply_authority_state_sync(crate::ModuleStateSyncRequest {
+            resolved_compartment_boundaries: &[],
+            session_id: SESSION,
+            project_path: "project",
+            shadow_generation: 0,
+            expected_shadow_seq,
+            seed_boundary_id: None,
+            drop_seeds: &drop_seeds,
+            drop_seed_skipped: 0,
+            pending_agent_drops: &[],
+            pending_agent_drops_skipped: 0,
+            user_hint_seeds: &[],
+            auto_search_hint_skipped: 0,
+            note_nudge_anchors: None,
+            todo_synthetic_anchor: None,
+            todo_synthetic_anchor_present: false,
+            emergency_latches: None,
+            pending_compaction_marker: None,
+            deferred_execute_state: None,
+            channel2_nudge_state: None,
+            strip_seeds: &strip_seeds,
+            strip_seed_skipped: 0,
+            reasoning_cleared_through_tag: None,
+            last_todo_state: None,
+            acked_watermarks: serde_json::json!({}),
+        })
+        .unwrap()
+}
+
+/// The control for the test below: over an intact stored frozen list, the valid seeds land
+/// as frozen units and only the invalid ones are reported as skipped.
+#[test]
+fn a_state_sync_over_an_intact_list_stores_its_valid_seeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    seeded(&store);
+    let result = sync_with_seeds(&store, 0);
+    assert_eq!(result.drop_seeds_skipped, 1);
+    assert_eq!(result.strip_seeds_skipped, 1);
+    assert_eq!(result.seeds_skipped_frozen_discarded, 0);
+    let loaded = store.load(SESSION).unwrap();
+    assert!(!loaded.sections.unwrap().any_discarded());
+    let keys: Vec<_> = loaded
+        .core
+        .frozen_units
+        .iter()
+        .map(|u| u.key.as_str())
+        .collect();
+    assert!(keys.contains(&"red:m7#0"));
+    assert!(keys.contains(&"strip:placeholder:m8"));
+}
+
+/// A state sync does not own the frozen list. When the stored list failed its checks, the
+/// sync keeps those rows as they are (so the next transform still sees the discard and goes
+/// HARD) and its valid seeds are not stored. It must report them as skipped, not as landed.
+#[test]
+fn a_state_sync_over_a_discarded_list_keeps_the_chunks_and_reports_its_seeds_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    seeded(&store);
+    corrupt_chunk(&store);
+    let before = snapshot(&store);
+    let frozen_entry = |rows: &RowSnapshot| {
+        SectionIndex::parse(rows.section_index.as_ref().unwrap())
+            .unwrap()
+            .f
+    };
+
+    let result = sync_with_seeds(&store, 0);
+    // One invalid seed of each kind, plus the valid seed of each kind that was not stored.
+    assert_eq!(result.drop_seeds_skipped, 2);
+    assert_eq!(result.strip_seeds_skipped, 2);
+    assert_eq!(result.seeds_skipped_frozen_discarded, 2);
+
+    let after = snapshot(&store);
+    assert_eq!(after.chunks, before.chunks, "the stored chunks are kept");
+    assert_eq!(frozen_entry(&after), frozen_entry(&before));
+    let loaded = store.load(SESSION).unwrap();
+    assert_eq!(
+        loaded.sections.unwrap().frozen,
+        SectionState::Discarded(DiscardReason::DigestMismatch),
+        "the next transform still sees the discard"
+    );
+}
+
 /// Every refusal leaves every chunk, section and index byte identical.
 #[test]
 fn conflicting_commit_leaves_sections_untouched() {

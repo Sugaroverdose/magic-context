@@ -5,6 +5,7 @@ import {
     shouldBypassFailClosedBlock,
 } from "../features/magic-context/fail-closed-block";
 import { getOrCreateSessionMeta, openDatabase } from "../features/magic-context/storage";
+import { getSchemaFenceRejection } from "../features/magic-context/storage-db";
 import {
     getOverflowState,
     isEmergencyRecoveryArmed,
@@ -325,9 +326,41 @@ export function createMessagesTransformHandler(args: {
               })()
             : null;
         try {
-            if (!args.compactionOff && magicContext) {
+            if (magicContext) {
                 const admissionDb = openDatabase();
-                if (admissionDb) await withAsyncPrivilegedWriter(admissionDb, () => undefined);
+                if (admissionDb) {
+                    if (!args.compactionOff) {
+                        await withAsyncPrivilegedWriter(admissionDb, () => undefined);
+                    }
+                } else {
+                    const fence = getSchemaFenceRejection();
+                    if (fence) {
+                        // Another process migrated context.db past the newest schema this
+                        // build supports. The inner transform writes through the handle this
+                        // process cached at startup, so running it would write rows the newer
+                        // schema no longer reads the same way. Refuse the pass instead, the
+                        // way boot refuses a database it cannot open.
+                        log(
+                            `[magic-context] schema fence on a cached handle: database v${fence.persistedVersion} is newer than this build supports (v${fence.supportedVersion}); refusing to transform`,
+                        );
+                        if (args.compactionOff) {
+                            restoreCompactionOffInput();
+                            return output.messages;
+                        }
+                        if (args.failClosed) {
+                            args.failClosed.arm({ kind: "schema_fence", ...fence });
+                            await args.failClosed.enforce({
+                                blockingEnabled: args.failClosedBlockingEnabled !== false,
+                                exempt: shouldBypassFailClosedBlock({
+                                    agent,
+                                    isInternalChildSession: isInternalChild,
+                                }),
+                                tryReopen: args.tryReopenStorage,
+                            });
+                        }
+                        return output.messages;
+                    }
+                }
             }
             await magicContext?.["experimental.chat.messages.transform"]?.(input, output);
             return output.messages;

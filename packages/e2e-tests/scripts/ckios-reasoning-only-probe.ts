@@ -143,8 +143,12 @@ for (const lane of ["plain", "mc", "marker", "marker-drops", "marker-dropped-bou
             const db = openTestDb(resolve(env.dataDir, "cortexkit/magic-context/context.db"));
             try {
                 writeFileSync(`${output}/${lane}-pre-upgrade-ledger.json`, JSON.stringify(db.query("SELECT merged_reasoning_stripped_ids FROM session_meta WHERE session_id = ?").get(id)));
-                // What the pre-fix build durably recorded as its last served array.
-                writeFileSync(`${output}/${lane}-pre-upgrade-lkg.json`, JSON.stringify(db.query("SELECT session_id, length(json_prefix) AS prefix_bytes, captured_at FROM lkg_slots WHERE session_id = ?").all(id)));
+                // What the pre-fix build durably recorded as its last served array. Since
+                // context.db v94 the prefix is stored as ordered slices in lkg_slot_chunks,
+                // so its length is the sum of the slice lengths. This reads the rows directly:
+                // the plugin's loader clears a slot that fails verification, and a probe
+                // must not change the state it records.
+                writeFileSync(`${output}/${lane}-pre-upgrade-lkg.json`, JSON.stringify(db.query("SELECT s.session_id, (SELECT COALESCE(SUM(length(c.body)), 0) FROM lkg_slot_chunks c WHERE c.session_id = s.session_id) AS prefix_bytes, s.captured_at FROM lkg_slots s WHERE s.session_id = ?").all(id)));
             } finally { db.close(); }
             await host.kill();
             host = await spawnOpencode({ ...spawnOptions, existingEnv: env, openCodeConfigExtra: { plugin: [probes[0], fixedPlugin, probes[1]] } });

@@ -3084,22 +3084,36 @@ fn apply_additive_only(
         || hard_fold_requested;
     let m1_revision_changed =
         m1_signal.revision != applied_m1_revision || loaded.meta.soft_refresh_pending;
-    let plan = classify(&ClassifierInput {
-        initialized: loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
-        is_legacy_baseline: is_legacy_baseline(&loaded.core),
-        valid_m0m1_shape: valid_m0m1_shape(&loaded.core),
-        cached_m1_missing: cached_m1_missing(&loaded.core),
-        render_config_changed,
-        hard_fold_requested,
-        // Compaction-off returns every raw request message, so refreshing m1 cannot trim
-        // messages at a stored coverage boundary and does not require a boundary anchor. It
-        // still requires a scheduler or config event that permits provider-visible bytes to change.
-        boundary_present: true,
-        reconcile_pending: false,
-        m1_revision_changed,
-        reductions_pending: false,
-        bust_opportunity,
-    });
+    // A stored frozen chunk or cache section that failed its digest (or its shape checks)
+    // decoded as empty. `classify` rejects an initialized session whose frozen list lacks its
+    // m0/m1 units, so without this override every later pass would fail and nothing would
+    // ever rewrite the chunks. Rebuild with a HARD pass instead, as `apply_once` does for
+    // compaction-on sessions. The commit below then rewrites every discarded value in full,
+    // and refuses if another writer changed the stored sections since this pass loaded them.
+    let cache_sections_discarded = loaded
+        .sections
+        .as_ref()
+        .is_some_and(mc_store::SectionsBase::any_discarded);
+    let plan = if cache_sections_discarded {
+        PassPlan::Hard
+    } else {
+        classify(&ClassifierInput {
+            initialized: loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
+            is_legacy_baseline: is_legacy_baseline(&loaded.core),
+            valid_m0m1_shape: valid_m0m1_shape(&loaded.core),
+            cached_m1_missing: cached_m1_missing(&loaded.core),
+            render_config_changed,
+            hard_fold_requested,
+            // Compaction-off returns every raw request message, so refreshing m1 cannot trim
+            // messages at a stored coverage boundary and does not require a boundary anchor. It
+            // still requires a scheduler or config event that permits provider-visible bytes to change.
+            boundary_present: true,
+            reconcile_pending: false,
+            m1_revision_changed,
+            reductions_pending: false,
+            bust_opportunity,
+        })
+    };
     if let PassPlan::Reject(message) = plan {
         return Err(TransformError::UnknownShape(message));
     }
@@ -3338,7 +3352,9 @@ fn apply_additive_only(
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
     }
-    let commit_required = core != loaded.core || meta != loaded.meta;
+    // A discarded section is rewritten even when the rebuild reproduces the loaded state, so
+    // the next load trusts the stored rows again.
+    let commit_required = state_changed || cache_sections_discarded;
     let store_commit_started_at = Instant::now();
     let row_version = if commit_required {
         #[cfg(test)]
@@ -3388,7 +3404,9 @@ fn apply_additive_only(
     let action = action_str(&plan, &core).to_string();
     let materialize_reason = match plan {
         PassPlan::Hard | PassPlan::MigrateHard => Some(
-            if !loaded.meta.initialized || loaded.meta.bootstrap_seed_fold_pending {
+            if cache_sections_discarded {
+                "cache_sections_discarded"
+            } else if !loaded.meta.initialized || loaded.meta.bootstrap_seed_fold_pending {
                 "first_render"
             } else if is_legacy_baseline(&loaded.core) {
                 "legacy_migration"
@@ -6626,8 +6644,14 @@ fn apply_once(
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
     }
-    let commit_required =
-        state_changed || !consumed_drop_ids.is_empty() || !pending_overlays.is_empty();
+    // A discarded section must be rewritten even when the rebuild reproduces the loaded state
+    // (a subagent session holds no frozen units, so its rebuilt list is as empty as the
+    // discarded one). Skipping the commit would leave the stored rows untrusted, and every
+    // later pass would go HARD again.
+    let commit_required = state_changed
+        || cache_sections_discarded
+        || !consumed_drop_ids.is_empty()
+        || !pending_overlays.is_empty();
     let mut scheduler_observation = pass_scheduler_observation(
         scheduler_outcome.pass,
         scheduler_outcome.defer_reason,
@@ -30502,6 +30526,134 @@ pub(crate) mod tests {
         assert!(!reloaded.sections.as_ref().unwrap().any_discarded());
         assert_eq!(reloaded.core.frozen_units, clean_units);
         let after = run(&s, &req("ses", "cfg0", items()), &spine());
+        assert_eq!(after.action, "SOFT+");
+    }
+
+    /// Subagent passes replace the classified plan with SOFT or DEFER, and they ignore
+    /// `force_hard`, so a discarded frozen list reaches HARD on a subagent only through the
+    /// explicit discard override. This pins that override.
+    ///
+    /// A subagent session holds no frozen units, so there is no chunk to corrupt. A stray
+    /// write to the frozen entry of `section_index` stands in for the corruption instead: its
+    /// digest no longer matches the (empty) stored chunks, and the load discards the list.
+    #[test]
+    fn subagent_discarded_frozen_list_forces_hard_and_full_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("sub", &[comp(1, 1, 1, "m1msg", "SUMMARY")])
+            .unwrap();
+        let request = || {
+            let mut request = active_opencode_req(
+                "sub",
+                "cfg0",
+                vec![item("m1msg", 1, "raw"), item("t2", 2, "tail2")],
+            );
+            request.is_subagent = true;
+            request
+        };
+        let first = run(&s, &request(), &spine());
+        assert_ne!(
+            first.action, "HARD",
+            "subagent passes do not go HARD on their own"
+        );
+        assert!(first.committed);
+
+        let conn = rusqlite::Connection::open(dir.path().join("store.db")).unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE mc_cache_state
+                    SET section_index = json_set(section_index, '$.f.h', '00000000000000000000000000000000')
+                  WHERE session_id = 'sub'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        drop(conn);
+        assert!(
+            s.load("sub")
+                .unwrap()
+                .sections
+                .as_ref()
+                .unwrap()
+                .frozen
+                .discard_reason()
+                .is_some(),
+            "the edited frozen entry is discarded on load"
+        );
+
+        let rebuilt = run(&s, &request(), &spine());
+        assert_eq!(
+            rebuilt.action, "HARD",
+            "a discarded section never serves a subagent SOFT or DEFER pass"
+        );
+        assert_eq!(
+            rebuilt.materialize_reason.as_deref(),
+            Some("cache_sections_discarded")
+        );
+        assert!(rebuilt.committed);
+        // The commit rewrote the frozen entry under a fresh digest: the next load trusts it.
+        let reloaded = s.load("sub").unwrap();
+        assert!(!reloaded.sections.as_ref().unwrap().any_discarded());
+    }
+
+    /// Compaction-off sessions take their own additive pass. An empty (discarded) frozen list
+    /// on an initialized session is not a shape the classifier accepts, so this pins that the
+    /// pass rebuilds the list instead of rejecting every pass from then on.
+    #[test]
+    fn compaction_off_corrupt_chunk_rebuilds_with_hard_instead_of_rejecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let request = active_opencode_req(
+            "off-corrupt",
+            "cfg0",
+            vec![item("head", 1, "raw head"), item("tail", 2, "raw tail")],
+        );
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        ctx.compaction_enabled = false;
+
+        let bootstrap = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(bootstrap.action, "HARD");
+        assert!(bootstrap.committed);
+        let clean_units = s.load("off-corrupt").unwrap().core.frozen_units;
+        assert!(!clean_units.is_empty());
+
+        corrupt_frozen_chunk(dir.path(), "off-corrupt");
+        assert!(
+            s.load("off-corrupt")
+                .unwrap()
+                .sections
+                .as_ref()
+                .unwrap()
+                .frozen
+                .discard_reason()
+                .is_some(),
+            "the corrupted chunk is discarded on load"
+        );
+
+        ctx.now_ms = 20;
+        let rebuilt = transform(&s, &request, &ctx)
+            .expect("a discarded frozen list rebuilds instead of rejecting the pass");
+        assert_eq!(rebuilt.action, "HARD");
+        assert_eq!(
+            rebuilt.materialize_reason.as_deref(),
+            Some("cache_sections_discarded")
+        );
+        assert!(rebuilt.committed);
+        assert_eq!(
+            serde_json::to_vec(rebuilt.messages()).unwrap(),
+            serde_json::to_vec(bootstrap.messages()).unwrap(),
+            "the rebuilt frame is the one the clean bootstrap served"
+        );
+
+        // The commit rewrote the chunks under fresh digests, so the next load trusts them.
+        let reloaded = s.load("off-corrupt").unwrap();
+        let sections = reloaded.sections.as_ref().unwrap();
+        assert!(sections.frozen.intact().is_some());
+        assert!(!sections.any_discarded());
+        assert_eq!(reloaded.core.frozen_units, clean_units);
+
+        ctx.now_ms = 30;
+        let after = transform(&s, &request, &ctx).unwrap();
         assert_eq!(after.action, "SOFT+");
     }
 
