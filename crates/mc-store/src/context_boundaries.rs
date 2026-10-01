@@ -139,7 +139,9 @@ pub(crate) struct BoundaryValidationCache {
 
 struct BoundaryValidationEntry {
     session: String,
-    source_json: String,
+    /// The digest of the boundary section the coordinates were read from, as recorded in
+    /// `section_index.b.h`. It identifies the stored coordinates without reading them.
+    source_digest: String,
     domain: std::sync::Arc<dyn crate::ContextDomain>,
     revision: (String, i64, i64, bool),
     valid: Vec<ResolvedContextBoundary>,
@@ -198,17 +200,54 @@ impl McStore {
         .optional()
     }
 
+    /// Read the boundary index entry and the body it vouches for in one read transaction, so
+    /// a commit landing between the two reads cannot pair a new body with an old digest.
+    fn read_boundary_body_consistently(
+        &self,
+        session: &str,
+    ) -> Result<Option<(String, u128)>, McStoreError> {
+        Ok(self.inner.with_conn(|conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let read = match crate::cache_codec::boundary_index_entry(&transaction, session)? {
+                Some((sv, Some(entry))) => crate::cache_codec::read_verified_boundary_body(
+                    &transaction,
+                    session,
+                    sv,
+                    &entry,
+                )?,
+                _ => None,
+            };
+            transaction.commit()?;
+            Ok(read)
+        })?)
+    }
+
     pub(crate) fn cached_context_boundaries(
         &self,
         session: &str,
     ) -> Result<Vec<ResolvedContextBoundary>, McStoreError> {
-        let json: Option<String> = self.inner.with_conn(|conn| {
-            conn.query_row("SELECT COALESCE(json_extract(meta, '$.resolved_compartment_boundaries'), '[]') FROM mc_cache_state WHERE session_id=?1", params![session], |row| row.get(0)).optional()
-        })?;
-        let json = json.unwrap_or_else(|| "[]".into());
-        if json == "[]" {
+        // Only the small row's index is read here: the boundaries have their own section row,
+        // and its digest identifies the stored coordinates without reading them. The body is
+        // read only when the validation below is not already cached for that digest.
+        let entry = self
+            .inner
+            .with_conn(|conn| crate::cache_codec::boundary_index_entry(conn, session))?;
+        let Some((_, Some(entry))) = entry else {
             return Ok(Vec::new());
-        }
+        };
+        // A migrated row has no digest until its first codec commit; key it on the hash of
+        // the body, which is what a codec writer would record for the same bytes.
+        let mut prefetched = None;
+        let mut source_digest = match entry.h.clone() {
+            Some(digest) => digest,
+            None => {
+                let Some((body, digest)) = self.read_boundary_body_consistently(session)? else {
+                    return Ok(Vec::new());
+                };
+                prefetched = Some(body);
+                crate::cache_codec::digest_hex(digest)
+            }
+        };
         let mut cache = self
             .context_boundary_cache
             .lock()
@@ -227,7 +266,7 @@ impl McStore {
             let hit = revision.as_ref().and_then(|revision| {
                 cache.entries.iter().position(|entry| {
                     entry.session == session
-                        && entry.source_json == json
+                        && entry.source_digest == source_digest
                         && std::sync::Arc::ptr_eq(&entry.domain, &domain)
                         && &entry.revision == revision
                 })
@@ -245,6 +284,20 @@ impl McStore {
             cache.entries.push_back(entry);
             return Ok(valid);
         }
+        let json = match prefetched {
+            Some(body) => body,
+            None => {
+                match self.read_boundary_body_consistently(session)? {
+                    // If a commit landed between the two reads, the cache entry is keyed on
+                    // the digest of the bytes actually validated, not on the older index.
+                    Some((body, digest)) => {
+                        source_digest = crate::cache_codec::digest_hex(digest);
+                        body
+                    }
+                    None => return Ok(Vec::new()),
+                }
+            }
+        };
         let cached: Vec<ResolvedContextBoundary> =
             serde_json::from_str(&json).map_err(|error| McStoreError::Serde(error.to_string()))?;
         let mut by_sequence = std::collections::HashMap::new();
@@ -267,7 +320,7 @@ impl McStore {
             }
             cache.entries.push_back(BoundaryValidationEntry {
                 session: session.into(),
-                source_json: json,
+                source_digest,
                 domain,
                 revision,
                 valid: valid.clone(),
@@ -509,14 +562,24 @@ mod tests {
             .apply_authority_state_sync(request(&[boundary()], 0))
             .unwrap();
         assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 4);
-        store.inner.with_conn(|conn| conn.execute_batch(
-            "UPDATE mc_cache_state SET meta=json_set(meta, '$.resolved_compartment_boundaries[0].end_message', 3) WHERE session_id='raw'"
-        )).unwrap();
+        // The coordinates live in their own section row; a direct edit goes through the
+        // codec so the section digest the validation cache keys on changes with them.
+        let rewrite = |edit: &dyn Fn(&mut Vec<ResolvedContextBoundary>)| {
+            let loaded = store.load("raw").unwrap();
+            let mut meta = loaded.meta.clone();
+            edit(&mut meta.resolved_compartment_boundaries);
+            store
+                .commit("raw", loaded.row_version, &loaded.core, &meta)
+                .unwrap();
+        };
+        rewrite(&|boundaries| boundaries[0].end_message = 3);
         assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 3);
         // Preserve the earlier coordinate if legacy metadata repeats a sequence.
-        store.inner.with_conn(|conn| conn.execute_batch(
-            "UPDATE mc_cache_state SET meta=json_insert(meta, '$.resolved_compartment_boundaries[#]', json_set(json_extract(meta, '$.resolved_compartment_boundaries[0]'), '$.end_message', 7)) WHERE session_id='raw'"
-        )).unwrap();
+        rewrite(&|boundaries| {
+            let mut repeated = boundaries[0].clone();
+            repeated.end_message = 7;
+            boundaries.push(repeated);
+        });
         assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 3);
     }
 

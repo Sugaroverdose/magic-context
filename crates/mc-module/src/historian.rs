@@ -749,13 +749,13 @@ pub fn persist_historian_state(
     session_id: &str,
     next_state: HistorianDurableState,
 ) -> Result<u64, HistorianStateError> {
-    let loaded = store.load(session_id)?;
+    let loaded = store.load_meta(session_id)?;
     let mut meta = loaded.meta.clone();
     meta.historian = next_state;
     if meta == loaded.meta {
         return Ok(loaded.row_version.unwrap_or(0));
     }
-    Ok(store.commit(session_id, loaded.row_version, &loaded.core, &meta)?)
+    Ok(store.commit_meta(session_id, loaded.row_version, &meta)?)
 }
 
 pub trait HistorianPublicationFence: Send + Sync {
@@ -1011,7 +1011,7 @@ pub fn handle_restart_load(
     now_ms: i64,
     failure_backoff_at_ms: i64,
 ) -> Result<RestartAction, HistorianStateError> {
-    let loaded = store.load(session_id)?;
+    let loaded = store.load_meta(session_id)?;
     let state = loaded.meta.historian.clone();
     match state.state {
         HistorianPhase::Idle => Ok(RestartAction::Done),
@@ -1852,7 +1852,7 @@ fn persist_idle_runner_refusal_detail(
     chain_exhausted: bool,
 ) -> Result<u64, HistorianStateError> {
     for attempt in 0..3 {
-        let loaded = store.load(session_id)?;
+        let loaded = store.load_meta(session_id)?;
         if loaded.meta.historian.state != HistorianPhase::Idle
             || expected_firing_seq
                 .is_some_and(|expected| loaded.meta.historian.firing_seq != expected)
@@ -1866,7 +1866,7 @@ fn persist_idle_runner_refusal_detail(
         if chain_exhausted {
             record_runner_refusal_outage(&mut meta.historian, retry_at_ms);
         }
-        match store.commit(session_id, loaded.row_version, &loaded.core, &meta) {
+        match store.commit_meta(session_id, loaded.row_version, &meta) {
             Ok(row_version) => return Ok(row_version),
             Err(McStoreError::CasConflict { .. }) if attempt < 2 => continue,
             Err(error) => return Err(HistorianStateError::Store(error)),
@@ -1936,13 +1936,13 @@ fn record_admission_refusal(
     request: &HistorianFireRequest<'_>,
     reason: &str,
 ) -> Result<(), HistorianDriveError> {
-    let loaded = request.store.load(request.session_id)?;
+    let loaded = request.store.load_meta(request.session_id)?;
     let mut meta = loaded.meta.clone();
     meta.historian.last_failure = Some(reason.to_string());
     meta.historian.failure_backoff_at_ms = Some(request.failure_backoff_at_ms);
     request
         .store
-        .commit(request.session_id, loaded.row_version, &loaded.core, &meta)?;
+        .commit_meta(request.session_id, loaded.row_version, &meta)?;
     Ok(())
 }
 
@@ -2079,7 +2079,7 @@ where
                 HistorianProducerError::context_overflow(reason),
             ));
         }
-        let loaded = request.store.load(request.session_id)?;
+        let loaded = request.store.load_meta(request.session_id)?;
         let mut recent_decision = request.recent_decision.clone();
         if let Some(decision) = recent_decision.as_mut() {
             decision.producer_model = Some(model.clone());
@@ -2507,13 +2507,13 @@ pub async fn run_historian_firing_on_host(
         primary_input,
         request.max_output_tokens,
     ) {
-        let loaded = request.store.load(request.session_id)?;
+        let loaded = request.store.load_meta(request.session_id)?;
         let mut meta = loaded.meta.clone();
         meta.historian.last_failure = Some(reason.clone());
         meta.historian.failure_backoff_at_ms = Some(request.failure_backoff_at_ms);
         request
             .store
-            .commit(request.session_id, loaded.row_version, &loaded.core, &meta)?;
+            .commit_meta(request.session_id, loaded.row_version, &meta)?;
         eprintln!(
             "[mc-module][{}] historian oversize admission refused before queueing: {reason}",
             request.session_id
@@ -2527,7 +2527,7 @@ pub async fn run_historian_firing_on_host(
         request.chunk_fingerprint,
         request.observed_chunk_fingerprint,
     )?;
-    let loaded = request.store.load(request.session_id)?;
+    let loaded = request.store.load_meta(request.session_id)?;
     let mut recent_decision = request.recent_decision.clone();
     if let Some(decision) = recent_decision.as_mut() {
         // The claimant picks the model from the chain, so the decision record
@@ -2627,7 +2627,7 @@ pub async fn run_historian_firing_on_host(
 
     // Reload rather than reusing `fired`: the claim advanced the phase, the
     // attempt and the token, and the publish predicate CASes on the attempt.
-    let claimed = request.store.load(request.session_id)?.meta.historian;
+    let claimed = request.store.load_meta(request.session_id)?.meta.historian;
     if claimed.state != HistorianPhase::AwaitingProducer
         || claimed.producer_run_id.as_deref() != Some(run_id.as_str())
     {
@@ -2775,7 +2775,7 @@ pub fn adopt_historian_run_on_host(
     // queue row stops being claimable the moment a report lands on it, so this is
     // a guard against a state that moved on some other way (a refire, a publish
     // that already happened) rather than against a racing claimant.
-    let awaiting = request.store.load(request.session_id)?.meta.historian;
+    let awaiting = request.store.load_meta(request.session_id)?.meta.historian;
     if awaiting.state != HistorianPhase::AwaitingProducer
         || awaiting.producer_run_id.as_deref() != Some(run_id.as_str())
         || awaiting.producer_attempt != parked.attempt
@@ -2912,7 +2912,7 @@ where
         }
     }
 
-    let loaded = request.store.load(request.session_id)?;
+    let loaded = request.store.load_meta(request.session_id)?;
     let awaiting = loaded.meta.historian.clone();
     let output = match producer
         .await_output_with_timeout(&producer_run_id, request.await_timeout)
@@ -3144,7 +3144,7 @@ fn abandon_current_state_with_detail(
     failure_backoff_at_ms: i64,
     detail: Option<String>,
 ) -> Result<(), HistorianStateError> {
-    let loaded = store.load(session_id)?;
+    let loaded = store.load_meta(session_id)?;
     persist_historian_state(
         store,
         session_id,

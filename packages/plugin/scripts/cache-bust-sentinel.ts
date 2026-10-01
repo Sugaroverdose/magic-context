@@ -589,7 +589,36 @@ export function loadSessionDecisions(
             .query("SELECT * FROM mc_pass_trace WHERE session_id = ?")
             .all(session.sessionId) as Array<Record<string, unknown>>;
         addRows(rows, source);
-        for (const row of rows) {
+        if (rows.length === 0) return;
+        // Store migration 63 moved the histories into ring rows and dropped the array columns;
+        // its read-only view rebuilds each session's arrays in sequence order. Older stores
+        // still carry the columns on the trace row itself.
+        const ringView = Boolean(
+            db
+                .query(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'mc_pass_trace_history_arrays'",
+                )
+                .get(),
+        );
+        const histories = ringView
+            ? (db
+                  .query(
+                      "SELECT scheduler_history, scheduler_interesting_history FROM mc_pass_trace_history_arrays WHERE session_id = ?",
+                  )
+                  .all(session.sessionId) as Array<Record<string, unknown>>)
+            : rows.filter(
+                  (row) =>
+                      typeof row.scheduler_history === "string" ||
+                      typeof row.scheduler_interesting_history === "string",
+              );
+        if (histories.length === 0) {
+            // Reading zero decisions here would look like a quiet session, not a schema the
+            // sentinel no longer understands.
+            throw new CacheBustSentinelInputError(
+                `${source} has a trace row for ${session.sessionId} but neither ring-row histories nor history columns`,
+            );
+        }
+        for (const row of histories) {
             for (const column of ["scheduler_history", "scheduler_interesting_history"] as const) {
                 if (typeof row[column] !== "string") continue;
                 try {

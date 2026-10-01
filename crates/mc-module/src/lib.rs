@@ -83,14 +83,14 @@ use mc_store::TagNumberRow;
 use mc_store::{
     canonical_root, validate_state_import_compartments, DeferredExecuteState,
     FacadeMemoryMutationError, FacadeMutationOutcome, HistorianChunkRange, HistorianDecision,
-    HistorianPhase, HistorianRecentDecision, InsertMemoryInput, LoadedState, MappingUpdate,
-    McStore, McStoreError, McTagRow, ModuleDropSeedRow, ModuleStateSyncError,
-    ModuleStateSyncRequest, ModuleStripSeedRow, NoteCasOutcome, NoteDismissOutcome,
-    NoteEvaluationInput, NoteInput, NoteNudgeAnchorSeed, NoteWriteInput, PendingAgentDrop,
-    PendingAgentDropSeedRow, PendingCompactionMarkerState, RecordWrapupCommandOutcome,
-    StateImportError, StateImportPreflight, StateImportValidationError, StoredChunkTranscript,
-    StoredCompartment, StoredNote, TodoStateSetOutcome, UserHintSeedRow, VerificationUpdate,
-    WrapupCommandRecord, LATEST_MIGRATION_VERSION, STORE_AHEAD_OF_BINARY_REFUSAL_REASON,
+    HistorianPhase, HistorianRecentDecision, InsertMemoryInput, MappingUpdate, McStore,
+    McStoreError, McTagRow, ModuleDropSeedRow, ModuleStateSyncError, ModuleStateSyncRequest,
+    ModuleStripSeedRow, NoteCasOutcome, NoteDismissOutcome, NoteEvaluationInput, NoteInput,
+    NoteNudgeAnchorSeed, NoteWriteInput, PendingAgentDrop, PendingAgentDropSeedRow,
+    PendingCompactionMarkerState, RecordWrapupCommandOutcome, StateImportError,
+    StateImportPreflight, StateImportValidationError, StoredChunkTranscript, StoredCompartment,
+    StoredNote, TodoStateSetOutcome, UserHintSeedRow, VerificationUpdate, WrapupCommandRecord,
+    LATEST_MIGRATION_VERSION, STORE_AHEAD_OF_BINARY_REFUSAL_REASON,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -3920,7 +3920,7 @@ struct HistorianDecisionContext {
 impl HistorianDecisionContext {
     fn from_request(
         parsed: &TransformRequest,
-        loaded: &LoadedState,
+        meta: &mc_store::ModuleMeta,
         now: i64,
         pressure: f64,
     ) -> Self {
@@ -3931,7 +3931,7 @@ impl HistorianDecisionContext {
                 .and_then(|observed| i64::try_from(observed).ok())
                 .unwrap_or(now),
             pressure_pct: quantize_pressure_pct(pressure),
-            drain_latch: loaded.meta.emergency_drain_active,
+            drain_latch: meta.emergency_drain_active,
             chunk_range: None,
             eligible_tokens: None,
             bar_tokens: None,
@@ -4936,7 +4936,7 @@ impl McHandler {
             .store
             .get()
             .ok_or("store_unavailable")?
-            .load(&parsed.session_id)
+            .load_meta(&parsed.session_id)
             .map_err(|_| "store_load_failed")?
             .meta
             .revert_epoch;
@@ -5077,7 +5077,7 @@ impl McHandler {
         let revert_epoch = self
             .store
             .get()?
-            .load(&request.session_id)
+            .load_meta(&request.session_id)
             .ok()?
             .meta
             .revert_epoch;
@@ -5460,10 +5460,11 @@ impl McHandler {
     fn handler_entry_state<'a>(
         store: &McStore,
         session_id: &str,
-        snapshot: &'a OnceLock<Option<LoadedState>>,
-    ) -> Option<&'a LoadedState> {
+        snapshot: &'a OnceLock<Option<mc_store::MetaSnapshot>>,
+    ) -> Option<&'a mc_store::MetaSnapshot> {
+        // The handler only reads meta scalars here; the transform takes the one full decode.
         snapshot
-            .get_or_init(|| store.load(session_id).ok())
+            .get_or_init(|| store.load_meta(session_id).ok())
             .as_ref()
     }
 
@@ -5471,7 +5472,7 @@ impl McHandler {
         &self,
         store: &McStore,
         session_id: &str,
-        entry_snapshot: &OnceLock<Option<LoadedState>>,
+        entry_snapshot: &OnceLock<Option<mc_store::MetaSnapshot>>,
     ) -> bool {
         if self
             .live_historian_sessions
@@ -5496,7 +5497,7 @@ impl McHandler {
         &self,
         store: &McStore,
         session_id: &str,
-        entry_snapshot: &OnceLock<Option<LoadedState>>,
+        entry_snapshot: &OnceLock<Option<mc_store::MetaSnapshot>>,
     ) -> Option<i64> {
         let mut observations = self
             .scheduler_observations
@@ -5661,7 +5662,7 @@ impl McHandler {
         let project_path = binding.project_root.to_string_lossy().to_string();
         let harness = binding.harness.clone();
         let config = self.effective_config(&binding.project_root);
-        let Ok(loaded) = store.load(&parsed.session_id) else {
+        let Ok(loaded) = store.load_meta(&parsed.session_id) else {
             return Some("recovery_load_failed");
         };
         let phase = loaded.meta.historian.state.clone();
@@ -6017,7 +6018,9 @@ impl McHandler {
             started_at: Instant::now(),
             timings,
         };
-        let loaded = match store.load(&parsed.session_id) {
+        // Historian bookkeeping reads and writes meta scalars only, so it loads the small row:
+        // a full load would decode every frozen unit for a decision that never looks at them.
+        let loaded = match store.load_meta(&parsed.session_id) {
             Ok(loaded) => loaded,
             Err(e) => {
                 return PreparedHistorianAction::Complete(historian_no_fire_diagnostics(
@@ -6039,7 +6042,7 @@ impl McHandler {
         let (context_limit, input_tokens, usage_percentage) =
             usage_numbers(parsed.usage.as_ref(), parsed.geometry.as_ref());
         let mut decision_context =
-            HistorianDecisionContext::from_request(parsed, &loaded, now, usage_percentage);
+            HistorianDecisionContext::from_request(parsed, &loaded.meta, now, usage_percentage);
         if loaded.meta.pending_rewrite.is_some() {
             let diagnostics = historian_no_fire_diagnostics(NoFireDiagnosticsInput {
                 no_fire: "pending_rewrite".into(),
@@ -6180,10 +6183,20 @@ impl McHandler {
         let pending_drops = store
             .load_pending_agent_drops(&parsed.session_id)
             .unwrap_or_default();
+        // The projection reads frozen `red:` units only when agent drops are pending, which is
+        // rare; only then is the frozen list loaded.
+        let pending_frozen_units = if pending_drops.is_empty() {
+            Vec::new()
+        } else {
+            store
+                .load(&parsed.session_id)
+                .map(|state| state.core.frozen_units)
+                .unwrap_or_default()
+        };
         let projected_post_drop_percentage = projected_post_drop_percentage(
             &boundary_messages,
             &pending_drops,
-            &loaded.core.frozen_units,
+            &pending_frozen_units,
             input_tokens,
             context_limit,
         );
@@ -6449,18 +6462,6 @@ impl McHandler {
             .cloned()
             .collect();
         let project_slug = project_slug(&binding.project_root);
-        if fold_is_only_reclaim {
-            // CC sessions are born on this profile; tail reducers never run, so no frozen
-            // `red:*` units should exist when the fold is the sole reclaim path.
-            debug_assert!(
-                !loaded
-                    .core
-                    .frozen_units
-                    .iter()
-                    .any(|u| u.key.starts_with("red:")),
-                "fold-only profile must not carry frozen tail reductions"
-            );
-        }
         let assemble = assemble_historian_firing(
             &store,
             &parsed.messages,
@@ -6787,7 +6788,7 @@ impl McHandler {
         session_id: &str,
         mut diagnostics: HistorianDiagnostics,
     ) -> HistorianDiagnostics {
-        if let Ok(loaded) = store.load(session_id) {
+        if let Ok(loaded) = store.load_meta(session_id) {
             diagnostics.state = loaded.meta.historian.state.as_str().to_string();
             diagnostics.last_failure = loaded.meta.historian.last_failure.clone();
         }
@@ -6800,13 +6801,13 @@ impl McHandler {
         &self,
         store: &McStore,
         session_id: &str,
-        loaded: &LoadedState,
+        loaded: &mc_store::MetaSnapshot,
         decision: &HistorianRecentDecision,
     ) {
         let mut meta = loaded.meta.clone();
         meta.historian.record_recent_decision(decision.clone());
         if store
-            .commit(session_id, loaded.row_version, &loaded.core, &meta)
+            .commit_meta(session_id, loaded.row_version, &meta)
             .is_ok()
         {
             DISPATCH_HEALTH.historian_recent_decisions_count.store(
@@ -6822,7 +6823,7 @@ impl McHandler {
         &self,
         store: &McStore,
         session_id: &str,
-        loaded: &mc_store::LoadedState,
+        loaded: &mc_store::MetaSnapshot,
         diagnostics: &HistorianDiagnostics,
         context: &HistorianDecisionContext,
     ) {
@@ -6847,7 +6848,7 @@ impl McHandler {
         }
         meta.historian.last_no_fire = Some(reason.to_string());
         if store
-            .commit(session_id, loaded.row_version, &loaded.core, &meta)
+            .commit_meta(session_id, loaded.row_version, &meta)
             .is_ok()
         {
             DISPATCH_HEALTH.historian_recent_decisions_count.store(
@@ -9465,7 +9466,7 @@ impl McHandler {
         session_id: &str,
     ) -> Result<String, mc_store::McStoreError> {
         for _ in 0..2 {
-            let loaded = store.load(session_id)?;
+            let loaded = store.load_meta(session_id)?;
             if !loaded.meta.guidance_date.is_empty() {
                 self.guidance_dates
                     .lock()
@@ -9485,7 +9486,7 @@ impl McHandler {
             };
             let mut meta = loaded.meta.clone();
             meta.guidance_date.clone_from(&date_line);
-            match store.commit(session_id, Some(expected), &loaded.core, &meta) {
+            match store.commit_meta(session_id, Some(expected), &meta) {
                 Ok(_) => return Ok(date_line),
                 Err(mc_store::McStoreError::CasConflict { .. }) => continue,
                 Err(error) => return Err(error),
@@ -10387,7 +10388,7 @@ impl McHandler {
         // bytes.
         if !parsed.is_subagent && result.scheduler_pass == scheduler::PassDecision::Emergency95 {
             let floor_advanced = store
-                .load(&parsed.session_id)
+                .load_meta(&parsed.session_id)
                 .map(|state| state.meta.publication_floor_ordinal != emergency_pre_floor)
                 .unwrap_or(false);
             if floor_advanced {
@@ -17913,7 +17914,7 @@ fn record_historian_connect_failure(
     before_commit: &ConnectFailureCommitHook,
 ) -> Result<(), McStoreError> {
     for attempt in 0..2 {
-        let loaded = store.load(session_id)?;
+        let loaded = store.load_meta(session_id)?;
         let mut meta = loaded.meta.clone();
         if meta.historian.state == HistorianPhase::Idle {
             // Connection failures happen before the historian transitions out of Idle, but
@@ -17934,7 +17935,7 @@ fn record_historian_connect_failure(
         {
             hook();
         }
-        match store.commit(session_id, loaded.row_version, &loaded.core, &meta) {
+        match store.commit_meta(session_id, loaded.row_version, &meta) {
             Ok(_) => return Ok(()),
             Err(McStoreError::CasConflict { .. }) if attempt == 0 => continue,
             Err(error) => return Err(error),
@@ -25827,10 +25828,12 @@ mod tests {
             1,
             "the cold transform is the only full tag payload read"
         );
+        // Handler entry and historian preflight read only the small row (`load_meta`);
+        // the transform's snapshot is the pass's one full decode, and it is not a `load`.
         assert_eq!(
             store.state_load_query_count_for_test(),
-            2,
-            "handler entry and historian preflight each take one state snapshot"
+            0,
+            "handler entry and historian preflight take no full state load"
         );
 
         for _ in 0..5 {
@@ -25846,7 +25849,7 @@ mod tests {
                 store.tag_payload_query_count_for_test() <= 1,
                 "historian preflight must not add a second payload scan even if another parallel test evicts the process cache"
             );
-            assert_eq!(store.state_load_query_count_for_test(), 2);
+            assert_eq!(store.state_load_query_count_for_test(), 0);
         }
 
         transform::load_cached_tags(&store, "ses").unwrap();

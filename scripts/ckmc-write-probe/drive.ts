@@ -20,6 +20,8 @@
  *                   this makes frame attribution exact but defers checkpoint writes
  *   PROBE_BROCA=1   start the hermetic historian producer so historian runs can publish
  *   PROBE_OUT       JSONL output path (default $PROBE_RUN/passes.jsonl)
+ *   PROBE_CLOCK_BASE_MS  fixed clock for the synthetic messages' ids and timestamps, so the
+ *                   served_sha256 of two runs can be compared
  *   PROBE_SQL_TRACE=1  record every write statement this process (the plugin) runs against
  *                   context.db to $PROBE_RUN/sqltrace.jsonl, with the pass it ran in and the
  *                   WAL frames it appended (exact for autocommit statements under PROBE_PIN=1)
@@ -402,7 +404,11 @@ async function main(): Promise<void> {
         // One agent step shaped like the session's own traffic: an assistant message that
         // ran a read tool and got a few kilobytes back.
         synthetic += 1;
-        const now = Date.now();
+        // PROBE_CLOCK_BASE_MS pins the synthetic messages' ids and timestamps, so two runs of
+        // the same plan on the same clone serve comparable bytes across binaries.
+        const now = process.env.PROBE_CLOCK_BASE_MS
+            ? Number(process.env.PROBE_CLOCK_BASE_MS) + synthetic * 60_000
+            : Date.now();
         const id = `msg_probe${String(now).padStart(16, "0")}${String(synthetic).padStart(4, "0")}`;
         const message = {
             info: {

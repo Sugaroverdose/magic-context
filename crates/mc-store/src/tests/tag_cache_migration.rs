@@ -101,8 +101,14 @@ fn migration_62_matches_old_triggers_after_every_mutation() {
     let new = Connection::open_in_memory().unwrap();
     tag_schema(&old);
     tag_schema(&new);
-    new.execute_batch(MIGRATIONS.last().unwrap().statements)
-        .unwrap();
+    new.execute_batch(
+        MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 62)
+            .unwrap()
+            .statements,
+    )
+    .unwrap();
     let mut seed = 0x1234_5678_u64;
     let directed = [
         "INSERT INTO mc_tags(session_id,tag_number,block_id,kind) VALUES ('a',1,'first','message')",
@@ -151,8 +157,14 @@ fn migration_62_bulk_tag_writes_have_linear_vm_step_cost() {
     fn measure(n: i64) -> (i32, i32) {
         let conn = Connection::open_in_memory().unwrap();
         tag_schema(&conn);
-        conn.execute_batch(MIGRATIONS.last().unwrap().statements)
-            .unwrap();
+        conn.execute_batch(
+            MIGRATIONS
+                .iter()
+                .find(|migration| migration.version == 62)
+                .unwrap()
+                .statements,
+        )
+        .unwrap();
         conn.execute_batch(&format!(
             "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < {n})
             INSERT INTO mc_tags(session_id,tag_number,block_id,kind)

@@ -299,7 +299,7 @@ fn load_meta(
     let Some((row_version, meta_json)) = row else {
         return Ok(None);
     };
-    match serde_json::from_str::<ModuleMeta>(&meta_json) {
+    match crate::cache_codec::decode_small_meta(&meta_json) {
         Ok(meta) => Ok(Some((row_version, meta))),
         // A meta blob this connection cannot read is not something a claim may
         // repair; report it as "no session" so the caller refuses rather than
@@ -316,7 +316,9 @@ fn store_meta(
     meta: &ModuleMeta,
 ) -> rusqlite::Result<u64> {
     let next = current_row_version.max(0) as u64 + 1;
-    let meta_json = serde_json::to_string(meta).map_err(|error| {
+    // Meta-only: the small row's `meta` and nothing else, so a claim or heartbeat never
+    // touches `section_index` or the frozen chunks it vouches for.
+    let meta_json = crate::cache_codec::encode_small_meta(meta).map_err(|error| {
         rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error.to_string())))
     })?;
     let affected = tx.execute(
@@ -333,6 +335,7 @@ fn store_meta(
     if affected != 1 {
         return Err(rusqlite::Error::StatementChangedRows(affected));
     }
+    crate::advance_row_state_digest_tx(tx, session_id, current_row_version, next as i64)?;
     Ok(next)
 }
 
@@ -1056,7 +1059,7 @@ impl McStore {
 
     /// The durable historian state for one session, for tests and diagnostics.
     pub fn historian_state(&self, session_id: &str) -> Result<HistorianDurableState, McStoreError> {
-        Ok(self.load(session_id)?.meta.historian)
+        Ok(self.load_meta(session_id)?.meta.historian)
     }
 }
 
