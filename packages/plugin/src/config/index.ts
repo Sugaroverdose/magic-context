@@ -10,6 +10,7 @@ import {
     isPrototypePollutionKey,
     parseJsoncRecovering,
 } from "../shared/jsonc-parser";
+import { log } from "../shared/logger";
 import { setOutputReserveConfig } from "../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
 import { setWindowOverlayPath } from "../shared/window-geometry";
@@ -385,7 +386,7 @@ export function resetProtectedTagsDeprecationWarningForTest(): void {
 export function warnProtectedTagsDeprecationOnce(): void {
     if (!warnedProtectedTagsDeprecation) {
         warnedProtectedTagsDeprecation = true;
-        console.warn(
+        log(
             "[magic-context] protected_tags is deprecated and ignored; use protected_tokens instead.",
         );
     }

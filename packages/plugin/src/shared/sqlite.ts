@@ -62,6 +62,28 @@ export function registerSlowWriteReporter(reporter: SlowWriteReporter): void {
     reportSlowPrivilegedWrite = reporter;
 }
 
+/**
+ * Writer acquisition and hold diagnostics are injected the same way. They must
+ * reach the Magic Context log file and never the console: OpenCode and Pi pass
+ * plugin stderr straight through to the operator's terminal. The storage
+ * bootstrap registers the shared logger here; until then these lines are
+ * dropped.
+ */
+type SqliteDiagnosticSink = (message: string) => void;
+let sqliteDiagnosticSink: SqliteDiagnosticSink | undefined;
+
+export function registerSqliteDiagnosticSink(sink: SqliteDiagnosticSink): void {
+    sqliteDiagnosticSink = sink;
+}
+
+function reportSqliteDiagnostic(message: string): void {
+    try {
+        sqliteDiagnosticSink?.(`[magic-context] ${message}`);
+    } catch {
+        // Diagnostics must never change the outcome of the write they describe.
+    }
+}
+
 export type SqliteRuntime = "Bun" | "Node.js";
 
 type SqliteModule = {
@@ -224,11 +246,16 @@ function installTransactionRouting(db: BetterSqlite3.Database, readonly: boolean
         writable: true,
         value: (sql: string) => {
             if (/^\s*BEGIN\s+(?:IMMEDIATE|EXCLUSIVE)(?:\s+TRANSACTION)?\s*;?\s*$/i.test(sql)) {
+                // A transaction that ended without passing through exec (for
+                // example an automatic rollback) must not be timed as this one.
+                openWriterTransactions.delete(db);
                 if (transformPassScope.getStore()?.active || backgroundWriterScope.getStore())
                     acquireShort(db, () => nativeExec(sql), sql.trim());
                 else nativeExec(sql);
                 return db;
             }
+            if (WRITER_TRANSACTION_END.test(sql) && openWriterTransactions.has(db))
+                return endWriterTransaction(db, () => nativeExec(sql), sql);
             return nativeExec(sql);
         },
     });
@@ -548,12 +575,51 @@ export class SqliteAcquisitionBusyError extends Error {
 const SHORT_BUSY_TIMEOUT_MS = 25;
 const FOREGROUND_IN_PASS_BUSY_TIMEOUT_MS = 250;
 const FOREGROUND_ACQUISITION_BUDGET_MS = 16_500;
+/** Waiting this long for the writer lock, or holding it this long, is logged. */
+const SLOW_WRITER_LOG_MS = 250;
+const WRITER_TRANSACTION_END = /^\s*(?:COMMIT|END|ROLLBACK)(?:\s+TRANSACTION)?\s*;?\s*$/i;
+
+type WriterLane = "foreground" | "background";
+
+/**
+ * One attempt of an outer acquisition loop (`beginSqliteWriterAsync`,
+ * `withAsyncPrivilegedWriter`). It names the writer and remembers when the loop
+ * started, so the time spent in earlier busy attempts and the sleeps between
+ * them counts as waiting for the lock. Only the first BEGIN issued inside the
+ * attempt may claim it; a later BEGIN from detached work started inside the
+ * same async scope is timed on its own.
+ */
+interface WriterAcquisition {
+    site: string;
+    lane: WriterLane;
+    startedAt: number;
+    attempts: number;
+    claimed: boolean;
+}
+
+/** A write transaction whose BEGIN went through `acquireShort` and has not ended yet. */
+interface OpenWriterTransaction {
+    site: string;
+    lane: WriterLane;
+    acquireMs: number;
+    attempts: number;
+    acquiredAt: number;
+}
+
+const writerAcquisitionScope = new AsyncLocalStorage<WriterAcquisition | undefined>();
+const openWriterTransactions = new WeakMap<Database, OpenWriterTransaction>();
 
 /** The connection is never handed back to another caller with a shortened timeout. */
 function acquireShort(db: Database, acquire: () => unknown, site: string): void {
     const started = performance.now();
     const previous = pragmaNumber(db, "busy_timeout");
-    let acquired = false;
+    const outer = writerAcquisitionScope.getStore();
+    const owner = outer && !outer.claimed ? outer : undefined;
+    if (owner) owner.claimed = true;
+    const writerSite = owner?.site ?? site;
+    const lane: WriterLane =
+        owner?.lane ?? (transformPassScope.getStore()?.active ? "foreground" : "background");
+    let acquiredAt: number | undefined;
     try {
         // Async admission retries after yielding, so each of its BEGIN attempts
         // stays short. An ordinary BEGIN inside a transform pass cannot yield;
@@ -566,42 +632,92 @@ function acquireShort(db: Database, acquire: () => unknown, site: string): void 
                 : SHORT_BUSY_TIMEOUT_MS;
         db.exec(`PRAGMA busy_timeout=${timeout}`);
         acquire();
-        acquired = true;
+        acquiredAt = performance.now();
     } catch (error) {
         if (transformPassScope.getStore()?.active && isTransientSqliteError(error))
             throw new SqliteAcquisitionBusyError(error, site);
         throw error;
     } finally {
+        const attemptMs = (acquiredAt ?? performance.now()) - started;
         if (previous !== null) db.exec(`PRAGMA busy_timeout=${previous}`);
-        const elapsed = performance.now() - started;
-        if (elapsed >= 250)
-            console.warn(
-                `[${new Date().toISOString()}] [magic-context] sqlite acquisition site=${site} lane=${transformPassScope.getStore()?.active ? "foreground" : "background"} elapsed=${Math.round(elapsed)}ms attempts=1 outcome=${acquired ? "acquired" : "busy"}`,
+        if (acquiredAt !== undefined) {
+            // Reported when the transaction ends, together with how long it held
+            // the lock (see endWriterTransaction).
+            openWriterTransactions.set(db, {
+                site: writerSite,
+                lane,
+                acquireMs: acquiredAt - (owner?.startedAt ?? started),
+                attempts: owner?.attempts ?? 1,
+                acquiredAt,
+            });
+        } else if (attemptMs >= SLOW_WRITER_LOG_MS) {
+            reportSqliteDiagnostic(
+                `sqlite writer site=${writerSite} lane=${lane} acquire_ms=${Math.round(attemptMs)} attempts=${owner?.attempts ?? 1} outcome=busy`,
             );
+        }
+    }
+}
+
+/**
+ * Run the COMMIT, END or ROLLBACK that closes a transaction opened through
+ * `acquireShort`, then report how long the writer waited for the lock
+ * (`acquire_ms`) and how long it then held it (`hold_ms`) when either crosses
+ * the threshold. A long hold blocks every other process's writer, so it is
+ * worth seeing even when the lock itself came quickly.
+ */
+function endWriterTransaction(db: Database, end: () => unknown, sql: string): unknown {
+    let ended = false;
+    try {
+        const result = end();
+        ended = true;
+        return result;
+    } finally {
+        const open = openWriterTransactions.get(db);
+        // A COMMIT that failed with the transaction still open has not ended it.
+        if (open && !isInTransaction(db)) {
+            openWriterTransactions.delete(db);
+            const holdMs = performance.now() - open.acquiredAt;
+            if (open.acquireMs >= SLOW_WRITER_LOG_MS || holdMs >= SLOW_WRITER_LOG_MS) {
+                const outcome = /^\s*ROLLBACK/i.test(sql)
+                    ? "rolled_back"
+                    : ended
+                      ? "committed"
+                      : "failed";
+                reportSqliteDiagnostic(
+                    `sqlite writer site=${open.site} lane=${open.lane} acquire_ms=${Math.round(open.acquireMs)} hold_ms=${Math.round(holdMs)} attempts=${open.attempts} outcome=${outcome}`,
+                );
+            }
+        }
     }
 }
 
 /** Begin an immediate transaction with bounded asynchronous retries on writer contention.
- * Callers must recheck any lease or source snapshot after this function returns. */
-export async function beginSqliteWriterAsync(db: Database, site: string): Promise<void> {
+ * Callers must recheck any lease or source snapshot after this function returns.
+ * Resolves with the `performance.now()` time at which BEGIN IMMEDIATE succeeded,
+ * so a caller timing its transaction measures the hold, not the wait for the lock. */
+export async function beginSqliteWriterAsync(db: Database, site: string): Promise<number> {
     const started = performance.now();
     let attempts = 0;
     for (;;) {
         attempts++;
         try {
-            withSqliteBackgroundWriter(() => db.exec("BEGIN IMMEDIATE"));
-            const elapsed = performance.now() - started;
-            if (elapsed >= 250)
-                console.warn(
-                    `[${new Date().toISOString()}] [magic-context] sqlite acquisition site=${site} lane=background elapsed=${Math.round(elapsed)}ms attempts=${attempts} outcome=acquired`,
-                );
-            return;
+            const acquisition: WriterAcquisition = {
+                site,
+                lane: "background",
+                startedAt: started,
+                attempts,
+                claimed: false,
+            };
+            writerAcquisitionScope.run(acquisition, () =>
+                withSqliteBackgroundWriter(() => db.exec("BEGIN IMMEDIATE")),
+            );
+            return performance.now();
         } catch (error) {
             if (!isTransientSqliteError(error)) throw error;
             const elapsed = performance.now() - started;
             if (elapsed >= FOREGROUND_ACQUISITION_BUDGET_MS) {
-                console.warn(
-                    `[${new Date().toISOString()}] [magic-context] sqlite acquisition site=${site} lane=background elapsed=${Math.round(elapsed)}ms attempts=${attempts} outcome=busy`,
+                reportSqliteDiagnostic(
+                    `sqlite writer site=${site} lane=background acquire_ms=${Math.round(elapsed)} attempts=${attempts} outcome=busy`,
                 );
                 throw error;
             }
@@ -625,27 +741,31 @@ export async function withAsyncPrivilegedWriter<T>(db: Database, operation: () =
     for (;;) {
         attempts++;
         try {
-            const result = admissionScope.run(true, () =>
-                withSqliteTransformPass(() => withPrivilegedWriter(db, operation)),
+            const acquisition: WriterAcquisition = {
+                site: "privileged_writer",
+                lane: "foreground",
+                startedAt: started,
+                attempts,
+                claimed: false,
+            };
+            // The acquisition and hold of this transaction are reported when it
+            // commits or rolls back (see endWriterTransaction).
+            return admissionScope.run(true, () =>
+                withSqliteTransformPass(() =>
+                    writerAcquisitionScope.run(acquisition, () =>
+                        withPrivilegedWriter(db, operation),
+                    ),
+                ),
             );
-            const elapsed = performance.now() - started;
-            if (elapsed >= 250)
-                console.warn(
-                    `[${new Date().toISOString()}] [magic-context] sqlite acquisition site=privileged_writer lane=foreground elapsed=${Math.round(elapsed)}ms attempts=${attempts} outcome=acquired`,
-                );
-            return result;
         } catch (error) {
             // A callback failure can occur after writes; only retry a failed BEGIN.
             if (!(error instanceof SqliteAcquisitionBusyError)) throw error;
             const elapsed = performance.now() - started;
             if (elapsed >= FOREGROUND_ACQUISITION_BUDGET_MS) {
-                if (elapsed >= 250)
-                    console.warn(
-                        `[${new Date().toISOString()}] [magic-context] sqlite acquisition site=privileged_writer lane=foreground elapsed=${Math.round(elapsed)}ms attempts=${attempts} outcome=busy`,
-                    );
-                throw error instanceof SqliteAcquisitionBusyError
-                    ? error
-                    : new SqliteAcquisitionBusyError(error);
+                reportSqliteDiagnostic(
+                    `sqlite writer site=privileged_writer lane=foreground acquire_ms=${Math.round(elapsed)} attempts=${attempts} outcome=busy`,
+                );
+                throw error;
             }
             await new Promise<void>((resolve) =>
                 setTimeout(
@@ -680,7 +800,9 @@ export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
     const previousDepth = privilegeDepth.get(db) ?? 0;
     const nested = isInTransaction(db);
     const savepoint = "mc_privilege_scope";
-    const transactionStartedAt = nested ? undefined : performance.now();
+    // Timed from the moment the lock is held, so a slow-write report measures
+    // the hold and not the wait for BEGIN IMMEDIATE.
+    let transactionStartedAt: number | undefined;
     if (nested) {
         db.exec(`SAVEPOINT ${savepoint}`);
     } else {
@@ -691,6 +813,7 @@ export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
                 throw new SqliteAcquisitionBusyError(error);
             throw error;
         }
+        transactionStartedAt = performance.now();
     }
     privilegeDepth.set(db, previousDepth + 1);
     try {

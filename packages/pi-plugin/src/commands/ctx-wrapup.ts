@@ -304,8 +304,9 @@ export async function runPiWrapup(
 				});
 			} catch (err) {
 				// A missed renewal is safe because the wrapup marker has a five-minute TTL.
-				console.warn(
-					`[magic-context][pi] /ctx-wrapup marker renewal failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+				sessionLog(
+					sessionId,
+					`[pi] /ctx-wrapup marker renewal failed: ${err instanceof Error ? err.message : String(err)}`,
 				);
 			}
 		}, 60_000);
@@ -421,8 +422,9 @@ export async function runPiWrapup(
 						renewCompartmentLease(deps.db, sessionId, leaseHolder);
 					} catch (err) {
 						// A missed renewal is safe because the compartment lease has a five-minute TTL.
-						console.warn(
-							`[magic-context][pi] /ctx-wrapup compartment lease renewal failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+						sessionLog(
+							sessionId,
+							`[pi] /ctx-wrapup compartment lease renewal failed: ${err instanceof Error ? err.message : String(err)}`,
 						);
 					}
 				}, COMPARTMENT_LEASE_RENEWAL_MS);

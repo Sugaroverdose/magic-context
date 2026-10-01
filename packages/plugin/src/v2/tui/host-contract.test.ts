@@ -1,8 +1,9 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { Host } from "@opencode/plugin/host";
+import * as logger from "../../shared/logger";
 import { setupWithJsx } from "./index";
 import type { V2SidebarState, V2SlotClaim, V2TuiContext } from "./types";
 
@@ -177,11 +178,8 @@ test("GA 2.0.5 keeps the sidebar when the app-slot keymap registration also fail
             throw new Error("Keymap.Provider is missing");
         },
     });
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (...args: unknown[]) => {
-        warnings.push(args.map(String).join(" "));
-    };
+    // The gap is recorded in the plugin log; the TUI host drops console output.
+    const logged = spyOn(logger, "log");
     try {
         const cleanup = await setupWithJsx(fixture.context, (type, props) => ({ type, props }));
         expect(fixture.claims.map((claim) => claim.append)).toEqual(["sidebar.content", "app"]);
@@ -191,11 +189,11 @@ test("GA 2.0.5 keeps the sidebar when the app-slot keymap registration also fail
         appClaim.render({});
         expect(fixture.layers).toHaveLength(0);
         expect(
-            warnings.filter((line) => line.includes("keymap.layer is unavailable")),
+            logged.mock.calls.filter(([line]) => line.includes("keymap.layer is unavailable")),
         ).toHaveLength(1);
         cleanup();
     } finally {
-        console.warn = originalWarn;
+        logged.mockRestore();
     }
 });
 

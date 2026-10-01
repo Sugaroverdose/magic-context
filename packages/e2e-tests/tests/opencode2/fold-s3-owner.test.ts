@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";
 import { rawMessages } from "../../../plugin/src/v2/hooks/store";
-import { spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
+import { spawnOpencode2, waitForPluginActive, waitForPluginLog } from '../../src/opencode2-runner/spawn';
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 for (const mode of ["local", "provider"] as const) {
@@ -158,7 +158,7 @@ for (const mode of ["local", "provider"] as const) {
             hostDb.prepare("UPDATE session_message SET data = json_set(data, '$.summary', ?) WHERE id = ?").run("CORRUPTED-PERSISTED-SUMMARY", cut!.id);
             hostDb.close();
             await turn("Detect persisted checkpoint divergence");
-            expect(host.stderr()).toContain("HARD reason=host_rerender");
+            expect(await waitForPluginLog(host.env, "HARD reason=host_rerender")).toContain("HARD reason=host_rerender");
             expect(JSON.stringify(host.mock.requests().at(-1)!.body)).not.toContain("CORRUPTED-PERSISTED-SUMMARY");
             const recovered = frames().filter(frame => frame.kind === "context").at(-1);
             await turn("Defer after divergence recovery");

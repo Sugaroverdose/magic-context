@@ -113,7 +113,34 @@ export function isolation(): OpenCode2Isolation {
 	const cwd = join(root, "work");
 	mkdirSync(cwd);
 	env.MAGIC_CONTEXT_STORAGE_DIR = join(env.XDG_DATA_HOME!, "cortexkit", "magic-context");
+	// Magic Context writes its diagnostics to this file and never to the host's
+	// stderr, so a test that checks a diagnostic reads it here (see readPluginLog).
+	env.MAGIC_CONTEXT_LOG_PATH = join(root, "magic-context.log");
 	return { root, env, cwd };
+}
+
+/** The Magic Context log of a host spawned with this isolation, or "" before the first flush. */
+export function readPluginLog(env: NodeJS.ProcessEnv): string {
+	const path = env.MAGIC_CONTEXT_LOG_PATH;
+	return path && existsSync(path) ? readFileSync(path, "utf8") : "";
+}
+
+/**
+ * Wait for a line to reach the Magic Context log. The plugin buffers log
+ * writes for up to half a second, so a line logged during the turn a test just
+ * awaited may not be on disk yet.
+ */
+export async function waitForPluginLog(
+	env: NodeJS.ProcessEnv,
+	text: string,
+	timeoutMs = 5_000,
+): Promise<string> {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const content = readPluginLog(env);
+		if (content.includes(text) || Date.now() >= deadline) return content;
+		await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+	}
 }
 export function assertIsolation(root: string, env: NodeJS.ProcessEnv): void {
 	if (!OPENCODE2_NO_BACKGROUND_SERVICE_FLAG.trim())
@@ -470,6 +497,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 			stop,
 			stdout: () => stdout,
 			stderr: () => stderr,
+			pluginLog: () => readPluginLog(fixture.env),
 		};
 	} catch (error) {
 		await stop();

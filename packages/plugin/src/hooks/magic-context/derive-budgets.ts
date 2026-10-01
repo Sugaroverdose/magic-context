@@ -17,6 +17,7 @@
  *     by its own context, not the main session's pressure math.
  */
 
+import { log } from "../../shared/logger";
 import {
     getSdkContextLimit,
     getSdkInputLimit,
@@ -140,7 +141,7 @@ export function resolveHistorianContextLimit(historianModelOverride?: string): n
     // and use the conservative default for chunk-budget derivation.
     if (typeof historianModelOverride === "string" && historianModelOverride.trim() !== "") {
         // eslint-disable-next-line no-console
-        console.warn(
+        log(
             `[magic-context] historian.model "${historianModelOverride}" lacks provider prefix ("provider/model-id"); using the default context limit for chunk-budget derivation.`,
         );
     }
