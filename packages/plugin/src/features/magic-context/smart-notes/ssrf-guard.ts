@@ -28,11 +28,18 @@ export interface SmartNoteResolver {
     ): Promise<Array<{ address: string; family: 4 | 6 }>>;
 }
 
+interface SmartNoteAddressResponse {
+    status: number;
+    body: string;
+    location?: string;
+    bytesRead?: number;
+}
+
 type SmartNoteAddressRequest = (
     validation: SmartNoteUrlValidation,
     candidate: ResolvedSmartNoteAddress,
     options: { signal: AbortSignal; timeoutMs: number; bodyLimitBytes: number },
-) => Promise<{ status: number; body: string }>;
+) => Promise<SmartNoteAddressResponse>;
 
 export interface GuardedSmartNoteHttpGetOptions {
     signal: AbortSignal;
@@ -46,6 +53,8 @@ const DNS_TIMEOUT_MS = 3_000;
 const DEFAULT_HTTP_TIMEOUT_MS = 5_000;
 const DEFAULT_HTTP_BODY_LIMIT_BYTES = 64 * 1024;
 const MAX_HTTP_ADDRESS_CANDIDATES = 4;
+const MAX_HTTP_REDIRECTS = 5;
+const HTTP_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 const defaultResolver: SmartNoteResolver = {
     async lookup(hostname, signal) {
@@ -106,39 +115,102 @@ export async function guardedSmartNoteHttpGet(
     input: string,
     options: GuardedSmartNoteHttpGetOptions,
 ): Promise<{ status: number; body: string }> {
-    const validation = await validateSmartNoteHttpUrl(input, {
-        signal: options.signal,
-        resolver: options.resolver,
-    });
     const timeoutMs = options.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
     const bodyLimitBytes = options.bodyLimitBytes ?? DEFAULT_HTTP_BODY_LIMIT_BYTES;
     const requestAddress = options.requestAddress ?? requestValidatedAddress;
-    // DNS can return long A/AAAA sets. Smart-note checks only sample a few
-    // validated IPs so one hostname cannot fan out unbounded egress.
-    const candidates = validation.addresses.slice(0, MAX_HTTP_ADDRESS_CANDIDATES);
-    let lastError: unknown;
-    for (const candidate of candidates) {
-        try {
-            return await requestAddress(validation, candidate, {
-                signal: options.signal,
-                timeoutMs,
-                bodyLimitBytes,
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    options.signal.addEventListener("abort", onAbort, { once: true });
+    if (options.signal.aborted) controller.abort();
+    const deadline = performance.now() + timeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const follow = async (): Promise<{ status: number; body: string }> => {
+        let currentUrl = input;
+        let remainingBytes = bodyLimitBytes;
+        for (let redirects = 0; ; redirects++) {
+            throwIfAborted(controller.signal);
+            const validation = await validateSmartNoteHttpUrl(currentUrl, {
+                signal: controller.signal,
+                resolver: options.resolver,
             });
-        } catch (error) {
-            lastError = error;
-            // Connection-level failures can try the next validated IP. Once the
-            // target itself is too large or too slow, retrying the rest of the
-            // address list only repeats the same request budget and egress.
-            if (
-                error instanceof SmartNoteSecurityError ||
-                options.signal.aborted ||
-                isTerminalSmartNoteNetworkError(error)
-            ) {
-                throw error;
+            // Each redirect is a new destination, with fresh DNS validation and
+            // pinning. Address retries and redirects share the original budgets.
+            const candidates = validation.addresses.slice(0, MAX_HTTP_ADDRESS_CANDIDATES);
+            let lastError: unknown;
+            let response: SmartNoteAddressResponse | undefined;
+            for (const candidate of candidates) {
+                try {
+                    throwIfAborted(controller.signal);
+                    response = await requestAddress(validation, candidate, {
+                        signal: controller.signal,
+                        timeoutMs: Math.max(1, deadline - performance.now()),
+                        bodyLimitBytes: remainingBytes,
+                    });
+                    break;
+                } catch (error) {
+                    lastError = error;
+                    if (
+                        error instanceof SmartNoteSecurityError ||
+                        controller.signal.aborted ||
+                        isTerminalSmartNoteNetworkError(error)
+                    ) {
+                        throw error;
+                    }
+                }
+            }
+            if (!response) throw toNetworkError(lastError, "all validated addresses failed");
+            remainingBytes -= response.bytesRead ?? Buffer.byteLength(response.body);
+            if (remainingBytes < 0) {
+                throw new SmartNoteNetworkError("SMART_NOTE_NETWORK: response body too large", {
+                    terminal: true,
+                    persistent: true,
+                });
+            }
+            if (!HTTP_REDIRECT_STATUSES.has(response.status)) {
+                return { status: response.status, body: response.body };
+            }
+            if (redirects >= MAX_HTTP_REDIRECTS) {
+                throw new SmartNoteNetworkError("SMART_NOTE_NETWORK: too many redirects", {
+                    terminal: true,
+                });
+            }
+            if (!response.location?.trim()) {
+                throw new SmartNoteNetworkError("SMART_NOTE_NETWORK: missing redirect Location", {
+                    terminal: true,
+                });
+            }
+            try {
+                currentUrl = new URL(response.location, validation.url).href;
+            } catch {
+                throw new SmartNoteNetworkError("SMART_NOTE_NETWORK: invalid redirect Location", {
+                    terminal: true,
+                });
             }
         }
+    };
+
+    try {
+        // A wall-clock deadline also covers DNS and trickling response bodies;
+        // socket inactivity timeouts alone cannot bound the whole redirect chain.
+        return await Promise.race([
+            follow(),
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => {
+                    reject(
+                        new SmartNoteNetworkError("SMART_NOTE_NETWORK: request timed out", {
+                            terminal: true,
+                        }),
+                    );
+                    controller.abort();
+                }, timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+        options.signal.removeEventListener("abort", onAbort);
+        controller.abort();
     }
-    throw toNetworkError(lastError, "all validated addresses failed");
 }
 
 async function resolveHostToValidatedGlobalAddresses(
@@ -230,11 +302,11 @@ export function requestValidatedAddress(
     validation: SmartNoteUrlValidation,
     candidate: ResolvedSmartNoteAddress,
     options: { signal: AbortSignal; timeoutMs: number; bodyLimitBytes: number },
-): Promise<{ status: number; body: string }> {
+): Promise<SmartNoteAddressResponse> {
     // A request-local agent prevents global keep-alive or proxying agents from
     // reusing a socket that was not opened through the pinned lookup below.
     const agent = createSmartNoteRequestAgent();
-    return new Promise<{ status: number; body: string }>((resolve, reject) => {
+    return new Promise<SmartNoteAddressResponse>((resolve, reject) => {
         const url = validation.url;
         const hostHeader = url.host;
         const request = https.request(
@@ -307,7 +379,12 @@ export function requestValidatedAddress(
                         );
                         return;
                     }
-                    resolve({ status, body: Buffer.concat(chunks).toString("utf8") });
+                    resolve({
+                        status,
+                        body: Buffer.concat(chunks).toString("utf8"),
+                        location: response.headers.location,
+                        bytesRead: bytes,
+                    });
                 });
             },
         );
