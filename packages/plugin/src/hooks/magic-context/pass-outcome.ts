@@ -58,6 +58,11 @@ export const PASS_DEGRADATION_EFFECTS = {
     "trailing-blank-decision-persistence-failure": "changes-request",
     "trailing-blank-decision-exception": "changes-request",
     "proactive-thinking-strip-persistence-failure": "changes-request",
+    // The saved removal set is unreadable: the pass fails closed.
+    "reasoning-removal-read-failure": "changes-request",
+    // This pass's new removals were not saved, so it serves the earlier set
+    // only and can be larger than a healthy pass.
+    "reasoning-removal-persistence-failure": "changes-request",
 } as const satisfies Record<string, "changes-request" | "served">;
 
 export type PassDegradationSite = keyof typeof PASS_DEGRADATION_EFFECTS;
