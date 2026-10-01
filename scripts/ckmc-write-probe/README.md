@@ -26,9 +26,29 @@ Per pass it records the module's disk-write counter (`rusage.py`, macOS `proc_pi
 
 Confirm isolation with `lsof -p <pid>` on the probe's `ck-mc` and `ck-subc`: every regular file must be under the run directory.
 
+`PROBE_SQL_TRACE=1` also logs every write statement the plugin process runs against `context.db` to `$PROBE_RUN/sqltrace.jsonl`: the pass, the table, the columns it sets, its bound bytes, the WAL frames it appended (exact for autocommit statements under `PROBE_PIN=1`), and for each bound string of 64 KiB or more how much of it matches the same statement's previous value. `python3 sqlsum.py $PROBE_RUN` prints the per-pass summary. `pluginrows.py <context.db clone> <session prefix>...` lists the bytes per column of a session's `session_meta` and `lkg_slots` rows.
+
+## The proposed migration 63
+
+`migcheck/` holds the exact migration text (`migration63.sql`) and a Rust probe that runs it with the SQLite ck-mc links (3.46.0, through `rusqlite =0.32.1` with `bundled`). The crate is outside the repository's Cargo workspace; build it from a copy so no `Cargo.lock` or `target/` lands here:
+
+```sh
+W=$TMPDIR/magic-context/ckmc-writes-r2
+cp -R scripts/ckmc-write-probe/migcheck $W/migcheck-src
+(cd $W/migcheck-src && CARGO_TARGET_DIR=$W/target-exact cargo build --release -j 2 --features exact)
+(cd $W/migcheck-src && CARGO_TARGET_DIR=$W/target-fast cargo build --release -j 2)
+cp -c $W/golden/mc/store.db $W/mig/store.db
+$W/target-exact/release/migcheck migrate $W/mig/store.db
+$W/target-exact/release/migcheck verify $W/golden/mc/store.db $W/mig/store.db
+$W/target-exact/release/migcheck fixtures
+$W/target-fast/release/migcheck loadcost $W/golden/mc/store.db $W/mig/store.db <session> 60
+```
+
+`verify` compares every moved value with the serde-parsed original; `--features exact` compares numbers by their text and keeps key order, so it also reports byte identity. `MIGCHECK_SQL=<file>` runs a different migration text, which is how a deliberately broken aggregate shows that `verify` catches corruption. `loadcost` parses into `serde_json::Value`, a proxy for the typed structs, so compare the two layouts rather than the absolute times.
+
 ## SQL-level replay of one commit
 
-`sqlexp.py <golden>/mc/store.db <work dir> <session> [scenario ...]` (the golden clone has its WAL folded in) runs the statements `McStore::commit_transform` issues, with a ck-mc connection's pragmas, on per-scenario clones, for today's layout and for the proposed split layout (including the cost of migrating every session).
+`sqlexp.py <golden>/mc/store.db <work dir> <session> [scenario ...]` (the golden clone has its WAL folded in) runs the statements `McStore::commit_transform` issues, with a ck-mc connection's pragmas, on per-scenario clones, for today's layout and for the proposed split layout. Its `migrate()` is a Python split used only to build the split layout for the cost model; it is not migration 63, and its timing is not the migration's (use `migcheck` for that).
 
 ## Live evidence without opening the live store
 

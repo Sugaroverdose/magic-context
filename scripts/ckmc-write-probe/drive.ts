@@ -20,7 +20,11 @@
  *                   this makes frame attribution exact but defers checkpoint writes
  *   PROBE_BROCA=1   start the hermetic historian producer so historian runs can publish
  *   PROBE_OUT       JSONL output path (default $PROBE_RUN/passes.jsonl)
+ *   PROBE_SQL_TRACE=1  record every write statement this process (the plugin) runs against
+ *                   context.db to $PROBE_RUN/sqltrace.jsonl, with the pass it ran in and the
+ *                   WAL frames it appended (exact for autocommit statements under PROBE_PIN=1)
  */
+import { Database as BunDatabase } from "bun:sqlite";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -57,6 +61,99 @@ process.env.OPENCODE_DB = join(RUN, "oc", "opencode.db");
 // The plugin logger writes under the temp directory; keep it out of the operator's log.
 process.env.TMPDIR = join(RUN, "tmp");
 mkdirSync(process.env.TMPDIR, { recursive: true });
+
+/** Index of the plan entry being replayed, so each SQL write-trace entry names its pass. */
+let currentPass: number | string = "boot";
+const SQL_TRACE = join(RUN, "sqltrace.jsonl");
+const WAL_FRAME_BYTES = 4096 + 24;
+
+/**
+ * Wrap bun:sqlite so every write statement against context.db is logged. The plugin reaches
+ * SQLite only through `Database` from shared/sqlite, which is bun:sqlite under Bun, so
+ * patching the prototype sees every statement it runs. Frames are the growth of the
+ * context.db WAL across the statement: exact for an autocommit statement while a pinned
+ * reader stops the WAL from resetting, and zero for a statement inside a transaction, whose
+ * frames land at its COMMIT.
+ */
+function installSqlTrace(): void {
+    const walSize = (): number => statSync(`${CONTEXT_DB}-wal`, { throwIfNoEntry: false })?.size ?? 0;
+    const byteLength = (value: unknown): number =>
+        typeof value === "string" ? Buffer.byteLength(value) : value instanceof Uint8Array ? value.length : 8;
+    const columnsOf = (sql: string): string[] => {
+        const set = sql.match(/\bSET\b([\s\S]*?)(\bWHERE\b|$)/i)?.[1];
+        if (set) return [...set.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*=/g)].map((m) => m[1]);
+        const insert = sql.match(/\bINTO\s+[A-Za-z_][A-Za-z0-9_]*\s*\(([^)]*)\)/i)?.[1];
+        return insert ? insert.split(",").map((c) => c.trim()) : [];
+    };
+    // For every bound string of 64 KiB or more, how much of it the same statement's previous
+    // run already wrote: the common prefix, and how many 64 KiB positional chunks differ. This
+    // is what a chunked layout for the plugin's large columns would have to rewrite.
+    const CHUNK_CHARS = 64 * 1024;
+    const previousLarge = new Map<string, string>();
+    const largeDiffs = (sql: string, values: unknown[]): unknown[] =>
+        values.flatMap((value, index) => {
+            if (typeof value !== "string" || value.length < CHUNK_CHARS) return [];
+            const key = `${sql}\u0000${index}`;
+            const previous = previousLarge.get(key);
+            previousLarge.set(key, value);
+            if (previous === undefined) return [{ index, chars: value.length, previous_chars: null }];
+            let common = 0;
+            const limit = Math.min(previous.length, value.length);
+            while (common < limit && previous.charCodeAt(common) === value.charCodeAt(common)) common++;
+            const chunks = Math.ceil(value.length / CHUNK_CHARS);
+            let changedChunks = 0;
+            for (let chunk = 0; chunk < chunks; chunk++) {
+                const start = chunk * CHUNK_CHARS;
+                if (value.slice(start, start + CHUNK_CHARS) !== previous.slice(start, start + CHUNK_CHARS)) changedChunks++;
+            }
+            return [{ index, chars: value.length, previous_chars: previous.length, common_prefix_chars: common, chunks, changed_chunks: changedChunks }];
+        });
+    const log = (db: BunDatabase, sql: string, args: unknown[], run: () => unknown): unknown => {
+        const before = walSize();
+        const inTransaction = db.inTransaction;
+        const result = run() as { changes?: number } | undefined;
+        const flat = args.length === 1 && Array.isArray(args[0]) ? (args[0] as unknown[]) : args;
+        const large = largeDiffs(sql, flat);
+        appendFileSync(
+            SQL_TRACE,
+            `${JSON.stringify({
+                pass: currentPass,
+                table: sql.match(/\b(?:INTO|UPDATE|FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/i)?.[1] ?? "?",
+                in_transaction: inTransaction,
+                frames: (walSize() - before) / WAL_FRAME_BYTES,
+                param_bytes: flat.reduce((sum: number, value) => sum + byteLength(value), 0),
+                columns: columnsOf(sql),
+                changes: result?.changes ?? null,
+                large,
+                sql: sql.replace(/\s+/g, " ").slice(0, 160),
+            })}\n`,
+        );
+        return result;
+    };
+    const isWrite = (db: BunDatabase, sql: string): boolean =>
+        db.filename.endsWith("context.db") && /^\s*(INSERT|UPDATE|REPLACE|DELETE)\b/i.test(sql);
+    // biome-ignore lint/suspicious/noExplicitAny: patching bun:sqlite's runtime prototype.
+    const proto = BunDatabase.prototype as any;
+    // biome-ignore lint/suspicious/noExplicitAny: bun:sqlite statements are patched in place.
+    const wrap = (db: BunDatabase, sql: string, statement: any): any => {
+        if (!isWrite(db, sql) || statement.__probeTraced) return statement;
+        const run = statement.run.bind(statement);
+        statement.run = (...args: unknown[]) => log(db, sql, args, () => run(...args));
+        statement.__probeTraced = true;
+        return statement;
+    };
+    for (const method of ["prepare", "query"] as const) {
+        const original = proto[method];
+        proto[method] = function (this: BunDatabase, sql: string, ...rest: unknown[]) {
+            return wrap(this, sql, original.call(this, sql, ...rest));
+        };
+    }
+    const originalRun = proto.run;
+    proto.run = function (this: BunDatabase, sql: string, ...args: unknown[]) {
+        if (!isWrite(this, sql)) return originalRun.call(this, sql, ...args);
+        return log(this, sql, args, () => originalRun.call(this, sql, ...args));
+    };
+}
 
 const children: ChildProcess[] = [];
 function cleanup(): void {
@@ -114,6 +211,7 @@ function startProcess(label: string, cmd: string, args: string[], env: Record<st
 }
 
 async function main(): Promise<void> {
+    if (process.env.PROBE_SQL_TRACE === "1") installSqlTrace();
     mkdirSync(RUNTIME_DIR, { recursive: true });
     mkdirSync(HOME, { recursive: true });
     const daemonConfig = join(DATA, "cortexkit", "_daemon-config");
@@ -352,6 +450,7 @@ async function main(): Promise<void> {
     }
 
     for (const [index, kind] of PLAN.entries()) {
+        currentPass = index;
         const before = frames();
         const beforeSide = sideFileBytes();
         const now = Date.now();
@@ -400,6 +499,7 @@ async function main(): Promise<void> {
             ...diff(before, after, module.pid!, daemon.pid!),
         });
     }
+    currentPass = "end";
     if (process.env.PROBE_PIN === "1") {
         record({
             kind: "run_total_context_db",
