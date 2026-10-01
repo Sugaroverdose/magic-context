@@ -999,11 +999,11 @@ impl DispatchHealth {
             before.saturating_sub(registry.active.len()) as u64
         };
         if released > 0 {
-            let _ =
-                self.in_flight_count
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                        Some(count.saturating_sub(released))
-                    });
+            let _ = self
+                .in_flight_count
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    Some(count.saturating_sub(released))
+                });
         }
     }
 
@@ -1034,11 +1034,11 @@ impl DispatchHealth {
             .remove(&id)
             .is_some();
         if removed {
-            let _ =
-                self.in_flight_count
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                        Some(count.saturating_sub(1))
-                    });
+            let _ = self
+                .in_flight_count
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    Some(count.saturating_sub(1))
+                });
         }
         removed
     }

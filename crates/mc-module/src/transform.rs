@@ -13688,7 +13688,7 @@ fn assert_no_orphaned_tool_arcs(messages: &[ServedMessage]) {
         let same_message_results = external_results(message);
         let next_message_results = messages
             .get(message_index + 1)
-            .map(&external_results)
+            .map(external_results)
             .unwrap_or_default();
         for id in calls {
             assert!(
