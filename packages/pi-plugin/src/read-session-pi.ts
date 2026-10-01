@@ -258,37 +258,53 @@ export function findLastModelKeyFromBranch(
 }
 
 /**
- * The model of the newest assistant message on the branch (`provider/model`),
- * failed or aborted replies included.
+ * The model to seed the live model pin with on the first context pass after a
+ * restart (`provider/model`).
  *
- * While Pi runs, the live model pin follows every assistant message_end, so
- * after a restart this is the model the pin held when the process stopped. A
- * `model_change` newer than that message is a switch the new process has not
- * seen yet; seeding the pin from that `model_change` instead would make the
- * first pass compare the new model with itself and miss the switch. Returns
- * undefined when no assistant message carries both fields.
+ * Usually the last `model_change` (see findLastModelKeyFromBranch). But when
+ * a `model_change` is newer than the newest assistant message, the user
+ * switched models after the last reply, possibly before the restart: that
+ * entry already names the model in use now, so seeding from it would make the
+ * first pass compare the new model with itself and miss the switch. The
+ * newest assistant message's model (failed or aborted replies included) is
+ * then the model the pin held when the last reply ended, which is what a
+ * process that never restarted would compare against.
  */
-export function findLastAssistantModelKeyFromBranch(
+export function findRestartModelSeedFromBranch(
 	entries: readonly unknown[] | null | undefined,
 ): string | undefined {
 	if (!Array.isArray(entries)) return undefined;
+	let switchedAfterLastReply = false;
 	for (let i = entries.length - 1; i >= 0; i--) {
-		const e = entries[i] as { type?: unknown; message?: unknown } | null;
+		const e = entries[i] as {
+			type?: unknown;
+			message?: unknown;
+			provider?: unknown;
+			modelId?: unknown;
+		} | null;
+		if (e?.type === "model_change") {
+			if (typeof e.provider === "string" && typeof e.modelId === "string")
+				switchedAfterLastReply = true;
+			continue;
+		}
 		if (e?.type !== "message") continue;
 		const m = e.message as
 			| { role?: unknown; provider?: unknown; model?: unknown }
 			| undefined;
 		if (m?.role !== "assistant") continue;
 		if (
-			typeof m.provider === "string" &&
-			m.provider.length > 0 &&
-			typeof m.model === "string" &&
-			m.model.length > 0
+			typeof m.provider !== "string" ||
+			m.provider.length === 0 ||
+			typeof m.model !== "string" ||
+			m.model.length === 0
 		) {
-			return `${m.provider}/${m.model}`;
+			continue;
 		}
+		return switchedAfterLastReply
+			? `${m.provider}/${m.model}`
+			: findLastModelKeyFromBranch(entries);
 	}
-	return undefined;
+	return findLastModelKeyFromBranch(entries);
 }
 
 function rawEntryVersion(entry: MessageEntry): string | number {

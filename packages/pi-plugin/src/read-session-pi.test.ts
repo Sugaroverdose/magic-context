@@ -6,7 +6,43 @@ import {
 	convertEntriesToRawMessagePage,
 	convertEntriesToRawMessages,
 	findLastModelKeyFromBranch,
+	findRestartModelSeedFromBranch,
 } from "./read-session-pi";
+
+describe("findRestartModelSeedFromBranch", () => {
+	const reply = (provider: string, model: string) => ({
+		type: "message",
+		message: { role: "assistant", provider, model },
+	});
+	const change = (provider: string, modelId: string) => ({
+		type: "model_change",
+		provider,
+		modelId,
+	});
+
+	it("uses the last reply's model when a model_change follows it", () => {
+		expect(
+			findRestartModelSeedFromBranch([
+				change("google-antigravity", "gemini"),
+				reply("google-antigravity", "gemini"),
+				change("openai-codex", "gpt-6-sol"),
+			]),
+		).toBe("google-antigravity/gemini");
+	});
+
+	it("keeps the last model_change when no switch follows the last reply", () => {
+		expect(
+			findRestartModelSeedFromBranch([
+				change("openai-codex", "gpt-6-sol"),
+				reply("test-provider", "test-model"),
+			]),
+		).toBe("openai-codex/gpt-6-sol");
+		expect(
+			findRestartModelSeedFromBranch([change("openai-codex", "gpt-6-sol")]),
+		).toBe("openai-codex/gpt-6-sol");
+		expect(findRestartModelSeedFromBranch([reply("a", "b")])).toBeUndefined();
+	});
+});
 
 describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () => {
 	// Regression coverage for the cortexkit/magic-context X1+X2 production

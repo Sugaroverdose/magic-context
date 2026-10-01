@@ -21,9 +21,12 @@ import {
 	userMessage,
 } from "./test-utils.test";
 
-// A session proved a 786,172-token prompt on a 1M-window model (model A),
-// then moved to a model whose configured window is 500K (model B). The proof
-// says nothing about model B, yet it kept lifting B's usable limit to 786,172.
+// Magic Context records the largest prompt a provider accepted in a session
+// (the proven input floor) and lifts the usable context limit to it when the
+// configured window is smaller. A session had a 786,172-token prompt accepted
+// by a 1M-window model (model A), then moved to a model whose configured window
+// is 500K (model B). A's acceptance says nothing about B, yet the floor kept
+// lifting B's usable limit to 786,172.
 
 const MODEL_A = {
 	provider: "google-antigravity",
@@ -245,8 +248,9 @@ describe("Pi proven input floor is keyed to the model that proved it", () => {
 		const logs = captureLogs();
 		try {
 			await proveFloorOnA(db, sessionId);
-			// The live pin already names B, so no switch is detected on this
-			// pass: only the floor's own model key keeps it off B.
+			// The in-memory current model is already B, so this pass detects no
+			// model switch: only the model recorded with the floor keeps A's
+			// floor off B.
 			recordPiLiveModel(sessionId, KEY_B);
 			await runPass({ db, sessionId, model: MODEL_B });
 			const limits = transformLimits(logs);
@@ -266,7 +270,8 @@ describe("Pi proven input floor is keyed to the model that proved it", () => {
 		const logs = captureLogs();
 		try {
 			await proveFloorOnA(db, sessionId);
-			// A fresh process: no live model pin, first pass not yet seen.
+			// Simulate a new process: forget the in-memory current model and
+			// the fact that a first pass has run.
 			clearContextHandlerSession(sessionId);
 			await runPass({
 				db,
@@ -300,7 +305,8 @@ describe("Pi proven input floor is keyed to the model that proved it", () => {
 	it("a floor stored with no model is dropped on first use, not trusted", async () => {
 		const sessionId = "ses-floor-unkeyed";
 		const db = createTestDb();
-		// The state a release before model keys left behind: the floor alone.
+		// What releases before this check stored: the floor's token count with
+		// no record of the model that proved it.
 		updateSessionMeta(db, sessionId, {
 			piStableIdScheme: 1,
 			observedSafeInputTokens: FLOOR_A,

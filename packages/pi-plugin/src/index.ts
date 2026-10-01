@@ -205,6 +205,8 @@ import {
 	isPiContextUsageRawBranchEstimate,
 	notePiUsageReadingUsed,
 	noteRawBranchEstimateSetAside,
+	piMessageAnchorsLiveUsage,
+	recordPiLiveUsageClassification,
 } from "./pi-pressure";
 import {
 	piProvenFloorModelKey,
@@ -721,6 +723,17 @@ export async function persistPiPressureFromMessageEnd(args: {
 	piTokensIsRawBranchEstimate?: boolean;
 	notifyIssue?: (message: string) => unknown | Promise<unknown>;
 }): Promise<void> {
+	// Pi emits message_end before it appends the message to the branch, so the
+	// branch read for the flag does not hold this message yet. A reply with
+	// provider usage becomes the anchor of Pi's live figure once appended.
+	if (piMessageAnchorsLiveUsage(args.message)) {
+		recordPiLiveUsageClassification(args.sessionId, false);
+	} else if (typeof args.piTokensIsRawBranchEstimate === "boolean") {
+		recordPiLiveUsageClassification(
+			args.sessionId,
+			args.piTokensIsRawBranchEstimate,
+		);
+	}
 	const { provider, model } = getPiMessageModel(args.message);
 	const activeModel = args.piModel ?? { provider, id: model };
 	const modelKey =

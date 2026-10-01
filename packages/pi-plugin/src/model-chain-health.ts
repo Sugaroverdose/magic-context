@@ -20,7 +20,10 @@ import type {
 import { buildDreamTaskRuntimeConfigs } from "@magic-context/core/features/magic-context/dreamer/task-config";
 import { resolveHistorianModel } from "@magic-context/core/shared/model-resolution";
 
-/** `pi` or `omp`; OMP expands `@role` selectors itself. */
+/**
+ * The Pi-compatible host: Pi itself, or OMP (oh-my-pi, whose child CLI
+ * expands `@role` model selectors itself rather than its model registry).
+ */
 type PiHarness = "pi" | "omp";
 
 export interface PiModelRegistryLike {

@@ -3,7 +3,12 @@ import { resolveProjectIdentity } from "@magic-context/core/features/magic-conte
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { buildPiStatusDetail } from "./dialogs/status-dialog";
-import { resolvePiPressureSnapshotWithEstimateGuard } from "./pi-pressure";
+import { persistPiPressureFromMessageEnd } from "./index";
+import {
+	isPiContextUsageRawBranchEstimate,
+	resolvePiPressureSnapshotWithEstimateGuard,
+} from "./pi-pressure";
+import { recordPiProvenFloorModel } from "./pi-proven-floor";
 import { renderStatusText } from "./status-line";
 import { createTestDb, fakeContext } from "./test-utils.test";
 
@@ -187,45 +192,88 @@ function incidentContext(sessionId: string, retried: boolean) {
 	const branch = incidentBranch(retried);
 	const base = fakeContext(sessionId);
 	return {
-		...base,
-		model: MODEL,
-		sessionManager: { ...base.sessionManager, getBranch: () => branch },
-		getContextUsage: () => {
-			const tokens = piContextUsageTokens(branch);
-			return {
-				tokens,
-				percent: (tokens / MODEL.contextWindow) * 100,
-				contextWindow: MODEL.contextWindow,
-			};
+		branch,
+		ctx: {
+			...base,
+			model: MODEL,
+			sessionManager: { ...base.sessionManager, getBranch: () => branch },
+			getContextUsage: () => {
+				const tokens = piContextUsageTokens(branch);
+				return {
+					tokens,
+					percent: (tokens / MODEL.contextWindow) * 100,
+					contextWindow: MODEL.contextWindow,
+				};
+			},
+			getSystemPrompt: () => "system prompt",
 		},
-		getSystemPrompt: () => "system prompt",
 	};
 }
 
+/**
+ * The session state before the failed attempt: the last provider reading,
+ * 237,913 tokens at 30.3% of a 786,172-token usable limit. That limit is a
+ * proven input floor, recorded here for the model in use.
+ */
 function seedPersistedReading(db: ReturnType<typeof createTestDb>, id: string) {
 	updateSessionMeta(db, id, {
 		lastInputTokens: PERSISTED_INPUT,
 		lastContextPercentage: (PERSISTED_INPUT / USABLE_LIMIT) * 100,
 		lastUsageContextLimit: USABLE_LIMIT,
+		observedSafeInputTokens: USABLE_LIMIT,
+	});
+	recordPiProvenFloorModel(
+		db,
+		id,
+		`${MODEL.provider}/${MODEL.id}`,
+		USABLE_LIMIT,
+	);
+}
+
+/** What index.ts does on Pi's message_end, with the modelled Pi context. */
+function messageEnd(
+	db: ReturnType<typeof createTestDb>,
+	sessionId: string,
+	ctx: ReturnType<typeof incidentContext>["ctx"],
+	message: unknown,
+) {
+	const usage = ctx.getContextUsage();
+	return persistPiPressureFromMessageEnd({
+		db,
+		sessionId,
+		message,
+		piContextWindow: usage.contextWindow,
+		piContextWindowSource: "catalog",
+		piModel: MODEL,
+		piTokens: usage.tokens,
+		piTokensIsRawBranchEstimate: isPiContextUsageRawBranchEstimate(
+			ctx.sessionManager,
+		),
 	});
 }
+
+const QUEUED_PROMPT = {
+	role: "user",
+	content: "Don't use any workers, we want direct audit.",
+};
 
 describe("Pi status displays after a retried request", () => {
 	it("the modelled Pi figure is the raw-branch estimate only after the context edit", () => {
 		expect(
-			incidentContext("ses-model-check", true).getContextUsage().tokens,
+			incidentContext("ses-model-check", true).ctx.getContextUsage().tokens,
 		).toBe(RAW_BRANCH_ESTIMATE);
 		expect(
-			incidentContext("ses-model-check", false).getContextUsage().tokens,
+			incidentContext("ses-model-check", false).ctx.getContextUsage().tokens,
 		).toBe(238_613);
 	});
 
-	it("/ctx-status shows the transform's guarded 30%, not 125.9%", () => {
+	it("/ctx-status shows the transform's guarded 30%, not 125.9%", async () => {
 		const db = createTestDb();
 		try {
 			const sessionId = "ses-status-raw-branch";
 			seedPersistedReading(db, sessionId);
-			const ctx = incidentContext(sessionId, true);
+			const { ctx } = incidentContext(sessionId, true);
+			await messageEnd(db, sessionId, ctx, QUEUED_PROMPT);
 
 			const detail = buildPiStatusDetail(
 				{ getAllTools: () => [] } as never,
@@ -238,7 +286,8 @@ describe("Pi status displays after a retried request", () => {
 			expect(detail.inputTokens).toBe(PERSISTED_INPUT);
 			expect(detail.usagePercentage).toBeCloseTo(30.26, 1);
 
-			// The figure the transform's pressure decision used for this pass.
+			// The token figure the context transform's pressure decision uses on
+			// the pass that sends the retried request.
 			const transform = resolvePiPressureSnapshotWithEstimateGuard({
 				sessionId,
 				source: "transform",
@@ -255,34 +304,53 @@ describe("Pi status displays after a retried request", () => {
 		}
 	});
 
-	it("the footer shows 30%, not 125.9%", () => {
+	it("the footer shows 30%, not 125.9%, until the retry's reply restores the live figure", async () => {
 		const db = createTestDb();
 		try {
 			const sessionId = "ses-footer-raw-branch";
 			seedPersistedReading(db, sessionId);
-			const text = renderStatusText(
-				incidentContext(sessionId, true) as never,
-				db,
-				sessionId,
-			);
+			const { ctx, branch } = incidentContext(sessionId, true);
+			await messageEnd(db, sessionId, ctx, QUEUED_PROMPT);
+			const text = renderStatusText(ctx as never, db, sessionId);
 			expect(text).toContain("mc: 237.9K (30%)");
 			expect(text).not.toContain("989.6K");
+
+			// The retried request succeeds. Pi emits message_end before it
+			// appends the reply to the branch.
+			const reply = {
+				role: "assistant",
+				content: [],
+				provider: MODEL.provider,
+				model: MODEL.id,
+				stopReason: "stop",
+				usage: {
+					input: 108,
+					cacheRead: 238_208,
+					cacheWrite: 0,
+					output: 847,
+					totalTokens: 239_163,
+				},
+			};
+			await messageEnd(db, sessionId, ctx, reply);
+			branch.push({ type: "message", id: "retry-reply", message: reply });
+			expect(renderStatusText(ctx as never, db, sessionId)).toContain(
+				"mc: 239.2K (30%)",
+			);
 		} finally {
 			closeQuietly(db);
 		}
 	});
 
-	it("a live figure anchored on provider usage still wins when it is larger", () => {
+	it("a live figure anchored on provider usage still wins when it is larger", async () => {
 		const db = createTestDb();
 		try {
 			const sessionId = "ses-footer-usage-anchored";
 			seedPersistedReading(db, sessionId);
-			const text = renderStatusText(
-				incidentContext(sessionId, false) as never,
-				db,
-				sessionId,
+			const { ctx } = incidentContext(sessionId, false);
+			await messageEnd(db, sessionId, ctx, QUEUED_PROMPT);
+			expect(renderStatusText(ctx as never, db, sessionId)).toContain(
+				"mc: 238.6K (30%)",
 			);
-			expect(text).toContain("mc: 238.6K (30%)");
 		} finally {
 			closeQuietly(db);
 		}

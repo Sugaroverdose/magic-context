@@ -115,7 +115,7 @@ export function renderStatusText(
 	const pressure =
 		liveInputTokens !== undefined || persistedInputTokens !== undefined
 			? resolvePiStatusPressureSnapshot({
-					sessionManager: ctx.sessionManager,
+					sessionId,
 					persistedPercentage: meta?.last_context_percentage ?? 0,
 					persistedInputTokens: persistedInputTokens ?? 0,
 					liveInputTokens,

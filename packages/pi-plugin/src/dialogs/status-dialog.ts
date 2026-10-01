@@ -657,7 +657,7 @@ export function buildPiStatusDetail(
 		persistedPercentage: meta.lastContextPercentage,
 	});
 	const pressure = resolvePiStatusPressureSnapshot({
-		sessionManager: ctx.sessionManager,
+		sessionId,
 		persistedPercentage: meta.lastContextPercentage,
 		persistedInputTokens: meta.lastInputTokens,
 		liveInputTokens: usage?.tokens,
