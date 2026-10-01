@@ -121,7 +121,9 @@ mkdir -p "$BK/pre"
 cp -c "$DATA/context.db" "$DATA/store.db" "$BK/pre/" || restore_and_fail "pre-window clone"
 say "pre-window clone of both stores: $BK/pre"
 
-say "migrating context.db to $CONTEXT_FENCE with the new plugin code"
+# A store still at 92 runs migrations 93 and 94 here in one open; on a clone of
+# the live store that took about 95 s under load, mostly moving LKG slots.
+say "migrating context.db to $CONTEXT_FENCE with the new plugin code (can take a few minutes)"
 (cd "$DISTS/packages/plugin" && MAGIC_CONTEXT_STORAGE_DIR="$DATA" bun -e "
 const { openDatabase, getDatabasePersistenceError } = await import('./src/features/magic-context/storage-db.ts');
 const db = openDatabase();
@@ -143,7 +145,9 @@ done
 
 say "placing ck-mc $SHA (its first open migrates store.db to $STORE_FENCE)"
 ck module start magic-context || true
-bash "$REPO/scripts/place-ck-mc.sh" --source-ref "$SHA" "$STAGED"
+# store.db 62->63 runs on the module's first open (8-32 s on clones under load),
+# so give placement's version and health waits more headroom than the default.
+PLACE_CK_MC_POLL_SECONDS=5 bash "$REPO/scripts/place-ck-mc.sh" --source-ref "$SHA" "$STAGED"
 rc=$?
 [ "$rc" -eq 0 ] || post_fail "ck-mc placement exited $rc"
 got=$(store_versions)
