@@ -1,9 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-
 import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-types";
 import {
     markNoteNudgeDelivered,
@@ -11,6 +10,7 @@ import {
     resetNoteNudgeCooldownOnly,
 } from "../../../hooks/magic-context/note-nudger";
 import { Database } from "../../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { setPersistedNoteNudgeTrigger } from "../storage-meta-persisted";
@@ -28,9 +28,7 @@ afterEach(() => {
     for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 function tempDirectory(): string {
-    const root = path.join(tmpdir(), "magic-context", "smart-notes-fix");
-    mkdirSync(root, { recursive: true });
-    const dir = mkdtempSync(path.join(root, "fixture-"));
+    const dir = createTestTempDirFromPath(path.join(tmpdir(), "smart-notes-fixture-"));
     directories.push(dir);
     return dir;
 }

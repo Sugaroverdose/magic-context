@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
@@ -15,6 +15,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 
 import {
 	clearContextHandlerSession,
@@ -148,7 +149,7 @@ describe("Pi context handler LKG replay", () => {
 	for (const mode of ["handler", "host"]) {
 		for (const count of [2812, 300]) {
 			it(`fit-guards ${count} raw messages after snapshot, boundary contraction, and SQLITE_BUSY (${mode})`, async () => {
-				const dir = mkdtempSync(join(tmpdir(), "pi-lkg-fit-"));
+				const dir = createTestTempDirFromPath(join(tmpdir(), "pi-lkg-fit-"));
 				tempDirs.push(dir);
 				const dbPath = join(dir, "context.db");
 				const db = createTestDb(dbPath);
@@ -251,7 +252,7 @@ describe("Pi context handler LKG replay", () => {
 
 	for (const tailBytes of [17, 1_700_000]) {
 		it(`host fit-guards LKG replay with ${tailBytes}-byte appended tail`, async () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-lkg-busy-"));
+			const dir = createTestTempDirFromPath(join(tmpdir(), "pi-lkg-busy-"));
 			tempDirs.push(dir);
 			const dbPath = join(dir, "context.db");
 			const db = createTestDb(dbPath);
@@ -333,7 +334,9 @@ describe("Pi context handler LKG replay", () => {
 	}
 
 	it("fails closed instead of serving LKG or raw when emergency recovery meets SQLITE_BUSY", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-lkg-emergency-busy-"));
+		const dir = createTestTempDirFromPath(
+			join(tmpdir(), "pi-lkg-emergency-busy-"),
+		);
 		tempDirs.push(dir);
 		const dbPath = join(dir, "context.db");
 		const db = createTestDb(dbPath);
@@ -372,7 +375,7 @@ describe("Pi context handler LKG replay", () => {
 	});
 
 	it("refuses divergent LKG and unmeasured raw fallback", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-lkg-diverged-"));
+		const dir = createTestTempDirFromPath(join(tmpdir(), "pi-lkg-diverged-"));
 		tempDirs.push(dir);
 		const dbPath = join(dir, "context.db");
 		const db = createTestDb(dbPath);
@@ -416,7 +419,7 @@ describe("Pi context handler LKG replay", () => {
 	});
 
 	it("logs the exact reason and raw count when a transient lock has no LKG", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-lkg-miss-"));
+		const dir = createTestTempDirFromPath(join(tmpdir(), "pi-lkg-miss-"));
 		tempDirs.push(dir);
 		const dbPath = join(dir, "context.db");
 		const db = createTestDb(dbPath);
@@ -457,7 +460,7 @@ describe("Pi context handler LKG replay", () => {
 	});
 
 	it("hydrates the durable LKG slot in a fresh handler after a simulated process restart", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-lkg-restart-"));
+		const dir = createTestTempDirFromPath(join(tmpdir(), "pi-lkg-restart-"));
 		tempDirs.push(dir);
 		const dbPath = join(dir, "context.db");
 		const db = createTestDb(dbPath);
@@ -545,7 +548,7 @@ describe("Pi context handler LKG replay", () => {
 	});
 
 	it("refreshes LKG on every successful SOFT+ applied pass", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-lkg-refresh-"));
+		const dir = createTestTempDirFromPath(join(tmpdir(), "pi-lkg-refresh-"));
 		tempDirs.push(dir);
 		const dbPath = join(dir, "context.db");
 		const db = createTestDb(dbPath);

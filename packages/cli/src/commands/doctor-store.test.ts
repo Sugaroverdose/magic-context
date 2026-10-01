@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LATEST_SUPPORTED_VERSION } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { runDoctorStoreCli, runDoctorStoreInit } from "./doctor-store";
 
 let root: string;
@@ -13,7 +14,7 @@ beforeEach(() => {
     oldEnv = { ...process.env };
     const parent = join(tmpdir(), "magic-context", "store-init");
     mkdirSync(parent, { recursive: true });
-    root = mkdtempSync(join(parent, "cli-"));
+    root = createTestTempDirFromPath(join(parent, "cli-"));
     data = join(root, "cortexkit", "magic-context");
     // Explicit scratch paths exercise production path resolution without touching a live store.
     process.env.NODE_ENV = "production";

@@ -1,4 +1,5 @@
 /// <reference types="bun-types" />
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 /**
  * Tagger load-scoping tests (OpenCode `initFromDb(sessionId, db, floor)`).
@@ -14,7 +15,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database as DatabaseType } from "../../shared/sqlite";
@@ -177,7 +178,7 @@ describe("tagger scoped initFromDb", () => {
     });
 
     it("keeps this session hot across foreign writes to another session", () => {
-        const directory = mkdtempSync(join(tmpdir(), "mc-tagger-version-"));
+        const directory = createTestTempDirFromPath(join(tmpdir(), "mc-tagger-version-"));
         const path = join(directory, "context.db");
         const primary = new Database(path);
         const foreign = new Database(path);

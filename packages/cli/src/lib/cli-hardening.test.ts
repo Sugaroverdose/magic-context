@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { isDevPathPluginEntry } from "../adapters/opencode";
 import { projectPathToPiDirSlug } from "../commands/migrate";
 import { resolveAdaptersForCommand } from "./harness-select";
@@ -19,7 +20,7 @@ afterEach(() => {
 });
 
 function tempRoot(): string {
-    const root = mkdtempSync(join(tmpdir(), "mc-cli-hardening-"));
+    const root = createTestTempDirFromPath(join(tmpdir(), "mc-cli-hardening-"));
     roots.push(root);
     return root;
 }

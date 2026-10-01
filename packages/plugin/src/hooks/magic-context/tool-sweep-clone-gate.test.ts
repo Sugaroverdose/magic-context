@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,11 +8,12 @@ import {
     openDatabase,
 } from "../../features/magic-context/storage";
 import { copySessionStateForClone } from "../../features/magic-context/storage-clone";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { useScopedToolSweep } from "./tool-sweep-policy";
 
 function cloneFixture(adopt: boolean) {
     const old = process.env.XDG_DATA_HOME;
-    const home = mkdtempSync(join(tmpdir(), "scoped-clone-gate-"));
+    const home = createTestTempDirFromPath(join(tmpdir(), "scoped-clone-gate-"));
     process.env.XDG_DATA_HOME = home;
     try {
         const db = openDatabase();
@@ -49,7 +50,7 @@ test.skipIf(!process.env.MC_GATE_OLD_ROOT)(
         const { stripReasoningFromMergedAssistants } = await import(
             `${root}/packages/plugin/src/hooks/magic-context/strip-content.ts`
         );
-        const home = mkdtempSync(join(tmpdir(), "scoped-old-reader-"));
+        const home = createTestTempDirFromPath(join(tmpdir(), "scoped-old-reader-"));
         const old = process.env.XDG_DATA_HOME;
         process.env.XDG_DATA_HOME = home;
         try {

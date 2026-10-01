@@ -1,4 +1,5 @@
 /// <reference types="bun-types" />
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 /**
  * Reproductions for the issue 538 follow-up report: a warm-cache session whose
@@ -26,7 +27,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -69,7 +70,7 @@ const roleOf = (index: number): "user" | "assistant" => (index % 2 === 1 ? "user
 
 /** Persist rows 1..count in a throwaway OpenCode message table, in canonical order. */
 function seedOpenCodeSession(count: number): void {
-    const dir = mkdtempSync(join(tmpdir(), "mc-issue538-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-issue538-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     const path = join(dir, "opencode", "opencode.db");
@@ -155,7 +156,7 @@ describe("issue 538 claim 3: the two paths read one array in sequence", () => {
     it("injection finds the baseline boundary and cuts; the prefix trim then sees it before the window", () => {
         seedOpenCodeSession(20);
         const db = contextDb();
-        const projectDirectory = mkdtempSync(join(tmpdir(), "mc-issue538-project-"));
+        const projectDirectory = createTestTempDirFromPath(join(tmpdir(), "mc-issue538-project-"));
         tempDirs.push(projectDirectory);
 
         // One transform pass in production order: injection preparation first,

@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
     type ProviderConfig,
     ProviderError,
@@ -17,7 +18,7 @@ const temporaryDirectories: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 async function temporaryDirectory(prefix = "retina-local-fs-"): Promise<string> {
-    const directory = await mkdtemp(join(tmpdir(), prefix));
+    const directory = await createTestTempDirFromPath(join(tmpdir(), prefix));
     temporaryDirectories.push(directory);
     return directory;
 }

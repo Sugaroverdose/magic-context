@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
 } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { rpcPortFilePath } from "../../shared/rpc-utils";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { closeRpc, initRpcClient } from "./context-db";
 import {
     _resetNotificationSocketStateForTesting,
@@ -41,7 +42,7 @@ afterEach(() => {
 });
 
 function makeDataHome(): string {
-    const dir = mkdtempSync(join(tmpdir(), "mc-notification-socket-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-notification-socket-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     return dir;

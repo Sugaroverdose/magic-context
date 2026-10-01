@@ -1,9 +1,10 @@
 /// <reference types="bun-types" />
 
 import { afterAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     DOCTOR_HELP,
     LIST_HIDDEN_SESSIONS_HELP,
@@ -43,7 +44,7 @@ describe("subcommandHelp", () => {
 // End-to-end through `main()`: each command must print help and exit 0 without
 // running. Every host path points into a throwaway root so a regression that
 // did run a command could not touch the real OpenCode or Magic Context stores.
-const root = mkdtempSync(join(tmpdir(), "mc-cli-help-"));
+const root = createTestTempDirFromPath(join(tmpdir(), "mc-cli-help-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 const cliEntry = resolve(import.meta.dir, "..", "index.ts");

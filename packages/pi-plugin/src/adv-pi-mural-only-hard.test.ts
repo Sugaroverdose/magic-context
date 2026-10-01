@@ -6,7 +6,7 @@
  * cached prefix, and the queued drop is withheld.
  */
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory/storage-memory";
@@ -27,6 +27,7 @@ import {
 	refreshModelLimitsFromApi,
 } from "@magic-context/core/shared/models-dev-cache";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	clearContextHandlerSession,
 	__test as contextHandlerInternals,
@@ -64,7 +65,7 @@ function imageOf(messages: unknown[]): string | null {
 
 describe("ADV Pi: mural-only HARD fold and the shared bust permission", () => {
 	it("a fold that swaps only the mural image opens the lanes", async () => {
-		const xdg = mkdtempSync(join(tmpdir(), "mc-adv-pi-mural-"));
+		const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-adv-pi-mural-"));
 		const originalXdg = process.env.XDG_DATA_HOME;
 		process.env.XDG_DATA_HOME = xdg;
 		clearModelsDevCache();

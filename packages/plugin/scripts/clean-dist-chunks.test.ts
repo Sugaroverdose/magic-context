@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { cleanupTestTempDir, createTestTempDir } from "../src/shared/test-temp-dir";
 
 const repoRoot = resolve(import.meta.dir, "../../..");
 const script = join(repoRoot, "scripts/clean-dist-chunks.mjs");
 const dirs: string[] = [];
 
 function scratch(): string {
-    const dir = mkdtempSync(join(tmpdir(), "mc-clean-dist-chunks-"));
+    const { dir } = createTestTempDir("mc-clean-dist-chunks-");
     dirs.push(dir);
     return dir;
 }
@@ -19,7 +19,7 @@ function run(...args: string[]) {
 }
 
 afterEach(() => {
-    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    for (const dir of dirs.splice(0)) cleanupTestTempDir(dir);
 });
 
 describe("clean-dist-chunks", () => {

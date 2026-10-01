@@ -1,4 +1,5 @@
 /// <reference types="bun-types" />
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 // A native OpenCode compaction (`/compact`) replaces the host window with
 // [compaction request, summary, retained tail, newer rows]. The next pass must
@@ -8,7 +9,7 @@
 // fire once per compaction and never again for the same one.
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -101,7 +102,7 @@ function sessionWithUnfoldedCompartment(): string {
     db = new Database(":memory:");
     initializeDatabase(db);
     getOrCreateSessionMeta(db, SESSION_ID);
-    const projectDirectory = mkdtempSync(join(tmpdir(), "mc-host-compaction-"));
+    const projectDirectory = createTestTempDirFromPath(join(tmpdir(), "mc-host-compaction-"));
     tempDirs.push(projectDirectory);
     appendCompartments(db, SESSION_ID, [compartment(0, "Alpha", "Alpha baseline")]);
     pass(projectDirectory, true, BASE_HARD);

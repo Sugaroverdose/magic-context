@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MagicContextConfigSchema } from "../config/schema/magic-context";
@@ -38,6 +38,7 @@ import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
 import { buildStatusViewFor } from "../shared/status-view";
 import { checkStatusDetailPayload } from "../shared/status-view-check";
+import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import {
     buildCompartmentCount,
     buildDebugMemoryUsage,
@@ -134,7 +135,7 @@ describe("session-owner", () => {
     }
 
     test("claims a session whose host directory is this server's directory in another spelling", async () => {
-        const root = mkdtempSync(join(tmpdir(), "session-owner-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "session-owner-"));
         try {
             const handler = ownerHandler(root, {
                 ses_mine: `${root}/`,
@@ -306,7 +307,7 @@ describe("Rust session status reads", () => {
 
 describe("sidebar snapshot RPC failures", () => {
     test("unborn repo sidebar loads existing directory memories", () => {
-        const directory = mkdtempSync(join(tmpdir(), "sidebar-unborn-"));
+        const directory = createTestTempDirFromPath(join(tmpdir(), "sidebar-unborn-"));
         const db = createTestDb();
         try {
             execFileSync("git", ["init", "-q", directory], { windowsHide: true });
@@ -326,7 +327,7 @@ describe("sidebar snapshot RPC failures", () => {
     });
 
     test("paused sidebar logs once per directory and reason without stacks", () => {
-        const directory = mkdtempSync(join(tmpdir(), "sidebar-paused-"));
+        const directory = createTestTempDirFromPath(join(tmpdir(), "sidebar-paused-"));
         execFileSync("git", ["init", "-q", directory], { windowsHide: true });
         const db = createTestDb();
         const logged = spyOn(logger, "log").mockImplementation(() => {});

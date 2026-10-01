@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { writeTestExecutable } from "@magic-context/core/shared/test-fake-executable";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     detectOmpBinary,
     getOmpCommandInvocation,
@@ -30,7 +31,7 @@ afterEach(() => {
 describe("OMP binary discovery", () => {
     /** A real OMP package root plus a fake `bun` on PATH; HOME has no OMP. */
     function makePackageRoot(): { root: string; binDir: string } {
-        const root = mkdtempSync(join(tmpdir(), "mc-omp-package-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-omp-package-"));
         roots.push(root);
         mkdirSync(join(root, "pkg", "dist"), { recursive: true });
         writeFileSync(

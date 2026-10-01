@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import fixture from "../../../../../tests/fixtures/tool-input-string-bytes.json";
@@ -14,6 +14,7 @@ import {
     updateTagDropMode,
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { createDroppedInputGuard } from "./dropped-input-guard";
 import {
     isSmallToolInput,
@@ -39,7 +40,7 @@ afterEach(() => {
 });
 
 function freshDb() {
-    const dir = mkdtempSync(join(tmpdir(), "real-or-absent-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "real-or-absent-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     return openDatabase();

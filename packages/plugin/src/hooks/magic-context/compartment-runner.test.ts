@@ -2,10 +2,11 @@ import {
     __resetNotificationStateForTests,
     drainNotifications,
 } from "../../shared/rpc-notifications";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -1054,7 +1055,7 @@ describe("executeContextRecomp", () => {
 });
 
 function useTempDataHome(prefix: string): void {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
 }

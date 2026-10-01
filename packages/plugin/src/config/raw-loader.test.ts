@@ -1,24 +1,16 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import {
-    chmodSync,
-    mkdtempSync,
-    readdirSync,
-    readFileSync,
-    rmSync,
-    statSync,
-    writeFileSync,
-} from "node:fs";
+import { chmodSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import { parseJsonc } from "../shared/jsonc-parser";
+import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import { hasFlatKeys, loadRawConfigFile, migrateFlatDetailed } from "./raw-loader";
 import { PER_HARNESS_MIGRATION_INVENTORY } from "./schema/magic-context";
 
 const temporaryDirectories: string[] = [];
 
 function temporaryDirectory(): string {
-    const directory = mkdtempSync(join(tmpdir(), "mc-per-harness-"));
+    const directory = createTestTempDirFromPath(join(tmpdir(), "mc-per-harness-"));
     temporaryDirectories.push(directory);
     return directory;
 }

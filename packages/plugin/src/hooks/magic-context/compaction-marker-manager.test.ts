@@ -1,4 +1,5 @@
 /// <reference types="bun-types" />
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 /**
  * Tests for `applyDeferredCompactionMarker` (plan v6 §5).
@@ -21,7 +22,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findBoundaryUserMessage } from "../../features/magic-context/compaction-marker";
@@ -54,7 +55,7 @@ const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 function useTempDataHome(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     mkdirSync(join(dir, "opencode"), { recursive: true });
@@ -524,7 +525,7 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
         // Don't create the opencode dir at all — this makes the writable
         // OpenCode DB handle fail to open, which throws inside
         // getOpenCodeMessageById and trips the outer try/catch.
-        const dataHome = mkdtempSync(join(tmpdir(), "apply-deferred-db-err-"));
+        const dataHome = createTestTempDirFromPath(join(tmpdir(), "apply-deferred-db-err-"));
         tempDirs.push(dataHome);
         process.env.XDG_DATA_HOME = dataHome;
         mkdirSync(join(dataHome, "cortexkit", "magic-context"), { recursive: true });

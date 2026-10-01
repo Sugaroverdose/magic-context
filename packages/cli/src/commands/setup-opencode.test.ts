@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse as parseJsonc } from "comment-json";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     addPluginToOpenCodeConfig,
     addPluginToTuiConfig,
@@ -13,7 +14,7 @@ import {
 const tempDirs: string[] = [];
 
 function tempDir(): string {
-    const path = mkdtempSync(join(tmpdir(), "mc-opencode-setup-"));
+    const path = createTestTempDirFromPath(join(tmpdir(), "mc-opencode-setup-"));
     tempDirs.push(path);
     return path;
 }

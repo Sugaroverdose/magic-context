@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it, mock, spyOn } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -24,6 +24,7 @@ import type { PluginContext } from "../../plugin/types";
 import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { createV2RawMessageProvider, createV2RawMessageReader } from "../../v2/hooks/store";
 import {
     getV2StoreReaderDebugCounters,
@@ -505,7 +506,7 @@ describe("runCompartmentAgent wrapup controls", () => {
     it("keeps a 10K-row v2 post-historian publish bounded and closes every reader", async () => {
         const db = createDb();
         const sessionId = "ses-v2-post-historian";
-        const root = mkdtempSync(join(tmpdir(), "mc-v2-post-historian-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-v2-post-historian-"));
         const storePath = join(root, "opencode.db");
         const store = new Database(storePath);
         const logSpy = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});

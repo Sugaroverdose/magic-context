@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import {
     copyFileSync,
     mkdirSync,
-    mkdtempSync,
     readdirSync,
     readFileSync,
     realpathSync,
@@ -19,11 +18,12 @@ import {
     runMigrations,
 } from "@magic-context/core/features/magic-context/storage";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { formatIdentitySplits } from "./doctor-identity-splits";
 import { runMergeIdentityCli } from "./doctor-merge-identity";
 
 // Every path here lives under one throwaway root; no live store, config, or cache is read.
-const root = realpathSync(mkdtempSync(join(tmpdir(), "mc-merge-safety-")));
+const root = realpathSync(createTestTempDirFromPath(join(tmpdir(), "mc-merge-safety-")));
 const savedEnv: Record<string, string | undefined> = {};
 const ISOLATED_ENV = {
     MAGIC_CONTEXT_STORAGE_DIR: join(root, "env-storage"),

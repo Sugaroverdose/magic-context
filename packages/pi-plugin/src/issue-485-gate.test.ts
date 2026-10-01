@@ -1,6 +1,6 @@
 import { expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
@@ -23,6 +23,7 @@ import {
 import { stream as anthropicStream } from "pi-ai-086/api/anthropic-messages";
 import { stream as responsesStream } from "pi-ai-086/api/openai-responses";
 import { SessionManager } from "pi-coding-agent-086";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	__test as cloneTest,
 	handlePiCloneSessionStart,
@@ -167,7 +168,7 @@ it.skipIf(!process.env.MC_GATE_RESTART)("A restart child", async () => {
 });
 
 it("A C D reporter fold, process restart, LKG and second cut", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "mc-gate-"));
+	const dir = createTestTempDirFromPath(join(tmpdir(), "mc-gate-"));
 	const dbPath = join(dir, "gate.sqlite");
 	const db = createTestDb(dbPath);
 	const manager = SessionManager.create(process.cwd(), dir);
@@ -273,7 +274,7 @@ it("A C D reporter fold, process restart, LKG and second cut", async () => {
 
 for (const order of ["inject-first", "marker-first"])
 	it(`B snapshot excludes MC prefix ${order}`, () => {
-		const dir = mkdtempSync(join(tmpdir(), "mc-order-"));
+		const dir = createTestTempDirFromPath(join(tmpdir(), "mc-order-"));
 		const db = createTestDb();
 		const manager = SessionManager.create(process.cwd(), dir);
 		const sid = manager.getSessionId();
@@ -597,7 +598,7 @@ for (const api of ["anthropic-messages", "openai-responses"])
 
 for (const mode of ["missing-method", "throwing-signature", "readonly-085"])
 	it(`J reflective drain ${mode}`, async () => {
-		const dir = mkdtempSync(join(tmpdir(), "mc-bind-"));
+		const dir = createTestTempDirFromPath(join(tmpdir(), "mc-bind-"));
 		const db = createTestDb();
 		const manager = SessionManager.create(process.cwd(), dir);
 		const sid = manager.getSessionId();
@@ -637,7 +638,7 @@ for (const mode of ["missing-method", "throwing-signature", "readonly-085"])
 	});
 
 it("J populated stale-view snapshot is refused by the equivalence fence", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "mc-race-"));
+	const dir = createTestTempDirFromPath(join(tmpdir(), "mc-race-"));
 	const db = createTestDb();
 	const manager = SessionManager.create(process.cwd(), dir);
 	const sid = manager.getSessionId();
@@ -713,7 +714,7 @@ it("J populated stale-view snapshot is refused by the equivalence fence", async 
 });
 
 it("J wholly absent runtime manager returns unchanged input", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "mc-absent-"));
+	const dir = createTestTempDirFromPath(join(tmpdir(), "mc-absent-"));
 	const db = createTestDb();
 	const manager = SessionManager.create(process.cwd(), dir);
 	const sid = manager.getSessionId();
@@ -743,7 +744,7 @@ it("J wholly absent runtime manager returns unchanged input", async () => {
 });
 
 it("H physical fork inherits protocol entries and compartment ordinals", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "mc-fork-"));
+	const dir = createTestTempDirFromPath(join(tmpdir(), "mc-fork-"));
 	const db = createTestDb();
 	try {
 		const source = SessionManager.create(process.cwd(), dir);

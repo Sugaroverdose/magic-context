@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import { parse as parseJsonc } from "comment-json";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import {
     removePiSettingsPackage,
@@ -19,7 +19,7 @@ const originalPiDir = process.env.PI_CODING_AGENT_DIR;
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
 
 function makeTempRoot(): string {
-    const path = mkdtempSync(join(tmpdir(), "mc-pi-setup-"));
+    const path = createTestTempDirFromPath(join(tmpdir(), "mc-pi-setup-"));
     tempRoots.push(path);
     return path;
 }

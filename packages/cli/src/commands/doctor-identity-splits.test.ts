@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { findIdentitySplits, formatIdentitySplits } from "./doctor-identity-splits";
 
 test("reports dir/git and two-git splits from both host generations without changing rows", () => {
@@ -50,7 +51,9 @@ test("reports dir/git and two-git splits from both host generations without chan
 });
 
 test("reports directory data after the first commit before a git session binding exists", () => {
-    const directory = realpathSync(mkdtempSync(join(tmpdir(), "doctor-first-commit-")));
+    const directory = realpathSync(
+        createTestTempDirFromPath(join(tmpdir(), "doctor-first-commit-")),
+    );
     const identity = `dir:${createHash("md5").update(directory).digest("hex").slice(0, 12)}`;
     const db = new Database(":memory:");
     const host = new Database(":memory:");

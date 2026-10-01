@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
@@ -11,6 +11,7 @@ import {
     LATEST_SUPPORTED_VERSION,
 } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { runDoctorSingleStore } from "./doctor-single-store";
 
 const root = join(tmpdir(), "magic-context", "b2-t2");
@@ -62,7 +63,7 @@ const report = {
 };
 beforeEach(() => {
     oldEnv = { ...process.env };
-    dir = mkdtempSync(join(root, "case-"));
+    dir = createTestTempDirFromPath(join(root, "case-"));
     data = join(dir, "cortexkit", "magic-context");
     mkdirSync(data, { recursive: true });
     process.env.XDG_DATA_HOME = dir;

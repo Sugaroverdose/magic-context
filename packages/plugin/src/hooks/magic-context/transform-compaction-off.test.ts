@@ -4,6 +4,7 @@ import {
     __resetNotificationStateForTests,
     drainNotifications,
 } from "../../shared/rpc-notifications";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 /// <reference types="bun-types" />
 
 /**
@@ -18,7 +19,7 @@ import {
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { replaceAllCompartments } from "../../features/magic-context/compartment-storage";
@@ -98,7 +99,7 @@ afterEach(() => {
 });
 
 function useTempDataHome(prefix: string): void {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     process.env.XDG_CACHE_HOME = dir;

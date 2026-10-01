@@ -1,12 +1,13 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     __openCodeTurnStateTest,
     assistantAwaitingTools,
@@ -546,7 +547,7 @@ describe("tracked out-of-pass turn state", () => {
 });
 
 function useTempDataHome(prefix: string): void {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
 }

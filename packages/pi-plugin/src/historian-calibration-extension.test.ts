@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 
 import { calibrateHistorianProviderPayload } from "./historian-calibration-extension";
 
@@ -115,14 +116,14 @@ describe("historian provider calibration", () => {
 });
 
 it("observes the effective context prompt rather than before-agent input", async () => {
-	const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+	const { writeFileSync, rmSync } = await import("node:fs");
 	const { tmpdir } = await import("node:os");
 	const { join } = await import("node:path");
 	const { spyOn } = await import("bun:test");
 	const { default: extension } = await import(
 		"./historian-calibration-extension"
 	);
-	const root = mkdtempSync(join(tmpdir(), "mc-provenance-test-"));
+	const root = createTestTempDirFromPath(join(tmpdir(), "mc-provenance-test-"));
 	const previous = process.env.MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE;
 	const output = spyOn(process.stdout, "write").mockImplementation(() => true);
 	try {

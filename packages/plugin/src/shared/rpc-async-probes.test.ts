@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import type { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,6 +16,7 @@ import {
     inspectProcessesAsync,
 } from "./rpc-utils";
 import { Database } from "./sqlite";
+import { createTestTempDirFromPath } from "./test-temp-dir";
 
 afterEach(() => {
     __resetSchemaFenceStateForTests();
@@ -116,7 +117,7 @@ test("async Windows inspection bounds CIM and tasklist fallback and caches failu
 });
 
 test("boot storage wait stays responsive with a locked v90 store and slow Windows probes", async () => {
-    const root = mkdtempSync(join(tmpdir(), "async-storage-guard-"));
+    const root = createTestTempDirFromPath(join(tmpdir(), "async-storage-guard-"));
     const dbPath = join(root, "context.db");
     const seeded = new Database(dbPath);
     seeded.exec(

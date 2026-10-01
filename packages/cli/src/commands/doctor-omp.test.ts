@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordDreamerTickFailure } from "@magic-context/core/features/magic-context/dreamer/tick-failure";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { inspectMagicContextLogs } from "../lib/log-lines";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import { runDoctor } from "./doctor-omp";
@@ -62,7 +63,7 @@ afterEach(() => {
 
 describe("OMP doctor", () => {
     it("accepts a healthy OMP installation", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-omp-doctor-"));
         roots.push(root);
         const agentDir = join(root, ".omp", "agent");
         const pluginDir = join(root, "plugin");
@@ -114,7 +115,7 @@ describe("OMP doctor", () => {
      * the background maintenance is not running at all (issue 496).
      */
     it("reports a background maintenance pass that stopped before its work", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-tick-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-omp-doctor-tick-"));
         roots.push(root);
         const agentDir = join(root, ".omp", "agent");
         const pluginDir = join(root, "plugin");
@@ -171,7 +172,7 @@ describe("OMP doctor", () => {
     });
 
     it("reports a background maintenance pass that completed", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-tick-ok-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-omp-doctor-tick-ok-"));
         roots.push(root);
         const agentDir = join(root, ".omp", "agent");
         const pluginDir = join(root, "plugin");
@@ -222,7 +223,7 @@ describe("OMP doctor", () => {
     });
 
     it("reads the OMP legacy log when no Pi log exists", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-log-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-omp-doctor-log-"));
         roots.push(root);
         const agentDir = join(root, ".omp", "agent");
         const pluginDir = join(root, "plugin");
@@ -280,7 +281,7 @@ describe("OMP doctor", () => {
     });
 
     it("repairs a missing config when it is the only health finding", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-config-only-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-omp-doctor-config-only-"));
         roots.push(root);
         const agentDir = join(root, ".omp", "agent");
         const pluginDir = join(root, "plugin");
@@ -323,7 +324,7 @@ describe("OMP doctor", () => {
     });
 
     it("writes an independent default config even when OMP is missing", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-no-bin-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-omp-doctor-no-bin-"));
         roots.push(root);
         process.env.HOME = root;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -344,7 +345,7 @@ describe("OMP doctor", () => {
     });
 
     it("does not repair global settings through a project config override", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-project-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-omp-doctor-project-"));
         roots.push(root);
         const agentDir = join(root, ".omp", "agent");
         const pluginDir = join(root, "plugin");
@@ -393,7 +394,7 @@ describe("OMP doctor", () => {
         expect(prompts.messages.join("\n")).toContain("automatic global repair is disabled");
     });
     it("rejects an array at the Magic Context config root", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-array-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-omp-doctor-array-"));
         roots.push(root);
         mkdirSync(join(root, ".config", "cortexkit"), { recursive: true });
         writeFileSync(join(root, ".config", "cortexkit", "magic-context.jsonc"), "[]\n");
@@ -412,8 +413,8 @@ describe("OMP doctor", () => {
     });
 
     it("does not write a default config after a refused legacy migration", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-migration-"));
-        const cwd = mkdtempSync(join(tmpdir(), "mc-omp-doctor-cwd-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-omp-doctor-migration-"));
+        const cwd = createTestTempDirFromPath(join(tmpdir(), "mc-omp-doctor-cwd-"));
         roots.push(root, cwd);
         const piAgentDir = join(root, ".pi", "agent");
         const opencodeDir = join(root, ".config", "opencode");

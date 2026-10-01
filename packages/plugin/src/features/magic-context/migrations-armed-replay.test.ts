@@ -1,12 +1,13 @@
 /// <reference types="bun-types" />
 
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
 import type { Database as DatabaseType } from "../../shared/sqlite";
 import { Database, withPrivilegedWriter } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     ensureContextStoreUuid,
     installAuthorityManagedMarker,
@@ -331,7 +332,9 @@ function populateHarnessEvidenceAtV86(db: DatabaseType, state: ReplayState): voi
     if (!shape) throw new Error("captured store shapes are missing migrated_v1_v2");
 
     const storePath = join(
-        mkdtempSync(join(process.env.MAGIC_CONTEXT_TEST_DATA_DIR as string, "armed-host-")),
+        createTestTempDirFromPath(
+            join(process.env.MAGIC_CONTEXT_TEST_DATA_DIR as string, "armed-host-"),
+        ),
         "opencode.db",
     );
     const store = new Database(storePath);

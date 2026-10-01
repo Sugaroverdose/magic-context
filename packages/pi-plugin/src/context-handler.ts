@@ -282,10 +282,13 @@ import {
 	resolvePiLkgOutputEntryIds,
 } from "./pi-lkg";
 import {
+	clearPiLiveUsageClassification,
 	formatPiPressureForLog,
 	isPiLiveUsageRawBranchEstimate,
+	recordPiLiveUsageClassification,
 	resolvePiPressureSnapshotWithEstimateGuard,
 } from "./pi-pressure";
+import { resolvePiProvenInputFloor } from "./pi-proven-floor";
 import {
 	assertPiRawFallbackFits,
 	PiDegradedPassError,
@@ -303,7 +306,7 @@ import {
 import {
 	convertEntriesToRawMessagePage,
 	convertEntriesToRawMessages,
-	findLastModelKeyFromBranch,
+	findRestartModelSeedFromBranch,
 	readPiSessionMessagePage,
 	readPiSessionMessages,
 	resolvePiStableId,
@@ -2441,6 +2444,10 @@ export function registerPiContextHandler(
 			// retried request); such a figure is never used as pressure.
 			const piLiveUsageIsRawBranchEstimate =
 				isPiLiveUsageRawBranchEstimate(branchEntries);
+			recordPiLiveUsageClassification(
+				sessionId,
+				piLiveUsageIsRawBranchEstimate,
+			);
 			schedulePiTransformDecisionResolve({
 				db: options.db,
 				sessionId,
@@ -2687,13 +2694,16 @@ export function registerPiContextHandler(
 			// branch is the session's last-used model; seeding it lets the
 			// comparison below fire. No-op when the branch has no model_change
 			// (older sessions) — previousModelKey stays undefined (today's behavior).
+			// A model_change newer than the last reply is seeded from that reply's
+			// model instead (see findRestartModelSeedFromBranch), so a switch made
+			// before the first prompt after the restart is still detected.
 			if (
 				isFirstContextPassForSession &&
 				liveModelBySession.get(sessionId) === undefined
 			) {
 				// Reuse the branch entries already read above (readPiBranchEntries
 				// ForContext) — getBranch() must be walked only once per event.
-				const seeded = findLastModelKeyFromBranch(branchEntries);
+				const seeded = findRestartModelSeedFromBranch(branchEntries);
 				if (seeded !== undefined) {
 					liveModelBySession.set(sessionId, seeded);
 				}
@@ -2935,7 +2945,11 @@ export function registerPiContextHandler(
 				detectedContextLimit,
 			});
 			rawFallbackLimit = baseWindowGeometry?.usableHard ?? rawFallbackLimit;
-			let provenInputTokens = sessionMeta.observedSafeInputTokens ?? 0;
+			let provenInputTokens = resolvePiProvenInputFloor({
+				db: options.db,
+				sessionId,
+				modelKey: currentModelKey,
+			});
 			if (
 				baseWindowGeometry &&
 				hasTrustedAbsoluteWall(baseWindowGeometry) &&
@@ -4646,7 +4660,12 @@ function maybeFireHistorian(args: {
 			rawContextWindowSource: usageContextWindowSource,
 			model: ctx.model,
 			detectedContextLimit,
-			provenInputTokens: sessionMeta.observedSafeInputTokens ?? undefined,
+			provenInputTokens:
+				resolvePiProvenInputFloor({
+					db,
+					sessionId,
+					modelKey: resolvePiContextModelKey(ctx),
+				}) || undefined,
 		});
 		if (
 			sessionMeta.lastContextPercentage > 0 &&
@@ -7721,6 +7740,7 @@ function clearPiCompactionOffInMemoryState(sessionId: string): void {
 // Do not add DB clearSession here.
 export function clearContextHandlerSession(sessionId: string): void {
 	invalidateTrueRawTokenCache({ sessionId, reason: "pi.branch.changed" });
+	clearPiLiveUsageClassification(sessionId);
 	clearPiLkgSessionState(sessionId);
 	activeContextHandlerSessions.delete(sessionId);
 	clearAutoSearchForPiSession(sessionId);

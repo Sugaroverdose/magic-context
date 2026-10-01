@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it } from "bun:test";
 import {
     existsSync,
     mkdirSync,
-    mkdtempSync,
     readFileSync,
     renameSync,
     rmSync,
@@ -14,6 +13,7 @@ import { dirname, join } from "node:path";
 import { LATEST_SUPPORTED_VERSION } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { convertEntriesToRawMessages } from "@magic-context/pi-core/read-session-pi";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     type MigrationPendingRow,
     migrateOpenCodeSessionToPi,
@@ -29,7 +29,7 @@ const databases: Array<{ close(): void }> = [];
 const originalPiDir = process.env.PI_CODING_AGENT_DIR;
 
 function tempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), "mc-migrate-test-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-migrate-test-"));
     tempDirs.push(dir);
     return dir;
 }

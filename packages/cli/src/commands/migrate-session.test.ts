@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,6 +8,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { SubcModuleTransport } from "@magic-context/core/hooks/magic-context/module-transport";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 
 import {
     applyMigrateSession,
@@ -385,7 +386,7 @@ describe("applyMigrateSession — OpenCode + context re-stamp", () => {
 
 describe("runMigrateSessionCli subc configuration", () => {
     it("constructs its transport with configured subc.connection_file", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-migrate-session-cli-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-migrate-session-cli-"));
         const source = join(root, "source");
         const target = join(root, "target");
         const configHome = join(root, "config");

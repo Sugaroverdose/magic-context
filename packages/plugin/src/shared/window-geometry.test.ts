@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveLimit, resolveOutputReserve } from "./models-dev-cache";
+import { createTestTempDirFromPath } from "./test-temp-dir";
 import {
     applyProvenInputFloor,
     deriveWindowGeometry,
@@ -160,7 +161,7 @@ describe("Fusiform overlay v1", () => {
     });
 
     test("a missing file is silent and a bad file logs one summary", () => {
-        const dir = mkdtempSync(join(tmpdir(), "window-overlay-test-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "window-overlay-test-"));
         tempDirs.push(dir);
         const logs: string[] = [];
         expect(

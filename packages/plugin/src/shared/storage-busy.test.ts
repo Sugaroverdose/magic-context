@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,10 +8,11 @@ import {
     withAsyncPrivilegedWriter,
     withPrivilegedWriter,
 } from "./sqlite";
+import { createTestTempDirFromPath } from "./test-temp-dir";
 
 describe("writer acquisition", () => {
     test("exhausted async admission preserves the foreground budget and never invokes the callback", async () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-writer-budget-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-writer-budget-"));
         const path = join(dir, "context.db");
         const blocker = new Database(path);
         blocker.exec(

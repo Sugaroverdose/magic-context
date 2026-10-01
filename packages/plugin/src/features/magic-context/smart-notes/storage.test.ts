@@ -1,12 +1,12 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { evaluateSmartNotes } from "../dreamer/evaluate-smart-notes";
 import { acquireLease } from "../dreamer/lease";
 import { runMigrations } from "../migrations";
@@ -33,7 +33,7 @@ function freshDb(): Database {
 }
 
 function tempProject(): string {
-    const dir = mkdtempSync(path.join(tmpdir(), "mc-smart-note-storage-"));
+    const dir = createTestTempDirFromPath(path.join(tmpdir(), "mc-smart-note-storage-"));
     tempDirs.push(dir);
     return dir;
 }

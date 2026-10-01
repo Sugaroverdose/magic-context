@@ -1,13 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import {
-    existsSync,
-    mkdirSync,
-    mkdtempSync,
-    readFileSync,
-    rmSync,
-    statSync,
-    writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -20,6 +12,7 @@ import { computeLegacyRustDirIdentity } from "@magic-context/core/features/magic
 import { resolveOpenCodeDbPath } from "@magic-context/core/shared/opencode-db-path";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { openExistingContextDatabase } from "../lib/database-access";
 import {
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION,
@@ -214,7 +207,7 @@ describe("OpenCode model catalog parsing", () => {
 
 describe("doctor shared DB row counts", () => {
     it("counts rows still in the write-ahead log through the read-only open", () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-doctor-wal-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-doctor-wal-"));
         const path = join(dir, "context.db");
         const writer = new Database(path);
         try {
@@ -283,7 +276,7 @@ describe("OpenCode database doctor surface", () => {
 
 describe("doctor OpenCode 2 database path", () => {
     it("uses an absolute OPENCODE_DB as is, like OpenCode 2 does", () => {
-        const dataHome = mkdtempSync(join(tmpdir(), "mc-doctor-db-"));
+        const dataHome = createTestTempDirFromPath(join(tmpdir(), "mc-doctor-db-"));
         try {
             const absolute = join(dataHome, "elsewhere", "opencode.db");
             const resolution = resolveOpenCodeDbPath("v2", {
@@ -437,7 +430,7 @@ let originalNpmUserConfig: string | undefined;
 let originalOpenCodeConfigDir: string | undefined;
 
 function makeTempDir(prefix = "mc-v22-doctor-"): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     return dir;
 }

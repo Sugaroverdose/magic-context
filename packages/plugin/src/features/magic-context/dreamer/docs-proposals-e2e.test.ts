@@ -1,11 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DREAMER_DOCS_ALLOWED_TOOLS } from "../../../agents/dreamer";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { listPendingDocsProposals } from "./docs-proposals";
@@ -22,7 +23,7 @@ afterEach(() => {
 });
 
 test("maintain-docs stub model cannot edit docs, emits a proposal and skips the next run", async () => {
-    dir = mkdtempSync(join(tmpdir(), "mc-docs-e2e-"));
+    dir = createTestTempDirFromPath(join(tmpdir(), "mc-docs-e2e-"));
     const git = (...args: string[]) =>
         execFileSync("git", args, { windowsHide: true, cwd: dir, encoding: "utf8" }).trim();
     const file = join(dir, "ARCHITECTURE.md");

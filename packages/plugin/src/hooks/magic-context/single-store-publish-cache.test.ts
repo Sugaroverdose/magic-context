@@ -1,4 +1,5 @@
 /// <reference types="bun-types" />
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 // Cache rule for a fold the Rust module writes straight into context.db.
 //
@@ -16,7 +17,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -147,7 +148,7 @@ describe("a fold written by the single-store module", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         getOrCreateSessionMeta(db, SESSION_ID);
-        const dir = mkdtempSync(join(tmpdir(), "mc-single-store-cache-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-single-store-cache-"));
         tempDirs.push(dir);
         appendCompartments(db, SESSION_ID, [compartment(0, "A", "Alpha baseline")]);
         return dir;

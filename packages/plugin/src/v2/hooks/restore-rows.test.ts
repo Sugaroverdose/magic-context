@@ -1,10 +1,11 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     getV2StoreReaderDebugCounters,
     resetV2StoreReaderDebugCounters,
@@ -21,7 +22,7 @@ afterEach(() => {
 
 /** A v2 host store holding `count` rows of user turns and assistant/tool arcs. */
 function seedStore(count: number): { path: string; store: Database } {
-    const root = mkdtempSync(join(tmpdir(), "mc-v2-restore-bounded-"));
+    const root = createTestTempDirFromPath(join(tmpdir(), "mc-v2-restore-bounded-"));
     roots.push(root);
     const path = join(root, "opencode.db");
     const store = new Database(path);

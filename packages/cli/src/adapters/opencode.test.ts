@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { OpenCodeAdapter } from "./opencode";
 
 // An OpenCode 2 host reads its native `plugins` array and still decodes the legacy
@@ -13,7 +14,7 @@ describe("OpenCodeAdapter registration keys across host generations", () => {
     const originalConfigHome = process.env.XDG_CONFIG_HOME;
 
     beforeEach(() => {
-        root = mkdtempSync(join(tmpdir(), "mc-oc-adapter-"));
+        root = createTestTempDirFromPath(join(tmpdir(), "mc-oc-adapter-"));
         process.env.XDG_CONFIG_HOME = root;
         configPath = join(root, "opencode", "opencode.json");
     });
@@ -122,7 +123,7 @@ describe("OpenCodeAdapter plugin cache readers across cache layouts", () => {
     let cache: string;
 
     beforeEach(() => {
-        root = mkdtempSync(join(tmpdir(), "mc-oc-adapter-cache-"));
+        root = createTestTempDirFromPath(join(tmpdir(), "mc-oc-adapter-cache-"));
         for (const key of envKeys) savedEnv[key] = process.env[key];
         cache = join(root, "cache");
         process.env.XDG_CACHE_HOME = cache;

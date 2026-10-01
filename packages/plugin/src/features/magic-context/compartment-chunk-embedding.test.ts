@@ -1,11 +1,12 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as formatting from "../../hooks/magic-context/read-session-formatting";
 import { estimateTokens, formatBlock } from "../../hooks/magic-context/read-session-formatting";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     _resetCompartmentChunkSearchCacheForTests,
     buildCanonicalChunkTextFromFts,
@@ -302,7 +303,7 @@ describe("compartment chunk embedding core", () => {
     });
 
     test("coverage stays read-only before the drain renumbers matching one-based rows", async () => {
-        const tempDirectory = mkdtempSync(join(tmpdir(), "chunk-window-renumber-"));
+        const tempDirectory = createTestTempDirFromPath(join(tmpdir(), "chunk-window-renumber-"));
         const databasePath = join(tempDirectory, "store.db");
         const db = createDb(databasePath);
         const embeddedTexts: string[] = [];

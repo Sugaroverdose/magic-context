@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     collectHistorianFailures,
     collectHistorianRuns,
@@ -110,7 +111,7 @@ describe("doctor database collectors", () => {
     beforeEach(() => {
         const base = join(tmpdir(), "magic-context", "doctor-node");
         mkdirSync(base, { recursive: true });
-        root = mkdtempSync(join(base, "collectors-"));
+        root = createTestTempDirFromPath(join(base, "collectors-"));
         for (const name of names) {
             const dir = join(root, name);
             mkdirSync(dir);

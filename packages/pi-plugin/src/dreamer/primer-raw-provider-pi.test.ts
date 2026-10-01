@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildPrimerSeed } from "@magic-context/core/features/magic-context/dreamer/primer-seed";
@@ -15,6 +15,7 @@ import {
 	withRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { convertEntriesToRawMessages } from "../read-session-pi";
 import { createPiPrimerRawProviderFactory } from "./primer-raw-provider-pi";
 
@@ -24,9 +25,7 @@ afterEach(() => {
 		rmSync(dir, { recursive: true, force: true });
 });
 function store(entries: unknown[]) {
-	const root = join(tmpdir(), "magic-context", "issue-576");
-	mkdirSync(root, { recursive: true });
-	const dir = mkdtempSync(join(root, "mc-primer-pi-pages-"));
+	const dir = createTestTempDirFromPath(join(tmpdir(), "mc-primer-pi-pages-"));
 	dirs.push(dir);
 	writeFileSync(
 		join(dir, "session.jsonl"),

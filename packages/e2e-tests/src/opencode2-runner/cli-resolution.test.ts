@@ -1,5 +1,6 @@
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,7 +19,7 @@ afterEach(() => {
 });
 
 function fixture() {
-	const root = mkdtempSync(join(tmpdir(), "mc-oc2-cli-resolution-"));
+	const root = createTestTempDirFromPath(join(tmpdir(), "mc-oc2-cli-resolution-"));
 	roots.push(root);
 	const sharedRoot = join(root, "shared");
 	const nodeModules = join(root, "node_modules/.bin/opencode2");

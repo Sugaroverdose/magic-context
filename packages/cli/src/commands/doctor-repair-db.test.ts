@@ -6,7 +6,6 @@ import { createHash } from "node:crypto";
 import {
     closeSync,
     mkdirSync,
-    mkdtempSync,
     openSync,
     readdirSync,
     readFileSync,
@@ -27,6 +26,7 @@ import {
 import { rpcPortFilePath } from "@magic-context/core/shared/rpc-utils";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { writeTestExecutable } from "@magic-context/core/shared/test-fake-executable";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import { defaultSqliteExecutable, REPAIR_DB_EXIT, runRepairDb } from "./doctor-repair-db";
@@ -95,7 +95,7 @@ class MockPrompts implements PromptIO {
 }
 
 function tempStorage(): string {
-    const root = mkdtempSync(join(tmpdir(), "mc-repair-db-"));
+    const root = createTestTempDirFromPath(join(tmpdir(), "mc-repair-db-"));
     tempDirs.push(root);
     return root;
 }

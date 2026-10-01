@@ -1,13 +1,13 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     LATEST_MIGRATION_VERSION,
     runMigrations,
@@ -33,7 +33,7 @@ afterEach(() => {
  * evidence absent, v87 changes nothing — so any row that moves moved in v85.
  */
 function useAbsentHostStore(): void {
-    const dir = mkdtempSync(join(tmpdir(), "mc-v85-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-v85-"));
     tempDirs.push(dir);
     process.env.OPENCODE_DB = join(dir, "opencode.db");
     resetOpenCodeDbPathStateForTesting();

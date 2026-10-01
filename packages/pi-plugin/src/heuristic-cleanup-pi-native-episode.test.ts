@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
 	addNativeReasoningIds,
 	getNativeReasoningIds,
 } from "@magic-context/core/features/magic-context/storage-native-replay";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	clearContextHandlerSession,
 	registerPiContextHandler,
@@ -164,7 +165,7 @@ for (const latchControl of [false, true]) {
 		const childDb = process.env.MC_NATIVE_EPISODE_RESTART_DB;
 		const directory = childDb
 			? dirname(childDb)
-			: mkdtempSync(join(tmpdir(), "pi-native-episode-"));
+			: createTestTempDirFromPath(join(tmpdir(), "pi-native-episode-"));
 		const dbPath = childDb ?? join(directory, "context.db");
 		const f = fixture(sessionId, dbPath);
 		try {

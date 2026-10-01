@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { closeSync, mkdtempSync, openSync, rmSync, writeSync } from "node:fs";
+import { closeSync, openSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
 	_resetHarnessForTesting,
 	setHarness,
 } from "@magic-context/core/shared/harness";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { PiRetrospectiveRawProvider } from "./retrospective-raw-provider-pi";
 
 const dirs: string[] = [];
@@ -20,7 +21,7 @@ afterEach(() => {
 });
 
 function fixture(turns: number): string {
-	const dir = mkdtempSync(join(tmpdir(), "mc-pi-primer-heap-"));
+	const dir = createTestTempDirFromPath(join(tmpdir(), "mc-pi-primer-heap-"));
 	dirs.push(dir);
 	const fd = openSync(join(dir, "session.jsonl"), "w");
 	const line = (entry: unknown) => writeSync(fd, `${JSON.stringify(entry)}\n`);
@@ -131,7 +132,7 @@ test("Pi retrospective input is byte-identical to whole-file reads under caps", 
 	rows[7].message.timestamp = first;
 	writeFileSync(
 		file,
-		rows.map((row) => JSON.stringify(row)).join("\n") + "\nmalformed\n",
+		`${rows.map((row) => JSON.stringify(row)).join("\n")}\nmalformed\n`,
 	);
 	const api = await loadDefaultPiSessionApi();
 	const entries = (await api.loadEntriesFromFile(file)) as typeof rows;

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
 	updateTagStatus,
 } from "@magic-context/core/features/magic-context/storage";
 import { getNativeToolInputs } from "@magic-context/core/features/magic-context/storage-native-replay";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	clearContextHandlerSession,
 	registerPiContextHandler,
@@ -334,7 +335,9 @@ const childMode = process.env.MC_OVERWALL_RESTART_MODE;
 
 for (const native of [false, true]) {
 	test(`removal markers survive a separate-process restart (native=${native})`, () => {
-		const root = mkdtempSync(join(tmpdir(), "mc-overwall-restart-"));
+		const root = createTestTempDirFromPath(
+			join(tmpdir(), "mc-overwall-restart-"),
+		);
 		try {
 			for (const mode of ["mint", "replay"]) {
 				const child = Bun.spawnSync({

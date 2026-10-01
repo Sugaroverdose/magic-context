@@ -1,4 +1,5 @@
 /// <reference types="bun-types" />
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 /**
  * Adversarial checks for the prefix trim when the stored compartment boundary
@@ -14,7 +15,7 @@
 
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -72,7 +73,7 @@ function openCodeDbPath(): string {
 
 /** Create a throwaway OpenCode store under a fresh XDG_DATA_HOME. */
 function createOpenCodeStore(rows: readonly SeedRow[]): void {
-    const dir = mkdtempSync(join(tmpdir(), "mc-prefix-trim-adversarial-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-prefix-trim-adversarial-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     mkdirSync(dirname(openCodeDbPath()), { recursive: true });

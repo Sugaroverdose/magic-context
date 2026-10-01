@@ -1,9 +1,6 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
@@ -19,6 +16,7 @@ import type { ContextUsage } from "../../features/magic-context/types";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import type { PluginContext } from "../../plugin/types";
 import { Database } from "../../shared/sqlite";
+import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { DegradedPassRefusalError } from "./degraded-pass-refusal";
 import { dropSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { STORAGE_BUSY_MESSAGE } from "./storage-busy-refusal";
@@ -35,7 +33,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 let heldLock: Database | null = null;
 
 function useTempDataHome(prefix: string): void {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const { dir } = createTestTempDir(prefix);
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
 }
@@ -56,7 +54,7 @@ afterEach(() => {
     closeDatabase();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
-    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+    for (const dir of tempDirs) cleanupTestTempDir(dir);
     tempDirs.length = 0;
 });
 
@@ -292,8 +290,8 @@ describe("a pass that falls back to the launch directory", () => {
 
     it("replays the frozen m[0]/m[1] when it would otherwise rebuild, and a resolved pass rebuilds", async () => {
         useTempDataHome("mc-degraded-directory-");
-        const sessionDirectory = mkdtempSync(join(tmpdir(), "mc-session-dir-"));
-        const launchDirectory = mkdtempSync(join(tmpdir(), "mc-launch-dir-"));
+        const sessionDirectory = createTestTempDir("mc-session-dir-").dir;
+        const launchDirectory = createTestTempDir("mc-launch-dir-").dir;
         tempDirs.push(sessionDirectory, launchDirectory);
         const sessionId = "ses-directory-fallback";
         const db = openDatabase();

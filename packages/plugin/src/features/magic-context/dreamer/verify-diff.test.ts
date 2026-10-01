@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 
 import { buildVerifyDiffEvidence, VERIFY_DIFF_BUDGET_TOKENS } from "./verify-diff";
 import { buildVerifyPrompt, type VerifyPromptMemory } from "./verify-prompt";
@@ -14,7 +15,7 @@ afterEach(() => {
 const git = (dir: string, ...args: string[]) =>
     execFileSync("git", args, { cwd: dir, encoding: "utf8", windowsHide: true }).trim();
 function repo() {
-    const dir = mkdtempSync(path.join(tmpdir(), "verify-diff-"));
+    const dir = createTestTempDirFromPath(path.join(tmpdir(), "verify-diff-"));
     dirs.push(dir);
     git(dir, "init", "-q");
     git(dir, "config", "user.email", "verify@example.invalid");

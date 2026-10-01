@@ -1,9 +1,10 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { Host } from "@opencode/plugin/host";
 import * as logger from "../../shared/logger";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { setupWithJsx } from "./index";
 import type { V2SidebarState, V2SlotClaim, V2TuiContext } from "./types";
 
@@ -223,7 +224,7 @@ test("OpenCode 1.18.30 TUI loader projection executes unchanged sidebar registra
     expect(plugin.server).toBeUndefined();
     expect(typeof plugin.setup).toBe("function");
 
-    const directory = mkdtempSync(resolve(tmpdir(), "mc-v1-tui-union-"));
+    const directory = createTestTempDirFromPath(resolve(tmpdir(), "mc-v1-tui-union-"));
     temporary.push(directory);
     const fixture = v1Api(directory);
     const previousCompactionOverride = process.env.OPENCODE_DISABLE_AUTOCOMPACT;

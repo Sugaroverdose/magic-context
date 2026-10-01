@@ -1,18 +1,18 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import {
     createPromptSurfaceGuidanceEpochCache,
     createPromptSurfaceRuntime,
     LIGHT_TOOL_DESCRIPTIONS,
 } from "./prompt-surface-runtime";
+import { createTestTempDirFromPath } from "./test-temp-dir";
 
 const tempDirs: string[] = [];
 
 function tempDir(): string {
-    const directory = mkdtempSync(join(tmpdir(), "prompt-surface-runtime-"));
+    const directory = createTestTempDirFromPath(join(tmpdir(), "prompt-surface-runtime-"));
     tempDirs.push(directory);
     return directory;
 }
