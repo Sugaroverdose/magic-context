@@ -19879,7 +19879,7 @@ mod tests {
         let line = supported_fences_line();
         assert_eq!(
             line,
-            format!("context.db=93 store.db={LATEST_MIGRATION_VERSION}")
+            format!("context.db=94 store.db={LATEST_MIGRATION_VERSION}")
         );
     }
 
