@@ -667,7 +667,7 @@ fn a_second_run_reports_already_migrated_and_writes_nothing() {
 }
 
 #[test]
-fn a_store_upgraded_to_62_remains_recognized_as_migrated() {
+fn a_store_upgraded_to_the_latest_schema_remains_recognized_as_migrated() {
     let fixture = Fixture::new(Extras::default());
     fixture.migrate();
     let descriptor = cortexkit_store_types::StorageDescriptor {
@@ -681,7 +681,7 @@ fn a_store_upgraded_to_62_remains_recognized_as_migrated() {
     drop(mc_store::McStore::open(&descriptor).unwrap());
     assert_eq!(
         schema::recorded_store_version(&fixture.store()).unwrap(),
-        62
+        mc_store::LATEST_MIGRATION_VERSION
     );
     let before = fixture.digest();
     let report = run(&fixture.options("backup-again"), &mut NoHooks).unwrap();

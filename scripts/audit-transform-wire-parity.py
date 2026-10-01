@@ -1530,6 +1530,31 @@ def fetch_dicts(
     return [dict(zip(names, row)) for row in cursor.fetchall()]
 
 
+def scheduler_history_rows(
+    db: sqlite3.Connection, sessions: set[str]
+) -> list[tuple[str, str, str]]:
+    """Each session's scheduler and interesting histories as JSON arrays, oldest first.
+
+    Store migration 63 moved the histories into ring rows and dropped the array columns of
+    `mc_pass_trace`; its read-only view `mc_pass_trace_history_arrays` rebuilds the arrays in
+    sequence order. Older stores still carry the columns.
+    """
+    if not sessions:
+        return []
+    source = (
+        "mc_pass_trace_history_arrays"
+        if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'mc_pass_trace_history_arrays'"
+        ).fetchone()
+        else "mc_pass_trace"
+    )
+    placeholders = ", ".join("?" for _ in sessions)
+    return db.execute(
+        f"SELECT session_id, scheduler_history, scheduler_interesting_history FROM {source} WHERE session_id IN ({placeholders})",
+        tuple(sorted(sessions)),
+    ).fetchall()
+
+
 def table_exists(db: sqlite3.Connection, table: str) -> bool:
     return (
         db.execute(
@@ -2524,10 +2549,7 @@ def summarize_telemetry(
                         "active_since_window_start": last_activity >= start_ms,
                         "caveman_age_basis_tag": parsed_meta.get("caveman_age_basis_tag"),
                     }
-                scheduler_rows = db.execute(
-                    f"SELECT session_id, scheduler_history, scheduler_interesting_history FROM mc_pass_trace WHERE session_id IN ({placeholders})",
-                    tuple(sorted(sessions)),
-                ).fetchall()
+                scheduler_rows = scheduler_history_rows(db, sessions)
             else:
                 scheduler_rows = []
             report["rust_historian_rows"] = summarize_historian_rows(

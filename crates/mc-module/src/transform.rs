@@ -55,12 +55,13 @@ use crate::tail_hygiene::{
 };
 use mc_core::{classify, CkItem, ClassifierInput, CoreState, FrozenUnit, PassInput, PassPlan};
 use mc_store::{
-    BlockIdentity, Channel1AppendRow, DeferredExecuteState, LineageAnchor, LineageConstituent,
-    LineageDescentDisposition, LineageDescentRequest, McStore, McStoreError, McTagRow,
-    MemoryRevision, ModuleMeta, ModuleUsage, PassSchedulerObservation, PendingAgentDrop,
-    PendingChannel2Directive, PendingRewriteState, ServedBlockFingerprint, StoredCompartment,
-    TagCacheSummary, TagMintInput, TailHygieneBaseline, TailHygienePartKind, TemporalMarkInput,
-    TemporalMarkRow, TransformCommit, TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
+    BlockIdentity, Channel1AppendRow, DeferredExecuteState, FrozenClear, LineageAnchor,
+    LineageConstituent, LineageDescentDisposition, LineageDescentRequest, McStore, McStoreError,
+    McTagRow, MemoryRevision, ModuleMeta, ModuleUsage, PassSchedulerObservation, PendingAgentDrop,
+    PendingChannel2Directive, PendingRewriteState, SectionsCommit, ServedBlockFingerprint,
+    StoredCompartment, TagCacheSummary, TagMintInput, TailHygieneBaseline, TailHygienePartKind,
+    TemporalMarkInput, TemporalMarkRow, TransformCommit, TransformOverlayBatch,
+    UserHintDecisionInput, UserHintRow,
 };
 use mc_store::{CompartmentBoundary, RenderedCompartmentCoverage};
 use regex::Regex;
@@ -2356,7 +2357,7 @@ fn previously_tagged_synthetic_rows(
         return Ok(None);
     }
     let reclassified = store
-        .load(&req.session_id)?
+        .load_meta(&req.session_id)?
         .meta
         .reclassified_synthetic_mids;
     let candidate_blocks: Vec<String> = req
@@ -3339,6 +3340,12 @@ fn apply_additive_only(
                 expected: loaded.row_version,
                 core: &core,
                 meta: &meta,
+                // This path rebuilds the frozen list from the loaded one, so an empty result
+                // is its own, not an unloaded state.
+                sections: SectionsCommit {
+                    frozen_clear: FrozenClear::Explicit,
+                    ..SectionsCommit::over(loaded.sections.as_ref())
+                },
                 consumed_drop_ids: &[],
                 first_applied_command_ids: &[],
                 memory_revision: commit_memory_revision.as_ref(),
@@ -3548,7 +3555,8 @@ fn apply_once(
                 initial_projection,
             ));
         }
-        let initial_state = store.load(&ingress_req.session_id)?;
+        // Only the CAS token is needed here; the descent decodes what it copies itself.
+        let initial_state = store.load_meta(&ingress_req.session_id)?;
         let anchor = continuation_summary_anchor(ingress_req, &initial_projection);
         let constituents = ingress_req
             .constituents
@@ -3651,6 +3659,30 @@ fn apply_once(
     timings.store_overlay_frontier = transform_snapshot.timings.overlay_frontier_ms;
     let loaded = transform_snapshot.loaded;
     let overlay_frontier = transform_snapshot.overlay_frontier;
+    // A stored frozen chunk or cache section that failed its digest (or its shape checks)
+    // decoded as empty. The prefix may have been built against the lost value, so the pass
+    // rebuilds it from the messages with a HARD pass, as a lineage descent that needs
+    // materializing does, instead of failing the pass or serving from a truncated list. The
+    // commit then rewrites every discarded value in full.
+    let cache_sections_discarded = loaded
+        .sections
+        .as_ref()
+        .is_some_and(mc_store::SectionsBase::any_discarded);
+    if cache_sections_discarded {
+        lineage_state.force_hard = true;
+    }
+    // Claude Code sessions are born on a fold-only profile; tail reducers never run there, so
+    // no frozen `red:*` units should exist when the fold is the sole reclaim path. Checked
+    // here because this pass holds the frozen list; historian bookkeeping no longer loads it.
+    debug_assert!(
+        serializer_profile.is_none_or(crate::healing::tail_reclaim)
+            || !loaded
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key.starts_with("red:")),
+        "fold-only profile must not carry frozen tail reductions"
+    );
     // Legacy sessions stored the CC latch before the generic surface latch existed.
     // Treat that old true value as the generic latch so an upgrade does not repeat a fold.
     let persisted_tagging_surface_active =
@@ -3887,6 +3919,7 @@ fn apply_once(
                         expected: loaded.row_version,
                         core: &loaded.core,
                         meta: &next_meta,
+                        sections: SectionsCommit::over(loaded.sections.as_ref()),
                         consumed_drop_ids: &[],
                         first_applied_command_ids: &[],
                         memory_revision: None,
@@ -4003,6 +4036,7 @@ fn apply_once(
                 expected: loaded.row_version,
                 core: &core,
                 meta: &meta,
+                sections: SectionsCommit::over(loaded.sections.as_ref()),
                 consumed_drop_ids: &[],
                 first_applied_command_ids: &[],
                 memory_revision: None,
@@ -4817,6 +4851,9 @@ fn apply_once(
     } else if lineage_state.force_hard {
         plan = PassPlan::Hard;
     }
+    if cache_sections_discarded {
+        plan = PassPlan::Hard;
+    }
     let mut materialize_reason = classify_materialize_reason(MaterializeReasonInputs {
         plan,
         bootstrap_due: !loaded.meta.initialized || loaded.meta.bootstrap_seed_fold_pending,
@@ -4840,6 +4877,9 @@ fn apply_once(
     }
     if lineage_state.force_hard {
         materialize_reason = Some("lineage_descent".to_string());
+    }
+    if cache_sections_discarded {
+        materialize_reason = Some("cache_sections_discarded".to_string());
     }
     if boundary_divergence_recut.is_some() {
         materialize_reason = Some("boundary_divergence_recut".to_string());
@@ -4913,6 +4953,10 @@ fn apply_once(
         meta.emergency_drop_assessment = Some(assessment);
     }
     let mut commit_expected = loaded.row_version;
+    // Row-version steps adopted from meta-only writers since `loaded` was read. The commit
+    // checks `commit_expected == loaded.row_version + meta_only_steps`, so the chunks it
+    // diffs against `loaded.sections` cannot silently come from another commit.
+    let mut meta_only_steps = 0u64;
     if clear_pending_rewrite_on_present {
         meta.pending_rewrite = None;
         meta.pending_rewrite_trip_count = meta.pending_rewrite_trip_count.saturating_add(1);
@@ -5223,6 +5267,11 @@ fn apply_once(
                                 keep_through_seq,
                                 commit_expected,
                             )?;
+                            // The truncate is meta-only: it steps the version by one when it
+                            // drops compartments and not at all when there is nothing to drop.
+                            if Some(outcome.row_version) != commit_expected {
+                                meta_only_steps += 1;
+                            }
                             commit_expected = Some(outcome.row_version);
                             meta.revert_epoch = outcome.revert_epoch;
                             meta.last_recut = outcome.last_recut;
@@ -6519,6 +6568,14 @@ fn apply_once(
                 expected: commit_expected,
                 core: &core,
                 meta: &meta,
+                // The core was derived from the loaded frozen list in this pass, so an empty
+                // list here is the pass's own result (a re-mint, a retired legacy unit), never
+                // an unloaded state.
+                sections: SectionsCommit {
+                    base: loaded.sections.as_ref(),
+                    meta_only_steps,
+                    frozen_clear: FrozenClear::Explicit,
+                },
                 consumed_drop_ids: &consumed_drop_ids,
                 first_applied_command_ids: &first_applied_command_ids,
                 memory_revision: commit_memory_revision.as_ref(),
@@ -18698,6 +18755,7 @@ pub(crate) mod tests {
                         expected: seeded.row_version,
                         core: &seeded.core,
                         meta: &seeded.meta,
+                        sections: mc_store::SectionsCommit::default(),
                         consumed_drop_ids: &[],
                         first_applied_command_ids: &[],
                         memory_revision: None,
@@ -22723,6 +22781,7 @@ pub(crate) mod tests {
                 expected: after.row_version,
                 core: &before.core,
                 meta: &alternative_meta,
+                sections: mc_store::SectionsCommit::default(),
                 consumed_drop_ids: &[],
                 first_applied_command_ids: &[],
                 memory_revision: None,
@@ -30122,6 +30181,81 @@ pub(crate) mod tests {
         }
     }
 
+    /// Overwrite the bytes of one stored frozen chunk, as disk corruption or a stray writer
+    /// would, without touching the digest the last codec commit recorded for it.
+    fn corrupt_frozen_chunk(dir: &std::path::Path, session: &str) {
+        let conn = rusqlite::Connection::open(dir.join("store.db")).unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE mc_cache_frozen_chunks SET body = json_set(body, '$[0].reset_rule', 'x')
+                  WHERE session_id = ?1 AND chunk = 0",
+                [session],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "the session has a first chunk to corrupt");
+    }
+
+    #[test]
+    fn corrupt_chunk_forces_hard_and_full_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "m1msg", "SUMMARY")])
+            .unwrap();
+        let items = || vec![item("m1msg", 1, "raw"), item("t2", 2, "tail2")];
+        let bootstrap = run(&s, &req("ses", "cfg0", items()), &spine());
+        let stable = run(&s, &req("ses", "cfg0", items()), &spine());
+        assert_eq!(stable.action, "SOFT+");
+        let clean_units = s.load("ses").unwrap().core.frozen_units;
+        assert!(!clean_units.is_empty());
+
+        corrupt_frozen_chunk(dir.path(), "ses");
+        let rebuilt = run(&s, &req("ses", "cfg0", items()), &spine());
+        assert_eq!(
+            rebuilt.action, "HARD",
+            "a discarded section never serves a SOFT pass"
+        );
+        assert_eq!(
+            rebuilt.materialize_reason.as_deref(),
+            Some("cache_sections_discarded")
+        );
+        assert!(rebuilt.committed);
+        // The rebuilt frame is the one a clean build of the same messages serves.
+        assert_eq!(m0_bytes(&rebuilt), m0_bytes(&bootstrap));
+        assert_eq!(m1_bytes(&rebuilt), m1_bytes(&bootstrap));
+        assert_eq!(tail_ids(&rebuilt), tail_ids(&bootstrap));
+        // Every chunk was rewritten in full under fresh digests: the next load trusts it.
+        let reloaded = s.load("ses").unwrap();
+        assert!(!reloaded.sections.as_ref().unwrap().any_discarded());
+        assert_eq!(reloaded.core.frozen_units, clean_units);
+        let after = run(&s, &req("ses", "cfg0", items()), &spine());
+        assert_eq!(after.action, "SOFT+");
+    }
+
+    #[test]
+    fn a_new_message_pass_runs_exactly_one_full_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "m1msg", "SUMMARY")])
+            .unwrap();
+        run(
+            &s,
+            &req("ses", "cfg0", vec![item("m1msg", 1, "raw")]),
+            &spine(),
+        );
+        let mut items = vec![item("m1msg", 1, "raw")];
+        for n in 2..=4u64 {
+            items.push(item(&format!("t{n}"), n, &format!("tail{n}")));
+            let before = mc_store::cache_codec::full_decode_count();
+            let response = run(&s, &req("ses", "cfg0", items.clone()), &spine());
+            assert!(response.committed);
+            assert_eq!(
+                mc_store::cache_codec::full_decode_count() - before,
+                1,
+                "pass {n}: the transform snapshot is the pass's only full decode"
+            );
+        }
+    }
+
     #[test]
     fn public_memory_update_rides_soft_not_hard() {
         let dir = tempfile::tempdir().unwrap();
@@ -32298,6 +32432,7 @@ pub(crate) mod tests {
                 expected: seeded.row_version,
                 core: &seeded.core,
                 meta: &seeded.meta,
+                sections: mc_store::SectionsCommit::default(),
                 consumed_drop_ids: &[],
                 first_applied_command_ids: &[],
                 memory_revision: None,
@@ -35725,6 +35860,7 @@ pub(crate) mod tests {
                     expected: loaded.row_version,
                     core: &loaded.core,
                     meta: &loaded.meta,
+                    sections: mc_store::SectionsCommit::default(),
                     consumed_drop_ids: &[pending[0].id],
                     first_applied_command_ids: &command_ids,
                     memory_revision: None,
@@ -35812,6 +35948,7 @@ pub(crate) mod tests {
                     expected: loaded.row_version,
                     core: &loaded.core,
                     meta: &loaded.meta,
+                    sections: mc_store::SectionsCommit::default(),
                     consumed_drop_ids: &[pending_a[0].id],
                     first_applied_command_ids: &command_a,
                     memory_revision: None,
@@ -39884,6 +40021,7 @@ pub(crate) mod tests {
                 expected: poisoned.row_version,
                 core: &poisoned.core,
                 meta: &poisoned.meta,
+                sections: mc_store::SectionsCommit::default(),
                 consumed_drop_ids: &[],
                 first_applied_command_ids: &[],
                 memory_revision: None,

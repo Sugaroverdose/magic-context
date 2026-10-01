@@ -13,6 +13,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cache_codec;
+pub use cache_codec::{
+    DiscardReason, FrozenBase, HashBase, SectionState, SectionsBase, FROZEN_CHUNK_UNITS,
+};
 pub mod context_boundaries;
 pub use context_boundaries::ResolvedContextBoundary;
 pub mod context_writes;
@@ -3145,6 +3149,26 @@ const MIGRATIONS: &[Migration] = &[
         END;
         "#,
     },
+    Migration {
+        version: 63,
+        // Split a session's cache state so a commit rewrites only what changed. SQLite
+        // rewrites a whole record whenever its length changes, and every new message appends
+        // to `core_state.frozen_units`, so each commit used to rewrite megabytes on a large
+        // session for a few hundred bytes of change. `cache_codec` documents the layout; it is
+        // the only reader and writer of the new tables and of `section_index`.
+        //
+        // The pass-trace histories become ring rows in the same migration, so the fleet takes
+        // one fence move rather than two.
+        //
+        // The text is the one `scripts/ckmc-write-probe/migcheck` ran unchanged against a
+        // clone of a whole live store and verified row by row; a test pins the two copies to
+        // the same bytes. Its shape guards fail the batch, and so leave the store at 62 for
+        // the previous binary, when a stored value is one the codec could not round-trip.
+        statements: concat!(
+            include_str!("migrations/store_063_cache_split.sql"),
+            include_str!("migrations/store_063_pass_trace_ring.sql"),
+        ),
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -3709,10 +3733,6 @@ fn serialize_interesting_scheduler_observation(
 }
 
 const REQUEST_TRACE_HISTORY_LIMIT: usize = 32;
-// Reuse the existing scheduler metadata JSON instead of adding a schema column. The carrier
-// is intentionally not a scheduler record: its missing timestamp keeps incident queries blind
-// to it, while the loader extracts it before deserializing scheduler observations.
-const REQUEST_TRACE_CARRIER_DECISION: &str = "__request_trace_history__";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PassRequestTrace {
@@ -3722,57 +3742,161 @@ pub struct PassRequestTrace {
     pub outcome: String,
 }
 
-fn pass_trace_meta_parts(
-    raw: &str,
-) -> Result<(Vec<Value>, Vec<PassRequestTrace>), serde_json::Error> {
-    let mut entries: Vec<Value> = serde_json::from_str(raw)?;
-    let carrier_index = entries.iter().rposition(|entry| {
-        entry.get("scheduler_decision").and_then(Value::as_str)
-            == Some(REQUEST_TRACE_CARRIER_DECISION)
-    });
-    let request_history = carrier_index
-        .map(|index| entries.remove(index))
-        .and_then(|carrier| carrier.get("request_history").cloned())
-        .map(serde_json::from_value)
-        .transpose()?
-        .unwrap_or_default();
-    Ok((entries, request_history))
+/// One of the bounded pass-trace histories, each a ring of rows in `mc_pass_trace_history`.
+///
+/// They used to be JSON arrays on the session's `mc_pass_trace` row, and every append
+/// re-serialized the whole array: about 160 KB per receive and per completion on a large
+/// session. A ring row is written on its own. The next sequence number per history lives in
+/// `mc_pass_trace`; `slot = seq % cap` bounds storage, and readers order by `seq`, never by
+/// `slot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PassTraceHistory {
+    /// Every accepted scheduler observation.
+    Scheduler,
+    /// Scheduler observations worth keeping for incidents (reductions, divergences).
+    Interesting,
+    /// Module receipt and terminal outcome of each transform request.
+    Request,
 }
 
-fn pass_trace_meta_json(
-    mut scheduler_interesting_history: Vec<Value>,
-    request_history: &[PassRequestTrace],
-) -> Result<String, serde_json::Error> {
-    scheduler_interesting_history.push(serde_json::json!({
-        "scheduler_decision": REQUEST_TRACE_CARRIER_DECISION,
-        "request_history": request_history,
-    }));
-    serde_json::to_string(&scheduler_interesting_history)
+impl PassTraceHistory {
+    fn kind(self) -> &'static str {
+        match self {
+            PassTraceHistory::Scheduler => "scheduler",
+            PassTraceHistory::Interesting => "interesting",
+            PassTraceHistory::Request => "request",
+        }
+    }
+
+    fn next_seq_column(self) -> &'static str {
+        match self {
+            PassTraceHistory::Scheduler => "scheduler_next_seq",
+            PassTraceHistory::Interesting => "interesting_next_seq",
+            PassTraceHistory::Request => "request_next_seq",
+        }
+    }
+
+    fn cap(self) -> i64 {
+        match self {
+            PassTraceHistory::Scheduler | PassTraceHistory::Interesting => {
+                PASS_SCHEDULER_HISTORY_CAP as i64
+            }
+            PassTraceHistory::Request => REQUEST_TRACE_HISTORY_LIMIT as i64,
+        }
+    }
 }
 
-fn mutate_pass_request_history(
+/// Read a session's pass breadcrumbs and their histories. Call it inside a read transaction
+/// so the row and its ring entries come from the same commit.
+fn read_pass_trace(
     conn: &rusqlite::Connection,
     session_id: &str,
-    mutate: impl FnOnce(&mut Vec<PassRequestTrace>),
+) -> rusqlite::Result<Option<PassTrace>> {
+    let trace = conn
+        .query_row(
+            "SELECT last_received_at_ms, last_completed_at_ms, last_reject_error,
+                    last_reject_at_ms, reject_count, receive_count, first_divergence,
+                    last_divergence
+               FROM mc_pass_trace WHERE session_id = ?1",
+            params![session_id],
+            |row| {
+                Ok(PassTrace {
+                    last_received_at_ms: row.get(0)?,
+                    last_completed_at_ms: row.get(1)?,
+                    last_reject_error: row.get(2)?,
+                    last_reject_at_ms: row.get(3)?,
+                    reject_count: row.get::<_, i64>(4)?.max(0) as u64,
+                    receive_count: row.get::<_, i64>(5)?.max(0) as u64,
+                    first_divergence: row.get(6)?,
+                    last_divergence: row.get(7)?,
+                    scheduler_history: Vec::new(),
+                    request_history: Vec::new(),
+                })
+            },
+        )
+        .optional()?;
+    let Some(mut trace) = trace else {
+        return Ok(None);
+    };
+    trace.scheduler_history =
+        load_pass_trace_history(conn, session_id, PassTraceHistory::Scheduler)?;
+    trace.request_history = load_pass_trace_history(conn, session_id, PassTraceHistory::Request)?;
+    Ok(Some(trace))
+}
+
+/// Append one entry to a pass-trace history ring. The session's `mc_pass_trace` row must
+/// already exist; every caller upserts it first.
+fn append_pass_trace_history(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    history: PassTraceHistory,
+    entry_json: &str,
 ) -> rusqlite::Result<()> {
-    let raw = conn.query_row(
-        "SELECT scheduler_interesting_history FROM mc_pass_trace WHERE session_id = ?1",
-        params![session_id],
-        |row| row.get::<_, String>(0),
-    )?;
-    let (scheduler_history, mut request_history) = pass_trace_meta_parts(&raw)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    mutate(&mut request_history);
-    if request_history.len() > REQUEST_TRACE_HISTORY_LIMIT {
-        request_history.drain(..request_history.len() - REQUEST_TRACE_HISTORY_LIMIT);
-    }
-    let meta = pass_trace_meta_json(scheduler_history, &request_history)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    conn.execute(
-        "UPDATE mc_pass_trace SET scheduler_interesting_history = ?2 WHERE session_id = ?1",
-        params![session_id, meta],
-    )?;
+    let column = history.next_seq_column();
+    let seq: i64 = conn
+        .prepare_cached(&format!(
+            "UPDATE mc_pass_trace SET {column} = {column} + 1 WHERE session_id = ?1
+             RETURNING {column} - 1"
+        ))?
+        .query_row(params![session_id], |row| row.get(0))?;
+    conn.prepare_cached(
+        "INSERT INTO mc_pass_trace_history (session_id, kind, slot, seq, entry)
+         VALUES (?1, ?2, ?3, ?4, json(?5))
+         ON CONFLICT(session_id, kind, slot) DO UPDATE SET
+             seq = excluded.seq,
+             entry = excluded.entry",
+    )?
+    .execute(params![
+        session_id,
+        history.kind(),
+        seq.rem_euclid(history.cap()),
+        seq,
+        entry_json
+    ])?;
     Ok(())
+}
+
+/// Record a request's terminal outcome on its newest receipt entry, if it is still retained.
+fn finish_pass_request_trace(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    attempt_id: &str,
+    outcome: &str,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    conn.prepare_cached(
+        "UPDATE mc_pass_trace_history
+            SET entry = json_set(entry, '$.completed_at_ms', ?3, '$.outcome', ?4)
+          WHERE session_id = ?1 AND kind = 'request'
+            AND seq = (SELECT MAX(seq) FROM mc_pass_trace_history
+                        WHERE session_id = ?1 AND kind = 'request'
+                          AND json_extract(entry, '$.attempt_id') = ?2)",
+    )?
+    .execute(params![session_id, attempt_id, now_ms, outcome])?;
+    Ok(())
+}
+
+/// The retained entries of one pass-trace history, oldest first.
+fn load_pass_trace_history<T: serde::de::DeserializeOwned>(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    history: PassTraceHistory,
+) -> rusqlite::Result<Vec<T>> {
+    conn.prepare_cached(
+        "SELECT entry FROM mc_pass_trace_history
+          WHERE session_id = ?1 AND kind = ?2 ORDER BY seq",
+    )?
+    .query_map(params![session_id, history.kind()], |row| {
+        let raw = row.get::<_, String>(0)?;
+        serde_json::from_str(&raw).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+    })?
+    .collect()
 }
 
 /// Durable publish-transaction timing for one session, in microseconds.
@@ -5016,10 +5140,48 @@ impl TransformOverlayBatch<'_> {
     }
 }
 
+/// Whether a commit may store an empty frozen-unit list over a session that has units.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FrozenClear {
+    /// Refuse: an empty list is more likely a state that was never loaded than a
+    /// deliberate clear.
+    #[default]
+    Refuse,
+    /// The caller really is resetting the list.
+    Explicit,
+}
+
+/// How a transform commit writes the split chunk and section rows.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SectionsCommit<'a> {
+    /// The base the pass loaded ([`LoadedState::sections`]). With it the commit writes only
+    /// the rows whose bytes differ from it, rewrites in full any section it discarded, and
+    /// refuses with a CAS conflict if another codec writer advanced the sections version
+    /// since the load. Without it the commit decodes the stored rows inside its own
+    /// transaction and diffs against those.
+    pub base: Option<&'a SectionsBase>,
+    /// `row_version` steps the pass adopted from meta-only writers after loading `base`.
+    /// The commit checks `expected == base.row_version + meta_only_steps`, so a pass cannot
+    /// commit chunks diffed against a base from some other commit.
+    pub meta_only_steps: u64,
+    pub frozen_clear: FrozenClear,
+}
+
+impl<'a> SectionsCommit<'a> {
+    /// Diff against the base a load returned.
+    pub fn over(base: Option<&'a SectionsBase>) -> Self {
+        SectionsCommit {
+            base,
+            ..SectionsCommit::default()
+        }
+    }
+}
+
 pub struct TransformCommit<'a> {
     pub expected: Option<u64>,
     pub core: &'a CoreState,
     pub meta: &'a ModuleMeta,
+    pub sections: SectionsCommit<'a>,
     pub consumed_drop_ids: &'a [i64],
     pub first_applied_command_ids: &'a [String],
     pub memory_revision: Option<&'a MemoryRevision>,
@@ -5497,6 +5659,19 @@ pub struct LoadedState {
     /// The row_version read from disk; pass it back to [`McStore::commit`] as the CAS
     /// expectation. `None` when no row existed yet (first bootstrap → INSERT path).
     pub row_version: Option<u64>,
+    /// What the load saw of the split chunk and section rows. A transform commit passes it
+    /// back so it writes only what changed, and a discarded section in it means the stored
+    /// value could not be trusted and must be rebuilt. `None` when no row existed yet.
+    pub sections: Option<SectionsBase>,
+}
+
+/// The small cache-state row only: the CAS token and the meta blob without its two hashed
+/// sections or its row-stored parts. For writers that edit meta scalars and nothing else.
+#[derive(Debug, Clone)]
+pub struct MetaSnapshot {
+    /// `None` when the session has no row.
+    pub row_version: Option<u64>,
+    pub meta: ModuleMeta,
 }
 
 /// Query-family timings collected while loading a transform snapshot.
@@ -5774,6 +5949,24 @@ pub enum McStoreError {
         /// The highest migration version this binary carries.
         binary_max: u32,
     },
+    /// A commit carried an empty frozen-unit list over a session that has units stored,
+    /// without saying the clear is deliberate.
+    ///
+    /// An empty list means either "every unit was dropped" or "this state was never loaded",
+    /// as with block identities above. Paths that really do reset the list pass
+    /// [`FrozenClear::Explicit`].
+    FrozenClearRefused {
+        session_id: String,
+        stored_units: u64,
+    },
+    /// A transform commit's `row_version` expectation is not the version its sections base
+    /// was loaded at plus the meta-only steps the pass adopted. The pass would write chunks
+    /// diffed against a base from a different commit; this is a caller bug.
+    SectionsBaseMismatch {
+        expected: Option<u64>,
+        base_row_version: u64,
+        meta_only_steps: u64,
+    },
 }
 
 impl std::fmt::Display for McStoreError {
@@ -5862,6 +6055,23 @@ impl std::fmt::Display for McStoreError {
                 f,
                 "session {session_id} commit carries no block identities but {stored} are stored; \
                  the committed meta was never hydrated by the store"
+            ),
+            McStoreError::FrozenClearRefused {
+                session_id,
+                stored_units,
+            } => write!(
+                f,
+                "session {session_id} commit carries no frozen units but {stored_units} are stored; \
+                 clearing them needs an explicit clear"
+            ),
+            McStoreError::SectionsBaseMismatch {
+                expected,
+                base_row_version,
+                meta_only_steps,
+            } => write!(
+                f,
+                "commit expects row_version {expected:?} over a base loaded at \
+                 {base_row_version} plus {meta_only_steps} meta-only steps"
             ),
         }
     }
@@ -5980,6 +6190,7 @@ enum CommitOutcome {
     Committed(u64),
     CasConflict(u64),
     UnhydratedBlockIdentities(usize),
+    FrozenClearRefused(u64),
 }
 
 enum PublishTxnOutcome {
@@ -8165,32 +8376,20 @@ impl McStore {
         self.state_load_query_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let row = self.inner.with_conn(|conn| {
-            let state = conn
-                .query_row(
-                    "SELECT row_version, core_state, meta FROM mc_cache_state WHERE session_id = ?1",
-                    params![session_id],
-                    |r| {
-                        Ok((
-                            r.get::<_, i64>(0)? as u64,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-                .ok();
-            // The row-stored parts of the meta are read on the same connection, so a caller
-            // never sees a blob from before a concurrent commit paired with identities from
-            // after it.
-            match state {
-                None => Ok(None),
-                Some((rv, core_json, meta_json)) => Ok(Some((
-                    rv,
-                    core_json,
-                    meta_json,
-                    load_block_identities_tx(conn, session_id)?,
-                    load_served_output_fingerprints_tx(conn, session_id)?,
-                ))),
-            }
+            // The small row, its chunk and section rows and the row-stored parts of the meta
+            // are read in one transaction, so a caller never pairs rows from two commits.
+            let transaction = conn.unchecked_transaction()?;
+            let decoded = cache_codec::read_decoded(&transaction, session_id)?;
+            let row = match decoded {
+                None => None,
+                Some(decoded) => Some((
+                    decoded,
+                    load_block_identities_tx(&transaction, session_id)?,
+                    load_served_output_fingerprints_tx(&transaction, session_id)?,
+                )),
+            };
+            transaction.commit()?;
+            Ok(row)
         })?;
 
         // The user-profile version is the host's, kept in context.db; the cached meta only
@@ -8208,21 +8407,120 @@ impl McStore {
                     ..ModuleMeta::default()
                 },
                 row_version: None,
+                sections: None,
             }),
-            Some((rv, core_json, meta_json, identities, served)) => {
-                let mut meta: ModuleMeta = serde_json::from_str(&meta_json)
-                    .map_err(|e| McStoreError::Serde(e.to_string()))?;
+            Some((decoded, identities, served)) => {
+                let cache_codec::DecodedRow {
+                    row_version,
+                    core,
+                    mut meta,
+                    sections,
+                } = decoded;
+                log_discarded_sections(session_id, &sections);
                 meta.block_identity_by_mid = identities;
                 meta.served_output_fingerprint = served;
                 meta.user_profile_version = user_profile_version;
                 Ok(LoadedState {
-                    core: serde_json::from_str(&core_json)
-                        .map_err(|e| McStoreError::Serde(e.to_string()))?,
+                    core,
                     meta,
-                    row_version: Some(rv),
+                    row_version: Some(row_version),
+                    sections: Some(sections),
                 })
             }
         }
+    }
+
+    /// Load the small cache-state row only: no frozen units, no hashed sections, no
+    /// row-stored identities. For writers that edit meta scalars and commit them with
+    /// [`McStore::commit_meta`]; a full load on those paths would decode megabytes for
+    /// nothing.
+    pub fn load_meta(&self, session_id: &str) -> Result<MetaSnapshot, McStoreError> {
+        let row = self
+            .inner
+            .with_conn(|conn| cache_codec::read_small_row(conn, session_id))?;
+        let user_profile_version = if self.has_context_domain() {
+            self.user_profile_version()?
+        } else {
+            0
+        };
+        match row {
+            None => Ok(MetaSnapshot {
+                row_version: None,
+                meta: ModuleMeta {
+                    user_profile_version,
+                    ..ModuleMeta::default()
+                },
+            }),
+            Some(row) => {
+                let mut meta = cache_codec::decode_small_meta(&row.meta)
+                    .map_err(|error| McStoreError::Serde(error.to_string()))?;
+                meta.user_profile_version = user_profile_version;
+                Ok(MetaSnapshot {
+                    row_version: Some(row.row_version),
+                    meta,
+                })
+            }
+        }
+    }
+
+    /// Commit a meta-only edit under the `row_version` CAS.
+    ///
+    /// It rewrites the small row's `meta` and nothing else: never `core_state`, never
+    /// `section_index`, never a chunk, section or identity row. That is what keeps a meta-only
+    /// write from re-blessing a corrupted chunk, and what keeps it cheap: the small row is a
+    /// few kilobytes where the full state is megabytes. Any hashed-section value the caller
+    /// left in `meta` is dropped; only the codec's section writers store those.
+    ///
+    /// Byte-identical meta is not written and keeps the current `row_version`, as
+    /// [`McStore::commit`] does.
+    pub fn commit_meta(
+        &self,
+        session_id: &str,
+        expected: Option<u64>,
+        meta: &ModuleMeta,
+    ) -> Result<u64, McStoreError> {
+        let Some(expected) = expected else {
+            // There is no small row to edit; creating one is a full codec write.
+            return self.commit(session_id, None, &CoreState::default(), meta);
+        };
+        let meta_json = cache_codec::encode_small_meta(meta)
+            .map_err(|error| McStoreError::Serde(error.to_string()))?;
+        let outcome = self.inner.with_conn_fenced(|tx| {
+            let current: Option<(i64, bool)> = tx
+                .query_row(
+                    "SELECT row_version, meta = ?2 FROM mc_cache_state WHERE session_id = ?1",
+                    params![session_id, meta_json],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((current, unchanged)) = current else {
+                return Ok(Err(0));
+            };
+            if current != expected as i64 {
+                return Ok(Err(current.max(0) as u64));
+            }
+            if unchanged {
+                return Ok(Ok(expected));
+            }
+            let next = expected + 1;
+            tx.execute(
+                "UPDATE mc_cache_state SET row_version = ?2, meta = ?3, last_activity_at = ?4
+                  WHERE session_id = ?1 AND row_version = ?5",
+                params![
+                    session_id,
+                    next as i64,
+                    meta_json,
+                    current_time_ms(),
+                    expected as i64
+                ],
+            )?;
+            advance_row_state_digest_tx(tx, session_id, expected as i64, next as i64)?;
+            Ok(Ok(next))
+        })?;
+        outcome.map_err(|found| McStoreError::CasConflict {
+            expected: Some(expected),
+            found,
+        })
     }
 
     /// Read bootstrap cursors without hydrating frozen units or compartment summary bodies.
@@ -8232,17 +8530,38 @@ impl McStore {
         include_boundary: bool,
     ) -> Result<(ModuleMeta, String, i64), McStoreError> {
         let row = self.inner.with_conn(|conn| {
-            conn.query_row(
-                "SELECT meta, CASE WHEN ?2 THEN COALESCE(json_extract(core_state, '$.boundary_id'), '') ELSE '' END
-                 FROM mc_cache_state WHERE session_id = ?1",
-                params![session_id, include_boundary],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            ).optional()
+            // The boundaries live in their own section row since migration 63; reading them
+            // in the same transaction as the small row keeps the pair from one commit. A
+            // caller that reports `context_boundaries_resolved` from this meta would
+            // otherwise always see an empty list and make the host re-resolve every time.
+            let transaction = conn.unchecked_transaction()?;
+            let row = transaction
+                .query_row(
+                    "SELECT meta, CASE WHEN ?2 THEN COALESCE(json_extract(core_state, '$.boundary_id'), '') ELSE '' END
+                     FROM mc_cache_state WHERE session_id = ?1",
+                    params![session_id, include_boundary],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            let row = match row {
+                Some((meta, boundary)) => Some((
+                    meta,
+                    boundary,
+                    cache_codec::read_boundary_section(&transaction, session_id)?,
+                )),
+                None => None,
+            };
+            transaction.commit()?;
+            Ok(row)
         })?;
         match row {
-            Some((meta, boundary)) => Ok((
-                serde_json::from_str(&meta)
-                    .map_err(|error| McStoreError::Serde(error.to_string()))?,
+            Some((meta, boundary, boundaries)) => Ok((
+                {
+                    let mut meta = cache_codec::decode_small_meta(&meta)
+                        .map_err(|error| McStoreError::Serde(error.to_string()))?;
+                    meta.resolved_compartment_boundaries = boundaries.unwrap_or_default();
+                    meta
+                },
                 boundary,
                 self.context_read(|conn| {
                     conn.query_row(
@@ -8274,46 +8593,28 @@ impl McStore {
         let snapshot = self.inner.with_conn(|conn| {
             let transaction = conn.unchecked_transaction()?;
             let cache_state_started_at = Instant::now();
-            let state = transaction
-                .query_row(
-                    "SELECT row_version, core_state, meta FROM mc_cache_state WHERE session_id = ?1",
-                    params![session_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)? as u64,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            let loaded = match state {
-                Some((row_version, core_json, meta_json)) => {
-                    let mut meta: ModuleMeta =
-                        serde_json::from_str(&meta_json).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                2,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?;
+            let loaded = match cache_codec::read_decoded(&transaction, session_id)? {
+                Some(decoded) => {
+                    let cache_codec::DecodedRow {
+                        row_version,
+                        core,
+                        mut meta,
+                        sections,
+                    } = decoded;
+                    log_discarded_sections(session_id, &sections);
                     hydrate_meta_row_state(&transaction, session_id, &mut meta)?;
                     LoadedState {
-                        core: serde_json::from_str(&core_json).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                1,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?,
+                        core,
                         meta,
                         row_version: Some(row_version),
+                        sections: Some(sections),
                     }
                 }
                 None => LoadedState {
                     core: CoreState::default(),
                     meta: ModuleMeta::default(),
                     row_version: None,
+                    sections: None,
                 },
             };
             let cache_state_ms = cache_state_started_at.elapsed().as_secs_f64() * 1_000.0;
@@ -8417,55 +8718,39 @@ impl McStore {
         })?;
         let snapshot = self.inner.with_conn(|conn| {
             let transaction = conn.unchecked_transaction()?;
-            let state = transaction
-                .query_row(
-                    "SELECT row_version, core_state, meta FROM mc_cache_state WHERE session_id = ?1",
-                    params![session_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)? as u64,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            let loaded = match state {
-                Some((row_version, core_json, meta_json)) => {
-                    let mut meta: ModuleMeta =
-                        serde_json::from_str(&meta_json).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                2,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?;
+            // Status reports the session-history size from frozen unit m0 and the raw
+            // passthrough state from the whole frozen list, so it decodes the row in full.
+            let loaded = match cache_codec::read_decoded(&transaction, session_id)? {
+                Some(decoded) => {
+                    let cache_codec::DecodedRow {
+                        row_version,
+                        core,
+                        mut meta,
+                        sections,
+                    } = decoded;
                     hydrate_meta_row_state(&transaction, session_id, &mut meta)?;
                     LoadedState {
-                        core: serde_json::from_str(&core_json).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                1,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?,
+                        core,
                         meta,
                         row_version: Some(row_version),
+                        sections: Some(sections),
                     }
                 }
                 None => LoadedState {
                     core: CoreState::default(),
                     meta: ModuleMeta::default(),
                     row_version: None,
+                    sections: None,
                 },
             };
             let count = |table: &str| -> Result<usize, rusqlite::Error> {
-                transaction.query_row(
-                    &format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?1"),
-                    params![session_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map(|value| value.max(0) as usize)
+                transaction
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?1"),
+                        params![session_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map(|value| value.max(0) as usize)
             };
             let tag_count = transaction
                 .query_row(
@@ -8474,46 +8759,7 @@ impl McStore {
                     |row| row.get::<_, i64>(0),
                 )?
                 .max(0) as usize;
-            let pass_trace = transaction
-                .query_row(
-                    "SELECT last_received_at_ms, last_completed_at_ms, last_reject_error,
-                            last_reject_at_ms, reject_count, receive_count, first_divergence,
-                            last_divergence, scheduler_history, scheduler_interesting_history
-                       FROM mc_pass_trace WHERE session_id = ?1",
-                    params![session_id],
-                    |row| {
-                        Ok(PassTrace {
-                            last_received_at_ms: row.get(0)?,
-                            last_completed_at_ms: row.get(1)?,
-                            last_reject_error: row.get(2)?,
-                            last_reject_at_ms: row.get(3)?,
-                            reject_count: row.get::<_, i64>(4)?.max(0) as u64,
-                            receive_count: row.get::<_, i64>(5)?.max(0) as u64,
-                            first_divergence: row.get(6)?,
-                            last_divergence: row.get(7)?,
-                            scheduler_history: serde_json::from_str(
-                                &row.get::<_, String>(8)?,
-                            )
-                            .map_err(|error| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    8,
-                                    rusqlite::types::Type::Text,
-                                    Box::new(error),
-                                )
-                            })?,
-                            request_history: pass_trace_meta_parts(&row.get::<_, String>(9)?)
-                                .map(|(_, history)| history)
-                                .map_err(|error| {
-                                    rusqlite::Error::FromSqlConversionFailure(
-                                        9,
-                                        rusqlite::types::Type::Text,
-                                        Box::new(error),
-                                    )
-                                })?,
-                        })
-                    },
-                )
-                .optional()?;
+            let pass_trace = read_pass_trace(&transaction, session_id)?;
             let snapshot = SessionStatusSnapshot {
                 loaded,
                 compartment_count: compartment_count.max(0) as usize,
@@ -8596,7 +8842,10 @@ impl McStore {
         now_ms: i64,
     ) -> Result<(), McStoreError> {
         self.inner.with_conn(|conn| {
-            conn.execute(
+            // One transaction for the counter row and its ring entry, so they commit together
+            // and cost one commit rather than two.
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
                 "INSERT INTO mc_pass_trace (
                      session_id,
                      last_received_at_ms,
@@ -8613,15 +8862,15 @@ impl McStore {
                      first_divergence = NULL",
                 params![session_id, now_ms],
             )?;
-            mutate_pass_request_history(conn, session_id, |history| {
-                history.push(PassRequestTrace {
-                    attempt_id: attempt_id.to_string(),
-                    received_at_ms: now_ms,
-                    completed_at_ms: None,
-                    outcome: "received".to_string(),
-                });
-            })?;
-            Ok(())
+            let entry = serde_json::to_string(&PassRequestTrace {
+                attempt_id: attempt_id.to_string(),
+                received_at_ms: now_ms,
+                completed_at_ms: None,
+                outcome: "received".to_string(),
+            })
+            .map_err(serde_to_sql_error)?;
+            append_pass_trace_history(&transaction, session_id, PassTraceHistory::Request, &entry)?;
+            transaction.commit()
         })?;
         Ok(())
     }
@@ -8637,9 +8886,9 @@ impl McStore {
         _full_array_fingerprint: Option<&str>,
     ) -> Result<(), McStoreError> {
         let observation_json = serialize_scheduler_observation(observation)?;
-        let interesting_json: Option<String> = None;
         self.inner.with_conn(|conn| {
-            conn.execute(
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
                 "INSERT INTO mc_pass_trace (
                      session_id,
                      last_received_at_ms,
@@ -8648,52 +8897,20 @@ impl McStore {
                      last_reject_at_ms,
                      reject_count,
                      receive_count,
-                     first_divergence,
-                     scheduler_history,
-                     scheduler_interesting_history
-                 ) VALUES (
-                     ?1, 0, ?2, NULL, NULL, 0, 0, NULL, json_array(json(?3)),
-                     CASE WHEN ?4 IS NOT NULL THEN json_array(json(?4)) ELSE '[]' END
-                 )
+                     first_divergence
+                 ) VALUES (?1, 0, ?2, NULL, NULL, 0, 0, NULL)
                  ON CONFLICT(session_id) DO UPDATE SET
                      first_divergence = NULL,
-                     last_completed_at_ms = excluded.last_completed_at_ms,
-                     scheduler_history = CASE
-                         WHEN json_array_length(mc_pass_trace.scheduler_history) < 256 THEN
-                             json_insert(mc_pass_trace.scheduler_history, '$[#]', json(?3))
-                         ELSE
-                             json_insert(
-                                 (SELECT json_group_array(json(value))
-                                    FROM json_each(mc_pass_trace.scheduler_history)
-                                   WHERE key >= json_array_length(mc_pass_trace.scheduler_history) - 255),
-                                 '$[#]', json(?3)
-                             )
-                     END,
-                     scheduler_interesting_history = CASE
-                         WHEN ?4 IS NULL THEN mc_pass_trace.scheduler_interesting_history
-                         WHEN json_array_length(mc_pass_trace.scheduler_interesting_history) < 256 THEN
-                             json_insert(
-                                 mc_pass_trace.scheduler_interesting_history,
-                                 '$[#]', json(?4)
-                             )
-                         ELSE
-                             json_insert(
-                                 (SELECT json_group_array(json(value))
-                                    FROM json_each(mc_pass_trace.scheduler_interesting_history)
-                                   WHERE key >= json_array_length(
-                                       mc_pass_trace.scheduler_interesting_history
-                                   ) - 255),
-                                 '$[#]', json(?4)
-                             )
-                     END",
-                params![
-                    session_id,
-                    observation.timestamp_ms,
-                    observation_json,
-                    interesting_json
-                ],
+                     last_completed_at_ms = excluded.last_completed_at_ms",
+                params![session_id, observation.timestamp_ms],
             )?;
-            Ok(())
+            append_pass_trace_history(
+                &transaction,
+                session_id,
+                PassTraceHistory::Scheduler,
+                &observation_json,
+            )?;
+            transaction.commit()
         })?;
         Ok(())
     }
@@ -8708,7 +8925,8 @@ impl McStore {
         now_ms: i64,
     ) -> Result<(), McStoreError> {
         self.inner.with_conn(|conn| {
-            conn.execute(
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
                 "INSERT INTO mc_pass_trace (
                      session_id,
                      last_received_at_ms,
@@ -8723,17 +8941,8 @@ impl McStore {
                      last_completed_at_ms = excluded.last_completed_at_ms",
                 params![session_id, now_ms],
             )?;
-            mutate_pass_request_history(conn, session_id, |history| {
-                if let Some(request) = history
-                    .iter_mut()
-                    .rev()
-                    .find(|request| request.attempt_id == attempt_id)
-                {
-                    request.completed_at_ms = Some(now_ms);
-                    request.outcome = "completed".to_string();
-                }
-            })?;
-            Ok(())
+            finish_pass_request_trace(&transaction, session_id, attempt_id, "completed", now_ms)?;
+            transaction.commit()
         })?;
         Ok(())
     }
@@ -8751,7 +8960,8 @@ impl McStore {
     ) -> Result<(), McStoreError> {
         let error = capped_trace_error(error);
         self.inner.with_conn(|conn| {
-            conn.execute(
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
                 "INSERT INTO mc_pass_trace (
                      session_id,
                      last_received_at_ms,
@@ -8768,17 +8978,8 @@ impl McStore {
                      reject_count = mc_pass_trace.reject_count + 1",
                 params![session_id, error, now_ms],
             )?;
-            mutate_pass_request_history(conn, session_id, |history| {
-                if let Some(request) = history
-                    .iter_mut()
-                    .rev()
-                    .find(|request| request.attempt_id == attempt_id)
-                {
-                    request.completed_at_ms = Some(now_ms);
-                    request.outcome = "rejected".to_string();
-                }
-            })?;
-            Ok(())
+            finish_pass_request_trace(&transaction, session_id, attempt_id, "rejected", now_ms)?;
+            transaction.commit()
         })?;
         Ok(())
     }
@@ -8786,59 +8987,16 @@ impl McStore {
     /// Load the durable pass breadcrumbs for one session, if any have been written.
     pub fn load_pass_trace(&self, session_id: &str) -> Result<Option<PassTrace>, McStoreError> {
         Ok(self.inner.with_conn(|conn| {
-            conn.query_row(
-                "SELECT
-                     last_received_at_ms,
-                     last_completed_at_ms,
-                     last_reject_error,
-                     last_reject_at_ms,
-                     reject_count,
-                     receive_count,
-                     first_divergence,
-                     last_divergence,
-                     scheduler_history,
-                     scheduler_interesting_history
-                   FROM mc_pass_trace
-                 WHERE session_id = ?1",
-                params![session_id],
-                |r| {
-                    Ok(PassTrace {
-                        last_received_at_ms: r.get(0)?,
-                        last_completed_at_ms: r.get(1)?,
-                        last_reject_error: r.get(2)?,
-                        last_reject_at_ms: r.get(3)?,
-                        reject_count: r.get::<_, i64>(4)? as u64,
-                        receive_count: r.get::<_, i64>(5)? as u64,
-                        first_divergence: r.get(6)?,
-                        last_divergence: r.get(7)?,
-                        scheduler_history: serde_json::from_str(&r.get::<_, String>(8)?).map_err(
-                            |error| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    8,
-                                    rusqlite::types::Type::Text,
-                                    Box::new(error),
-                                )
-                            },
-                        )?,
-                        request_history: pass_trace_meta_parts(&r.get::<_, String>(9)?)
-                            .map(|(_, history)| history)
-                            .map_err(|error| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    9,
-                                    rusqlite::types::Type::Text,
-                                    Box::new(error),
-                                )
-                            })?,
-                    })
-                },
-            )
-            .optional()
+            let transaction = conn.unchecked_transaction()?;
+            let trace = read_pass_trace(&transaction, session_id)?;
+            transaction.commit()?;
+            Ok(trace)
         })?)
     }
 
     /// Load accepted scheduler observations whose request timestamps fall in an inclusive range.
-    /// The JSON ring stays on the session row so appends reuse existing pass writes; `json_each`
-    /// makes the bounded records directly filterable during an incident.
+    /// The ring rows keep each record's JSON, so `json_extract` filters them directly during an
+    /// incident.
     pub fn load_pass_scheduler_history(
         &self,
         session_id: &str,
@@ -8850,13 +9008,10 @@ impl McStore {
         }
         Ok(self.inner.with_conn(|conn| {
             let mut statement = conn.prepare(
-                "SELECT history.value
-                   FROM mc_pass_trace AS trace,
-                        json_each(trace.scheduler_history) AS history
-                  WHERE trace.session_id = ?1
-                    AND CAST(json_extract(history.value, '$.timestamp_ms') AS INTEGER)
-                        BETWEEN ?2 AND ?3
-                  ORDER BY CAST(history.key AS INTEGER)",
+                "SELECT entry FROM mc_pass_trace_history
+                  WHERE session_id = ?1 AND kind = 'scheduler'
+                    AND CAST(json_extract(entry, '$.timestamp_ms') AS INTEGER) BETWEEN ?2 AND ?3
+                  ORDER BY seq",
             )?;
             let rows = statement
                 .query_map(params![session_id, start_ms, end_ms], |row| {
@@ -8888,13 +9043,10 @@ impl McStore {
         }
         Ok(self.inner.with_conn(|conn| {
             let mut statement = conn.prepare(
-                "SELECT history.value
-                   FROM mc_pass_trace AS trace,
-                        json_each(trace.scheduler_interesting_history) AS history
-                  WHERE trace.session_id = ?1
-                    AND CAST(json_extract(history.value, '$.timestamp_ms') AS INTEGER)
-                        BETWEEN ?2 AND ?3
-                  ORDER BY CAST(history.key AS INTEGER)",
+                "SELECT entry FROM mc_pass_trace_history
+                  WHERE session_id = ?1 AND kind = 'interesting'
+                    AND CAST(json_extract(entry, '$.timestamp_ms') AS INTEGER) BETWEEN ?2 AND ?3
+                  ORDER BY seq",
             )?;
             let rows = statement
                 .query_map(params![session_id, start_ms, end_ms], |row| {
@@ -8921,14 +9073,10 @@ impl McStore {
         let request_observed_at_ms = request_observed_at_ms.to_string();
         Ok(self.inner.with_conn(|conn| {
             let mut statement = conn.prepare(
-                "SELECT history.value
-                   FROM mc_pass_trace AS trace,
-                        json_each(trace.scheduler_interesting_history) AS history
-                  WHERE trace.session_id = ?1
-                    AND CAST(json_extract(
-                        history.value, '$.request_observed_at_ms'
-                    ) AS TEXT) = ?2
-                  ORDER BY CAST(history.key AS INTEGER)",
+                "SELECT entry FROM mc_pass_trace_history
+                  WHERE session_id = ?1 AND kind = 'interesting'
+                    AND CAST(json_extract(entry, '$.request_observed_at_ms') AS TEXT) = ?2
+                  ORDER BY seq",
             )?;
             let rows = statement
                 .query_map(params![session_id, request_observed_at_ms], |row| {
@@ -8954,12 +9102,10 @@ impl McStore {
     ) -> Result<Vec<InterestingPassSchedulerObservation>, McStoreError> {
         Ok(self.inner.with_conn(|conn| {
             let mut statement = conn.prepare(
-                "SELECT history.value
-                   FROM mc_pass_trace AS trace,
-                        json_each(trace.scheduler_interesting_history) AS history
-                  WHERE trace.session_id = ?1
-                    AND json_extract(history.value, '$.full_array_fingerprint') = ?2
-                  ORDER BY CAST(history.key AS INTEGER)",
+                "SELECT entry FROM mc_pass_trace_history
+                  WHERE session_id = ?1 AND kind = 'interesting'
+                    AND json_extract(entry, '$.full_array_fingerprint') = ?2
+                  ORDER BY seq",
             )?;
             let rows = statement
                 .query_map(params![session_id, full_array_fingerprint], |row| {
@@ -10330,6 +10476,7 @@ impl McStore {
                 expected,
                 core,
                 meta,
+                sections: SectionsCommit::default(),
                 consumed_drop_ids,
                 first_applied_command_ids: &[],
                 memory_revision,
@@ -10359,6 +10506,7 @@ impl McStore {
             expected,
             core,
             meta,
+            sections,
             consumed_drop_ids,
             first_applied_command_ids,
             memory_revision: _,
@@ -10402,10 +10550,18 @@ impl McStore {
                 })
             })
             .transpose()?;
-        let core_json =
-            serde_json::to_string(core).map_err(|e| McStoreError::Serde(e.to_string()))?;
-        let meta_json =
-            serde_json::to_string(meta).map_err(|e| McStoreError::Serde(e.to_string()))?;
+        if let Some(base) = sections.base {
+            let base_expected = base.row_version + sections.meta_only_steps;
+            if expected != Some(base_expected) {
+                return Err(McStoreError::SectionsBaseMismatch {
+                    expected,
+                    base_row_version: base.row_version,
+                    meta_only_steps: sections.meta_only_steps,
+                });
+            }
+        }
+        let encoded = cache_codec::encode_row(core, meta)
+            .map_err(|error| McStoreError::Serde(error.to_string()))?;
         let fingerprint = row_state_fingerprint(meta);
         let scheduler_observation_json = scheduler_observation
             .map(serialize_scheduler_observation)
@@ -10460,6 +10616,24 @@ impl McStore {
                 // Empty txn (commits nothing); the caller re-loads and re-steps.
                 return Ok(CommitOutcome::CasConflict(current.max(0) as u64));
             }
+            // Every refusal runs before the first write: the fenced transaction commits
+            // whatever ran before an `Ok` refusal is returned.
+            let stored_index = tx
+                .query_row(
+                    "SELECT section_index FROM mc_cache_state WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|json| cache_codec::SectionIndex::parse(&json));
+            // The sections CAS: the base's digests describe the rows at its `sv`, and only
+            // codec writers advance it. A pass that adopted a meta-only version step still
+            // conflicts here if a codec writer ran since its load.
+            if let Some(base) = sections.base {
+                if stored_index.as_ref().map_or(0, |index| index.sv) != base.sv {
+                    return Ok(CommitOutcome::CasConflict(current.max(0) as u64));
+                }
+            }
             // The domain heads (memory, mutation, compartment) are not re-read here: they
             // live in context.db, and the revision this commit stores is the one the pass
             // rendered from, read in one context.db snapshot. A write that lands after that
@@ -10469,6 +10643,16 @@ impl McStore {
             // request to delete the session's identity history.
             if let Some(stored) = refuse_unhydrated_block_identities_tx(tx, session_id, meta)? {
                 return Ok(CommitOutcome::UnhydratedBlockIdentities(stored));
+            }
+            let stored_units = stored_index
+                .as_ref()
+                .map_or(0, cache_codec::SectionIndex::frozen_units);
+            if expected.is_some()
+                && encoded.unit_count == 0
+                && stored_units > 0
+                && sections.frozen_clear != FrozenClear::Explicit
+            {
+                return Ok(CommitOutcome::FrozenClearRefused(stored_units));
             }
 
             // The grow-mostly parts of the meta are rows, so a pass writes only the entries
@@ -10502,22 +10686,58 @@ impl McStore {
                 || !consumed_drop_ids.is_empty()
                 || !first_applied_command_ids.is_empty();
 
+            // The chunk and section rows. A bootstrap starts from nothing: rows a previous
+            // life of the session left behind are deleted, not diffed against. A commit with
+            // no loaded base diffs against the stored rows as decoded here.
+            let derived_base;
+            let write_base = if current == NO_ROW {
+                cache_codec::clear_session_rows(tx, session_id)?;
+                cache_codec::WriteBase::Cleared
+            } else if let Some(base) = sections.base {
+                cache_codec::WriteBase::Loaded(base)
+            } else {
+                derived_base = cache_codec::read_decoded(tx, session_id)?
+                    .map(|decoded| decoded.sections);
+                match &derived_base {
+                    Some(base) => cache_codec::WriteBase::Loaded(base),
+                    None => cache_codec::WriteBase::Cleared,
+                }
+            };
+            let index_json = cache_codec::write_sections(
+                tx,
+                session_id,
+                &encoded,
+                write_base,
+                cache_codec::FrozenWrite::Write,
+                stored_index.as_ref(),
+                next,
+            )?
+            .index_json;
+            #[cfg(any(test, feature = "test-support"))]
+            if cache_codec::FAIL_COMMIT_AFTER_SECTION_WRITES.with(|flag| flag.replace(false)) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+
             // SQLite rewrites a whole record on UPDATE, so writing an unchanged blob column
             // costs as much as changing it. A pass whose durable state is byte-identical to
             // what is already stored therefore leaves the row, and its row_version, alone.
-            let blobs_changed =
-                !cache_state_blobs_unchanged(tx, session_id, &core_json, &meta_json)?;
+            // Any chunk or section write changes `section_index`, so it is covered too.
+            let blobs_changed = !cache_state_blobs_unchanged(
+                tx,
+                session_id,
+                &encoded.core_json,
+                &encoded.meta_json,
+                &index_json,
+            )?;
             let accepted_version = if blobs_changed || row_state_writes > 0 || decision_writes {
                 // INSERT-or-UPDATE in the same fenced txn (bootstrap has no row to UPDATE).
-                tx.execute(
-                    "INSERT INTO mc_cache_state (session_id, row_version, core_state, meta, last_activity_at)
-                      VALUES (?1, ?2, ?3, ?4, ?5)
-                      ON CONFLICT(session_id) DO UPDATE SET
-                          row_version = excluded.row_version,
-                          core_state  = excluded.core_state,
-                          meta        = excluded.meta,
-                          last_activity_at = excluded.last_activity_at",
-                    params![session_id, next as i64, core_json, meta_json, current_time_ms()],
+                cache_codec::upsert_small_row(
+                    tx,
+                    session_id,
+                    next,
+                    &encoded,
+                    &index_json,
+                    current_time_ms(),
                 )?;
                 record_row_state_digest_tx(tx, session_id, next as i64, &fingerprint)?;
                 next
@@ -10542,16 +10762,12 @@ impl McStore {
                      reject_count,
                      receive_count,
                      first_divergence,
-                     last_divergence,
-                     scheduler_history,
-                     scheduler_interesting_history
+                     last_divergence
                  ) VALUES (
                      ?1, 0, 0, NULL, NULL, 0, 0, ?2,
                      CASE WHEN ?2 IS NOT NULL THEN
                          json_object('pass_id', ?3, 'timestamp_ms', ?4, 'divergence', json(?2))
-                     ELSE NULL END,
-                     CASE WHEN ?5 IS NOT NULL THEN json_array(json(?5)) ELSE '[]' END,
-                     CASE WHEN ?6 IS NOT NULL THEN json_array(json(?6)) ELSE '[]' END
+                     ELSE NULL END
                  )
                  ON CONFLICT(session_id) DO UPDATE SET
                      first_divergence = excluded.first_divergence,
@@ -10561,45 +10777,25 @@ impl McStore {
                               'timestamp_ms', ?4,
                               'divergence', json(excluded.first_divergence)
                           )
-                     ELSE mc_pass_trace.last_divergence END,
-                     scheduler_history = CASE
-                         WHEN ?5 IS NULL THEN mc_pass_trace.scheduler_history
-                         WHEN json_array_length(mc_pass_trace.scheduler_history) < 256 THEN
-                             json_insert(mc_pass_trace.scheduler_history, '$[#]', json(?5))
-                         ELSE
-                             json_insert(
-                                 (SELECT json_group_array(json(value))
-                                    FROM json_each(mc_pass_trace.scheduler_history)
-                                   WHERE key >= json_array_length(mc_pass_trace.scheduler_history) - 255),
-                                 '$[#]', json(?5)
-                              )
-                      END,
-                      scheduler_interesting_history = CASE
-                          WHEN ?6 IS NULL THEN mc_pass_trace.scheduler_interesting_history
-                          WHEN json_array_length(mc_pass_trace.scheduler_interesting_history) < 256 THEN
-                              json_insert(
-                                  mc_pass_trace.scheduler_interesting_history,
-                                  '$[#]', json(?6)
-                              )
-                          ELSE
-                              json_insert(
-                                  (SELECT json_group_array(json(value))
-                                     FROM json_each(mc_pass_trace.scheduler_interesting_history)
-                                    WHERE key >= json_array_length(
-                                        mc_pass_trace.scheduler_interesting_history
-                                    ) - 255),
-                                  '$[#]', json(?6)
-                              )
-                      END",
+                     ELSE mc_pass_trace.last_divergence END",
                  params![
                      session_id,
                      first_divergence,
                      divergence_pass_id,
-                     divergence_at_ms,
-                     scheduler_observation_json,
-                     scheduler_interesting_json
+                     divergence_at_ms
                  ],
             )?;
+            if let Some(observation) = scheduler_observation_json.as_deref() {
+                append_pass_trace_history(tx, session_id, PassTraceHistory::Scheduler, observation)?;
+            }
+            if let Some(interesting) = scheduler_interesting_json.as_deref() {
+                append_pass_trace_history(
+                    tx,
+                    session_id,
+                    PassTraceHistory::Interesting,
+                    interesting,
+                )?;
+            }
             if let Some(project_root) = canonical_project_root.as_deref() {
                 // Durable root lineage is committed with the cache CAS, so a restart cannot
                 // authenticate a root that never produced the accepted session state.
@@ -10756,6 +10952,12 @@ impl McStore {
                     stored,
                 })
             }
+            CommitOutcome::FrozenClearRefused(stored_units) => {
+                Err(McStoreError::FrozenClearRefused {
+                    session_id: session_id.to_string(),
+                    stored_units,
+                })
+            }
         }
     }
 
@@ -10776,8 +10978,6 @@ impl McStore {
         let timing_started = std::time::Instant::now();
         let mut drop_seed_units_ms = 0.0;
         let mut import_ms = 0.0;
-        let default_core_json = serde_json::to_string(&CoreState::default())
-            .map_err(|e| ModuleStateSyncError::Serde(e.to_string()))?;
         // A declared seed boundary is checked against the session's compartments, which
         // live in context.db; they are read before the store.db transaction, never inside it.
         let mut seed_compartments = if request.seed_boundary_id.is_some()
@@ -10826,39 +11026,20 @@ impl McStore {
             boundary.apply(row);
         }
         let outcome = self.inner.with_conn_fenced(|tx| {
-            let row = tx
-                .query_row(
-                    "SELECT row_version, core_state, meta FROM mc_cache_state WHERE session_id = ?1",
-                    params![request.session_id],
-                    |r| {
-                        Ok((
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-                .optional()?;
-
-            let (current, mut core, mut meta) = match row {
-                Some((row_version, core_state_json, meta_json)) => {
-                    let core = match serde_json::from_str::<CoreState>(&core_state_json) {
-                        Ok(core) => core,
-                        Err(e) => return Ok(ModuleStateSyncTxnOutcome::Serde(e.to_string())),
-                    };
-                    let meta = match serde_json::from_str::<ModuleMeta>(&meta_json) {
-                        Ok(meta) => meta,
-                        Err(e) => return Ok(ModuleStateSyncTxnOutcome::Serde(e.to_string())),
-                    };
-                    (row_version, core, meta)
-                }
-                None => {
-                    let core = match serde_json::from_str::<CoreState>(&default_core_json) {
-                        Ok(core) => core,
-                        Err(e) => return Ok(ModuleStateSyncTxnOutcome::Serde(e.to_string())),
-                    };
-                    (NO_ROW, core, ModuleMeta::default())
-                }
+            // The state is decoded through the codec, so the boundaries and the frozen units
+            // come from their own rows and the commit below diffs against what was read.
+            let decoded = match cache_codec::read_decoded(tx, request.session_id) {
+                Ok(decoded) => decoded,
+                Err(error) => return Ok(ModuleStateSyncTxnOutcome::Serde(error.to_string())),
+            };
+            let (current, mut core, mut meta, base) = match decoded {
+                Some(decoded) => (
+                    decoded.row_version as i64,
+                    decoded.core,
+                    decoded.meta,
+                    Some(decoded.sections),
+                ),
+                None => (NO_ROW, CoreState::default(), ModuleMeta::default(), None),
             };
             let mut adopted_over_materialized_boundary = false;
             if meta.shadow_generation != request.shadow_generation {
@@ -11060,23 +11241,50 @@ impl McStore {
             meta.shadow_acked_watermarks = request.acked_watermarks.clone();
 
             let next = current.max(0) as u64 + 1;
-            let core_json = match serde_json::to_string(&core) {
-                Ok(json) => json,
+            let encoded = match cache_codec::encode_row(&core, &meta) {
+                Ok(encoded) => encoded,
                 Err(e) => return Ok(ModuleStateSyncTxnOutcome::Serde(e.to_string())),
             };
-            let meta_json = match serde_json::to_string(&meta) {
-                Ok(json) => json,
-                Err(e) => return Ok(ModuleStateSyncTxnOutcome::Serde(e.to_string())),
+            let stored_index = tx
+                .query_row(
+                    "SELECT section_index FROM mc_cache_state WHERE session_id = ?1",
+                    params![request.session_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|json| cache_codec::SectionIndex::parse(&json));
+            let write_base = match &base {
+                Some(base) => cache_codec::WriteBase::Loaded(base),
+                None => {
+                    cache_codec::clear_session_rows(tx, request.session_id)?;
+                    cache_codec::WriteBase::Cleared
+                }
             };
-            tx.execute(
-                "INSERT INTO mc_cache_state (session_id, row_version, core_state, meta, last_activity_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(session_id) DO UPDATE SET
-                     row_version = excluded.row_version,
-                     core_state  = excluded.core_state,
-                     meta        = excluded.meta,
-                     last_activity_at = excluded.last_activity_at",
-                params![request.session_id, next as i64, core_json, meta_json, current_time_ms()],
+            // A state sync appends seeded units but does not own the frozen list. When the
+            // stored list could not be trusted it leaves those rows as they are, so the next
+            // transform still sees the discard and rebuilds the list with a HARD pass; writing
+            // only the seeds would make a truncated list look intact.
+            let frozen_write = match base.as_ref().map(|base| &base.frozen) {
+                Some(SectionState::Discarded(_)) => cache_codec::FrozenWrite::Keep,
+                _ => cache_codec::FrozenWrite::Write,
+            };
+            let index_json = cache_codec::write_sections(
+                tx,
+                request.session_id,
+                &encoded,
+                write_base,
+                frozen_write,
+                stored_index.as_ref(),
+                next,
+            )?
+            .index_json;
+            cache_codec::upsert_small_row(
+                tx,
+                request.session_id,
+                next,
+                &encoded,
+                &index_json,
+                current_time_ms(),
             )?;
 
             import_ms = timing_started.elapsed().as_secs_f64() * 1000.0;
@@ -11472,22 +11680,13 @@ impl McStore {
         // as pending inside the store.db transaction and applied after it commits.
         let mut lineage_write: Option<context_writes::PendingContextWrite> = None;
         let outcome = self.inner.with_conn_fenced(|tx| {
-            let current_target = tx
-                .query_row(
-                    "SELECT row_version, core_state, meta FROM mc_cache_state WHERE session_id = ?1",
-                    params![request.target_key],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-                .optional()?;
+            let current_target = match cache_codec::read_decoded(tx, request.target_key) {
+                Ok(decoded) => decoded,
+                Err(error) => return Ok(LineageDescentTxnOutcome::Serde(error.to_string())),
+            };
             let current_target_version = current_target
                 .as_ref()
-                .map_or(NO_ROW, |(version, _, _)| *version);
+                .map_or(NO_ROW, |decoded| decoded.row_version as i64);
             let cas_ok = match request.expected_target_row_version {
                 Some(expected) => current_target_version == expected as i64,
                 None => current_target_version == NO_ROW,
@@ -11498,24 +11697,13 @@ impl McStore {
                 ));
             }
 
-            let (mut target_core, mut target_meta) = match current_target.as_ref() {
-                Some((_, core_json, meta_json)) => {
-                    let core = match serde_json::from_str(core_json) {
-                        Ok(core) => core,
-                        Err(error) => {
-                            return Ok(LineageDescentTxnOutcome::Serde(error.to_string()))
-                        }
-                    };
-                    let mut meta: ModuleMeta = match serde_json::from_str(meta_json) {
-                        Ok(meta) => meta,
-                        Err(error) => {
-                            return Ok(LineageDescentTxnOutcome::Serde(error.to_string()))
-                        }
-                    };
+            let (mut target_core, mut target_meta, target_base) = match current_target {
+                Some(decoded) => {
+                    let mut meta = decoded.meta;
                     hydrate_meta_row_state(tx, request.target_key, &mut meta)?;
-                    (core, meta)
+                    (decoded.core, meta, Some(decoded.sections))
                 }
-                None => (CoreState::default(), ModuleMeta::default()),
+                None => (CoreState::default(), ModuleMeta::default(), None),
             };
 
             if !target_meta.lineage_descent_disposition.is_empty()
@@ -11532,6 +11720,7 @@ impl McStore {
                         core: target_core,
                         meta: target_meta,
                         row_version: Some(current_target_version.max(0) as u64),
+                        sections: target_base,
                     },
                 }));
             }
@@ -11589,39 +11778,21 @@ impl McStore {
                     false,
                 );
                 let next_version = current_target_version.max(0) as u64 + 1;
-                let core_json = match serde_json::to_string(&target_core) {
-                    Ok(json) => json,
-                    Err(error) => {
-                        return Ok(LineageDescentTxnOutcome::Serde(error.to_string()))
-                    }
-                };
-                let meta_json = match serde_json::to_string(&target_meta) {
-                    Ok(json) => json,
-                    Err(error) => {
-                        return Ok(LineageDescentTxnOutcome::Serde(error.to_string()))
-                    }
-                };
-                tx.execute(
-                    "INSERT INTO mc_cache_state (session_id, row_version, core_state, meta, last_activity_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(session_id) DO UPDATE SET
-                         row_version = excluded.row_version,
-                         core_state = excluded.core_state,
-                         meta = excluded.meta,
-                         last_activity_at = excluded.last_activity_at",
-                    params![
-                        request.target_key,
-                        next_version as i64,
-                        core_json,
-                        meta_json,
-                        request.now_ms
-                    ],
+                let sections = write_cache_state_tx(
+                    tx,
+                    request.target_key,
+                    next_version,
+                    &target_core,
+                    &target_meta,
+                    target_base.as_ref(),
+                    request.now_ms,
                 )?;
                 return Ok(LineageDescentTxnOutcome::Committed(LineageDescentOutcome {
                     loaded: LoadedState {
                         core: target_core,
                         meta: target_meta,
                         row_version: Some(next_version),
+                        sections: Some(sections),
                     },
                     disposition,
                     source_key: None,
@@ -11680,39 +11851,21 @@ impl McStore {
                     false,
                 );
                 let next_version = current_target_version.max(0) as u64 + 1;
-                let core_json = match serde_json::to_string(&target_core) {
-                    Ok(json) => json,
-                    Err(error) => {
-                        return Ok(LineageDescentTxnOutcome::Serde(error.to_string()))
-                    }
-                };
-                let meta_json = match serde_json::to_string(&target_meta) {
-                    Ok(json) => json,
-                    Err(error) => {
-                        return Ok(LineageDescentTxnOutcome::Serde(error.to_string()))
-                    }
-                };
-                tx.execute(
-                    "INSERT INTO mc_cache_state (session_id, row_version, core_state, meta, last_activity_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(session_id) DO UPDATE SET
-                         row_version = excluded.row_version,
-                         core_state = excluded.core_state,
-                         meta = excluded.meta,
-                         last_activity_at = excluded.last_activity_at",
-                    params![
-                        request.target_key,
-                        next_version as i64,
-                        core_json,
-                        meta_json,
-                        request.now_ms
-                    ],
+                let sections = write_cache_state_tx(
+                    tx,
+                    request.target_key,
+                    next_version,
+                    &target_core,
+                    &target_meta,
+                    target_base.as_ref(),
+                    request.now_ms,
                 )?;
                 return Ok(LineageDescentTxnOutcome::Committed(LineageDescentOutcome {
                     loaded: LoadedState {
                         core: target_core,
                         meta: target_meta,
                         row_version: Some(next_version),
+                        sections: Some(sections),
                     },
                     disposition,
                     source_key: None,
@@ -11722,28 +11875,24 @@ impl McStore {
                 }));
             };
 
-            let source_row = tx
-                .query_row(
-                    "SELECT core_state, meta FROM mc_cache_state WHERE session_id = ?1",
-                    params![source_key],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )
-                .optional()?;
-            let Some((source_core_json, source_meta_json)) = source_row else {
+            let source_row = match cache_codec::read_decoded(tx, &source_key) {
+                Ok(decoded) => decoded,
+                Err(error) => return Ok(LineageDescentTxnOutcome::Serde(error.to_string())),
+            };
+            let Some(source_row) = source_row else {
                 return Ok(LineageDescentTxnOutcome::Invalid(
                     "selected lineage source disappeared inside the fenced transaction".to_string(),
                 ));
             };
-            let source_core: CoreState = match serde_json::from_str(&source_core_json) {
-                Ok(core) => core,
-                Err(error) => return Ok(LineageDescentTxnOutcome::Serde(error.to_string())),
-            };
-            let source_meta: ModuleMeta = match serde_json::from_str(&source_meta_json) {
-                Ok(mut meta) => {
-                    hydrate_meta_row_state(tx, &source_key, &mut meta)?;
-                    meta
-                }
-                Err(error) => return Ok(LineageDescentTxnOutcome::Serde(error.to_string())),
+            // A source section that failed its digest decodes as empty, so the target copies
+            // no units from it. The target already reports `materialization_required`, which
+            // makes its first transform rebuild the frame with a HARD pass.
+            log_discarded_sections(&source_key, &source_row.sections);
+            let source_core = source_row.core;
+            let source_meta = {
+                let mut meta = source_row.meta;
+                hydrate_meta_row_state(tx, &source_key, &mut meta)?;
+                meta
             };
             let prior_last = source_meta.newest_live_ordinal;
             if prior_last == 0 {
@@ -11760,39 +11909,21 @@ impl McStore {
                     .pending_build_skew
                     .saturating_add(1);
                 let next_version = current_target_version.max(0) as u64 + 1;
-                let core_json = match serde_json::to_string(&target_core) {
-                    Ok(json) => json,
-                    Err(error) => {
-                        return Ok(LineageDescentTxnOutcome::Serde(error.to_string()))
-                    }
-                };
-                let meta_json = match serde_json::to_string(&target_meta) {
-                    Ok(json) => json,
-                    Err(error) => {
-                        return Ok(LineageDescentTxnOutcome::Serde(error.to_string()))
-                    }
-                };
-                tx.execute(
-                    "INSERT INTO mc_cache_state (session_id, row_version, core_state, meta, last_activity_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(session_id) DO UPDATE SET
-                         row_version = excluded.row_version,
-                         core_state = excluded.core_state,
-                         meta = excluded.meta,
-                         last_activity_at = excluded.last_activity_at",
-                    params![
-                        request.target_key,
-                        next_version as i64,
-                        core_json,
-                        meta_json,
-                        request.now_ms
-                    ],
+                let sections = write_cache_state_tx(
+                    tx,
+                    request.target_key,
+                    next_version,
+                    &target_core,
+                    &target_meta,
+                    target_base.as_ref(),
+                    request.now_ms,
                 )?;
                 return Ok(LineageDescentTxnOutcome::Committed(LineageDescentOutcome {
                     loaded: LoadedState {
                         core: target_core,
                         meta: target_meta,
                         row_version: Some(next_version),
+                        sections: Some(sections),
                     },
                     disposition: LineageDescentDisposition::PendingBuildSkew,
                     source_key: Some(source_key),
@@ -11941,14 +12072,6 @@ impl McStore {
                 true,
             );
             let next_target_version = current_target_version.max(0) as u64 + 1;
-            let target_core_json = match serde_json::to_string(&target_core) {
-                Ok(json) => json,
-                Err(error) => return Ok(LineageDescentTxnOutcome::Serde(error.to_string())),
-            };
-            let target_meta_json = match serde_json::to_string(&target_meta) {
-                Ok(json) => json,
-                Err(error) => return Ok(LineageDescentTxnOutcome::Serde(error.to_string())),
-            };
 
             for table in [
                 "mc_chunk_transcripts",
@@ -12065,21 +12188,14 @@ impl McStore {
                 ],
             )?;
 
-            tx.execute(
-                "INSERT INTO mc_cache_state (session_id, row_version, core_state, meta, last_activity_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(session_id) DO UPDATE SET
-                     row_version = excluded.row_version,
-                     core_state = excluded.core_state,
-                     meta = excluded.meta,
-                     last_activity_at = excluded.last_activity_at",
-                params![
-                    request.target_key,
-                    next_target_version as i64,
-                    target_core_json,
-                    target_meta_json,
-                    request.now_ms
-                ],
+            let target_sections = write_cache_state_tx(
+                tx,
+                request.target_key,
+                next_target_version,
+                &target_core,
+                &target_meta,
+                target_base.as_ref(),
+                request.now_ms,
             )?;
 
             Ok(LineageDescentTxnOutcome::Committed(LineageDescentOutcome {
@@ -12087,6 +12203,7 @@ impl McStore {
                     core: target_core,
                     meta: target_meta,
                     row_version: Some(next_target_version),
+                    sections: Some(target_sections),
                 },
                 disposition: LineageDescentDisposition::Descended,
                 source_key: Some(source_key),
@@ -12353,14 +12470,6 @@ impl McStore {
                 )),
                 ..ModuleMeta::default()
             };
-            let core_json = match serde_json::to_string(&CoreState::default()) {
-                Ok(json) => json,
-                Err(error) => return Ok(TruncateTxnOutcome::Serde(error.to_string())),
-            };
-            let reset_meta_json = match serde_json::to_string(&reset_meta) {
-                Ok(json) => json,
-                Err(error) => return Ok(TruncateTxnOutcome::Serde(error.to_string())),
-            };
             for table in [
                 "mc_chunk_transcripts",
                 "mc_compartment_dates",
@@ -12378,17 +12487,17 @@ impl McStore {
             // the served fingerprints along with it. They are rows now, so drop them here.
             clear_meta_row_state_tx(tx, session_id)?;
             let next_version = current as u64 + 1;
-            tx.execute(
-                "UPDATE mc_cache_state
-                    SET row_version = ?2, core_state = ?3, meta = ?4
-                  WHERE session_id = ?1 AND row_version = ?5",
-                params![
-                    session_id,
-                    next_version as i64,
-                    core_json,
-                    reset_meta_json,
-                    current
-                ],
+            // A full codec rewrite with no base: every chunk and section row goes, and the
+            // index records the empty state under a new sections version, so no unit or
+            // section from before the reset can be read back as part of the new state.
+            write_cache_state_tx(
+                tx,
+                session_id,
+                next_version,
+                &CoreState::default(),
+                &reset_meta,
+                None,
+                current_time_ms(),
             )?;
             Ok(TruncateTxnOutcome::Committed(TruncateOutcome {
                 revert_epoch: next_epoch,
@@ -16371,11 +16480,13 @@ fn cache_state_blobs_unchanged(
     session_id: &str,
     core_json: &str,
     meta_json: &str,
+    section_index: &str,
 ) -> rusqlite::Result<bool> {
     Ok(tx
         .query_row(
-            "SELECT core_state = ?2 AND meta = ?3 FROM mc_cache_state WHERE session_id = ?1",
-            params![session_id, core_json, meta_json],
+            "SELECT core_state = ?2 AND meta = ?3 AND section_index = ?4
+               FROM mc_cache_state WHERE session_id = ?1",
+            params![session_id, core_json, meta_json, section_index],
             |row| row.get::<_, bool>(0),
         )
         .optional()?
@@ -16506,6 +16617,90 @@ fn row_state_digest_matches_tx(
         )
         .optional()?
         .unwrap_or(false))
+}
+
+/// Write a session's whole cache state through the codec inside an open write transaction,
+/// at `row_version`, and return the split rows as they now stand.
+///
+/// With no `base` every chunk and section row of the session is deleted first and the state
+/// is written in full; with one, only the rows whose bytes differ from it are written. For
+/// writers that build the state themselves (a lineage descent, a reset); the transform
+/// commit has its own path because it runs refusals and overlay writes around the same
+/// steps.
+fn write_cache_state_tx(
+    tx: &rusqlite::Connection,
+    session_id: &str,
+    row_version: u64,
+    core: &CoreState,
+    meta: &ModuleMeta,
+    base: Option<&SectionsBase>,
+    last_activity_at: i64,
+) -> rusqlite::Result<SectionsBase> {
+    let encoded = cache_codec::encode_row(core, meta)?;
+    let stored_index = tx
+        .query_row(
+            "SELECT section_index FROM mc_cache_state WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|json| cache_codec::SectionIndex::parse(&json));
+    let write_base = match base {
+        Some(base) => cache_codec::WriteBase::Loaded(base),
+        None => {
+            cache_codec::clear_session_rows(tx, session_id)?;
+            cache_codec::WriteBase::Cleared
+        }
+    };
+    let written = cache_codec::write_sections(
+        tx,
+        session_id,
+        &encoded,
+        write_base,
+        cache_codec::FrozenWrite::Write,
+        stored_index.as_ref(),
+        row_version,
+    )?;
+    cache_codec::upsert_small_row(
+        tx,
+        session_id,
+        row_version,
+        &encoded,
+        &written.index_json,
+        last_activity_at,
+    )?;
+    Ok(written.base_after)
+}
+
+/// Carry the row-state digest across a `row_version` step that did not touch the rows it
+/// covers, so the next transform commit can still trust it and skip walking every row.
+/// Only advances a digest that described the version being replaced.
+fn advance_row_state_digest_tx(
+    tx: &rusqlite::Connection,
+    session_id: &str,
+    from_row_version: i64,
+    to_row_version: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE mc_cache_state_digest SET row_version = ?3
+          WHERE session_id = ?1 AND row_version = ?2",
+        params![session_id, from_row_version, to_row_version],
+    )?;
+    Ok(())
+}
+
+/// Report the stored values a full load refused to trust. The caller decides what that
+/// means; this only makes it visible.
+fn log_discarded_sections(session_id: &str, sections: &SectionsBase) {
+    for (section, reason) in sections.discarded() {
+        tracing::warn!(
+            target: "magic-context",
+            session_id,
+            section,
+            reason = reason.as_str(),
+            "mc-cache-sections-discarded"
+        );
+    }
 }
 
 fn record_row_state_digest_tx(
@@ -17170,6 +17365,7 @@ mod tests {
                     expected,
                     core: &core,
                     meta: &meta,
+                    sections: SectionsCommit::default(),
                     consumed_drop_ids: &[],
                     first_applied_command_ids: &[],
                     memory_revision: None,
@@ -17850,11 +18046,17 @@ mod tests {
         legacy_meta["block_identity_by_mid"] = serde_json::to_value(&identities).unwrap();
         legacy_meta["served_output_fingerprint"] = serde_json::to_value(&served).unwrap();
         let legacy_meta_json = serde_json::to_string(&legacy_meta).unwrap();
-        let legacy_core_json = serde_json::to_string(&CoreState {
-            boundary_id: "b1".to_string(),
-            ..CoreState::default()
-        })
-        .unwrap();
+        // The legacy row as it stands after every later migration has run: the frozen
+        // units have their own rows since migration 63, so the small core omits them.
+        let legacy_core_json = cache_codec::encode_row(
+            &CoreState {
+                boundary_id: "b1".to_string(),
+                ..CoreState::default()
+            },
+            &ModuleMeta::default(),
+        )
+        .unwrap()
+        .core_json;
 
         let migration_55 = MIGRATIONS
             .iter()
@@ -18019,6 +18221,7 @@ mod tests {
                         expected,
                         core: &loaded.core,
                         meta: &loaded.meta,
+                        sections: SectionsCommit::default(),
                         consumed_drop_ids: &[],
                         first_applied_command_ids: &[],
                         memory_revision: None,
@@ -18098,6 +18301,7 @@ mod tests {
                     expected: initial.row_version,
                     core: &initial.core,
                     meta: &initial.meta,
+                    sections: SectionsCommit::default(),
                     consumed_drop_ids: &[],
                     first_applied_command_ids: &[],
                     memory_revision: None,
@@ -18174,6 +18378,7 @@ mod tests {
                     expected: missing_initial.row_version,
                     core: &missing_initial.core,
                     meta: &missing_initial.meta,
+                    sections: SectionsCommit::default(),
                     consumed_drop_ids: &[],
                     first_applied_command_ids: &[],
                     memory_revision: None,
@@ -18234,8 +18439,9 @@ mod tests {
         };
         let mut raw = rusqlite::Connection::open(raw_path).unwrap();
         raw.pragma_update(None, "busy_timeout", 5_000).unwrap();
-        let core_json = serde_json::to_string(&initial.core).unwrap();
-        let meta_json = serde_json::to_string(&initial.meta).unwrap();
+        // The small blobs as the codec stores them; the frozen units stay in their chunks.
+        let encoded = cache_codec::encode_row(&initial.core, &initial.meta).unwrap();
+        let (core_json, meta_json) = (encoded.core_json, encoded.meta_json);
 
         let snapshot = store
             .load_transform_snapshot_with_hook("ses", || {
@@ -18313,6 +18519,7 @@ mod tests {
                     expected: split_state.row_version,
                     core: &split_state.core,
                     meta: &split_state.meta,
+                    sections: SectionsCommit::default(),
                     consumed_drop_ids: &[],
                     first_applied_command_ids: &[],
                     memory_revision: None,
@@ -18406,6 +18613,7 @@ mod tests {
                     expected: stale.row_version,
                     core: &stale.core,
                     meta: &stale.meta,
+                    sections: SectionsCommit::default(),
                     consumed_drop_ids: &[],
                     first_applied_command_ids: &[],
                     memory_revision: None,
@@ -18538,6 +18746,7 @@ mod tests {
                     expected: loaded.row_version,
                     core: &loaded.core,
                     meta: &loaded.meta,
+                    sections: SectionsCommit::default(),
                     consumed_drop_ids: &[pending[0].id],
                     first_applied_command_ids: &command_ids,
                     memory_revision: None,
@@ -19407,6 +19616,7 @@ mod tests {
                         expected: loaded.row_version,
                         core: &loaded.core,
                         meta: &loaded.meta,
+                        sections: SectionsCommit::default(),
                         consumed_drop_ids: &[],
                         first_applied_command_ids: &[],
                         memory_revision: None,
@@ -19472,6 +19682,7 @@ mod tests {
                     expected: loaded.row_version,
                     core: &loaded.core,
                     meta: &loaded.meta,
+                    sections: SectionsCommit::default(),
                     consumed_drop_ids: &[],
                     first_applied_command_ids: &[],
                     memory_revision: None,
@@ -20080,9 +20291,10 @@ mod tests {
             .inner
             .with_conn(|conn| {
                 conn.query_row(
-                    "SELECT length(CAST(scheduler_history AS BLOB))
-                          + length(CAST(scheduler_interesting_history AS BLOB))
-                       FROM mc_pass_trace WHERE session_id = 'interesting-bound'",
+                    "SELECT COALESCE(SUM(length(CAST(entry AS BLOB))), 0)
+                       FROM mc_pass_trace_history
+                      WHERE session_id = 'interesting-bound'
+                        AND kind IN ('scheduler', 'interesting')",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
@@ -20207,6 +20419,7 @@ mod tests {
                         expected: None,
                         core: &core,
                         meta: &meta,
+                        sections: SectionsCommit::default(),
                         consumed_drop_ids: &[],
                         first_applied_command_ids: &[],
                         memory_revision: None,
@@ -20621,7 +20834,22 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(fresh_has_scheduler_histories, 2);
+        // Migration 63 moved the scheduler histories into ring rows and dropped the array
+        // columns, so a reader that still names them fails loudly instead of reading a frozen
+        // copy. The ring table and the read-only view that rebuilds the arrays replace them.
+        assert_eq!(fresh_has_scheduler_histories, 0);
+        let fresh_has_history_ring = fresh
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                      WHERE name IN ('mc_pass_trace_history', 'mc_pass_trace_history_arrays')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(fresh_has_history_ring, 2);
         let fresh_has_mural_artifacts = fresh
             .inner
             .with_conn(|conn| {
@@ -20769,7 +20997,8 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(migrated_has_scheduler_histories, 2);
+        // Migration 63 moves the histories into ring rows and drops the array columns.
+        assert_eq!(migrated_has_scheduler_histories, 0);
         let migrated_has_mural_artifacts = migrated
             .inner
             .with_conn(|conn| {
