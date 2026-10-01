@@ -368,6 +368,19 @@ pub fn render_session_ref_compartment(c: &ReferenceCompartment) -> String {
 }
 
 pub fn render_session_references_block(all_compartments: &[ReferenceCompartment]) -> String {
+    render_session_references_block_window(all_compartments, SESSION_REF_WINDOW)
+}
+
+/// Render at most `window` (capped at [`SESSION_REF_WINDOW`]) of the most recent
+/// compartments, so a caller short of producer-window room can drop the oldest.
+pub fn render_session_references_block_window(
+    all_compartments: &[ReferenceCompartment],
+    window: usize,
+) -> String {
+    let window = window.min(SESSION_REF_WINDOW);
+    if window == 0 {
+        return String::new();
+    }
     let all_compartments: Vec<_> = all_compartments
         .iter()
         .filter(|c| {
@@ -381,7 +394,7 @@ pub fn render_session_references_block(all_compartments: &[ReferenceCompartment]
     if all_compartments.is_empty() {
         return String::new();
     }
-    let start = all_compartments.len().saturating_sub(SESSION_REF_WINDOW);
+    let start = all_compartments.len().saturating_sub(window);
     let body = all_compartments[start..]
         .iter()
         .map(|c| render_session_ref_compartment(c))
@@ -412,6 +425,24 @@ pub fn build_reference_blocks_from_stored(
         .map(ReferenceCompartment::from)
         .collect();
     build_reference_blocks(session_id, chunk_start, &refs)
+}
+
+/// Return the memories that [`render_historian_memory_block`] renders, in the order
+/// it renders them (by category priority, then input order). Rendering any prefix
+/// of this list reproduces the first lines of the full block, so a caller that must
+/// shrink the block to fit a model window drops the lowest-priority lines by taking
+/// a shorter prefix.
+pub fn order_historian_memories(memories: &[StoredMemory]) -> Vec<StoredMemory> {
+    let mut ordered = Vec::new();
+    for category in HISTORIAN_MEMORY_CATEGORY_PRIORITY {
+        ordered.extend(
+            memories
+                .iter()
+                .filter(|memory| memory.category == *category)
+                .cloned(),
+        );
+    }
+    ordered
 }
 
 /// Render the historian's category-grouped project-memory block from already-loaded rows.

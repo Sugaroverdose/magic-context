@@ -564,6 +564,36 @@ async function runHistorianPrompt(args: {
         });
     };
 
+    const system = withContentLanguageDirective(
+        agentId === HISTORIAN_EDITOR_AGENT
+            ? HISTORIAN_EDITOR_SYSTEM_PROMPT
+            : COMPARTMENT_AGENT_SYSTEM_PROMPT,
+        args.language,
+    );
+    // Admit the prompt before opening a child session. A prompt that cannot fit
+    // the selected model would be refused by the transport anyway, and opening
+    // first left one more hidden session behind for every refused attempt.
+    const overrideModel = parseModelOverride(toModelEntry(modelOverride)?.model ?? "");
+    const preOpenFailure = overrideModel
+        ? historianPromptAdmissionFailure({
+              model: overrideModel,
+              prompt,
+              system,
+              maxOutputTokens: args.maxOutputTokens,
+              parentSessionId,
+          })
+        : null;
+    if (preOpenFailure) {
+        shared.sessionLog(
+            parentSessionId,
+            `historian: prompt refused before opening a child session: ${preOpenFailure}`,
+        );
+        return {
+            ok: false,
+            error: `Historian failed while processing this session: ${preOpenFailure}`,
+        };
+    }
+
     try {
         shared.sessionLog(
             parentSessionId,
@@ -574,12 +604,7 @@ async function runHistorianPrompt(args: {
             parentInvocationId,
             agent: agentId,
             kind: agentId === HISTORIAN_EDITOR_AGENT ? "historian-editor" : "historian",
-            system: withContentLanguageDirective(
-                agentId === HISTORIAN_EDITOR_AGENT
-                    ? HISTORIAN_EDITOR_SYSTEM_PROMPT
-                    : COMPARTMENT_AGENT_SYSTEM_PROMPT,
-                args.language,
-            ),
+            system,
             maxOutputTokens: args.maxOutputTokens,
             model: modelOverride,
             configuredModels: [
@@ -630,76 +655,14 @@ async function runHistorianPrompt(args: {
                     {
                         transport: Object.assign(
                             (request: import("../../shared/model-suggestion-retry").PromptArgs) => {
-                                const selected = request.body?.model;
-                                const modelKey = selected
-                                    ? `${selected.providerID}/${selected.modelID}`
-                                    : undefined;
-                                const system = withContentLanguageDirective(
-                                    agentId === HISTORIAN_EDITOR_AGENT
-                                        ? HISTORIAN_EDITOR_SYSTEM_PROMPT
-                                        : COMPARTMENT_AGENT_SYSTEM_PROMPT,
-                                    args.language,
-                                );
-                                const contextLimitTokens = selected
-                                    ? getSdkContextLimit(
-                                          selected.providerID,
-                                          selected.modelID,
-                                          undefined,
-                                          { reservation: "none" },
-                                      )
-                                    : undefined;
-                                const producerLimits = selected
-                                    ? resolveHistorianProducerLimits(modelKey)
-                                    : {};
-                                const producerContext =
-                                    producerLimits.context ??
-                                    (producerLimits.input === undefined
-                                        ? contextLimitTokens
-                                        : undefined);
-                                const reserve = historianProducerReserve(
-                                    producerContext,
-                                    args.maxOutputTokens,
-                                    selected
-                                        ? getSdkOutputLimit(selected.providerID, selected.modelID)
-                                        : undefined,
-                                );
-                                if (
-                                    contextLimitTokens !== undefined &&
-                                    producerInputTokenLimit(
-                                        producerContext,
-                                        reserve,
-                                        producerLimits.input,
-                                    ) === undefined &&
-                                    modelKey &&
-                                    !unknownProducerWindows.has(modelKey)
-                                ) {
-                                    unknownProducerWindows.add(modelKey);
-                                    shared.sessionLog(
-                                        parentSessionId,
-                                        `producer window inconsistent for ${modelKey}: window=${contextLimitTokens} reserve=${reserve}; sending unguarded`,
-                                    );
-                                }
-                                const failure = producerPromptFailureReason({
-                                    sourceLocal: estimateTokens(prompt),
-                                    systemLocal: estimateTokens(system),
-                                    toolsLocal: 0,
-                                    modelKey,
-                                    contextLimitTokens: producerContext,
-                                    inputLimitTokens: producerLimits.input,
-                                    maxOutputTokens: reserve,
+                                const failure = historianPromptAdmissionFailure({
+                                    model: request.body?.model,
+                                    prompt,
+                                    system,
+                                    maxOutputTokens: args.maxOutputTokens,
+                                    parentSessionId,
                                 });
                                 if (failure) throw new Error(failure);
-                                if (
-                                    modelKey &&
-                                    contextLimitTokens === undefined &&
-                                    !unknownProducerWindows.has(modelKey)
-                                ) {
-                                    unknownProducerWindows.add(modelKey);
-                                    shared.sessionLog(
-                                        parentSessionId,
-                                        `producer window unknown for ${modelKey}: sending unguarded`,
-                                    );
-                                }
                                 return executor.attempt(opened, request);
                             },
                             { childSessionId: opened.childSessionId },
@@ -937,6 +900,66 @@ async function runFallbackHistorianPass(args: {
     }
 
     return { ok: false, error: lastError };
+}
+
+/**
+ * Whether `prompt` fits the selected producer model's window, after its output
+ * reserve and the estimator margin. Returns the refusal reason, or null when the
+ * prompt fits or the window is unknown (the prompt then goes out unguarded).
+ */
+function historianPromptAdmissionFailure(args: {
+    model: { providerID: string; modelID: string } | undefined;
+    prompt: string;
+    system: string;
+    maxOutputTokens?: number;
+    parentSessionId: string;
+}): string | null {
+    const selected = args.model;
+    const modelKey = selected ? `${selected.providerID}/${selected.modelID}` : undefined;
+    const contextLimitTokens = selected
+        ? getSdkContextLimit(selected.providerID, selected.modelID, undefined, {
+              reservation: "none",
+          })
+        : undefined;
+    const producerLimits = selected ? resolveHistorianProducerLimits(modelKey) : {};
+    const producerContext =
+        producerLimits.context ??
+        (producerLimits.input === undefined ? contextLimitTokens : undefined);
+    const reserve = historianProducerReserve(
+        producerContext,
+        args.maxOutputTokens,
+        selected ? getSdkOutputLimit(selected.providerID, selected.modelID) : undefined,
+    );
+    if (
+        contextLimitTokens !== undefined &&
+        producerInputTokenLimit(producerContext, reserve, producerLimits.input) === undefined &&
+        modelKey &&
+        !unknownProducerWindows.has(modelKey)
+    ) {
+        unknownProducerWindows.add(modelKey);
+        shared.sessionLog(
+            args.parentSessionId,
+            `producer window inconsistent for ${modelKey}: window=${contextLimitTokens} reserve=${reserve}; sending unguarded`,
+        );
+    }
+    const failure = producerPromptFailureReason({
+        sourceLocal: estimateTokens(args.prompt),
+        systemLocal: estimateTokens(args.system),
+        toolsLocal: 0,
+        modelKey,
+        contextLimitTokens: producerContext,
+        inputLimitTokens: producerLimits.input,
+        maxOutputTokens: reserve,
+    });
+    if (failure) return failure;
+    if (modelKey && contextLimitTokens === undefined && !unknownProducerWindows.has(modelKey)) {
+        unknownProducerWindows.add(modelKey);
+        shared.sessionLog(
+            args.parentSessionId,
+            `producer window unknown for ${modelKey}: sending unguarded`,
+        );
+    }
+    return null;
 }
 
 function parseModelOverride(modelId: string): { providerID: string; modelID: string } | null {

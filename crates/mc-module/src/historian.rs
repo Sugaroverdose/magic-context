@@ -1928,6 +1928,24 @@ pub(crate) fn producer_window_failure_reason_with_input(
     ))
 }
 
+/// Record a prompt refused before any producer run as a failure with the
+/// configured backoff. These refusals return before `fire` touches durable
+/// state, so without this the scheduler saw no failure and re-fired the same
+/// unfit prompt on every turn.
+fn record_admission_refusal(
+    request: &HistorianFireRequest<'_>,
+    reason: &str,
+) -> Result<(), HistorianDriveError> {
+    let loaded = request.store.load(request.session_id)?;
+    let mut meta = loaded.meta.clone();
+    meta.historian.last_failure = Some(reason.to_string());
+    meta.historian.failure_backoff_at_ms = Some(request.failure_backoff_at_ms);
+    request
+        .store
+        .commit(request.session_id, loaded.row_version, &loaded.core, &meta)?;
+    Ok(())
+}
+
 pub async fn run_historian_firing<P>(
     producer: &mut P,
     request: HistorianFireRequest<'_>,
@@ -1970,6 +1988,7 @@ where
             "[mc-module][{}] historian oversize admission refused before spawn: {reason}",
             request.session_id
         );
+        record_admission_refusal(&request, &reason)?;
         return Err(HistorianDriveError::Producer(
             HistorianProducerError::context_overflow(reason),
         ));
@@ -2052,9 +2071,13 @@ where
         if fit_limit.is_some_and(|limit| {
             !full_tokens.is_finite() || full_tokens <= 0.0 || full_tokens > limit as f64
         }) {
-            return Err(HistorianDriveError::Producer(HistorianProducerError::context_overflow(
-                format!("producer_prompt_fit_refused model={model} calibrated_tokens={full_tokens} limit={fit_limit:?}"),
-            )));
+            let reason = format!(
+                "producer_prompt_fit_refused model={model} calibrated_tokens={full_tokens} limit={fit_limit:?}"
+            );
+            record_admission_refusal(&request, &reason)?;
+            return Err(HistorianDriveError::Producer(
+                HistorianProducerError::context_overflow(reason),
+            ));
         }
         let loaded = request.store.load(request.session_id)?;
         let mut recent_decision = request.recent_decision.clone();
@@ -3800,9 +3823,19 @@ mod tests {
         let mut request = fire_request(&store, &prompt, &models, &chunk, &prior);
         request.historian_context_limit_tokens = Some(10_000);
         request.max_output_tokens = 1000;
+        let configured_backoff = request.failure_backoff_at_ms;
         let mut producer = ScriptedProducer::default();
         assert!(run_historian_firing(&mut producer, request).await.is_err());
         assert!(producer.observed_starts.is_empty());
+        let refused_state = store.load("ses").unwrap().meta.historian;
+        assert_eq!(
+            refused_state.failure_backoff_at_ms,
+            Some(configured_backoff)
+        );
+        assert!(refused_state
+            .last_failure
+            .as_deref()
+            .is_some_and(|failure| failure.starts_with("producer_prompt_fit_refused")));
         let mut missing = fire_request(&store, "small", &models, &chunk, &prior);
         missing.historian_context_limit_tokens = None;
         let mut missing_producer = ScriptedProducer::default()
@@ -3832,15 +3865,24 @@ mod tests {
         refused_request.producer_source_tokens = 20_000;
         refused_request.historian_context_limit_tokens = Some(11_000);
         refused_request.max_output_tokens = 1_000;
+        let configured_backoff = refused_request.failure_backoff_at_ms;
         let mut refused_producer = ScriptedProducer::default();
 
         assert!(run_historian_firing(&mut refused_producer, refused_request)
             .await
             .is_err());
         assert!(refused_producer.observed_starts.is_empty());
+        // A refused prompt is a failure the scheduler must back off on; without
+        // the durable record it re-fired the same prompt on every turn.
         let refused_state = refused_store.load("ses").unwrap().meta.historian;
-        assert_eq!(refused_state.failure_backoff_at_ms, None);
-        assert_eq!(refused_state.last_failure, None);
+        assert_eq!(
+            refused_state.failure_backoff_at_ms,
+            Some(configured_backoff)
+        );
+        assert!(refused_state
+            .last_failure
+            .as_deref()
+            .is_some_and(|failure| failure.starts_with("producer_source_exceeds_window")));
 
         let admitted_dir = tempfile::tempdir().unwrap();
         let admitted_store = store(admitted_dir.path());

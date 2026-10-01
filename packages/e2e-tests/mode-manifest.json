@@ -1029,6 +1029,22 @@
             ]
         },
         {
+            "path": "tests/opencode2/hidden-child-native-remove.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Real OpenCode 2 host, shipped plugin: on a build whose plugin session API has session.remove, historian and dreamer hidden children are created under the user's session and removed when each run ends, leaving no root session; on a build without it the reusable, recorded root children are unchanged. Point MC_E2E_OPENCODE2_CLI at the build under test; dedicated v2 lane",
+            "contract_refs": [
+                "R44",
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/hidden-child-terminal-failure.test.ts",
             "tier": "excluded",
             "invocation": {
@@ -2509,6 +2525,21 @@
             "hosts": [
                 "opencode",
                 "pi"
+            ]
+        },
+        {
+            "path": "tests/historian-window-fit.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "real OpenCode 1.18.30 host with small mock historian windows: a 64k window keeps publishing compartments with chunks sized to fit, and a 32k window that cannot hold the historian system prompt fails once, backs off on later triggers, sends no historian request and opens no hidden child session; it needs the installed host binary and a throwaway TMPDIR, HOME and store paths, so it runs by hand outside the mode lanes",
+            "contract_refs": [
+                "HISTORIAN-WINDOW-FIT"
+            ],
+            "hosts": [
+                "opencode"
             ]
         },
         {
