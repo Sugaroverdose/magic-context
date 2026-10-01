@@ -233,6 +233,140 @@ function countActivePrimers(db: Database, projectPath: string): number {
 }
 
 /**
+ * How far back session activity and new compartments count as "recent" when
+ * deciding whether an identity has anything for the dreamer to do. Older work
+ * no longer seeds schedule rows, and an identity whose only inputs are older
+ * than this (and that has no memories) is pruned from the schedule.
+ */
+export const SCHEDULE_ACTIVITY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Any active or permanent memory, expired or not (the curate gate's pool). */
+export function hasActiveMemories(db: Database, projectPath: string): boolean {
+    return (
+        db
+            .prepare<[string], { one: number }>(
+                "SELECT 1 AS one FROM memories WHERE project_path = ? AND status IN ('active','permanent') LIMIT 1",
+            )
+            .get(projectPath) != null
+    );
+}
+
+/**
+ * Sessions count as recent when they were bound or were active after `since`.
+ * Both signals are checked because not every host records live activity:
+ * OpenCode 2 only backfills activity once at startup, while every host writes
+ * the session's project binding (`session_projects.updated_at`) when the
+ * session is first seen.
+ */
+const RECENT_PROJECT_SESSIONS_SQL = `SELECT sp.session_id FROM session_projects sp
+       LEFT JOIN schema_migrations_meta activity
+         ON activity.key = 'retrospective_activity:' || sp.session_id
+      WHERE sp.project_path = ?
+        AND (sp.updated_at > ? OR CAST(activity.value AS INTEGER) > ?)`;
+
+/** Whether a session of this project was bound or was active after `since`. */
+export function hasRecentProjectSession(db: Database, projectPath: string, since: number): boolean {
+    return (
+        db
+            .prepare<[string, number, number], { session_id: string }>(
+                `${RECENT_PROJECT_SESSIONS_SQL} LIMIT 1`,
+            )
+            .get(projectPath, since, since) != null
+    );
+}
+
+/**
+ * Whether a recent session of this project produced a compartment after
+ * `since`. Starting from the few recent sessions keeps this cheap: counting a
+ * large project's compartments by creation time reads every compartment row.
+ */
+function hasRecentProjectCompartment(db: Database, projectPath: string, since: number): boolean {
+    return (
+        db
+            .prepare<[string, number, number, number], { session_id: string }>(
+                `${RECENT_PROJECT_SESSIONS_SQL}
+                    AND EXISTS (SELECT 1 FROM compartments c
+                                 WHERE c.session_id = sp.session_id AND c.created_at > ?)
+                  LIMIT 1`,
+            )
+            .get(projectPath, since, since, since) != null
+    );
+}
+
+/**
+ * The input a task needs before it is worth giving a schedule row at all.
+ *
+ * This is deliberately broader than the per-run activity gate in
+ * `evaluateTaskGate`: the gate asks "is there new work since the last run?",
+ * while this asks "does this identity have the kind of data this task works on?".
+ * A directory that only ever hosted a chat has no memories, so the memory
+ * maintenance tasks get no rows for it; they are seeded later, on the first
+ * scheduler pass after its first memory appears.
+ *
+ * Session-derived inputs only count inside SCHEDULE_ACTIVITY_WINDOW_MS, which
+ * keeps this consistent with the idle-identity pruning: an identity that pruning
+ * removed is never seeded straight back by the next reconcile.
+ */
+export function taskHasSchedulableInput(
+    task: DreamTaskName,
+    db: Database,
+    projectPath: string,
+    now: number,
+): boolean {
+    switch (task) {
+        case "map-memories":
+        case "verify":
+        case "verify-broad":
+        case "curate":
+        case "compress-cues":
+        case "classify-memories":
+            // Raw status, not expiry: curate must still see an expired-only pool
+            // once to transition it.
+            return hasActiveMemories(db, projectPath);
+        case "retrospective":
+            return hasRecentProjectSession(db, projectPath, now - SCHEDULE_ACTIVITY_WINDOW_MS);
+        case "maintain-docs":
+            return hasRecentProjectCompartment(db, projectPath, now - SCHEDULE_ACTIVITY_WINDOW_MS);
+        case "evaluate-smart-notes":
+            return countPendingSmartNotes(db, projectPath) > 0;
+        case "review-user-memories":
+            // Candidates are global (one cross-project user profile) and any
+            // scheduled identity may review them, so they alone are no reason to
+            // schedule an identity that otherwise has nothing to do.
+            return (
+                countUserMemoryCandidates(db) > 0 && identityHasProjectInput(db, projectPath, now)
+            );
+        case "promote-primers":
+            return countPrimerCandidatesForProject(db, projectPath) > 0;
+        case "refresh-primers":
+            return countActivePrimers(db, projectPath) > 0;
+        default: {
+            const _exhaustive: never = task;
+            return Boolean(_exhaustive);
+        }
+    }
+}
+
+/**
+ * Whether an identity has anything of its own for the dreamer to work on:
+ * active memories, a session in the activity window, or input for any
+ * project-scoped task. The global user-memory review is left out (see
+ * taskHasSchedulableInput). An identity for which this is false is idle and
+ * its schedule rows are pruned.
+ */
+export function identityHasProjectInput(db: Database, projectPath: string, now: number): boolean {
+    // Memories and recent sessions are checked first and by name: they are the
+    // cheapest signals, and "never prune an identity with memories" must hold
+    // even if a memory task's own input rule changes.
+    if (hasActiveMemories(db, projectPath)) return true;
+    if (hasRecentProjectSession(db, projectPath, now - SCHEDULE_ACTIVITY_WINDOW_MS)) return true;
+    return CANONICAL_DREAM_TASKS.some(
+        (task) =>
+            task !== "review-user-memories" && taskHasSchedulableInput(task, db, projectPath, now),
+    );
+}
+
+/**
  * Read-only backlog probe for one task. These probes reuse the task selection
  * predicates and never acquire a lease, materialize a prompt cache, or invoke a model.
  */

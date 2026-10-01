@@ -2,6 +2,7 @@
 
 import { expect, test } from "bun:test";
 import { Database } from "../../../shared/sqlite";
+import { insertMemory } from "../memory/storage-memory";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { nextDueAtMs } from "./cron";
@@ -22,6 +23,11 @@ test("conflicting worktree schedules cannot continually postpone a shared slot",
     const worktreeB = config("30 * * * *");
     const start = Date.UTC(2026, 0, 1, 0, 0, 0);
     const due: Array<{ minute: number; worktree: "A" | "B" }> = [];
+    // verify only gets a schedule row for a project with active memories, so
+    // every project in this test gets one.
+    for (const project of [projectIdentity, "git:control-a", "git:control-b"]) {
+        insertMemory(db, { projectPath: project, category: "PROJECT_RULES", content: project });
+    }
 
     try {
         // Distinct project identities retain the existing single-owner behavior.
