@@ -122,6 +122,8 @@ export interface AgentDeliverRequest {
         from_session_id: "health-sentinel-mc";
         from_harness: "magic-context";
         content: string;
+        /** The sender is a script with no session, so replies cannot reach it. */
+        one_way: true;
     };
     urgency: "high";
     expected_residence_epoch?: number;
@@ -876,6 +878,7 @@ export function agentDeliverRequest(
             from_session_id: SENTINEL_FROM_SESSION_ID,
             from_harness: SENTINEL_FROM_HARNESS,
             content: `${event.session_id}: cache bust detected in directory ${event.directory} at ${event.payload.at}; rewritten_tokens=${event.payload.rewritten_tokens}; divergence_class=${event.payload.divergence_class}; first_divergence=${event.payload.first_divergence}${event.payload.identity_delta ? `; identity_delta=${event.payload.identity_delta.join(",")}` : ""}; analyzer_cmd=${event.payload.analyzer_cmd}`,
+            one_way: true,
         },
         urgency: "high",
     };
