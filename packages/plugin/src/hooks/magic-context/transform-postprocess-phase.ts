@@ -53,6 +53,10 @@ import {
     thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
 import {
+    addRemovedReasoningIds,
+    getRemovedReasoningIds,
+} from "../../features/magic-context/storage-reasoning-removal";
+import {
     getTagNumberByMessageId,
     markTagsCompactedByMessageIds,
     updateTagStatus,
@@ -124,6 +128,7 @@ import {
     postprocessTailTags,
 } from "./postprocess-read-cache";
 import { estimateTokens } from "./read-session-formatting";
+import { removeReasoningParts, selectReasoningRemovals } from "./reasoning-removal";
 import { modelAcceptsEmptyContent, replaySentinelByMessageIds } from "./sentinel";
 import {
     applyFrozenTrailingBlankDecisions,
@@ -1944,6 +1949,27 @@ export async function runPostTransformPhase(
         }
     }
     const canUseEmptySentinels = modelAcceptsEmptyContent(args.resolvedProviderID);
+    // Whole-part reasoning removal serves every provider except canonical
+    // Anthropic, which keeps its "[cleared]" + empty-sentinel lane unchanged.
+    // The persisted set is read on every pass so defer passes replay it.
+    const reasoningRemovalEnabled = !canUseEmptySentinels && !compactionOff;
+    const removedReasoningIds = new Set<string>();
+    let reasoningRemovalReadable = false;
+    if (reasoningRemovalEnabled) {
+        try {
+            for (const id of getRemovedReasoningIds(args.db, args.sessionId)) {
+                removedReasoningIds.add(id);
+            }
+            reasoningRemovalReadable = true;
+        } catch (error) {
+            args.passOutcome?.record("reasoning-removal-read-failure");
+            sessionLog(
+                args.sessionId,
+                "reasoning removal: persisted set unreadable; selecting nothing new:",
+                error,
+            );
+        }
+    }
     if (shouldRunHeuristics) {
         const subagentRerun =
             !args.fullFeatureMode &&
@@ -2140,6 +2166,7 @@ export async function runPostTransformPhase(
                                   currentTotalInputTokens: args.contextUsage.inputTokens,
                                   ceilingTokens: args.emergencyCeilingTokens,
                                   usagePercentage: args.contextUsage.percentage,
+                                  passAlreadyPriced: independentMutationBeforeHeuristics,
                               }
                             : undefined,
                     routine: routineCleanupApplied,
@@ -2231,6 +2258,42 @@ export async function runPostTransformPhase(
             const strippedInline = routineCleanupApplied
                 ? stripInlineThinking(args.messages, args.messageTagNumbers, args.clearReasoningAge)
                 : 0;
+            // Every other provider removes whole reasoning parts instead. New ids
+            // are chosen only here, on the same rebuilding pass as the lane above,
+            // and persisted before final representation applies them; a failed
+            // write applies nothing new and replays only the earlier set.
+            let removedReasoningMessages = 0;
+            if (routineCleanupApplied && reasoningRemovalEnabled && reasoningRemovalReadable) {
+                const newIds = selectReasoningRemovals({
+                    messages: args.messages,
+                    messageTagNumbers: args.messageTagNumbers,
+                    clearReasoningAge: args.clearReasoningAge,
+                    alreadyRemoved: removedReasoningIds,
+                    prefixBound: args.thinkingBindingRecoveryEnabledForModel === true,
+                });
+                if (newIds.length > 0) {
+                    let persisted = false;
+                    try {
+                        persisted = addRemovedReasoningIds(args.db, args.sessionId, newIds);
+                    } catch (error) {
+                        sessionLog(args.sessionId, "reasoning removal: persistence threw:", error);
+                    }
+                    if (persisted) {
+                        for (const id of newIds) removedReasoningIds.add(id);
+                        removedReasoningMessages = newIds.length;
+                        sessionLog(
+                            args.sessionId,
+                            `reasoning removal: froze ${newIds.length} assistant(s), total=${removedReasoningIds.size}`,
+                        );
+                    } else {
+                        args.passOutcome?.record("reasoning-removal-persistence-failure");
+                        sessionLog(
+                            args.sessionId,
+                            "reasoning removal: persistence failed; serving the earlier set only",
+                        );
+                    }
+                }
+            }
             if (clearedReasoning > 0 || strippedInline > 0) {
                 // Compute and persist the reasoning watermark so future defer passes
                 // can replay the same clearing without re-computing the cutoff.
@@ -2258,8 +2321,12 @@ export async function runPostTransformPhase(
             }
             logTransformTiming(args.sessionId, "clearOldReasoning", t7);
             heuristicOrReasoningDidMutate =
-                heuristicMutationCount + clearedReasoning + strippedInline > 0;
-            droppedCount += clearedReasoning + strippedInline;
+                heuristicMutationCount +
+                    clearedReasoning +
+                    strippedInline +
+                    removedReasoningMessages >
+                0;
+            droppedCount += clearedReasoning + strippedInline + removedReasoningMessages;
             // ── Drain pendingMaterializationSessions ──
             // Heuristics + materialization successfully ran on this pass.
             // We've fulfilled every reason the set was added (user
@@ -3328,9 +3395,16 @@ export async function runPostTransformPhase(
         finalizeOptions,
     );
 
+    // Remove reasoning last: every lane above addresses parts by index on the
+    // array as OpenCode built it, and the next pass rebuilds that array, so the
+    // splice never shifts an index another lane reads.
+    const removedReasoningParts = reasoningRemovalEnabled
+        ? removeReasoningParts(args.messages, removedReasoningIds, args.resolvedProviderID)
+        : 0;
+
     sessionLog(
         args.sessionId,
-        `final representation: clearedParts=${finalRepresentation.clearedParts} mergedReasoningParts=${finalRepresentation.mergedReasoningParts}`,
+        `final representation: clearedParts=${finalRepresentation.clearedParts} mergedReasoningParts=${finalRepresentation.mergedReasoningParts} removedReasoningParts=${removedReasoningParts}`,
     );
     logTransformTiming(
         args.sessionId,

@@ -298,6 +298,10 @@ describe("planEmergencyDrop — target math", () => {
             // ≥ reclaim → met without touching `small`.
             currentTotalInputTokens: 20_000,
             ceilingTokens: 12_000,
+            // At 95% the T1/T2 recency reserve yields, so `big` is selectable.
+            // Below it, `big` is the reserved newest T2 and `small` alone would
+            // reclaim 200 tokens, which the minimum achievable reclaim rejects.
+            usagePercentage: 95,
         });
         expect(plan.shouldDrop).toBe(true);
         // `big` (T2) is NOT dropped before T3 `small` — tier order wins — but
@@ -534,7 +538,9 @@ describe("planEmergencyDrop — token protection window cutoff & >=95% yield (#4
         });
 
         expect(plan.shouldDrop).toBe(false);
-        expect(plan.reason).toBe("no-candidates");
+        expect(plan.reason.startsWith("no-candidates")).toBe(true);
+        // The fixed floor (15000) alone exceeds the 10000 ceiling; the reason says so.
+        expect(plan.reason).toContain("already exceeds ceiling 10000");
         // Episode latch remains unconsumed (plan returned shouldDrop: false)
     });
 });
@@ -553,4 +559,61 @@ it("reclaim measurement charges retained skeleton tokens instead of original tag
             reclaimableTokens: 13964.751,
         }),
     ).toBe(13964.751);
+});
+
+describe("planEmergencyDrop — minimum achievable reclaim", () => {
+    // Shape of the live worker that sat at 100% for an hour: the fixed floor
+    // (~326K) is already above the ceiling (~251K), almost every tool output is
+    // dropped, and the only candidate is a fresh result worth ~149 tokens.
+    const workerShape = (extra: Partial<Parameters<typeof planEmergencyDrop>[0]> = {}) => {
+        const fresh = tag(330, "bash", 596); // 596 bytes x 0.25 = 149 tokens
+        const conversation = tag(1, null, 36_204, { type: "message" }); // ~9,051 tokens
+        return planEmergencyDrop({
+            tags: [fresh],
+            floorTags: [fresh, conversation],
+            maxTag: 330,
+            protectedCutoff: null,
+            usagePercentage: 100,
+            currentTotalInputTokens: 335_200,
+            ceilingTokens: 251_000,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+            ...extra,
+        });
+    };
+
+    it("skips a pass whose selection reclaims less than the minimum, and says the floor is above the ceiling", () => {
+        const plan = workerShape();
+        expect(plan.shouldDrop).toBe(false);
+        expect(plan.tagNumbers).toEqual([]);
+        expect(plan.reason).toContain("achievable reclaim below minimum");
+        expect(plan.reason).toContain("reclaim≈149 < 2000");
+        expect(plan.reason).toContain("already exceeds ceiling 251000");
+    });
+
+    it("lets the same small selection ride a pass another mutation already prices", () => {
+        const plan = workerShape({ passAlreadyPriced: true });
+        expect(plan.shouldDrop).toBe(true);
+        expect(plan.tagNumbers).toEqual([330]);
+    });
+
+    it("commits a selection that reaches the minimum", () => {
+        const big = tag(10, "bash", 12_000); // 3,000 tokens
+        const fresh = tag(330, "bash", 596);
+        const conversation = tag(1, null, 36_204, { type: "message" });
+        const plan = planEmergencyDrop({
+            tags: [big, fresh],
+            floorTags: [big, fresh, conversation],
+            maxTag: 330,
+            protectedCutoff: null,
+            usagePercentage: 100,
+            currentTotalInputTokens: 338_200,
+            ceilingTokens: 251_000,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+        });
+        expect(plan.shouldDrop).toBe(true);
+        expect(plan.tagNumbers).toEqual([10, 330]);
+        expect(plan.reason).toContain("already exceeds ceiling 251000");
+    });
 });

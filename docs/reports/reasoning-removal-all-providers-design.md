@@ -15,11 +15,10 @@ A long OpenCode subagent on `openai/gpt-6.1-sol` (openai-auth, Responses API ove
 
 Magic Context's tags recorded only 2,994 reasoning tokens for the session, because opaque reasoning is not counted. Each emergency pass at 100% dropped exactly one tag: the tool result that had arrived under a second earlier. That reclaimed 28 to 149 tokens against a gap of about 9,200. The logged floor was about 326K and the ceiling about 251K.
 
-Three defects explain this:
+Two defects explain this:
 
 1. Age-based reasoning cleanup runs only when the provider id is exactly `anthropic`, so every other route keeps all of its reasoning forever.
 2. The emergency planner commits a pass that reclaims almost nothing, because its minimum is compared with the gap, not with what the chosen candidates reclaim.
-3. The emergency planner may select a tool result that the model has not read yet.
 
 ## 1. Remove old reasoning parts on every provider
 
@@ -81,19 +80,9 @@ minimum = max(EMERGENCY_REARM_MIN_TOKENS (2,000), 10% of the gap)
 
 Rust's `select_emergency` gets the same rule, with the same constants and messages.
 
-## 3. Never auto-drop a tool result the model has not seen
+## Considered and dropped: exempting unseen tool results
 
-A tool result is **seen** only when the host history in this pass's message array holds completed model output produced after it. The model could only produce that output after reading the result. This is derived from the host's persisted history, not from position or recency heuristics. It therefore survives restarts and gives the same answer on replay, and it needs no new state.
-
-| Host | The tool result is seen when |
-|---|---|
-| OpenCode | A later assistant message contains a `step-finish` part. Or, inside the same assistant message, a `step-start` after the tool part is followed by a `step-finish`. The `step-finish` of the tool's own step does not count: that step emitted the call, and the model reads the result only in the next step. An aborted step without a `step-finish` does not count. |
-| Pi | A later assistant message has non-empty content and a `stopReason` other than `error` or `aborted`. |
-| Rust | Same rule, applied to the ingress array it receives. |
-
-All results of a parallel batch come back together, so the next completed step proves every one of them.
-
-**Lanes that skip unseen results:** emergency selection (also at 95% and above, where the recency window yields), the age sweep (`buildSyntheticToolReclaimOps`), and the heuristic deduplication drop. Explicit `ctx_reduce` drops are unaffected.
+A third guard was considered: never let an automatic lane drop a tool result before a completed later step has read it. It was dropped before implementation. Removing old reasoning removes the cause, and the minimum reclaim per emergency pass already stops a pass from discarding a small fresh result for nothing. The unseen check would add a walk of the message array on every pass and three implementations (OpenCode, Pi, Rust) to keep in sync, without preventing anything those two changes do not.
 
 ## Replay and byte identity
 
@@ -103,7 +92,7 @@ All results of a parallel batch come back together, so the next completed step p
 | OpenCode canonical Anthropic | unchanged | unchanged watermark | unchanged |
 | Pi | rebuilding passes only | existing watermark, now clamped | existing replay |
 | Rust | bust passes only | `reasoning_age` frozen units | existing unit replay |
-| Emergency and seen guards | only change what a rebuilding pass selects | nothing new | drops already applied replay as before |
+| Emergency minimum reclaim | only changes what a rebuilding pass selects | nothing new | drops already applied replay as before |
 
 ## What this note cannot settle offline
 
