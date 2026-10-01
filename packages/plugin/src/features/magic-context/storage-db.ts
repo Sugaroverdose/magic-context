@@ -43,8 +43,13 @@ import {
     type FailClosedProcessKind,
 } from "./fail-closed-block";
 import { startMessageFtsRowidMapBackfill } from "./message-fts-rowid-map";
+import {
+    LKG_SLOT_CHUNKS_DDL,
+    LKG_SLOTS_DDL,
+    SESSION_REPLAY_DECISIONS_DDL,
+} from "./migration-v94-write-split";
 import { FORK_MIGRATION_VERSION_FLOOR, runMigrations, runMigrationsWithRetry } from "./migrations";
-import { installCompartmentHistoryVersions } from './storage-compartment-history-version';
+import { installCompartmentHistoryVersions } from "./storage-compartment-history-version";
 import { ensureColumn, healAllNullColumns } from "./storage-schema-helpers";
 import {
     loadToolDefinitionMeasurements,
@@ -132,7 +137,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 93;
+export const LATEST_SUPPORTED_VERSION = 94;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1597,6 +1602,12 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       embedded_memory_id INTEGER NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL DEFAULT 0
     );
+
+    -- Last-known-good replay slots, their prefix slices, and trailing-blank replay
+    -- decisions, in the layout of migration v94.
+    ${LKG_SLOTS_DDL}
+    ${LKG_SLOT_CHUNKS_DDL}
+    ${SESSION_REPLAY_DECISIONS_DDL}
 
     CREATE TABLE IF NOT EXISTS message_history_index (
       session_id TEXT PRIMARY KEY,

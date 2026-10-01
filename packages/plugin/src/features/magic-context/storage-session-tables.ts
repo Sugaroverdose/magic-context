@@ -18,11 +18,22 @@ export const SESSION_SCOPED_TABLES: readonly SessionScopedTableDefinition[] = [
     { table: "tool_owner_backfill_state" },
     { table: "tags", harnessScoped: true },
     { table: "session_meta", harnessScoped: true },
+    // Replay decisions belong to the session's metadata row; a harness sweep that
+    // keeps another harness's row keeps them too.
+    {
+        table: "session_replay_decisions",
+        extraPredicate:
+            "NOT EXISTS (SELECT 1 FROM session_meta AS remaining WHERE remaining.session_id = session_replay_decisions.session_id)",
+    },
     { table: "session_projects", harnessScoped: true },
     { table: "compartment_chunk_embeddings", harnessScoped: true },
     { table: "compartments", harnessScoped: true },
     // A harness sweep can leave another harness's compartments for the same session.
-    { table: "compartment_history_versions", extraPredicate: "NOT EXISTS (SELECT 1 FROM compartments AS remaining WHERE remaining.session_id = compartment_history_versions.session_id)" },
+    {
+        table: "compartment_history_versions",
+        extraPredicate:
+            "NOT EXISTS (SELECT 1 FROM compartments AS remaining WHERE remaining.session_id = compartment_history_versions.session_id)",
+    },
     { table: "compression_depth", harnessScoped: true },
     { table: "session_facts", harnessScoped: true },
     { table: "compartment_state_lease" },
@@ -46,6 +57,7 @@ export const SESSION_SCOPED_TABLES: readonly SessionScopedTableDefinition[] = [
     { table: "message_history_source", harnessScoped: true },
     { table: "message_history_index", harnessScoped: true },
     { table: "lkg_slots" },
+    { table: "lkg_slot_chunks" },
 ];
 
 export interface DeleteSessionScopedRowsOptions {

@@ -3389,7 +3389,11 @@ export async function runPostTransformPhase(
                     overwriteMessageId: newestAssistantId,
                 });
                 if (persisted) {
-                    const committed = getTrailingBlankDecisions(args.db, args.sessionId);
+                    const committed = getTrailingBlankDecisions(
+                        args.db,
+                        args.sessionId,
+                        candidates.map(([id]) => id),
+                    );
                     for (const [id] of candidates) {
                         const decision = committed.get(id);
                         if (decision) trailingBlankDecisions.set(id, decision);

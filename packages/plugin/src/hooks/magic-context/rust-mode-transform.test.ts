@@ -4045,10 +4045,15 @@ describe("Rust mode authority adapter", () => {
             await transform.run(sessionId, input, secondOutput, makeMeta(db, sessionId));
             expect(JSON.stringify(secondOutput.messages)).toContain("module output 2");
             expect(getSlot(sessionId)?.jsonPrefix).toContain("module output 2");
-            const persisted = db
-                .prepare("SELECT json_prefix FROM lkg_slots WHERE session_id = ?")
-                .get(sessionId) as { json_prefix: string };
-            expect(persisted.json_prefix).toContain("module output 1");
+            // The durable prefix is stored as ordered slices.
+            const persisted = (
+                db
+                    .prepare("SELECT body FROM lkg_slot_chunks WHERE session_id = ? ORDER BY chunk")
+                    .all(sessionId) as Array<{ body: string }>
+            )
+                .map((row) => row.body)
+                .join("");
+            expect(persisted).toContain("module output 1");
         } finally {
             if (blocker.inTransaction) blocker.exec("ROLLBACK");
             closeQuietly(blocker);

@@ -1,5 +1,9 @@
 import { Database as BunDatabase } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
+import {
+    LKG_SLOT_CHUNKS_DDL,
+    LKG_SLOTS_DDL,
+} from "../../features/magic-context/migration-v94-write-split";
 import type { Database } from "../../shared/sqlite";
 import {
     clearPersistedLkgSlot,
@@ -11,12 +15,8 @@ import type { LkgSlot } from "./lkg-slot";
 
 function fixture(): { db: Database; raw: BunDatabase } {
     const raw = new BunDatabase(":memory:");
-    raw.exec(`CREATE TABLE lkg_slots (
-        session_id TEXT PRIMARY KEY, json_prefix TEXT, input_id_seq TEXT,
-        input_content_digests TEXT, input_content_signatures TEXT,
-        last_input_message_id TEXT, model_key TEXT, provider_key TEXT,
-        captured_at INTEGER, row_version INTEGER, capture_sequence INTEGER
-    ); CREATE TABLE session_projects (session_id TEXT, updated_at INTEGER);`);
+    raw.exec(`${LKG_SLOTS_DDL} ${LKG_SLOT_CHUNKS_DDL}
+        CREATE TABLE session_projects (session_id TEXT, updated_at INTEGER);`);
     return { db: raw as unknown as Database, raw };
 }
 
@@ -44,9 +44,10 @@ describe("LKG durable write discipline", () => {
             const changed = { ...slot, jsonPrefix: '[{"text":"onf"}]' };
             expect(saveLkgSlotToDb(db, "ses", changed)).toBe(true);
             expect(loadPersistedLkgSlot(db, "ses")?.jsonPrefix).toBe(changed.jsonPrefix);
+            // Two row changes: the prefix's only slice and the slot's metadata row.
             expect(
                 (raw.query("SELECT total_changes() AS count").get() as { count: number }).count,
-            ).toBe(initial.count + 1);
+            ).toBe(initial.count + 2);
             clearPersistedLkgSlot(db, "ses");
             expect(saveLkgSlotToDb(db, "ses", changed)).toBe(true);
             expect(loadPersistedLkgSlot(db, "ses")?.jsonPrefix).toBe(changed.jsonPrefix);

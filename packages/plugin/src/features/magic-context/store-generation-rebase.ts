@@ -1046,6 +1046,7 @@ function* rebaseSteps(
             // The replay slot keys on content digests of the exact prefix it
             // captured. Text the host re-joined no longer hashes the same, so the
             // slot could only decline; deleting it says so instead of pretending.
+            db.prepare("DELETE FROM lkg_slot_chunks WHERE session_id = ?").run(sessionId);
             db.prepare("DELETE FROM lkg_slots WHERE session_id = ?").run(sessionId);
             outcome.lkgSlotsDropped = lkgSlotCount;
         }
