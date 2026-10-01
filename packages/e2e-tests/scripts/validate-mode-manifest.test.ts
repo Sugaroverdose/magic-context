@@ -60,6 +60,7 @@ describe("mode manifest validator", () => {
             .map((entry) => entry.path);
         expect([...excluded].sort()).toEqual([
             "tests/adv-identical-bytes-hard.test.ts",
+            "tests/degraded-pass-lock.test.ts",
             "tests/dreamer-host-timeout.test.ts",
             "tests/dreamer-token-budget-oc1.test.ts",
             "tests/dreamer-verify-budget.test.ts",

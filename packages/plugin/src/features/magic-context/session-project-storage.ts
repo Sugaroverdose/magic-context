@@ -123,6 +123,19 @@ export function recordSessionProjectIdentity(
 }
 
 /**
+ * Whether a project binding has been stored for this session. Bindings are
+ * stored only from a directory the host returned for the session. A session
+ * without one has only ever been rendered with the directory OpenCode was
+ * launched from, which the transform falls back to when the host gives none.
+ */
+export function hasRecordedSessionProjectIdentity(db: Database, sessionId: string): boolean {
+    const row = db
+        .prepare("SELECT 1 AS found FROM session_projects WHERE session_id = ? AND harness = ?")
+        .get(sessionId, getHarness()) as { found: number } | null;
+    return row?.found === 1;
+}
+
+/**
  * Heal historical chunk rows whose stored project differs from their session owner
  * when either the stored or the correct project is this project. Both
  * partitions use indexes, and the precheck avoids a write on the common miss.

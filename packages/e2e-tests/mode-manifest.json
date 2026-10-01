@@ -2587,6 +2587,14 @@
             "rationale": "Real OpenCode 2 generate hook: managed prefix and applied drops, read-only database, pure replay and counterfactual next-main wire identity",
             "contract_refs": ["OC2-S1"],
             "hosts": ["opencode2"]
+        },
+        {
+            "path": "tests/degraded-pass-lock.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "manual regression probe on OpenCode 1.18.30: a context.db writer lock held across the tagging step replays the last good request instead of sending the conversation without its persisted drops; opt-in TMPDIR root with host and locker PID lsof containment",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode"]
         }
     ]
 }

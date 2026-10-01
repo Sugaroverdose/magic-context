@@ -42,6 +42,7 @@ import {
 } from "../../features/magic-context/tool-definition-tokens";
 import type { HiddenCompletionExecutor } from "../../hooks/magic-context/compartment-runner-types";
 import { resolveCtxReduceAvailabilityFromMessages } from "../../hooks/magic-context/ctx-reduce-availability";
+import { DegradedPassRefusalError } from "../../hooks/magic-context/degraded-pass-refusal";
 import {
     deriveHistorianChunkTokens,
     resolveHistorianContextLimit,
@@ -160,6 +161,7 @@ export function isBlockingV2TransformError(error: unknown): boolean {
     return (
         error instanceof EmergencyFailClosedError ||
         error instanceof UnresolvedHistoryBoundaryError ||
+        error instanceof DegradedPassRefusalError ||
         isFailClosedBlockingError(error)
     );
 }
@@ -1637,7 +1639,10 @@ export async function registerContext(context: V2Context) {
                 if (!compactionOff) {
                     // The host records an interrupted turn without its reason, so
                     // say on the TUI's notification channel what the user can do.
-                    if (error instanceof UnresolvedHistoryBoundaryError) {
+                    if (
+                        error instanceof UnresolvedHistoryBoundaryError ||
+                        error instanceof DegradedPassRefusalError
+                    ) {
                         pushNotification(
                             "toast",
                             { message: error.message, variant: "error" },

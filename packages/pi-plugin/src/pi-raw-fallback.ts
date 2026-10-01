@@ -15,6 +15,54 @@ export class PiStorageBusyError extends Error {
 	}
 }
 
+/**
+ * A stage the served messages depend on failed (tagging, or the replay of the
+ * session's persisted drops), so Pi's own messages would go out without the
+ * session's reductions. The context handler treats it like a transient storage
+ * failure: replay the last good request if it fits, otherwise refuse the turn.
+ */
+export class PiDegradedPassError extends Error {
+	readonly code = "PI_DEGRADED_PASS";
+	readonly recoverable = true;
+
+	constructor(
+		readonly site: string,
+		options?: { cause?: unknown },
+	) {
+		super(
+			"Magic Context could not finish preparing this turn; send your message again",
+			options,
+		);
+		this.name = "PiDegradedPassError";
+	}
+}
+
+/**
+ * Last-resort size guard for Pi's unmodified messages after an ordinary
+ * handler failure. True only when the messages alone, without the system
+ * prompt and tool definitions, already exceed the limit; a request that is
+ * shown to be over it would only be rejected by the provider. Messages that
+ * cannot be read or counted are not shown to be over the limit.
+ */
+export function piRawMessagesExceedLimit(
+	messages: readonly unknown[],
+	contextLimit: number | undefined,
+): { exceeds: boolean; tokens: number | null } {
+	if (!contextLimit || !Number.isFinite(contextLimit) || contextLimit <= 0) {
+		return { exceeds: false, tokens: null };
+	}
+	try {
+		const raw = tokenizePiMessages([...messages]);
+		const tokens = raw.conversation + raw.toolCall;
+		return {
+			exceeds: Number.isFinite(tokens) && tokens > contextLimit,
+			tokens,
+		};
+	} catch {
+		return { exceeds: false, tokens: null };
+	}
+}
+
 /** A byte-based approximation may reject early; admission needs measured system/tools and countable messages. */
 export function assertPiRawFallbackFits(
 	messages: readonly unknown[],
