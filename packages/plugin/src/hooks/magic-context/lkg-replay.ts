@@ -2,10 +2,14 @@ import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import {
     captureSlot,
     dropSlot,
+    exactReusablePrefix,
     getSlot,
     type LkgEntryNote,
+    type LkgInputSnapshot,
     type LkgSlot,
     lkgContentDigest,
+    lkgContentDigestFromFields,
+    lkgContentFields,
     noteEntry,
 } from "./lkg-slot";
 import { assertOpenAiCompatAdjacency } from "./openai-compat-adjacency";
@@ -58,7 +62,71 @@ export interface LkgEntryProjection {
 }
 
 export function projectLkgEntry(messages: MessageLike[]): LkgEntryProjection[] {
-    return messages.map((message) => {
+    return projectEntryWithDigests(messages, messages.map(lkgContentDigest));
+}
+
+/** Keep exact pristine tokens in memory: ids or rolling hashes alone cannot prove reuse. */
+export function createLkgEntryProjector() {
+    const priors = new Map<
+        string,
+        { snapshots: LkgInputSnapshot[]; digests: (string | null)[]; bytes: number }
+    >();
+    const maxBytes = 64 * 1024 * 1024;
+    let bytes = 0;
+    return (sessionId: string, messages: MessageLike[]): LkgEntryProjection[] => {
+        const prior = priors.get(sessionId);
+        const snapshots = messages.map((message) => ({
+            id: typeof message.info?.id === "string" ? message.info.id : "",
+            fields: lkgContentFields(message),
+        }));
+        const reusable = exactReusablePrefix(
+            snapshots.map((snapshot) => ({ ...snapshot, fields: snapshot.fields ?? [] })),
+            prior?.snapshots ?? null,
+        );
+        const digests = snapshots.map((snapshot, index) =>
+            index < reusable
+                ? (prior?.digests[index] ?? null)
+                : snapshot.fields
+                  ? lkgContentDigestFromFields(snapshot.fields)
+                  : null,
+        );
+        if (prior) {
+            bytes -= prior.bytes;
+            priors.delete(sessionId);
+        }
+        const retained = snapshots.map((snapshot) => ({
+            ...snapshot,
+            fields: snapshot.fields ?? [],
+        }));
+        const size = retained.reduce(
+            (total, snapshot) =>
+                total +
+                snapshot.id.length * 2 +
+                snapshot.fields.reduce<number>(
+                    (sum, field) => sum + 16 + (typeof field === "string" ? field.length * 2 : 0),
+                    0,
+                ),
+            0,
+        );
+        if (size <= maxBytes) {
+            while (priors.size >= 16 || bytes + size > maxBytes) {
+                const oldest = priors.entries().next().value;
+                if (!oldest) break;
+                bytes -= oldest[1].bytes;
+                priors.delete(oldest[0]);
+            }
+            priors.set(sessionId, { snapshots: retained, digests, bytes: size });
+            bytes += size;
+        }
+        return projectEntryWithDigests(messages, digests);
+    };
+}
+
+function projectEntryWithDigests(
+    messages: MessageLike[],
+    digests: readonly (string | null)[],
+): LkgEntryProjection[] {
+    return messages.map((message, index) => {
         const info = messageInfo(message);
         const time = info.time;
         const timeRecord =
@@ -103,7 +171,7 @@ export function projectLkgEntry(messages: MessageLike[]): LkgEntryProjection[] {
         };
         // Tagging and heuristic edits mutate these same objects later in the pass.
         // Replay sees pristine host inputs, so bind the capture to those entry bytes.
-        const contentDigest = lkgContentDigest(message);
+        const contentDigest = digests[index] ?? null;
         Object.defineProperty(projection, "contentDigest", {
             value: () => contentDigest,
             enumerable: false,

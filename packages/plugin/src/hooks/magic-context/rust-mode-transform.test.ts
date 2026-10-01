@@ -72,6 +72,7 @@ import {
 } from "./emergency-fail-closed";
 import { getVisibleMemoryIds } from "./inject-compartments";
 import { createDbLkgPersistence } from "./lkg-persist";
+import * as lkgSlot from "./lkg-slot";
 import { getSlot, registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
 import { MODULE_ORDINAL_PAGE_SIZE, MODULE_PAGE_MAX_BYTES } from "./module-wire";
 import { clearNoteNudgeTriggerOnly } from "./note-nudger";
@@ -1749,6 +1750,33 @@ describe("Rust mode authority adapter", () => {
         await transform({}, output);
         expect(output.messages).toEqual(native);
         expect(input).toEqual(native);
+    });
+
+    it("skips TypeScript entry projection in Rust mode", async () => {
+        const sessionId = `rust-no-entry-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const native = [{ role: "user", parts: [{ type: "text", text: "unchanged" }] }];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform"
+                    ? { decision: "SOFT+", native_messages: native }
+                    : { ok: true },
+        };
+        const fullDigest = spyOn(lkgSlot, "lkgContentDigest");
+        const fields = spyOn(lkgSlot, "lkgContentFields");
+        try {
+            const transform = createTransform(makeDeps(db, moduleClient));
+            const output = { messages: makeMessages(sessionId) as unknown[] };
+            await transform({}, output);
+            expect(output.messages).toEqual(native);
+            expect(fullDigest).not.toHaveBeenCalled();
+            expect(fields).not.toHaveBeenCalled();
+        } finally {
+            fullDigest.mockRestore();
+            fields.mockRestore();
+        }
     });
 
     it("applies module output through the OpenCode hook array reference", async () => {

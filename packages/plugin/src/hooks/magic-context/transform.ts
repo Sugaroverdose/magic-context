@@ -116,7 +116,7 @@ import {
     selectHiddenMessagesAtCompactionSeam,
 } from "./inject-compartments";
 import { saveLkgSlotToDb } from "./lkg-persist";
-import { captureLkgSlot, projectLkgEntry, resolveLkgModelKeys } from "./lkg-replay";
+import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
 import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
 import {
@@ -685,6 +685,7 @@ export function createTransform(deps: TransformDeps) {
                   memorySyncRequestedSessions: deps.rustMemorySyncRequestedSessions,
               })
             : undefined;
+    const projectEntry = createLkgEntryProjector();
     const deferredHistoryRefreshSessions = deps.deferredHistoryRefreshSessions ?? new Set<string>();
     const deferredMaterializationSessions =
         deps.deferredMaterializationSessions ?? new Set<string>();
@@ -719,7 +720,9 @@ export function createTransform(deps: TransformDeps) {
         }
         logTransformTiming(sessionId, "findSessionId", tSessionId, `messages=${messages.length}`);
         const tLkgEntry = performance.now();
-        const lkgInput = projectLkgEntry(messages);
+        // The Rust adapter captures its own last-known-good input snapshot and returns
+        // before the TypeScript capture, so it does not need this entry projection.
+        const lkgInput = deps.transformMode === "rust" ? [] : projectEntry(sessionId, messages);
         logTransformTiming(sessionId, "lkg.entryProjection", tLkgEntry);
         const resolvedSessionId = sessionId;
         const runNotificationParams = (sid: string) => {
