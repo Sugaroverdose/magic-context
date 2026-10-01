@@ -253,6 +253,99 @@ export function isPiLiveUsageRawBranchEstimate(
 	return false;
 }
 
+/**
+ * isPiLiveUsageRawBranchEstimate on the branch of a Pi context's session
+ * manager. False when the branch cannot be read: the live figure is then
+ * treated the way it was before the check existed.
+ */
+export function isPiContextUsageRawBranchEstimate(
+	sessionManager: unknown,
+): boolean {
+	try {
+		const manager = sessionManager as
+			| { getBranch?: () => unknown[] }
+			| null
+			| undefined;
+		if (typeof manager?.getBranch !== "function") return false;
+		return isPiLiveUsageRawBranchEstimate(manager.getBranch());
+	} catch {
+		return false;
+	}
+}
+
+export interface ResolveGuardedPiPressureSnapshotArgs
+	extends ResolvePiPressureSnapshotArgs {
+	/** Pi's live figure is a raw-branch estimate (see isPiLiveUsageRawBranchEstimate). */
+	liveIsRawBranchEstimate?: boolean;
+	/**
+	 * `persistedInputTokens` is itself Pi's live figure (the caller had no
+	 * persisted provider reading and fell back to `getContextUsage()`), so
+	 * it is set aside together with the live figure.
+	 */
+	persistedFromLive?: boolean;
+}
+
+/**
+ * `resolvePiPressureSnapshot` with Pi's raw-branch estimate left out at any
+ * size, and no logging. The transform (through
+ * resolvePiPressureSnapshotWithEstimateGuard) and the status displays both
+ * use it, so `/ctx-status` and the footer show the same figure the pressure
+ * decision used.
+ */
+export function resolveGuardedPiPressureSnapshot(
+	args: ResolveGuardedPiPressureSnapshotArgs,
+): { snapshot: PiPressureSnapshot; setAsideEstimate: number | undefined } {
+	const live =
+		typeof args.liveInputTokens === "number" &&
+		Number.isFinite(args.liveInputTokens)
+			? args.liveInputTokens
+			: 0;
+	const setAside = args.liveIsRawBranchEstimate === true && live > 0;
+	const snapshot = resolvePiPressureSnapshot(
+		setAside
+			? {
+					...args,
+					liveInputTokens: undefined,
+					...(args.persistedFromLive
+						? { persistedInputTokens: 0, persistedPercentage: 0 }
+						: {}),
+				}
+			: args,
+	);
+	return { snapshot, setAsideEstimate: setAside ? live : undefined };
+}
+
+/**
+ * Pressure for the status displays (`/ctx-status` and the footer): the
+ * persisted provider reading against Pi's live figure, with the raw-branch
+ * estimate set aside exactly as the transform sets it aside.
+ *
+ * The branch is read only when the live figure would otherwise win: below the
+ * persisted reading its classification cannot change the result, and the
+ * footer redraws on every tool result.
+ */
+export function resolvePiStatusPressureSnapshot(
+	args: ResolvePiPressureSnapshotArgs & { sessionManager: unknown },
+): PiPressureSnapshot {
+	const { sessionManager, ...pressureArgs } = args;
+	const live =
+		typeof pressureArgs.liveInputTokens === "number" &&
+		Number.isFinite(pressureArgs.liveInputTokens)
+			? pressureArgs.liveInputTokens
+			: 0;
+	const persisted =
+		Number.isFinite(pressureArgs.persistedInputTokens) &&
+		pressureArgs.persistedInputTokens > 0
+			? pressureArgs.persistedInputTokens
+			: 0;
+	const liveIsRawBranchEstimate =
+		live > persisted && isPiContextUsageRawBranchEstimate(sessionManager);
+	return resolveGuardedPiPressureSnapshot({
+		...pressureArgs,
+		liveIsRawBranchEstimate,
+	}).snapshot;
+}
+
 /** Log a set-aside raw-branch estimate once per episode for the session. */
 export function noteRawBranchEstimateSetAside(
 	sessionId: string,
@@ -280,38 +373,18 @@ export function noteRawBranchEstimateSetAside(
  * overflow for the scheduler to handle.
  */
 export function resolvePiPressureSnapshotWithEstimateGuard(
-	args: ResolvePiPressureSnapshotArgs & {
+	args: ResolveGuardedPiPressureSnapshotArgs & {
 		sessionId: string;
 		source: string;
-		/** Pi's live figure is a raw-branch estimate (see isPiLiveUsageRawBranchEstimate). */
-		liveIsRawBranchEstimate?: boolean;
-		/**
-		 * `persistedInputTokens` is itself Pi's live figure (the caller had no
-		 * persisted provider reading and fell back to `getContextUsage()`), so
-		 * it is set aside together with the live figure.
-		 */
-		persistedFromLive?: boolean;
 	},
 ): PiPressureSnapshot {
-	const live =
-		typeof args.liveInputTokens === "number" &&
-		Number.isFinite(args.liveInputTokens)
-			? args.liveInputTokens
-			: 0;
-	const setAsideEstimate = args.liveIsRawBranchEstimate === true && live > 0;
-	const snapshot = resolvePiPressureSnapshot(
-		setAsideEstimate
-			? {
-					...args,
-					liveInputTokens: undefined,
-					...(args.persistedFromLive
-						? { persistedInputTokens: 0, persistedPercentage: 0 }
-						: {}),
-				}
-			: args,
-	);
-	if (setAsideEstimate) {
-		noteRawBranchEstimateSetAside(args.sessionId, live, args.source);
+	const { snapshot, setAsideEstimate } = resolveGuardedPiPressureSnapshot(args);
+	if (setAsideEstimate !== undefined) {
+		noteRawBranchEstimateSetAside(
+			args.sessionId,
+			setAsideEstimate,
+			args.source,
+		);
 	} else if (snapshot.inputTokens > 0) {
 		notePiUsageReadingUsed(args.sessionId);
 	}

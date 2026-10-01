@@ -194,7 +194,7 @@ import {
 import {
 	computePiPressure,
 	extractAssistantUsage,
-	isPiLiveUsageRawBranchEstimate,
+	isPiContextUsageRawBranchEstimate,
 	notePiUsageReadingUsed,
 	noteRawBranchEstimateSetAside,
 } from "./pi-pressure";
@@ -2625,16 +2625,9 @@ async function startPiMagicContextRuntime(
 					piUsage && typeof piUsage.tokens === "number"
 						? piUsage.tokens
 						: undefined,
-				piTokensIsRawBranchEstimate: (() => {
-					try {
-						const branch = (
-							ctx.sessionManager as { getBranch?: () => unknown[] }
-						).getBranch?.();
-						return isPiLiveUsageRawBranchEstimate(branch);
-					} catch {
-						return false;
-					}
-				})(),
+				piTokensIsRawBranchEstimate: isPiContextUsageRawBranchEstimate(
+					ctx.sessionManager,
+				),
 				notifyIssue: async (message) => {
 					const uiNotify = (
 						ctx as { ui?: { notify?: (message: string) => unknown } }

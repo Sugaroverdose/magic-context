@@ -82,7 +82,7 @@ import packageJson from "../../package.json";
 import { resolveSessionId } from "../commands/pi-command-utils";
 import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
 import { resolvePiWindowGeometry } from "../pi-context-limit";
-import { resolvePiPressureSnapshot } from "../pi-pressure";
+import { resolvePiStatusPressureSnapshot } from "../pi-pressure";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
 
 /** Refresh cadence while dialog is open. */
@@ -656,7 +656,8 @@ export function buildPiStatusDetail(
 		persistedInputTokens: meta.lastInputTokens,
 		persistedPercentage: meta.lastContextPercentage,
 	});
-	const pressure = resolvePiPressureSnapshot({
+	const pressure = resolvePiStatusPressureSnapshot({
+		sessionManager: ctx.sessionManager,
 		persistedPercentage: meta.lastContextPercentage,
 		persistedInputTokens: meta.lastInputTokens,
 		liveInputTokens: usage?.tokens,
