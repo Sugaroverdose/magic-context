@@ -155,7 +155,7 @@ export interface V2Context {
             model: { providerID: string; id: string; variant?: string };
             location: { directory: string };
             metadata: { magic_context: "hidden-run"; role: "historian" | "dreamer" };
-            /** Honoured only by hosts that also expose `remove`; see `remove` below. */
+            /** Kept only by hosts that also have the optional `session.remove` declared below. */
             parentID?: string;
         }): Promise<{ id: string }>;
         get(input: { sessionID: string }): Promise<{

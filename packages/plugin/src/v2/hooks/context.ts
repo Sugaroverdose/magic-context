@@ -112,7 +112,7 @@ import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
-import { nativeSessionRemove } from '../hidden-child-native';
+import { nativeSessionRemove } from "../hidden-child-native";
 import { createLateHiddenExecutor, createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { type HostServiceOwner, removeHostSession } from "../host-service";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";

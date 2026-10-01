@@ -6,7 +6,6 @@ import type { HiddenRunIdentity } from "../hooks/magic-context/compartment-runne
 import { declareHostLimitation } from "../shared/host-limitations";
 import { log } from "../shared/logger";
 import type { Database } from "../shared/sqlite";
-import type { V2HiddenCompletionOptions } from "./hidden-completion";
 import {
     assistantOutcome,
     childCreateInput,
@@ -20,6 +19,7 @@ import {
     roleTitle,
     withReader,
 } from "./hidden-child-record";
+import type { V2HiddenCompletionOptions } from "./hidden-completion";
 import { hiddenToolLoop } from "./hooks/hidden-child";
 import { type HostServiceOwner, HostServiceUnavailable, hostServiceOwner } from "./host-service";
 import type { StoreRow } from "./store-reader";

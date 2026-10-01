@@ -16,7 +16,8 @@ import type { StoreRow } from "./store-reader";
  * - `hidden-child-native.ts` serves hosts whose plugin session API can remove sessions. Each run
  *   gets a fresh child parented to the user's session, removed when the run ends.
  * - `hidden-child-legacy.ts` serves older hosts. Children are root sessions reused across runs,
- *   recorded in context.db, and deleted through the host's HTTP route or by `doctor --fix`.
+ *   recorded in context.db, and deleted through the host's HTTP route; whatever that misses is
+ *   deleted offline by the CLI's `doctor --fix` (doctor-hidden-children.ts in packages/cli).
  *
  * `createV2HiddenCompletionExecutor` picks one of the two, in one place.
  */
