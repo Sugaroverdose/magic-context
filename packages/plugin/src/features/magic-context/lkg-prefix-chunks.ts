@@ -68,12 +68,13 @@ export interface AssembledLkgPrefix {
 
 /**
  * Rebuild a prefix from its stored slices and check it against the slot row's
- * count, length and hash. Returns undefined on any mismatch: a missing, extra,
- * reordered or partially written slice must never produce a replayable prefix.
+ * count, length and hash, and each slice against its own stored hash. Returns
+ * undefined on any mismatch: a missing, extra, reordered or partially written
+ * slice must never produce a replayable prefix.
  */
 export function assembleLkgPrefix(
     expected: { chars: unknown; chunks: unknown; hash: unknown },
-    rows: ReadonlyArray<{ chunk?: unknown; body?: unknown }>,
+    rows: ReadonlyArray<{ chunk?: unknown; hash?: unknown; body?: unknown }>,
 ): AssembledLkgPrefix | undefined {
     const { chars, chunks, hash } = expected;
     if (
@@ -96,6 +97,9 @@ export function assembleLkgPrefix(
     }
     if (length !== chars) return undefined;
     const chunkHashes = bodies.map(hashLkgChunk);
+    // A slice's stored hash is what the next save compares against, so it must
+    // describe the stored body.
+    if (chunkHashes.some((chunkHash, index) => rows[index]?.hash !== chunkHash)) return undefined;
     if (hashLkgChunkList(chunkHashes) !== hash) return undefined;
     return { jsonPrefix: bodies.join(""), chunkHashes, hash };
 }

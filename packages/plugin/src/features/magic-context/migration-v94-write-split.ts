@@ -17,11 +17,16 @@ import { layoutLkgPrefix } from "./lkg-prefix-chunks";
  *   leaving only the envelope (version and other namespaces) in the column.
  */
 
-/** Slices of each LKG prefix, in order; see lkg-prefix-chunks.ts. */
+/**
+ * Slices of each LKG prefix, in order; see lkg-prefix-chunks.ts. `hash` is the
+ * slice's SHA-256, which a save compares to decide whether the slice changed.
+ * It precedes `body` so reading it never walks the body's overflow pages.
+ */
 export const LKG_SLOT_CHUNKS_DDL = `
     CREATE TABLE IF NOT EXISTS lkg_slot_chunks (
         session_id TEXT NOT NULL,
         chunk INTEGER NOT NULL,
+        hash TEXT NOT NULL,
         body TEXT NOT NULL,
         PRIMARY KEY (session_id, chunk)
     );
@@ -60,8 +65,8 @@ function lkgSlotsDdl(table: string): string {
 /** The `lkg_slots` layout from migration 94 on, without the prefix itself. */
 export const LKG_SLOTS_DDL = lkgSlotsDdl("lkg_slots");
 
-/** Same window as pruneStaleLkgSlots: slots older than this with no recent session activity. */
-const LKG_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+/** Slots captured longer ago than this are dropped rather than moved; see splitLkgSlotPrefixes. */
+const LKG_MOVE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 function tableExists(db: Database, name: string): boolean {
     return Boolean(
@@ -77,12 +82,17 @@ function columnExists(db: Database, table: string, column: string): boolean {
 /**
  * Rebuild `lkg_slots` without `json_prefix`, moving each prefix into slices.
  *
- * The slots are moved rather than dropped: the restart that applies this
- * migration also restarts the Rust module, and while it reopens its own store
- * the LKG slot is what a session replays. A slot the regular prune would delete
- * (captured over a week ago, no session activity in that week) is not carried
- * over. The prefix is sliced in JavaScript, not with SQL substr, because the
- * slice boundaries and the hash a load verifies must be computed exactly as
+ * The LKG is a recovery cache: the next applied pass of a session recaptures
+ * its slot. It matters most right after this migration, because the restart
+ * that applies it also restarts the Rust module, and while the module reopens
+ * its own store the LKG slot is what a session replays. So slots captured in the
+ * last day, the sessions that can send a pass in that window, are moved, and
+ * older ones are dropped. Moving every slot would rewrite the whole cache (about
+ * 700 MB on a large store, 34 to 73 seconds under load) while holding the write
+ * lock every other process needs to start.
+ *
+ * The prefix is sliced in JavaScript, not with SQL substr, because the slice
+ * boundaries and the hash a load verifies must be computed exactly as
  * saveLkgSlotToDb computes them.
  */
 export function splitLkgSlotPrefixes(db: Database, now = Date.now()): void {
@@ -93,15 +103,7 @@ export function splitLkgSlotPrefixes(db: Database, now = Date.now()): void {
     }
     if (!columnExists(db, "lkg_slots", "json_prefix")) return;
 
-    if (tableExists(db, "session_projects")) {
-        const cutoff = now - LKG_STALE_AFTER_MS;
-        db.prepare(
-            `DELETE FROM lkg_slots WHERE captured_at < ? AND NOT EXISTS (
-                SELECT 1 FROM session_projects sp
-                WHERE sp.session_id = lkg_slots.session_id AND sp.updated_at >= ?
-            )`,
-        ).run(cutoff, cutoff);
-    }
+    db.prepare("DELETE FROM lkg_slots WHERE NOT (captured_at >= ?)").run(now - LKG_MOVE_WINDOW_MS);
 
     db.exec("DROP TABLE IF EXISTS lkg_slots_v94");
     db.exec(lkgSlotsDdl("lkg_slots_v94"));
@@ -125,7 +127,7 @@ export function splitLkgSlotPrefixes(db: Database, now = Date.now()): void {
         FROM lkg_slots WHERE session_id IS ?`,
     );
     const insertChunk = db.prepare(
-        "INSERT INTO lkg_slot_chunks (session_id, chunk, body) VALUES (?, ?, ?)",
+        "INSERT INTO lkg_slot_chunks (session_id, chunk, hash, body) VALUES (?, ?, ?, ?)",
     );
     db.prepare("DELETE FROM lkg_slot_chunks").run();
     // One slot at a time, so at most one prefix (up to several megabytes) is in memory.
@@ -137,7 +139,7 @@ export function splitLkgSlotPrefixes(db: Database, now = Date.now()): void {
         const inserted = insertSlot.run(layout.chars, layout.chunks.length, layout.hash, sessionId);
         if (Number(inserted.changes) !== 1) continue;
         for (let index = 0; index < layout.chunks.length; index += 1) {
-            insertChunk.run(sessionId, index, layout.chunks[index]);
+            insertChunk.run(sessionId, index, layout.chunkHashes[index], layout.chunks[index]);
         }
     }
     db.exec("DROP TABLE lkg_slots");

@@ -157,32 +157,24 @@ export function parsePersistedLkgSlot(row: unknown): LkgSlot | undefined {
 }
 
 /**
- * What this process last knows to be stored for a session: the fingerprint of
- * the slot it saved (empty when the state came from a load, so the next save
- * still refreshes the metadata row), the prefix hash recorded in the row, and
- * the hash of each stored slice.
+ * Fingerprint of the slot each session last saved through this handle, so an
+ * unchanged slot skips the database entirely.
  */
-interface PersistedLkgState {
-    fingerprint: string;
-    prefixHash: string;
-    chunkHashes: string[];
-}
+const persistedFingerprints = new WeakMap<Database, Map<string, string>>();
+const PERSISTED_FINGERPRINT_MAX_SESSIONS = 1000;
 
-const persistedStates = new WeakMap<Database, Map<string, PersistedLkgState>>();
-const PERSISTED_STATE_MAX_SESSIONS = 1000;
-
-function rememberPersistedState(db: Database, sessionId: string, state: PersistedLkgState): void {
-    let states = persistedStates.get(db);
-    if (!states) {
-        states = new Map();
-        persistedStates.set(db, states);
+function rememberFingerprint(db: Database, sessionId: string, fingerprint: string): void {
+    let saved = persistedFingerprints.get(db);
+    if (!saved) {
+        saved = new Map();
+        persistedFingerprints.set(db, saved);
     }
-    states.delete(sessionId);
-    if (states.size >= PERSISTED_STATE_MAX_SESSIONS) {
-        const oldest = states.keys().next().value;
-        if (oldest !== undefined) states.delete(oldest);
+    saved.delete(sessionId);
+    if (saved.size >= PERSISTED_FINGERPRINT_MAX_SESSIONS) {
+        const oldest = saved.keys().next().value;
+        if (oldest !== undefined) saved.delete(oldest);
     }
-    states.set(sessionId, state);
+    saved.set(sessionId, fingerprint);
 }
 
 function slotFingerprint(slot: LkgSlot): string {
@@ -211,35 +203,32 @@ function slotFingerprint(slot: LkgSlot): string {
  * Persist a slot for the session, replacing any prior row. Best-effort: callers
  * treat a failure as "this process still has the in-memory slot" and log.
  *
- * Only the prefix slices whose hash changed are written. The slices, the removal
+ * Only the prefix slices whose hash differs from the stored slice's hash are
+ * written. Comparing against the stored hashes, not a hash this process
+ * remembers, keeps the first save after a restart and a save after another
+ * connection's save just as small and just as correct. The slices, the removal
  * of slices past the new count, and the metadata row (with the count, length and
  * hash a load verifies) commit in one transaction.
  */
 export function saveLkgSlotToDb(db: Database, sessionId: string, slot: LkgSlot): boolean {
     const fingerprint = slotFingerprint(slot);
-    const previous = persistedStates.get(db)?.get(sessionId);
-    if (previous?.fingerprint === fingerprint) return true;
+    if (persistedFingerprints.get(db)?.get(sessionId) === fingerprint) return true;
     const layout = layoutLkgPrefix(slot.jsonPrefix);
     try {
         db.transaction(() => {
-            // Slice hashes remembered by this process describe the stored slices
-            // only while the row still carries the prefix hash this process wrote
-            // or loaded. Another connection may have saved the slot since; then
-            // every slice is rewritten.
-            const stored = db
-                .prepare("SELECT json_prefix_hash FROM lkg_slots WHERE session_id = ?")
-                .get(sessionId) as { json_prefix_hash?: unknown } | undefined;
-            const knownHashes =
-                previous !== undefined && stored?.json_prefix_hash === previous.prefixHash
-                    ? previous.chunkHashes
-                    : [];
+            const storedHashes = new Map<unknown, unknown>();
+            for (const row of db
+                .prepare("SELECT chunk, hash FROM lkg_slot_chunks WHERE session_id = ?")
+                .all(sessionId) as Array<{ chunk: unknown; hash: unknown }>) {
+                storedHashes.set(row.chunk, row.hash);
+            }
             const upsertChunk = db.prepare(
-                `INSERT INTO lkg_slot_chunks (session_id, chunk, body) VALUES (?, ?, ?)
-                ON CONFLICT(session_id, chunk) DO UPDATE SET body = excluded.body`,
+                `INSERT INTO lkg_slot_chunks (session_id, chunk, hash, body) VALUES (?, ?, ?, ?)
+                ON CONFLICT(session_id, chunk) DO UPDATE SET hash = excluded.hash, body = excluded.body`,
             );
             for (let index = 0; index < layout.chunks.length; index += 1) {
-                if (knownHashes[index] === layout.chunkHashes[index]) continue;
-                upsertChunk.run(sessionId, index, layout.chunks[index]);
+                if (storedHashes.get(index) === layout.chunkHashes[index]) continue;
+                upsertChunk.run(sessionId, index, layout.chunkHashes[index], layout.chunks[index]);
             }
             db.prepare("DELETE FROM lkg_slot_chunks WHERE session_id = ? AND chunk >= ?").run(
                 sessionId,
@@ -289,16 +278,9 @@ export function saveLkgSlotToDb(db: Database, sessionId: string, slot: LkgSlot):
                 slot.captureSequence ?? null,
             );
         }).immediate();
-        rememberPersistedState(db, sessionId, {
-            fingerprint,
-            prefixHash: layout.hash,
-            chunkHashes: layout.chunkHashes,
-        });
+        rememberFingerprint(db, sessionId, fingerprint);
         return true;
     } catch (error) {
-        // The transaction rolled back, so the remembered state (if any) may no
-        // longer match what is stored; the next save rewrites every slice.
-        persistedStates.get(db)?.delete(sessionId);
         sessionLog(sessionId, "LKG snapshot persistence failed (in-memory slot retained):", error);
         return false;
     }
@@ -310,14 +292,14 @@ export function clearPersistedLkgSlot(db: Database, sessionId: string): void {
             db.prepare("DELETE FROM lkg_slot_chunks WHERE session_id = ?").run(sessionId);
             db.prepare("DELETE FROM lkg_slots WHERE session_id = ?").run(sessionId);
         }).immediate();
-        persistedStates.get(db)?.delete(sessionId);
+        persistedFingerprints.get(db)?.delete(sessionId);
     } catch (error) {
         sessionLog(sessionId, "LKG snapshot durable clear failed:", error);
     }
 }
 
 export function loadPersistedLkgSlot(db: Database, sessionId: string): LkgSlot | undefined {
-    type ChunkRow = { chunk?: unknown; body?: unknown };
+    type ChunkRow = { chunk?: unknown; hash?: unknown; body?: unknown };
     let row: Record<string, unknown> | undefined;
     let chunkRows: ChunkRow[];
     try {
@@ -331,7 +313,7 @@ export function loadPersistedLkgSlot(db: Database, sessionId: string): LkgSlot |
                 if (!slotRow) return { row: undefined, chunkRows: [] as ChunkRow[] };
                 const slices = db
                     .prepare(
-                        "SELECT chunk, body FROM lkg_slot_chunks WHERE session_id = ? ORDER BY chunk",
+                        "SELECT chunk, hash, body FROM lkg_slot_chunks WHERE session_id = ? ORDER BY chunk",
                     )
                     .all(sessionId) as ChunkRow[];
                 return { row: slotRow, chunkRows: slices };
@@ -361,13 +343,6 @@ export function loadPersistedLkgSlot(db: Database, sessionId: string): LkgSlot |
         clearPersistedLkgSlot(db, sessionId);
         return undefined;
     }
-    // The verified slice hashes let the first save after a restart rewrite only
-    // the slices that changed.
-    rememberPersistedState(db, sessionId, {
-        fingerprint: "",
-        prefixHash: prefix.hash,
-        chunkHashes: prefix.chunkHashes,
-    });
     // Size admission is enforced by the slot store's own bound when the loaded
     // slot is installed; an oversized row simply declines to hydrate.
     return slot;
@@ -395,7 +370,7 @@ export function pruneStaleLkgSlots(db: Database, now = Date.now()): number {
                     .changes;
             })
             .immediate();
-        if (changes) persistedStates.delete(db);
+        if (changes) persistedFingerprints.delete(db);
         return changes;
     } finally {
         db.exec(`PRAGMA busy_timeout = ${Number(previousTimeout.timeout) || 0}`);

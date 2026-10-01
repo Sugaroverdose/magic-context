@@ -168,7 +168,7 @@ function observeReplay(db: Database, sessionId: string, visibleIds: string[]) {
 }
 
 describe("migration v94: LKG prefixes as slices", () => {
-    test("moves live v93 slots into verified slices and drops only stale ones", () => {
+    test("moves slots captured in the last day into verified slices and drops older ones", () => {
         const db = v93Database();
         try {
             const now = Date.now();
@@ -177,10 +177,12 @@ describe("migration v94: LKG prefixes as slices", () => {
                 ...slotFor('[{"role":"user"},{"role":"assistant"}]', now),
                 piOutputEntryIds: ["m0", null],
             };
-            const stale = slotFor('[{"text":"old"}]', now - 30 * 24 * 60 * 60 * 1000);
+            const stale = slotFor('[{"text":"old"}]', now - 2 * 24 * 60 * 60 * 1000);
+            const recent = slotFor('[{"text":"recent"}]', now - 23 * 60 * 60 * 1000);
             saveV93LkgSlot(db, "opencode", opencode);
             saveV93LkgSlot(db, "pi", pi);
             saveV93LkgSlot(db, "stale", stale);
+            saveV93LkgSlot(db, "recent", recent);
 
             runMigrations(db);
 
@@ -199,6 +201,7 @@ describe("migration v94: LKG prefixes as slices", () => {
             expect(chunkCount(db, "opencode")).toBe(3);
             expect(loadPersistedLkgSlot(db, "opencode")).toEqual(opencode);
             expect(loadPersistedLkgSlot(db, "pi")).toEqual(pi);
+            expect(loadPersistedLkgSlot(db, "recent")).toEqual(recent);
             expect(loadPersistedLkgSlot(db, "stale")).toBeUndefined();
             expect(chunkCount(db, "stale")).toBe(0);
         } finally {
@@ -232,8 +235,8 @@ describe("migration v94: LKG prefixes as slices", () => {
         try {
             initializeDatabase(after);
             runMigrations(after);
-            const restored = loadPersistedLkgSlot(after, "ses");
-            expect(restored?.jsonPrefix).toBe(second.jsonPrefix);
+            // The first save after a restart, with no load before it, still writes
+            // only the changed slice: it compares against the stored slice hashes.
             const start = totalChanges(after);
             expect(saveLkgSlotToDb(after, "ses", third)).toBe(true);
             expect(totalChanges(after) - start).toBe(2);
@@ -286,7 +289,7 @@ describe("LKG slices never replay a torn or mixed prefix", () => {
         const { db } = migratedWithSlot();
         try {
             db.prepare(
-                "INSERT INTO lkg_slot_chunks (session_id, chunk, body) VALUES ('ses', 3, 'x')",
+                "INSERT INTO lkg_slot_chunks (session_id, chunk, hash, body) VALUES ('ses', 3, 'h', 'x')",
             ).run();
             expect(loadPersistedLkgSlot(db, "ses")).toBeUndefined();
         } finally {
@@ -322,7 +325,7 @@ describe("LKG slices never replay a torn or mixed prefix", () => {
         }
     });
 
-    test("a save from a connection whose remembered slices are stale rewrites them", () => {
+    test("a save after another connection's save rewrites the slices that differ from what is stored", () => {
         const path = tempDbPath();
         const setup = v93Database(path);
         runMigrations(setup);
@@ -337,7 +340,7 @@ describe("LKG slices never replay a torn or mixed prefix", () => {
             const third = slotFor(appendMessage(base, "third"));
             expect(saveLkgSlotToDb(a, "ses", first)).toBe(true);
             expect(saveLkgSlotToDb(b, "ses", other)).toBe(true);
-            // `a` still remembers first's slices, but the stored first slice is other's.
+            // `a` last wrote first's slices, but the stored first slice is other's.
             expect(saveLkgSlotToDb(a, "ses", third)).toBe(true);
             expect(loadPersistedLkgSlot(b, "ses")).toEqual(third);
         } finally {
