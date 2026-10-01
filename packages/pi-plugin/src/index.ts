@@ -42,7 +42,6 @@ import type {
 	MagicContextConfig,
 } from "@magic-context/core/config/schema/magic-context";
 import {
-	buildDreamTaskRuntimeConfigs,
 	summarizeDreamSchedule,
 	userMemoryCollectionEnabled,
 } from "@magic-context/core/features/magic-context/dreamer/task-config";
@@ -75,6 +74,7 @@ import {
 import {
 	clearDetectedContextLimit,
 	getOverflowState,
+	loadProtectedTailMeta,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { describeStorageUnavailability } from "@magic-context/core/features/magic-context/storage-unavailable-reason";
 import { runDeferredV22Backfill } from "@magic-context/core/features/magic-context/v22-deferred-backfill";
@@ -182,6 +182,14 @@ import {
 	unregisterPiProjectEmbeddings,
 } from "./embedding-bootstrap";
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
+import {
+	describeInertEmergencyDrainLatch,
+	emptyPiModelChainsKey,
+	findEmptyPiModelChains,
+	formatEmptyPiModelChain,
+	formatEmptyPiModelChainsNotice,
+	type PiModelRegistryLike,
+} from "./model-chain-health";
 import { bootPiRuntimeWithDeadline } from "./pi-boot-deadline";
 import {
 	resolvePiUsableContextLimit,
@@ -194,10 +202,18 @@ import {
 import {
 	computePiPressure,
 	extractAssistantUsage,
-	isPiLiveUsageRawBranchEstimate,
+	isPiContextUsageRawBranchEstimate,
 	notePiUsageReadingUsed,
 	noteRawBranchEstimateSetAside,
+	piMessageAnchorsLiveUsage,
+	recordPiLiveUsageClassification,
 } from "./pi-pressure";
+import {
+	piProvenFloorModelKey,
+	readPiProvenFloorRecord,
+	recordPiProvenFloorModel,
+	resolvePiProvenInputFloor,
+} from "./pi-proven-floor";
 import { abortInFlightRecomps, awaitInFlightRecomps } from "./pi-recomp-runner";
 import { handlePiProviderFailure } from "./provider-error-recovery-pi";
 import { readPiSessionMessages } from "./read-session-pi";
@@ -707,6 +723,17 @@ export async function persistPiPressureFromMessageEnd(args: {
 	piTokensIsRawBranchEstimate?: boolean;
 	notifyIssue?: (message: string) => unknown | Promise<unknown>;
 }): Promise<void> {
+	// Pi emits message_end before it appends the message to the branch, so the
+	// branch read for the flag does not hold this message yet. A reply with
+	// provider usage becomes the anchor of Pi's live figure once appended.
+	if (piMessageAnchorsLiveUsage(args.message)) {
+		recordPiLiveUsageClassification(args.sessionId, false);
+	} else if (typeof args.piTokensIsRawBranchEstimate === "boolean") {
+		recordPiLiveUsageClassification(
+			args.sessionId,
+			args.piTokensIsRawBranchEstimate,
+		);
+	}
 	const { provider, model } = getPiMessageModel(args.message);
 	const activeModel = args.piModel ?? { provider, id: model };
 	const modelKey =
@@ -780,8 +807,15 @@ export async function persistPiPressureFromMessageEnd(args: {
 		}
 	}
 
+	// The floor is proof about the model that served it; see pi-proven-floor.ts.
+	// Resolved before the row is read, because an unkeyed floor is cleared here.
+	const floorModelKey = piProvenFloorModelKey(activeModel);
+	let observedSafeInputTokens = resolvePiProvenInputFloor({
+		db: args.db,
+		sessionId: args.sessionId,
+		modelKey: floorModelKey,
+	});
 	const meta = getOrCreateSessionMeta(args.db, args.sessionId);
-	let observedSafeInputTokens = meta.observedSafeInputTokens ?? 0;
 	const updates: Partial<{
 		lastResponseTime: number;
 		lastContextPercentage: number;
@@ -910,6 +944,24 @@ export async function persistPiPressureFromMessageEnd(args: {
 	}
 
 	updateSessionMeta(args.db, args.sessionId, updates);
+	if (
+		floorModelKey !== undefined &&
+		typeof updates.observedSafeInputTokens === "number" &&
+		updates.observedSafeInputTokens > 0
+	) {
+		const recorded = readPiProvenFloorRecord(args.db, args.sessionId);
+		if (
+			recorded?.modelKey !== floorModelKey ||
+			recorded.tokens !== updates.observedSafeInputTokens
+		) {
+			recordPiProvenFloorModel(
+				args.db,
+				args.sessionId,
+				floorModelKey,
+				updates.observedSafeInputTokens,
+			);
+		}
+	}
 	if (cacheAlert !== undefined) {
 		await args.notifyIssue?.(cacheAlert);
 	}
@@ -928,6 +980,33 @@ const PLUGIN_VERSION: string = (() => {
 /** Lock the harness at module load. Safe to import this file in tests; the
  * lock is idempotent and will throw only on a conflicting reset. */
 setHarness(PI_HARNESS_KIND);
+
+// Model-chain reports already made in this process. Kept on globalThis so an
+// extension reload in the same Pi process does not repeat them.
+const PI_MODEL_CHAIN_REPORTS = Symbol.for(
+	"magic-context.pi.model-chain-reports",
+);
+function piModelChainReports(): {
+	notified: Set<string>;
+	logged: Set<string>;
+} {
+	const globals = globalThis as Record<symbol, unknown>;
+	const existing = globals[PI_MODEL_CHAIN_REPORTS] as
+		| { notified: Set<string>; logged: Set<string> }
+		| undefined;
+	if (existing) return existing;
+	const created = { notified: new Set<string>(), logged: new Set<string>() };
+	globals[PI_MODEL_CHAIN_REPORTS] = created;
+	return created;
+}
+const notifiedPiModelChainKeys = piModelChainReports().notified;
+const loggedPiModelChainLines = piModelChainReports().logged;
+
+/** Forget the model-chain reports made in this process (tests only). */
+export function resetPiModelChainReportsForTest(): void {
+	notifiedPiModelChainKeys.clear();
+	loggedPiModelChainLines.clear();
+}
 
 // ---------------------------------------------------------------------------
 // Config-driven resolvers
@@ -1548,6 +1627,65 @@ async function startPiMagicContextRuntime(
 	let activeModelRegistry:
 		| { find(provider: string, modelId: string): unknown }
 		| undefined;
+
+	// Config generation last checked per project directory.
+	const modelChainsCheckedGeneration = new Map<string, number>();
+	/**
+	 * Validate the historian and dreamer chains against Pi's model registry:
+	 * log the historian chain that will actually run, and notify the session
+	 * once per process for each set of chains left empty (see
+	 * model-chain-health.ts). Runs at session start and after a config reload.
+	 */
+	function reportPiModelChains(
+		ctx: {
+			modelRegistry?: PiModelRegistryLike;
+			hasUI?: boolean;
+			ui?: { notify?: (message: string, level?: "warning") => unknown };
+		},
+		project: ResolvedPiProjectDeps,
+	): void {
+		const registry = ctx.modelRegistry;
+		if (!registry) return;
+		try {
+			const live = liveReaderFor(project.projectDir, project.config).poll();
+			modelChainsCheckedGeneration.set(project.projectDir, live.generation);
+			const checked = historianRunConfig(project.config, live.effective);
+			const historian = resolveHistorianFromConfig(
+				checked,
+				PI_HARNESS_KIND,
+				registry,
+			);
+			const empty = findEmptyPiModelChains({
+				config: checked,
+				registry,
+				harness: PI_HARNESS_KIND,
+			});
+			const emptyHistorian = empty.find((chain) => chain.owner === "historian");
+			const historianLine = historian
+				? `registered historian trigger (model=${historian.model}${historian.fallbackModels?.length ? `, fallbacks=${historian.fallbackModels.join(",")}` : ""}, executeThreshold=${formatExecuteThresholdForLog(historian.executeThresholdPercentage)})`
+				: emptyHistorian
+					? `registered historian trigger: DISABLED (no configured model is registered in Pi: ${formatEmptyPiModelChain(emptyHistorian)})`
+					: undefined;
+			if (historianLine && !loggedPiModelChainLines.has(historianLine)) {
+				loggedPiModelChainLines.add(historianLine);
+				info(historianLine);
+			}
+			if (empty.length === 0) return;
+			const key = emptyPiModelChainsKey(empty);
+			if (notifiedPiModelChainKeys.has(key)) return;
+			const notice = formatEmptyPiModelChainsNotice(empty);
+			if (!loggedPiModelChainLines.has(notice)) {
+				loggedPiModelChainLines.add(notice);
+				warn(notice);
+			}
+			if (ctx.hasUI && typeof ctx.ui?.notify === "function") {
+				notifiedPiModelChainKeys.add(key);
+				ctx.ui.notify(notice, "warning");
+			}
+		} catch (err) {
+			warn("model chain check failed:", err);
+		}
+	}
 	function resolveContextOptionsForProject(
 		dir: string,
 	): PiContextHandlerOptions {
@@ -1687,6 +1825,7 @@ async function startPiMagicContextRuntime(
 		projectDepsByDir.delete(ctx.cwd);
 		const current = resolveCurrentProjectDeps(ctx);
 		activeModelRegistry = ctx.modelRegistry;
+		reportPiModelChains(ctx, current);
 		if (ctx.hasUI) syncDreamerProjectRegistration(current, ctx.modelRegistry);
 		syncCtxMemoryToolEnabled(pi, current.config.memory.enabled);
 
@@ -1724,6 +1863,13 @@ async function startPiMagicContextRuntime(
 
 	pi.on("agent_start", (_event, ctx) => {
 		setEmbeddingSessionBusy(ctx.sessionManager.getSessionId(), true);
+		// A config reload adopted since the last check gets the same report.
+		const current = resolveCurrentProjectDeps(ctx);
+		const generation = liveReaderFor(current.projectDir, current.config).poll()
+			.generation;
+		if (modelChainsCheckedGeneration.get(current.projectDir) !== generation) {
+			reportPiModelChains(ctx, current);
+		}
 	});
 	const readLastTodoState = (sessionId: string) =>
 		getOrCreateSessionMeta(db, sessionId).lastTodoState;
@@ -1742,11 +1888,15 @@ async function startPiMagicContextRuntime(
 	// parts via the shared Tagger and applies queued drops from
 	// `pending_ops` so /ctx-flush and ctx_reduce work against Pi sessions.
 	registerPiContextHandler(pi, bootProjectDeps.contextOptions);
-	info(
-		bootProjectDeps.historianConfig
-			? `registered historian trigger (model=${bootProjectDeps.historianConfig.model}, executeThreshold=${formatExecuteThresholdForLog(bootProjectDeps.historianConfig.executeThresholdPercentage)})`
-			: "registered historian trigger: DISABLED (configure the active harness's historian model in magic-context.jsonc)",
-	);
+	// Pi's model registry reaches the extension only with the first session
+	// context, so the chain the historian will actually use is logged by
+	// reportPiModelChains at session start. Logging the configured model here
+	// would name a model that registry validation may still drop.
+	if (!bootProjectDeps.historianConfig) {
+		info(
+			"registered historian trigger: DISABLED (configure the active harness's historian model in magic-context.jsonc)",
+		);
+	}
 	info(
 		bootProjectDeps.autoSearchConfig.enabled
 			? `registered auto-search hint (threshold=${bootProjectDeps.autoSearchConfig.scoreThreshold}, minChars=${bootProjectDeps.autoSearchConfig.minPromptChars})`
@@ -1814,31 +1964,24 @@ async function startPiMagicContextRuntime(
 				modelChainWarning: (() => {
 					const registry = activeModelRegistry;
 					if (!registry) return undefined;
-					const tasks = validatePiDreamerModels(
-						buildDreamTaskRuntimeConfigs(
-							current.config.dreamer,
-							PI_HARNESS_KIND,
-							current.config.language,
-							current.config.mural.model,
-						),
+					// Only chains that would run: unscheduled dreamer tasks are left out.
+					const empty = findEmptyPiModelChains({
+						config: current.config,
 						registry,
-						PI_HARNESS_KIND,
-					);
-					const empty: string[] = tasks
-						.filter((task) => task.modelChainUnavailable)
-						.map((task) => task.task);
-					if (
-						!resolveHistorianFromConfig(
-							current.config,
-							PI_HARNESS_KIND,
-							registry,
-						) &&
-						current.historianConfig
-					)
-						empty.push("historian");
-					return empty.length
-						? `Pi model chain empty (no model found): ${empty.join(", ")}`
-						: undefined;
+						harness: PI_HARNESS_KIND,
+					});
+					if (empty.length === 0) return undefined;
+					const parts = empty.map(formatEmptyPiModelChain);
+					if (empty.some((chain) => chain.owner === "historian")) {
+						const sessionId = resolveSessionId(ctx);
+						const latch = sessionId
+							? describeInertEmergencyDrainLatch(
+									loadProtectedTailMeta(db, sessionId).emergencyDrainActive,
+								)
+							: undefined;
+						if (latch) parts.push(latch);
+					}
+					return `Pi model chain empty (no model found): ${parts.join("; ")}`;
 				})(),
 				activeProfile: current.config.profile,
 				cacheTtlConfig: current.config.cache_ttl,
@@ -2625,16 +2768,9 @@ async function startPiMagicContextRuntime(
 					piUsage && typeof piUsage.tokens === "number"
 						? piUsage.tokens
 						: undefined,
-				piTokensIsRawBranchEstimate: (() => {
-					try {
-						const branch = (
-							ctx.sessionManager as { getBranch?: () => unknown[] }
-						).getBranch?.();
-						return isPiLiveUsageRawBranchEstimate(branch);
-					} catch {
-						return false;
-					}
-				})(),
+				piTokensIsRawBranchEstimate: isPiContextUsageRawBranchEstimate(
+					ctx.sessionManager,
+				),
 				notifyIssue: async (message) => {
 					const uiNotify = (
 						ctx as { ui?: { notify?: (message: string) => unknown } }

@@ -257,6 +257,56 @@ export function findLastModelKeyFromBranch(
 	return undefined;
 }
 
+/**
+ * The model to seed the live model pin with on the first context pass after a
+ * restart (`provider/model`).
+ *
+ * Usually the last `model_change` (see findLastModelKeyFromBranch). But when
+ * a `model_change` is newer than the newest assistant message, the user
+ * switched models after the last reply, possibly before the restart: that
+ * entry already names the model in use now, so seeding from it would make the
+ * first pass compare the new model with itself and miss the switch. The
+ * newest assistant message's model (failed or aborted replies included) is
+ * then the model the pin held when the last reply ended, which is what a
+ * process that never restarted would compare against.
+ */
+export function findRestartModelSeedFromBranch(
+	entries: readonly unknown[] | null | undefined,
+): string | undefined {
+	if (!Array.isArray(entries)) return undefined;
+	let switchedAfterLastReply = false;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i] as {
+			type?: unknown;
+			message?: unknown;
+			provider?: unknown;
+			modelId?: unknown;
+		} | null;
+		if (e?.type === "model_change") {
+			if (typeof e.provider === "string" && typeof e.modelId === "string")
+				switchedAfterLastReply = true;
+			continue;
+		}
+		if (e?.type !== "message") continue;
+		const m = e.message as
+			| { role?: unknown; provider?: unknown; model?: unknown }
+			| undefined;
+		if (m?.role !== "assistant") continue;
+		if (
+			typeof m.provider !== "string" ||
+			m.provider.length === 0 ||
+			typeof m.model !== "string" ||
+			m.model.length === 0
+		) {
+			continue;
+		}
+		return switchedAfterLastReply
+			? `${m.provider}/${m.model}`
+			: findLastModelKeyFromBranch(entries);
+	}
+	return findLastModelKeyFromBranch(entries);
+}
+
 function rawEntryVersion(entry: MessageEntry): string | number {
 	const record = entry as unknown as Record<string, unknown>;
 	const updated = record.updatedAt ?? record.updated_at ?? record.timestamp;

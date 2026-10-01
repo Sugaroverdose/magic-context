@@ -225,6 +225,10 @@ test("Q6 above-wall persisted floor plus provider pressure, then below wall", as
 			lastContextPercentage: 500,
 			cacheTtl: "never",
 		});
+		// The floor was proven on the model this reply comes from; a floor with
+		// no recorded model would be dropped instead of kept.
+		const { recordPiProvenFloorModel } = await import("./pi-proven-floor");
+		recordPiProvenFloorModel(db, sessionId, "openai-codex/gpt-5.6-sol", 140000);
 		await persistPiPressureFromMessageEnd({
 			db,
 			sessionId,

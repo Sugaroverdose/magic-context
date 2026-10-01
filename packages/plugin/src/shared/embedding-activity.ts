@@ -25,3 +25,12 @@ export function observeEmbeddingActivity(event: { type: string; properties?: unk
 export function isEmbeddingHostBusy(): boolean {
     return busySessions.size > 0;
 }
+
+/**
+ * Forget every busy session (tests only). A test that starts an agent turn and
+ * never ends it would otherwise leave the whole process busy, and background
+ * embedding in later tests of the same process would stop at once.
+ */
+export function resetEmbeddingActivityForTests(): void {
+    busySessions.clear();
+}
