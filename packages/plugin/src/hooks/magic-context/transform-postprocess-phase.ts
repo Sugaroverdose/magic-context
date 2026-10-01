@@ -128,7 +128,11 @@ import {
     postprocessTailTags,
 } from "./postprocess-read-cache";
 import { estimateTokens } from "./read-session-formatting";
-import { removeReasoningParts, selectReasoningRemovals } from "./reasoning-removal";
+import {
+    removeNeutralizedReasoningParts,
+    removeReasoningParts,
+    selectReasoningRemovals,
+} from "./reasoning-removal";
 import { modelAcceptsEmptyContent, replaySentinelByMessageIds } from "./sentinel";
 import {
     applyFrozenTrailingBlankDecisions,
@@ -3398,9 +3402,15 @@ export async function runPostTransformPhase(
     // Remove reasoning last: every lane above addresses parts by index on the
     // array as OpenCode built it, and the next pass rebuilds that array, so the
     // splice never shifts an index another lane reads.
-    const removedReasoningParts = reasoningRemovalEnabled
-        ? removeReasoningParts(args.messages, removedReasoningIds, args.resolvedProviderID)
-        : 0;
+    const removedReasoningParts =
+        (reasoningRemovalEnabled
+            ? removeReasoningParts(args.messages, removedReasoningIds, args.resolvedProviderID)
+            : 0) +
+        removeNeutralizedReasoningParts(
+            args.messages,
+            args.resolvedProviderID,
+            args.thinkingBindingRecoveryEnabledForModel === true,
+        );
 
     sessionLog(
         args.sessionId,

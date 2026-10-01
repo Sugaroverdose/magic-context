@@ -39,6 +39,63 @@ export function modelAcceptsEmptyContent(providerID?: string): boolean {
 }
 
 /**
+ * True when the route serializes reasoning as Anthropic signed thinking, where
+ * removing the tool-result separator between two reasoning-bearing assistant
+ * steps lets the adapter merge them into one signed turn (issue 423). Covers
+ * canonical Anthropic, Vertex and other custom Anthropic ids, Bedrock, and
+ * Claude models served through any other provider (Copilot, OpenRouter). The
+ * forced call skeleton beside reasoning exists only for these routes.
+ */
+export function isAnthropicFamilyRoute(providerID?: string, modelID?: string): boolean {
+    const provider = (providerID ?? "").toLowerCase();
+    const model = (modelID ?? "").toLowerCase();
+    return (
+        provider.includes("anthropic") ||
+        provider.includes("bedrock") ||
+        model.includes("claude") ||
+        model.includes("anthropic")
+    );
+}
+
+const REMOVED_REASONING_MARK = Symbol.for("magic-context.removed-reasoning");
+
+/**
+ * Take a reasoning part that a tool or text drop invalidated off the wire,
+ * without ever writing placeholder text into it.
+ *
+ * The part object is rewritten in place to the exact `makeSentinel(part)`
+ * shape (an empty text part keeping any cache marker), so indices stay stable
+ * for every lane that runs later in the pass. Canonical Anthropic's adapter
+ * drops that empty part, which is the output the older `[cleared]` plus
+ * sentinel conversion produced. On every other route the part also carries a
+ * hidden mark, and final representation splices it out together with all of
+ * its provider metadata (signatures, OpenAI encrypted content).
+ *
+ * Parts without `thinking` or `text` (redacted blocks) are left alone, as
+ * before.
+ */
+export function neutralizeDroppedReasoningPart(part: unknown): void {
+    if (!isRecord(part)) return;
+    if (part.thinking === undefined && part.text === undefined) return;
+    if (part.type === "text") return;
+    const cacheControl = part.cache_control;
+    const cacheControlCamel = part.cacheControl;
+    for (const key of Object.keys(part)) delete part[key];
+    part.type = "text";
+    part.text = "";
+    if (cacheControl !== undefined) part.cache_control = cacheControl;
+    if (cacheControlCamel !== undefined) part.cacheControl = cacheControlCamel;
+    Object.defineProperty(part, REMOVED_REASONING_MARK, { value: true, enumerable: false });
+}
+
+/** True for a part rewritten by `neutralizeDroppedReasoningPart`. */
+export function isNeutralizedReasoningPart(part: unknown): boolean {
+    return (
+        isRecord(part) && (part as Record<PropertyKey, unknown>)[REMOVED_REASONING_MARK] === true
+    );
+}
+
+/**
  * Provider-cache facts for model identities whose effort can change without
  * invalidating cached prompt bytes: Anthropic Fable 5.1 was observed on
  * 2026-09-02, OpenAI GPT-6 Astra on 2026-09-05, and Anthropic Opus 5.5 on

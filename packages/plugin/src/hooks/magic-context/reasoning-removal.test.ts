@@ -10,8 +10,19 @@ import {
 } from "../../features/magic-context/storage-reasoning-removal";
 import { createTagger } from "../../features/magic-context/tagger";
 import { Database } from "../../shared/sqlite";
-import { removeReasoningParts, selectReasoningRemovals } from "./reasoning-removal";
+import {
+    removeNeutralizedReasoningParts,
+    removeReasoningParts,
+    selectReasoningRemovals,
+} from "./reasoning-removal";
+import {
+    isAnthropicFamilyRoute,
+    isNeutralizedReasoningPart,
+    makeSentinel,
+    neutralizeDroppedReasoningPart,
+} from "./sentinel";
 import type { MessageLike } from "./tag-messages";
+import { tagMessages } from "./tag-messages";
 import { runPostTransformPhase } from "./transform-postprocess-phase";
 
 type PostTransformArgs = Parameters<typeof runPostTransformPhase>[0];
@@ -321,5 +332,75 @@ describe("reasoning removal through postprocess", () => {
             trailingBlank: { "assistant-x": "strip" },
             reasoningRemoval: { messageIds: ["assistant-0"] },
         });
+    });
+});
+
+describe("reasoning invalidated by drops", () => {
+    it("neutralizes in place to the exact makeSentinel shape (canonical Anthropic output unchanged)", () => {
+        const original = {
+            type: "reasoning",
+            text: "signed thought",
+            metadata: { anthropic: { signature: "sig" } },
+            cache_control: { type: "ephemeral" },
+        };
+        const expected = makeSentinel(structuredClone(original));
+        const part = structuredClone(original) as Record<string, unknown>;
+        neutralizeDroppedReasoningPart(part);
+        expect(JSON.stringify(part)).toBe(JSON.stringify(expected));
+        expect(isNeutralizedReasoningPart(part)).toBe(true);
+        const redacted = { type: "redacted_thinking", data: "opaque" };
+        neutralizeDroppedReasoningPart(redacted);
+        expect(redacted).toEqual({ type: "redacted_thinking", data: "opaque" });
+    });
+
+    it("a dropped tool takes its reasoning and encrypted payload off a non-Anthropic wire", () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const { messages } = toolLoop(4);
+        const tagged = tagMessages("ses-drop-path", messages, createTagger(), db);
+        const row = db
+            .prepare(
+                "SELECT tag_number AS tagNumber FROM tags WHERE message_id = ? AND type = 'tool'",
+            )
+            .get("call-1") as { tagNumber: number } | undefined;
+        expect(row).toBeDefined();
+        expect(tagged.targets.get(row?.tagNumber ?? -1)?.drop?.()).toBe("removed");
+        tagged.batch?.finalize();
+        expect(JSON.stringify(messages)).not.toContain("[cleared]");
+        const removed = removeNeutralizedReasoningParts(messages, "openai", false);
+        expect(removed).toBe(1);
+        // The tag lane links an OpenCode tool to the reasoning of the assistant
+        // step before it; that reasoning leaves with its encrypted payload.
+        const wire = JSON.stringify(messages);
+        expect(wire).not.toContain("ENC_0");
+        expect(wire).toContain("ENC_2");
+        expect(wire).toContain("ENC_3");
+        expect(messages.some((m) => m.parts.some(isNeutralizedReasoningPart))).toBe(false);
+    });
+
+    it("keeps the sentinel on canonical Anthropic and closes the prefix on bound models", () => {
+        const anthropic = toolLoop(4).messages;
+        neutralizeDroppedReasoningPart(anthropic[3].parts[1]);
+        expect(removeNeutralizedReasoningParts(anthropic, "anthropic", true)).toBe(0);
+        expect(anthropic[3].parts[1]).toEqual({ type: "text", text: "" });
+
+        const bound = toolLoop(4).messages;
+        neutralizeDroppedReasoningPart(bound[3].parts[1]);
+        removeNeutralizedReasoningParts(bound, "google-vertex-anthropic", true);
+        // assistant-2 lost its reasoning to a drop; everything older goes too.
+        expect([1, 2, 3].map((index) => reasoningCount(bound[index]))).toEqual([0, 0, 0]);
+        expect(reasoningCount(bound[4])).toBe(1);
+    });
+
+    it("scopes the forced skeleton to Anthropic-family routes", () => {
+        expect(isAnthropicFamilyRoute("anthropic", "claude-sonnet-5")).toBe(true);
+        expect(isAnthropicFamilyRoute("google-vertex-anthropic", "claude-opus-5-5")).toBe(true);
+        expect(isAnthropicFamilyRoute("amazon-bedrock", "us.anthropic.claude-fable-5-1-v1:0")).toBe(
+            true,
+        );
+        expect(isAnthropicFamilyRoute("github-copilot", "claude-sonnet-5")).toBe(true);
+        expect(isAnthropicFamilyRoute("openai", "gpt-6.1-sol")).toBe(false);
+        expect(isAnthropicFamilyRoute("google", "gemini-2.5-pro")).toBe(false);
+        expect(isAnthropicFamilyRoute("deepseek", "deepseek-reasoner")).toBe(false);
     });
 });

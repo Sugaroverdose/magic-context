@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { isNeutralizedReasoningPart } from "./sentinel";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 import {
     createToolDropTarget,
@@ -213,8 +214,12 @@ describe("tool-drop-target", () => {
                     expect(hasCall(messages, "call-1")).toBe(false);
                     expect(messages).toHaveLength(1);
                     expect(messages[0]?.info.id).toBe("m-keep");
-                    expect(thinkingParts[0]?.thinking).toBe("[cleared]");
-                    expect(thinkingParts[1]?.text).toBe("[cleared]");
+                    // A drop takes the reasoning off the wire whole instead of writing "[cleared]" into it.
+                    expect(thinkingParts[0]).toEqual({ type: "text", text: "" });
+                    expect(isNeutralizedReasoningPart(thinkingParts[0])).toBe(true);
+                    // A drop takes the reasoning off the wire whole instead of writing "[cleared]" into it.
+                    expect(thinkingParts[1]).toEqual({ type: "text", text: "" });
+                    expect(isNeutralizedReasoningPart(thinkingParts[1])).toBe(true);
                 });
             });
         });
@@ -317,7 +322,9 @@ describe("tool-drop-target", () => {
                     batch.finalize();
 
                     expect(hasCall(messages, "call-2")).toBe(false);
-                    expect(thinkingParts[0]?.thinking).toBe("[cleared]");
+                    // A drop takes the reasoning off the wire whole instead of writing "[cleared]" into it.
+                    expect(thinkingParts[0]).toEqual({ type: "text", text: "" });
+                    expect(isNeutralizedReasoningPart(thinkingParts[0])).toBe(true);
                 });
             });
         });
@@ -462,8 +469,12 @@ describe("tool-drop-target", () => {
                     expect(toolResultPart.content).toBe("old-result");
                     expect(wireToolPart).not.toBe(toolPart);
                     expect(wireResultPart).not.toBe(toolResultPart);
-                    expect(thinkingParts[0]?.thinking).toBe("[cleared]");
-                    expect(thinkingParts[1]?.text).toBe("[cleared]");
+                    // A drop takes the reasoning off the wire whole instead of writing "[cleared]" into it.
+                    expect(thinkingParts[0]).toEqual({ type: "text", text: "" });
+                    expect(isNeutralizedReasoningPart(thinkingParts[0])).toBe(true);
+                    // A drop takes the reasoning off the wire whole instead of writing "[cleared]" into it.
+                    expect(thinkingParts[1]).toEqual({ type: "text", text: "" });
+                    expect(isNeutralizedReasoningPart(thinkingParts[1])).toBe(true);
                 });
 
                 it("#then replaces reporter-shaped inputs with one non-executable marker", () => {

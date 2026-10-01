@@ -15,7 +15,11 @@
 // representation, after every lane that addresses parts by index has run.
 
 import { isRecord } from "../../shared/record-type-guard";
-import { makeWholeMessageSentinel } from "./sentinel";
+import {
+    isNeutralizedReasoningPart,
+    makeWholeMessageSentinel,
+    modelAcceptsEmptyContent,
+} from "./sentinel";
 import { findLatestAssistantReasoningMutationExemptMessage } from "./strip-content";
 import type { MessageLike } from "./tag-messages";
 
@@ -123,6 +127,54 @@ export function removeReasoningParts(
         message.parts.push(...kept);
         if (!hasWireContentBesideReasoning(message)) {
             message.parts.push(makeWholeMessageSentinel(providerID));
+        }
+    }
+    return removed;
+}
+
+/**
+ * Splice out reasoning parts that tool or text drops neutralized this pass
+ * (see neutralizeDroppedReasoningPart). Canonical Anthropic keeps them as the
+ * empty sentinels its adapter already drops, which is its existing output.
+ *
+ * The drop decision itself is persisted and replayed on every pass, so this
+ * removal is replayed with it and first appears only on the pass where the
+ * drop first applied. On prefix-bound models every reasoning part older than
+ * the newest message that lost reasoning this way is removed too, so the
+ * surviving signed blocks are always a contiguous newest suffix.
+ */
+export function removeNeutralizedReasoningParts(
+    messages: MessageLike[],
+    providerID: string | undefined,
+    prefixBound: boolean,
+): number {
+    if (modelAcceptsEmptyContent(providerID)) return 0;
+    let removed = 0;
+    let lastTouched = -1;
+    messages.forEach((message, index) => {
+        if (message.info.role !== "assistant") return;
+        const kept = message.parts.filter((part) => !isNeutralizedReasoningPart(part));
+        if (kept.length === message.parts.length) return;
+        removed += message.parts.length - kept.length;
+        message.parts.length = 0;
+        message.parts.push(...kept);
+        lastTouched = index;
+        if (!hasWireContentBesideReasoning(message) && !message.parts.some(isReasoningPart)) {
+            message.parts.push(makeWholeMessageSentinel(providerID));
+        }
+    });
+    if (prefixBound && lastTouched > 0) {
+        for (let index = 0; index < lastTouched; index += 1) {
+            const message = messages[index];
+            if (message.info.role !== "assistant") continue;
+            const kept = message.parts.filter((part) => !isReasoningPart(part));
+            if (kept.length === message.parts.length) continue;
+            removed += message.parts.length - kept.length;
+            message.parts.length = 0;
+            message.parts.push(...kept);
+            if (!hasWireContentBesideReasoning(message)) {
+                message.parts.push(makeWholeMessageSentinel(providerID));
+            }
         }
     }
     return removed;
