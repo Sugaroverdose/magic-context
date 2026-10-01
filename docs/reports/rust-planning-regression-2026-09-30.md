@@ -423,3 +423,42 @@ nonce-only replay equality. Final pass bytes:
   the external-repair assertion. Each exact run filtered 178 unrelated tests.
   Both controls had nonempty diffs while applied and empty diffs after restore.
 - Comment review: no unclear comments flagged. No mutation marker remains.
+
+## Restart-window follow-up: installer, harness sweep and reason labels
+
+The installer now reads the four existing sqlite_master definitions and compares
+SQLite's stored creation text with the expected table/trigger text. An unchanged
+open returns before the IMMEDIATE transaction and the seeding scan. Missing or
+different triggers are repaired atomically, with a second check after acquiring the
+lock to avoid redundant repair by concurrent openers. Unexpected table-definition
+drift is rejected rather than replacing revision data. Trigger SQL and fingerprints
+are unchanged. A second-connection test holds a competing IMMEDIATE writer with
+zero busy timeout: installation succeeds without a write lock or schema cookie
+change, then verifies missing/different triggers are repaired and subsequent opens
+remain read-only.
+
+The session-counter cleanup predicate now requires that no compartments remain for
+that session. The actual orphan-sweep test removes one harness's compartments while
+retaining another harness's compartment and its incremented counter, then removes
+the last harness and requires counter removal.
+
+History rebuilds now report `compartment_history_revision`, including both the
+trigger signal and explicit m0 history mutation log. This diagnostic component is
+tracked separately from the unchanged aggregate rendering fingerprint. Zero-valued
+tracking is omitted from serialized metadata, preserving the existing baseline
+metadata-digest claim. The managed-repair test reproduces both the new history
+label and the old generic label with identical input/core snapshots; the serialized
+served CK message bytes are identical. The existing eager-rewrite test retains its
+HARD/content assertions and changes only its intentionally corrected reason label.
+
+Requested gates passed: full mc-module library (1442 passed, 17 ignored), mc-store
+(180 passed, one ignored), clean clippy, plugin migration/maintenance tests, CLI
+single-store doctor tests, and plugin/CLI typechecks. A shared sibling dependency
+moved during verification, making the unchanged lock cease to resolve. The parent
+authorized a lock-only version correction: subc-client-rs 0.23.4 -> 0.23.9. An offline
+regeneration also proposed unrelated registry upgrades; those were discarded, and
+only that path-package version changed. An existing short lease-timing test failed
+once under suite load and passed its isolated retry and the final full run.
+
+No live stores were opened or modified. The coordinated restart/deployment hold
+above still applies.
