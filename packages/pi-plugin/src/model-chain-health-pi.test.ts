@@ -8,6 +8,7 @@ import {
 	openDatabase,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import { resetEmbeddingActivityForTests } from "@magic-context/core/shared/embedding-activity";
 import * as loggerModule from "@magic-context/core/shared/logger";
 import {
 	cleanupTestTempDir,
@@ -135,7 +136,20 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 	};
 	const roots: string[] = [];
 
-	afterEach(() => {
+	// Every runtime and context a test started a session on, so teardown can end
+	// the session the way Pi does.
+	const startedSessions: Array<{
+		runtime: ReturnType<typeof createPi>;
+		ctx: unknown;
+	}> = [];
+
+	afterEach(async () => {
+		for (const { runtime, ctx } of startedSessions.splice(0)) {
+			await runtime.emit("session_shutdown", ctx);
+		}
+		// Backstop: an agent turn left open marks the whole process busy, and
+		// background embedding in later test files sharing the process stops.
+		resetEmbeddingActivityForTests();
 		for (const [key, value] of Object.entries(originalEnv)) {
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
@@ -173,16 +187,23 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 			sendMessage: () => undefined,
 			sendUserMessage: () => undefined,
 		} as unknown as ExtensionAPI;
-		return {
+		const runtime = {
 			pi,
 			entries,
 			async runCommand(name: string, ctx: unknown) {
 				await commands.get(name)?.("", ctx);
 			},
 			async emit(event: string, ctx: unknown) {
+				if (event === "session_start") startedSessions.push({ runtime, ctx });
 				for (const handler of handlers.get(event) ?? []) await handler({}, ctx);
 			},
+			/** One agent turn: Pi always follows agent_start with agent_end. */
+			async agentTurn(ctx: unknown) {
+				await runtime.emit("agent_start", ctx);
+				await runtime.emit("agent_end", ctx);
+			},
 		};
+		return runtime;
 	}
 
 	function isolatedConfig(config: unknown): string {
@@ -279,7 +300,7 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 		};
 		await runtime.emit("session_start", ctx);
 		await runtime.emit("session_start", ctx);
-		await runtime.emit("agent_start", ctx);
+		await runtime.agentTurn(ctx);
 
 		expect(notify).toHaveBeenCalledTimes(1);
 		const notice = String(notify.mock.calls[0]?.[0]);
@@ -315,7 +336,7 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 				dreamer: { disable: true },
 			}),
 		);
-		await runtime.emit("agent_start", ctx);
+		await runtime.agentTurn(ctx);
 		expect(notify).toHaveBeenCalledTimes(1);
 		expect(
 			logs.some((line) =>
@@ -333,7 +354,7 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 				dreamer: { disable: true },
 			}),
 		);
-		await runtime.emit("agent_start", ctx);
+		await runtime.agentTurn(ctx);
 		expect(notify).toHaveBeenCalledTimes(2);
 		expect(String(notify.mock.calls[1]?.[0])).toContain(
 			"openai/gpt-6.1-sol (did you mean openai-codex/gpt-6.1-sol?)",
