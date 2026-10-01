@@ -1329,6 +1329,13 @@ interface RunPostTransformPhaseArgs {
     phaseJustAwaitedPublication: boolean;
     compartmentInProgress: boolean;
     historyRefreshExplicitBeforePrepare: boolean;
+    /**
+     * Replay the persisted m[0]/m[1] pair byte-identically instead of folding
+     * or refreshing it, and leave every materialization request pending. Set
+     * when the session's directory could not be resolved, so the pass only
+     * knows a fallback directory that may belong to another project.
+     */
+    freezeM0M1?: boolean;
     deferredHistoryWasPendingAtPassStart: boolean;
     compartmentInjectionRebuiltFromDb: boolean;
     rebuiltHistoryFromInitialPrepare: boolean;
@@ -1695,8 +1702,9 @@ export async function runPostTransformPhase(
         args.m0M1 !== undefined &&
         (!!args.m0M1.projectPath || !!args.m0M1.projectDirectory) &&
         (args.fullFeatureMode || compactionOff);
+    const freezeM0M1 = args.freezeM0M1 === true;
     const foldDueDecision =
-        m0M1EnabledForFold && args.m0M1
+        m0M1EnabledForFold && args.m0M1 && !freezeM0M1
             ? mustMaterialize({
                   db: args.db,
                   sessionId: args.sessionId,
@@ -1716,7 +1724,8 @@ export async function runPostTransformPhase(
     const shouldCaptureCachedPrefix =
         (foldDueDecision.value || args.schedulerDecision === "execute") &&
         m0M1EnabledForFold &&
-        !emergencyDropEligible;
+        !emergencyDropEligible &&
+        !freezeM0M1;
     const cachedPrefixBeforePreflight = shouldCaptureCachedPrefix
         ? prepareCachedM0M1Replay(args.db, args.sessionId)
         : undefined;
@@ -1735,7 +1744,8 @@ export async function runPostTransformPhase(
     let foldBustsServedPrefixThisPass = false;
     let publishedM1RefreshedThisPass = false;
     let prefixPreflightFailed = false;
-    const softRefreshOpportunity = args.schedulerDecision === "execute" || deferredMaterialize;
+    const softRefreshOpportunity =
+        !freezeM0M1 && (args.schedulerDecision === "execute" || deferredMaterialize);
     let m0RematerializedThisPass = false;
     const m0CoverageBeforeFold =
         args.sessionMeta.cachedM0Bytes === null ? -1 : args.sessionMeta.cachedM0MaxCompartmentSeq;
@@ -2268,7 +2278,9 @@ export async function runPostTransformPhase(
             // compartmentRunning had blocked us above, this drain is
             // intentionally NOT reached — the flag survives so the next
             // safe pass picks up the work.
-            if (pendingMaterializationAtPassStart) {
+            // A frozen m[0]/m[1] pass did not materialize, so the request
+            // stays pending for the next pass that can.
+            if (pendingMaterializationAtPassStart && !freezeM0M1) {
                 args.pendingMaterializationSessions.delete(args.sessionId);
             }
             if (args.currentTurnId) {
@@ -2386,7 +2398,7 @@ export async function runPostTransformPhase(
         if (args.sessionMeta.lastTransformError !== null) {
             updateSessionMeta(args.db, args.sessionId, { lastTransformError: null });
         }
-        if (shouldRunHeuristics) {
+        if (shouldRunHeuristics && !freezeM0M1) {
             if (isExplicitFlush) explicitMaterializedSuccessfully = true;
             if (deferredMaterialize) deferredMaterializedSuccessfully = true;
         }
@@ -2482,6 +2494,12 @@ export async function runPostTransformPhase(
     // Same gate computed once at the top for the known-bust fold decision.
     const m0M1Enabled = m0M1EnabledForFold;
     if (m0M1Enabled && args.m0M1) {
+        // Serve the persisted pair and its trim boundary as they are. Marking
+        // the replay contention-exhausted keeps this pass from counting as
+        // consumed history, so deferred refreshes stay pending.
+        if (freezeM0M1 && !preparedPrefix) {
+            preparedPrefix = prepareCachedM0M1Replay(args.db, args.sessionId);
+        }
         const tInjectM0M1 = performance.now();
         try {
             const result = injectM0M1({
@@ -2497,7 +2515,7 @@ export async function runPostTransformPhase(
                 historyBudgetTokens: args.m0M1.historyBudgetTokens,
                 historyBudgetPolicyIdentity: args.m0M1.historyBudgetPolicyIdentity,
                 temporalAwareness: args.m0M1.temporalAwareness,
-                isCacheBustingPass,
+                isCacheBustingPass: isCacheBustingPass && !freezeM0M1,
                 preparedPrefix,
                 prefixTrimSourceOrder: args.prefixTrimSourceOrder,
                 allowFreshContentionFallback: forceMaterialization || emergencyDropEligible,

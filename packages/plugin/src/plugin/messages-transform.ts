@@ -11,6 +11,7 @@ import {
     isProviderOverflowFailClosedProven,
 } from "../features/magic-context/storage-meta-persisted";
 import { updateSessionMeta } from "../features/magic-context/storage-meta-session";
+import { DegradedPassRefusalError } from "../hooks/magic-context/degraded-pass-refusal";
 import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-closed";
 import { replayLkg, resolveLkgModelKeys } from "../hooks/magic-context/lkg-replay";
 import { dropSlot, getSlot, noteEntry } from "../hooks/magic-context/lkg-slot";
@@ -210,6 +211,9 @@ function preserveUserTerminatedTail(
  *
  * - **SQLITE_BUSY / SQLITE_LOCKED**: Writer acquisition already retried before
  *   any callback ran. Replay LKG or refuse; never retry the mutating transform.
+ *
+ * - **UnresolvedHistoryBoundaryError / DegradedPassRefusalError**: The pass
+ *   could not produce a request that is safe to send. Replay LKG or refuse.
  *
  * - **Non-BUSY errors**: Schema corruption, programming bugs, type errors.
  *   These can silently disable magic-context for the entire session if the
@@ -416,11 +420,16 @@ export function createMessagesTransformHandler(args: {
                 sessionLog(sessionId, "lkg_miss");
             }
             // The LKG replay above (the last request this session served
-            // successfully) could not stand in, and the untrimmed request does
-            // not fit the window: refuse the turn rather than hand the provider a
-            // request it will reject (or, on OpenCode 1, the raw input messages,
-            // which are just as large).
-            if (!args.compactionOff && error instanceof UnresolvedHistoryBoundaryError) {
+            // successfully) could not stand in, and the pass could not produce a
+            // request that is safe to send: the untrimmed request does not fit
+            // the window, or a stage the request depends on failed. Refuse the
+            // turn rather than hand the provider a request it will reject (or,
+            // on OpenCode 1, the raw input messages, which are just as large).
+            if (
+                !args.compactionOff &&
+                (error instanceof UnresolvedHistoryBoundaryError ||
+                    error instanceof DegradedPassRefusalError)
+            ) {
                 throw error;
             }
             const code = (error as { code?: string } | null)?.code;

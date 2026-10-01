@@ -14,7 +14,10 @@ import type { Scheduler } from "../../features/magic-context/scheduler";
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
 import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
-import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
+import {
+    hasRecordedSessionProjectIdentity,
+    recordSessionProjectIdentity,
+} from "../../features/magic-context/session-project-storage";
 import {
     type ContextDatabase,
     deriveTagLoadFloor,
@@ -86,6 +89,7 @@ import {
     formatChannel1Evaluation,
     formatChannel2Evaluation,
 } from "./ctx-reduce-nudge";
+import { DegradedPassRefusalError, degradedPassError } from "./degraded-pass-refusal";
 import { deriveTriggerBudget } from "./derive-budgets";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import {
@@ -115,7 +119,7 @@ import { saveLkgSlotToDb } from "./lkg-persist";
 import { captureLkgSlot, projectLkgEntry, resolveLkgModelKeys } from "./lkg-replay";
 import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
-import { createPassOutcome } from "./pass-outcome";
+import { createPassOutcome, type PassDegradationKind } from "./pass-outcome";
 import {
     createDefaultBoundarySnapshotForTests,
     hasRunnableCompartmentWindow,
@@ -724,12 +728,28 @@ export function createTransform(deps: TransformDeps) {
 
         const db = deps.db;
 
+        // A stage this pass cannot be served without has failed: the session's
+        // saved drops, truncations, history cut or emergency state would be
+        // missing from the output, so the request could be far larger than the
+        // last one (or differ from it on a pass that must replay it unchanged).
+        // Record the degradation and stop the pass; the messages wrapper then
+        // replays the last good request or refuses the turn. Compaction-off
+        // mode keeps going instead: native compaction owns the window there,
+        // the pass only adds blocks, and on any thrown error the wrapper would
+        // serve the input unchanged anyway.
+        const failPass = (site: string, error: unknown, kind?: PassDegradationKind): void => {
+            passOutcome.record(site, kind);
+            if (deps.compactionOff === true) return;
+            throw degradedPassError(site, error);
+        };
+
         // Runs before anything reads a saved coordinate. Every ordinal this
         // session stored is a position in the message list some host served; if
         // the host in front of us serves a different projection of the same
         // conversation, those positions must be re-derived from the surviving
-        // message ids first. Failing here must not take the chat down: the
-        // generation stamp is only written on success, so the next pass retries.
+        // message ids first. A failure stops this pass rather than trimming
+        // against stale positions; the generation stamp is only written on
+        // success, so the next pass retries.
         if (deps.storeGeneration !== undefined) {
             try {
                 // The module keeps its own copy of this conversation, keyed on the
@@ -757,12 +777,12 @@ export function createTransform(deps: TransformDeps) {
                     readMessages: host.hostRawMessages,
                 });
             } catch (error) {
-                passOutcome.record("store-generation-rebase-failure");
                 sessionLog(
                     sessionId,
                     "store projection rebase failed (retrying next pass):",
                     error,
                 );
+                failPass("store-generation-rebase-failure", error);
             }
         }
 
@@ -780,7 +800,6 @@ export function createTransform(deps: TransformDeps) {
         const tMeta = performance.now();
         let sessionMeta: import("../../features/magic-context/types").SessionMeta | undefined;
         try {
-            // Intentional fail-open: magic-context should not block live chat if session state read fails.
             sessionMeta = getOrCreateSessionMeta(db, sessionId);
             const ttlModel =
                 findNewestUserModel(messages) ??
@@ -793,8 +812,10 @@ export function createTransform(deps: TransformDeps) {
                 ttlModel ? `${ttlModel.providerID}/${ttlModel.modelID}` : undefined,
             ).value;
         } catch (error) {
-            passOutcome.record("session-meta-early-return", "fatal");
             sessionLog(sessionId, "transform failed reading session meta:", error);
+            // Returning here would hand the host its raw messages, without any
+            // of the session's saved reductions.
+            failPass("session-meta-early-return", error, "fatal");
             return;
         }
         logTransformTiming(sessionId, "getOrCreateSessionMeta", tMeta);
@@ -911,8 +932,10 @@ export function createTransform(deps: TransformDeps) {
                 }
             }
         } catch (error) {
-            passOutcome.record("compaction-mode-transition-failure");
             sessionLog(sessionId, "compaction mode transition failed (retrying next pass):", error);
+            // A half-applied transition leaves this pass on a stale m[0]/m[1]
+            // baseline or marker state that a completed one would have replaced.
+            failPass("compaction-mode-transition-failure", error);
         }
 
         // Read the agent and session permissions for ctx_reduce before either
@@ -934,7 +957,13 @@ export function createTransform(deps: TransformDeps) {
         // provide the shared additive-only memory/docs contract.
         if (deps.transformMode === "rust") {
             if (!rustModeTransform) {
-                sessionLog(sessionId, "rust transform unavailable; using raw passthrough");
+                // Production wiring always builds a module client in Rust mode,
+                // so this is a wiring fault. Returning would serve the raw input.
+                sessionLog(sessionId, "rust transform unavailable; not serving raw messages");
+                failPass(
+                    "rust-transform-unavailable",
+                    new Error("Rust mode is configured without a module client"),
+                );
                 return;
             }
             if (!compactionOff) {
@@ -1015,6 +1044,7 @@ export function createTransform(deps: TransformDeps) {
         // transform never blocks on a permanent SDK error.
         let sessionDirectory: string = deps.directory ?? "";
         let sessionDirectoryResolvedFromHost = false;
+        let sessionDirectoryFellBack = false;
         const cachedDirectory = deps.sessionDirectoryBySession?.get(sessionId);
         if (cachedDirectory && cachedDirectory.length > 0) {
             sessionDirectory = cachedDirectory;
@@ -1043,7 +1073,38 @@ export function createTransform(deps: TransformDeps) {
                 passOutcome.record("session-directory-fallback");
                 sessionLog(sessionId, "session directory lookup failed; using fallback:", error);
             }
-            if (!sessionDirectoryResolvedFromHost) passOutcome.record("session-directory-fallback");
+            if (!sessionDirectoryResolvedFromHost) {
+                passOutcome.record("session-directory-fallback");
+                sessionDirectoryFellBack = true;
+            }
+        }
+        // The launch directory can belong to a different project than the
+        // session (`opencode -s <id>` started elsewhere). A pass that fell back
+        // to it must not render that project's memories and docs into m[0]/m[1]:
+        // a rebuild is persisted and replayed by every later pass. When a frozen
+        // pair exists, this pass replays it byte-identically, as a defer pass
+        // does, and leaves every rebuild signal pending for the next pass that
+        // resolves the directory. Two cases render with the launch directory,
+        // as they always have: a session with nothing frozen yet, and one the
+        // host has never resolved (no stored project binding), whose frozen
+        // pair was itself rendered with the launch directory.
+        const freezeM0M1 =
+            sessionDirectoryFellBack &&
+            sessionMeta.cachedM0Bytes != null &&
+            sessionMeta.cachedM1Bytes != null &&
+            (() => {
+                try {
+                    return hasRecordedSessionProjectIdentity(db, sessionId);
+                } catch {
+                    // Unknown: keep the frozen pair rather than risk a rebuild.
+                    return true;
+                }
+            })();
+        if (freezeM0M1) {
+            sessionLog(
+                sessionId,
+                "session directory unresolved; replaying the frozen m[0]/m[1] and deferring any rebuild",
+            );
         }
         const compartmentDirectory = sessionDirectory;
         const historianRunnable = deps.historianRunnable !== false;
@@ -1339,12 +1400,14 @@ export function createTransform(deps: TransformDeps) {
                     );
                 }
             } catch (error) {
-                passOutcome.record("overflow-state-read-failure");
                 sessionLog(
                     sessionId,
                     "transform: overflow recovery state read failed:",
                     getErrorMessage(error),
                 );
+                // Without it a provider-overflow latch is not seen, so the
+                // emergency drops that shrink an over-limit request never run.
+                failPass("overflow-state-read-failure", error);
             }
         }
         // Resolve the model's stable context limit directly so the history
@@ -1507,8 +1570,12 @@ export function createTransform(deps: TransformDeps) {
         // per-pass local, not shared deps state: concurrent transforms must not
         // overwrite each other's explicit/deferred attribution.
         //
-        const historyRefreshExplicitBeforePrepare = deps.historyRefreshSessions.has(sessionId);
-        const deferredHistoryWasPendingAtPassStart = deferredHistoryRefreshSessions.has(sessionId);
+        // A frozen m[0]/m[1] pass neither sees nor consumes a history refresh:
+        // rebuilding history would move the trim past the frozen baseline.
+        const historyRefreshExplicitBeforePrepare =
+            !freezeM0M1 && deps.historyRefreshSessions.has(sessionId);
+        const deferredHistoryWasPendingAtPassStart =
+            !freezeM0M1 && deferredHistoryRefreshSessions.has(sessionId);
         const prefixTrimSourceOrder = deferredHistoryWasPendingAtPassStart
             ? capturePrefixTrimSourceOrder(messages)
             : undefined;
@@ -2028,10 +2095,9 @@ export function createTransform(deps: TransformDeps) {
                 logTransformTiming(sessionId, "tagMessages", t0);
                 taggingSucceeded = true;
             } catch (error) {
-                passOutcome.record("tagging-persistence-failure");
                 sessionLog(
                     sessionId,
-                    "transform tag persistence failed; continuing without tagging:",
+                    "transform tag persistence failed; not serving this pass:",
                     error,
                 );
                 // Drop in-memory tagger state for this session so the next pass
@@ -2045,6 +2111,12 @@ export function createTransform(deps: TransformDeps) {
                 } catch (cleanupError) {
                     sessionLog(sessionId, "tagger cleanup after failure threw:", cleanupError);
                 }
+                // Without tag targets none of the session's persisted drops,
+                // truncations, reasoning clears or caveman rewrites can be
+                // replayed, so this pass would send the conversation unreduced.
+                // A busy writer goes to the storage-busy path; any other error
+                // (a UNIQUE collision, for example) is refused the same way.
+                failPass("tagging-persistence-failure", error);
             }
         }
 
@@ -2094,8 +2166,10 @@ export function createTransform(deps: TransformDeps) {
                 batch?.finalize();
                 logTransformTiming(sessionId, "batchFinalize:flushed", t2);
             } catch (error) {
-                passOutcome.record("flushed-status-failure");
                 sessionLog(sessionId, "transform failed applying flushed statuses:", error);
+                // The replay mutates messages as it goes and has no rollback, so
+                // some persisted drops may be applied and others not.
+                failPass("flushed-status-failure", error);
             }
         }
 
@@ -2314,6 +2388,7 @@ export function createTransform(deps: TransformDeps) {
             : rebuiltHistoryFromInitialPrepare || compartmentPhase.rebuiltHistoryThisPass;
 
         const protectionFoldWillBust =
+            !freezeM0M1 &&
             (!!projectIdentity || !!sessionDirectory) &&
             (fullFeatureMode || compactionOff) &&
             mustMaterialize({
@@ -2461,6 +2536,7 @@ export function createTransform(deps: TransformDeps) {
             phaseJustAwaitedPublication: compartmentPhase.justAwaitedPublication,
             compartmentInProgress,
             historyRefreshExplicitBeforePrepare,
+            freezeM0M1,
             deferredHistoryWasPendingAtPassStart,
             compartmentInjectionRebuiltFromDb: pendingCompartmentInjection?.rebuiltFromDb === true,
             rebuiltHistoryFromInitialPrepare,
@@ -2701,6 +2777,47 @@ export function createTransform(deps: TransformDeps) {
                     `EMERGENCY: fail-closed (reason=${emergencyFailClosed.reason}, recoveryOrigin=${emergencyRecoveryOrigin ?? "unknown"}, finalEstimate=${finalWireEstimate?.tokens ?? "unavailable"}, estimateTrusted=${finalWireEstimate?.trusted ?? false}, syntheticUsage=${usagePercentageSynthetic})`,
                 );
                 return;
+            }
+            // Last-resort size guard. A pass that recorded any degradation, or
+            // whose own estimate is untrusted, has not shown that it matches
+            // what a healthy pass would send. If its request is over the
+            // model's limit, stop: the wrapper replays the last good request
+            // or refuses, instead of sending a request the provider rejects.
+            // An untrusted estimate is partial (it misses parts it cannot
+            // count), so one already over the limit is over it for certain.
+            // A healthy pass pays nothing here: it is only estimated when a
+            // degradation was recorded and no estimate exists yet.
+            const degradedServe = passOutcome.degradations.length > 0;
+            if (degradedServe || (finalWireEstimate && !finalWireEstimate.trusted)) {
+                try {
+                    finalWireEstimate ??= estimateFinalWireInputTokens({
+                        messages,
+                        systemPromptTokens: sessionMeta.systemPromptTokens,
+                        providerID: modelForBudget?.providerID,
+                        modelID: modelForBudget?.modelID,
+                        agentName: notificationParams.agent,
+                    });
+                } catch (error) {
+                    sessionLog(sessionId, "degraded pass size guard could not estimate:", error);
+                }
+                // The limit falls back to inputTokens / percentage, which is
+                // 0 when a synthetic usage bump meets an empty input sample;
+                // no limit proves nothing about fit.
+                if (
+                    finalWireEstimate &&
+                    boundaryContextLimit > 0 &&
+                    (!Number.isFinite(finalWireEstimate.tokens) ||
+                        finalWireEstimate.tokens > boundaryContextLimit)
+                ) {
+                    sessionLog(
+                        sessionId,
+                        `degraded pass over the context limit: estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} limit=${boundaryContextLimit} degradations=${passOutcome.degradations.map((item) => item.site).join(",") || "none"}; not sending it`,
+                    );
+                    throw new DegradedPassRefusalError("served-request-over-limit", {
+                        estimatedTokens: finalWireEstimate.tokens,
+                        contextLimitTokens: boundaryContextLimit,
+                    });
+                }
             }
         }
         if (!finalWireEstimate) {
