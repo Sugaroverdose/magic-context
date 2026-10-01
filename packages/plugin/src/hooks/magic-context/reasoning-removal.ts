@@ -12,13 +12,17 @@
 // Cache contract: new message ids are selected only on a pass that already
 // rebuilds the provider cache and are persisted before any byte changes. Every
 // pass, defer passes included, splices exactly the persisted set at final
-// representation, after every lane that addresses parts by index has run.
+// representation, after the lanes that address parts by index have run.
+//
+// The lane must never change bytes without taking content off the wire. A
+// message whose reasoning payload would stay on the wire through some other
+// part (see `reasoningPayloadLeavesWithParts`) is never selected.
 
 import { isRecord } from "../../shared/record-type-guard";
 import {
     isNeutralizedReasoningPart,
     makeWholeMessageSentinel,
-    modelAcceptsEmptyContent,
+    restoreNeutralizedReasoningPart,
 } from "./sentinel";
 import { findLatestAssistantReasoningMutationExemptMessage } from "./strip-content";
 import type { MessageLike } from "./tag-messages";
@@ -27,6 +31,11 @@ const REMOVABLE_REASONING_TYPES = new Set(["reasoning", "thinking", "redacted_th
 
 function isReasoningPart(part: unknown): boolean {
     return isRecord(part) && REMOVABLE_REASONING_TYPES.has(String(part.type));
+}
+
+/** A reasoning part, or one a drop neutralized on this pass (see sentinel.ts). */
+function isReasoningOrNeutralized(part: unknown): boolean {
+    return isReasoningPart(part) || isNeutralizedReasoningPart(part);
 }
 
 /**
@@ -50,18 +59,81 @@ function newestAssistant(messages: MessageLike[]): MessageLike | undefined {
     return undefined;
 }
 
+function isOpenRouterRoute(providerID: string | undefined): boolean {
+    return (providerID ?? "").toLowerCase().includes("openrouter");
+}
+
+/** `metadata.openrouter.reasoning_details` of a part, when present. */
+function openRouterReasoningDetails(part: unknown): unknown[] | undefined {
+    if (!isRecord(part) || !isRecord(part.metadata)) return undefined;
+    const openrouter = part.metadata.openrouter;
+    if (!isRecord(openrouter) || !Array.isArray(openrouter.reasoning_details)) return undefined;
+    return openrouter.reasoning_details;
+}
+
+/**
+ * Gemini's thought signatures ride OpenRouter's `reasoning_details` on the
+ * tool call they sign, and Gemini needs them back for every function call of
+ * the current turn. They are never removed.
+ */
+function isGeminiSignatureDetail(detail: unknown): boolean {
+    if (!isRecord(detail)) return false;
+    const format = typeof detail.format === "string" ? detail.format : "";
+    return format.startsWith("google-gemini");
+}
+
+/**
+ * True when removing the message's reasoning parts takes its reasoning payload
+ * off the wire. On OpenRouter, `@openrouter/ai-sdk-provider` sends the
+ * message's `reasoning_details` taken first from the tool-call parts' provider
+ * metadata, and only then from the reasoning part, so a removal there must
+ * strip the tool-call copies too. When those copies hold Gemini signatures,
+ * which must stay, the message is not removable at all.
+ */
+function reasoningPayloadLeavesWithParts(
+    message: MessageLike,
+    providerID: string | undefined,
+): boolean {
+    if (!isOpenRouterRoute(providerID)) return true;
+    for (const part of message.parts) {
+        const details = openRouterReasoningDetails(part);
+        if (details?.some(isGeminiSignatureDetail)) return false;
+    }
+    return true;
+}
+
+/** Remove OpenRouter `reasoning_details` copies from the message's other parts. */
+function stripOpenRouterReasoningDetails(message: MessageLike): number {
+    let stripped = 0;
+    for (const part of message.parts) {
+        if (!openRouterReasoningDetails(part)) continue;
+        const metadata = (part as { metadata: Record<string, unknown> }).metadata;
+        const { reasoning_details: _removed, ...rest } = metadata.openrouter as Record<
+            string,
+            unknown
+        >;
+        metadata.openrouter = rest;
+        stripped += 1;
+    }
+    return stripped;
+}
+
 /**
  * Pick assistant message ids whose reasoning should be removed on this
  * rebuilding pass. Pure; the caller persists the result before applying it.
  *
  * A message qualifies when its tag is at most `maxTag - clearReasoningAge`, it
- * carries a reasoning part, it is not the newest assistant (nor the newest one
- * with replayable content), and it keeps wire content after removal.
+ * carries a reasoning part (or one a drop neutralized), it is not the newest
+ * assistant (nor the newest one with replayable content), it keeps wire
+ * content after removal, and removal actually takes its reasoning payload off
+ * the wire on this route.
  *
- * With `prefixBound` (models whose signed thinking is bound to the request
- * prefix), the walk stops at the first reasoning-bearing assistant that is
- * neither already removed nor eligible, so the removed set stays a contiguous
- * oldest prefix and never leaves an older block behind a removed newer one.
+ * Prefix-bound models (`prefixBound`: Fable 5.1, Opus 5.5, Sonnet 5.5, on any
+ * route) select nothing. Their signed thinking stays valid only while
+ * everything before it is unchanged, so removing an older block would
+ * invalidate every newer one (docs/reports/anthropic-thinking-binding.md). On
+ * those models the proactive thinking strip removes every block on a busting
+ * pass instead.
  */
 export function selectReasoningRemovals(args: {
     messages: MessageLike[];
@@ -69,7 +141,9 @@ export function selectReasoningRemovals(args: {
     clearReasoningAge: number;
     alreadyRemoved: ReadonlySet<string>;
     prefixBound: boolean;
+    providerID?: string;
 }): string[] {
+    if (args.prefixBound) return [];
     let maxTag = 0;
     for (const tag of args.messageTagNumbers.values()) if (tag > maxTag) maxTag = tag;
     const cutoff = maxTag - args.clearReasoningAge;
@@ -80,33 +154,33 @@ export function selectReasoningRemovals(args: {
     const selected: string[] = [];
     for (const message of args.messages) {
         if (message.info.role !== "assistant") continue;
-        if (!message.parts.some(isReasoningPart)) continue;
+        if (!message.parts.some(isReasoningOrNeutralized)) continue;
         const id = message.info.id;
-        if (typeof id === "string" && args.alreadyRemoved.has(id)) continue;
+        if (typeof id !== "string" || id.length === 0 || args.alreadyRemoved.has(id)) continue;
         const tag = args.messageTagNumbers.get(message) ?? 0;
-        const eligible =
-            typeof id === "string" &&
-            id.length > 0 &&
+        if (
             message !== newest &&
             message !== exempt &&
             tag > 0 &&
             tag <= cutoff &&
-            hasWireContentBesideReasoning(message);
-        if (eligible) {
+            hasWireContentBesideReasoning(message) &&
+            reasoningPayloadLeavesWithParts(message, args.providerID)
+        ) {
             selected.push(id);
-        } else if (args.prefixBound) {
-            break;
         }
     }
     return selected;
 }
 
 /**
- * Splice every reasoning part out of the assistant messages named in `ids`.
- * Runs on every pass. The persisted set is replayed unconditionally, so a
- * removed block never returns, even if a revert later makes its message the
- * newest one. When an earlier drop has already emptied a message, a
- * whole-message placeholder keeps it from being sent empty.
+ * Splice every reasoning part (including drop-neutralized ones) out of the
+ * assistant messages named in `ids`, on every pass. The newest assistant with
+ * replayable content is skipped, matching Rust's exempt-message rule; a
+ * removed message can only become that message if newer history disappears,
+ * which already rewrites the cache. On OpenRouter the message's
+ * `reasoning_details` copies leave with it. When an earlier drop has already
+ * emptied a message, a whole-message placeholder keeps it from being sent
+ * empty.
  */
 export function removeReasoningParts(
     messages: MessageLike[],
@@ -114,17 +188,20 @@ export function removeReasoningParts(
     providerID: string | undefined,
 ): number {
     if (ids.size === 0) return 0;
+    const exempt = findLatestAssistantReasoningMutationExemptMessage(messages);
     let removed = 0;
     for (const message of messages) {
-        if (message.info.role !== "assistant") continue;
+        if (message.info.role !== "assistant" || message === exempt) continue;
         const id = message.info.id;
         if (typeof id !== "string" || !ids.has(id)) continue;
+        if (!reasoningPayloadLeavesWithParts(message, providerID)) continue;
         const before = message.parts.length;
-        const kept = message.parts.filter((part) => !isReasoningPart(part));
+        const kept = message.parts.filter((part) => !isReasoningOrNeutralized(part));
         if (kept.length === before) continue;
         removed += before - kept.length;
         message.parts.length = 0;
         message.parts.push(...kept);
+        if (isOpenRouterRoute(providerID)) stripOpenRouterReasoningDetails(message);
         if (!hasWireContentBesideReasoning(message)) {
             message.parts.push(makeWholeMessageSentinel(providerID));
         }
@@ -133,49 +210,31 @@ export function removeReasoningParts(
 }
 
 /**
- * Splice out reasoning parts that tool or text drops neutralized this pass
- * (see neutralizeDroppedReasoningPart). Canonical Anthropic keeps them as the
- * empty sentinels its adapter already drops, which is its existing output.
+ * How reasoning neutralized by a drop is served on a route other than
+ * canonical Anthropic (which keeps the empty sentinel its adapter drops):
  *
- * The drop decision itself is persisted and replayed on every pass, so this
- * removal is replayed with it and first appears only on the pass where the
- * drop first applied. On prefix-bound models every reasoning part older than
- * the newest message that lost reasoning this way is removed too, so the
- * surviving signed blocks are always a contiguous newest suffix.
+ * - `restore`: put the original part back. A drop leaves reasoning to the age
+ *   lane, as Pi and Rust do. The tag lane links a tool to the reasoning of
+ *   the step before it, so removing that reasoning would take an unrelated
+ *   block off the wire.
+ * - `legacy`: put the original part back with `[cleared]` written into its
+ *   text, exactly the bytes served before this lane existed. Used only until a
+ *   session's first rebuilding pass after upgrade, and when the provider is
+ *   unresolved, so the change first lands on a pass that already rebuilds.
  */
-export function removeNeutralizedReasoningParts(
+export type DroppedReasoningMode = "restore" | "legacy";
+
+export function settleDroppedReasoningParts(
     messages: MessageLike[],
-    providerID: string | undefined,
-    prefixBound: boolean,
+    mode: DroppedReasoningMode,
 ): number {
-    if (modelAcceptsEmptyContent(providerID)) return 0;
-    let removed = 0;
-    let lastTouched = -1;
-    messages.forEach((message, index) => {
-        if (message.info.role !== "assistant") return;
-        const kept = message.parts.filter((part) => !isNeutralizedReasoningPart(part));
-        if (kept.length === message.parts.length) return;
-        removed += message.parts.length - kept.length;
-        message.parts.length = 0;
-        message.parts.push(...kept);
-        lastTouched = index;
-        if (!hasWireContentBesideReasoning(message) && !message.parts.some(isReasoningPart)) {
-            message.parts.push(makeWholeMessageSentinel(providerID));
-        }
-    });
-    if (prefixBound && lastTouched > 0) {
-        for (let index = 0; index < lastTouched; index += 1) {
-            const message = messages[index];
-            if (message.info.role !== "assistant") continue;
-            const kept = message.parts.filter((part) => !isReasoningPart(part));
-            if (kept.length === message.parts.length) continue;
-            removed += message.parts.length - kept.length;
-            message.parts.length = 0;
-            message.parts.push(...kept);
-            if (!hasWireContentBesideReasoning(message)) {
-                message.parts.push(makeWholeMessageSentinel(providerID));
-            }
+    let settled = 0;
+    for (const message of messages) {
+        if (message.info.role !== "assistant") continue;
+        for (const part of message.parts) {
+            if (!isNeutralizedReasoningPart(part)) continue;
+            if (restoreNeutralizedReasoningPart(part, mode === "legacy")) settled += 1;
         }
     }
-    return removed;
+    return settled;
 }

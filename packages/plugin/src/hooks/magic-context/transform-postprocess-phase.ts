@@ -54,8 +54,17 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import {
     addRemovedReasoningIds,
-    getRemovedReasoningIds,
+    getReasoningRemovalState,
+    markDropLeavesReasoning,
+    type ReasoningRemovalState,
 } from "../../features/magic-context/storage-reasoning-removal";
+
+/**
+ * Last successfully read reasoning-removal state per session, replayed when the
+ * persisted document cannot be read so removed reasoning never comes back.
+ */
+const lastGoodReasoningRemovalState = new Map<string, ReasoningRemovalState>();
+
 import {
     getTagNumberByMessageId,
     markTagsCompactedByMessageIds,
@@ -129,9 +138,10 @@ import {
 } from "./postprocess-read-cache";
 import { estimateTokens } from "./read-session-formatting";
 import {
-    removeNeutralizedReasoningParts,
+    type DroppedReasoningMode,
     removeReasoningParts,
     selectReasoningRemovals,
+    settleDroppedReasoningParts,
 } from "./reasoning-removal";
 import { modelAcceptsEmptyContent, replaySentinelByMessageIds } from "./sentinel";
 import {
@@ -1956,20 +1966,35 @@ export async function runPostTransformPhase(
     // Whole-part reasoning removal serves every provider except canonical
     // Anthropic, which keeps its "[cleared]" + empty-sentinel lane unchanged.
     // The persisted set is read on every pass so defer passes replay it.
+    // An unresolved provider never selects: the session may be canonical
+    // Anthropic, whose later passes would not replay the ids. It still replays
+    // ids an earlier, resolved pass froze.
     const reasoningRemovalEnabled = !canUseEmptySentinels && !compactionOff;
+    const reasoningRemovalSelectable =
+        reasoningRemovalEnabled && typeof args.resolvedProviderID === "string";
     const removedReasoningIds = new Set<string>();
+    let dropLeavesReasoning = false;
     let reasoningRemovalReadable = false;
     if (reasoningRemovalEnabled) {
         try {
-            for (const id of getRemovedReasoningIds(args.db, args.sessionId)) {
-                removedReasoningIds.add(id);
-            }
+            const state = getReasoningRemovalState(args.db, args.sessionId);
+            for (const id of state.messageIds) removedReasoningIds.add(id);
+            dropLeavesReasoning = state.dropLeavesReasoning;
             reasoningRemovalReadable = true;
+            lastGoodReasoningRemovalState.set(args.sessionId, state);
         } catch (error) {
+            // Serving no removals would bring removed reasoning back on what may
+            // be a defer pass. Replay this process's last good copy instead and
+            // select nothing new until the document reads again.
+            const lastGood = lastGoodReasoningRemovalState.get(args.sessionId);
+            if (lastGood) {
+                for (const id of lastGood.messageIds) removedReasoningIds.add(id);
+                dropLeavesReasoning = lastGood.dropLeavesReasoning;
+            }
             args.passOutcome?.record("reasoning-removal-read-failure");
             sessionLog(
                 args.sessionId,
-                "reasoning removal: persisted set unreadable; selecting nothing new:",
+                `reasoning removal: persisted state unreadable; replaying ${lastGood ? "the last good copy" : "nothing (no copy in this process)"}, selecting nothing new:`,
                 error,
             );
         }
@@ -2126,6 +2151,18 @@ export async function runPostTransformPhase(
                 args.historyRebuiltThisPass ||
                 args.compartmentInjectionRebuiltFromDb ||
                 args.rebuiltHistoryFromInitialPrepare;
+            // Only a rewrite this pass already pays for waives the emergency
+            // minimum, as in Pi: newly applied drops, a fold that busts the
+            // served prefix, or a rebuilt history injection. Replaying persisted
+            // drop statuses restores bytes already served on every pass, so it
+            // never counts (otherwise any session holding a drop would lift the
+            // minimum on every pass).
+            const emergencyRewriteAlreadyPriced =
+                pendingOpsDidMutate ||
+                foldBustsServedPrefixThisPass ||
+                args.historyRebuiltThisPass ||
+                args.compartmentInjectionRebuiltFromDb ||
+                args.rebuiltHistoryFromInitialPrepare;
             // An independent mutation is already pricing this pass. Rearm the
             // emergency batch so all candidates accumulated during sustained
             // force pressure can ride it instead of waiting for another episode.
@@ -2170,7 +2207,7 @@ export async function runPostTransformPhase(
                                   currentTotalInputTokens: args.contextUsage.inputTokens,
                                   ceilingTokens: args.emergencyCeilingTokens,
                                   usagePercentage: args.contextUsage.percentage,
-                                  passAlreadyPriced: independentMutationBeforeHeuristics,
+                                  passAlreadyPriced: emergencyRewriteAlreadyPriced,
                               }
                             : undefined,
                     routine: routineCleanupApplied,
@@ -2247,8 +2284,12 @@ export async function runPostTransformPhase(
             // providers keep their reasoning intact. Inline-thinking stripping
             // below stays provider-independent (it removes literal <thinking> tags
             // from text, never touches typed reasoning parts).
+            // Prefix-bound models never take the age lane: removing an older
+            // signed block invalidates every newer one. The proactive strip
+            // removes all of them on a busting pass instead.
+            const ageLaneAllowed = args.thinkingBindingRecoveryEnabledForModel !== true;
             const clearedReasoning =
-                routineCleanupApplied && canUseEmptySentinels
+                routineCleanupApplied && canUseEmptySentinels && ageLaneAllowed
                     ? clearOldReasoning(
                           args.messages,
                           args.reasoningByMessage,
@@ -2267,13 +2308,14 @@ export async function runPostTransformPhase(
             // and persisted before final representation applies them; a failed
             // write applies nothing new and replays only the earlier set.
             let removedReasoningMessages = 0;
-            if (routineCleanupApplied && reasoningRemovalEnabled && reasoningRemovalReadable) {
+            if (routineCleanupApplied && reasoningRemovalSelectable && reasoningRemovalReadable) {
                 const newIds = selectReasoningRemovals({
                     messages: args.messages,
                     messageTagNumbers: args.messageTagNumbers,
                     clearReasoningAge: args.clearReasoningAge,
                     alreadyRemoved: removedReasoningIds,
                     prefixBound: args.thinkingBindingRecoveryEnabledForModel === true,
+                    providerID: args.resolvedProviderID,
                 });
                 if (newIds.length > 0) {
                     let persisted = false;
@@ -2284,6 +2326,19 @@ export async function runPostTransformPhase(
                     }
                     if (persisted) {
                         for (const id of newIds) removedReasoningIds.add(id);
+                        // Serve the committed union: another process may have added
+                        // ids between this pass's read and its compare-and-swap.
+                        try {
+                            const committed = getReasoningRemovalState(args.db, args.sessionId);
+                            for (const id of committed.messageIds) removedReasoningIds.add(id);
+                            lastGoodReasoningRemovalState.set(args.sessionId, committed);
+                        } catch (error) {
+                            sessionLog(
+                                args.sessionId,
+                                "reasoning removal: committed set re-read failed:",
+                                error,
+                            );
+                        }
                         removedReasoningMessages = newIds.length;
                         sessionLog(
                             args.sessionId,
@@ -3365,12 +3420,12 @@ export async function runPostTransformPhase(
     // representation step below), which strips that set first; later passes
     // replay the same set through the same step and serve identical bytes.
     //
-    // Subagents are left out, as in Rust mode, where host postprocess does not
-    // run for them.
+    // Subagents are included: on these models the age lane never removes
+    // reasoning, so this strip is their only reasoning reclaim, and a subagent's
+    // busting pass invalidates its signed blocks exactly as a primary's does.
     let proactiveThinkingStrip: ProactiveThinkingStrip | null = null;
     if (
         !compactionOff &&
-        args.fullFeatureMode &&
         args.thinkingBindingRecoveryEnabledForModel === true &&
         proactiveThinkingStripPermitted
     ) {
@@ -3392,6 +3447,33 @@ export async function runPostTransformPhase(
         }
     }
 
+    // Reasoning that a drop neutralized this pass. Canonical Anthropic keeps the
+    // empty sentinel its adapter drops (its existing bytes). Elsewhere a drop
+    // leaves reasoning to the age lane, as Pi and Rust do, and the original part
+    // is put back in place, before finalize so the binding strips still see it.
+    // Until the session's first rebuilding pass after upgrade (and whenever the
+    // provider is unresolved) the part is put back with the "[cleared]" text it
+    // was served with before, so that change never lands on a defer pass.
+    let settledDroppedReasoning = 0;
+    if (!canUseEmptySentinels) {
+        let mode: DroppedReasoningMode = "legacy";
+        if (typeof args.resolvedProviderID === "string") {
+            if (dropLeavesReasoning) {
+                mode = "restore";
+            } else if (isCacheBustingPass && reasoningRemovalReadable) {
+                try {
+                    if (markDropLeavesReasoning(args.db, args.sessionId)) {
+                        dropLeavesReasoning = true;
+                        mode = "restore";
+                    }
+                } catch (error) {
+                    sessionLog(args.sessionId, "reasoning removal: drop mode write failed:", error);
+                }
+            }
+        }
+        settledDroppedReasoning = settleDroppedReasoningParts(args.messages, mode);
+    }
+
     const tFinalRepresentation = performance.now();
     const finalRepresentation = finalizeMessageRepresentation(
         args.messages,
@@ -3399,22 +3481,17 @@ export async function runPostTransformPhase(
         finalizeOptions,
     );
 
-    // Remove reasoning last: every lane above addresses parts by index on the
-    // array as OpenCode built it, and the next pass rebuilds that array, so the
-    // splice never shifts an index another lane reads.
-    const removedReasoningParts =
-        (reasoningRemovalEnabled
-            ? removeReasoningParts(args.messages, removedReasoningIds, args.resolvedProviderID)
-            : 0) +
-        removeNeutralizedReasoningParts(
-            args.messages,
-            args.resolvedProviderID,
-            args.thinkingBindingRecoveryEnabledForModel === true,
-        );
+    // Remove reasoning last. Every lane above addresses parts by index on the
+    // array as OpenCode built it, and the next pass rebuilds that array. The
+    // tail-hygiene walk below does read `:p<index>` positions on the spliced
+    // array; its attribution is the same on every pass, so it never flips bytes.
+    const removedReasoningParts = reasoningRemovalEnabled
+        ? removeReasoningParts(args.messages, removedReasoningIds, args.resolvedProviderID)
+        : 0;
 
     sessionLog(
         args.sessionId,
-        `final representation: clearedParts=${finalRepresentation.clearedParts} mergedReasoningParts=${finalRepresentation.mergedReasoningParts} removedReasoningParts=${removedReasoningParts}`,
+        `final representation: clearedParts=${finalRepresentation.clearedParts} mergedReasoningParts=${finalRepresentation.mergedReasoningParts} removedReasoningParts=${removedReasoningParts} settledDroppedReasoning=${settledDroppedReasoning}`,
     );
     logTransformTiming(
         args.sessionId,

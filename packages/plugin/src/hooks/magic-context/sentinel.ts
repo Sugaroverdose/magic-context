@@ -42,22 +42,23 @@ export function modelAcceptsEmptyContent(providerID?: string): boolean {
  * True when the route serializes reasoning as Anthropic signed thinking, where
  * removing the tool-result separator between two reasoning-bearing assistant
  * steps lets the adapter merge them into one signed turn (issue 423). Covers
- * canonical Anthropic, Vertex and other custom Anthropic ids, Bedrock, and
- * Claude models served through any other provider (Copilot, OpenRouter). The
- * forced call skeleton beside reasoning exists only for these routes.
+ * canonical Anthropic, Vertex and other custom Anthropic ids, and Claude
+ * models behind any other provider (Bedrock, Copilot, OpenRouter
+ * `anthropic/*`). Non-Claude Bedrock models (Nova, Llama, DeepSeek) do not
+ * produce signed Anthropic thinking and are excluded. The forced call
+ * skeleton beside reasoning exists only for these routes.
  */
 export function isAnthropicFamilyRoute(providerID?: string, modelID?: string): boolean {
     const provider = (providerID ?? "").toLowerCase();
     const model = (modelID ?? "").toLowerCase();
     return (
-        provider.includes("anthropic") ||
-        provider.includes("bedrock") ||
-        model.includes("claude") ||
-        model.includes("anthropic")
+        provider.includes("anthropic") || model.includes("claude") || model.includes("anthropic")
     );
 }
 
 const REMOVED_REASONING_MARK = Symbol.for("magic-context.removed-reasoning");
+/** The fields a neutralized part had, so a route that keeps it can restore it. */
+const NEUTRALIZED_ORIGINALS = new WeakMap<object, Record<string, unknown>>();
 
 /**
  * Take a reasoning part that a tool or text drop invalidated off the wire,
@@ -78,6 +79,7 @@ export function neutralizeDroppedReasoningPart(part: unknown): void {
     if (!isRecord(part)) return;
     if (part.thinking === undefined && part.text === undefined) return;
     if (part.type === "text") return;
+    NEUTRALIZED_ORIGINALS.set(part, { ...part });
     const cacheControl = part.cache_control;
     const cacheControlCamel = part.cacheControl;
     for (const key of Object.keys(part)) delete part[key];
@@ -85,7 +87,31 @@ export function neutralizeDroppedReasoningPart(part: unknown): void {
     part.text = "";
     if (cacheControl !== undefined) part.cache_control = cacheControl;
     if (cacheControlCamel !== undefined) part.cacheControl = cacheControlCamel;
-    Object.defineProperty(part, REMOVED_REASONING_MARK, { value: true, enumerable: false });
+    Object.defineProperty(part, REMOVED_REASONING_MARK, {
+        value: true,
+        enumerable: false,
+        configurable: true,
+    });
+}
+
+/**
+ * Put a neutralized part back exactly as it was (same object, same key order).
+ * With `legacyCleared`, write `[cleared]` into its `thinking`/`text` the way
+ * drops did before parts were neutralized, reproducing those bytes.
+ */
+export function restoreNeutralizedReasoningPart(part: unknown, legacyCleared: boolean): boolean {
+    if (!isRecord(part)) return false;
+    const original = NEUTRALIZED_ORIGINALS.get(part);
+    if (!original) return false;
+    for (const key of Object.keys(part)) delete part[key];
+    Object.assign(part, original);
+    if (legacyCleared) {
+        if (part.thinking !== undefined) part.thinking = "[cleared]";
+        if (part.text !== undefined) part.text = "[cleared]";
+    }
+    NEUTRALIZED_ORIGINALS.delete(part);
+    delete (part as Record<PropertyKey, unknown>)[REMOVED_REASONING_MARK];
+    return true;
 }
 
 /** True for a part rewritten by `neutralizeDroppedReasoningPart`. */

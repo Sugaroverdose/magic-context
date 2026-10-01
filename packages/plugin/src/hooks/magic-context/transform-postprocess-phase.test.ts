@@ -9385,14 +9385,16 @@ describe("proactive strip of thinking on busting passes", () => {
         expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(new Set());
     });
 
-    it("leaves subagent sessions alone, as Rust mode does", async () => {
+    // Subagents used to be left out. The age lane no longer removes reasoning on
+    // prefix-bound models (an older removal invalidates every newer signed
+    // block), so a busting pass strips subagents' thinking the same way.
+    it("strips subagent sessions on a busting pass too", async () => {
         openDb();
         const sessionId = "ses-proactive-subagent";
         const pass = buildSession(sessionId, "re-rendered first user message");
         const result = await serve(sessionId, pass, { busting: true, fullFeatureMode: false });
-        expect(result.proactiveThinkingStrip).toBeNull();
-        expect(reasoningCount(findMessage(pass, "assistant-one"))).toBe(1);
-        expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(new Set());
+        expect(result.proactiveThinkingStrip).toEqual({ messageIds: ALL_ASSISTANTS });
+        for (const id of ALL_ASSISTANTS) expect(reasoningCount(findMessage(pass, id))).toBe(0);
     });
 
     it("strips through Rust-mode host postprocess only on a busting pass and replays it", () => {
