@@ -68,7 +68,7 @@ export interface SpawnedOpencode {
     port: number;
     pid: number;
     env: IsolatedEnv;
-    kill: () => Promise<void>;
+    kill: (preserveEnv?: boolean, cleanupEnv?: boolean) => Promise<void>;
     stdout: () => string;
     stderr: () => string;
     /** The hermetic Rust stack is provisioned only when MC_E2E_MODE is set to "rust"; this property exposes it when available. */
@@ -824,7 +824,7 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
             stdout: () => stdoutBuf,
             stderr: () => stderrBuf,
             rustStack: resources?.stack,
-            kill: async () => {
+            kill: async (preserveEnv = false, cleanupEnv = false) => {
                 try {
                     if (child.exitCode === null && child.signalCode === null && child.pid) {
                         killGroup(child.pid, "SIGTERM");
@@ -841,7 +841,7 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
                 } finally {
                     if (child.pid) liveChildGroups.delete(child.pid);
                     try { await stopProvisionedRustStack(); } finally {
-                        if (!opts.existingEnv) cleanupE2ETempDir(dirname(env.configDir));
+                        if ((!opts.existingEnv || cleanupEnv) && !preserveEnv) cleanupE2ETempDir(dirname(env.configDir));
                     }
                 }
             },

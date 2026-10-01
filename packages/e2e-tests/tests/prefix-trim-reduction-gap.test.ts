@@ -183,8 +183,14 @@ it("reports tool-only steps after the boundary as cut or removed this pass, not 
         writable.close();
     }
 
+    const configPath = join(h.opencode.env.configDir, "opencode.json");
+    const databasePath = join(h.dataDir, "opencode", "opencode.db");
+    expect(existsSync(configPath)).toBe(true);
+    expect(existsSync(databasePath)).toBe(true);
     const logOffset = existsSync(pluginLogPath()) ? readFileSync(pluginLogPath()).length : 0;
     await h.restart();
+    expect(existsSync(configPath)).toBe(true);
+    expect(existsSync(databasePath)).toBe(true);
     h.mock.setDefault({ text: "after restart", usage: LOW });
     await h.sendPrompt(sessionId, "anything else?", { timeoutMs: 120_000 });
     await h.waitForMockQuiescence({ label: "post-restart turn settles" });
