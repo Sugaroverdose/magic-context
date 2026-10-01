@@ -49,6 +49,10 @@ function matches(expected: Definition[], installed: Map<string, string>): boolea
 
 /** Let Rust coordinate validation detect changes without rereading historical summary text. */
 export function installCompartmentHistoryVersions(db: Database): void {
+    // A partial legacy schema can reach this migration before `compartments`
+    // exists. Its triggers need that table, and openDatabase() runs this again
+    // after the base schema is in place, so there is nothing to do yet.
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='compartments'").get()) return;
     // Most opens need no DDL, seeding scan or write lock. Compare SQLite's stored
     // creation text, including the privilege-aware trigger variant, before writing.
     if (matches(definitions(db), installedDefinitions(db))) return;
