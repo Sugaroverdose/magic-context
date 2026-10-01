@@ -18,6 +18,14 @@
             ]
         },
         {
+            "path": "tests/live-providers.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "opt-in real-provider acceptance probes (MC_LIVE_PROVIDERS=1): billed calls to OpenAI, Bedrock, OpenRouter, DeepSeek and Kimi with keys served by CKCRED to the mc-e2e consumer, on OpenCode 1.18.30 in throwaway roots with host PID lsof containment; never run in CI",
+            "contract_refs": ["REASONING-REMOVAL-LIVE"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/issue-574-unborn-project.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
