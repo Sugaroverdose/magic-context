@@ -607,11 +607,9 @@ export function inspectRpcServerDiscovery(
     }
 
     const portFiles: string[] = [];
-    const projectDirs: string[] = [];
     for (const projectEntry of projectEntries) {
         if (!projectEntry.isDirectory()) continue;
         const projectDir = join(rpcRoot, projectEntry.name);
-        projectDirs.push(projectDir);
         let entries: string[];
         try {
             entries = rpcDiscoveryFs.readdirSync(projectDir) as string[];
@@ -626,7 +624,6 @@ export function inspectRpcServerDiscovery(
         }
     }
     if (portFiles.length === 0) {
-        pruneEmptyRpcProjectDirs(projectDirs);
         return { state: "absent", serverPids: [], staleFiles: [] };
     }
 
@@ -715,7 +712,6 @@ export function inspectRpcServerDiscovery(
             return unreadableDiscovery(staleFile, "io");
         }
     }
-    pruneEmptyRpcProjectDirs(projectDirs);
 
     const serverPids = [...pids].sort((a, b) => a - b);
     if (serverPids.length > 0) {
@@ -744,26 +740,49 @@ export function inspectRpcServerDiscovery(
     return { state: "stale", serverPids: [], staleFiles };
 }
 
+/** An empty project directory younger than this may belong to a host that is about to write its record. */
+export const RPC_DISCOVERY_DIR_PRUNE_MIN_AGE_MS = 60_000;
+
 /**
- * Remove per-project discovery directories that hold no files. Hosts that exit
- * remove only their own record, so these accumulate. Removal is best effort:
- * a directory that gained a file since it was listed fails to remove and stays.
+ * Remove per-project discovery directories under `<storageDir>/rpc` that hold
+ * no files. Hosts that exit remove only their own record, so these accumulate.
+ *
+ * Doctor-only (`--prune-discovery`, `--fix`); never called from storage opens.
+ * A starting host runs `mkdir -p` and then writes its port file. Removing the
+ * directory between those two steps makes the write fail, and the host becomes
+ * invisible to the storage guard. A directory modified within the last minute
+ * is therefore skipped, and one that gains a file fails to remove and stays.
  */
-function pruneEmptyRpcProjectDirs(projectDirs: readonly string[]): void {
-    for (const projectDir of projectDirs) {
+export function pruneEmptyRpcDiscoveryDirs(storageDir: string): string[] {
+    const rpcRoot = join(storageDir, "rpc");
+    let entries: Dirent[];
+    try {
+        entries = rpcDiscoveryFs.readdirSync(rpcRoot, { withFileTypes: true }) as Dirent[];
+    } catch {
+        return [];
+    }
+    const removed: string[] = [];
+    const now = Date.now();
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const projectDir = join(rpcRoot, entry.name);
         try {
             if ((rpcDiscoveryFs.readdirSync(projectDir) as string[]).length > 0) continue;
+            const ageMs = now - rpcDiscoveryFs.statSync(projectDir).mtimeMs;
+            if (!(ageMs >= RPC_DISCOVERY_DIR_PRUNE_MIN_AGE_MS)) continue;
             rpcDiscoveryFs.rmdirSync(projectDir);
+            removed.push(projectDir);
         } catch {
             // Missing, unreadable or newly non-empty: leave it for a later pass.
         }
     }
+    return removed;
 }
 
 /**
- * Delete discovery records the user chose to remove (`doctor --prune-discovery`),
- * then remove project directories left empty. Only files directly inside a
- * project directory under `<storageDir>/rpc` are touched.
+ * Delete discovery records the user chose to remove (`doctor --prune-discovery`).
+ * Only files directly inside a project directory under `<storageDir>/rpc` are
+ * touched; the directories themselves are left to pruneEmptyRpcDiscoveryDirs.
  */
 export function removeRpcDiscoveryRecords(
     storageDir: string,
@@ -772,7 +791,6 @@ export function removeRpcDiscoveryRecords(
     const rpcRoot = resolve(join(storageDir, "rpc"));
     const removed: string[] = [];
     const failed: Array<{ file: string; error: string }> = [];
-    const projectDirs = new Set<string>();
     for (const file of files) {
         const projectDir = dirname(resolve(file));
         if (dirname(projectDir) !== rpcRoot || !basename(file).startsWith("port")) {
@@ -786,9 +804,7 @@ export function removeRpcDiscoveryRecords(
             if ((error as NodeJS.ErrnoException).code === "ENOENT") removed.push(file);
             else failed.push({ file, error: getErrorMessage(error) });
         }
-        projectDirs.add(projectDir);
     }
-    pruneEmptyRpcProjectDirs([...projectDirs]);
     return { removed, failed };
 }
 

@@ -8,6 +8,7 @@ import {
     readFileSync,
     realpathSync,
     rmSync,
+    utimesSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +24,7 @@ import { runMergeIdentityCli } from "./doctor-merge-identity";
 import {
     PRUNE_DISCOVERY_COMMAND,
     reportDiscoveryRecords,
+    runDiscoveryDoctorCheck,
     runPruneDiscoveryCli,
 } from "./doctor-prune-discovery";
 import { defaultInspectHolders } from "./doctor-repair-db";
@@ -104,6 +106,13 @@ function listRecords(): string[] {
 }
 
 const at = (iso: string) => Date.parse(iso);
+
+/** Backdate every discovery project directory by an hour, past the pruning age limit. */
+function ageRpcDirs(): void {
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const rpc = join(storage, "rpc");
+    for (const name of readdirSync(rpc)) utimesSync(join(rpc, name), hourAgo, hourAgo);
+}
 const HOST_PID = 13620;
 const HOST_DIR = "60beaf10494f9d58";
 
@@ -223,7 +232,7 @@ function fileHash(path: string): string {
 }
 
 describe("doctor merge-identities with reused PIDs in discovery records", () => {
-    it("removes the 21 reused-PID records, keeps the live host blocking, then allows the merge once it exits", () => {
+    it("removes the 21 reused-PID records, keeps the live host blocking, then allows the merge once it exits", async () => {
         const { genuine, processes } = seedIssueTree();
         const { dbPath, args } = createMergeFixture();
         const before = fileHash(dbPath);
@@ -245,8 +254,25 @@ describe("doctor merge-identities with reused PIDs in discovery records", () => 
         expect(listRecords()).toEqual(
             genuine.map((file) => `${HOST_DIR}/${file.split(/[\\/]/).at(-1)}`).sort(),
         );
-        expect(readdirSync(join(storage, "rpc"))).toEqual([HOST_DIR]);
+        // The merge's holder check never removes directories: 46 empty ones plus
+        // the 17 it just emptied are still there.
+        expect(readdirSync(join(storage, "rpc"))).toHaveLength(64);
         expect(fileHash(dbPath)).toBe(before);
+
+        // `doctor --prune-discovery` removes empty directories older than a minute
+        // and leaves a fresh one, which a starting host may be about to fill.
+        ageRpcDirs();
+        mkdirSync(join(storage, "rpc", "fresh"));
+        expect(
+            await runPruneDiscoveryCli(["--yes"], {
+                storageDir: storage,
+                inspect: (dir) => inspectRpcServerDiscovery(dir, cimProcesses(processes)),
+                interactive: false,
+                print: () => {},
+            }),
+        ).toBe(0);
+        expect(readdirSync(join(storage, "rpc")).sort()).toEqual([HOST_DIR, "fresh"]);
+        expect(listRecords()).toHaveLength(10);
 
         // The server exits: its PID is dead, so its records are stale too.
         processes.delete(HOST_PID);
@@ -317,7 +343,8 @@ describe("doctor --prune-discovery", () => {
             }),
         ).toBe(0);
         expect(existsSync(file)).toBe(false);
-        expect(existsSync(join(storage, "rpc", "p"))).toBe(false);
+        // Its directory was emptied just now, so the age rule keeps it until a later run.
+        expect(existsSync(join(storage, "rpc", "p"))).toBe(true);
     });
 
     it("removes unresolved records without a prompt when --yes is passed", async () => {
@@ -351,5 +378,20 @@ describe("doctor --prune-discovery", () => {
         expect(issue).toBe(true);
         expect(passes).toEqual([]);
         expect(warnings.join("\n")).toContain(PRUNE_DISCOVERY_COMMAND);
+    });
+
+    it("doctor removes old empty discovery directories only with --fix", () => {
+        mkdirSync(join(storage, "rpc", "old-empty"), { recursive: true });
+        ageRpcDirs();
+        mkdirSync(join(storage, "rpc", "fresh-empty"));
+        const sink = { pass: () => {}, warn: () => {}, info: () => {} };
+        const inspect = (dir: string) => inspectRpcServerDiscovery(dir, cimProcesses(new Map()));
+
+        expect(runDiscoveryDoctorCheck(storage, { inspect }, sink)).toBe(false);
+        expect(existsSync(join(storage, "rpc", "old-empty"))).toBe(true);
+
+        expect(runDiscoveryDoctorCheck(storage, { fix: true, inspect }, sink)).toBe(false);
+        expect(existsSync(join(storage, "rpc", "old-empty"))).toBe(false);
+        expect(existsSync(join(storage, "rpc", "fresh-empty"))).toBe(true);
     });
 });

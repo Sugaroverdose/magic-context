@@ -6,10 +6,12 @@
  *
  * Inspection already deletes records proven stale (dead PID, a process that
  * started after the record was written, or an image no host can run). This
- * module reports what is left and lets the user remove it explicitly.
+ * module reports what is left and lets the user remove it explicitly. Empty
+ * project directories are pruned only here, never during storage opens.
  */
 import {
     inspectRpcServerDiscovery,
+    pruneEmptyRpcDiscoveryDirs,
     type RpcDiscoveryRecordEvidence,
     type RpcServerDiscovery,
     removeRpcDiscoveryRecords,
@@ -55,6 +57,28 @@ interface DiscoveryReportSink {
 }
 
 /**
+ * The main doctor's discovery check: inspect, report, and with `--fix` prune
+ * empty project directories. Returns true when the doctor should count an issue.
+ */
+export function runDiscoveryDoctorCheck(
+    storageDir: string,
+    options: { fix?: boolean; inspect?: (storageDir: string) => RpcServerDiscovery },
+    sink: DiscoveryReportSink,
+): boolean {
+    const issue = reportDiscoveryRecords(
+        (options.inspect ?? inspectDiscoveryRecords)(storageDir),
+        sink,
+    );
+    if (options.fix) {
+        const pruned = pruneEmptyRpcDiscoveryDirs(storageDir);
+        if (pruned.length > 0) {
+            sink.info(`Removed ${pruned.length} empty RPC discovery director(ies)`);
+        }
+    }
+    return issue;
+}
+
+/**
  * Report discovery records in the main doctor. Returns true when records remain
  * that nothing could resolve, so the doctor does not end with a clean bill.
  */
@@ -94,6 +118,7 @@ export interface PruneDiscoveryDeps {
     inspect: (storageDir: string) => RpcServerDiscovery;
     confirm: (message: string) => Promise<boolean>;
     remove: typeof removeRpcDiscoveryRecords;
+    pruneDirs: typeof pruneEmptyRpcDiscoveryDirs;
     print: (line: string) => void;
     interactive: boolean;
 }
@@ -118,6 +143,7 @@ export async function runPruneDiscoveryCli(
         inspect: inspectDiscoveryRecords,
         confirm: (message) => confirm(message, false),
         remove: removeRpcDiscoveryRecords,
+        pruneDirs: pruneEmptyRpcDiscoveryDirs,
         print: (line) => console.log(line),
         interactive: Boolean(process.stdin.isTTY),
         ...overrides,
@@ -133,6 +159,12 @@ export async function runPruneDiscoveryCli(
             `Discovery record ${discovery.unreadableFile ?? "<unknown>"} ${discovery.unreadableArm === "parse" ? "could not be parsed (it may still be being written; retry in ten minutes)" : "could not be read"}. Nothing else was removed.`,
         );
         return 1;
+    }
+    // Directories emptied a moment ago are skipped by the age rule, so they are
+    // pruned on a later run rather than here.
+    const prunedDirs = deps.pruneDirs(deps.storageDir);
+    if (prunedDirs.length > 0) {
+        deps.print(`Removed ${prunedDirs.length} empty discovery director(ies).`);
     }
     if (discovery.serverPids.length > 0) {
         deps.print(

@@ -7,6 +7,7 @@ import {
     existsSync,
     mkdirSync,
     mkdtempSync,
+    readdirSync,
     readFileSync,
     rmSync,
     statSync,
@@ -50,6 +51,7 @@ import {
     LATEST_SUPPORTED_VERSION,
     openDatabase,
     openDatabaseAsync,
+    pruneEmptyRpcDiscoveryDirs,
     removeRpcDiscoveryRecords,
     resolveDatabasePath,
 } from "./storage-db";
@@ -1522,6 +1524,12 @@ describe("RPC discovery records whose PIDs were reused", () => {
         return file;
     }
 
+    /** Backdate every project directory by an hour, past the pruning age limit. */
+    function ageDirs(storage: string): void {
+        const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+        const rpc = join(storage, "rpc");
+        for (const name of readdirSync(rpc)) utimesSync(join(rpc, name), hourAgo, hourAgo);
+    }
     it("removes a record whose live PID started after the record was written", () => {
         const storage = makeTempDir("mc-rpc-recycled-");
         const file = writeRecord(storage, "a", 17856, RECORDED);
@@ -1588,24 +1596,41 @@ describe("RPC discovery records whose PIDs were reused", () => {
         expect(existsSync(file)).toBe(false);
     });
 
-    it("removes project directories left with no records", () => {
+    it("leaves empty project directories in place during inspection", () => {
+        // Inspection runs on every storage open; a host may be between creating
+        // its directory and writing its record, so directories are never removed here.
         const storage = makeTempDir("mc-rpc-empty-dirs-");
         mkdirSync(join(storage, "rpc", "empty-before"), { recursive: true });
         writeRecord(storage, "emptied", 26532, RECORDED);
         const kept = writeRecord(storage, "kept", 7036, RECORDED);
+        ageDirs(storage);
         inspectRpcServerDiscovery(
             storage,
             cimProcesses({ 7036: { startTime: null, imageName: "node.exe" } }),
         );
-        expect(existsSync(join(storage, "rpc", "empty-before"))).toBe(false);
-        expect(existsSync(join(storage, "rpc", "emptied"))).toBe(false);
+        expect(existsSync(join(storage, "rpc", "empty-before"))).toBe(true);
+        expect(existsSync(join(storage, "rpc", "emptied"))).toBe(true);
         expect(existsSync(kept)).toBe(true);
 
-        // A tree with only empty directories is pruned too.
         const bare = makeTempDir("mc-rpc-only-empty-");
         mkdirSync(join(bare, "rpc", "x"), { recursive: true });
+        ageDirs(bare);
         expect(inspectRpcServerDiscovery(bare, cimProcesses({})).state).toBe("absent");
-        expect(existsSync(join(bare, "rpc", "x"))).toBe(false);
+        expect(existsSync(join(bare, "rpc", "x"))).toBe(true);
+    });
+
+    it("prunes only empty project directories untouched for at least a minute", () => {
+        const storage = makeTempDir("mc-rpc-prune-dirs-");
+        mkdirSync(join(storage, "rpc", "old-empty"), { recursive: true });
+        const kept = writeRecord(storage, "old-with-record", 7036, RECORDED);
+        ageDirs(storage);
+        // Created now: a host may be about to write its record into it.
+        mkdirSync(join(storage, "rpc", "fresh-empty"), { recursive: true });
+
+        expect(pruneEmptyRpcDiscoveryDirs(storage)).toEqual([join(storage, "rpc", "old-empty")]);
+        expect(existsSync(join(storage, "rpc", "old-empty"))).toBe(false);
+        expect(existsSync(join(storage, "rpc", "fresh-empty"))).toBe(true);
+        expect(existsSync(kept)).toBe(true);
     });
 
     it("removes chosen records and refuses paths outside the discovery tree", () => {
@@ -1617,6 +1642,6 @@ describe("RPC discovery records whose PIDs were reused", () => {
         expect(result.removed).toEqual([record]);
         expect(result.failed).toEqual([{ file: outside, error: "not an RPC discovery record" }]);
         expect(existsSync(outside)).toBe(true);
-        expect(existsSync(join(storage, "rpc", "a"))).toBe(false);
+        expect(existsSync(record)).toBe(false);
     });
 });

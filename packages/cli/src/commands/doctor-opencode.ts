@@ -136,7 +136,7 @@ import {
     openCodeHostDatabaseFiles,
     reportOpenCodeV2PluginCache,
 } from "./doctor-opencode2-cache";
-import { inspectDiscoveryRecords, reportDiscoveryRecords } from "./doctor-prune-discovery";
+import { runDiscoveryDoctorCheck } from "./doctor-prune-discovery";
 import {
     countPendingCoordinateRebases,
     formatPendingCoordinateRebases,
@@ -1896,14 +1896,15 @@ export async function runDoctor(
 
     // 7d. RPC discovery records. Inspection removes records proven stale; any
     // left unresolved block offline maintenance such as merge-identities, so
-    // they count as an issue instead of passing silently.
+    // they count as an issue instead of passing silently. --fix also removes
+    // empty discovery directories.
     try {
         if (
-            reportDiscoveryRecords(inspectDiscoveryRecords(storage.path), {
-                pass,
-                warn,
-                info: (message) => log.info(message),
-            })
+            runDiscoveryDoctorCheck(
+                storage.path,
+                { fix: options.fix },
+                { pass, warn, info: (message) => log.info(message) },
+            )
         ) {
             issues++;
         }
