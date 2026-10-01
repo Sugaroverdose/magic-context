@@ -2,13 +2,13 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import type { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import { _resetHarnessForTesting } from "../../shared/harness";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     __resetProjectIdentityForTests,
     __setProjectIdentityTestHooks,
@@ -38,7 +38,7 @@ afterEach(() => {
 });
 
 function makeTempDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     return dir;
 }

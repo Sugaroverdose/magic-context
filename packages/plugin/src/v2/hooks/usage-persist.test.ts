@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,6 +13,7 @@ import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import type { TransformDeps } from "../../hooks/magic-context/transform";
 import { ABSOLUTE_EMERGENCY_PERCENTAGE } from "../../shared/escalation-bands";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { clearWindowOverlayCacheForTest, setWindowOverlayPath } from "../../shared/window-geometry";
 import { persistV2UsageReading } from "./usage-persist";
 
@@ -31,7 +32,7 @@ afterEach(() => {
 });
 
 function makeTempDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     return dir;
 }

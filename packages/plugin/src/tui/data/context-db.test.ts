@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import type { SidebarSnapshot } from "../../shared/rpc-types";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     closeRpc,
     getCompartmentCount,
@@ -33,7 +34,7 @@ afterEach(() => {
 });
 
 function makeDataHome(): string {
-    const dir = mkdtempSync(join(tmpdir(), "mc-context-db-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-context-db-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     // The shared resolver gives test isolation priority. Keep both values
@@ -175,7 +176,7 @@ describe("TUI context RPC data", () => {
         // started with (here through a symlink, as macOS /var is to
         // /private/var); the TUI asks with the resolved spelling.
         const dataHome = makeDataHome();
-        const root = realpathSync(mkdtempSync(join(tmpdir(), "mc-spelling-")));
+        const root = realpathSync(createTestTempDirFromPath(join(tmpdir(), "mc-spelling-")));
         tempDirs.push(root);
         const real = join(root, "Pictures", "project");
         mkdirSync(real, { recursive: true });

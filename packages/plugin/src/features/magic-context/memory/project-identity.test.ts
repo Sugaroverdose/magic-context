@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import {
     __resetProjectIdentityForTests,
     __setProjectIdentityTestHooks,
@@ -14,7 +15,7 @@ import {
 } from "./project-identity";
 
 function tempDir(): string {
-    return mkdtempSync(join(tmpdir(), "mc-identity-"));
+    return createTestTempDirFromPath(join(tmpdir(), "mc-identity-"));
 }
 
 function returningRootCommit(rootCommit: string): typeof execFileSync {
@@ -108,7 +109,7 @@ describe("resolveProjectIdentity directory fallback", () => {
     });
 
     test("keeps a contained repository distinct from the home identity", () => {
-        const contained = mkdtempSync(join(homedir(), "mc-home-identity-"));
+        const contained = createTestTempDirFromPath(join(homedir(), "mc-home-identity-"));
         try {
             mkdirSync(join(contained, ".git"));
             __setProjectIdentityTestHooks({ execFileSync: returningRootCommit("abc1234") });

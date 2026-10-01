@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 
 import { createSmartNoteCapabilities, type SmartNoteCapabilityApi } from "./capabilities";
 import {
@@ -24,7 +25,7 @@ const fakeCap: SmartNoteCapabilityApi = {
 };
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-    const dir = await mkdtemp(path.join(tmpdir(), "mc-smart-note-compiler-"));
+    const dir = await createTestTempDirFromPath(path.join(tmpdir(), "mc-smart-note-compiler-"));
     try {
         return await fn(dir);
     } finally {

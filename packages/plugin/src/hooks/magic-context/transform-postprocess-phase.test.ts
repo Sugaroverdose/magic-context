@@ -2,11 +2,10 @@
 
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import todoRideGolden from "../../../../../crates/mc-module/testdata/todo-ride-only.json";
-
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
@@ -56,6 +55,7 @@ import {
 import { createTagger } from "../../features/magic-context/tagger";
 import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
 import { registerActiveCompartmentRun } from "./compartment-runner";
 import { clearToolPermissionDenied } from "./ctx-reduce-availability";
@@ -102,7 +102,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 let db: Database;
 
 function createOpenCodeDbWithoutMessages(prefix: string): void {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     mkdirSync(join(dir, "opencode"), { recursive: true });
@@ -1080,7 +1080,9 @@ describe("deferred compaction marker representation", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-rust-marker-retry-every-defer";
-        const dataHome = mkdtempSync(join(tmpdir(), "postprocess-rust-marker-retry-"));
+        const dataHome = createTestTempDirFromPath(
+            join(tmpdir(), "postprocess-rust-marker-retry-"),
+        );
         tempDirs.push(dataHome);
         process.env.XDG_DATA_HOME = dataHome;
         appendCompartments(db, sessionId, [
@@ -1139,7 +1141,7 @@ describe("deferred compaction marker representation", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-rust-marker-retry-heals";
-        const dataHome = mkdtempSync(join(tmpdir(), "postprocess-rust-marker-heal-"));
+        const dataHome = createTestTempDirFromPath(join(tmpdir(), "postprocess-rust-marker-heal-"));
         tempDirs.push(dataHome);
         process.env.XDG_DATA_HOME = dataHome;
         appendCompartments(db, sessionId, [
@@ -1350,7 +1352,7 @@ describe("deferred compaction marker representation", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-marker-wire-stability";
-        const dataHome = mkdtempSync(join(tmpdir(), "postprocess-marker-wire-"));
+        const dataHome = createTestTempDirFromPath(join(tmpdir(), "postprocess-marker-wire-"));
         tempDirs.push(dataHome);
         process.env.XDG_DATA_HOME = dataHome;
         mkdirSync(join(dataHome, "opencode"), { recursive: true });
@@ -1662,7 +1664,9 @@ describe("deferred compaction marker advance representation", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-marker-advance-wire-stability";
-        const dataHome = mkdtempSync(join(tmpdir(), "postprocess-marker-advance-wire-"));
+        const dataHome = createTestTempDirFromPath(
+            join(tmpdir(), "postprocess-marker-advance-wire-"),
+        );
         tempDirs.push(dataHome);
         process.env.XDG_DATA_HOME = dataHome;
         mkdirSync(join(dataHome, "opencode"), { recursive: true });
@@ -3244,7 +3248,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-hardfold-inert-whitespace";
-        const dataHome = mkdtempSync(join(tmpdir(), "postprocess-hardfold-whitespace-"));
+        const dataHome = createTestTempDirFromPath(
+            join(tmpdir(), "postprocess-hardfold-whitespace-"),
+        );
         tempDirs.push(dataHome);
         process.env.XDG_DATA_HOME = dataHome;
         mkdirSync(join(dataHome, "opencode"), { recursive: true });
@@ -4612,7 +4618,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         // as a change.
         for (const lean of [false, true]) {
             it(`REGATE mural unchanged (${lean ? "lean" : "hydrated"} state): an identical-bytes epoch HARD holds the drop`, async () => {
-                const xdg = mkdtempSync(join(tmpdir(), "mc-regate-oc-mural-"));
+                const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-regate-oc-mural-"));
                 tempDirs.push(xdg);
                 process.env.XDG_DATA_HOME = xdg;
                 const modelsDev = await import("../../shared/models-dev-cache");
@@ -4697,7 +4703,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             getTagsBySession(db, sessionId).find((row) => row.tagNumber === tag)?.status;
 
         it("mural-only change: an OpenCode HARD that swaps only the mural image opens the lanes", async () => {
-            const xdg = mkdtempSync(join(tmpdir(), "mc-adv-oc-mural-"));
+            const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-adv-oc-mural-"));
             tempDirs.push(xdg);
             process.env.XDG_DATA_HOME = xdg;
             const modelsDev = await import("../../shared/models-dev-cache");
@@ -8315,7 +8321,7 @@ describe("contract adversarial cache sequences", () => {
         const { resolveEpochFloorForPass, resetEpochFloorRegistryForTest } = await import(
             "../../features/magic-context/storage-meta-persisted"
         );
-        const dir = mkdtempSync(join(tmpdir(), "audit-floor-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "audit-floor-"));
         tempDirs.push(dir);
         const path = join(dir, "context.db");
         db = new Database(path);
@@ -8398,7 +8404,7 @@ describe("contract adversarial cache sequences", () => {
     });
 
     it("contract marker contraction reopen reexpansion keeps frozen visible bytes", async () => {
-        const dir = mkdtempSync(join(tmpdir(), "audit-marker-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "audit-marker-"));
         tempDirs.push(dir);
         const path = join(dir, "context.db");
         db = new Database(path);

@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 
 import { validateSmartNoteHttpUrl } from "./ssrf-guard";
 
@@ -30,7 +31,7 @@ describe("smart-note SSRF guard runtime parity", () => {
             () => true,
         );
 
-        const dir = await mkdtemp(path.join(tmpdir(), "mc-ssrf-parity-"));
+        const dir = await createTestTempDirFromPath(path.join(tmpdir(), "mc-ssrf-parity-"));
         try {
             const result = await Bun.build({
                 entrypoints: [path.join(here, "ssrf-guard.ts")],

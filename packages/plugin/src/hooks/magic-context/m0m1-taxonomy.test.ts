@@ -1,4 +1,5 @@
 /// <reference types="bun-types" />
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 // Cache-stability gate for the SOFT+ / SOFT / HARD materialization taxonomy.
 //
@@ -14,7 +15,7 @@
 // delta that folds into m[0] only on a HARD bust.
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPluginConfigDetailed } from "../../config";
@@ -46,7 +47,7 @@ function makeDb(): Database {
 }
 
 function makeProjectDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), "mc-taxonomy-test-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-taxonomy-test-"));
     tempDirs.push(dir);
     return dir;
 }

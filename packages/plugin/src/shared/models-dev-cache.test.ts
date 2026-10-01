@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -22,6 +22,7 @@ import {
     resolveLimit,
     setOutputReserveConfig,
 } from "./models-dev-cache";
+import { createTestTempDirFromPath } from "./test-temp-dir";
 
 /**
  * Model context limits resolve from OpenCode's SDK only (`config.providers()`),
@@ -137,7 +138,7 @@ describe("models-dev-cache (SDK-only)", () => {
     }
 
     beforeEach(() => {
-        tempDir = mkdtempSync(join(tmpdir(), "mc-models-dev-"));
+        tempDir = createTestTempDirFromPath(join(tmpdir(), "mc-models-dev-"));
         // Isolate the persisted-cache file under a temp data dir so tests never
         // touch the real ~/.local/share/cortexkit/magic-context cache.
         originalXdgData = process.env.XDG_DATA_HOME;

@@ -1,21 +1,21 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import {
     buildDreamTaskRuntimeConfigs,
     userMemoryCollectionEnabled,
 } from "../features/magic-context/dreamer/task-config";
 import { producerInputTokenLimit } from "../hooks/magic-context/producer-window-guard";
 import { resolveHistorianModel } from "../shared/model-resolution";
+import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import { loadPluginConfigDetailed } from "./index";
 import { dreamerRunConfig, historianRunConfig } from "./live-run-config";
 import { LiveConfigReader } from "./live-snapshot";
 
 for (const host of ["OC1", "OC2", "Pi", "OMP"] as const) {
     test(`${host} historian samples the next generation while an existing run keeps its model and fallback`, () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-live-historian-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-live-historian-"));
         const previous = { home: process.env.HOME, config: process.env.XDG_CONFIG_HOME };
         process.env.HOME = root;
         process.env.XDG_CONFIG_HOME = join(root, "config");
@@ -87,7 +87,7 @@ for (const host of ["OC1", "OC2", "Pi", "OMP"] as const) {
 
 for (const host of ["OC1", "OC2", "Pi", "OMP"] as const) {
     test(`${host} dreamer samples the new schedule and model chain without changing a running task`, () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-live-dreamer-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-live-dreamer-"));
         const previous = { home: process.env.HOME, config: process.env.XDG_CONFIG_HOME };
         process.env.HOME = root;
         process.env.XDG_CONFIG_HOME = join(root, "config");
@@ -171,7 +171,7 @@ for (const host of ["OC1", "OC2", "Pi", "OMP"] as const) {
 }
 
 test("malformed project config retains last good values and deduplicates the warning; project overrides remain tier-safe", () => {
-    const root = mkdtempSync(join(tmpdir(), "mc-live-tiers-"));
+    const root = createTestTempDirFromPath(join(tmpdir(), "mc-live-tiers-"));
     const previous = { home: process.env.HOME, config: process.env.XDG_CONFIG_HOME };
     process.env.HOME = root;
     process.env.XDG_CONFIG_HOME = join(root, "config");

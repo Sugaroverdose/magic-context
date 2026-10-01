@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EmbeddingConfig } from "../config/schema/magic-context";
@@ -12,6 +12,7 @@ import {
 } from "../features/magic-context/memory/embedding";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { closeDatabase, openDatabase } from "../features/magic-context/storage";
+import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "./embedding-bootstrap";
 
 const tempDirs: string[] = [];
@@ -20,7 +21,7 @@ const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 function tempDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     return dir;
 }

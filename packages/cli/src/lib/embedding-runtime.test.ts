@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     __setEmbeddingRuntimeTestHooks,
     checkLocalEmbeddingRuntime,
@@ -17,7 +18,7 @@ afterEach(() => {
 });
 
 function makeRoot(): string {
-    return mkdtempSync(join(tmpdir(), "mc-embruntime-"));
+    return createTestTempDirFromPath(join(tmpdir(), "mc-embruntime-"));
 }
 
 function installWasmPackage(root: string): void {
@@ -368,7 +369,7 @@ function installResolvablePlugin(
     withBinary: boolean,
     indexSource = "module.exports = {};\n",
 ): string {
-    const pluginDir = mkdtempSync(join(tmpdir(), "mc-pi-plugin-"));
+    const pluginDir = createTestTempDirFromPath(join(tmpdir(), "mc-pi-plugin-"));
     writeFileSync(
         join(pluginDir, "package.json"),
         JSON.stringify({ name: "@cortexkit/pi-magic-context", version: "0.0.0" }),

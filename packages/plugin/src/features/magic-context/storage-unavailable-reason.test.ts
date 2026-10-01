@@ -2,20 +2,14 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import type { execFileSync } from "node:child_process";
-import {
-    existsSync,
-    mkdirSync,
-    mkdtempSync,
-    type readFileSync,
-    rmSync,
-    writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, type readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { __resetRpcIdentityTestHooks, __setRpcIdentityTestHooks } from "../../shared/rpc-utils";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     FAIL_CLOSED_DOCTOR_COMMAND,
     formatFailClosedBlockingMessage,
@@ -35,7 +29,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 function useTempDataHome(): string {
-    const dataHome = mkdtempSync(join(tmpdir(), "storage-unavailable-reason-"));
+    const dataHome = createTestTempDirFromPath(join(tmpdir(), "storage-unavailable-reason-"));
     tempDirs.push(dataHome);
     process.env.XDG_DATA_HOME = dataHome;
     process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;

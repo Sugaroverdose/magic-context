@@ -6,7 +6,6 @@ import {
     type chmodSync,
     existsSync,
     mkdirSync,
-    mkdtempSync,
     readdirSync,
     readFileSync,
     rmSync,
@@ -28,6 +27,7 @@ import {
     __resetStoragePrivatePermissionEnforcementForTests,
     setStoragePrivatePermissionEnforcement,
 } from "../../shared/storage-permissions";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     __resetRpcDiscoveryFsForTests,
     __resetSchemaFenceStateForTests,
@@ -65,7 +65,7 @@ const originalNodeEnv = process.env.NODE_ENV;
 const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 function makeTempDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     return dir;
 }

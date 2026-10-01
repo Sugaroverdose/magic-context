@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import { LATEST_SUPPORTED_VERSION } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { parse as parseJsonc } from "comment-json";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { openExistingContextDatabase } from "../lib/database-access";
 import type { PiDiagnosticReport } from "../lib/diagnostics-pi";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
@@ -21,7 +21,7 @@ const originalCacheHome = process.env.XDG_CACHE_HOME;
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
 
 function makeTempRoot(prefix = "mc-pi-doctor-"): string {
-    const path = mkdtempSync(join(tmpdir(), prefix));
+    const path = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempRoots.push(path);
     return path;
 }

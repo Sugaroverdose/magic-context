@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import {
 	mkdirSync,
-	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	rmSync,
@@ -9,6 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import { loadPiConfig } from "./config/index";
 import { resolveHistorianFromConfig } from "./index";
 
@@ -30,7 +30,7 @@ const originalHome = process.env.HOME;
 const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
 
 function makeTempRoot(prefix: string): string {
-	const path = mkdtempSync(join(tmpdir(), prefix));
+	const path = createTestTempDirFromPath(join(tmpdir(), prefix));
 	tempRoots.push(path);
 	return path;
 }

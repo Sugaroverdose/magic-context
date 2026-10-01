@@ -1,16 +1,17 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AsyncProcessInspection } from "@magic-context/core/shared/rpc-utils";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     assertHiddenChildStoresClosed,
     cleanupRetiredHiddenChildren,
 } from "./doctor-hidden-children";
 
 function fixture() {
-    const dir = mkdtempSync(join(tmpdir(), "mc-doctor-hidden-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-doctor-hidden-"));
     const hostDbPath = join(dir, "opencode2.db");
     const contextDbPath = join(dir, "context.db");
     const host = new Database(hostDbPath);

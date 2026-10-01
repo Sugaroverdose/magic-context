@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DreamerConfigSchema } from "../config/schema/magic-context";
@@ -18,6 +18,7 @@ import { markSessionCleanupPending, openDatabase } from "../features/magic-conte
 import { _resetHarnessForTesting, type HarnessId, setHarness } from "../shared/harness";
 import type { StatusDetail } from "../shared/rpc-types";
 import { statusSummaryFromDetail } from "../shared/status-summary";
+import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import {
     _resetDreamTimerForTests,
     _setDreamTimerStagesForTests,
@@ -37,7 +38,7 @@ import {
  */
 describe("schema-fence null-DB contract", () => {
     test("openDatabase returns falsy (never throws) when DB schema exceeds supported version", () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-fence-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-fence-"));
         const dbPath = join(dir, "context.db");
         try {
             // First open migrates the fresh DB to the current LATEST schema.
@@ -68,7 +69,7 @@ describe("dream-timer registration cleanup", () => {
         _resetDreamTimerForTests();
     });
     test("stale same-directory cleanup preserves the replacement registration", async () => {
-        const directory = mkdtempSync(join(tmpdir(), "mc-dream-timer-cleanup-"));
+        const directory = createTestTempDirFromPath(join(tmpdir(), "mc-dream-timer-cleanup-"));
         const timerHandle = {
             unref: mock(() => {}),
         } as unknown as ReturnType<typeof setInterval>;
@@ -110,7 +111,9 @@ describe("dream-timer registration cleanup", () => {
     // Registering it under "" would run every per-project task for a blank
     // project key, so the timer refuses the registration outright.
     test("refuses a registration whose project identity is empty", async () => {
-        const directory = mkdtempSync(join(tmpdir(), "mc-dream-timer-empty-identity-"));
+        const directory = createTestTempDirFromPath(
+            join(tmpdir(), "mc-dream-timer-empty-identity-"),
+        );
         const setIntervalSpy = spyOn(globalThis, "setInterval");
         try {
             for (const projectIdentity of ["", "  "]) {
@@ -131,7 +134,7 @@ describe("dream-timer registration cleanup", () => {
     });
 
     test("picks up a durable Rust deletion from the cold-boot startup tick", async () => {
-        const directory = mkdtempSync(join(tmpdir(), "mc-dream-timer-rust-delete-"));
+        const directory = createTestTempDirFromPath(join(tmpdir(), "mc-dream-timer-rust-delete-"));
         const timerHandle = {
             unref: mock(() => {}),
         } as unknown as ReturnType<typeof setInterval>;
@@ -191,7 +194,7 @@ describe("dream-timer registration cleanup", () => {
     });
 
     test("stops the singleton when a tick removes the last dead directory", async () => {
-        const directory = mkdtempSync(join(tmpdir(), "mc-dream-timer-dead-dir-"));
+        const directory = createTestTempDirFromPath(join(tmpdir(), "mc-dream-timer-dead-dir-"));
         const timerHandle = {
             unref: mock(() => {}),
         } as unknown as ReturnType<typeof setInterval>;
@@ -414,7 +417,7 @@ describe("dreamer tick stage containment", () => {
         const directories: string[] = [];
         const cleanups: Array<(() => void) | undefined> = [];
         for (const projectIdentity of projectIdentities) {
-            const directory = mkdtempSync(join(tmpdir(), "mc-dream-tick-"));
+            const directory = createTestTempDirFromPath(join(tmpdir(), "mc-dream-tick-"));
             directories.push(directory);
             cleanups.push(
                 await startDreamScheduleTimer({

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,6 +10,7 @@ import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { V2StoreReader } from "../store-reader";
 import { runV2SessionProjectBackfill } from "./session-project-backfill";
 
@@ -21,7 +22,7 @@ afterEach(() => {
 });
 
 function tempDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
     return dir;
 }

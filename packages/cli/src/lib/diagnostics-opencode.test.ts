@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     collectOpenCodePluginCacheReport,
     collectRecentSessionsFromDatabase,
@@ -29,7 +30,7 @@ describe("issue report plugin cache", () => {
     const savedCacheHome = process.env.XDG_CACHE_HOME;
 
     beforeEach(() => {
-        root = mkdtempSync(join(tmpdir(), "mc-diag-cache-"));
+        root = createTestTempDirFromPath(join(tmpdir(), "mc-diag-cache-"));
         cache = join(root, "cache");
         process.env.XDG_CACHE_HOME = cache;
     });

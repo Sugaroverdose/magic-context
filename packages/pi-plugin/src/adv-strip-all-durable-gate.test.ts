@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
@@ -8,6 +8,7 @@ import {
 	getMergedReasoningStrippedIds,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	applyPiProactiveThinkingStrip,
 	applyPiThinkingBindingRecovery,
@@ -45,7 +46,7 @@ const input = () => [
 ];
 
 it("replays strip-all across independent connections, restart, and undo with the same entry ids", () => {
-	const root = mkdtempSync(join(tmpdir(), "mc-strip-gate-"));
+	const root = createTestTempDirFromPath(join(tmpdir(), "mc-strip-gate-"));
 	roots.push(root);
 	const path = join(root, "context.db");
 	const first = new Database(path);

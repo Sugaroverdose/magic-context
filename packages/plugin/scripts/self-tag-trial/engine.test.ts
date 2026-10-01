@@ -1,8 +1,16 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { createTestTempDir } from "../../src/shared/test-temp-dir";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { forbiddenOpenPaths, isolate } from "./bootstrap";
 import type * as Engine from "./engine";
 let engine: typeof Engine;
-beforeAll(async () => { isolate(); engine = await import("./engine"); });
+const originalEnv = { ...process.env };
+beforeAll(async () => { isolate(createTestTempDir("self-tag-engine-").dir); engine = await import("./engine"); });
+afterAll(() => {
+    for (const key of ["XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "HOME", "MAGIC_CONTEXT_STORAGE_DIR", "MAGIC_CONTEXT_LOG_PATH", "OPENCODE_DB", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR"]) {
+        if (originalEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = originalEnv[key];
+    }
+});
 describe("self-tag trial real tagging", () => {
     test("live-store fence rejects forbidden lsof entries", () => {
         const entries = "p123\nn/tmp/magic-context/self-tag-trial/context.db\nn/Users/operator/.local/share/opencode/opencode.db\nn/Users/operator/.config/cortexkit/config.json";

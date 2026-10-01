@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import {
     existsSync,
     mkdirSync,
-    mkdtempSync,
     readdirSync,
     readFileSync,
     realpathSync,
@@ -20,6 +19,7 @@ import {
 import { inspectRpcServerDiscovery } from "@magic-context/core/features/magic-context/storage-db";
 import type { AsyncProcessInspection } from "@magic-context/core/shared/rpc-utils";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { runMergeIdentityCli } from "./doctor-merge-identity";
 import {
     PRUNE_DISCOVERY_COMMAND,
@@ -36,7 +36,7 @@ const savedEnv = {
 };
 
 function tempDir(): string {
-    const path = realpathSync(mkdtempSync(join(tmpdir(), "mc-prune-discovery-")));
+    const path = realpathSync(createTestTempDirFromPath(join(tmpdir(), "mc-prune-discovery-")));
     tempDirs.push(path);
     return path;
 }

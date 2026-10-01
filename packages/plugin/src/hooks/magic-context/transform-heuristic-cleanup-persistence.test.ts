@@ -1,13 +1,14 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { createTransform } from "./transform";
 
 type TestPart =
@@ -27,13 +28,13 @@ const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 function useTempDataHome(prefix: string): void {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
 }
 
 function makeTempDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     return dir;
 }

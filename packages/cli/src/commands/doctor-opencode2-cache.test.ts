@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,6 +8,7 @@ import {
     __setRpcIdentityTestHooks,
 } from "@magic-context/core/shared/rpc-utils";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     getOpenCodeV2PluginCacheSlot,
     OPENCODE_PLUGIN_NAME,
@@ -27,7 +28,7 @@ afterEach(() => {
 });
 
 function tempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), "mc-oc2-cache-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-oc2-cache-"));
     tempDirs.push(dir);
     return dir;
 }

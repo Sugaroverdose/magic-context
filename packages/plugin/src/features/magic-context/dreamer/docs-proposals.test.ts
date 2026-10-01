@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import {
     docsBaseHashes,
     docsChangeSet,
@@ -18,7 +19,7 @@ afterEach(() => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 function fixture() {
-    const dir = mkdtempSync(join(tmpdir(), "mc-proposal-test-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-proposal-test-"));
     dirs.push(dir);
     writeFileSync(
         join(dir, "ARCHITECTURE.md"),

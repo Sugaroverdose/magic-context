@@ -1,16 +1,17 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readSessionActivity } from "@magic-context/core/features/magic-context/session-activity";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
 	backfillPiSessionActivity,
 	latestPiMessageTime,
 	observePiMessageActivity,
 } from "./session-activity-pi";
 
-const dir = mkdtempSync(join(tmpdir(), "pi-activity-"));
+const dir = createTestTempDirFromPath(join(tmpdir(), "pi-activity-"));
 test("Pi/OMP message feed and JSONL entry backfill use message timestamps", async () => {
 	const db = new Database(":memory:");
 	try {

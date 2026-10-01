@@ -1,11 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeOpenCodeV1FixtureStore } from "../../../hooks/magic-context/opencode-v1-store-fixture";
 import { closeReadOnlySessionDb } from "../../../hooks/magic-context/read-session-db";
 import { _resetHarnessForTesting } from "../../../shared/harness";
 import { resetOpenCodeDbPathStateForTesting } from "../../../shared/opencode-db-path";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import {
     assertBoundedHeap,
     measurePrimerRefresh,
@@ -25,7 +26,7 @@ afterEach(() => {
 test("OpenCode primer refresh peak heap does not grow with same-project history", async () => {
     const measurements = [];
     for (const turns of [500, 5_000]) {
-        const dir = mkdtempSync(join(tmpdir(), "mc-primer-refresh-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-primer-refresh-"));
         dirs.push(dir);
         const path = join(dir, "opencode.db");
         writeOpenCodeV1FixtureStore(path, [

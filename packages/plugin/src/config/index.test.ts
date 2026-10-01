@@ -1,13 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import { resolveEpochFloorForPass } from "../features/magic-context/storage-meta-persisted";
 import { buildOpenCodeConfigWarningBanner } from "../shared/config-warning-surface";
 import { resolveHistorianModel } from "../shared/model-resolution";
 import { Database } from "../shared/sqlite";
-import { createTestTempDir } from "../shared/test-temp-dir";
+import { createTestTempDir, createTestTempDirFromPath } from "../shared/test-temp-dir";
 import {
     getWindowOverlay,
     reloadWindowOverlay,
@@ -28,7 +27,7 @@ import { RUST_COMPACTION_OFF_WARNING } from "./transform-mode";
  * contain a project config so only the user config is loaded.
  */
 function loadWithUserConfig(configText: string, extraEnv: Record<string, string> = {}) {
-    const xdg = mkdtempSync(join(tmpdir(), "mc-config-test-"));
+    const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-config-test-"));
     // Hard cutover: the loader reads user config from <XDG>/cortexkit/.
     const configDir = join(xdg, "cortexkit");
     const fs = require("node:fs") as typeof import("node:fs");
@@ -45,7 +44,7 @@ function loadWithUserConfig(configText: string, extraEnv: Record<string, string>
 
     // Use a directory that definitely has no project config so only the
     // user config feeds the loader. We use a sibling temp directory.
-    const projectDir = mkdtempSync(join(tmpdir(), "mc-config-proj-"));
+    const projectDir = createTestTempDirFromPath(join(tmpdir(), "mc-config-proj-"));
     try {
         return loadPluginConfig(projectDir);
     } finally {
@@ -76,8 +75,8 @@ function loadWithUserAndProjectConfig(
     projectConfigText: string,
     extraEnv: Record<string, string> = {},
 ) {
-    const xdg = mkdtempSync(join(tmpdir(), "mc-config-test-"));
-    const projectDir = mkdtempSync(join(tmpdir(), "mc-config-proj-"));
+    const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-config-test-"));
+    const projectDir = createTestTempDirFromPath(join(tmpdir(), "mc-config-proj-"));
     const fs = require("node:fs") as typeof import("node:fs");
     // Hard cutover: user config at <XDG>/cortexkit/, project at <root>/.cortexkit/.
     const configDir = join(xdg, "cortexkit");
@@ -125,7 +124,7 @@ function loadWithUserAndProjectConfig(
 
 describe("loadPluginConfig — Fusiform overlay reload", () => {
     it("does not invalidate a same-path overlay during routine config reads", () => {
-        const overlayDir = mkdtempSync(join(tmpdir(), "mc-config-overlay-"));
+        const overlayDir = createTestTempDirFromPath(join(tmpdir(), "mc-config-overlay-"));
         const overlayPath = join(overlayDir, "window-overlay.json");
         const configText = JSON.stringify({ models: { window_overlay_path: overlayPath } });
         const writeOverlay = (modelId: string) =>
@@ -161,7 +160,7 @@ describe("loadPluginConfig — Fusiform overlay reload", () => {
 
 describe("loadPluginConfig — preload user-config isolation", () => {
     it("resolves schema-default embedding config for a fixture with no config (#388)", () => {
-        const projectDir = mkdtempSync(join(tmpdir(), "mc-config-preload-fixture-"));
+        const projectDir = createTestTempDirFromPath(join(tmpdir(), "mc-config-preload-fixture-"));
         try {
             // The test preload owns this default. A per-test XDG_CONFIG_HOME assignment
             // still overrides it through loadWithUserConfig below.
@@ -306,9 +305,9 @@ describe("loadPluginConfig — transform mode resolution", () => {
 
 describe("loadPluginConfig — secret redaction", () => {
     it("reads an unmigrated legacy project config instead of falling to defaults", () => {
-        const xdg = mkdtempSync(join(tmpdir(), "mc-config-test-"));
-        const home = mkdtempSync(join(tmpdir(), "mc-config-home-"));
-        const projectDir = mkdtempSync(join(tmpdir(), "mc-config-legacy-proj-"));
+        const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-config-test-"));
+        const home = createTestTempDirFromPath(join(tmpdir(), "mc-config-home-"));
+        const projectDir = createTestTempDirFromPath(join(tmpdir(), "mc-config-legacy-proj-"));
         const origXdg = process.env.XDG_CONFIG_HOME;
         const origHome = process.env.HOME;
         process.env.XDG_CONFIG_HOME = xdg;
@@ -348,9 +347,9 @@ describe("loadPluginConfig — secret redaction", () => {
         // The runtime registers via loadPluginConfig (index.ts), NOT the detailed
         // variant. This locks that the read-legacy fallback applies there too — a
         // migration refusal must not silently re-enable disabled features at init.
-        const xdg = mkdtempSync(join(tmpdir(), "mc-config-test-"));
-        const home = mkdtempSync(join(tmpdir(), "mc-config-home-"));
-        const projectDir = mkdtempSync(join(tmpdir(), "mc-config-legacy-proj-"));
+        const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-config-test-"));
+        const home = createTestTempDirFromPath(join(tmpdir(), "mc-config-home-"));
+        const projectDir = createTestTempDirFromPath(join(tmpdir(), "mc-config-legacy-proj-"));
         const origXdg = process.env.XDG_CONFIG_HOME;
         const origHome = process.env.HOME;
         process.env.XDG_CONFIG_HOME = xdg;
@@ -1540,9 +1539,9 @@ describe("loadPluginConfig — user-owned model profiles", () => {
     });
 
     it("resolves profiles independently for two projects in one process", () => {
-        const xdg = mkdtempSync(join(tmpdir(), "mc-profile-isolation-user-"));
-        const projectA = mkdtempSync(join(tmpdir(), "mc-profile-isolation-a-"));
-        const projectB = mkdtempSync(join(tmpdir(), "mc-profile-isolation-b-"));
+        const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-profile-isolation-user-"));
+        const projectA = createTestTempDirFromPath(join(tmpdir(), "mc-profile-isolation-a-"));
+        const projectB = createTestTempDirFromPath(join(tmpdir(), "mc-profile-isolation-b-"));
         const previousXdg = process.env.XDG_CONFIG_HOME;
         mkdirSync(join(xdg, "cortexkit"), { recursive: true });
         mkdirSync(join(projectA, ".cortexkit"), { recursive: true });
@@ -1614,8 +1613,8 @@ describe("loadPluginConfig — user-owned model profiles", () => {
 
 describe("loadPluginConfigDetailed — prompt-surface registration owner", () => {
     it("captures the user default before project guidance routing is merged", () => {
-        const xdg = mkdtempSync(join(tmpdir(), "mc-config-prompt-surface-"));
-        const projectDir = mkdtempSync(join(tmpdir(), "mc-project-prompt-surface-"));
+        const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-config-prompt-surface-"));
+        const projectDir = createTestTempDirFromPath(join(tmpdir(), "mc-project-prompt-surface-"));
         const fs = require("node:fs") as typeof import("node:fs");
         const userDir = join(xdg, "cortexkit");
         const projectConfigDir = join(projectDir, ".cortexkit");

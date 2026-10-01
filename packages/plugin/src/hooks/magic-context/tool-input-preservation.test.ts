@@ -1,11 +1,12 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { type MessageLike, tagMessages } from "./transform-operations";
 
 const tempDirs: string[] = [];
@@ -26,7 +27,7 @@ afterEach(() => {
 });
 
 function useTempDataHome(prefix: string): void {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
 }

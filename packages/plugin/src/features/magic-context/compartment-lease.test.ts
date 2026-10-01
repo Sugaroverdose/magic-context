@@ -1,11 +1,12 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     acquireCompartmentLease,
     getCompartmentLeaseBlocker,
@@ -124,7 +125,7 @@ describe("compartment state lease", () => {
     });
 
     it("allows exactly one winner across separate DB handles", () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-lease-handles-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-lease-handles-"));
         const path = join(dir, "context.db");
         const dbA = makeDb(path);
         const dbB = makeDb(path);
@@ -146,7 +147,7 @@ describe("compartment state lease", () => {
     });
 
     it("allows exactly one winner across subprocesses sharing a DB", async () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-lease-process-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-lease-process-"));
         const path = join(dir, "context.db");
         const setup = makeDb(path);
         closeQuietly(setup);

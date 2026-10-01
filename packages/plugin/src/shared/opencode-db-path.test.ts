@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +17,7 @@ import {
     sourceOpenCodeDatabaseFilename,
 } from "./opencode-db-path";
 import { Database } from "./sqlite";
+import { createTestTempDirFromPath } from "./test-temp-dir";
 
 const ORIGINAL_ENV = {
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
@@ -42,7 +43,7 @@ afterEach(() => {
 });
 
 function useDataHome(): { dataHome: string; openCodeDir: string } {
-    const dataHome = mkdtempSync(join(tmpdir(), "opencode-db-path-"));
+    const dataHome = createTestTempDirFromPath(join(tmpdir(), "opencode-db-path-"));
     const openCodeDir = join(dataHome, "opencode");
     mkdirSync(openCodeDir, { recursive: true });
     tempDirs.push(dataHome);

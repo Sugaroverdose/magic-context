@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -63,6 +63,7 @@ import { resolvePromptSurface } from "@magic-context/core/shared/prompt-surface"
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 
 import { clearAutoSearchForPiSession } from "./auto-search-pi";
 import {
@@ -107,7 +108,7 @@ describe("Pi context project identity cache", () => {
 	it("serves byte-identical output with cached identity and one host-usage read per context", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-pi-project-identity-cache";
-		const project = mkdtempSync(join(tmpdir(), "mc-pi-project-"));
+		const project = createTestTempDirFromPath(join(tmpdir(), "mc-pi-project-"));
 		const fake = createFakePi();
 		let probes = 0;
 		let usageReads = 0;
@@ -212,7 +213,9 @@ describe("Pi protected-token floor wiring", () => {
 	it("snapshots the derived floor instead of a project-only decrease", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-pi-project-protected-floor";
-		const project = mkdtempSync(join(tmpdir(), "mc-pi-protected-floor-"));
+		const project = createTestTempDirFromPath(
+			join(tmpdir(), "mc-pi-protected-floor-"),
+		);
 		const fake = createFakePi();
 		try {
 			registerPiContextHandler(fake.pi as never, {
@@ -851,7 +854,9 @@ describe("Pi fallback tag adoption", () => {
 	});
 
 	it("re-probes a stale negative after fingerprint construction before skipping adoption", () => {
-		const dir = mkdtempSync(join(tmpdir(), "mc-pi-fallback-race-"));
+		const dir = createTestTempDirFromPath(
+			join(tmpdir(), "mc-pi-fallback-race-"),
+		);
 		const dbPath = join(dir, "context.db");
 		const db = createTestDb(dbPath);
 		const siblingDb = createTestDb(dbPath);
@@ -2625,7 +2630,7 @@ describe("registerPiContextHandler", () => {
 	});
 
 	it("clears a stale unkeyed detected limit from the same database after restart", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "mc-pi-stale-limit-"));
+		const dir = createTestTempDirFromPath(join(tmpdir(), "mc-pi-stale-limit-"));
 		const path = join(dir, "context.db");
 		const sessionId = "ses-pi-stale-detected-restart";
 		let db = createTestDb(path);
@@ -6472,7 +6477,9 @@ for (const withTools of [false, true]) {
 
 describe("Pi transform_decisions dropped_tokens telemetry", () => {
 	it("sums persisted output token counts for dropped tags and records dropped_tokens", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "pi-dropped-tokens-sum-"));
+		const tempDir = createTestTempDirFromPath(
+			join(tmpdir(), "pi-dropped-tokens-sum-"),
+		);
 		const dbPath = join(tempDir, "context.db");
 		const db = openDatabase(dbPath);
 		const sessionId = "ses-pi-dropped-tokens-sum";
@@ -6572,7 +6579,9 @@ describe("Pi transform_decisions dropped_tokens telemetry", () => {
 	});
 
 	it("never sends a whole multi-megabyte message array to the exact tokenizer seam during drop pass", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "pi-dropped-tokens-seam-"));
+		const tempDir = createTestTempDirFromPath(
+			join(tmpdir(), "pi-dropped-tokens-seam-"),
+		);
 		const dbPath = join(tempDir, "context.db");
 		const db = openDatabase(dbPath);
 		const sessionId = "ses-pi-tokenizer-seam";
@@ -6660,7 +6669,9 @@ describe("Pi transform_decisions dropped_tokens telemetry", () => {
 	});
 
 	it("keeps execute and following defer bytes pinned while draining the same operations", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "pi-dropped-tokens-parity-"));
+		const tempDir = createTestTempDirFromPath(
+			join(tmpdir(), "pi-dropped-tokens-parity-"),
+		);
 		const dbPath = join(tempDir, "context.db");
 		const db = openDatabase(dbPath);
 		const sessionId = "ses-pi-wire-parity";
@@ -6747,7 +6758,9 @@ describe("Pi transform_decisions dropped_tokens telemetry", () => {
 	});
 
 	it("constant-mutation test: fails if writer records constant 0 across passes with different reduction masses", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "pi-const-mutation-test-"));
+		const tempDir = createTestTempDirFromPath(
+			join(tmpdir(), "pi-const-mutation-test-"),
+		);
 		const dbPath = join(tempDir, "context.db");
 		const db = openDatabase(dbPath);
 		try {

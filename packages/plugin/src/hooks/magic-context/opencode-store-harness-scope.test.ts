@@ -13,7 +13,7 @@
  * bounded whatever the session size.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openOpenCodeDb } from "../../features/magic-context/dreamer/open-opencode-db";
@@ -28,6 +28,7 @@ import {
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
 import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { writeOpenCodeV1FixtureStore } from "./opencode-v1-store-fixture";
 import {
     readRawSessionMessagePage,
@@ -49,7 +50,7 @@ function useFixtureStore(sessions: Parameters<typeof writeOpenCodeV1FixtureStore
 }
 
 beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), "mc-opencode-store-scope-"));
+    tempDir = createTestTempDirFromPath(join(tmpdir(), "mc-opencode-store-scope-"));
 });
 
 afterEach(() => {

@@ -1,4 +1,5 @@
 /// <reference types="bun-types" />
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 /**
  * OpenCode keeps agent and session permissions off the first user message's
@@ -14,7 +15,7 @@
  */
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Scheduler } from "../../features/magic-context/scheduler";
@@ -54,7 +55,7 @@ afterEach(() => {
 });
 
 function useTempDataHome(): string {
-    const dir = mkdtempSync(join(tmpdir(), "ctx-reduce-permission-freeze-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "ctx-reduce-permission-freeze-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     process.env.XDG_CACHE_HOME = dir;

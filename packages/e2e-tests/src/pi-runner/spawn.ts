@@ -1,8 +1,8 @@
+import { createE2ETempDir } from "../temp-dir";
 /** Shared Pi e2e process configuration helpers. */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { __test as subagentRunnerTest } from "../../../pi-plugin/src/subagent-runner";
 import { hostExtractCache } from '../host-extract-cache';
@@ -130,8 +130,7 @@ export function createPiIsolatedEnv(
   sharedDataDir?: string,
   host: PiRunnerHost = "pi",
 ): PiIsolatedEnv {
-  const unique = `${host}-e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const baseDirRaw = join(tmpdir(), unique);
+  const baseDirRaw = createE2ETempDir(`${host}-e2e-`);
   mkdirSync(baseDirRaw, { recursive: true });
   const baseDir = realpathSync(baseDirRaw);
   const configDir = join(baseDir, "config");

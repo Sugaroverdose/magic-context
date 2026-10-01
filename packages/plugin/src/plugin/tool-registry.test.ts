@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
@@ -20,6 +20,7 @@ import {
     createPromptSurfaceRuntime,
     LIGHT_TOOL_DESCRIPTIONS,
 } from "../shared/prompt-surface-runtime";
+import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import {
     FULL_PARAMETER_DESCRIPTIONS,
     LIGHT_PARAMETER_DESCRIPTIONS,
@@ -50,7 +51,7 @@ afterEach(() => {
 });
 
 function isolateDb(): void {
-    const dir = mkdtempSync(join(tmpdir(), "tool-registry-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "tool-registry-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
 }

@@ -7,7 +7,7 @@ import {
 	setSystemTime,
 	spyOn,
 } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -18,6 +18,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import * as loggerModule from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	clearContextHandlerSession,
 	__test as contextHandlerInternals,
@@ -75,7 +76,7 @@ function setup(
 			logs.push(parts.map(String).join(" "));
 		},
 	);
-	const root = mkdtempSync(join(tmpdir(), "mc-idle-ttl-"));
+	const root = createTestTempDirFromPath(join(tmpdir(), "mc-idle-ttl-"));
 	const db = createTestDb();
 	const fake = createFakePi();
 	registerPiContextHandler(fake.pi as never, {

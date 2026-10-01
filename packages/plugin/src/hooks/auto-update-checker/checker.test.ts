@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as logger from "../../shared/logger";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 let importCounter = 0;
 const tempDirs: string[] = [];
@@ -21,7 +22,7 @@ afterEach(() => {
 });
 
 function makeProjectFixture(): string {
-    const root = mkdtempSync(join(tmpdir(), "mc-checker-fixture-"));
+    const root = createTestTempDirFromPath(join(tmpdir(), "mc-checker-fixture-"));
     tempDirs.push(root);
     mkdirSync(join(root, ".opencode"), { recursive: true });
     return root;

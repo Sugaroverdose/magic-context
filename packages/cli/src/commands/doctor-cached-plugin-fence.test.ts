@@ -1,11 +1,12 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LATEST_SUPPORTED_VERSION } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     getOpenCodePluginPackageJsonPath,
     getOpenCodeV2PluginCacheSlot,
@@ -25,7 +26,7 @@ afterEach(() => {
 });
 
 function tempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), "mc-cached-fence-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-cached-fence-"));
     tempDirs.push(dir);
     return dir;
 }

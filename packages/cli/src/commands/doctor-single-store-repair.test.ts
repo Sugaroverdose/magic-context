@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { runDoctorSingleStoreCli } from "./doctor-single-store";
 import { parseRepairHistoryArgs, runDoctorSingleStoreRepair } from "./doctor-single-store-repair";
 
@@ -49,7 +50,7 @@ let oldEnv: NodeJS.ProcessEnv;
 
 beforeEach(() => {
     oldEnv = { ...process.env };
-    dir = mkdtempSync(join(root, "case-"));
+    dir = createTestTempDirFromPath(join(root, "case-"));
     data = join(dir, "cortexkit", "magic-context");
     backup = join(dir, "migration-backup");
     mkdirSync(data, { recursive: true });

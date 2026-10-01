@@ -1,11 +1,12 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeReadOnlySessionDb } from "../../hooks/magic-context/read-session-db";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { resolveIsSubagentFromOpenCodeDb } from "./resolve-subagent-fallback";
 
 /**
@@ -19,7 +20,7 @@ describe("resolveIsSubagentFromOpenCodeDb", () => {
     let openCodeDb: Database | null = null;
 
     beforeEach(() => {
-        tempDir = mkdtempSync(join(tmpdir(), "mc-subagent-fallback-"));
+        tempDir = createTestTempDirFromPath(join(tmpdir(), "mc-subagent-fallback-"));
         originalXdg = process.env.XDG_DATA_HOME;
         process.env.XDG_DATA_HOME = tempDir;
 

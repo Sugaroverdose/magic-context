@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { readRememberedGitIdentity } from "./memory/project-identity-cache";
 import {
     __clearProjectIdentityResolutionCacheForTests,
@@ -41,7 +42,7 @@ afterEach(() => {
 });
 
 function makeTempDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     return dir;
 }

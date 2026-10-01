@@ -1,4 +1,5 @@
 /// <reference types="bun-types" />
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 /**
  * The m[0]/m[1] prefix trim when the stored compartment boundary is not in the
@@ -16,7 +17,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -56,7 +57,7 @@ const roleOf = (index: number): "user" | "assistant" => (index % 2 === 1 ? "user
 
 /** Persist rows 1..count in OpenCode's message table, in canonical order. */
 function seedOpenCodeSession(count: number): void {
-    const dir = mkdtempSync(join(tmpdir(), "mc-prefix-trim-absent-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-prefix-trim-absent-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     const path = join(dir, "opencode", "opencode.db");
@@ -278,7 +279,9 @@ describe("recovery from a boundary missing inside the window", () => {
     it("the next cache-busting pass moves the baseline into the window and trims by id", () => {
         seedOpenCodeSession(20);
         const db = contextDb();
-        const projectDirectory = mkdtempSync(join(tmpdir(), "mc-prefix-trim-recovery-"));
+        const projectDirectory = createTestTempDirFromPath(
+            join(tmpdir(), "mc-prefix-trim-recovery-"),
+        );
         tempDirs.push(projectDirectory);
         const run = (messages: MessageLike[], isCacheBustingPass: boolean) =>
             injectM0M1({

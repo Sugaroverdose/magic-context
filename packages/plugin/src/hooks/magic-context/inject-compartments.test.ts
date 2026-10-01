@@ -2,10 +2,9 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-
 import {
     appendCompartments,
     replaceAllCompartmentState,
@@ -35,6 +34,7 @@ import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { insertUserMemory } from "../../features/magic-context/user-memory/storage-user-memory";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     COMPARTMENT_RENDER_EPOCH,
     encodeCachedM0UpgradeIdentity,
@@ -80,7 +80,7 @@ function makeDb(): Database {
 }
 
 function makeProjectDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), "mc-renderer-test-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-renderer-test-"));
     tempDirs.push(dir);
     return dir;
 }
@@ -101,7 +101,7 @@ function createUserMemoryTable(): void {
 }
 
 function createOpenCodeMessageTimes(rows: Array<{ id: string; timestamp: number }>): void {
-    const dataHome = mkdtempSync(join(tmpdir(), "mc-inject-dates-"));
+    const dataHome = createTestTempDirFromPath(join(tmpdir(), "mc-inject-dates-"));
     tempDirs.push(dataHome);
     process.env.XDG_DATA_HOME = dataHome;
     process.env.XDG_CACHE_HOME = dataHome;

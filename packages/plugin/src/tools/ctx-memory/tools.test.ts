@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tool } from "@opencode-ai/plugin";
-
 import { DREAMER_AGENT } from "../../agents/dreamer";
 import {
     computeNormalizedHash,
@@ -34,6 +33,7 @@ import type {
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 const { createCtxMemoryListTools, createCtxMemoryTools } = await import("./tools");
 
@@ -585,7 +585,7 @@ describe("createCtxMemoryTools", () => {
         });
 
         it("returns an exact-dedup response when another writer wins after the pre-check", async () => {
-            const tempDir = mkdtempSync(join(tmpdir(), "ctx-memory-race-"));
+            const tempDir = createTestTempDirFromPath(join(tmpdir(), "ctx-memory-race-"));
             const dbPath = join(tempDir, "context.db");
             const db1 = createTestDb(dbPath);
             const db2 = createTestDb(dbPath);

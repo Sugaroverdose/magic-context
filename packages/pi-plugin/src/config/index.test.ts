@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getProtectedTokensTierOverrides } from "@magic-context/core/config/project-security";
@@ -12,6 +12,7 @@ import {
 	reloadWindowOverlay,
 	setWindowOverlayPath,
 } from "@magic-context/core/shared/window-geometry";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { loadPiConfig, loadPiConfigDetailed } from "./index";
 
 const tempRoots: string[] = [];
@@ -19,7 +20,7 @@ const originalHome = process.env.HOME;
 const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
 
 function makeTempRoot(prefix: string): string {
-	const path = mkdtempSync(join(tmpdir(), prefix));
+	const path = createTestTempDirFromPath(join(tmpdir(), prefix));
 	tempRoots.push(path);
 	return path;
 }

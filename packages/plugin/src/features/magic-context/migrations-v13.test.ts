@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { closeDatabase, openDatabase } from "./storage";
 import {
     clearPendingCompactionMarkerStateIf,
@@ -14,7 +15,7 @@ import {
 const tempDirs: string[] = [];
 
 function useTempDataHome(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     return dir;

@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parsePluginConfig } from "../../config";
@@ -11,6 +11,7 @@ import {
     openDatabase,
 } from "../../features/magic-context/storage";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { registerTools } from "./tools";
 import type { V2Context } from "./types";
 
@@ -19,7 +20,7 @@ let db: ContextDatabase;
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "mc-v2-tool-backends-"));
+    dir = createTestTempDirFromPath(join(tmpdir(), "mc-v2-tool-backends-"));
     process.env.XDG_DATA_HOME = dir;
     mkdirSync(join(dir, "cortexkit", "magic-context"), { recursive: true });
     const opened = openDatabase();

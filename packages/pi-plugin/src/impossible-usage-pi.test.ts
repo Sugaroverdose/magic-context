@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,6 +14,7 @@ import {
 	clearWindowOverlayCacheForTest,
 	setWindowOverlayPath,
 } from "@magic-context/core/shared/window-geometry";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 
 import {
 	awaitInFlightHistorians,
@@ -461,7 +462,7 @@ describe("isPiLiveUsageRawBranchEstimate", () => {
 // A measured overlay cell for the model: the strongest configured window the
 // resolver knows, and the one a provider report above 272K contradicts.
 function use272kOverlay(): () => void {
-	const dir = mkdtempSync(join(tmpdir(), "pi-534-overlay-"));
+	const dir = createTestTempDirFromPath(join(tmpdir(), "pi-534-overlay-"));
 	const overlayPath = join(dir, "window-overlay.json");
 	writeFileSync(
 		overlayPath,

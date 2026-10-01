@@ -1,13 +1,14 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it, spyOn } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
 import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import {
@@ -217,7 +218,7 @@ describe("dreamer lease (serialized acquisition)", () => {
     });
 
     it("allows exactly one winner across separate DB handles", () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-dream-lease-handles-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-dream-lease-handles-"));
         const path = join(dir, "context.db");
         const dbA = makeDb(path);
         const dbB = makeDb(path);
@@ -233,7 +234,7 @@ describe("dreamer lease (serialized acquisition)", () => {
     });
 
     it("allows exactly one winner across subprocesses sharing a DB", async () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-dream-lease-process-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-dream-lease-process-"));
         const path = join(dir, "context.db");
         const setup = makeDb(path);
         closeQuietly(setup);
@@ -452,7 +453,7 @@ describe("startLeaseHeartbeat", () => {
     });
 
     it("detects takeover by a second process without reclaiming its lease", async () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-dream-lease-heartbeat-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-dream-lease-heartbeat-"));
         const path = join(dir, "context.db");
         const db = makeDb(path);
         const acquisition = acquireLeaseWithAcquisition(db, "holder-a");

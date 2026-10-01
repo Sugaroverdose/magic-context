@@ -1,12 +1,12 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import {
     __resetVerificationPathsForTests,
     __setVerificationPathsTestHooks,
@@ -48,7 +48,7 @@ function gitCommand(args: readonly string[]): string {
 }
 
 function makeGitMetadataDirectory(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     dirs.push(dir);
     mkdirSync(join(dir, ".git"));
     writeFileSync(join(dir, "a.ts"), "export const a = 1;\n", "utf8");

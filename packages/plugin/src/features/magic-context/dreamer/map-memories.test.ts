@@ -2,12 +2,12 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { insertMemory } from "../memory";
 import {
     getMemoryVerifications,
@@ -38,7 +38,7 @@ function freshDb(): Database {
 }
 
 function tempProject(): string {
-    const dir = mkdtempSync(path.join(tmpdir(), "mc-map-memories-"));
+    const dir = createTestTempDirFromPath(path.join(tmpdir(), "mc-map-memories-"));
     tempDirs.push(dir);
     mkdirSync(path.join(dir, "src"), { recursive: true });
     writeFileSync(path.join(dir, "src", "fact.ts"), "export const fact = true;", "utf8");

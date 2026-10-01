@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,6 +13,7 @@ import {
 	refreshModelLimitsFromApi,
 } from "@magic-context/core/shared/models-dev-cache";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	__test,
 	injectM0M1Pi,
@@ -100,8 +101,8 @@ describe("Pi m[0] mural image fold (on-demand render → wire)", () => {
 			);
 			const meta = getOrCreateSessionMeta(db, SESSION_ID);
 			const legacy = Buffer.from(
-				meta
-					.cachedM0Bytes!.toString("utf8")
+				meta.cachedM0Bytes
+					?.toString("utf8")
 					.replace(`${MEMORY_MURAL_GUIDANCE}\n`, ""),
 			);
 			db.prepare(
@@ -397,7 +398,9 @@ describe("Pi m[0] mural image fold (on-demand render → wire)", () => {
 	});
 
 	it("stays text-only when the model has no vision metadata (fail closed)", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "mc-pi-mural-novision-"));
+		const tempDir = createTestTempDirFromPath(
+			join(tmpdir(), "mc-pi-mural-novision-"),
+		);
 		const originalXdgData = process.env.XDG_DATA_HOME;
 		process.env.XDG_DATA_HOME = tempDir;
 		clearModelsDevCache();
@@ -463,7 +466,7 @@ describe("resolveMuralWire Pi provider-prefix translation", () => {
 	beforeEach(() => {
 		// Isolate the persisted models-dev cache so vision seeds never touch the
 		// real ~/.local/share tree or leak across cases via cold-start reload.
-		tempDir = mkdtempSync(join(tmpdir(), "mc-pi-mural-models-"));
+		tempDir = createTestTempDirFromPath(join(tmpdir(), "mc-pi-mural-models-"));
 		originalXdgData = process.env.XDG_DATA_HOME;
 		process.env.XDG_DATA_HOME = tempDir;
 		clearModelsDevCache();
