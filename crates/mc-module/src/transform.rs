@@ -5118,12 +5118,14 @@ fn apply_once(
     });
     let current_exempt_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
     // A bust releases the full native vector kept for an assistant that is no longer the
-    // newest, which may apply overlays withheld from it.
-    let releases_native_reasoning_keep = loaded.core.frozen_units.iter().any(|unit| {
-        unit.key
-            .strip_prefix("strip:native_reasoning_keep:")
-            .is_some_and(|mid| Some(mid) != current_exempt_mid)
-    });
+    // newest, and the tag or hint overlays withheld from it then land on its text: an edit
+    // before newer thinking. Without active overlays its parts are unchanged.
+    let releases_native_reasoning_keep = (tagging_active || auto_search_active)
+        && loaded.core.frozen_units.iter().any(|unit| {
+            unit.key
+                .strip_prefix("strip:native_reasoning_keep:")
+                .is_some_and(|mid| Some(mid) != current_exempt_mid)
+        });
     // A bust applies system-injection strips that earlier defers held back.
     let applies_held_system_strip = loaded.core.frozen_units.iter().any(|unit| {
         unit.key.starts_with(SYSTEM_STRIP_BLOCK_PREFIX) && !unit.reset_rule.is_empty()
