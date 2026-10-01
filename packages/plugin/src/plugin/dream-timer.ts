@@ -648,6 +648,7 @@ async function sweepProject(
             projectIdentity: reg.projectIdentity,
             tasks: runtimeConfigs,
             executor,
+            projectMemoryEnabled: reg.memoryEnabled !== false,
         });
         if (ran > 0) {
             log(`[dreamer] timer tick (${origin}) ${reg.projectIdentity} — ran ${ran} task(s)`);
