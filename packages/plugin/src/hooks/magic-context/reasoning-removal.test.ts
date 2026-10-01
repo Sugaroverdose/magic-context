@@ -10,11 +10,16 @@ import {
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
+    getEmergencyInputSample,
+    setEmergencyDropSample,
+} from "../../features/magic-context/storage-meta-persisted";
+import {
     addRemovedReasoningIds,
     getRemovedReasoningIds,
 } from "../../features/magic-context/storage-reasoning-removal";
 import { createTagger } from "../../features/magic-context/tagger";
 import { Database } from "../../shared/sqlite";
+import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import {
     removeReasoningParts,
     selectReasoningRemovals,
@@ -26,6 +31,7 @@ import {
     makeSentinel,
     neutralizeDroppedReasoningPart,
 } from "./sentinel";
+import { replayClearedReasoning } from "./strip-content";
 import type { MessageLike } from "./tag-messages";
 import { type TagTarget, tagMessages } from "./tag-messages";
 import { runPostTransformPhase } from "./transform-postprocess-phase";
@@ -311,17 +317,18 @@ describe("reasoning removal through postprocess", () => {
         expect(getRemovedReasoningIds(database, sessionId).size).toBe(0);
     });
 
-    it("applies nothing when the persisted replay document is unreadable", async () => {
+    it("fails closed instead of serving nothing when the replay document itself is unreadable", async () => {
         const database = openDb();
         const sessionId = "ses-removal-write-fails";
         getOrCreateSessionMeta(database, sessionId);
-        // A trailing-blank document this writer cannot parse makes every CAS fail.
+        // A document this reader cannot parse: the removal set is unknown, so
+        // serving an empty set could bring removed reasoning back.
         database
             .prepare("UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ?")
             .run('{"version":7}', sessionId);
-        const busting = toolLoop(8);
-        await pass(database, sessionId, busting, { busting: true, providerID: "openai" });
-        expect(busting.messages.slice(1).every((m) => reasoningCount(m) === 1)).toBe(true);
+        await expect(
+            pass(database, sessionId, toolLoop(8), { busting: true, providerID: "openai" }),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
     });
 
     it("stores the set without disturbing other replay document lanes", () => {
@@ -341,6 +348,7 @@ describe("reasoning removal through postprocess", () => {
             version: 2,
             trailingBlank: { "assistant-x": "strip" },
             reasoningRemoval: { messageIds: ["assistant-0"] },
+            reasoningRemovalBackup: { messageIds: ["assistant-0"] },
         });
     });
 
@@ -398,87 +406,267 @@ describe("reasoning removal through postprocess", () => {
         expect(sha256(after.messages)).toBe(sha256(rebuild.messages));
     });
 
-    it("keeps the emergency minimum when only persisted drops are replayed (100%, sub-2,000 selection)", async () => {
-        const database = openDb();
-        const sessionId = "ses-emergency-minimum";
-        const toolMessage = {
-            info: { id: "assistant-fresh", role: "assistant", sessionID: "s" },
-            parts: [
-                {
-                    type: "tool",
-                    tool: "bash",
-                    callID: "call-fresh",
-                    state: { status: "completed", input: {}, output: "word ".repeat(100) },
-                },
-            ],
-        } as unknown as MessageLike;
-        const conversation = {
-            info: { id: "user-big", role: "user", sessionID: "s" },
-            parts: [{ type: "text", text: "word ".repeat(7_000) }],
-        } as unknown as MessageLike;
-        insertTag(database, sessionId, "user-big", "message", 35_000, 1, 0, null, 0, null, null, {
-            tokenCount: 8_750,
-            inputTokenCount: 0,
-            reasoningTokenCount: 0,
-        });
-        insertTag(database, sessionId, "call-fresh", "tool", 500, 2, 0, "bash", 0, null, null, {
-            tokenCount: 125,
-            inputTokenCount: 0,
-            reasoningTokenCount: 0,
-        });
-        const targets = new Map<number, TagTarget>([
-            [
-                1,
-                {
-                    message: conversation,
-                    setContent: () => false,
-                    getContent: () => "word ".repeat(7_000),
-                },
-            ],
-            [
-                2,
-                {
-                    message: toolMessage,
-                    setContent: () => false,
-                    canDrop: () => toolMessage.parts.length > 0,
-                    measureReclaim: () => ({
-                        beforeTools: 125,
-                        afterTools: 0,
-                        beforeProse: 0,
-                        afterProse: 0,
-                    }),
-                    drop: () => {
-                        toolMessage.parts.splice(0, 1);
-                        return "removed";
+    for (const fullFeatureMode of [false, true]) {
+        it(`keeps the emergency minimum when only persisted drops are replayed (100%, sub-2,000 selection, ${fullFeatureMode ? "primary" : "subagent"})`, async () => {
+            const database = openDb();
+            const sessionId = `ses-emergency-minimum-${fullFeatureMode}`;
+            const toolMessage = {
+                info: { id: "assistant-fresh", role: "assistant", sessionID: "s" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "bash",
+                        callID: "call-fresh",
+                        state: { status: "completed", input: {}, output: "word ".repeat(100) },
                     },
-                    skeletonReal: () => "truncated",
-                    inputStringBytes: () => 0,
+                ],
+            } as unknown as MessageLike;
+            const conversation = {
+                info: { id: "user-big", role: "user", sessionID: "s" },
+                parts: [{ type: "text", text: "word ".repeat(7_000) }],
+            } as unknown as MessageLike;
+            insertTag(
+                database,
+                sessionId,
+                "user-big",
+                "message",
+                35_000,
+                1,
+                0,
+                null,
+                0,
+                null,
+                null,
+                {
+                    tokenCount: 8_750,
+                    inputTokenCount: 0,
+                    reasoningTokenCount: 0,
                 },
-            ],
-        ]);
-        await pass(
-            database,
-            sessionId,
-            { messages: [conversation, toolMessage], tags: new Map() },
-            {
-                busting: false,
-                providerID: "openai",
-                overrides: {
-                    schedulerDecision: "execute",
-                    contextUsage: { percentage: 100, inputTokens: 335_000 },
-                    emergencyCeilingTokens: 251_000,
-                    // Replaying a persisted drop restored bytes already served; it
-                    // must not count as a rewrite this pass already pays for.
-                    didMutateFromFlushedStatuses: true,
-                    tags: getActiveTagsBySession(database, sessionId),
-                    targets,
-                    sessionMeta: getOrCreateSessionMeta(database, sessionId),
+            );
+            insertTag(database, sessionId, "call-fresh", "tool", 500, 2, 0, "bash", 0, null, null, {
+                tokenCount: 125,
+                inputTokenCount: 0,
+                reasoningTokenCount: 0,
+            });
+            const targets = new Map<number, TagTarget>([
+                [
+                    1,
+                    {
+                        message: conversation,
+                        setContent: () => false,
+                        getContent: () => "word ".repeat(7_000),
+                    },
+                ],
+                [
+                    2,
+                    {
+                        message: toolMessage,
+                        setContent: () => false,
+                        canDrop: () => toolMessage.parts.length > 0,
+                        measureReclaim: () => ({
+                            beforeTools: 125,
+                            afterTools: 0,
+                            beforeProse: 0,
+                            afterProse: 0,
+                        }),
+                        drop: () => {
+                            toolMessage.parts.splice(0, 1);
+                            return "removed";
+                        },
+                        skeletonReal: () => "truncated",
+                        inputStringBytes: () => 0,
+                    },
+                ],
+            ]);
+            await pass(
+                database,
+                sessionId,
+                { messages: [conversation, toolMessage], tags: new Map() },
+                {
+                    busting: false,
+                    providerID: "openai",
+                    overrides: {
+                        schedulerDecision: "execute",
+                        contextUsage: { percentage: 100, inputTokens: 335_000 },
+                        emergencyCeilingTokens: 251_000,
+                        // Replaying a persisted drop restored bytes already served; it
+                        // must not count as a rewrite this pass already pays for.
+                        didMutateFromFlushedStatuses: true,
+                        fullFeatureMode,
+                        tags: getActiveTagsBySession(database, sessionId),
+                        targets,
+                        sessionMeta: getOrCreateSessionMeta(database, sessionId),
+                    },
                 },
-            },
+            );
+            const fresh = getTagsBySession(database, sessionId).find((tag) => tag.tagNumber === 2);
+            expect(fresh?.status).toBe("active");
+            expect(toolMessage.parts).toHaveLength(1);
+        });
+    }
+
+    const reasoningMap = (messages: MessageLike[]) => {
+        const map = new Map<MessageLike, { type: string; text?: string }[]>();
+        for (const message of messages) {
+            const parts = message.parts.filter(
+                (part) => (part as { type?: string }).type === "reasoning",
+            ) as { type: string; text?: string }[];
+            if (parts.length > 0) map.set(message, parts);
+        }
+        return map;
+    };
+    /** ABORT makes the write throw; IGNORE makes it silently change nothing. */
+    const blockWrites = (database: Database, column: string, how: "ABORT" | "IGNORE" = "ABORT") =>
+        database.exec(
+            `CREATE TRIGGER block_${column} BEFORE UPDATE OF ${column} ON session_meta BEGIN SELECT RAISE(${how === "ABORT" ? "ABORT, 'blocked'" : "IGNORE"}); END;`,
         );
-        const fresh = getTagsBySession(database, sessionId).find((tag) => tag.tagNumber === 2);
-        expect(fresh?.status).toBe("active");
-        expect(toolMessage.parts).toHaveLength(1);
+    /** The persisted watermark, replayed onto a fresh array as transform.ts does on every pass. */
+    const replayOnNextPass = (
+        database: Database,
+        sessionId: string,
+        fresh: ReturnType<typeof toolLoop>,
+    ) =>
+        replayClearedReasoning(
+            fresh.messages,
+            reasoningMap(fresh.messages) as never,
+            fresh.tags,
+            getOrCreateSessionMeta(database, sessionId).clearedReasoningThroughTag ?? 0,
+        );
+
+    it("prefix-bound canonical Anthropic: the inline strip never advances the watermark that later replays clear typed reasoning", async () => {
+        const database = openDb();
+        const sessionId = "ses-bound-inline";
+        // The proactive strip's write fails here, so nothing masks a moved watermark.
+        blockWrites(database, "merged_reasoning_stripped_ids");
+        const withInline = () => {
+            const session = toolLoop(8);
+            session.messages[1].parts.splice(2, 0, {
+                type: "text",
+                text: "<thinking>inline</thinking>answer 0",
+            });
+            return session;
+        };
+        await pass(database, sessionId, withInline(), {
+            busting: true,
+            providerID: "anthropic",
+            prefixBound: true,
+        });
+        expect(getOrCreateSessionMeta(database, sessionId).clearedReasoningThroughTag ?? 0).toBe(0);
+        const next = withInline();
+        const before = sha256(next.messages);
+        expect(replayOnNextPass(database, sessionId, next)).toBe(0);
+        expect(sha256(next.messages)).toBe(before);
+    });
+
+    it("prefix-bound canonical Anthropic: the age lane never clears typed reasoning", async () => {
+        const database = openDb();
+        const sessionId = "ses-bound-age";
+        blockWrites(database, "merged_reasoning_stripped_ids");
+        const session = toolLoop(8);
+        await pass(database, sessionId, session, {
+            busting: true,
+            providerID: "anthropic",
+            prefixBound: true,
+            overrides: { reasoningByMessage: reasoningMap(session.messages) as never },
+        });
+        expect(getOrCreateSessionMeta(database, sessionId).clearedReasoningThroughTag ?? 0).toBe(0);
+        expect(JSON.stringify(session.messages)).not.toContain("[cleared]");
+        const next = toolLoop(8);
+        const before = sha256(next.messages);
+        replayOnNextPass(database, sessionId, next);
+        expect(sha256(next.messages)).toBe(before);
+    });
+
+    it("once the drop switch is persisted, an unresolved provider still serves the restored bytes", async () => {
+        const database = openDb();
+        const sessionId = "ses-switch-unresolved";
+        const withDrop = () => {
+            const session = toolLoop(4);
+            neutralizeDroppedReasoningPart(session.messages[2].parts[1]);
+            return session;
+        };
+        await pass(database, sessionId, withDrop(), { busting: true, providerID: "openai" });
+        const resolved = withDrop();
+        await pass(database, sessionId, resolved, { busting: false, providerID: "openai" });
+        const unresolved = withDrop();
+        await pass(database, sessionId, unresolved, { busting: false, providerID: undefined });
+        expect(sha256(unresolved.messages)).toBe(sha256(resolved.messages));
+        expect(JSON.stringify(unresolved.messages)).not.toContain("[cleared]");
+    });
+
+    it("serves the legacy drop bytes when the switch cannot be persisted on a rebuilding pass", async () => {
+        const database = openDb();
+        const sessionId = "ses-switch-blocked";
+        getOrCreateSessionMeta(database, sessionId);
+        // The compare-and-swap finds nothing updated and gives up: the write
+        // reports failure without throwing.
+        blockWrites(database, "trailing_blank_decisions", "IGNORE");
+        const session = toolLoop(4);
+        neutralizeDroppedReasoningPart(session.messages[2].parts[1]);
+        await pass(database, sessionId, session, { busting: true, providerID: "openai" });
+        expect(session.messages[2].parts[1]).toMatchObject({
+            type: "reasoning",
+            text: "[cleared]",
+        });
+    });
+
+    it("serves the committed set after the write, including ids another process added meanwhile", async () => {
+        const database = openDb();
+        const sessionId = "ses-committed-union";
+        getOrCreateSessionMeta(database, sessionId);
+        // Stand-in for a concurrent writer: when this pass's write lands, another
+        // process's id (assistant-6, newer than the age cutoff) joins the set.
+        database.exec(`CREATE TRIGGER concurrent_writer AFTER UPDATE OF trailing_blank_decisions ON session_meta
+            WHEN NEW.trailing_blank_decisions LIKE '%assistant-0%' AND NEW.trailing_blank_decisions NOT LIKE '%assistant-6%'
+            BEGIN
+              UPDATE session_meta SET trailing_blank_decisions = json_insert(
+                json_insert(NEW.trailing_blank_decisions, '$.reasoningRemoval.messageIds[#]', 'assistant-6'),
+                '$.reasoningRemovalBackup.messageIds[#]', 'assistant-6')
+              WHERE session_id = NEW.session_id;
+            END;`);
+        const session = toolLoop(8);
+        await pass(database, sessionId, session, { busting: true, providerID: "openai" });
+        expect(getRemovedReasoningIds(database, sessionId).has("assistant-6")).toBe(true);
+        expect(reasoningCount(session.messages[7])).toBe(0);
+    });
+
+    it("fails the pass closed when neither the removal set nor its backup can be read", async () => {
+        const database = openDb();
+        const sessionId = "ses-removal-unreadable";
+        await pass(database, sessionId, toolLoop(8), { busting: true, providerID: "openai" });
+        const raw = database
+            .prepare(
+                "SELECT trailing_blank_decisions AS raw FROM session_meta WHERE session_id = ?",
+            )
+            .get(sessionId) as { raw: string };
+        const corrupted = JSON.parse(raw.raw);
+        corrupted.reasoningRemoval.messageIds.push(42);
+        corrupted.reasoningRemovalBackup.messageIds.push(42);
+        database
+            .prepare("UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ?")
+            .run(JSON.stringify(corrupted), sessionId);
+        await expect(
+            pass(database, sessionId, toolLoop(8), { busting: false, providerID: "openai" }),
+        ).rejects.toBeInstanceOf(EmergencyFailClosedError);
+    });
+
+    it("does not rearm the emergency episode for replayed drop statuses", async () => {
+        const database = openDb();
+        const sessionId = "ses-latch";
+        getOrCreateSessionMeta(database, sessionId);
+        setEmergencyDropSample(database, sessionId, 90_000);
+        await pass(database, sessionId, toolLoop(2), {
+            busting: true,
+            providerID: "openai",
+            overrides: {
+                schedulerDecision: "execute",
+                contextUsage: { percentage: 90, inputTokens: 90_000 },
+                emergencyCeilingTokens: 80_000,
+                didMutateFromFlushedStatuses: true,
+                sessionMeta: getOrCreateSessionMeta(database, sessionId),
+            },
+        });
+        expect(getEmergencyInputSample(database, sessionId)).toBe(90_000);
     });
 });
 
@@ -625,7 +813,6 @@ describe("the removal lane never changes bytes without taking reasoning off the 
                 clearReasoningAge: 5,
                 alreadyRemoved: new Set(),
                 prefixBound: false,
-                providerID,
             });
             removeReasoningParts(messages, new Set(["assistant-x"]), providerID);
             const after = JSON.stringify(message);
@@ -657,6 +844,53 @@ describe("the removal lane never changes bytes without taking reasoning off the 
             new Set(["assistant-x"]),
             "openrouter",
         );
+        expect(JSON.stringify(message)).toBe(before);
+    });
+});
+
+describe("replay and route guards", () => {
+    it("replay skips the newest assistant with replayable content, as Rust does", () => {
+        const { messages } = toolLoop(3);
+        const newest = messages[messages.length - 1];
+        removeReasoningParts(messages, new Set(["assistant-1", "assistant-2"]), "openai");
+        expect(reasoningCount(messages[2])).toBe(0);
+        expect(reasoningCount(newest)).toBe(1);
+    });
+
+    it("recognizes the OpenRouter adapter by its metadata under any provider id", () => {
+        const message = routeStep("openrouter-claude");
+        removeReasoningParts(
+            [message, routeStep("deepseek")],
+            new Set(["assistant-x"]),
+            "my-gateway",
+        );
+        expect(JSON.stringify(message)).not.toContain("PAYLOAD");
+    });
+
+    it("never strips a reasoning_details entry without a format", () => {
+        const message = routeStep("openrouter-claude");
+        for (const part of message.parts) {
+            const details = (
+                part as {
+                    metadata?: { openrouter?: { reasoning_details?: Record<string, unknown>[] } };
+                }
+            ).metadata?.openrouter?.reasoning_details;
+            for (const detail of details ?? []) delete detail.format;
+        }
+        const before = JSON.stringify(message);
+        const newer = routeStep("deepseek");
+        const selected = selectReasoningRemovals({
+            messages: [message, newer],
+            messageTagNumbers: new Map([
+                [message, 1],
+                [newer, 20],
+            ]),
+            clearReasoningAge: 5,
+            alreadyRemoved: new Set(),
+            prefixBound: false,
+        });
+        expect(selected).toEqual([]);
+        removeReasoningParts([message, newer], new Set(["assistant-x"]), "openrouter");
         expect(JSON.stringify(message)).toBe(before);
     });
 });

@@ -333,3 +333,33 @@ fn opencode_removal_selects_nothing_on_prefix_bound_unresolved_or_openrouter_rou
     assert!(!is_prefix_bound_thinking_model(Some("anthropic/claude-sonnet-5")));
     assert!(!is_prefix_bound_thinking_model(Some("anthropic/claude-sonnet-5-50")));
 }
+
+#[test]
+fn reasoning_cutoff_is_not_captured_for_prefix_bound_models() {
+    let mut request = reasoning_clear_fixture();
+    let tags = BTreeMap::from([("old".to_string(), 2), ("multipart-user".to_string(), 30)]);
+    let profile = Some(SerializerProfile::OpencodeAiSdk);
+    request.model_key = Some("anthropic/claude-sonnet-5".to_string());
+    assert!(reasoning_clear_cutoff_with_tags(&request, profile, true, &tags).is_some());
+    request.model_key = Some("anthropic/claude-opus-5-5".to_string());
+    assert_eq!(reasoning_clear_cutoff_with_tags(&request, profile, true, &tags), None);
+    let claude_code = Some(SerializerProfile::ClaudeCodeAnthropic);
+    assert_eq!(reasoning_clear_cutoff_with_tags(&request, claude_code, true, &tags), None);
+}
+
+#[test]
+fn opencode_removal_skips_messages_carrying_openrouter_reasoning_details_under_any_provider_id() {
+    let mut request = opencode_openai_removal_request(6, "my-gateway", "anthropic/claude-haiku-4.5");
+    let natives = request.native_messages.as_mut().unwrap();
+    natives[2]["parts"][1]["metadata"] =
+        json!({"openrouter":{"reasoning_details":[{"type":"reasoning.text","format":"anthropic-claude-v1"}]}});
+    let tags: BTreeMap<String, u64> = request
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| (message.mid.clone(), index as u64 + 1))
+        .collect();
+    let selected = opencode_reasoning_removal_mids(&request, &tags, Some(6), &HashSet::new());
+    assert!(!selected.contains("a1"), "{selected:?}");
+    assert!(selected.contains("a0"));
+}

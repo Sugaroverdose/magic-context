@@ -59,10 +59,6 @@ function newestAssistant(messages: MessageLike[]): MessageLike | undefined {
     return undefined;
 }
 
-function isOpenRouterRoute(providerID: string | undefined): boolean {
-    return (providerID ?? "").toLowerCase().includes("openrouter");
-}
-
 /** `metadata.openrouter.reasoning_details` of a part, when present. */
 function openRouterReasoningDetails(part: unknown): unknown[] | undefined {
     if (!isRecord(part) || !isRecord(part.metadata)) return undefined;
@@ -74,30 +70,30 @@ function openRouterReasoningDetails(part: unknown): unknown[] | undefined {
 /**
  * Gemini's thought signatures ride OpenRouter's `reasoning_details` on the
  * tool call they sign, and Gemini needs them back for every function call of
- * the current turn. They are never removed.
+ * the current turn. They are never removed. `format` is optional in the
+ * adapter's schema, so a detail without one cannot be told apart from a Gemini
+ * signature and is protected the same way.
  */
-function isGeminiSignatureDetail(detail: unknown): boolean {
-    if (!isRecord(detail)) return false;
-    const format = typeof detail.format === "string" ? detail.format : "";
-    return format.startsWith("google-gemini");
+function isProtectedReasoningDetail(detail: unknown): boolean {
+    if (!isRecord(detail)) return true;
+    if (typeof detail.format !== "string") return true;
+    return detail.format.startsWith("google-gemini");
 }
 
 /**
  * True when removing the message's reasoning parts takes its reasoning payload
- * off the wire. On OpenRouter, `@openrouter/ai-sdk-provider` sends the
- * message's `reasoning_details` taken first from the tool-call parts' provider
- * metadata, and only then from the reasoning part, so a removal there must
- * strip the tool-call copies too. When those copies hold Gemini signatures,
- * which must stay, the message is not removable at all.
+ * off the wire. `@openrouter/ai-sdk-provider` stores its provider metadata
+ * under `openrouter` and sends the message's `reasoning_details` taken first
+ * from the tool-call parts, and only then from the reasoning part, so a removal
+ * must strip the tool-call copies too. The adapter is recognized by that
+ * metadata, not by the provider id, which a user may choose freely. When a copy
+ * holds a Gemini signature (or a detail without a format), which must stay, the
+ * message is not removable at all.
  */
-function reasoningPayloadLeavesWithParts(
-    message: MessageLike,
-    providerID: string | undefined,
-): boolean {
-    if (!isOpenRouterRoute(providerID)) return true;
+function reasoningPayloadLeavesWithParts(message: MessageLike): boolean {
     for (const part of message.parts) {
         const details = openRouterReasoningDetails(part);
-        if (details?.some(isGeminiSignatureDetail)) return false;
+        if (details?.some(isProtectedReasoningDetail)) return false;
     }
     return true;
 }
@@ -141,7 +137,6 @@ export function selectReasoningRemovals(args: {
     clearReasoningAge: number;
     alreadyRemoved: ReadonlySet<string>;
     prefixBound: boolean;
-    providerID?: string;
 }): string[] {
     if (args.prefixBound) return [];
     let maxTag = 0;
@@ -164,7 +159,7 @@ export function selectReasoningRemovals(args: {
             tag > 0 &&
             tag <= cutoff &&
             hasWireContentBesideReasoning(message) &&
-            reasoningPayloadLeavesWithParts(message, args.providerID)
+            reasoningPayloadLeavesWithParts(message)
         ) {
             selected.push(id);
         }
@@ -194,14 +189,14 @@ export function removeReasoningParts(
         if (message.info.role !== "assistant" || message === exempt) continue;
         const id = message.info.id;
         if (typeof id !== "string" || !ids.has(id)) continue;
-        if (!reasoningPayloadLeavesWithParts(message, providerID)) continue;
+        if (!reasoningPayloadLeavesWithParts(message)) continue;
         const before = message.parts.length;
         const kept = message.parts.filter((part) => !isReasoningOrNeutralized(part));
         if (kept.length === before) continue;
         removed += before - kept.length;
         message.parts.length = 0;
         message.parts.push(...kept);
-        if (isOpenRouterRoute(providerID)) stripOpenRouterReasoningDetails(message);
+        stripOpenRouterReasoningDetails(message);
         if (!hasWireContentBesideReasoning(message)) {
             message.parts.push(makeWholeMessageSentinel(providerID));
         }

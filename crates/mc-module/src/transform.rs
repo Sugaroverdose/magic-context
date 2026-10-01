@@ -4502,7 +4502,11 @@ fn apply_once(
         >= scheduler::escalation_bands(ctx.execute_threshold_percentage)
             .force_materialize_percentage;
     let force_episode_available = force_band_active && !loaded.meta.has_prior_emergency_drop;
-    let supersession_ride_available = (prefix_materialization_enabled
+    // A rebuild that is not the emergency itself. It is the only thing that waives the
+    // emergency minimum: the force-band edge and the 95% backstop below permit a rewrite
+    // but do not pay for one. Both flags derive from this one expression so they cannot
+    // drift apart.
+    let independent_rebuild = (prefix_materialization_enabled
         && (!loaded.meta.initialized
             || render_config_changed
             || cached_m1_missing(&loaded.core)
@@ -4511,22 +4515,12 @@ fn apply_once(
             || lineage_state.force_hard
             || (scheduler_outcome.pass != scheduler::PassDecision::Defer
                 && current_m1_digest != applied_m1_revision)))
+        || loaded.meta.soft_refresh_pending;
+    let supersession_ride_available = independent_rebuild
         || force_episode_available
-        || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
-        || loaded.meta.soft_refresh_pending;
+        || scheduler_outcome.pass == scheduler::PassDecision::Emergency95;
     let pass_already_busting = supersession_ride_available;
-    // The emergency minimum is waived only by a rebuild that is not the emergency itself;
-    // the force-band edge and the 95% backstop permit a rewrite but do not pay for one.
-    let emergency_minimum_waived = (prefix_materialization_enabled
-        && (!loaded.meta.initialized
-            || render_config_changed
-            || cached_m1_missing(&loaded.core)
-            || hard_fold_prices_mutations
-            || reconcile_hard_due
-            || lineage_state.force_hard
-            || (scheduler_outcome.pass != scheduler::PassDecision::Defer
-                && current_m1_digest != applied_m1_revision)))
-        || loaded.meta.soft_refresh_pending;
+    let emergency_minimum_waived = independent_rebuild;
     let calibration_candidate = crate::decision_calibration::DecisionCalibration::freeze_for_model(
         req.model_key.as_deref(),
     );
@@ -12792,6 +12786,26 @@ fn opencode_reasoning_removal_mids<'a>(
     }
     let newest = latest_assistant_mid(&req.messages);
     let exempt = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    // `@openrouter/ai-sdk-provider` keeps copies of the reasoning as
+    // `metadata.openrouter.reasoning_details` on other parts of the message. This lane
+    // cannot strip those, so such messages are skipped whatever the provider id is.
+    let openrouter_shaped: HashSet<&str> = req
+        .native_messages
+        .iter()
+        .flatten()
+        .filter_map(|native| {
+            let id = native.get("info")?.get("id")?.as_str()?;
+            native
+                .get("parts")?
+                .as_array()?
+                .iter()
+                .any(|part| {
+                    part.pointer("/metadata/openrouter/reasoning_details")
+                        .is_some()
+                })
+                .then_some(id)
+        })
+        .collect();
     for message in &req.messages {
         if message.ck.meta.synthetic
             || message.ck.role != "assistant"
@@ -12800,7 +12814,9 @@ fn opencode_reasoning_removal_mids<'a>(
             continue;
         }
         let mid = message.mid.as_str();
-        if existing_keys.contains(format!("strip:reasoning_age:{mid}").as_str()) {
+        if existing_keys.contains(format!("strip:reasoning_age:{mid}").as_str())
+            || openrouter_shaped.contains(mid)
+        {
             continue;
         }
         let tag = message_tag_number(message, tag_numbers);

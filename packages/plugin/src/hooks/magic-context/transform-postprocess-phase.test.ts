@@ -9397,6 +9397,31 @@ describe("proactive strip of thinking on busting passes", () => {
         for (const id of ALL_ASSISTANTS) expect(reasoningCount(findMessage(pass, id))).toBe(0);
     });
 
+    it("strips Rust-mode subagents on a busting pass and replays it on defer", () => {
+        openDb();
+        const sessionId = "ses-proactive-rust-subagent";
+        const postprocess = (messages: MessageLike[], cacheBustingPass: boolean) =>
+            runRustModePostprocess({
+                db,
+                sessionId,
+                messages,
+                fullFeatureMode: false,
+                resolvedProviderID: "anthropic",
+                thinkingBindingRecoveryEnabledForModel: true,
+                cacheBustingPass,
+                tagger: createTagger(),
+                ctxReduceAvailability: { callable: true, frozen: true },
+            });
+        const busting = buildSession(sessionId, "re-rendered first user message");
+        expect(postprocess(busting, true).proactiveThinkingStrip).toEqual({
+            messageIds: ALL_ASSISTANTS,
+        });
+        for (const id of ALL_ASSISTANTS) expect(reasoningCount(findMessage(busting, id))).toBe(0);
+        const defer = buildSession(sessionId, "re-rendered first user message");
+        expect(postprocess(defer, false).proactiveThinkingStrip).toBeNull();
+        expect(sha256(defer)).toBe(sha256(busting));
+    });
+
     it("strips through Rust-mode host postprocess only on a busting pass and replays it", () => {
         openDb();
         const sessionId = "ses-proactive-rust";

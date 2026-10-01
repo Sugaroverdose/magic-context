@@ -22,6 +22,12 @@ import {
  *   change in what a drop does to reasoning first lands on a rebuilding pass.
  */
 const NAMESPACE = "reasoningRemoval";
+/**
+ * A second copy written in the same compare-and-swap. A malformed primary
+ * namespace is read from here, so the persisted set survives process
+ * restarts and other writers without any process-local cache.
+ */
+const BACKUP_NAMESPACE = "reasoningRemovalBackup";
 
 export interface ReasoningRemovalState {
     messageIds: Set<string>;
@@ -32,8 +38,12 @@ function invalidState(sessionId: string): Error {
     return new Error(`invalid persisted reasoning removal state for session ${sessionId}`);
 }
 
-function parseState(doc: ReplayDocument, sessionId: string): ReasoningRemovalState {
-    const lane = doc[NAMESPACE];
+function parseState(
+    doc: ReplayDocument,
+    sessionId: string,
+    namespace: string = NAMESPACE,
+): ReasoningRemovalState {
+    const lane = doc[namespace];
     if (lane === undefined) return { messageIds: new Set(), dropLeavesReasoning: false };
     if (!isRecord(lane) || !Array.isArray(lane.messageIds)) throw invalidState(sessionId);
     const ids = new Set<string>();
@@ -49,19 +59,28 @@ function parseState(doc: ReplayDocument, sessionId: string): ReasoningRemovalSta
 
 function writeState(doc: ReplayDocument, state: ReasoningRemovalState): void {
     doc.version = 2;
-    doc[NAMESPACE] = {
+    const lane = {
         messageIds: [...state.messageIds],
         ...(state.dropLeavesReasoning ? { dropLeavesReasoning: true } : {}),
     };
+    doc[NAMESPACE] = lane;
+    doc[BACKUP_NAMESPACE] = { ...lane, messageIds: [...lane.messageIds] };
 }
 
 /**
- * Return the persisted state. A document without the namespace is empty; a
- * malformed namespace throws so the caller can refuse to select new removals
- * and fall back to its last good copy instead of silently starting empty.
+ * Return the persisted state. A document without the namespace is empty. A
+ * malformed primary namespace is read from the backup copy. When neither copy
+ * (or the document itself) can be read this throws: the caller must not serve
+ * an empty set, which would bring removed reasoning back.
  */
 export function getReasoningRemovalState(db: Database, sessionId: string): ReasoningRemovalState {
-    return parseState(readReplayDocument(db, sessionId), sessionId);
+    const doc = readReplayDocument(db, sessionId);
+    try {
+        return parseState(doc, sessionId);
+    } catch (error) {
+        if (doc[BACKUP_NAMESPACE] === undefined) throw error;
+        return parseState(doc, sessionId, BACKUP_NAMESPACE);
+    }
 }
 
 export function getRemovedReasoningIds(db: Database, sessionId: string): Set<string> {
@@ -93,7 +112,11 @@ export function addRemovedReasoningIds(
     });
 }
 
-/** Record that drops now leave reasoning to the age lane. False when not written. */
+/**
+ * Record that drops now leave reasoning to the age lane. True when the switch
+ * is persisted, whether this call wrote it or it was already set; false when
+ * the document could not be written.
+ */
 export function markDropLeavesReasoning(db: Database, sessionId: string): boolean {
     return updateReplayDocument(db, sessionId, (doc) => {
         const current = parseState(doc, sessionId);

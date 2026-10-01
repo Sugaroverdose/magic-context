@@ -383,3 +383,17 @@ export function resolvePiBindingStripOrder(args: {
 	}
 	return "start";
 }
+
+/**
+ * Whether this pass may run the proactive thinking strip. Subagents are
+ * included, as in OpenCode: on prefix-bound models the age lane no longer
+ * clears thinking, so this strip is their only reasoning reclaim, and their
+ * busting passes invalidate signed blocks exactly as a primary's do.
+ */
+export function shouldRunPiProactiveThinkingStrip(args: {
+	compactionOff: boolean;
+	bindingStripOrder: "start" | "end";
+	isSubagent: boolean;
+}): boolean {
+	return !args.compactionOff && args.bindingStripOrder === "end";
+}

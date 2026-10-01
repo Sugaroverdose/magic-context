@@ -291,6 +291,7 @@ import {
 	applyPiProactiveThinkingStrip,
 	applyPiThinkingBindingRecovery,
 	resolvePiBindingStripOrder,
+	shouldRunPiProactiveThinkingStrip,
 } from "./provider-error-recovery-pi";
 import {
 	convertEntriesToRawMessagePage,
@@ -3613,10 +3614,13 @@ export function registerPiContextHandler(
 							endOfPassOrder: true,
 						})
 					: startOfPassBindingRecovery;
-			// Subagents are included, as in OpenCode: on prefix-bound models the age
-			// lane no longer clears thinking, so this strip is their only reasoning
-			// reclaim, and their busting passes invalidate signed blocks too.
-			if (!options.compactionOff && bindingStripOrder === "end") {
+			if (
+				shouldRunPiProactiveThinkingStrip({
+					compactionOff: options.compactionOff === true,
+					bindingStripOrder,
+					isSubagent: sessionMeta.isSubagent === true,
+				})
+			) {
 				try {
 					applyPiProactiveThinkingStrip({
 						db: options.db,
@@ -6246,8 +6250,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			const tClearReasoning = performance.now();
 			const prevWatermark = args.sessionMeta.clearedReasoningThroughTag ?? 0;
 			// Both lanes share one replayed watermark, so both use the same bound:
-			// below the newest assistant, and a contiguous oldest prefix on
-			// prefix-bound models.
+			// below the newest assistant, and 0 (no new clearing) on prefix-bound
+			// models, where clearing an older block would invalidate every newer one.
 			const maxCutoff = piReasoningClearCutoff({
 				messages: workingMessages,
 				messageIdToMaxTag,
