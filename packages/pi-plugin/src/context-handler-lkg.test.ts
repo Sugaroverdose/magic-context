@@ -113,6 +113,16 @@ describe("Pi context handler LKG replay", () => {
 						contextWindow: 272000,
 						maxTokens: 68000,
 					},
+					// The host reports the same window as the model, so the raw
+					// messages (about 170K tokens) fit its 204K usable limit even
+					// though their byte proxy does not. Raw messages that are over
+					// the limit are refused; context-handler-degraded-pass.test.ts
+					// covers that.
+					getContextUsage: () => ({
+						tokens: 0,
+						percent: 0,
+						contextWindow: 272000,
+					}),
 				});
 				const served = await host.emit(
 					fake.handlers.get("context") as never,

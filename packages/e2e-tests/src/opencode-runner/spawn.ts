@@ -48,7 +48,7 @@ function newestSourceMtime(directory: string): number {
 // A fresh bundle is the closest production representation and avoids slow source
 // loading on CI. Ignored dist files can survive a local checkout, though, so never
 // let an older bundle silently test different code from the current source tree.
-const PLUGIN_ENTRY =
+export const PLUGIN_ENTRY =
     existsSync(PLUGIN_DIST_ENTRY) &&
     statSync(PLUGIN_DIST_ENTRY).mtimeMs >= newestSourceMtime(PLUGIN_SRC_ROOT)
         ? PLUGIN_DIST_ENTRY
