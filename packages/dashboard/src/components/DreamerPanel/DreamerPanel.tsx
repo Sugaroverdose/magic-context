@@ -13,7 +13,7 @@ import {
   saveProjectConfig,
 } from "../../lib/api";
 import { describeCron } from "../../lib/cron";
-import { getDreamRunTaskDetail } from "../../lib/dream-run-detail";
+import { getDreamRunTaskDetail, latestTaskFailureText } from "../../lib/dream-run-detail";
 import { jsoncErrorMessage, parseJsonc, patchDreamerTasksJsonc } from "../../lib/jsonc";
 import type {
   DreamerProject,
@@ -383,15 +383,8 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
     [...(runs() ?? [])].sort((a, b) => b.finished_at - a.finished_at),
   );
 
-  const latestTaskFailure = (projectPath: string, taskName: string): string | null => {
-    for (const run of flatRuns()) {
-      if (run.project_path !== projectPath || run.tasks_failed <= 0) continue;
-      const task = run.tasks_json.find((candidate) => candidate.name === taskName);
-      if (!task) continue;
-      return getDreamRunTaskDetail(task, run.tasks_failed).text ?? null;
-    }
-    return null;
-  };
+  const latestTaskFailure = (projectPath: string, taskName: string): string | null =>
+    latestTaskFailureText(flatRuns(), projectPath, taskName);
 
   const toggleProject = (projectPath: string) => {
     setExpandedProjects((previous) => {

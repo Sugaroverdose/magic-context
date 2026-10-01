@@ -40,3 +40,33 @@ export function getDreamRunTaskDetail(task: DreamRunTask, tasksFailed: number): 
     tone: "neutral",
   };
 }
+
+/** The run fields `latestTaskFailureText` reads. */
+export interface DreamRunForTask {
+  project_path: string;
+  finished_at: number;
+  tasks_failed: number;
+  tasks_json: DreamRunTask[];
+}
+
+/**
+ * The failure text a task card shows: the outcome of the task's newest run only.
+ * An older failure must not outlive a later success, because it would name a
+ * model or provider that is no longer in play and read as the current state.
+ * Returns null when the newest run succeeded or the task has no run here.
+ */
+export function latestTaskFailureText(
+  runs: readonly DreamRunForTask[],
+  projectPath: string,
+  taskName: string,
+): string | null {
+  const newestFirst = [...runs].sort((a, b) => b.finished_at - a.finished_at);
+  for (const run of newestFirst) {
+    if (run.project_path !== projectPath) continue;
+    const task = run.tasks_json.find((candidate) => candidate.name === taskName);
+    if (!task) continue;
+    if (run.tasks_failed <= 0) return null;
+    return getDreamRunTaskDetail(task, run.tasks_failed).text ?? null;
+  }
+  return null;
+}
