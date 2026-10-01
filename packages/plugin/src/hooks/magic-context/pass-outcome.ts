@@ -5,13 +5,15 @@ export type PassDegradationKind = "degraded" | "fatal";
  * with the request a healthy pass would serve.
  *
  * - `changes-request`: the stage that failed decides bytes the request depends
- *   on (persisted drops and truncations, the history cut, m[0]/m[1], strips and
- *   their replay), so the served request can be larger than a healthy one or
- *   differ from it. Such a pass is not served when it is over the context limit.
+ *   on (persisted drops and truncations, the history cut, the session-history
+ *   head messages m[0]/m[1], and the reasoning, image and ctx_reduce strips
+ *   replayed from earlier passes), so the served request can be larger than a
+ *   healthy one or differ from it. Such a pass is not served when it is over
+ *   the context limit.
  * - `served`: the request equals a healthy pass's, or a healthy pass's minus
  *   text appended to a new, never-served turn, so it can be neither larger nor
  *   different in anything already served. The pass is served as a healthy one
- *   would be, and the normal over-limit and emergency paths own it.
+ *   would be, over the limit or not.
  *
  * Every site a pass records is listed here, with its verdict from
  * docs/reports/degraded-pass-fail-open.md. Recording a site that is not listed

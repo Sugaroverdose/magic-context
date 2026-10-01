@@ -2793,14 +2793,16 @@ export function createTransform(deps: TransformDeps) {
             // request is over the model's limit, stop: the wrapper replays the
             // last good request or refuses, instead of sending a request the
             // provider rejects. Any other pass is served exactly as a healthy
-            // one, over the limit or not, and the normal over-limit and
-            // emergency paths own it. That includes a pass whose estimate is
-            // only untrusted: on a session's first pass the system prompt has
-            // not been measured yet, which says nothing about the pass. An
-            // untrusted estimate is partial (it misses parts it cannot count),
-            // so on a degraded pass one already over the limit is over it for
-            // certain. A healthy pass pays nothing here: it is only estimated
-            // when such a degradation was recorded and no estimate exists yet.
+            // one, over the limit or not, and the emergency drop and
+            // provider-overflow recovery handle it as before. That includes a
+            // pass whose estimate is untrusted, i.e. missing a part it could
+            // not count, such as a system prompt not yet measured on a
+            // session's first pass: a missing measurement says nothing about
+            // whether the pass is degraded. A missing part can only make the
+            // estimate smaller, so on a degraded pass an untrusted estimate
+            // already over the limit is over it for certain. A healthy pass
+            // pays nothing here: it is only estimated when such a degradation
+            // was recorded and no estimate exists yet.
             const requestChangingDegradations = passOutcome.degradations.filter((degradation) =>
                 degradationChangesRequest(degradation.site),
             );

@@ -414,8 +414,9 @@ describe("the served-request size guard", () => {
         const sessionId = "ses-size-guard-degraded";
         const { client, directory } = resolvedProject();
         const transform = smallWindowTransform(sessionId, client, { directory });
-        // m[0]/m[1] cannot be rendered: the pass is recorded as degraded and
-        // goes on with a different history block than a healthy pass serves.
+        // The session-history head messages (m[0]/m[1]) fail to render, so the
+        // pass records a degradation and serves a fallback history block that
+        // a healthy pass would not.
         const inject = spyOn(injectCompartments, "injectM0M1").mockImplementation(() => {
             throw new Error("m[0]/m[1] render failed");
         });
@@ -469,8 +470,9 @@ describe("the served-request size guard", () => {
             kind: "timeout",
         });
         try {
-            // A short first turn, then a defer pass whose new turn alone is over
-            // the window and whose hint search times out.
+            // A short first turn, then a pass (the scheduler defers, so nothing
+            // is reduced) whose new user turn alone is over the window and whose
+            // auto-search for a memory hint times out.
             await transform({}, { messages: history(sessionId).slice(0, 1) });
             const messages: Message[] = [
                 ...history(sessionId).slice(0, 1),
