@@ -148,6 +148,57 @@ A third guard was considered: never let an automatic lane drop a tool result bef
 | Rust | bust passes only | `reasoning_age` frozen units | existing unit replay |
 | Emergency minimum reclaim | only changes what a rebuilding pass selects | nothing new | drops already applied replay as before |
 
+## Real-host wire evidence (recorded after implementation)
+
+**Setup.**
+
+- **Harness:** `packages/e2e-tests/src/repro/reasoning-removal-real-host.ts`.
+- **Host:** the installed OpenCode **1.18.30** (`opencode-stock-1.18.30`), running `serve` with the locally built plugin (`packages/plugin/dist`).
+- **Fixture:** a plugin listed before Magic Context. On every request it prepends the same single-turn tool loop: 40 assistant steps, each with `step-start`, a reasoning part carrying provider metadata, a completed `bash` call and `step-finish`.
+- **Endpoints:** every route is a loopback recorder that rejects the request after OpenCode has serialized it. The captures therefore prove the wire shape and its replay, not provider acceptance.
+- **Isolation:** one throwaway root per scenario under `$TMPDIR/magic-context/reasoning-removal/run3/`, holding HOME, all XDG roots, `OPENCODE_DB` and `MAGIC_CONTEXT_STORAGE_DIR`. After every scenario, `lsof -p <host pid>` listed only the `wire.db` and `context.db` files (plus their WAL and SHM files) inside that root.
+
+**What each scenario does.**
+
+- **age** (`clear_reasoning_age=10`): passes 1 to 3 are three prompts in one session. Pass 1 is the session's first pass, which is a rebuilding pass. Passes 2 and 3 are defer passes.
+- **drop** (age lane idle): passes 1 and 2 serve the loop as is. A `drop` is then queued for `call_fx_5`, and `/ctx-flush` makes pass 3 a rebuilding pass. Pass 4 is a defer pass.
+- **Prefix hash:** compares the serialized history before the newest tool-result segment.
+
+| Route (adapter) | Lane | Reasoning blocks of 40 on the wire, by pass | Encrypted payloads / signatures | `[cleared]` | Fixture prefix hash across later passes |
+|---|---|---|---|---|---|
+| `anthropic` (`@ai-sdk/anthropic`, signed thinking) | age | 1 / 1 / 1 | 1 signature | 0 | identical on passes 1–3 |
+| `anthropic` | drop | 2 / 2 / 2 / 2 (tool calls 40 → 39) | 2 signatures | 0 | identical on 1–2; identical on 3–4 |
+| `vertex-eu-anthropic` (`@ai-sdk/google-vertex/anthropic`) | age | 9 / 9 / 9 | 9 signatures | 0 | identical on 1–3 |
+| `vertex-eu-anthropic` | drop | 40 / 40 / **38** / 38 (tools 40 → 39) | 40 → 38 signatures | 0 | identical on 1–2; identical on 3–4 |
+| `openai` (`@ai-sdk/openai` Responses, `store:false`) | age | 9 / 9 / 9 | 9 `encrypted_content` | 0 | identical on 1–3 |
+| `openai` | drop | 40 / 40 / **38** / 38 (tools 40 → 39) | 40 → 38 `encrypted_content` | 0 | identical on 1–2; identical on 3–4 |
+| `google` (`@ai-sdk/google`, Gemini 2.5 Pro) | age | 9 / 9 / 9 | 9 `thoughtSignature` | 0 | identical on 1–3 |
+| `google` | drop | 40 / 40 / **38** / 38 (tools 40 → 39) | 40 → 38 thought signatures | 0 | identical on 1–2; identical on 3–4 |
+
+**Reading the rows.**
+
+- The newest assistant's reasoning and the newest tool result were on the wire in every pass.
+- Canonical Anthropic keeps only one or two blocks because its existing merged-reasoning lane keeps at most one reasoning block per run of consecutive assistant messages. That lane is unchanged.
+- On the drop rows, the drop removed the tool call and its owner message. The reasoning the drop invalidated left the wire with no `[cleared]` text, on the rebuilding pass only.
+
+**Worker shape (OpenAI, 300 steps, about 3 KB `encrypted_content` each).**
+
+| Run | Request bytes | Reasoning items | Newest tool result present |
+|---|---:|---:|---|
+| age lane idle (control) | 1,458,451 | 300 | yes |
+| this change | **494,863** (−66 %) | 9 | yes |
+
+The 494,863-byte request was byte-identical in its fixture prefix across the two defer passes that followed. At about 0.25 tokens per byte, the control is about 365K tokens and the new request about 124K. That is below the ~251K ceiling logged in the incident, and the reduction comes without dropping any tool result.
+
+**Not covered by this run.** The forced-skeleton scope needs a pressure-driven emergency drop, which requires provider usage numbers; the recorder returns none. It is covered by the unit test of `isAnthropicFamilyRoute` and by the transform wiring, but not on a real host.
+
 ## What this note cannot settle offline
 
-Whether each backend accepts removed reasoning in the middle of an open tool loop is unproven offline. OpenAI may expect the reasoning items of the current turn alongside function calls. Vertex, Bedrock and Gemini acceptance are likewise unproven, as is OpenAI's behaviour with `previous_response_id` continuation. The delivery lists the live calls that would settle each one.
+Provider acceptance cannot be proven offline. The open questions, each with the live call that would settle it:
+
+1. **OpenAI Responses (Codex OAuth, `store:false`), removed reasoning mid-turn.** Does the service accept the worker's own turn with the reasoning items of older steps removed while their `function_call` items stay? Send tonight's body twice, as-is and with every reasoning item older than the 10 newest removed, and compare status, `usage.input_tokens` and `cached_tokens`.
+2. **OpenAI `previous_response_id` and WebSocket suffix continuation.** openai-auth may send only a suffix and rely on server state. Does a server-held prior response restore reasoning that the client dropped? Run one continuation with `previous_response_id` after a removal pass.
+3. **Vertex-Anthropic and Bedrock, removal of an oldest prefix of signed thinking.** Send three completed turns, then a request with the first two thinking blocks removed. On binding models (Opus 5.5, Fable 5.1), add `prefix_mismatch_behavior:"error"`.
+4. **Gemini, thought parts removed beside retained function-call signatures.** One Gemini 2.5 call and one Gemini 3 call, each with older thought parts removed.
+5. **Copilot Claude, reasoning part (and its `reasoning_opaque`) removed.** One call.
+6. **Unsigned chat routes (DeepSeek, Kimi), function-call pairs fully removed.** One call each, with an older pair removed beside retained `reasoning_content`.
