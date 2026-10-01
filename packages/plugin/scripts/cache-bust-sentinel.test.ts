@@ -694,6 +694,7 @@ describe("agent.deliver contract", () => {
                 from_session_id: "health-sentinel-mc" as const,
                 from_harness: "magic-context" as const,
                 content,
+                one_way: true as const,
             },
             urgency: "high" as const,
         };
@@ -730,6 +731,7 @@ describe("agent.deliver contract", () => {
             "from_session_id",
             "from_harness",
             "content",
+            "one_way",
         ]);
         expect(await transport.record(event)).toEqual({
             result: { disposition: "delivered", committed_order: 41 },

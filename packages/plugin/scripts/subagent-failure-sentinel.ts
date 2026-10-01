@@ -140,7 +140,9 @@ async function deliver(options: FailureSentinelOptions, content: string, id: str
         const reply = await client.call("prefrontal-core", "agent.deliver", {
             agent_id: AGENT_ID, delivery_id: id,
             body: { kind: "peer_message", from_agent: "mc-subagent-failure-sentinel",
-                from_session_id: "health-sentinel-mc", from_harness: "magic-context", content },
+                from_session_id: "health-sentinel-mc", from_harness: "magic-context", content,
+                // A script sends this, so replies cannot reach it.
+                one_way: true },
             urgency: "high",
         }, { identity: { project_root: process.cwd(), harness: "magic-context", session: "health-sentinel-mc" },
             consumerIdentity: null, timeoutMs: 15_000 });
