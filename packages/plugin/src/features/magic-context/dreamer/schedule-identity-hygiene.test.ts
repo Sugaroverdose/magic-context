@@ -13,7 +13,7 @@ import {
     pruneIdleScheduleIdentities,
 } from "./idle-schedule-prune";
 import { getDreamState, setDreamState } from "./storage-dream-state";
-import { writeTaskScheduleState } from "./storage-task-schedule";
+import { getTaskScheduleState, writeTaskScheduleState } from "./storage-task-schedule";
 import { CANONICAL_DREAM_TASKS, type DreamTaskName } from "./task-registry";
 import {
     type DreamTaskRuntimeConfig,
@@ -305,20 +305,32 @@ describe("idle identities are pruned", () => {
     });
 });
 
-describe("identities with project memory disabled are never scheduled", () => {
-    it("a home directory with memory disabled gets no rows, and its old rows are removed", async () => {
+describe("a caller with project memory disabled schedules nothing", () => {
+    function countingExecutor() {
+        const calls = { count: 0 };
+        const executor = async (): Promise<TaskExecOutcome> => {
+            calls.count += 1;
+            return { status: "completed" };
+        };
+        return { calls, executor };
+    }
+
+    function allRows(d: Database, project: string): unknown[] {
+        return d
+            .prepare<[string], Record<string, unknown>>(
+                "SELECT * FROM task_schedule_state WHERE project_path = ? ORDER BY task",
+            )
+            .all(project);
+    }
+
+    it("a home directory with memory disabled gets no new rows and runs nothing", async () => {
         db = freshDb();
         const home = "dir:home-directory";
-        writeLegacyRows(db, home, NOW - 60 * DAY_MS);
-        // Even with memories and a fresh session it must not be scheduled.
+        // Even with memories and a fresh session nothing may be seeded.
         addMemory(db, home);
         addSession(db, home, "ses-home", NOW - DAY_MS, NOW - DAY_MS);
         makePruneFresh(db);
-        let executed = 0;
-        const executor = async (): Promise<TaskExecOutcome> => {
-            executed += 1;
-            return { status: "completed" };
-        };
+        const { calls, executor } = countingExecutor();
 
         for (const now of [NOW, NOW + 60_000]) {
             const ran = await runDueTasksForProject({
@@ -332,23 +344,84 @@ describe("identities with project memory disabled are never scheduled", () => {
             expect(ran).toBe(0);
             expect(scheduledTasks(db, home)).toEqual([]);
         }
-        expect(executed).toBe(0);
+        expect(calls.count).toBe(0);
     });
 
-    it("an identity with memory enabled keeps being scheduled", async () => {
+    it("existing rows are left intact and are not run", async () => {
         db = freshDb();
-        const project = "git:memory-on";
+        const project = "git:memory-off-here";
+        // Overdue rows for a project with memories: a caller with memory on
+        // would run them now.
+        writeLegacyRows(db, project, NOW - DAY_MS);
         addMemory(db, project);
         makePruneFresh(db);
+        const before = allRows(db, project);
+        const { calls, executor } = countingExecutor();
 
         await runDueTasksForProject({
             db,
             projectIdentity: project,
             tasks: ALL_TASKS,
-            executor: async () => ({ status: "completed" }),
+            executor,
             now: NOW,
-            projectMemoryEnabled: true,
+            projectMemoryEnabled: false,
         });
-        expect(scheduledTasks(db, project)).toEqual([...MEMORY_TASKS].sort());
+        expect(calls.count).toBe(0);
+        expect(allRows(db, project)).toEqual(before);
+    });
+
+    it("a shared identity keeps its watermarks when one caller has memory off and another on", async () => {
+        db = freshDb();
+        // Two worktrees (or hosts) of one repository share this identity.
+        const shared = "git:shared-repository";
+        addMemory(db, shared);
+        addSession(db, shared, "ses-shared", NOW - DAY_MS, NOW - DAY_MS);
+        makePruneFresh(db);
+        const notDue = NOW + DAY_MS;
+        const base = {
+            projectPath: shared,
+            lastRunAt: NOW - 2 * DAY_MS,
+            nextDueAt: notDue,
+            schedule: "0 3 * * *",
+            lastStatus: "completed" as const,
+            lastError: null,
+            retryCount: 0,
+        };
+        writeTaskScheduleState(db, {
+            ...base,
+            task: "retrospective",
+            retrospectiveWatermarkMs: NOW - 3 * DAY_MS,
+        });
+        writeTaskScheduleState(db, { ...base, task: "verify-broad", lastBroadRunAt: NOW - DAY_MS });
+        writeTaskScheduleState(db, {
+            ...base,
+            task: "curate",
+            taskStateJson: '{"next":"PROJECT_RULES"}',
+        });
+        const { calls, executor } = countingExecutor();
+
+        for (let pass = 0; pass < 3; pass += 1) {
+            for (const projectMemoryEnabled of [false, true]) {
+                await runDueTasksForProject({
+                    db,
+                    projectIdentity: shared,
+                    tasks: ALL_TASKS,
+                    executor,
+                    now: NOW + pass * 60_000,
+                    projectMemoryEnabled,
+                });
+            }
+        }
+
+        expect(calls.count).toBe(0);
+        expect(getTaskScheduleState(db, shared, "retrospective")?.retrospectiveWatermarkMs).toBe(
+            NOW - 3 * DAY_MS,
+        );
+        expect(getTaskScheduleState(db, shared, "verify-broad")?.lastBroadRunAt).toBe(NOW - DAY_MS);
+        expect(getTaskScheduleState(db, shared, "curate")?.taskStateJson).toBe(
+            '{"next":"PROJECT_RULES"}',
+        );
+        // The memory-on caller still seeds missing memory tasks such as map-memories.
+        expect(scheduledTasks(db, shared)).toContain("map-memories");
     });
 });

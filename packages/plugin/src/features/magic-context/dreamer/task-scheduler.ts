@@ -16,7 +16,6 @@ import {
 } from "./lease";
 import { getDreamState } from "./storage-dream-state";
 import {
-    deleteTaskScheduleRowsForProject,
     getTaskScheduleState,
     pruneNonCanonicalTaskRows,
     seedTaskScheduleState,
@@ -103,8 +102,8 @@ export interface RunDueTasksDeps {
     executor: TaskExecutor;
     now?: number;
     /**
-     * The host's `memory.enabled` for this project. `false` means the identity
-     * is never scheduled and its schedule rows are deleted; omitted means on.
+     * The host's `memory.enabled` for this project. `false` means this caller
+     * schedules nothing (existing rows are kept); omitted means on.
      */
     projectMemoryEnabled?: boolean;
 }
@@ -656,17 +655,13 @@ export async function runDueTasksForProject(deps: RunDueTasksDeps): Promise<numb
     // A blank identity is an unresolved directory, not a project; running tasks
     // for it would read and write project-scoped rows under the key "".
     if (!isUsableProjectIdentity(deps.projectIdentity)) return 0;
-    if (deps.projectMemoryEnabled === false) {
-        // Project memory is off for this identity: it is not scheduled at all,
-        // and rows left from when it was on are removed.
-        const removed = deleteTaskScheduleRowsForProject(deps.db, deps.projectIdentity);
-        if (removed > 0) {
-            log(
-                `[dreamer] removed ${removed} schedule row(s) for ${deps.projectIdentity}: project memory is disabled`,
-            );
-        }
-        return 0;
-    }
+    // Project memory is off for this caller: schedule nothing and leave the
+    // rows alone. A `git:` identity is shared by every worktree and host of the
+    // repository, and one with memory on keeps using those rows and the progress
+    // they record (retrospective watermark, open verify-broad cycle, curate
+    // rotation). An identity with no memories and nothing else to do loses its
+    // rows to the daily idle prune instead.
+    if (deps.projectMemoryEnabled === false) return 0;
     const now = deps.now ?? Date.now();
     const due = planDueTasks(deps.db, deps.projectIdentity, deps.tasks, now);
     if (due.length === 0) return 0;

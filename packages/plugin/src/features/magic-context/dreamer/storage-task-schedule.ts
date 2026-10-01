@@ -177,9 +177,9 @@ export function pruneNonCanonicalTaskRows(
  *    (e.g. a finalized mason worktree). A dead directory must NOT trigger this
  *    for a `git:` identity: that is shared across worktrees/clones of the same
  *    repo, so one dead worktree says nothing about the others.
- *  - the scheduler removes an identity whose project memory is disabled, and
- *    the idle-identity prune removes one with no memories and nothing to do.
- *    Those decisions are about the identity itself, so they apply to `git:` too.
+ *  - the idle-identity prune removes an identity with no memories and nothing
+ *    to do. That decision is about the identity itself, so it applies to
+ *    `git:` too.
  */
 export function deleteTaskScheduleRowsForProject(db: Database, projectPath: string): number {
     const result = db

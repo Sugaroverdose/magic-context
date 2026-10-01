@@ -12,20 +12,30 @@ import { insertMemory } from "../../features/magic-context/memory/storage-memory
 import { openDatabase } from "../../features/magic-context/storage";
 import { startDreamTrigger } from "./dream-trigger";
 
-/** A context whose event stream delivers one finished session execution. */
+/**
+ * A context whose event stream delivers one finished session execution.
+ * `handled` resolves when the trigger asks for the next event, which it does
+ * only after its scheduler pass for the first one has returned.
+ */
 function contextWithOneExecution(directory: string) {
-    return {
+    let markHandled: () => void = () => undefined;
+    const handled = new Promise<void>((resolve) => {
+        markHandled = resolve;
+    });
+    const context = {
         location: { directory },
         event: {
             subscribe: ({ signal }: { signal: AbortSignal }) =>
                 (async function* () {
                     yield { type: "session.execution.succeeded", data: { sessionID: "ses-v2" } };
+                    markHandled();
                     await new Promise<void>((resolve) =>
                         signal.addEventListener("abort", () => resolve(), { once: true }),
                     );
                 })(),
         },
     } as never;
+    return { context, handled };
 }
 
 // Every production call into the scheduled pass must say whether the project's
@@ -49,7 +59,10 @@ test("every scheduled-pass caller forwards the project's memory switch", () => {
 // OpenCode 2 reaches the scheduler through this trigger rather than the dream
 // timer, so the project's memory switch must be forwarded here as well.
 for (const projectMemoryEnabled of [false, true]) {
-    test(`OpenCode 2 ${projectMemoryEnabled ? "keeps" : "removes"} the schedule of a project with memory ${projectMemoryEnabled ? "enabled" : "disabled"}`, async () => {
+    const label = projectMemoryEnabled
+        ? "schedules a project with memory enabled"
+        : "schedules nothing for a project with memory disabled and leaves its rows";
+    test(`OpenCode 2 ${label}`, async () => {
         const db = openDatabase();
         if (!db) throw new Error("test database unavailable");
         const projectIdentity = `git:v2-trigger-memory-${projectMemoryEnabled ? "on" : "off"}`;
@@ -65,32 +78,30 @@ for (const projectMemoryEnabled of [false, true]) {
             lastError: null,
             retryCount: 0,
         });
-        const readRows = () =>
-            db
-                .prepare("SELECT task FROM task_schedule_state WHERE project_path = ?")
-                .all(projectIdentity) as Array<{ task: string }>;
-        // With memory on, the pass is observable as the single-shot memory
-        // tasks (classify-memories) being seeded next to the verify row.
-        const passFinished = () =>
-            projectMemoryEnabled
-                ? readRows().some((row) => row.task === "classify-memories")
-                : readRows().length === 0;
+        const readTasks = () =>
+            (
+                db
+                    .prepare("SELECT task FROM task_schedule_state WHERE project_path = ?")
+                    .all(projectIdentity) as Array<{ task: string }>
+            ).map((row) => row.task);
 
-        const trigger = startDreamTrigger(contextWithOneExecution("/tmp/v2-project"), {
+        const { context, handled } = contextWithOneExecution("/tmp/v2-project");
+        const trigger = startDreamTrigger(context, {
             config: DreamerConfigSchema.parse({}),
             executor: { capabilities: { tools: false } } as never,
             projectIdentity: () => projectIdentity,
             projectMemoryEnabled,
         });
         try {
-            for (let attempt = 0; attempt < 400 && !passFinished(); attempt += 1) {
-                await Bun.sleep(5);
-            }
+            await handled;
             if (projectMemoryEnabled) {
-                expect(readRows().map((row) => row.task)).toContain("verify");
-                expect(readRows().map((row) => row.task)).toContain("classify-memories");
+                // The pass keeps verify and seeds classify-memories, a memory task
+                // this host can run without a tool loop.
+                expect(readTasks()).toContain("verify");
+                expect(readTasks()).toContain("classify-memories");
             } else {
-                expect(readRows()).toEqual([]);
+                // The pass adds nothing and keeps the existing verify row.
+                expect(readTasks()).toEqual(["verify"]);
             }
         } finally {
             await trigger.dispose();

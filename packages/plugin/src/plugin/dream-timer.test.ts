@@ -387,7 +387,11 @@ describe("dreamer tick stage containment", () => {
 
     async function startTickFixture(
         projectIdentities: string[],
-        registration: Partial<Parameters<typeof startDreamScheduleTimer>[0]> = {},
+        registration:
+            | Partial<Parameters<typeof startDreamScheduleTimer>[0]>
+            | ((
+                  projectIdentity: string,
+              ) => Partial<Parameters<typeof startDreamScheduleTimer>[0]>) = {},
     ): Promise<TickFixture> {
         const timerHandle = { unref: mock(() => {}) } as unknown as ReturnType<typeof setInterval>;
         const timeoutHandle = { unref: mock(() => {}) } as unknown as ReturnType<typeof setTimeout>;
@@ -420,7 +424,9 @@ describe("dreamer tick stage containment", () => {
                     client: {} as never,
                     dreamerConfig: { disable: false } as never,
                     ensureRegistered: async () => undefined,
-                    ...registration,
+                    ...(typeof registration === "function"
+                        ? registration(projectIdentity)
+                        : registration),
                 }),
             );
         }
@@ -493,65 +499,64 @@ describe("dreamer tick stage containment", () => {
 
     // The timer is how OpenCode 1 and Pi reach the scheduler, so the project's
     // memory switch has to travel from the registration into the scheduler.
-    for (const memoryEnabled of [false, true]) {
-        test(`a tick ${memoryEnabled ? "keeps" : "removes"} the schedule of a project with memory ${memoryEnabled ? "enabled" : "disabled"}`, async () => {
-            const projectIdentity = `git:tick-memory-${memoryEnabled ? "on" : "off"}`;
-            const db = timerDb();
+    test("a tick schedules nothing for a project with memory disabled and leaves its rows", async () => {
+        const off = "git:tick-memory-off";
+        const on = "git:tick-memory-on";
+        const db = timerDb();
+        for (const projectIdentity of [off, on]) {
             insertMemory(db, {
                 projectPath: projectIdentity,
                 category: "PROJECT_RULES",
-                content: "a rule",
+                content: "r",
             });
             writeTaskScheduleState(db, {
                 projectPath: projectIdentity,
                 task: "verify",
                 lastRunAt: null,
-                // Not due, so the enabled case finishes without running a task.
+                // Not due, so the enabled project finishes without running a task.
                 nextDueAt: Date.now() + 60 * 60_000,
                 schedule: "0 3 * * *",
                 lastStatus: null,
                 lastError: null,
                 retryCount: 0,
             });
-            const restoreStages = _setDreamTimerStagesForTests({
-                runMessageHistoryMaintenance: async () => undefined,
-            });
-            const fixture = await startTickFixture([projectIdentity], {
-                dreamerConfig: DreamerConfigSchema.parse({}),
-                memoryEnabled,
-            });
-
-            try {
-                await fixture.tick();
-                const readRows = () =>
-                    db
-                        .prepare("SELECT task FROM task_schedule_state WHERE project_path = ?")
-                        .all(projectIdentity) as Array<{ task: string }>;
-                // Project maintenance awaits real storage work before reaching
-                // the scheduler; give it time to get there. With memory on, the
-                // scheduler pass is observable as the other memory tasks being
-                // seeded next to the existing verify row.
-                const passFinished = (rows: Array<{ task: string }>) =>
-                    memoryEnabled
-                        ? rows.some((row) => row.task === "map-memories")
-                        : rows.length === 0;
-                for (let attempt = 0; attempt < 400 && !passFinished(readRows()); attempt += 1) {
-                    await Bun.sleep(5);
-                }
-                const rows = readRows();
-                if (memoryEnabled) {
-                    expect(rows.map((row) => row.task)).toContain("verify");
-                    expect(rows.map((row) => row.task)).toContain("map-memories");
-                } else {
-                    expect(rows).toEqual([]);
-                }
-            } finally {
-                restoreStages();
-                fixture.dispose();
-                deleteTaskScheduleRowsForProject(db, projectIdentity);
-            }
+        }
+        const readTasks = (projectIdentity: string) =>
+            (
+                db
+                    .prepare("SELECT task FROM task_schedule_state WHERE project_path = ?")
+                    .all(projectIdentity) as Array<{ task: string }>
+            ).map((row) => row.task);
+        const restoreStages = _setDreamTimerStagesForTests({
+            runMessageHistoryMaintenance: async () => undefined,
         });
-    }
+        // A tick visits registrations in order, so once the memory-on project
+        // (registered second) has been scheduled, the memory-off one is done.
+        const fixture = await startTickFixture([off, on], (projectIdentity) => ({
+            dreamerConfig: DreamerConfigSchema.parse({}),
+            memoryEnabled: projectIdentity === on,
+        }));
+
+        try {
+            await fixture.tick();
+            // The scheduler pass is observable as map-memories being seeded
+            // next to the existing verify row.
+            for (
+                let attempt = 0;
+                attempt < 400 && !readTasks(on).includes("map-memories");
+                attempt += 1
+            ) {
+                await Bun.sleep(5);
+            }
+            expect(readTasks(on)).toContain("map-memories");
+            expect(readTasks(off)).toEqual(["verify"]);
+        } finally {
+            restoreStages();
+            fixture.dispose();
+            deleteTaskScheduleRowsForProject(db, off);
+            deleteTaskScheduleRowsForProject(db, on);
+        }
+    });
 
     test("keeps running the projects when message-history maintenance throws", async () => {
         const maintained: string[] = [];
