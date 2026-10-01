@@ -161,6 +161,12 @@ export const USER_FACING_FAILURES = {
         sentence: "The last context update did not finish.",
         action: "Send another message to retry.",
     },
+    transform_pass_degraded: {
+        code: "MC-S06",
+        sentence:
+            "This request was not sent: Magic Context could not finish preparing it, and without that preparation it could be far larger than the previous request.",
+        action: "Send your message again.",
+    },
     configuration_warning: {
         code: "MC-S03",
         sentence: "Some configuration settings could not be applied.",

@@ -284,7 +284,12 @@ import {
 	isPiLiveUsageRawBranchEstimate,
 	resolvePiPressureSnapshotWithEstimateGuard,
 } from "./pi-pressure";
-import { assertPiRawFallbackFits, PiStorageBusyError } from "./pi-raw-fallback";
+import {
+	assertPiRawFallbackFits,
+	PiDegradedPassError,
+	PiStorageBusyError,
+	piRawMessagesExceedLimit,
+} from "./pi-raw-fallback";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
 import {
 	applyPiProactiveThinkingStrip,
@@ -3914,8 +3919,16 @@ export function registerPiContextHandler(
 			const message = err instanceof Error ? err.message : String(err);
 			const stack = err instanceof Error ? err.stack : undefined;
 			const transientStorageFailure = isTransientPiStorageError(err);
+			// A failed tagging or drop-replay stage is handled like a busy store:
+			// Pi's own messages lack the session's persisted reductions.
+			const degradedPass =
+				err instanceof PiDegradedPassError && !lkgCompactionOff;
+			const replayOrRefuse = transientStorageFailure || degradedPass;
+			const failureLabel = transientStorageFailure
+				? "TRANSIENT STORAGE FAILURE"
+				: "DEGRADED PASS";
 			if (
-				transientStorageFailure &&
+				replayOrRefuse &&
 				sessionIdForError &&
 				lkgPassSnapshot &&
 				!lkgCompactionOff &&
@@ -3937,7 +3950,7 @@ export function registerPiContextHandler(
 						const reason = piStorageErrorReason(err);
 						logPiLkgRecovery(
 							sessionIdForError,
-							`TRANSIENT STORAGE FAILURE ${reason}: LKG replay served ${replay.messages.length} messages instead of raw ${rawMessageCount}`,
+							`${failureLabel} ${reason}: LKG replay served ${replay.messages.length} messages instead of raw ${rawMessageCount}`,
 						);
 						capturePiServedArray(sessionIdForError, replay.messages);
 						return { messages: replay.messages } as unknown as {
@@ -3946,16 +3959,16 @@ export function registerPiContextHandler(
 					}
 					logPiLkgRecovery(
 						sessionIdForError,
-						`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); checking raw ${rawMessageCount}-message input`,
+						`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); checking raw ${rawMessageCount}-message input`,
 					);
 				} catch (replayError) {
 					if (replayError instanceof PiStorageBusyError) throw replayError;
 					logPiLkgRecovery(
 						sessionIdForError,
-						`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG replay unavailable (${replayError instanceof Error ? replayError.message : String(replayError)}); checking raw ${rawMessageCount}-message input`,
+						`${failureLabel} ${piStorageErrorReason(err)}: LKG replay unavailable (${replayError instanceof Error ? replayError.message : String(replayError)}); checking raw ${rawMessageCount}-message input`,
 					);
 				}
-			} else if (transientStorageFailure && sessionIdForError) {
+			} else if (replayOrRefuse && sessionIdForError) {
 				const refusal = lkgCompactionOff
 					? "compaction_off"
 					: lkgEmergencyRecoveryArmed
@@ -3963,12 +3976,12 @@ export function registerPiContextHandler(
 						: (lkgPassSnapshot?.preparationFailure ?? "lkg_miss");
 				logPiLkgRecovery(
 					sessionIdForError,
-					`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG unavailable (${refusal}); checking raw ${rawMessageCount}-message input`,
+					`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${refusal}); checking raw ${rawMessageCount}-message input`,
 				);
 			}
 			// Keep refusal outside the replay try/catch: it must reach Pi, not be
 			// mistaken for another replay failure and swallowed into raw fallthrough.
-			if (transientStorageFailure) {
+			if (replayOrRefuse) {
 				assertPiRawFallbackFits(
 					event.messages,
 					rawFallbackLimit,
@@ -3979,10 +3992,6 @@ export function registerPiContextHandler(
 					err,
 				);
 			}
-			log(
-				`[magic-context][pi] context handler failed (continuing without mutation): ${message}`,
-				stack,
-			);
 			if (sessionIdForError && !transientStorageFailure) {
 				// baseOptions.db (not the per-pass `options`, which is scoped to
 				// the try). The DB handle is shared across all projects.
@@ -3993,6 +4002,33 @@ export function registerPiContextHandler(
 					sessionMetaForPass?.lastTransformError,
 				);
 			}
+			// Last-resort size guard: an ordinary failure still hands Pi its
+			// unmodified messages, but never ones already over the context limit.
+			// The provider would only reject them.
+			if (!lkgCompactionOff) {
+				let rawMessages: readonly unknown[] | undefined;
+				try {
+					rawMessages = event.messages;
+				} catch {
+					rawMessages = undefined;
+				}
+				const raw = rawMessages
+					? piRawMessagesExceedLimit(rawMessages, rawFallbackLimit)
+					: { exceeds: false, tokens: null };
+				if (raw.exceeds) {
+					log(
+						`[magic-context][pi] context handler failed and the unmodified messages (${raw.tokens} tokens) exceed the context limit ${rawFallbackLimit}; refusing the turn: ${message}`,
+						stack,
+					);
+					throw new PiDegradedPassError("raw-messages-over-limit", {
+						cause: err,
+					});
+				}
+			}
+			log(
+				`[magic-context][pi] context handler failed (continuing without mutation): ${message}`,
+				stack,
+			);
 			// Fall through with no mutation — Pi proceeds with original
 			// messages, equivalent to a no-op transform pass.
 			return;
@@ -5617,29 +5653,31 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		tagToolTokenCache = new Map();
 		piTagToolTokenCacheBySession.set(args.sessionId, tagToolTokenCache);
 	}
-	const { targets } = tagTranscript(
-		args.sessionId,
-		transcript,
-		args.tagger,
-		args.db,
-		{
-			skipPrefixInjection: !ctxReduceCallable,
-			entryFingerprintByMessageId,
-			reuseMessageIds: textIdentityPlan.reusableMessageIds,
-			textIdentityDriftMessageIds: textIdentityPlan.driftedMessageIds,
-			textIdentitySourceCache: textIdentityPlan.sourceCache,
-			textTokenCache: tagTextTokenCache,
-			toolTokenCache: tagToolTokenCache,
-			onTiming: hasPiTransformTimingObserver()
-				? (phase, elapsedMs) => {
-						recordPiTransformTiming({
-							sessionId: args.sessionId,
-							stage: `tag:${phase}`,
-							elapsedMs,
-						});
-					}
-				: undefined,
-		},
+	// Without tag targets none of the session's persisted drops can be
+	// replayed, so a tagging failure must not fall through to Pi's raw
+	// messages; see runPersistedReplayStage.
+	const { targets } = runPersistedReplayStage(
+		"tagging-persistence-failure",
+		() => args.tagger.cleanup(args.sessionId),
+		() =>
+			tagTranscript(args.sessionId, transcript, args.tagger, args.db, {
+				skipPrefixInjection: !ctxReduceCallable,
+				entryFingerprintByMessageId,
+				reuseMessageIds: textIdentityPlan.reusableMessageIds,
+				textIdentityDriftMessageIds: textIdentityPlan.driftedMessageIds,
+				textIdentitySourceCache: textIdentityPlan.sourceCache,
+				textTokenCache: tagTextTokenCache,
+				toolTokenCache: tagToolTokenCache,
+				onTiming: hasPiTransformTimingObserver()
+					? (phase, elapsedMs) => {
+							recordPiTransformTiming({
+								sessionId: args.sessionId,
+								stage: `tag:${phase}`,
+								elapsedMs,
+							});
+						}
+					: undefined,
+			}),
 	);
 	logTransformTiming(args.sessionId, "tagMessages", tTag);
 
@@ -5885,11 +5923,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		`targets=${targetTagNumbers.length} fetched=${flushedDroppedTags.length}`,
 	);
 	const tFlushed = performance.now();
-	didMutateFromFlushedStatuses = applyFlushedStatuses(
-		args.sessionId,
-		args.db,
-		targets,
-		flushedDroppedTags,
+	didMutateFromFlushedStatuses = runPersistedReplayStage(
+		"flushed-status-failure",
+		undefined,
+		() =>
+			applyFlushedStatuses(
+				args.sessionId,
+				args.db,
+				targets,
+				flushedDroppedTags,
+			),
 	);
 	logTransformTiming(args.sessionId, "applyFlushedStatuses", tFlushed);
 	logTransformTiming(args.sessionId, "batchFinalize:flushed", tFlushed);
@@ -7597,4 +7640,33 @@ export function clearContextHandlerSession(sessionId: string): void {
 	}
 	clearSessionTracking(sessionId);
 	clearPiEmbedSessionState(sessionId);
+}
+
+/**
+ * Run a stage the served messages cannot do without. If it fails, the context
+ * handler's catch must not fall through to Pi's unmodified messages: they lack
+ * the session's persisted drops and can be far larger than the last request.
+ * A busy or locked store is rethrown as is (the handler's transient-storage
+ * path); any other error becomes a PiDegradedPassError, which that path
+ * handles the same way. `onFailure` runs first, for state the next pass must
+ * reload.
+ */
+function runPersistedReplayStage<T>(
+	site: string,
+	onFailure: (() => void) | undefined,
+	run: () => T,
+): T {
+	try {
+		return run();
+	} catch (error) {
+		try {
+			onFailure?.();
+		} catch (cleanupError) {
+			log(
+				`[magic-context][pi] cleanup after ${site} failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+			);
+		}
+		if (isTransientPiStorageError(error)) throw error;
+		throw new PiDegradedPassError(site, { cause: error });
+	}
 }
