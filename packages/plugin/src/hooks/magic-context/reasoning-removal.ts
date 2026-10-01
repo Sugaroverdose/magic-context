@@ -125,11 +125,14 @@ function stripOpenRouterReasoningDetails(message: MessageLike): number {
  * the wire on this route.
  *
  * Prefix-bound models (`prefixBound`: Fable 5.1, Opus 5.5, Sonnet 5.5, on any
- * route) select nothing. Their signed thinking stays valid only while
- * everything before it is unchanged, so removing an older block would
- * invalidate every newer one (docs/reports/anthropic-thinking-binding.md). On
- * those models the proactive thinking strip removes every block on a busting
- * pass instead.
+ * route) select only a contiguous oldest prefix. Anthropic's preserved-thinking
+ * page ("What counts as an edit") lists "Remove `thinking` blocks from the
+ * start of the history, from the end, or all of them" as valid, but "Remove a
+ * `thinking` block from the middle of the history and keep later ones" as
+ * invalid for every later thinking block. The walk therefore goes oldest
+ * first, passes over messages whose reasoning is already gone (`alreadyRemoved`
+ * or `alsoGone`), and stops at the first reasoning-bearing message it may not
+ * remove, so the removed set never has a gap.
  */
 export function selectReasoningRemovals(args: {
     messages: MessageLike[];
@@ -137,8 +140,12 @@ export function selectReasoningRemovals(args: {
     clearReasoningAge: number;
     alreadyRemoved: ReadonlySet<string>;
     prefixBound: boolean;
+    /**
+     * Assistants whose reasoning another lane already took off the wire for
+     * good (the binding-mismatch strip set). Only the prefix walk reads it.
+     */
+    alsoGone?: ReadonlySet<string>;
 }): string[] {
-    if (args.prefixBound) return [];
     let maxTag = 0;
     for (const tag of args.messageTagNumbers.values()) if (tag > maxTag) maxTag = tag;
     const cutoff = maxTag - args.clearReasoningAge;
@@ -150,19 +157,28 @@ export function selectReasoningRemovals(args: {
     for (const message of args.messages) {
         if (message.info.role !== "assistant") continue;
         if (!message.parts.some(isReasoningOrNeutralized)) continue;
-        const id = message.info.id;
-        if (typeof id !== "string" || id.length === 0 || args.alreadyRemoved.has(id)) continue;
-        const tag = args.messageTagNumbers.get(message) ?? 0;
+        const id =
+            typeof message.info.id === "string" && message.info.id.length > 0
+                ? message.info.id
+                : undefined;
         if (
+            id !== undefined &&
+            (args.alreadyRemoved.has(id) || (args.prefixBound && args.alsoGone?.has(id)))
+        )
+            continue;
+        const tag = args.messageTagNumbers.get(message) ?? 0;
+        const removable =
+            id !== undefined &&
             message !== newest &&
             message !== exempt &&
             tag > 0 &&
             tag <= cutoff &&
             hasWireContentBesideReasoning(message) &&
-            reasoningPayloadLeavesWithParts(message)
-        ) {
-            selected.push(id);
-        }
+            reasoningPayloadLeavesWithParts(message);
+        if (removable && id !== undefined) selected.push(id);
+        // On a prefix-bound model a block left in place here would sit before
+        // every block removed after it: a removal from the middle.
+        else if (args.prefixBound) break;
     }
     return selected;
 }

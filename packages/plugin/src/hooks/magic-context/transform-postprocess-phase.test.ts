@@ -33,6 +33,7 @@ import {
     updateTagDropMode,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { getRemovedReasoningIds } from "../../features/magic-context/storage-reasoning-removal";
 import {
     addMergedReasoningStrippedIds,
     addTrailingBlankDecisions,
@@ -9497,5 +9498,232 @@ describe("proactive strip of thinking on busting passes", () => {
         });
         expect(result.proactiveThinkingStrip).toBeNull();
         expect(JSON.stringify(busting)).toBe(before);
+    });
+});
+
+// Each test is named after the row of Anthropic's "What counts as an edit" table
+// (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking) that
+// the behavior relies on.
+describe("prefix-bound oldest-prefix reasoning trim", () => {
+    const PROVIDER = "google-vertex-anthropic";
+    const sha256 = (value: unknown): string =>
+        createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    const reasoningCount = (message: MessageLike): number =>
+        message.parts.filter((part) => (part as { type?: unknown }).type === "reasoning").length;
+
+    /**
+     * One user message (tag 1) and `steps` assistant steps; step i carries a
+     * signed reasoning part and a completed tool call and owns tag i + 2.
+     */
+    const boundLoop = (sessionId: string, steps: number, options: { untagged?: number } = {}) => {
+        const messages: MessageLike[] = [
+            {
+                info: { id: "user-0", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "do the work" }],
+            } as unknown as MessageLike,
+        ];
+        const tags = new Map<MessageLike, number>([[messages[0], 1]]);
+        for (let step = 0; step < steps; step += 1) {
+            const message = {
+                info: { id: `assistant-${step}`, role: "assistant", sessionID: sessionId },
+                parts: [
+                    {
+                        type: "reasoning",
+                        text: `signed ${step}`,
+                        metadata: { anthropic: { signature: `sig-${step}` } },
+                    },
+                    {
+                        type: "tool",
+                        tool: "bash",
+                        callID: `call-${step}`,
+                        state: { status: "completed", input: {}, output: `out ${step} `.repeat(200) },
+                    },
+                ],
+            } as unknown as MessageLike;
+            messages.push(message);
+            if (options.untagged !== step) tags.set(message, step + 2);
+        }
+        return { messages, tags };
+    };
+
+    const serve = (
+        sessionId: string,
+        session: ReturnType<typeof boundLoop>,
+        options: {
+            /** A force-band pass: busting, with no drop, fold or materialization of its own. */
+            force?: boolean;
+            /** A requested materialization, which also busts. */
+            flush?: boolean;
+            fullFeatureMode?: boolean;
+            clearReasoningAge?: number;
+            overrides?: Partial<PostTransformArgs>;
+        } = {},
+    ) =>
+        runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, session.messages, {
+                resolvedProviderID: PROVIDER,
+                thinkingBindingRecoveryEnabledForModel: true,
+                messageTagNumbers: session.tags,
+                clearReasoningAge: options.clearReasoningAge ?? 3,
+                fullFeatureMode: options.fullFeatureMode ?? true,
+                contextUsage: options.force
+                    ? { percentage: 96, inputTokens: 96_000 }
+                    : { percentage: 20, inputTokens: 1000 },
+                ...(options.flush ? { pendingMaterializationSessions: new Set([sessionId]) } : {}),
+                ...options.overrides,
+            }),
+        );
+
+    const openDb = () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+    };
+    const message = (session: ReturnType<typeof boundLoop>, id: string) =>
+        findMessage(session.messages, id);
+    const AGED = [0, 1, 2, 3, 4].map((step) => `assistant-${step}`);
+    const NEWER = [5, 6, 7].map((step) => `assistant-${step}`);
+
+    for (const fullFeatureMode of [true, false]) {
+        const who = fullFeatureMode ? "primary" : "subagent";
+        it(`${who}: "Remove \`thinking\` blocks from the start of the history" is valid, so a trim-only pass keeps every newer signed block byte-identical and defer passes replay it`, async () => {
+            openDb();
+            const sessionId = `ses-bound-trim-only-${who}`;
+            const served = boundLoop(sessionId, 8);
+            await serve(sessionId, served, { fullFeatureMode });
+            expect(served.messages.slice(1).every((m) => reasoningCount(m) === 1)).toBe(true);
+
+            const trim = boundLoop(sessionId, 8);
+            const result = await serve(sessionId, trim, { force: true, fullFeatureMode });
+            expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set(AGED));
+            for (const id of AGED) expect(reasoningCount(message(trim, id))).toBe(0);
+            // Nothing else changed, so no newer block is stripped.
+            expect(result.proactiveThinkingStrip).toBeNull();
+            expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(new Set());
+            for (const id of NEWER) {
+                expect(JSON.stringify(message(trim, id))).toBe(JSON.stringify(message(served, id)));
+            }
+
+            for (const steps of [8, 10]) {
+                const defer = boundLoop(sessionId, steps);
+                const deferResult = await serve(sessionId, defer, { fullFeatureMode });
+                expect(deferResult.proactiveThinkingStrip).toBeNull();
+                expect(sha256(defer.messages.slice(0, trim.messages.length))).toBe(
+                    sha256(trim.messages),
+                );
+            }
+        });
+    }
+
+    it('"Clear or shorten an earlier `tool_result`" invalidates every later block, so a pass that trims and also applies a drop strips every signed block', async () => {
+        openDb();
+        const sessionId = "ses-bound-trim-and-drop";
+        await serve(sessionId, boundLoop(sessionId, 8));
+        const pass = boundLoop(sessionId, 8);
+        const dropped = message(pass, "assistant-6");
+        insertTag(db, sessionId, "call-6", "tool", 1000, 8, 0, "bash", 0, "assistant-6");
+        padRecentToolSkeletonWindow(sessionId, 9);
+        queuePendingOp(db, sessionId, 8, "drop");
+        const result = await serve(sessionId, pass, {
+            force: true,
+            overrides: { targets: new Map([[8, makeDropTarget(dropped)]]) },
+        });
+        expect(getPendingOps(db, sessionId)).toHaveLength(0);
+        expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set(AGED));
+        expect(result.proactiveThinkingStrip?.messageIds).toEqual(
+            expect.arrayContaining([...AGED, ...NEWER]),
+        );
+        for (const m of pass.messages.slice(1)) expect(reasoningCount(m)).toBe(0);
+    });
+
+    it('"Change the top-level `system` string or blocks" is invalid, and a requested materialization cannot say whether it changed it, so a trimming pass that materializes strips every signed block', async () => {
+        openDb();
+        const sessionId = "ses-bound-trim-and-flush";
+        await serve(sessionId, boundLoop(sessionId, 8));
+        const pass = boundLoop(sessionId, 8);
+        const result = await serve(sessionId, pass, { flush: true });
+        expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set(AGED));
+        expect(result.proactiveThinkingStrip?.messageIds).toEqual(
+            expect.arrayContaining(NEWER),
+        );
+        for (const m of pass.messages.slice(1)) expect(reasoningCount(m)).toBe(0);
+    });
+
+    it('"Remove a `thinking` block from the middle of the history and keep later ones" is invalid, so an ineligible message stops the trim and nothing after it is removed', async () => {
+        openDb();
+        const sessionId = "ses-bound-gap";
+        await serve(sessionId, boundLoop(sessionId, 8, { untagged: 2 }));
+        const pass = boundLoop(sessionId, 8, { untagged: 2 });
+        const result = await serve(sessionId, pass, { force: true });
+        expect(result.proactiveThinkingStrip).toBeNull();
+        expect(getRemovedReasoningIds(db, sessionId)).toEqual(
+            new Set(["assistant-0", "assistant-1"]),
+        );
+        for (const step of [2, 3, 4, 5, 6, 7]) {
+            expect(reasoningCount(message(pass, `assistant-${step}`))).toBe(1);
+        }
+    });
+
+    it('"Put back a `thinking` block you removed on an earlier request" is invalid, so removed and stripped blocks never return and the trim continues behind a strip', async () => {
+        openDb();
+        const sessionId = "ses-bound-never-restore";
+        await serve(sessionId, boundLoop(sessionId, 8));
+        await serve(sessionId, boundLoop(sessionId, 8), { force: true });
+        expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set(AGED));
+
+        // A later busting pass that selects nothing new still serves the removal.
+        const quiet = boundLoop(sessionId, 8);
+        await serve(sessionId, quiet, { force: true, clearReasoningAge: 999 });
+        for (const id of AGED) expect(reasoningCount(message(quiet, id))).toBe(0);
+
+        // A materializing pass strips everything; the strip set is replayed.
+        const flush = boundLoop(sessionId, 8);
+        await serve(sessionId, flush, { flush: true });
+        for (const m of flush.messages.slice(1)) expect(reasoningCount(m)).toBe(0);
+
+        // New steps arrive. The trim passes over the stripped messages and
+        // removes the newly aged steps, without stripping the newest ones.
+        const grown = boundLoop(sessionId, 14);
+        const result = await serve(sessionId, grown, { force: true });
+        expect(result.proactiveThinkingStrip).toBeNull();
+        for (const step of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+            expect(reasoningCount(message(grown, `assistant-${step}`))).toBe(0);
+        }
+        for (const step of [11, 12, 13]) {
+            expect(reasoningCount(message(grown, `assistant-${step}`))).toBe(1);
+        }
+        expect(getRemovedReasoningIds(db, sessionId)).toEqual(
+            new Set([...AGED, ...[8, 9, 10].map((step) => `assistant-${step}`)]),
+        );
+    });
+
+    it("Rust-mode host keeps newer blocks on a module bust whose only edit is the oldest-prefix trim, and strips them otherwise", () => {
+        openDb();
+        const postprocess = (
+            sessionId: string,
+            messages: MessageLike[],
+            moduleReasoningTrimOnly: boolean,
+        ) =>
+            runRustModePostprocess({
+                db,
+                sessionId,
+                messages,
+                fullFeatureMode: true,
+                resolvedProviderID: PROVIDER,
+                thinkingBindingRecoveryEnabledForModel: true,
+                cacheBustingPass: true,
+                moduleReasoningTrimOnly,
+                tagger: createTagger(),
+                ctxReduceAvailability: { callable: true, frozen: true },
+            });
+        const kept = boundLoop("ses-rust-trim-only", 8).messages;
+        const before = JSON.stringify(kept);
+        expect(postprocess("ses-rust-trim-only", kept, true).proactiveThinkingStrip).toBeNull();
+        expect(JSON.stringify(kept)).toBe(before);
+
+        const stripped = boundLoop("ses-rust-other-edit", 8).messages;
+        expect(
+            postprocess("ses-rust-other-edit", stripped, false).proactiveThinkingStrip?.messageIds,
+        ).toHaveLength(8);
+        for (const m of stripped.slice(1)) expect(reasoningCount(m)).toBe(0);
     });
 });
