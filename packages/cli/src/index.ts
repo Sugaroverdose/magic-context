@@ -159,6 +159,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
                 const { runMigrateSessionCli } = await import("./commands/migrate-session");
                 return runMigrateSessionCli(rest.slice(1));
             }
+            if (rest.includes("--prune-discovery")) {
+                const { runPruneDiscoveryCli } = await import("./commands/doctor-prune-discovery");
+                return runPruneDiscoveryCli(rest);
+            }
             const { runDoctor } = await import("./commands/doctor");
             const rekeyV22DirIdentity = valueAfter(rest, "--rekey-v22-dir-identity");
             const report = valueAfter(rest, "--report");

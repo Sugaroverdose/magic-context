@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 import {
     __resetRpcIdentityTestHooks,
     __setRpcIdentityTestHooks,
+    type AsyncProcessInspection,
     inspectWindowsProcessesSync,
 } from "../../shared/rpc-utils";
 import { Database } from "../../shared/sqlite";
@@ -49,6 +50,7 @@ import {
     LATEST_SUPPORTED_VERSION,
     openDatabase,
     openDatabaseAsync,
+    removeRpcDiscoveryRecords,
     resolveDatabasePath,
 } from "./storage-db";
 import { clearSession } from "./storage-meta-session";
@@ -1482,4 +1484,139 @@ it("RPC holder inspection reports slow progress and refuses after its deadline",
     } finally {
         clock.mockRestore();
     }
+});
+
+describe("RPC discovery records whose PIDs were reused", () => {
+    const RECORDED = Date.parse("2026-07-22T02:50:42Z");
+    const LATER = Date.parse("2026-09-28T16:53:00Z");
+
+    interface FakeProcess {
+        startTime: number | null;
+        imageName: string;
+    }
+
+    /** A Windows CIM snapshot in which every listed PID is alive. */
+    function cimProcesses(byPid: Record<number, FakeProcess>): AsyncProcessInspection {
+        const facts = Object.entries(byPid).map(([pid, fact]) => ({
+            pid: Number(pid),
+            imageName: fact.imageName,
+            commandLine: null,
+        }));
+        return {
+            pi: { state: "known", processIds: [] },
+            processSnapshot: { source: "cim", facts },
+            liveness: (pid) => (byPid[pid] ? "alive" : "dead"),
+            evidence: (pid) => ({
+                startTime: byPid[pid]?.startTime ?? null,
+                commandLine: byPid[pid]?.imageName ?? null,
+                ...(byPid[pid] ? { imageName: byPid[pid].imageName } : {}),
+            }),
+        };
+    }
+
+    function writeRecord(storage: string, project: string, pid: number, startedAt: number): string {
+        const dir = join(storage, "rpc", project);
+        mkdirSync(dir, { recursive: true });
+        const file = join(dir, `port-${pid}.json`);
+        writeFileSync(file, JSON.stringify({ port: 54209, pid, started_at: startedAt }));
+        return file;
+    }
+
+    it("removes a record whose live PID started after the record was written", () => {
+        const storage = makeTempDir("mc-rpc-recycled-");
+        const file = writeRecord(storage, "a", 17856, RECORDED);
+        const result = inspectRpcServerDiscovery(
+            storage,
+            cimProcesses({ 17856: { startTime: LATER, imageName: "Cherry Studio.exe" } }),
+        );
+        expect(result.state).toBe("stale");
+        expect(result.staleFiles).toEqual([file]);
+        expect(existsSync(file)).toBe(false);
+    });
+
+    it("keeps a genuine host whose process started at or before its record", () => {
+        const storage = makeTempDir("mc-rpc-genuine-");
+        const file = writeRecord(storage, "a", 13620, RECORDED);
+        const result = inspectRpcServerDiscovery(
+            storage,
+            cimProcesses({ 13620: { startTime: RECORDED - 13_000, imageName: "opencode.exe" } }),
+        );
+        expect(result.state).toBe("live");
+        expect(result.serverPids).toEqual([13620]);
+        expect(existsSync(file)).toBe(true);
+    });
+
+    it("removes a record whose start time is unreadable when the image cannot be a host", () => {
+        const storage = makeTempDir("mc-rpc-svchost-");
+        const file = writeRecord(storage, "a", 3128, RECORDED);
+        const result = inspectRpcServerDiscovery(
+            storage,
+            cimProcesses({ 3128: { startTime: null, imageName: "svchost.exe" } }),
+        );
+        expect(result.state).toBe("stale");
+        expect(existsSync(file)).toBe(false);
+    });
+
+    it("keeps and reports a record whose start time is unreadable when the image could be a host", () => {
+        const storage = makeTempDir("mc-rpc-hostlike-");
+        const file = writeRecord(storage, "a", 7036, RECORDED);
+        const result = inspectRpcServerDiscovery(
+            storage,
+            cimProcesses({ 7036: { startTime: null, imageName: "node.exe" } }),
+        );
+        expect(result.state).toBe("inconclusive");
+        expect(result.inconclusivePids).toEqual([7036]);
+        expect(result.inconclusiveRecords).toEqual([
+            {
+                file,
+                pid: 7036,
+                recordedStartedAt: RECORDED,
+                processStartTime: null,
+                imageName: "node.exe",
+                commandLine: "node.exe",
+                liveness: "alive",
+            },
+        ]);
+        expect(existsSync(file)).toBe(true);
+    });
+
+    it("removes a record whose PID is dead", () => {
+        const storage = makeTempDir("mc-rpc-dead-");
+        const file = writeRecord(storage, "a", 26532, RECORDED);
+        const result = inspectRpcServerDiscovery(storage, cimProcesses({}));
+        expect(result.state).toBe("stale");
+        expect(existsSync(file)).toBe(false);
+    });
+
+    it("removes project directories left with no records", () => {
+        const storage = makeTempDir("mc-rpc-empty-dirs-");
+        mkdirSync(join(storage, "rpc", "empty-before"), { recursive: true });
+        writeRecord(storage, "emptied", 26532, RECORDED);
+        const kept = writeRecord(storage, "kept", 7036, RECORDED);
+        inspectRpcServerDiscovery(
+            storage,
+            cimProcesses({ 7036: { startTime: null, imageName: "node.exe" } }),
+        );
+        expect(existsSync(join(storage, "rpc", "empty-before"))).toBe(false);
+        expect(existsSync(join(storage, "rpc", "emptied"))).toBe(false);
+        expect(existsSync(kept)).toBe(true);
+
+        // A tree with only empty directories is pruned too.
+        const bare = makeTempDir("mc-rpc-only-empty-");
+        mkdirSync(join(bare, "rpc", "x"), { recursive: true });
+        expect(inspectRpcServerDiscovery(bare, cimProcesses({})).state).toBe("absent");
+        expect(existsSync(join(bare, "rpc", "x"))).toBe(false);
+    });
+
+    it("removes chosen records and refuses paths outside the discovery tree", () => {
+        const storage = makeTempDir("mc-rpc-remove-");
+        const record = writeRecord(storage, "a", 7036, RECORDED);
+        const outside = join(storage, "context.db");
+        writeFileSync(outside, "");
+        const result = removeRpcDiscoveryRecords(storage, [record, outside]);
+        expect(result.removed).toEqual([record]);
+        expect(result.failed).toEqual([{ file: outside, error: "not an RPC discovery record" }]);
+        expect(existsSync(outside)).toBe(true);
+        expect(existsSync(join(storage, "rpc", "a"))).toBe(false);
+    });
 });

@@ -136,6 +136,7 @@ import {
     openCodeHostDatabaseFiles,
     reportOpenCodeV2PluginCache,
 } from "./doctor-opencode2-cache";
+import { inspectDiscoveryRecords, reportDiscoveryRecords } from "./doctor-prune-discovery";
 import {
     countPendingCoordinateRebases,
     formatPendingCoordinateRebases,
@@ -1891,6 +1892,26 @@ export async function runDoctor(
                 );
             }
         }
+    }
+
+    // 7d. RPC discovery records. Inspection removes records proven stale; any
+    // left unresolved block offline maintenance such as merge-identities, so
+    // they count as an issue instead of passing silently.
+    try {
+        if (
+            reportDiscoveryRecords(inspectDiscoveryRecords(storage.path), {
+                pass,
+                warn,
+                info: (message) => log.info(message),
+            })
+        ) {
+            issues++;
+        }
+    } catch (error) {
+        warn(
+            `RPC discovery check unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        issues++;
     }
 
     // 8. Check plugin npm cache — clear only if outdated

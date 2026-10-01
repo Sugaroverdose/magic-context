@@ -7,6 +7,7 @@ import {
     mkdirSync,
     readdirSync,
     readFileSync,
+    rmdirSync,
     statSync,
     unlinkSync,
 } from "node:fs";
@@ -28,6 +29,7 @@ import {
     isOwnRpcServerRecord,
     isPidAlive,
     isPidIdentityPlausible,
+    type PidLiveness,
     parseRpcPortFile,
     readProcessProbeEvidence,
 } from "../../shared/rpc-utils";
@@ -411,8 +413,27 @@ export interface RpcServerDiscovery {
      * run. That failure does not prove that the process is actively using RPC.
      */
     inconclusivePids?: number[];
+    /** The records behind `inconclusivePids`, with the process evidence that was read. */
+    inconclusiveRecords?: RpcDiscoveryRecordEvidence[];
     unreadableFile?: string;
     unreadableArm?: RpcDiscoveryUnreadableArm;
+}
+
+/**
+ * A discovery record that was kept because nothing proved it stale, with what
+ * was read about the process now using its PID. Doctor shows this so a user
+ * can decide whether to remove the record.
+ */
+export interface RpcDiscoveryRecordEvidence {
+    file: string;
+    pid: number;
+    /** The record's `started_at` (epoch ms), or null when the record has none. */
+    recordedStartedAt: number | null;
+    /** When the process now using the PID started (epoch ms), or null when unreadable. */
+    processStartTime: number | null;
+    imageName: string | null;
+    commandLine: string | null;
+    liveness: PidLiveness;
 }
 
 function unreadableDiscovery(path: string, arm: RpcDiscoveryUnreadableArm): RpcServerDiscovery {
@@ -432,6 +453,8 @@ export interface RpcDiscoveryFs {
     readFileSync(path: string, encoding: "utf8"): string;
     statSync(path: string): { mtimeMs: number };
     unlinkSync(path: string): void;
+    /** Removes an empty directory; fails when the directory is not empty. */
+    rmdirSync(path: string): void;
 }
 
 const defaultRpcDiscoveryFs: RpcDiscoveryFs = {
@@ -442,6 +465,7 @@ const defaultRpcDiscoveryFs: RpcDiscoveryFs = {
     readFileSync: (path, encoding) => String(readFileSync(path, encoding)),
     statSync: (path) => ({ mtimeMs: statSync(path).mtimeMs }),
     unlinkSync: (path) => unlinkSync(path),
+    rmdirSync: (path) => rmdirSync(path),
 };
 let rpcDiscoveryFs = defaultRpcDiscoveryFs;
 
@@ -583,9 +607,11 @@ export function inspectRpcServerDiscovery(
     }
 
     const portFiles: string[] = [];
+    const projectDirs: string[] = [];
     for (const projectEntry of projectEntries) {
         if (!projectEntry.isDirectory()) continue;
         const projectDir = join(rpcRoot, projectEntry.name);
+        projectDirs.push(projectDir);
         let entries: string[];
         try {
             entries = rpcDiscoveryFs.readdirSync(projectDir) as string[];
@@ -600,6 +626,7 @@ export function inspectRpcServerDiscovery(
         }
     }
     if (portFiles.length === 0) {
+        pruneEmptyRpcProjectDirs(projectDirs);
         return { state: "absent", serverPids: [], staleFiles: [] };
     }
 
@@ -608,6 +635,7 @@ export function inspectRpcServerDiscovery(
     const processByPid = new Map<number, FailClosedBlockingProcess>();
     const staleFiles: string[] = [];
     const inconclusivePids = new Set<number>();
+    const inconclusiveRecords: RpcDiscoveryRecordEvidence[] = [];
     for (const [index, portFile] of portFiles.entries()) {
         if (Date.now() >= deadline)
             throw new Error(
@@ -659,17 +687,21 @@ export function inspectRpcServerDiscovery(
             if (!previous || (previous.kind === "process" && detected.kind !== "process")) {
                 processByPid.set(record.pid, detected);
             }
-        } else if (
-            identity === "implausible" &&
-            !(
-                (processes?.processSnapshot?.source === "cim" ||
-                    processes?.processSnapshot?.source === "tasklist") &&
-                liveness === "alive"
-            )
-        ) {
+        } else if (identity === "implausible") {
+            // "implausible" is proof on every platform: the live process started
+            // after the record was written, or its image cannot be a host.
             staleFiles.push(portFile);
         } else {
             inconclusivePids.add(record.pid);
+            inconclusiveRecords.push({
+                file: portFile,
+                pid: record.pid,
+                recordedStartedAt: record.started_at > 0 ? record.started_at : null,
+                processStartTime: evidence.startTime,
+                imageName: evidence.imageName ?? null,
+                commandLine: evidence.commandLine,
+                liveness,
+            });
         }
     }
 
@@ -683,6 +715,7 @@ export function inspectRpcServerDiscovery(
             return unreadableDiscovery(staleFile, "io");
         }
     }
+    pruneEmptyRpcProjectDirs(projectDirs);
 
     const serverPids = [...pids].sort((a, b) => a - b);
     if (serverPids.length > 0) {
@@ -693,6 +726,9 @@ export function inspectRpcServerDiscovery(
                 (pid) => processByPid.get(pid) ?? { kind: "process" as const, pid },
             ),
             staleFiles,
+            // A confirmed live server decides the state, but doctor still lists
+            // the unresolved records beside it.
+            ...(inconclusiveRecords.length > 0 ? { inconclusiveRecords } : {}),
         };
     }
     const uncertainPids = [...inconclusivePids].sort((a, b) => a - b);
@@ -702,9 +738,58 @@ export function inspectRpcServerDiscovery(
             serverPids: [],
             staleFiles,
             inconclusivePids: uncertainPids,
+            inconclusiveRecords,
         };
     }
     return { state: "stale", serverPids: [], staleFiles };
+}
+
+/**
+ * Remove per-project discovery directories that hold no files. Hosts that exit
+ * remove only their own record, so these accumulate. Removal is best effort:
+ * a directory that gained a file since it was listed fails to remove and stays.
+ */
+function pruneEmptyRpcProjectDirs(projectDirs: readonly string[]): void {
+    for (const projectDir of projectDirs) {
+        try {
+            if ((rpcDiscoveryFs.readdirSync(projectDir) as string[]).length > 0) continue;
+            rpcDiscoveryFs.rmdirSync(projectDir);
+        } catch {
+            // Missing, unreadable or newly non-empty: leave it for a later pass.
+        }
+    }
+}
+
+/**
+ * Delete discovery records the user chose to remove (`doctor --prune-discovery`),
+ * then remove project directories left empty. Only files directly inside a
+ * project directory under `<storageDir>/rpc` are touched.
+ */
+export function removeRpcDiscoveryRecords(
+    storageDir: string,
+    files: readonly string[],
+): { removed: string[]; failed: Array<{ file: string; error: string }> } {
+    const rpcRoot = resolve(join(storageDir, "rpc"));
+    const removed: string[] = [];
+    const failed: Array<{ file: string; error: string }> = [];
+    const projectDirs = new Set<string>();
+    for (const file of files) {
+        const projectDir = dirname(resolve(file));
+        if (dirname(projectDir) !== rpcRoot || !basename(file).startsWith("port")) {
+            failed.push({ file, error: "not an RPC discovery record" });
+            continue;
+        }
+        try {
+            rpcDiscoveryFs.unlinkSync(file);
+            removed.push(file);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") removed.push(file);
+            else failed.push({ file, error: getErrorMessage(error) });
+        }
+        projectDirs.add(projectDir);
+    }
+    pruneEmptyRpcProjectDirs([...projectDirs]);
+    return { removed, failed };
 }
 
 function createPiBlockingProcess(pid: number): FailClosedBlockingProcess {
