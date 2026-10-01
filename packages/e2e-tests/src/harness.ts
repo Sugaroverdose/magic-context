@@ -177,7 +177,7 @@ export class TestHarness implements HostHarness {
             this.contextDbCached = null;
         }
         const env = this.opencodeInstance.env;
-        await this.opencodeInstance.kill(true);
+        await this.opencodeInstance.kill({ root: "keep" });
         this.opencodeInstance = await spawnOpencode({
             ...this.spawnOptions,
             existingEnv: env,
@@ -570,7 +570,7 @@ export class TestHarness implements HostHarness {
                 }
                 this.contextDbCached = null;
             }
-            await this.opencode.kill(false, true);
+            await this.opencode.kill({ root: "remove" });
             await this.mock.stop();
         }
     }

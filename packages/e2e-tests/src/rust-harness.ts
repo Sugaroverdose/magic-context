@@ -423,7 +423,7 @@ export class RustTestHarness {
             }
             this.contextDbCached = null;
         }
-        await this.opencodeInstance.kill(true);
+        await this.opencodeInstance.kill({ root: "keep" });
         this.opencodeInstance = await RustTestHarness.spawnServe({
             env: this.env,
             mockURL: this.mockBaseURL,
@@ -1027,7 +1027,7 @@ export class RustTestHarness {
         }
         // Kill order: opencode (holds the plugin's subc client) → module → daemon.
         try {
-            await this.opencodeInstance.kill(false, true);
+            await this.opencodeInstance.kill({ root: "remove" });
         } catch {
             // ignore
         }

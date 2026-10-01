@@ -68,7 +68,12 @@ export interface SpawnedOpencode {
     port: number;
     pid: number;
     env: IsolatedEnv;
-    kill: (preserveEnv?: boolean, cleanupEnv?: boolean) => Promise<void>;
+    /**
+     * Stop the host. `root` decides the throwaway root: "keep" for a restart that
+     * reuses it, "remove" when the test is done with it, and the default removes it
+     * only when this spawn created it (not when it was given an existing env).
+     */
+    kill: (options?: { root?: "keep" | "remove" }) => Promise<void>;
     stdout: () => string;
     stderr: () => string;
     /** The hermetic Rust stack is provisioned only when MC_E2E_MODE is set to "rust"; this property exposes it when available. */
@@ -824,7 +829,7 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
             stdout: () => stdoutBuf,
             stderr: () => stderrBuf,
             rustStack: resources?.stack,
-            kill: async (preserveEnv = false, cleanupEnv = false) => {
+            kill: async (options?: { root?: "keep" | "remove" }) => {
                 try {
                     if (child.exitCode === null && child.signalCode === null && child.pid) {
                         killGroup(child.pid, "SIGTERM");
@@ -841,7 +846,10 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
                 } finally {
                     if (child.pid) liveChildGroups.delete(child.pid);
                     try { await stopProvisionedRustStack(); } finally {
-                        if ((!opts.existingEnv || cleanupEnv) && !preserveEnv) cleanupE2ETempDir(dirname(env.configDir));
+                        const removeRoot =
+                            options?.root === "remove" ||
+                            (options?.root !== "keep" && !opts.existingEnv);
+                        if (removeRoot) cleanupE2ETempDir(dirname(env.configDir));
                     }
                 }
             },
