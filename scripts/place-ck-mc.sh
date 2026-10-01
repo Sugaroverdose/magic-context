@@ -36,7 +36,12 @@ require_hardened() {
     sig=$(codesign -dv --verbose=2 "$1" 2>&1) || die "cannot read signature of $1"
     [[ "$sig" =~ flags=0x[[:xdigit:]]+\(([^\)]*)\) && ",${BASH_REMATCH[1]}," == *,runtime,* ]] ||
         die "$1 is not signed with hardened runtime (re-sign with --options runtime)"
-    ! codesign -d --entitlements - "$1" 2>/dev/null | grep -q get-task-allow ||
+    # Read the entitlements first, then match: a negated `codesign | grep -q` under
+    # pipefail would pass a binary that HAS get-task-allow whenever grep exits on
+    # its match before codesign finishes writing (codesign gets SIGPIPE).
+    local entitlements
+    entitlements=$(codesign -d --entitlements - "$1" 2>/dev/null || true)
+    [[ "$entitlements" != *get-task-allow* ]] ||
         die "$1 carries the get-task-allow entitlement"
 }
 require_hardened "$staged"
