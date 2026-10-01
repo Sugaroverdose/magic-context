@@ -163,6 +163,31 @@ describe("resolveProjectIdentity directory fallback", () => {
         }
     });
 
+    test("keeps the remembered git identity for a leftover worktree folder with no git metadata", () => {
+        const dir = tempDir();
+        const neverResolved = tempDir();
+        try {
+            mkdirSync(join(dir, ".git"));
+            __setProjectIdentityTestHooks({ execFileSync: returningRootCommit("fedcba9") });
+            expect(resolveProjectIdentity(dir)).toBe("git:fedcba9");
+
+            // A new process sees only the durable sidecar. Removing the worktree's git
+            // metadata leaves an empty folder that git no longer recognizes.
+            __resetProjectIdentityForTests();
+            rmSync(join(dir, ".git"), { recursive: true, force: true });
+            expect(resolveProjectIdentity(dir)).toBe("git:fedcba9");
+            expect(resolveProjectIdentityForSession(dir)).toBe("git:fedcba9");
+
+            // A plain folder the plugin never resolved to git keeps its directory identity.
+            expect(resolveProjectIdentity(neverResolved)).toBe(
+                `dir:${createHash("md5").update(neverResolved, "utf8").digest("hex").slice(0, 12)}`,
+            );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+            rmSync(neverResolved, { recursive: true, force: true });
+        }
+    });
+
     test("derives a deterministic identity from grafted-history repos (multiple root commits)", () => {
         const dir = tempDir();
         try {

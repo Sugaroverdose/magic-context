@@ -460,12 +460,33 @@ function rekeyGenericRow(
     return true;
 }
 
+function sourceRowsWhere(table: TableInfo): string {
+    return `WHERE ${quoteIdentifier(table.identityColumn)} = ?${table.name === "memories" ? " AND NOT (status = 'archived' AND superseded_by_memory_id IS NOT NULL AND EXISTS (SELECT 1 FROM identity_merge_log l WHERE l.table_name = 'memories' AND l.row_id = CAST(memories.id AS TEXT) AND l.from_identity = memories.project_path AND l.action = 'superseded'))" : ""}`;
+}
+
 function tableSourceRows(db: Database, table: TableInfo, fromIdentity: string): SqliteRow[] {
     return db
-        .prepare(
-            `SELECT rowid, * FROM ${quoteIdentifier(table.name)} WHERE ${quoteIdentifier(table.identityColumn)} = ?${table.name === "memories" ? " AND NOT (status = 'archived' AND superseded_by_memory_id IS NOT NULL AND EXISTS (SELECT 1 FROM identity_merge_log l WHERE l.table_name = 'memories' AND l.row_id = CAST(memories.id AS TEXT) AND l.from_identity = memories.project_path AND l.action = 'superseded'))" : ""}`,
-        )
+        .prepare(`SELECT rowid, * FROM ${quoteIdentifier(table.name)} ${sourceRowsWhere(table)}`)
         .all(fromIdentity) as SqliteRow[];
+}
+
+/**
+ * Rows an identity owns in every non-derived table keyed by project identity: the rows a
+ * merge from this identity would move. Memories already merged away (archived and
+ * superseded under the merge log) are not counted.
+ */
+export function countIdentityRows(db: Database, identity: string): number {
+    let total = 0;
+    for (const table of discoverIdentityTables(db)) {
+        if (table.derived) continue;
+        const row = db
+            .prepare(
+                `SELECT COUNT(*) AS n FROM ${quoteIdentifier(table.name)} ${sourceRowsWhere(table)}`,
+            )
+            .get(identity) as { n: number };
+        total += Number(row.n);
+    }
+    return total;
 }
 
 function assertMergeAllowed(db: Database, fromIdentity: string, toIdentity: string): void {
