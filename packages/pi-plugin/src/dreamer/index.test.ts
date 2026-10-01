@@ -607,6 +607,27 @@ describe("Pi dreamer wiring", () => {
 		expect(registration?.embeddingConfig?.provider).toBe("local");
 	});
 
+	// Pi schedules through the plugin's dream timer, which stops scheduling and
+	// deletes the schedule rows of a project whose `memory.enabled` is false. Pi
+	// must pass that setting through, not leave it unset (which means enabled).
+	test("threads a disabled project memory into scheduled maintenance", async () => {
+		db = createDb();
+		let registration: { memoryEnabled?: boolean } | undefined;
+		__test.setStartDreamScheduleTimerFactory(async (captured) => {
+			registration = captured;
+			return mock(() => {});
+		});
+		const opts = dreamerOptions({
+			database: db,
+			projectIdentity: "git:pi-memory-disabled",
+		});
+
+		registerPiDreamerProject({ ...opts, memoryEnabled: false });
+		await flushMicrotasks();
+
+		expect(registration?.memoryEnabled).toBe(false);
+	});
+
 	test("threads OMP identity into scheduled dreamer model resolution", async () => {
 		db = createDb();
 		let harness: string | undefined;

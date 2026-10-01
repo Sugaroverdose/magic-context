@@ -733,6 +733,7 @@ export async function registerContext(context: V2Context) {
                   ),
                   projectIdentity: () =>
                       resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
+                  projectMemoryEnabled: config.memory.enabled,
                   language: config.language,
                   mural: config.mural,
               })

@@ -170,11 +170,16 @@ export function pruneNonCanonicalTaskRows(
 }
 
 /**
- * Delete ALL task_schedule_state rows for a project. Used to GC a fully-orphaned
- * project — a `dir:<md5>` identity whose backing directory is gone (e.g. a
- * finalized mason worktree). NEVER call this for a `git:` identity: that is
- * shared across worktrees/clones of the same repo, so a single dead worktree
- * must not delete the shared project's schedule. Returns rows deleted.
+ * Delete ALL task_schedule_state rows for a project. Returns rows deleted.
+ *
+ * Callers:
+ *  - the dream timer GCs a `dir:<md5>` identity whose backing directory is gone
+ *    (e.g. a finalized mason worktree). A dead directory must NOT trigger this
+ *    for a `git:` identity: that is shared across worktrees/clones of the same
+ *    repo, so one dead worktree says nothing about the others.
+ *  - the scheduler removes an identity whose project memory is disabled, and
+ *    the idle-identity prune removes one with no memories and nothing to do.
+ *    Those decisions are about the identity itself, so they apply to `git:` too.
  */
 export function deleteTaskScheduleRowsForProject(db: Database, projectPath: string): number {
     const result = db

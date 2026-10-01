@@ -7,6 +7,7 @@ import type { ModelInput } from "../../../shared/model-resolution";
 import type { Database } from "../../../shared/sqlite";
 import { isUsableProjectIdentity } from "../memory/project-identity";
 import { nextDueAtMs } from "./cron";
+import { pruneIdleScheduleIdentities } from "./idle-schedule-prune";
 import {
     acquireLeaseWithAcquisition,
     type LeaseAcquisition,
@@ -15,12 +16,13 @@ import {
 } from "./lease";
 import { getDreamState } from "./storage-dream-state";
 import {
+    deleteTaskScheduleRowsForProject,
     getTaskScheduleState,
     pruneNonCanonicalTaskRows,
     seedTaskScheduleState,
     writeTaskScheduleState,
 } from "./storage-task-schedule";
-import { evaluateTaskGate, getDreamTaskBacklogs } from "./task-gates";
+import { evaluateTaskGate, getDreamTaskBacklogs, taskHasSchedulableInput } from "./task-gates";
 import {
     CANONICAL_DREAM_TASKS,
     compareTaskOrder,
@@ -100,12 +102,21 @@ export interface RunDueTasksDeps {
     tasks: readonly DreamTaskRuntimeConfig[];
     executor: TaskExecutor;
     now?: number;
+    /**
+     * The host's `memory.enabled` for this project. `false` means the identity
+     * is never scheduled and its schedule rows are deleted; omitted means on.
+     */
+    projectMemoryEnabled?: boolean;
 }
 
 /** First-seed a task's schedule row if absent. next_due_at from cron(after now);
  *  last_run_at seeded from the legacy per-project `last_dream_at` so a freshly
  *  upgraded project doesn't treat every task as never-run (full historical pass).
- *  Idempotent — ON CONFLICT DO NOTHING (see storage). */
+ *  Idempotent — ON CONFLICT DO NOTHING (see storage).
+ *
+ *  A task is seeded only once the identity has the input it works on (see
+ *  taskHasSchedulableInput); until then it gets no row, so a directory that
+ *  never produces a memory never carries memory-maintenance schedules. */
 function ensureSeeded(
     db: Database,
     projectIdentity: string,
@@ -113,6 +124,7 @@ function ensureSeeded(
     now: number,
 ): void {
     if (getTaskScheduleState(db, projectIdentity, config.task)) return;
+    if (!taskHasSchedulableInput(config.task, db, projectIdentity, now)) return;
     const legacy = getDreamState(db, `last_dream_at:${projectIdentity}`);
     const legacyLastRun = legacy ? Number(legacy) : null;
     const lastRunAt = legacyLastRun && Number.isFinite(legacyLastRun) ? legacyLastRun : null;
@@ -153,8 +165,10 @@ function reconcileSchedule(
     now: number,
 ): void {
     ensureSeeded(db, projectIdentity, config, now);
-    if (getTaskScheduleState(db, projectIdentity, config.task)?.schedule === config.schedule)
-        return;
+    const current = getTaskScheduleState(db, projectIdentity, config.task);
+    // No row means the task has no input yet: nothing to reconcile, and
+    // reconciling must not create the row seeding just declined to create.
+    if (!current || current.schedule === config.schedule) return;
 
     // Cron search can scan years for an impossible expression. Do it before
     // taking the write lock; only the row-dependent decision belongs inside.
@@ -231,6 +245,14 @@ export function planDueTasks(
     const pruned = pruneNonCanonicalTaskRows(db, projectIdentity, CANONICAL_DREAM_TASKS);
     if (pruned > 0) {
         log(`[dreamer] pruned ${pruned} retired task row(s) for ${projectIdentity}`);
+    }
+    // Identities that can do nothing (no memories, no recent sessions, no task
+    // input) are removed across the whole store, at most once a day. A failure
+    // here must not stop this identity's own tasks.
+    try {
+        pruneIdleScheduleIdentities(db, now);
+    } catch (error) {
+        log("[dreamer] idle schedule pruning failed:", error);
     }
 
     const due: DueTask[] = [];
@@ -548,7 +570,9 @@ export async function runManualDream(
     result.backlogBefore = getDreamTaskBacklogs(deps.db, deps.projectIdentity, selectedTaskNames);
     result.backlogAfter = { ...result.backlogBefore };
 
-    // Seed rows so completion advancement has a row to update.
+    // Seed rows for tasks that have input. A forced run of a task without a row
+    // still records its outcome: the completion and failure writes create the
+    // row when it is missing.
     for (const cfg of selected) ensureSeeded(deps.db, deps.projectIdentity, cfg, now);
 
     // Build synthetic DueTasks (scheduledAt = now, since manual ignores schedule).
@@ -632,6 +656,17 @@ export async function runDueTasksForProject(deps: RunDueTasksDeps): Promise<numb
     // A blank identity is an unresolved directory, not a project; running tasks
     // for it would read and write project-scoped rows under the key "".
     if (!isUsableProjectIdentity(deps.projectIdentity)) return 0;
+    if (deps.projectMemoryEnabled === false) {
+        // Project memory is off for this identity: it is not scheduled at all,
+        // and rows left from when it was on are removed.
+        const removed = deleteTaskScheduleRowsForProject(deps.db, deps.projectIdentity);
+        if (removed > 0) {
+            log(
+                `[dreamer] removed ${removed} schedule row(s) for ${deps.projectIdentity}: project memory is disabled`,
+            );
+        }
+        return 0;
+    }
     const now = deps.now ?? Date.now();
     const due = planDueTasks(deps.db, deps.projectIdentity, deps.tasks, now);
     if (due.length === 0) return 0;

@@ -950,6 +950,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             projectIdentity: projectPath,
             tasks: runtimeConfigs,
             executor,
+            projectMemoryEnabled: deps.config.memory?.enabled !== false,
         }).catch((error: unknown) => {
             log("[dreamer] scheduled task run failed:", error);
         });
