@@ -284,6 +284,7 @@ import {
 	isPiLiveUsageRawBranchEstimate,
 	resolvePiPressureSnapshotWithEstimateGuard,
 } from "./pi-pressure";
+import { resolvePiProvenInputFloor } from "./pi-proven-floor";
 import { assertPiRawFallbackFits, PiStorageBusyError } from "./pi-raw-fallback";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
 import {
@@ -294,6 +295,7 @@ import {
 import {
 	convertEntriesToRawMessagePage,
 	convertEntriesToRawMessages,
+	findLastAssistantModelKeyFromBranch,
 	findLastModelKeyFromBranch,
 	readPiSessionMessagePage,
 	readPiSessionMessages,
@@ -2677,13 +2679,20 @@ export function registerPiContextHandler(
 			// branch is the session's last-used model; seeding it lets the
 			// comparison below fire. No-op when the branch has no model_change
 			// (older sessions) — previousModelKey stays undefined (today's behavior).
+			// The newest assistant message's model comes first: a model_change
+			// after it (a switch made before the first prompt after the restart)
+			// already names the current model, so seeding from it would hide the
+			// switch. The last model_change is the fallback for a branch with no
+			// assistant reply yet.
 			if (
 				isFirstContextPassForSession &&
 				liveModelBySession.get(sessionId) === undefined
 			) {
 				// Reuse the branch entries already read above (readPiBranchEntries
 				// ForContext) — getBranch() must be walked only once per event.
-				const seeded = findLastModelKeyFromBranch(branchEntries);
+				const seeded =
+					findLastAssistantModelKeyFromBranch(branchEntries) ??
+					findLastModelKeyFromBranch(branchEntries);
 				if (seeded !== undefined) {
 					liveModelBySession.set(sessionId, seeded);
 				}
@@ -2925,7 +2934,11 @@ export function registerPiContextHandler(
 				detectedContextLimit,
 			});
 			rawFallbackLimit = baseWindowGeometry?.usableHard ?? rawFallbackLimit;
-			let provenInputTokens = sessionMeta.observedSafeInputTokens ?? 0;
+			let provenInputTokens = resolvePiProvenInputFloor({
+				db: options.db,
+				sessionId,
+				modelKey: currentModelKey,
+			});
 			if (
 				baseWindowGeometry &&
 				hasTrustedAbsoluteWall(baseWindowGeometry) &&
@@ -4562,7 +4575,12 @@ function maybeFireHistorian(args: {
 			rawContextWindowSource: usageContextWindowSource,
 			model: ctx.model,
 			detectedContextLimit,
-			provenInputTokens: sessionMeta.observedSafeInputTokens ?? undefined,
+			provenInputTokens:
+				resolvePiProvenInputFloor({
+					db,
+					sessionId,
+					modelKey: resolvePiContextModelKey(ctx),
+				}) || undefined,
 		});
 		if (
 			sessionMeta.lastContextPercentage > 0 &&

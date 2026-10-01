@@ -257,6 +257,40 @@ export function findLastModelKeyFromBranch(
 	return undefined;
 }
 
+/**
+ * The model of the newest assistant message on the branch (`provider/model`),
+ * failed or aborted replies included.
+ *
+ * While Pi runs, the live model pin follows every assistant message_end, so
+ * after a restart this is the model the pin held when the process stopped. A
+ * `model_change` newer than that message is a switch the new process has not
+ * seen yet; seeding the pin from that `model_change` instead would make the
+ * first pass compare the new model with itself and miss the switch. Returns
+ * undefined when no assistant message carries both fields.
+ */
+export function findLastAssistantModelKeyFromBranch(
+	entries: readonly unknown[] | null | undefined,
+): string | undefined {
+	if (!Array.isArray(entries)) return undefined;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i] as { type?: unknown; message?: unknown } | null;
+		if (!e || typeof e !== "object" || e.type !== "message") continue;
+		const m = e.message as
+			| { role?: unknown; provider?: unknown; model?: unknown }
+			| undefined;
+		if (!m || m.role !== "assistant") continue;
+		if (
+			typeof m.provider === "string" &&
+			m.provider.length > 0 &&
+			typeof m.model === "string" &&
+			m.model.length > 0
+		) {
+			return `${m.provider}/${m.model}`;
+		}
+	}
+	return undefined;
+}
+
 function rawEntryVersion(entry: MessageEntry): string | number {
 	const record = entry as unknown as Record<string, unknown>;
 	const updated = record.updatedAt ?? record.updated_at ?? record.timestamp;

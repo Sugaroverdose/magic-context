@@ -198,6 +198,12 @@ import {
 	notePiUsageReadingUsed,
 	noteRawBranchEstimateSetAside,
 } from "./pi-pressure";
+import {
+	piProvenFloorModelKey,
+	readPiProvenFloorRecord,
+	recordPiProvenFloorModel,
+	resolvePiProvenInputFloor,
+} from "./pi-proven-floor";
 import { abortInFlightRecomps, awaitInFlightRecomps } from "./pi-recomp-runner";
 import { handlePiProviderFailure } from "./provider-error-recovery-pi";
 import { readPiSessionMessages } from "./read-session-pi";
@@ -780,8 +786,15 @@ export async function persistPiPressureFromMessageEnd(args: {
 		}
 	}
 
+	// The floor is proof about the model that served it; see pi-proven-floor.ts.
+	// Resolved before the row is read, because an unkeyed floor is cleared here.
+	const floorModelKey = piProvenFloorModelKey(activeModel);
+	let observedSafeInputTokens = resolvePiProvenInputFloor({
+		db: args.db,
+		sessionId: args.sessionId,
+		modelKey: floorModelKey,
+	});
 	const meta = getOrCreateSessionMeta(args.db, args.sessionId);
-	let observedSafeInputTokens = meta.observedSafeInputTokens ?? 0;
 	const updates: Partial<{
 		lastResponseTime: number;
 		lastContextPercentage: number;
@@ -910,6 +923,24 @@ export async function persistPiPressureFromMessageEnd(args: {
 	}
 
 	updateSessionMeta(args.db, args.sessionId, updates);
+	if (
+		floorModelKey !== undefined &&
+		typeof updates.observedSafeInputTokens === "number" &&
+		updates.observedSafeInputTokens > 0
+	) {
+		const recorded = readPiProvenFloorRecord(args.db, args.sessionId);
+		if (
+			recorded?.modelKey !== floorModelKey ||
+			recorded.tokens !== updates.observedSafeInputTokens
+		) {
+			recordPiProvenFloorModel(
+				args.db,
+				args.sessionId,
+				floorModelKey,
+				updates.observedSafeInputTokens,
+			);
+		}
+	}
 	if (cacheAlert !== undefined) {
 		await args.notifyIssue?.(cacheAlert);
 	}
