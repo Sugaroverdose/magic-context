@@ -28,6 +28,7 @@ import { Database, type Database as DatabaseType } from "@magic-context/core/sha
 
 import { type PromptIO, promptIO } from "../lib/prompts";
 import { probeHostProcessesUsing } from "./doctor-opencode2-cache";
+import { PRUNE_DISCOVERY_COMMAND } from "./doctor-prune-discovery";
 import { canonicalStoragePath, processReferencesStorage } from "./doctor-storage-holders";
 
 const ROW_COUNT_TABLES = ["tags", "compartments", "memories", "notes", "dream_runs"] as const;
@@ -119,7 +120,7 @@ export function defaultInspectHolders(
         return {
             safe: false,
             blockers: [],
-            uncertainty: `RPC process liveness could not be determined (PID ${(rpc.inconclusivePids ?? []).join(", ")})`,
+            uncertainty: `RPC process liveness could not be determined (PID ${(rpc.inconclusivePids ?? []).join(", ")}). If none of these is a running host, review and remove their discovery records with \`${PRUNE_DISCOVERY_COMMAND}\`.`,
         };
     const pi = overrides.inspectPi ? deps.inspectPi() : (processes?.pi ?? deps.inspectPi());
     if (canonicalStoragePath(storageDir) !== canonicalStoragePath(deps.defaultStorageDir)) {
